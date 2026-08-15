@@ -125,7 +125,26 @@ pub struct GitStore {
     /// composed with another lock; held across local git subprocess I/O by design — the store's
     /// writer is a single curator, and the atomic `update-ref` CAS is the cross-instance backstop.
     write_lock: Mutex<()>,
+    /// The persistent `git cat-file --batch` child (P6.2): blob reads are pipe round-trips on one
+    /// long-lived process, not a spawn per read — the difference between a corpus-scale `query`
+    /// costing two subprocesses and costing ten thousand. Lazily spawned, respawned once on death,
+    /// reaped on drop. The lock is internal-only and held for one pipe round-trip (µs).
+    cat_file: Mutex<Option<CatFile>>,
     tmp_seq: AtomicU64,
+}
+
+/// The persistent read child. Dropping it closes stdin (git exits) and reaps the process.
+struct CatFile {
+    child:  std::process::Child,
+    stdin:  std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Drop for CatFile {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait(); // reap — no zombie
+    }
 }
 
 // ── content hashing (version tokens) ────────────────────────────────────────────
@@ -269,7 +288,7 @@ impl GitStore {
     /// Open (creating + `git init -b {branch}` if needed) the store.
     pub fn open(cfg: GitStoreConfig) -> Result<Self, WikiError> {
         std::fs::create_dir_all(&cfg.dir)?;
-        let me = Self { cfg, write_lock: Mutex::new(()), tmp_seq: AtomicU64::new(0) };
+        let me = Self { cfg, write_lock: Mutex::new(()), cat_file: Mutex::new(None), tmp_seq: AtomicU64::new(0) };
         if !me.cfg.dir.join(".git").exists() {
             me.git_ok(&["init", "-q", "-b", &me.cfg.branch.clone()], None)?;
         }
@@ -340,13 +359,91 @@ impl GitStore {
         })
     }
 
+    fn spawn_cat_file(&self) -> Result<CatFile, WikiError> {
+        let mut child = Command::new("git")
+            .args(["cat-file", "--batch"])
+            .current_dir(&self.cfg.dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(io_ctx("spawning git cat-file"))?;
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        Ok(CatFile { child, stdin, stdout })
+    }
+
+    /// One blob via the persistent `cat-file --batch` child (P6.2): a pipe round-trip, not a
+    /// process spawn. `Ok(None)` for a missing object (an absent page). A dead child is respawned
+    /// once; a second failure surfaces.
+    fn read_blob(&self, spec: &str) -> Result<Option<Vec<u8>>, WikiError> {
+        let mut guard = self.cat_file.lock().unwrap_or_else(|e| e.into_inner());
+        for attempt in 0..2 {
+            if guard.is_none() {
+                *guard = Some(self.spawn_cat_file()?);
+            }
+            let cf = guard.as_mut().expect("just spawned");
+            match Self::read_blob_on(cf, spec) {
+                Ok(v) => return Ok(v),
+                Err(_) if attempt == 0 => *guard = None, // child died — respawn once and retry
+                Err(e) => return Err(WikiError::Io(e)),
+            }
+        }
+        unreachable!("two attempts always return or error")
+    }
+
+    fn read_blob_on(cf: &mut CatFile, spec: &str) -> io::Result<Option<Vec<u8>>> {
+        use std::io::{BufRead, Read, Write};
+        writeln!(cf.stdin, "{spec}")?;
+        cf.stdin.flush()?;
+        let mut header = String::new();
+        if cf.stdout.read_line(&mut header)? == 0 {
+            return Err(io::Error::other("cat-file: closed stream"));
+        }
+        let header = header.trim_end();
+        if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+            return Ok(None); // an absent path at this commit — a normal answer
+        }
+        let size: usize = header
+            .rsplit(' ')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| io::Error::other(format!("cat-file: unparseable header {header:?}")))?;
+        let mut buf = vec![0u8; size + 1]; // content + the protocol's trailing newline
+        cf.stdout.read_exact(&mut buf)?;
+        buf.pop();
+        Ok(Some(buf))
+    }
+
     /// The committed page file at `head`, parsed. `Ok(None)` if the file does not exist there.
     fn load_at(&self, head: &str, rel: &str) -> Result<Option<(String, PageFile)>, WikiError> {
-        let Some(bytes) = self.git_try(&["show", &format!("{head}:{rel}")])? else { return Ok(None) };
+        let Some(bytes) = self.read_blob(&format!("{head}:{rel}"))? else { return Ok(None) };
         let text = String::from_utf8(bytes)
             .map_err(|_| bad_content(format!("page file {rel:?} is not UTF-8")))?;
         let pf = parse(&text)?;
         Ok(Some((text, pf)))
+    }
+
+    /// Every page-shaped file under the store scope at `head`, as `(page, rel-path)` — **one**
+    /// `ls-tree` per call (P6.2: `query`/`list_pages` share this instead of re-walking per page).
+    fn page_files_at(&self, head: &str) -> Result<Vec<(String, String)>, WikiError> {
+        let mut args = vec!["ls-tree", "-r", "-z", "--name-only", head];
+        let scope;
+        if !self.cfg.subdir.is_empty() {
+            scope = self.cfg.subdir.clone();
+            args.push("--");
+            args.push(&scope);
+        }
+        let out = self.git_ok(&args, None)?;
+        let prefix = if self.cfg.subdir.is_empty() { String::new() } else { format!("{}/", self.cfg.subdir) };
+        let mut files = Vec::new();
+        for name in out.split(|&b| b == 0).filter(|s| !s.is_empty()) {
+            let name = String::from_utf8_lossy(name).into_owned();
+            let Some(rel) = name.strip_prefix(&prefix) else { continue };
+            let Some(page) = rel.strip_suffix(".md") else { continue };
+            files.push((page.to_string(), name.clone()));
+        }
+        Ok(files)
     }
 
     fn load(&self, page: &str) -> Result<Option<PageFile>, WikiError> {
@@ -397,8 +494,15 @@ impl GitStore {
                 Some(h) => plumb(&["read-tree", h])?,
                 None    => plumb(&["read-tree", "--empty"])?,
             };
+            // One index splice for the whole batch (P6.2): `--index-info` reads
+            // `mode SP sha TAB path` lines from stdin — N files, one subprocess.
+            let mut info = String::with_capacity(files.len() * 64);
             for ((rel, _), blob) in files.iter().zip(&blobs) {
-                plumb(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{rel}")])?;
+                info.push_str(&format!("100644 {blob}\t{rel}\n"));
+            }
+            match self.git_env(&["update-index", "--add", "--index-info"], Some(info.as_bytes()), &index_env)? {
+                (_, true)  => {}
+                (_, false) => return Err(WikiError::Io(io::Error::other("git update-index --index-info failed"))),
             }
             let tree = String::from_utf8_lossy(&plumb(&["write-tree"])?).trim().to_string();
             // Idempotent batch: identical tree ⇒ nothing to record (no empty commits).
@@ -593,12 +697,23 @@ impl WikiStore for GitStore {
     }
 
     fn query(&self, predicate: &Predicate) -> Result<Vec<SectionRef>, WikiError> {
+        // P6.2: one head resolve + one ls-tree + one blob round-trip per page — no per-page spawns.
+        let Some(head) = self.head()? else { return Ok(Vec::new()) };
         let mut hits = Vec::new();
-        for page in self.list_pages()? {
-            let Some(p) = self.read(&page)? else { continue };
-            for s in p.sections {
+        for (page, rel) in self.page_files_at(&head)? {
+            let Some((_, pf)) = self.load_at(&head, &rel)? else { continue };
+            let Some(manifest) = pf.manifest else { continue }; // orphan-only files are not pages
+            let by_id: BTreeMap<&str, &Section> = pf.blocks.iter().map(|s| (&*s.id, s)).collect();
+            for id in &manifest.order {
+                // Manifest-referenced sections only, in order — identical semantics to `read`.
+                let Some(s) = by_id.get(&**id) else { continue };
                 if predicate.matches(&s.attributes) {
-                    hits.push(SectionRef { page: page.clone(), id: s.id, heading: s.heading, attributes: s.attributes });
+                    hits.push(SectionRef {
+                        page:       page.clone(),
+                        id:         s.id.clone(),
+                        heading:    s.heading.clone(),
+                        attributes: s.attributes.clone(),
+                    });
                 }
             }
         }
@@ -665,25 +780,14 @@ impl WikiStore for GitStore {
     }
 
     fn list_pages(&self) -> Result<Vec<String>, WikiError> {
+        // P6.2: one head resolve + one ls-tree; manifest presence via the persistent read child.
         let Some(head) = self.head()? else { return Ok(Vec::new()) };
-        let mut args = vec!["ls-tree", "-r", "-z", "--name-only", head.as_str()];
-        let scope;
-        if !self.cfg.subdir.is_empty() {
-            scope = self.cfg.subdir.clone();
-            args.push("--");
-            args.push(&scope);
-        }
-        let out = self.git_ok(&args, None)?;
-        let prefix = if self.cfg.subdir.is_empty() { String::new() } else { format!("{}/", self.cfg.subdir) };
         let mut pages = Vec::new();
-        for name in out.split(|&b| b == 0).filter(|s| !s.is_empty()) {
-            let name = String::from_utf8_lossy(name);
-            let Some(rel) = name.strip_prefix(&prefix) else { continue };
-            let Some(page) = rel.strip_suffix(".md") else { continue };
+        for (page, rel) in self.page_files_at(&head)? {
             // A page "exists" only once it has a manifest (FsStore parity: orphan-only files are
             // invisible here too).
-            if self.load_at(&head, &name)?.is_some_and(|(_, pf)| pf.manifest.is_some()) {
-                pages.push(page.to_string());
+            if self.load_at(&head, &rel)?.is_some_and(|(_, pf)| pf.manifest.is_some()) {
+                pages.push(page);
             }
         }
         pages.sort();
