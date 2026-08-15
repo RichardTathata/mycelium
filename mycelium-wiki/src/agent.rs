@@ -374,6 +374,13 @@ impl<S: WikiStore + 'static> Wiki<S> {
             tracing::warn!(group = %self.cfg.group, reference, finding,
                 "wiki: ingest page refused by the write gate");
         }
+        if summary.applied > 0
+            && let Err(e) = self.store.publish()
+        {
+            // P6.3, best-effort: the batch is committed local truth; the next round or ingest
+            // retries the publish.
+            tracing::warn!(group = %self.cfg.group, reference, error = %e, "wiki: publish after ingest failed");
+        }
         Ok(summary)
     }
 
@@ -459,6 +466,16 @@ impl<S: WikiStore + 'static> Wiki<S> {
     }
 
     fn become_curator(self: &Arc<Self>) {
+        // P6.3: bring the store's local view up to date BEFORE serving. A promoted curator on a
+        // stale clone is the data-loss path, so a refresh failure REFUSES the curatorship — the
+        // node re-arms the reader watch, and another node (or a later retry here) promotes.
+        // No-op for inherently-shared stores (Fs/S3).
+        if let Err(e) = self.store.refresh() {
+            tracing::error!(group = %self.cfg.group, error = %e,
+                "wiki: store refresh failed — refusing the curatorship");
+            self.watch_and_promote();
+            return;
+        }
         let reg = self.agent.capabilities().advertise_capability(
             Capability::new("wiki", format!("{}.curator", self.cfg.group)),
             self.cfg.cap_refresh,
@@ -674,15 +691,21 @@ impl<S: WikiStore + 'static> Wiki<S> {
         }
         // Notify the projection sink AFTER the store writes + tombstones land — best-effort, and
         // deliberately not part of the apply's success (the store is the truth, the sink a derivation).
-        if !applied_pages.is_empty()
-            && let Some(sink) = &self.change_sink
-        {
-            sink.round_applied(&crate::sink::AppliedRound {
-                group:     self.cfg.group.to_string(),
-                pages:     applied_pages.into_iter().collect(),
-                proposals,
-                authors:   authors.into_iter().collect(),
-            });
+        if !applied_pages.is_empty() {
+            if let Some(sink) = &self.change_sink {
+                sink.round_applied(&crate::sink::AppliedRound {
+                    group:     self.cfg.group.to_string(),
+                    pages:     applied_pages.into_iter().collect(),
+                    proposals,
+                    authors:   authors.into_iter().collect(),
+                });
+            }
+            // P6.3: make the round.s writes visible to other nodes. clones — best-effort; the
+            // commits are local truth and the next round retries a failed publish.
+            if let Err(e) = self.store.publish() {
+                tracing::warn!(group = %self.cfg.group, error = %e,
+                    "wiki: publish failed (will retry next round)");
+            }
         }
     }
 

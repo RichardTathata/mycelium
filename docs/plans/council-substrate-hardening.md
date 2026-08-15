@@ -51,7 +51,7 @@ and run the write gate per page — hours against their 38–90 s validator.
   head resolve + ONE `ls-tree` via `page_files_at`; bonus write-side win: the per-file
   `update-index` loop became one `--index-info` stdin splice (N files, one subprocess).
 
-## P6.3 — Failover topology: pull-on-promote, push-per-round (Gap 2) [M] + [D]
+## P6.3 — Failover topology: pull-on-promote, push-per-round (Gap 2) [M] + [D] — ✅ BUILT 2026-08-15
 
 The checkout is node-local, so the companion's litmus ("failover transfers nothing") does not hold:
 a ring-promoted curator on another node has a stale clone. **Decision [D]: option (a)** — the E3
@@ -72,9 +72,19 @@ fallback via `WikiRole::Curator`.)
 - **Named residual:** a dead curator's *un-pushed* tail (≤ one round) is lost to the promoted
   curator and re-lands via proposal re-drain / batch resubmission — the same at-least-once +
   idempotency contract as everything else; stated, not hidden.
-- *Gate:* a real failover test over a local bare origin — curator A applies + pushes, dies;
-  B (own clone) promotes, `refresh` pulls, continues the same corpus; assert no divergence, no
-  duplicate leaves, and the un-pushed-tail case re-lands via resubmit.
+- *Gate (green):* `curator_failover_resumes_on_a_fresh_clone_via_the_shared_remote` — A applies,
+  the round publishes to a bare origin, A dies with a deliberately-unpublished local tail; B (a
+  FRESH clone) promotes, refresh adopts the remote head, **reads A.s corpus (the litmus)**, the
+  tail is asserted ABSENT (the named residual, not hidden) and re-lands via re-apply; B converges
+  with the remote, tripwire quiet. Plus `a_curator_that_cannot_refresh_never_serves` (the refusal
+  path). *As built:* `refresh`/`publish` are default no-op `WikiStore` methods (additive; Fs/S3
+  untouched); `GitStoreConfig.remote` + `with_remote`; refresh = ls-remote check (empty origin =
+  valid fresh start) + fetch + update-ref adopt + best-effort worktree restore; publish = push with
+  a **worktree-free `merge-tree --write-tree` two-parent merge retry** (disjoint councils merge
+  cleanly; a same-path conflict surfaces) + the ls-remote divergence tripwire
+  (`GitStore::push_divergences`); the curator refuses the curatorship on refresh failure and
+  publishes best-effort per applied round + after each ingest. Requires git ≥2.38 for the
+  merge path (merge-tree --write-tree).
 
 ## P6.4 — Write contention: backoff + topology guidance + a measured run (Gap 3) [M]
 

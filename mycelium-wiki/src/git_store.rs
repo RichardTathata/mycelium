@@ -83,6 +83,14 @@ pub struct GitStoreConfig {
     /// "--listed-only"]`) — its cost per run is the deployment's to manage (their #1359 tracks the
     /// validator's own speed); the gate contract is deliberately just "a command over the tree".
     pub validate_cmd: Option<Vec<String>>,
+    /// Optional shared remote (P6.3 — the failover topology's source of truth across nodes; the
+    /// E3 operator-owned, force-push-locked repo). When set: [`refresh`](crate::WikiStore::refresh)
+    /// fetches and **adopts the remote head** (the promotion step — a promoted curator's clone
+    /// catches up before it serves), and [`publish`](crate::WikiStore::publish) pushes the branch
+    /// (with a worktree-free `merge-tree` retry for concurrent disjoint-subtree writers, and a
+    /// post-push `ls-remote` **divergence tripwire** — counted and warned, never auto-fixed).
+    /// `None` = a local-only store (single-node deployments; every sync is a no-op).
+    pub remote: Option<String>,
 }
 
 impl Default for GitStoreConfig {
@@ -95,6 +103,7 @@ impl Default for GitStoreConfig {
             author_email:   "curator@wiki.invalid".to_string(),
             message_prefix: "wiki".to_string(),
             validate_cmd:   None,
+            remote:         None,
         }
     }
 }
@@ -116,6 +125,12 @@ impl GitStoreConfig {
             ..Self::default()
         }
     }
+
+    /// Set the shared remote (P6.3): the cross-node source of truth for refresh/publish.
+    pub fn with_remote(mut self, remote: impl Into<String>) -> Self {
+        self.remote = Some(remote.into());
+        self
+    }
 }
 
 /// A git-checkout-backed group wiki. See the module docs for the contract.
@@ -130,6 +145,10 @@ pub struct GitStore {
     /// costing two subprocesses and costing ten thousand. Lazily spawned, respawned once on death,
     /// reaped on drop. The lock is internal-only and held for one pipe round-trip (µs).
     cat_file: Mutex<Option<CatFile>>,
+    /// The post-push ancestry tripwire (P6.3): pushes after which `ls-remote` disagreed with the
+    /// local head — a force-push-permitting or concurrently-written remote. Detection, never
+    /// auto-fixed.
+    push_divergences: AtomicU64,
     tmp_seq: AtomicU64,
 }
 
@@ -288,11 +307,25 @@ impl GitStore {
     /// Open (creating + `git init -b {branch}` if needed) the store.
     pub fn open(cfg: GitStoreConfig) -> Result<Self, WikiError> {
         std::fs::create_dir_all(&cfg.dir)?;
-        let me = Self { cfg, write_lock: Mutex::new(()), cat_file: Mutex::new(None), tmp_seq: AtomicU64::new(0) };
+        let me = Self { cfg, write_lock: Mutex::new(()), cat_file: Mutex::new(None), push_divergences: AtomicU64::new(0), tmp_seq: AtomicU64::new(0) };
         if !me.cfg.dir.join(".git").exists() {
             me.git_ok(&["init", "-q", "-b", &me.cfg.branch.clone()], None)?;
         }
+        if let Some(remote) = &me.cfg.remote {
+            // (Re)point origin at the configured shared remote (P6.3).
+            if me.git_try(&["remote", "get-url", "origin"])?.is_some() {
+                me.git_ok(&["remote", "set-url", "origin", remote], None)?;
+            } else {
+                me.git_ok(&["remote", "add", "origin", remote], None)?;
+            }
+        }
         Ok(me)
+    }
+
+    /// Pushes after which the remote head disagreed with the local head (the P6.3 divergence
+    /// tripwire — a force-push-permitting or concurrently-written remote; detection, never fixed).
+    pub fn push_divergences(&self) -> u64 {
+        self.push_divergences.load(Ordering::Relaxed)
     }
 
     fn refname(&self) -> String {
@@ -830,5 +863,90 @@ impl WikiStore for GitStore {
             }
         }
         Err(WikiError::Conflict)
+    }
+
+    /// P6.3 — the promotion step: fetch the shared remote and **adopt its head as local truth**.
+    /// The reset-to-origin decision, recorded in the hardening plan: a promoted curator's clone
+    /// catches up before serving; a local un-pushed tail (≤ one round on the dead curator) is
+    /// knowingly discarded and re-lands via resubmission/re-drain (at-least-once + idempotent
+    /// apply). An **empty** remote (no branch yet) is a valid fresh start, not an error.
+    fn refresh(&self) -> Result<(), WikiError> {
+        if self.cfg.remote.is_none() {
+            return Ok(()); // local-only store: the local head already is the truth
+        }
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let refname = self.refname();
+        let ls = self.git_ok(&["ls-remote", "origin", &refname], None)?;
+        let remote_sha = String::from_utf8_lossy(&ls).split_whitespace().next().unwrap_or("").to_string();
+        if remote_sha.is_empty() {
+            return Ok(()); // the remote has no branch yet — nothing to adopt
+        }
+        self.git_ok(&["fetch", "-q", "origin", &self.cfg.branch], None)?;
+        self.git_ok(&["update-ref", &refname, &remote_sha], None)?;
+        // Best-effort worktree sync (human readers + the validator's surrounding context); truth
+        // is the committed head either way.
+        let scope = if self.cfg.subdir.is_empty() { ".".to_string() } else { self.cfg.subdir.clone() };
+        let _ = self.git_raw(&["restore", "--source", &remote_sha, "--worktree", "--", &scope], None);
+        Ok(())
+    }
+
+    /// P6.3 — make local commits visible to other nodes' clones: push the branch, with a
+    /// **worktree-free plumbing merge** retry for a non-fast-forward (another clone — a *different
+    /// council's* curator — pushed first: `merge-tree --write-tree` over the two heads, a
+    /// two-parent commit, CAS our ref, push again; disjoint subtrees merge cleanly, a genuine
+    /// same-path conflict surfaces as an error). After a successful push the **divergence
+    /// tripwire** checks `ls-remote` against the pushed head — counted and warned, never fixed.
+    fn publish(&self) -> Result<(), WikiError> {
+        if self.cfg.remote.is_none() {
+            return Ok(());
+        }
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut local) = self.head()? else { return Ok(()) }; // nothing committed yet
+        let refname = self.refname();
+        let refspec = format!("{}:{}", self.cfg.branch, self.cfg.branch);
+        for _ in 0..4 {
+            let (_, pushed) = self.git_raw(&["push", "-q", "origin", &refspec], None)?;
+            if pushed {
+                let ls = self.git_ok(&["ls-remote", "origin", &refname], None)?;
+                let remote_sha =
+                    String::from_utf8_lossy(&ls).split_whitespace().next().unwrap_or("").to_string();
+                if remote_sha != local {
+                    self.push_divergences.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(local, remote = remote_sha,
+                        "wiki git-store: remote head diverged after push (tripwire)");
+                }
+                return Ok(());
+            }
+            // Non-fast-forward: merge theirs without touching any worktree or index.
+            self.git_ok(&["fetch", "-q", "origin", &self.cfg.branch], None)?;
+            let theirs =
+                String::from_utf8_lossy(&self.git_ok(&["rev-parse", "FETCH_HEAD"], None)?).trim().to_string();
+            if theirs == local {
+                continue; // the remote already holds our head; the push failure was transient
+            }
+            let (merged, mok) = self.git_raw(&["merge-tree", "--write-tree", &local, &theirs], None)?;
+            if !mok {
+                return Err(WikiError::Io(io::Error::other(
+                    "publish: merge conflict — concurrent writers touched the same paths",
+                )));
+            }
+            let tree = String::from_utf8_lossy(&merged).lines().next().unwrap_or("").trim().to_string();
+            let ident: [(&str, &str); 4] = [
+                ("GIT_AUTHOR_NAME", &self.cfg.author_name),
+                ("GIT_AUTHOR_EMAIL", &self.cfg.author_email),
+                ("GIT_COMMITTER_NAME", &self.cfg.author_name),
+                ("GIT_COMMITTER_EMAIL", &self.cfg.author_email),
+            ];
+            let msg = format!("{}: merge concurrent writers", self.cfg.message_prefix);
+            let commit = match self.git_env(
+                &["commit-tree", &tree, "-p", &local, "-p", &theirs, "-m", &msg], None, &ident,
+            )? {
+                (out, true) => String::from_utf8_lossy(&out).trim().to_string(),
+                (_, false)  => return Err(WikiError::Io(io::Error::other("publish: commit-tree failed"))),
+            };
+            let (_, ok) = self.git_raw(&["update-ref", &refname, &commit, &local], None)?;
+            local = if ok { commit } else { self.head()?.unwrap_or(commit) };
+        }
+        Err(WikiError::Io(io::Error::other("publish: persistent contention pushing to the remote")))
     }
 }

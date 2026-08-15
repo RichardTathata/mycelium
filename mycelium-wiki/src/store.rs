@@ -125,4 +125,23 @@ pub trait WikiStore: Send + Sync {
         }
         Ok(())
     }
+
+    /// **Bring this store's local view up to date with its shared backing** (council-substrate
+    /// P6.3). Default: no-op — `FsStore`/`S3Store` are inherently shared, so a promoted curator
+    /// already sees the truth. A store with node-local state (`GitStore`: a per-node clone)
+    /// overrides it (fetch + adopt the remote head). The curator calls this **at promotion, before
+    /// serving** — and refuses the curatorship on failure, because a knowingly-stale curator is
+    /// the data-loss path.
+    fn refresh(&self) -> Result<(), WikiError> {
+        Ok(())
+    }
+
+    /// **Make this store's local writes visible to other nodes' views** (P6.3). Default: no-op —
+    /// inherently-shared stores have nothing to publish. `GitStore` pushes to its remote (with a
+    /// plumbing merge retry and a post-push divergence tripwire). The curator calls this
+    /// best-effort after each applied round — a publish failure is logged, never fails the apply
+    /// (the writes are committed locally; the next round retries).
+    fn publish(&self) -> Result<(), WikiError> {
+        Ok(())
+    }
 }
