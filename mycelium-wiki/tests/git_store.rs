@@ -535,3 +535,38 @@ fn a_gate_refusal_refuses_the_whole_batch_atomically() {
     assert_eq!((fixed.applied, fixed.refused), (2, 0));
     assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]).trim(), "1", "one commit, whole meeting");
 }
+
+// ── the read plane at corpus scale (P6.2) ───────────────────────────────────────
+
+#[test]
+fn the_read_plane_scales_without_per_page_process_spawns() {
+    // P6.2 gate: corpus-scale `list_pages` + `query` must not cost process spawns per page.
+    // Pre-P6.2 each page read spawned `rev-parse` + `git show` (~3 spawns/page → tens of seconds
+    // over 600 pages); with the persistent `cat-file --batch` child it is one `rev-parse` + one
+    // `ls-tree` + pipe round-trips. The bound is generous for CI noise but far below pre-fix cost.
+    use mycelium_wiki::PageWrite;
+    let (_d, s) = store();
+    for b in 0..3 {
+        let pages: Vec<PageWrite> = (0..200)
+            .map(|i| PageWrite {
+                path: format!("m/{b}/{i}"),
+                attributes: attrs(&[("meeting", "m")]),
+                sections: vec![sec(
+                    &format!("s{b}-{i}"),
+                    "H",
+                    &format!("body {b}-{i}"),
+                    &[("topic", if i % 2 == 0 { "even" } else { "odd" })],
+                )],
+            })
+            .collect();
+        s.write_pages(&pages, &format!("bulk-{b}")).unwrap();
+    }
+    let t0 = std::time::Instant::now();
+    assert_eq!(s.list_pages().unwrap().len(), 600);
+    let hits = s.query(&Predicate::new().with("topic", "even")).unwrap();
+    let elapsed = t0.elapsed();
+    assert_eq!(hits.len(), 300, "the attribute query is correct at corpus scale");
+    eprintln!("P6.2 measurement: list_pages + query over 600 pages in {elapsed:?}");
+    assert!(elapsed < std::time::Duration::from_secs(10),
+        "corpus-scale reads must not spawn per page: {elapsed:?}");
+}

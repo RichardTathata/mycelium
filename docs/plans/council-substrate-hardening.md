@@ -35,7 +35,7 @@ and run the write gate per page — hours against their 38–90 s validator.
   `ingest_is_byte_identical_to_the_serial_writer_and_lands_as_one_commit` +
   `a_gate_refusal_refuses_the_whole_batch_atomically`; exactly-once + curator suites unchanged.
 
-## P6.2 — The read plane: `cat-file --batch` (Gap 5) [M]
+## P6.2 — The read plane: `cat-file --batch` (Gap 5) [M] — ✅ BUILT 2026-08-15
 
 `read` spawns `rev-parse` + `git show` per call; `query`/`list_pages` stack that per file →
 ~10,000+ process spawns for one query over Edinburgh's 5,741 files.
@@ -43,9 +43,13 @@ and run the write gate per page — hours against their 38–90 s validator.
 - One persistent `git cat-file --batch` child per store (spawned lazily, restarted on death);
   `load_at` feeds `{sha}:{path}` lines and reads framed replies. `ls-tree -z` once per
   `list_pages`. Head resolved **once per operation**, not once per page-read.
-- *Gate:* a generated 1,000-page corpus — `query` and `list_pages` complete inside the normal test
-  timeout (plus a measured wall-clock recorded in this plan when it lands); all existing contract
-  tests unchanged.
+- *Gate (green):* `the_read_plane_scales_without_per_page_process_spawns` — a 600-page corpus;
+  **measured: `list_pages` + `query` in 330 ms** (~0.55 ms/page; extrapolated ≈3 s over
+  Edinburgh.s 5,741 files, vs tens of minutes pre-fix). All 24 contract tests unchanged + green.
+  *As built:* persistent `CatFile` child (lazy spawn, respawn-once-on-death, Drop-reaped);
+  `read_blob` replaces the per-read `rev-parse`+`git show` spawns; `query`/`list_pages` share ONE
+  head resolve + ONE `ls-tree` via `page_files_at`; bonus write-side win: the per-file
+  `update-index` loop became one `--index-info` stdin splice (N files, one subprocess).
 
 ## P6.3 — Failover topology: pull-on-promote, push-per-round (Gap 2) [M] + [D]
 
