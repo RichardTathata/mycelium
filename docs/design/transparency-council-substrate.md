@@ -1,9 +1,10 @@
 # Transparency Platform on Mycelium — the council-wiki substrate design
 
-**Status:** designed 2026-08-15; **Phase 1 (`GitStore`) built 2026-08-15** — feature `git-store`,
-`mycelium-wiki/src/git_store.rs`, gated by `tests/git_store.rs` (the FsStore contract mirrored, 20
-tests) + `tests/git_store_curator.rs` (the hinge: a curator draining proposals into scoped git
-commits). Phases 2–5 remain open — the build list is §6.
+**Status:** designed 2026-08-15; **Phases 1–2 built 2026-08-15** — the `GitStore` (feature
+`git-store`, `mycelium-wiki/src/git_store.rs`; the FsStore contract mirrored + the
+curator-to-scoped-commits hinge) and the group-per-council wiring
+(`GitStoreConfig::for_group`; gate: two curators, two councils, one repo, no cross-scope commits).
+Phases 3–5 remain open — the build list is §6.
 **Companion records:** [`wiki-git-store.md`](wiki-git-store.md) (the GitStore eligibility envelope this
 deployment satisfies — the first that does) · [`wiki-concurrent-edit.md`](wiki-concurrent-edit.md) ·
 [`../plans/mycelium-wiki.md`](../plans/mycelium-wiki.md) (council decisions is UC2, one of the two
@@ -142,9 +143,13 @@ Escape hatch if push contention ever bites: per-council branches + a merge queue
    empty commits on idempotent re-applies, unborn-branch = empty store, worktree ≡ HEAD);
    `tests/git_store_curator.rs` — the hinge end-to-end (curator drains a proposal → scoped,
    prefixed git commits). In the CI Wiki job.
-2. **Group-per-council wiring** — `WikiConfig::group` = slug → store scope; a shard variant.
-   Small; mostly a worked example + conventions. *Gate:* two curators on two councils in one repo,
-   concurrent applies, no cross-scope commits.
+2. **Group-per-council wiring.** ✅ **Built 2026-08-15**: `GitStoreConfig::for_group(dir, group)`
+   makes the convention executable — one repo, one store instance per group, `subdir =
+   councils/{group}`, messages prefixed `wiki({group})`; a shard (set of councils) is the same
+   constructor with a shard label and `{council}/{page}` page paths inside it. *Gate (green):*
+   `git_store_curator.rs::two_council_curators_share_one_repo_without_cross_scope_commits` — two
+   curators, two councils, one repo, concurrent applies; every commit touches exactly one council's
+   subtree and carries that council's message prefix; both documents land as committed truth.
 3. **Node-validator pre-apply lint** — a `SemanticLinter`/gate impl that shells FTT's
    `validation/validate.js --start councils/<slug>` over the curator's working tree and refuses the
    apply on errors (warnings pass — their blocking rule). *Gate:* an edit violating an entity

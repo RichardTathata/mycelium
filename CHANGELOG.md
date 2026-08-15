@@ -21,7 +21,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Transparency-Platform council-wiki substrate (`docs/design/transparency-council-substrate.md`).
   Gates: `tests/git_store.rs` (the FsStore contract suite mirrored, 20 tests, incl. a two-instance
   ref-CAS race) + `tests/git_store_curator.rs` (a curator draining proposals into scoped, prefixed
-  git commits).
+  git commits). **Phase-2 wiring:** `GitStoreConfig::for_group` — the group-per-council convention
+  made executable (one repo, one store per group, `councils/{group}` scope; gate: two curators, two
+  councils, one repo, concurrent applies, no cross-scope commits).
 - **`mycelium-wiki` change sinks — git as a projection of the store** (feature `git-mirror`): a
   `ChangeSink` on the `CuratorBrain` is notified after each applied drain round (best-effort, never
   load-bearing); the shipped `GitMirror` renders touched pages as pure markdown (no CAS tokens) into

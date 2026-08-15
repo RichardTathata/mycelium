@@ -80,3 +80,98 @@ async fn curator_applies_proposals_as_scoped_git_commits() {
     wiki.shutdown().await;
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// The Phase-2 gate (`transparency-council-substrate.md` §6.2): **two curators, two councils, one
+/// repo** — concurrent applies land in their own subtrees, every commit is scoped to exactly one
+/// council, messages carry the right per-council prefix, and the shared branch ref serialises the
+/// two store instances without losing either council's write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_council_curators_share_one_repo_without_cross_scope_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let councils = ["norfolk", "evesham"];
+
+    let mut wikis = Vec::new();
+    let mut agents = Vec::new();
+    let mut stores = Vec::new();
+    for slug in councils {
+        // Independent write domains need no shared mesh: each council's group has its own curator.
+        let agent = loop {
+            let port = mycelium::test_util::alloc_port();
+            let cfg = GossipConfig { bind_port: port, ..Default::default() };
+            let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+            if a.start().await.is_ok() {
+                break a;
+            }
+        };
+        let store = Arc::new(GitStore::open(GitStoreConfig::for_group(tmp.path(), slug)).unwrap());
+        let wiki = Wiki::new(
+            Arc::clone(&agent),
+            WikiConfig::new(slug).role(WikiRole::Curator),
+            Arc::clone(&store),
+        )
+        .await;
+        agents.push(agent);
+        stores.push(store);
+        wikis.push(wiki);
+    }
+
+    // Concurrent proposals into both councils.
+    for (i, slug) in councils.iter().enumerate() {
+        let section = mint_section_id(slug, "minutes/2026-08-15", 1, 1);
+        wikis[i].propose(
+            "minutes/2026-08-15",
+            section,
+            "Opening",
+            format!("The {slug} council opened the meeting."),
+            Default::default(),
+        );
+    }
+
+    // Both curators drain into the SAME repo — poll until both pages are committed truth.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let done = stores.iter().all(|s| s.read("minutes/2026-08-15").unwrap().is_some());
+        if done {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "both curators must apply into the shared repo");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Every commit touches exactly ONE council's subtree (the scoped-commit property under
+    // cross-instance concurrency), and its message carries that council's prefix.
+    let log = git(tmp.path(), &["log", "--name-only", "--format=@%s"]);
+    for entry in log.split('@').filter(|e| !e.trim().is_empty()) {
+        let mut lines = entry.lines();
+        let subject = lines.next().unwrap();
+        let files: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
+        assert!(!files.is_empty(), "every commit names its files: {entry:?}");
+        let scopes: std::collections::BTreeSet<&str> = files
+            .iter()
+            .map(|f| {
+                f.strip_prefix("councils/").and_then(|r| r.split('/').next()).unwrap_or_else(|| {
+                    panic!("commit touched a path outside councils/: {f:?} ({subject:?})")
+                })
+            })
+            .collect();
+        assert_eq!(scopes.len(), 1, "a commit crossed council subtrees: {subject:?} → {files:?}");
+        let slug = scopes.iter().next().unwrap();
+        assert!(
+            subject.starts_with(&format!("wiki({slug}): ")),
+            "message prefix names the council whose subtree it touched: {subject:?} → {files:?}"
+        );
+    }
+
+    // Both documents are committed truth in one tree, each in its own subtree.
+    for slug in councils {
+        let doc = git(tmp.path(), &["show", &format!("HEAD:councils/{slug}/minutes/2026-08-15.md")]);
+        assert!(doc.contains(&format!("The {slug} council")), "each council's text is in its own subtree");
+    }
+
+    for w in &wikis {
+        w.shutdown().await;
+    }
+    for a in &agents {
+        a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+}
