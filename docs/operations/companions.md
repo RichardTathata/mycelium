@@ -97,6 +97,31 @@ The wiki has a genuinely different operational model: a **node-independent store
   `Allowlist(node-ids)`.
 - **Observe.** `is_curator()`, `last_lint()` / `lint_pass_count()` (the group-health report), lint
   `warn!` logs. No metrics series.
+- **Optional git mirror (feature `git-mirror`).** A `GitMirror` change sink on the `CuratorBrain`
+  renders each applied drain round into a git worktree — one commit per round with proposal
+  provenance — and optionally pushes to a remote you own. Operational facts:
+  - **It is a projection, never the record.** Best-effort by contract: a mirror failure (dir gone,
+    `git` absent, push refused) is a `warn!` and can neither fail nor delay an apply. Losing the
+    mirror loses nothing — `rebuild()` regenerates it wholesale from the store. Do **not** point
+    pipelines at the mirror for anything that must be current-to-the-write; read the store.
+  - **Runs on the curator node only** — that is the only place git tooling and push credentials need
+    to exist (deploy key / token custody is yours; scope it to the one mirror repo, read-write).
+  - **Egress is fail-closed.** A non-local `remote` is checked against the configured `EgressPolicy`
+    at construction *and* before every push; a denied or unparseable host refuses. Local-path
+    remotes are exempt (they leave no machine). Add the git host to `allow_hosts` deliberately —
+    the mirror carries the whole corpus off-box.
+  - **The divergence tripwire.** After each push the mirror compares `ls-remote` with its local
+    head; a mismatch increments `push_divergences()` and logs `warn!`. A non-zero count means the
+    remote moved outside the mirror's own pushes — someone force-pushed or wrote to the mirror repo
+    directly. Treat the remote as read-only for humans; investigate, then `rebuild()` + push to
+    restore the true projection. The mirror never force-fixes on its own (detection, not prevention).
+  - **Erasure interplay:** the mirror's git history retains erased content until you delete the
+    mirror repo (local + remote) and `rebuild()` — see the erasure runbook
+    ([data-erasure](data-erasure.md)). Only deploy the mirror for corpora where permanent history is
+    acceptable, or fold the mirror step into your erasure procedure.
+  - Config: `GitMirrorConfig { dir, branch, remote, egress, author_name, author_email }`; zero new
+    dependencies (shells to the `git` CLI — install git on the curator node). Design + the rejected
+    git-as-datastore alternative: [`docs/design/wiki-git-store.md`](../design/wiki-git-store.md).
 - **Teardown — required.** `shutdown()` is **mandatory** to reclaim a `Wiki`: the background loops hold
   strong `Arc<Self>` references, so without it the wiki is a reference cycle that outlives its caller
   (a real leak for any process that creates and discards wikis). Idempotent; it aborts the loops,
