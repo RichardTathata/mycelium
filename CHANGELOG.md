@@ -28,7 +28,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pre-commit over the candidate file; nonzero exit refuses with findings
   (`WikiError::gate_refusal`, carried inside `Io` — no new enum variant), worktree restored, no
   commit; the curator **drops** refused proposals (never retries — the queue can't wedge) and
-  counts them via `Wiki::gate_refusals()`.
+  counts them via `Wiki::gate_refusals()`. **Phase-4 bulk ingest:** the claim-check path —
+  `IngestBatch`/`BatchSource` (`FsBatchSource` ref impl; S3 = deployment impl), pure deterministic
+  `apply_batch` (byte-identical git trees vs a serial writer, idempotent resubmit), and the
+  membership-gated `wiki.{group}.ingest` RPC + `Wiki::submit_batch` — the reference rides the RPC,
+  the payload never rides the mesh or KV.
 - **`mycelium-wiki` change sinks — git as a projection of the store** (feature `git-mirror`): a
   `ChangeSink` on the `CuratorBrain` is notified after each applied drain round (best-effort, never
   load-bearing); the shipped `GitMirror` renders touched pages as pure markdown (no CAS tokens) into

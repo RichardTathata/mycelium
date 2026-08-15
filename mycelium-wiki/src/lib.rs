@@ -35,6 +35,7 @@
 mod model;
 mod store;
 mod fs;
+mod ingest;
 #[cfg(feature = "git-store")]
 mod git_store;
 #[cfg(feature = "control-plane")]
@@ -57,6 +58,11 @@ pub use model::{
 };
 pub use store::WikiStore;
 pub use fs::FsStore;
+/// **Bulk ingest** — the claim-check path (council-substrate Phase 4): workers stage an
+/// `IngestBatch` in a bulk store and submit only a *reference*; the curator fetches from its
+/// `BatchSource` and applies deterministically (`apply_batch`). `FsBatchSource` is the reference
+/// impl standing in for the deployment S3 source.
+pub use ingest::{apply_batch, BatchSource, FsBatchSource, IngestBatch, IngestPage, IngestSummary};
 /// The **git-as-truth** store (feature `git-store`): pages are markdown files in a git checkout,
 /// every write is a commit behind an atomic ref CAS. Built only for deployments inside the
 /// E1-E4 eligibility envelope of `docs/design/wiki-git-store.md` -- see
@@ -68,7 +74,7 @@ pub use git_store::{GitStore, GitStoreConfig};
 /// evaporating proposal queue, and the single-writer apply. Behind the `control-plane` feature so the
 /// data plane above stays Mycelium-agnostic.
 #[cfg(feature = "control-plane")]
-pub use agent::{CuratorBrain, Wiki, WikiConfig, WikiRole};
+pub use agent::{CuratorBrain, IngestError, Wiki, WikiConfig, WikiRole};
 
 /// The curator's **reconcile** (Phase 3) — how a batch of same-section proposals is merged. The
 /// default [`DirectReconciler`] is a lossless no-LLM append-merge; [`LlmReconciler`] (feature `llm`) is

@@ -441,3 +441,84 @@ fn the_write_gate_refuses_before_commit_and_leaves_no_residue() {
     s.write_section("p", &sec("s1", "H", "amended wholesome text", &[]), Some(ver)).unwrap();
     assert_eq!(s.read("p").unwrap().unwrap().sections[0].body, "amended wholesome text");
 }
+
+// ── bulk ingest (council-substrate Phase 4) ─────────────────────────────────────
+
+use mycelium_wiki::{apply_batch, IngestBatch, IngestPage};
+
+fn meeting_batch() -> IngestBatch {
+    IngestBatch {
+        source: "pipeline/run-42".into(),
+        pages: vec![
+            IngestPage {
+                path: "minutes/2026-08-15/decisions".into(),
+                attributes: attrs(&[("meeting", "2026-08-15")]),
+                sections: vec![
+                    sec("d1", "Retrofit approved", "RESOLVED: the retrofit scheme proceeds.", &[("decision-id", "TV-1")]),
+                    sec("d2", "Budget noted", "The budget report was noted.", &[("decision-id", "TV-2")]),
+                ],
+            },
+            IngestPage {
+                path: "minutes/2026-08-15/statements".into(),
+                attributes: attrs(&[("meeting", "2026-08-15")]),
+                sections: vec![sec("s1", "Cllr Reed", "Spoke in support of the scheme.", &[])],
+            },
+        ],
+    }
+}
+
+#[test]
+fn ingest_is_byte_identical_to_the_serial_writer_and_resubmit_is_a_noop() {
+    // The Phase-4 determinism gate: the same meeting applied (a) by a serial in-process writer and
+    // (b) via apply_batch produces IDENTICAL git trees with the same commit granularity — and
+    // resubmitting the batch records nothing (idempotent recovery after a partial failure).
+    let tmp = tempfile::tempdir().unwrap();
+    let batch = meeting_batch();
+
+    let serial_repo = tmp.path().join("serial");
+    let serial = GitStore::open(GitStoreConfig::for_group(&serial_repo, "testville")).unwrap();
+    for page in &batch.pages {
+        serial.write_page(&page.path, &page.sections, &page.attributes).unwrap();
+    }
+
+    let ingest_repo = tmp.path().join("ingest");
+    let ingest = GitStore::open(GitStoreConfig::for_group(&ingest_repo, "testville")).unwrap();
+    let summary = apply_batch(&ingest, &batch).unwrap();
+    assert_eq!((summary.applied, summary.refused), (2, 0));
+
+    let tree = |repo: &Path| git(repo, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+    assert_eq!(tree(&serial_repo), tree(&ingest_repo), "ingest is byte-identical to the serial writer");
+    let count = |repo: &Path| git(repo, &["rev-list", "--count", "HEAD"]).trim().to_string();
+    assert_eq!(count(&serial_repo), count(&ingest_repo), "same commit granularity");
+
+    // Resubmission: everything already applied → no new commits, tree unchanged.
+    let again = apply_batch(&ingest, &batch).unwrap();
+    assert_eq!(again.applied, 2, "re-applies report success (no-ops)");
+    assert_eq!(count(&ingest_repo), "2", "an idempotent resubmit records nothing");
+}
+
+#[test]
+fn ingest_records_gate_refusals_per_page_and_applies_the_rest() {
+    // Phase 3 × Phase 4: a refused page must not lose the rest of the meeting.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let s = GitStore::open(GitStoreConfig {
+        validate_cmd: Some(gate_script(tmp.path())),
+        ..GitStoreConfig::for_group(&repo, "testville")
+    })
+    .unwrap();
+
+    let mut batch = meeting_batch();
+    batch.pages.push(IngestPage {
+        path: "minutes/2026-08-15/notes".into(),
+        attributes: BTreeMap::new(),
+        sections: vec![sec("n1", "Note", "FORBIDDEN claim.", &[])],
+    });
+
+    let summary = apply_batch(&s, &batch).unwrap();
+    assert_eq!((summary.applied, summary.refused), (2, 1));
+    assert!(summary.findings.iter().any(|f| f.starts_with("minutes/2026-08-15/notes:")
+        && f.contains("GATE001/forbidden-term")), "the finding names the refused page: {:?}", summary.findings);
+    assert!(s.read("minutes/2026-08-15/decisions").unwrap().is_some(), "clean pages landed");
+    assert_eq!(s.read("minutes/2026-08-15/notes").unwrap(), None, "the refused page did not");
+}
