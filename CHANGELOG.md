@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`mycelium-wiki` change sinks — git as a projection of the store** (feature `git-mirror`): a
+  `ChangeSink` on the `CuratorBrain` is notified after each applied drain round (best-effort, never
+  load-bearing); the shipped `GitMirror` renders touched pages as pure markdown (no CAS tokens) into
+  a git worktree — **one commit per round** with proposal provenance — and optionally pushes to an
+  operator remote, `EgressPolicy`-gated **fail-closed** with a post-push `ls-remote` divergence
+  tripwire (`push_divergences()`). `rebuild()` regenerates the whole mirror from the store (also the
+  erasure procedure's second step). Zero new dependencies (the `git` CLI). Deliberately **not** a
+  `GitStore` backing store — a branch ref is a global sequencer and git history forfeits erasability;
+  the rejected as-truth variant is retained behind an eligibility envelope in
+  `docs/design/wiki-git-store.md`. Gates: `mycelium-wiki/tests/git_mirror.rs` (5 tests) + the CI Wiki
+  job's `git-mirror` steps. Runbooks: `operations/companions.md` § git mirror ·
+  `operations/data-erasure.md` (projection retention) · cookbook recipe.
+
+### Security
+- **wasmtime 45 → 46 (RUSTSEC-2026-0222,** "Stores can mix up type indices between engines", low)
+  in `mycelium-wasm-host` — the 45.x line received no patched release, so this is a major bump
+  (lock: 46.0.2; source-compatible, zero code changes). The 46 tree raises the crate's MSRV
+  `rust-version` 1.88 → **1.94** (CI pins 1.96.0; `examples/coop` inherits the floor only under its
+  opt-in `wasm` feature).
+
 ## [2.3.0] — 2026-07-24
 
 Wire **v12** (PREV 11) — unchanged; a fully backwards-compatible rolling upgrade. This is the

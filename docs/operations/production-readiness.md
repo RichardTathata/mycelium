@@ -101,7 +101,12 @@ built on the public API and has its own gates + worked example. If your deployme
   on teardown for the wiki),
 - ☐ its store/persistence dependency is provisioned (the wiki needs a node-independent store — shared
   FS / S3 / doc store — and a membership policy for the access broker),
-- ☐ its gateway/SDK surface is access-gated like the core gateway.
+- ☐ its gateway/SDK surface is access-gated like the core gateway,
+- ☐ **if the wiki's git mirror is enabled** (`git-mirror`): the push host is in the `EgressPolicy`
+  allowlist (deliberately — the mirror carries the corpus off-box), push credentials live only on
+  curator-capable nodes, the remote is force-push-locked and treated read-only (the
+  `push_divergences()` tripwire fires otherwise), and the mirror's history-retention is written into
+  your erasure procedure ([data-erasure](data-erasure.md)).
 
 → companion pages under [`docs/wiki/dev/companions/`](../wiki/dev/companions/companions.md).
 

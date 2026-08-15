@@ -165,6 +165,27 @@ council use cases). It **composes** with Postgres (metrics) + RAG (background) b
 shared id namespace — it is the authoritative/maintained layer, not a similarity
 index.
 
+Want the corpus as a **reviewable git repo** (blame, history, PRs against the
+canon)? Attach the `GitMirror` change sink (feature `git-mirror`) — the curator
+renders each applied round into a git worktree, one commit per round, optionally
+pushing to a remote you own (`EgressPolicy`-gated):
+
+```rust
+let mirror = Arc::new(GitMirror::open(Arc::clone(&store), GitMirrorConfig {
+    dir: "/var/lib/coop/wiki-mirror".into(),
+    remote: Some("git@git.internal:coop/wiki-mirror.git".into()),
+    egress: Some(EgressPolicy { allow_hosts: vec!["git.internal".into()] }),
+    ..Default::default()
+})?);
+let wiki = Wiki::with_brain(agent, cfg, store,
+    CuratorBrain::default().with_change_sink(mirror)).await;
+```
+
+The mirror is a **projection, never the record** — best-effort, rebuildable
+(`rebuild()`), and deliberately *not* a `GitStore` backing store (why:
+[`wiki-git-store.md`](../design/wiki-git-store.md)); operator side:
+[companions runbook](../operations/companions.md#mycelium-wiki--durable-curated-canon).
+
 ### How do I make my agents reachable from LangChain / AutoGen (A2A)?
 
 Serve the A2A AgentCard — built automatically from your capabilities at

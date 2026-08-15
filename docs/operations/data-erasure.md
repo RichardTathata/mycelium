@@ -58,6 +58,17 @@ the *per-subject* layer above the KV value; the two are defence-in-depth.
   migrate (re-encrypt) or document as out of scope.
 - **Erasure latency** is the registry/KMS operation, not the mesh GC window: the DEK dies
   immediately; lingering ciphertext is already cryptographically dead.
+- **Derived projections retain content until regenerated.** The wiki's optional **git mirror**
+  (`mycelium-wiki` feature `git-mirror`) renders the curated corpus as *plaintext markdown with full
+  git history* — erased content survives in that history until you complete the mirror's own erasure
+  step: erase in the system of record first, **delete the mirror repo (local + any push remote)**,
+  then `GitMirror::rebuild()` a fresh history containing only the surviving corpus. Because the
+  mirror is a projection (never the record), rewriting it is legitimate and loses nothing. Only
+  deploy the mirror for corpora where permanent public history is acceptable — or write this step
+  into your erasure procedure and DPIA. Same rule generalises to any downstream sink you attach
+  (`ChangeSink`): a projection is a copy, and your erasure procedure must enumerate the copies.
+  Details: [companions runbook § git mirror](companions.md#mycelium-wiki--durable-curated-canon) ·
+  [`docs/design/wiki-git-store.md`](../design/wiki-git-store.md).
 
 ## Data residency
 
