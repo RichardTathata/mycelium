@@ -61,6 +61,9 @@ axum        = { version = "0.8", optional = true }
 # set for the test target — the library build is unaffected.
 mycelium = { path = "..", default-features = false, features = ["test-util"] }
 tempfile = "3"
+# Phase-5 work-distribution gate: the tuple space supplies council leases; test-only composition
+# (the production coupling is nil — workers and curators meet only through the store + RPC).
+mycelium-tuple-space = { path = "../mycelium-tuple-space" }
 tokio    = { version = "1.35", features = ["full"] }
 reqwest  = { version = "0.12", features = ["json"] }
 
@@ -99,4 +102,8 @@ required-features = ["git-store"]
 
 [[test]]
 name = "git_store_curator"
+required-features = ["git-store", "control-plane"]
+
+[[test]]
+name = "work_distribution"
 required-features = ["git-store", "control-plane"]

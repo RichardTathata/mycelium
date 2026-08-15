@@ -2306,6 +2306,7 @@ dependencies = [
  "axum 0.8.9",
  "bytes",
  "mycelium",
+ "mycelium-tuple-space",
  "parking_lot",
  "reqwest",
  "serde",

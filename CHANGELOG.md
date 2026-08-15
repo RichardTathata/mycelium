@@ -32,7 +32,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `IngestBatch`/`BatchSource` (`FsBatchSource` ref impl; S3 = deployment impl), pure deterministic
   `apply_batch` (byte-identical git trees vs a serial writer, idempotent resubmit), and the
   membership-gated `wiki.{group}.ingest` RPC + `Wiki::submit_batch` — the reference rides the RPC,
-  the payload never rides the mesh or KV.
+  the payload never rides the mesh or KV. **Phase-5 work distribution:** assembly-only — tuple-space
+  council leases × idempotent ingest = **exactly-once effect** across two companions (gate: worker
+  dies after submit before ack; redelivered lease re-submits in full; zero duplicate
+  commits/leaves).
 - **`mycelium-wiki` change sinks — git as a projection of the store** (feature `git-mirror`): a
   `ChangeSink` on the `CuratorBrain` is notified after each applied drain round (best-effort, never
   load-bearing); the shipped `GitMirror` renders touched pages as pure markdown (no CAS tokens) into

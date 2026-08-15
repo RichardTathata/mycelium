@@ -104,9 +104,11 @@ completed 2026-07-03 (phases 0–5); the **artifact library** completed 2026-07-
 library + librarian + kind/runtime generalization + resource-aware eligibility + honest demos —
 `docs/design/artifact-library.md`; only its crate-naming question stays open).
 Research-track: the three-arm work-distribution experiment (Paper 1) and the monetary-
-ecology article revision ([wiki](docs/wiki/domain/publications.md)). **Designed, not built
-(2026-08-15):** the Transparency-Platform council-wiki adoption — mycelium-wiki control plane over a
-`GitStore` data plane, group-per-council curators, distributed pipeline compute
-(`docs/design/transparency-council-substrate.md`; would double as Paper 1's production case study). Delivery ledger:
+ecology article revision ([wiki](docs/wiki/domain/publications.md)). **Built
+(2026-08-15), all five phases:** the Transparency-Platform council-wiki substrate — mycelium-wiki
+control plane over the new `GitStore` (feature `git-store`), group-per-council curators, validator
+write gate, bulk-ingest claim-check, tuple-space work distribution (exactly-once effect gate)
+(`docs/design/transparency-council-substrate.md`; deployment + council-scale runs are FTT-side —
+the scale run doubles as Paper 1.s production case study). Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).
