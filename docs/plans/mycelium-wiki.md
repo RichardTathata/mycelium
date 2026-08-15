@@ -10,7 +10,7 @@ push), deliberately **not** a `GitStore` backing store; rationale + the eligibil
 rejected as-truth variant: [`wiki-git-store.md`](../design/wiki-git-store.md).
 **Designed 2026-08-15 (not built):** the UC2 deployment architecture — the Transparency Platform's
 council-wiki adopts mycelium-wiki as its **control plane over a `GitStore` data plane** (the first
-deployment satisfying the envelope): group-per-council curators as the single writers, distributed
+deployment satisfying the envelope; **`GitStore` built 2026-08-15**, feature `git-store`): group-per-council curators as the single writers, distributed
 pipeline compute via tuple-space leases + an S3 claim-check bulk-ingest path, the Node validator as
 a pre-apply lint. Five-phase build list:
 [`transparency-council-substrate.md`](../design/transparency-council-substrate.md).

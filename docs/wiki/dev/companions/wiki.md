@@ -151,11 +151,24 @@ the design record [`docs/design/wiki-git-store.md`](../../../design/wiki-git-sto
 **The envelope has its first satisfying deployment (2026-08-15):** the Transparency Platform's
 council-wiki (git-as-truth, per-council write domains, public record) — the adoption design is
 [`transparency-council-substrate.md`](../../../design/transparency-council-substrate.md):
-mycelium-wiki as the control plane over a (to-be-built) `GitStore`, **group = council** curators as
+mycelium-wiki as the control plane over a `GitStore`, **group = council** curators as
 the single writers for *both* agent edits and the distributed pipeline's serial write phase, compute
 fanned out via tuple-space leases with an S3 claim-check ingest (payloads never in KV). There,
 `GitMirror` is unused (git is truth — nothing to mirror); it remains the answer for store-as-truth
 deployments.
+
+**`GitStore` (feature `git-store`, Phase 1 — built 2026-08-15).** The git-as-truth `WikiStore`,
+legitimate *only inside the envelope*: one page = one real markdown file
+(`{subdir}/{page}.md`, front-matter manifest + marker-delimited sections with visible headings,
+**byte-exact body round-trip**); **CAS tokens are content hashes that never appear in the
+document** (equality-only — and exactly what a merge-based writer needs: conflict ⟺ the reconcile
+base is no longer the committed content), which also preserves per-section CAS independence inside
+the single file; writes are plumbing against a **private temporary index** landed by an atomic
+`update-ref <new> <old>` (a true branch-head CAS — the user's staging is never touched, and each
+commit carries only the written path, so the scoped-commit discipline is the mechanism, not a
+rule); reads are **at HEAD, never the working tree**; zero added dependencies. Pure data plane
+(no `mycelium` dep) — the curator slots straight over it, proven by the
+`git_store_curator` end-to-end.
 
 ## Gates
 
@@ -163,7 +176,9 @@ deployments.
 · `--features llm` (reconcile + semantic-lint wiring, EchoBackend) · `--features gateway`
 (`tests/gateway.rs` — the `/gateway/wiki/*` lifecycle) · `--features git-mirror` (`tests/git_mirror.rs`
 — one commit per round, pure documents, history retained, egress fail-closed, sink-failure isolation,
-rebuild, the drain→sink wiring) · `tests/access.rs` (the membership-gated broker, under
+rebuild, the drain→sink wiring) · `--features git-store,control-plane` (`tests/git_store.rs` — the
+FsStore contract mirrored onto the git-as-truth store, 20 tests + the two-instance ref-CAS race;
+`tests/git_store_curator.rs` — a curator draining proposals into scoped git commits) · `tests/access.rs` (the membership-gated broker, under
 `control-plane`) · `./mycelium-wiki/ci_smoke.sh` (the worked example, Docker-free) · clippy
 `--features control-plane|llm|gateway|git-mirror --all-targets -D warnings`. Wired as the CI **Wiki**
 job. **Only open remainder (additive):** the disconnected KV-native section-CRDT variant for the

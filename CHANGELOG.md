@@ -10,6 +10,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`mycelium-wiki` `GitStore` — the git-as-truth `WikiStore`** (feature `git-store`, zero added
+  dependencies): pages are real markdown files in a git checkout, every write a commit behind an
+  atomic `update-ref` branch-head CAS (plumbing against a private temporary index — the caller's
+  staging is never touched; commits carry only the written path, so the scoped-commit discipline is
+  the mechanism, not a rule). CAS tokens are content hashes that never appear in the document,
+  preserving per-section CAS independence inside the one-file-per-page layout; bodies round-trip
+  byte-exactly; reads are at HEAD, never the working tree. Built **only for deployments inside the
+  E1–E4 eligibility envelope** of `docs/design/wiki-git-store.md` — Phase 1 of the
+  Transparency-Platform council-wiki substrate (`docs/design/transparency-council-substrate.md`).
+  Gates: `tests/git_store.rs` (the FsStore contract suite mirrored, 20 tests, incl. a two-instance
+  ref-CAS race) + `tests/git_store_curator.rs` (a curator draining proposals into scoped, prefixed
+  git commits).
 - **`mycelium-wiki` change sinks — git as a projection of the store** (feature `git-mirror`): a
   `ChangeSink` on the `CuratorBrain` is notified after each applied drain round (best-effort, never
   load-bearing); the shipped `GitMirror` renders touched pages as pure markdown (no CAS tokens) into

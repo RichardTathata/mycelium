@@ -35,6 +35,8 @@
 mod model;
 mod store;
 mod fs;
+#[cfg(feature = "git-store")]
+mod git_store;
 #[cfg(feature = "control-plane")]
 mod agent;
 #[cfg(feature = "control-plane")]
@@ -55,6 +57,12 @@ pub use model::{
 };
 pub use store::WikiStore;
 pub use fs::FsStore;
+/// The **git-as-truth** store (feature `git-store`): pages are markdown files in a git checkout,
+/// every write is a commit behind an atomic ref CAS. Built only for deployments inside the
+/// E1-E4 eligibility envelope of `docs/design/wiki-git-store.md` -- see
+/// `docs/design/transparency-council-substrate.md` for the first (council-wiki).
+#[cfg(feature = "git-store")]
+pub use git_store::{GitStore, GitStoreConfig};
 
 /// The Mycelium **control plane** (Phase 2) — the curator role, election + ring-failover, the
 /// evaporating proposal queue, and the single-writer apply. Behind the `control-plane` feature so the
