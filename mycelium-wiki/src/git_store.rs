@@ -88,6 +88,25 @@ impl Default for GitStoreConfig {
     }
 }
 
+impl GitStoreConfig {
+    /// The **group-per-council convention** (council-substrate Phase 2,
+    /// `docs/design/transparency-council-substrate.md` §4): one repo, one store instance per group,
+    /// each scoped to its own subtree — `subdir = councils/{group}`, commit messages prefixed
+    /// `wiki({group})`. The group label is the write domain: a council slug for one-council groups,
+    /// or a shard label (a region, a batch) for a set of councils whose pages then nest as
+    /// `{council}/{page}` inside the shard's subtree. N groups over one repo = N independent
+    /// single-writer domains sharing one branch; commits never cross subtrees (each carries only
+    /// its written path) and cross-instance interleaving is handled by the ref CAS.
+    pub fn for_group(dir: impl Into<PathBuf>, group: &str) -> Self {
+        Self {
+            dir:            dir.into(),
+            subdir:         format!("councils/{group}"),
+            message_prefix: format!("wiki({group})"),
+            ..Self::default()
+        }
+    }
+}
+
 /// A git-checkout-backed group wiki. See the module docs for the contract.
 pub struct GitStore {
     cfg: GitStoreConfig,
