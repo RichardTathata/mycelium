@@ -75,13 +75,17 @@ pub struct CuratorBrain {
     /// [`GitMirror`](crate::sink) under feature `git-mirror`). Never load-bearing: sink failures are
     /// the sink's to log; the apply neither waits on nor depends on it.
     pub change_sink:   Option<Arc<dyn crate::sink::ChangeSink>>,
+    /// Optional claim-check source for **bulk ingest** (council-substrate Phase 4): where the
+    /// curator fetches a staged [`IngestBatch`](crate::IngestBatch) when a worker submits a
+    /// reference. Absent ⇒ the ingest RPC surface is not served.
+    pub batch_source:  Option<Arc<dyn crate::ingest::BatchSource>>,
 }
 
 impl Default for CuratorBrain {
     fn default() -> Self {
         Self {
             reconciler: Box::new(DirectReconciler), semantic_lint: None,
-            membership: Membership::Open, change_sink: None,
+            membership: Membership::Open, change_sink: None, batch_source: None,
         }
     }
 }
@@ -107,6 +111,54 @@ impl CuratorBrain {
         self.change_sink = Some(sink);
         self
     }
+    /// Configure the claim-check [`BatchSource`](crate::ingest::BatchSource) — enables the bulk
+    /// ingest surface (`wiki.{group}.ingest`) while this node curates.
+    pub fn with_batch_source(mut self, source: Arc<dyn crate::ingest::BatchSource>) -> Self {
+        self.batch_source = Some(source);
+        self
+    }
+}
+
+/// Errors from the bulk-ingest path ([`Wiki::ingest`] / [`Wiki::submit_batch`]).
+#[derive(Debug)]
+pub enum IngestError {
+    /// `ingest` was called on a node that is not currently the curator.
+    NotCurator,
+    /// No [`BatchSource`](crate::ingest::BatchSource) is configured on this curator.
+    NoBatchSource,
+    /// No curator is currently discoverable on the capability ring.
+    NoCurator,
+    /// The batch source could not produce the referenced batch.
+    Fetch(String),
+    /// The store failed mid-apply (the batch is resubmittable — applied pages re-apply as no-ops).
+    Store(String),
+    /// The RPC to the curator failed.
+    Rpc(String),
+    /// The curator's reply did not decode, or reported an error.
+    Remote(String),
+}
+
+impl std::fmt::Display for IngestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IngestError::NotCurator    => write!(f, "wiki ingest: this node is not the curator"),
+            IngestError::NoBatchSource => write!(f, "wiki ingest: no batch source configured"),
+            IngestError::NoCurator     => write!(f, "wiki ingest: no curator discoverable"),
+            IngestError::Fetch(e)      => write!(f, "wiki ingest: fetching the batch failed: {e}"),
+            IngestError::Store(e)      => write!(f, "wiki ingest: store error mid-apply (resubmit): {e}"),
+            IngestError::Rpc(e)        => write!(f, "wiki ingest: rpc to curator failed: {e}"),
+            IngestError::Remote(e)     => write!(f, "wiki ingest: curator reported: {e}"),
+        }
+    }
+}
+impl std::error::Error for IngestError {}
+
+/// The ingest RPC's wire reply.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IngestReply {
+    ok:      bool,
+    error:   Option<String>,
+    summary: Option<crate::ingest::IngestSummary>,
 }
 
 /// A queued edit proposal — serialised into `wiki/{group}/proposal/{id}` (evaporating soft-state).
@@ -146,6 +198,8 @@ pub struct Wiki<S: WikiStore + 'static> {
     /// Optional projection sink, notified after each applied drain round (best-effort, never
     /// load-bearing — see `docs/design/wiki-git-store.md`).
     change_sink:      Option<Arc<dyn crate::sink::ChangeSink>>,
+    /// Optional claim-check source for bulk ingest (Phase 4); enables the ingest RPC while curating.
+    batch_source:     Option<Arc<dyn crate::ingest::BatchSource>>,
     /// The latest lint report (refreshed each lint tick while curating) — the group-function output.
     last_lint:        Mutex<LintReport>,
     /// Set whenever the curator writes the store; the periodic lint loop only runs a (whole-corpus)
@@ -196,6 +250,7 @@ impl<S: WikiStore + 'static> Wiki<S> {
             semantic_lint:    brain.semantic_lint,
             membership:       brain.membership,
             change_sink:      brain.change_sink,
+            batch_source:     brain.batch_source,
             last_lint:        Mutex::new(LintReport::default()),
             lint_dirty:       AtomicBool::new(true),
             lint_passes:      AtomicU64::new(0),
@@ -289,6 +344,61 @@ impl<S: WikiStore + 'static> Wiki<S> {
     /// Phase 3). Each refusal dropped its proposal batch with the findings in the `warn!` log.
     pub fn gate_refusals(&self) -> u64 {
         self.gate_refusals.load(Ordering::Relaxed)
+    }
+
+    /// **Curator-local bulk ingest** (Phase 4): fetch the referenced batch from the configured
+    /// [`BatchSource`](crate::ingest::BatchSource) and apply it in batch order through the normal
+    /// write path — the write gate runs per page (refusals are recorded in the summary, not fatal),
+    /// the lint re-arms, and the change sink gets one round for the batch. Deterministic and
+    /// resubmittable (see [`crate::ingest::apply_batch`]).
+    pub fn ingest(&self, reference: &str) -> Result<crate::ingest::IngestSummary, IngestError> {
+        if !self.is_curator() {
+            return Err(IngestError::NotCurator);
+        }
+        let source = self.batch_source.as_ref().ok_or(IngestError::NoBatchSource)?;
+        let batch = source.fetch(reference).map_err(IngestError::Fetch)?;
+        let summary = crate::ingest::apply_batch(self.store.as_ref(), &batch)
+            .map_err(|e| IngestError::Store(e.to_string()))?;
+        if summary.applied > 0 {
+            self.lint_dirty.store(true, Ordering::Release);
+            if let Some(sink) = &self.change_sink {
+                sink.round_applied(&crate::sink::AppliedRound {
+                    group:     self.cfg.group.to_string(),
+                    pages:     batch.pages.iter().map(|p| p.path.clone()).collect(),
+                    proposals: summary.applied,
+                    authors:   vec![batch.source.clone()],
+                });
+            }
+        }
+        for finding in &summary.findings {
+            tracing::warn!(group = %self.cfg.group, reference, finding,
+                "wiki: ingest page refused by the write gate");
+        }
+        Ok(summary)
+    }
+
+    /// **Worker-side submission** (Phase 4): send a staged batch's *reference* to the group's
+    /// curator over point-to-point RPC — the claim-check flow; the payload itself never rides the
+    /// mesh. The curator fetches from its own [`BatchSource`](crate::ingest::BatchSource) and
+    /// replies with the [`IngestSummary`](crate::ingest::IngestSummary). Membership-gated like
+    /// store access. Generous timeout: the curator applies (and commits) the whole batch before
+    /// replying.
+    pub async fn submit_batch(&self, reference: &str) -> Result<crate::ingest::IngestSummary, IngestError> {
+        if self.is_curator() {
+            return self.ingest(reference); // local fast path — no RPC to ourselves
+        }
+        let curator = self.resolve_role("curator").into_iter().next().ok_or(IngestError::NoCurator)?;
+        let kind = format!("wiki.{}.ingest", self.cfg.group);
+        let raw = self.agent.service()
+            .rpc_call(curator, kind, reference.as_bytes().to_vec(), Duration::from_secs(60))
+            .await
+            .map_err(|e| IngestError::Rpc(e.to_string()))?;
+        let reply: IngestReply =
+            serde_json::from_slice(&raw).map_err(|e| IngestError::Remote(e.to_string()))?;
+        match (reply.ok, reply.summary) {
+            (true, Some(summary)) => Ok(summary),
+            _ => Err(IngestError::Remote(reply.error.unwrap_or_else(|| "unspecified".into()))),
+        }
     }
 
     /// Run a lint pass now over the whole corpus: the always-on [`structural_lint`] plus the injected
@@ -396,12 +506,37 @@ impl<S: WikiStore + 'static> Wiki<S> {
                 tracing::info!(group = %me.cfg.group, requester = %requester, granted, "wiki: store-access request");
             }
         });
+        // The bulk-ingest responder (Phase 4) — served only when a batch source is configured.
+        // Workers submit a claim-check *reference*; the curator fetches + applies + replies with
+        // the summary. Membership-gated like store access (the same permits() as the broker).
+        let ingest_task = self.batch_source.is_some().then(|| {
+            let me = Arc::clone(self);
+            tokio::spawn(async move {
+                let mut rx = me.agent.service().rpc_rx(format!("wiki.{}.ingest", me.cfg.group));
+                while let Some(req) = rx.recv().await {
+                    let requester = req.sender().to_string();
+                    let reply = if !me.membership.permits(&requester) {
+                        IngestReply { ok: false, error: Some("membership denied".into()), summary: None }
+                    } else {
+                        let reference = String::from_utf8_lossy(&req.payload()).into_owned();
+                        match me.ingest(&reference) {
+                            Ok(summary) => IngestReply { ok: true, error: None, summary: Some(summary) },
+                            Err(e)      => IngestReply { ok: false, error: Some(e.to_string()), summary: None },
+                        }
+                    };
+                    me.agent.service().rpc_respond(&req, serde_json::to_vec(&reply).unwrap_or_default());
+                }
+            })
+        });
         // This curatorship's loops live in `curator_tasks` so a step-down can stop exactly them.
         {
             let mut ct = self.curator_tasks.lock();
             ct.push(drain);
             ct.push(lint);
             ct.push(broker);
+            if let Some(t) = ingest_task {
+                ct.push(t);
+            }
         }
 
         // Curator sentinel — split-brain reconciliation. The initial election settles on a fixed

@@ -236,3 +236,100 @@ async fn gate_refused_proposals_are_dropped_and_the_curator_keeps_working() {
     wiki.shutdown().await;
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// The Phase-4 gate, remote leg: a **worker submits a claim-check reference over the mesh**; the
+/// curator fetches the staged batch from its own source, applies it, and replies with the summary.
+/// The payload never rides the RPC — only the reference string does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_submits_a_batch_reference_and_the_curator_applies_it() {
+    use mycelium_wiki::{CuratorBrain, FsBatchSource, IngestBatch, IngestPage, Section};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let stage = tmp.path().join("stage"); // the claim-check store (S3 stand-in)
+    std::fs::create_dir_all(&stage).unwrap();
+
+    // Stage the batch where only the CURATOR's source can see it.
+    let batch = IngestBatch {
+        source: "pipeline/run-7".into(),
+        pages: vec![IngestPage {
+            path: "minutes/2026-08-15".into(),
+            attributes: Default::default(),
+            sections: vec![Section {
+                id: std::sync::Arc::from("d1"),
+                heading: "Retrofit approved".into(),
+                body: "RESOLVED: the retrofit scheme proceeds.".into(),
+                attributes: Default::default(),
+            }],
+        }],
+    };
+    std::fs::write(stage.join("run-7.json"), serde_json::to_vec(&batch).unwrap()).unwrap();
+
+    // A meshed pair: curator on A (with the batch source), worker on B (no source, no checkout).
+    let (agent_a, agent_b) = {
+        let mut pair = None;
+        for _ in 0..16 {
+            let (pa, pb) = (mycelium::test_util::alloc_port(), mycelium::test_util::alloc_port());
+            let mk = |port: u16, boot: u16| {
+                let cfg = GossipConfig {
+                    bind_port: port,
+                    bootstrap_peers: vec![NodeId::new("127.0.0.1", boot).unwrap()],
+                    ..Default::default()
+                };
+                Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg))
+            };
+            let a = mk(pa, pb);
+            if a.start().await.is_err() {
+                continue;
+            }
+            let b = mk(pb, pa);
+            if b.start().await.is_ok() {
+                pair = Some((a, b));
+                break;
+            }
+            a.shutdown_with_timeout(Duration::from_secs(5)).await;
+        }
+        pair.expect("could not bind an agent pair")
+    };
+
+    let store_a = Arc::new(GitStore::open(GitStoreConfig::for_group(&repo, "testville")).unwrap());
+    let curator = Wiki::with_brain(
+        Arc::clone(&agent_a),
+        WikiConfig::new("testville").role(WikiRole::Curator),
+        Arc::clone(&store_a),
+        CuratorBrain::default().with_batch_source(Arc::new(FsBatchSource::new(&stage))),
+    )
+    .await;
+    // The worker holds a read handle to the same repo (E4: git-native readers), but no batch source.
+    let store_b = Arc::new(GitStore::open(GitStoreConfig::for_group(&repo, "testville")).unwrap());
+    let worker = Wiki::new(
+        Arc::clone(&agent_b),
+        WikiConfig::new("testville").role(WikiRole::Reader),
+        Arc::clone(&store_b),
+    )
+    .await;
+
+    // Submit the REFERENCE (retry until the curator's capability has gossiped to the worker).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let summary = loop {
+        match worker.submit_batch("run-7.json").await {
+            Ok(s) => break s,
+            Err(e) => {
+                assert!(tokio::time::Instant::now() < deadline, "submission never succeeded: {e}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    assert_eq!((summary.applied, summary.refused), (1, 0), "the curator applied the staged batch");
+
+    // The result is committed truth, readable by the worker's own store handle, with provenance.
+    let page = store_b.read("minutes/2026-08-15").unwrap().expect("the page is committed truth");
+    assert!(page.sections[0].body.contains("retrofit scheme proceeds"));
+    let msg = git(&repo, &["log", "-1", "--format=%s"]);
+    assert!(msg.starts_with("wiki(testville): "), "scoped provenance survives the remote path: {msg}");
+
+    curator.shutdown().await;
+    worker.shutdown().await;
+    agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

@@ -1,11 +1,12 @@
 # Transparency Platform on Mycelium — the council-wiki substrate design
 
-**Status:** designed 2026-08-15; **Phases 1–3 built 2026-08-15** — the `GitStore` (feature
+**Status:** designed 2026-08-15; **Phases 1–4 built 2026-08-15** — the `GitStore` (feature
 `git-store`; the FsStore contract mirrored + the curator-to-scoped-commits hinge), the
 group-per-council wiring (`GitStoreConfig::for_group`; gate: two curators, two councils, one repo,
-no cross-scope commits), and the **write gate** (`GitStoreConfig::validate_cmd` — pre-commit
-validator refusal with findings; the curator drops refused proposals, `Wiki::gate_refusals()`).
-Phases 4–5 remain open — the build list is §6.
+no cross-scope commits), the **write gate** (`GitStoreConfig::validate_cmd` — pre-commit
+validator refusal with findings; the curator drops refused proposals), and the **bulk-ingest claim-check** (`BatchSource` + `apply_batch` +
+`Wiki::submit_batch` — the reference rides the RPC, never the payload; byte-identical to the serial
+writer, idempotent resubmit). Phase 5 remains open — the build list is §6.
 **Companion records:** [`wiki-git-store.md`](wiki-git-store.md) (the GitStore eligibility envelope this
 deployment satisfies — the first that does) · [`wiki-concurrent-edit.md`](wiki-concurrent-edit.md) ·
 [`../plans/mycelium-wiki.md`](../plans/mycelium-wiki.md) (council decisions is UC2, one of the two
@@ -166,10 +167,21 @@ Escape hatch if push contention ever bites: per-council branches + a merge queue
    contract is deliberately just "a command over the tree"). *Gates (green):*
    `git_store.rs::the_write_gate_refuses_before_commit_and_leaves_no_residue` +
    `git_store_curator.rs::gate_refused_proposals_are_dropped_and_the_curator_keeps_working`.
-4. **Bulk-ingest claim-check path** — a curator RPC accepting "apply this meeting's extracted
-   leaves" as an S3 reference (never KV payloads); the curator fetches, writes in candidate order,
-   commits per meeting. Wiring over existing RPC/bulk primitives, not invention. *Gate:* a
-   simulated worker submits a meeting; the commit is byte-identical to the serial pipeline's.
+4. **Bulk-ingest claim-check path.** ✅ **Built 2026-08-15**: `IngestBatch`/`IngestPage` (the staged
+   payload format), the pluggable `BatchSource` trait (`FsBatchSource` reference impl; an
+   `S3BatchSource` is the deployment impl of the same trait), the pure deterministic
+   `apply_batch` (writes each page via `write_page` in batch order — through the Phase-3 gate,
+   refusals recorded per page, never losing the rest of the meeting), and the RPC surface:
+   `CuratorBrain::with_batch_source` serves `wiki.{group}.ingest` (membership-gated, mirroring the
+   access broker) and `Wiki::submit_batch(reference)` is the worker side — **the RPC carries the
+   reference string only; the payload never rides the mesh** (the rule made structural).
+   Resubmission after a partial failure is naturally idempotent: `write_page` re-applies as no-ops,
+   so already-landed pages record nothing. *Gates (green):*
+   `git_store.rs::ingest_is_byte_identical_to_the_serial_writer_and_resubmit_is_a_noop` (identical
+   `HEAD^{tree}` + identical commit counts vs a serial writer; a resubmit records nothing) ·
+   `ingest_records_gate_refusals_per_page_and_applies_the_rest` (Phase 3 × 4) ·
+   `git_store_curator.rs::a_worker_submits_a_batch_reference_and_the_curator_applies_it` (a real
+   two-node mesh: reference over RPC, curator fetches + applies, worker reads committed truth).
 5. **Work-distribution assembly** — tuple-space lanes for council leases + per-PDF fan-out,
    leaning on FTT's skip-if-exists idempotency (what makes at-least-once redistribution safe by
    construction). Mostly assembling existing companions; doubles as the **production case study
