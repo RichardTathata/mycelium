@@ -175,3 +175,64 @@ async fn two_council_curators_share_one_repo_without_cross_scope_commits() {
         a.shutdown_with_timeout(Duration::from_secs(5)).await;
     }
 }
+
+/// The Phase-3 gate (`transparency-council-substrate.md` §6.3), end to end: a curator over a
+/// **gated** GitStore. A proposal the validator refuses is **dropped with the findings counted**
+/// (never retried — the queue must not wedge), and the curator keeps applying clean proposals
+/// afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gate_refused_proposals_are_dropped_and_the_curator_keeps_working() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let script = tmp.path().join("stub-validate.sh");
+    std::fs::write(&script, "#!/bin/sh\nif grep -q FORBIDDEN \"$1\"; then echo \"GATE001/forbidden-term: $1\"; exit 1; fi\nexit 0\n").unwrap();
+    let mut cfg = GitStoreConfig::for_group(&repo, "testville");
+    cfg.validate_cmd = Some(vec!["/bin/sh".into(), script.to_string_lossy().into_owned()]);
+    let store = Arc::new(GitStore::open(cfg).unwrap());
+
+    let agent = loop {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        if a.start().await.is_ok() {
+            break a;
+        }
+    };
+    let wiki = Wiki::new(
+        Arc::clone(&agent),
+        WikiConfig::new("testville").role(WikiRole::Curator),
+        Arc::clone(&store),
+    )
+    .await;
+
+    // A proposal the gate refuses…
+    let bad = mint_section_id("testville", "minutes/2026-08-15", 1, 1);
+    wiki.propose("minutes/2026-08-15", bad, "Opening", "FORBIDDEN claim.", Default::default());
+
+    // …is dropped with the refusal counted (poll the counter, not a sleep).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while wiki.gate_refusals() == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "the refusal was never recorded");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let refusals_at_drop = wiki.gate_refusals();
+    assert_eq!(store.read("minutes/2026-08-15").unwrap(), None, "the refused content never landed");
+
+    // A clean proposal afterwards applies normally — the queue did not wedge.
+    let good = mint_section_id("testville", "minutes/2026-08-15", 2, 2);
+    wiki.propose("minutes/2026-08-15", good, "Opening", "The meeting opened.", Default::default());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(p) = store.read("minutes/2026-08-15").unwrap() {
+            assert!(p.sections.iter().any(|s| s.body.contains("meeting opened")));
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the clean proposal never applied");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The dropped proposal was tombstoned, not retried: the counter stays where the drop left it.
+    assert_eq!(wiki.gate_refusals(), refusals_at_drop, "a dropped proposal is never retried");
+
+    wiki.shutdown().await;
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

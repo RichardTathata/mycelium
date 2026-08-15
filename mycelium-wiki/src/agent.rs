@@ -154,6 +154,9 @@ pub struct Wiki<S: WikiStore + 'static> {
     lint_dirty:       AtomicBool,
     /// How many lint passes the curator has run (observability + the dirty-skip regression test).
     lint_passes:      AtomicU64,
+    /// Applies refused by the deployment write gate (GitStore `validate_cmd`, council-substrate
+    /// Phase 3) — each refusal drops its proposals with the findings logged.
+    gate_refusals:    AtomicU64,
     is_curator:       AtomicBool,
     curator_reg:      Mutex<Option<CapabilityReg>>,
     candidate_reg:    Mutex<Option<CapabilityReg>>,
@@ -196,6 +199,7 @@ impl<S: WikiStore + 'static> Wiki<S> {
             last_lint:        Mutex::new(LintReport::default()),
             lint_dirty:       AtomicBool::new(true),
             lint_passes:      AtomicU64::new(0),
+            gate_refusals:    AtomicU64::new(0),
             is_curator:       AtomicBool::new(false),
             curator_reg:      Mutex::new(None),
             candidate_reg:    Mutex::new(None),
@@ -280,6 +284,12 @@ impl<S: WikiStore + 'static> Wiki<S> {
     /// How many lint passes the curator has run since construction. Observability, and the anchor for
     /// the dirty-skip regression test (an idle wiki does not advance this).
     pub fn lint_pass_count(&self) -> u64 { self.lint_passes.load(Ordering::Relaxed) }
+
+    /// Applies refused by the deployment write gate (`GitStore::validate_cmd`, council-substrate
+    /// Phase 3). Each refusal dropped its proposal batch with the findings in the `warn!` log.
+    pub fn gate_refusals(&self) -> u64 {
+        self.gate_refusals.load(Ordering::Relaxed)
+    }
 
     /// Run a lint pass now over the whole corpus: the always-on [`structural_lint`] plus the injected
     /// semantic pass (if any). Stores and returns the report. Any node may call it on demand; the
@@ -501,12 +511,29 @@ impl<S: WikiStore + 'static> Wiki<S> {
         let mut authors: std::collections::BTreeSet<String> = Default::default();
         let mut proposals = 0usize;
         for ((page, section), batch) in groups {
-            if self.apply_group(&page, &section, &batch.edits).await.is_ok() {
-                proposals += batch.edits.len();
-                authors.extend(batch.edits.iter().map(|e| e.author.clone()));
-                applied_pages.insert(page);
-                for key in batch.keys {
-                    let _ = self.agent.kv().delete(key); // tombstone only after the store write landed
+            match self.apply_group(&page, &section, &batch.edits).await {
+                Ok(()) => {
+                    proposals += batch.edits.len();
+                    authors.extend(batch.edits.iter().map(|e| e.author.clone()));
+                    applied_pages.insert(page);
+                    for key in batch.keys {
+                        let _ = self.agent.kv().delete(key); // tombstone only after the store write landed
+                    }
+                }
+                Err(e) => {
+                    if let Some(findings) = e.as_gate_refusal() {
+                        // The deployment's write gate refused this content (Phase 3). NOT a retry
+                        // signal — the same content refuses again — so the proposals are dropped
+                        // with the findings on record, and the queue never wedges on them.
+                        self.gate_refusals.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(%page, section = %section, findings,
+                            "wiki: apply refused by the write gate — proposals dropped");
+                        for key in batch.keys {
+                            let _ = self.agent.kv().delete(key);
+                        }
+                    }
+                    // Any other error (contention, transient store trouble): leave the proposals
+                    // queued — the next drain re-reads and re-reconciles (idempotent).
                 }
             }
         }

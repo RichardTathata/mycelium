@@ -73,6 +73,16 @@ pub struct GitStoreConfig {
     pub author_email: String,
     /// Commit-message prefix, e.g. `wiki(norfolk)` — messages read `{prefix}: write {page}`.
     pub message_prefix: String,
+    /// Optional **write gate** (council-substrate Phase 3): a command run before every commit with
+    /// the candidate file in place in the worktree — `cwd` = the repo dir, argv = this vector plus
+    /// the candidate's repo-relative path. **Exit 0 admits; any other exit refuses** the write with
+    /// the command's output as the findings (surfaced as [`WikiError::gate_refusal`], which the
+    /// curator treats as drop-with-findings, not retry). The worktree is restored to its prior
+    /// state after the check either way. For the council-wiki deployment this is the Node
+    /// validator in listed-only mode (`["node", "validation/validate.js", "--root", ".",
+    /// "--listed-only"]`) — its cost per run is the deployment's to manage (their #1359 tracks the
+    /// validator's own speed); the gate contract is deliberately just "a command over the tree".
+    pub validate_cmd: Option<Vec<String>>,
 }
 
 impl Default for GitStoreConfig {
@@ -84,6 +94,7 @@ impl Default for GitStoreConfig {
             author_name:    "mycelium-wiki curator".to_string(),
             author_email:   "curator@wiki.invalid".to_string(),
             message_prefix: "wiki".to_string(),
+            validate_cmd:   None,
         }
     }
 }
@@ -437,6 +448,12 @@ impl GitStore {
             if old_text.as_deref() == Some(content.as_str()) {
                 return Ok(token); // an idempotent re-apply: nothing to record, no empty commit
             }
+            // The write gate (Phase 3): candidate on disk → run the deployment's validator →
+            // refuse (a non-retry error carrying the findings) or admit. A refusal is checked
+            // before the commit, so a refused write leaves neither a commit nor worktree residue.
+            if self.cfg.validate_cmd.is_some() {
+                self.gate_check(&rel, &content)?;
+            }
             match self.commit_file(head.as_deref(), &rel, &content, message)? {
                 CommitOutcome::Committed => return Ok(token),
                 CommitOutcome::RefMoved  => continue, // rebuilt on the new head next iteration
@@ -447,6 +464,44 @@ impl GitStore {
 
     fn message(&self, verb: &str, page: &str) -> String {
         format!("{}: {verb} {page}", self.cfg.message_prefix)
+    }
+
+    /// Run the deployment's write gate over the candidate: place the candidate file in the
+    /// worktree, run `validate_cmd + [rel]` with `cwd` = the repo dir, then **restore the prior
+    /// worktree state either way** (an admitted write is re-synced by the commit itself; a refused
+    /// one must leave no residue). Exit 0 admits; anything else refuses with the command's output
+    /// as the findings.
+    fn gate_check(&self, rel: &str, candidate: &str) -> Result<(), WikiError> {
+        let Some(cmd) = &self.cfg.validate_cmd else { return Ok(()) };
+        let (program, args) = cmd.split_first().ok_or_else(|| {
+            WikiError::Io(io::Error::new(io::ErrorKind::InvalidInput, "validate_cmd must not be empty"))
+        })?;
+        let dst = self.cfg.dir.join(rel);
+        let prior = std::fs::read(&dst).ok(); // None = the file did not exist before
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dst, candidate)?;
+        let run = Command::new(program).args(args).arg(rel).current_dir(&self.cfg.dir).output();
+        // Restore before judging the outcome, so every exit path leaves the worktree as found.
+        match &prior {
+            Some(bytes) => std::fs::write(&dst, bytes)?,
+            None        => { let _ = std::fs::remove_file(&dst); }
+        }
+        let out = run.map_err(io_ctx("spawning the write gate"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let findings = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        );
+        Err(WikiError::gate_refusal(if findings.is_empty() {
+            format!("gate {program:?} exited {:?} with no output", out.status.code())
+        } else {
+            findings
+        }))
     }
 }
 

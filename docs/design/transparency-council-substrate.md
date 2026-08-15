@@ -1,10 +1,11 @@
 # Transparency Platform on Mycelium — the council-wiki substrate design
 
-**Status:** designed 2026-08-15; **Phases 1–2 built 2026-08-15** — the `GitStore` (feature
-`git-store`, `mycelium-wiki/src/git_store.rs`; the FsStore contract mirrored + the
-curator-to-scoped-commits hinge) and the group-per-council wiring
-(`GitStoreConfig::for_group`; gate: two curators, two councils, one repo, no cross-scope commits).
-Phases 3–5 remain open — the build list is §6.
+**Status:** designed 2026-08-15; **Phases 1–3 built 2026-08-15** — the `GitStore` (feature
+`git-store`; the FsStore contract mirrored + the curator-to-scoped-commits hinge), the
+group-per-council wiring (`GitStoreConfig::for_group`; gate: two curators, two councils, one repo,
+no cross-scope commits), and the **write gate** (`GitStoreConfig::validate_cmd` — pre-commit
+validator refusal with findings; the curator drops refused proposals, `Wiki::gate_refusals()`).
+Phases 4–5 remain open — the build list is §6.
 **Companion records:** [`wiki-git-store.md`](wiki-git-store.md) (the GitStore eligibility envelope this
 deployment satisfies — the first that does) · [`wiki-concurrent-edit.md`](wiki-concurrent-edit.md) ·
 [`../plans/mycelium-wiki.md`](../plans/mycelium-wiki.md) (council decisions is UC2, one of the two
@@ -150,10 +151,21 @@ Escape hatch if push contention ever bites: per-council branches + a merge queue
    `git_store_curator.rs::two_council_curators_share_one_repo_without_cross_scope_commits` — two
    curators, two councils, one repo, concurrent applies; every commit touches exactly one council's
    subtree and carries that council's message prefix; both documents land as committed truth.
-3. **Node-validator pre-apply lint** — a `SemanticLinter`/gate impl that shells FTT's
-   `validation/validate.js --start councils/<slug>` over the curator's working tree and refuses the
-   apply on errors (warnings pass — their blocking rule). *Gate:* an edit violating an entity
-   contract is refused with the validator's finding attached to the proposal outcome.
+3. **Node-validator pre-apply lint.** ✅ **Built 2026-08-15** as `GitStoreConfig::validate_cmd` —
+   a deployment-supplied command run **before every commit** with the candidate file in place
+   (cwd = repo dir, argv + relative path): exit 0 admits; any other exit **refuses** the write with
+   the command's output as findings, and the worktree is restored either way (a refused write
+   leaves neither a commit nor residue). The refusal travels as `WikiError::gate_refusal` (carried
+   inside `Io`, no new enum variant — additive), and the curator treats it as
+   **drop-with-findings, never retry**: the proposal batch is tombstoned, `Wiki::gate_refusals()`
+   counts it, and the queue cannot wedge on permanently-invalid content. Clean proposals keep
+   applying. For FTT the command is the Node validator in listed-only mode; warnings-pass is the
+   command's own policy (exit 2 = warnings-only would refuse — wrap with a script that exits 0 on
+   2, matching their errors-block-warnings-don't rule). §9's per-apply-vs-batched question resolves
+   as **per-apply with the deployment owning the cost** (their #1359 tracks validator speed; the
+   contract is deliberately just "a command over the tree"). *Gates (green):*
+   `git_store.rs::the_write_gate_refuses_before_commit_and_leaves_no_residue` +
+   `git_store_curator.rs::gate_refused_proposals_are_dropped_and_the_curator_keeps_working`.
 4. **Bulk-ingest claim-check path** — a curator RPC accepting "apply this meeting's extracted
    leaves" as an S3 reference (never KV payloads); the curator fetches, writes in candidate order,
    commits per meeting. Wiring over existing RPC/bulk primitives, not invention. *Gate:* a
