@@ -1,12 +1,12 @@
 # Transparency Platform on Mycelium — the council-wiki substrate design
 
-**Status:** designed 2026-08-15; **Phases 1–4 built 2026-08-15** — the `GitStore` (feature
-`git-store`; the FsStore contract mirrored + the curator-to-scoped-commits hinge), the
-group-per-council wiring (`GitStoreConfig::for_group`; gate: two curators, two councils, one repo,
-no cross-scope commits), the **write gate** (`GitStoreConfig::validate_cmd` — pre-commit
-validator refusal with findings; the curator drops refused proposals), and the **bulk-ingest claim-check** (`BatchSource` + `apply_batch` +
-`Wiki::submit_batch` — the reference rides the RPC, never the payload; byte-identical to the serial
-writer, idempotent resubmit). Phase 5 remains open — the build list is §6.
+**Status:** designed 2026-08-15; **ALL FIVE PHASES BUILT 2026-08-15** — the `GitStore` (feature
+`git-store`), the group-per-council wiring (`for_group`), the write gate (`validate_cmd`), the
+bulk-ingest claim-check (`BatchSource`/`apply_batch`/`submit_batch`), and the work-distribution
+assembly (tuple-space leases × idempotent ingest = exactly-once effect). Each phase carries its
+design-record gate as a passing test; the build list with as-built decisions is §6. What remains is
+**deployment** (FTT-side): an `S3BatchSource`, the real Node validator as `validate_cmd`, and
+running the assembly at council scale.
 **Companion records:** [`wiki-git-store.md`](wiki-git-store.md) (the GitStore eligibility envelope this
 deployment satisfies — the first that does) · [`wiki-concurrent-edit.md`](wiki-concurrent-edit.md) ·
 [`../plans/mycelium-wiki.md`](../plans/mycelium-wiki.md) (council decisions is UC2, one of the two
@@ -182,11 +182,18 @@ Escape hatch if push contention ever bites: per-council branches + a merge queue
    `ingest_records_gate_refusals_per_page_and_applies_the_rest` (Phase 3 × 4) ·
    `git_store_curator.rs::a_worker_submits_a_batch_reference_and_the_curator_applies_it` (a real
    two-node mesh: reference over RPC, curator fetches + applies, worker reads committed truth).
-5. **Work-distribution assembly** — tuple-space lanes for council leases + per-PDF fan-out,
-   leaning on FTT's skip-if-exists idempotency (what makes at-least-once redistribution safe by
-   construction). Mostly assembling existing companions; doubles as the **production case study
-   the Paper 1 work-distribution experiment lacks**. *Gate:* kill a worker mid-council; the lease
-   evaporates and another node completes it with zero duplicate leaves.
+5. **Work-distribution assembly.** ✅ **Built 2026-08-15** — pure composition, zero new mechanism:
+   the tuple space supplies council work-leases (`worker_timeout_secs` = the lease; a taken-not-acked
+   item re-queues — at-least-once), the Phase-4 ingest supplies the idempotent apply, and their
+   product is **exactly-once effect** (`exactly-once-effect.md`, the same contract the tuple space
+   and blackboard already carry). The work item is the claim-check reference and nothing more.
+   *Gate (green):* `tests/work_distribution.rs::a_dead_workers_lease_redelivers_and_the_batch_lands_exactly_once`
+   — the kill is at the **worst point** (after submit, before ack), so the redelivered lease
+   re-submits the batch *in full* and zero duplicate commits/leaves is earned by idempotency, not by
+   a convenient death. Operational note: the primary's re-queue scan ticks every 30 s, so
+   redelivery latency ≈ lease + ≤30 s — workers should poll `take`, not park, when waiting on
+   redelivered work. This is the production case-study substrate the Paper 1 work-distribution
+   experiment lacked; running it at real council scale is FTT-side work.
 
 **FTT-side agreements (theirs, not ours):** a curator **maintenance mode** while a council is bulk
 regenerated; hooks/CI stay for human edits; the E1 DPIA note.
