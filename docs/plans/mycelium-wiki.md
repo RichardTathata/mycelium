@@ -8,6 +8,12 @@ SDKs · worked example), all CI-green; audited in analysis Run 32 (one Major fin
 best-effort curator-emitted projection of the store (one commit per applied round, egress-gated
 push), deliberately **not** a `GitStore` backing store; rationale + the eligibility envelope for the
 rejected as-truth variant: [`wiki-git-store.md`](../design/wiki-git-store.md).
+**Designed 2026-08-15 (not built):** the UC2 deployment architecture — the Transparency Platform's
+council-wiki adopts mycelium-wiki as its **control plane over a `GitStore` data plane** (the first
+deployment satisfying the envelope): group-per-council curators as the single writers, distributed
+pipeline compute via tuple-space leases + an S3 claim-check bulk-ingest path, the Node validator as
+a pre-apply lint. Five-phase build list:
+[`transparency-council-substrate.md`](../design/transparency-council-substrate.md).
 **Open (additive):** the disconnected KV-native variant — the merge mechanism is settled
 ([`wiki-concurrent-edit.md`](../design/wiki-concurrent-edit.md) §1–§2), but its **eligibility envelope**
 (E1–E4 + a resident-corpus tripwire, §6) is the precondition a build must satisfy *first*: KV

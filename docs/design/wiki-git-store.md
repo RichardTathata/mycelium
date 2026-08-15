@@ -92,6 +92,12 @@ mirror.
 
 ## The eligibility envelope for GitStore-as-truth (not built)
 
+> **Envelope satisfied (2026-08-15):** the Transparency Platform's council-wiki is the first
+> deployment meeting all four conditions, and a full adoption design now exists —
+> [`transparency-council-substrate.md`](transparency-council-substrate.md) (control-plane adoption
+> over a `GitStore` data plane; the E1 councillor-GDPR caveat is stated there). `GitStore` remains
+> unbuilt; that record carries its phased build list.
+
 Like the KV-native wiki variant, the rejected adapter is retained as a *conditional* design: it may
 only be built for a deployment satisfying **all** of:
 

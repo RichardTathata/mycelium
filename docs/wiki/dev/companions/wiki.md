@@ -147,9 +147,15 @@ step of the **erasure** procedure (erase in the record, delete the mirror, rebui
 **Why not a `GitStore: WikiStore`:** a branch ref is a global sequencer (the store contract promises
 independent per-section CAS slots), git history forfeits erasability, and a push remote is an
 unpoliced egress path — the rejected variant is retained behind an eligibility envelope (E1–E4) in
-the design record [`docs/design/wiki-git-store.md`](../../../design/wiki-git-store.md). Driving use
-case: a council-decisions deployment whose repo stays the *human* system of engagement while the
-store is the machine system of record.
+the design record [`docs/design/wiki-git-store.md`](../../../design/wiki-git-store.md).
+**The envelope has its first satisfying deployment (2026-08-15):** the Transparency Platform's
+council-wiki (git-as-truth, per-council write domains, public record) — the adoption design is
+[`transparency-council-substrate.md`](../../../design/transparency-council-substrate.md):
+mycelium-wiki as the control plane over a (to-be-built) `GitStore`, **group = council** curators as
+the single writers for *both* agent edits and the distributed pipeline's serial write phase, compute
+fanned out via tuple-space leases with an S3 claim-check ingest (payloads never in KV). There,
+`GitMirror` is unused (git is truth — nothing to mirror); it remains the answer for store-as-truth
+deployments.
 
 ## Gates
 
