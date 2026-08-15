@@ -41,8 +41,15 @@
 //! heading may not contain a newline, and a body may not contain a line beginning with the section
 //! marker `<!-- mycelium-section `. Nothing else about the content is constrained.
 //!
-//! Zero dependencies beyond the `git` CLI. No pushing — replication cadence and the remote
-//! discipline are the deployment's (Phase-1 scope; see the design record's open questions).
+//! **Topology rule (P6.4).** One clone per curator node is the deployed shape: different councils.
+//! curators then share NO local ref — the only serialization is per-round `publish` to the shared
+//! remote (push + worktree-free merge). Co-locating many groups. stores over ONE checkout
+//! re-introduces the shared-branch-ref ceiling: writes across all groups serialize on that ref
+//! (jittered-backoff retries queue them — measured in the P6.4 gate — but throughput is bounded by
+//! one commit at a time). Prefer clone-per-group when councils share a process.
+//!
+//! Zero dependencies beyond the `git` CLI. Replication is `refresh`/`publish` against the
+//! configured remote (P6.3); push cadence is per applied round.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -85,10 +92,11 @@ pub struct GitStoreConfig {
     pub validate_cmd: Option<Vec<String>>,
     /// Optional shared remote (P6.3 — the failover topology's source of truth across nodes; the
     /// E3 operator-owned, force-push-locked repo). When set: [`refresh`](crate::WikiStore::refresh)
-    /// fetches and **adopts the remote head** (the promotion step — a promoted curator's clone
+    /// fetches and **adopts the remote head** (the promotion step — a promoted curator.s clone
     /// catches up before it serves), and [`publish`](crate::WikiStore::publish) pushes the branch
-    /// (with a worktree-free `merge-tree` retry for concurrent disjoint-subtree writers, and a
-    /// post-push `ls-remote` **divergence tripwire** — counted and warned, never auto-fixed).
+    /// (with a worktree-free **subtree splice** retry — no merge base needed, so cold-start
+    /// unrelated roots converge — and a post-push `ls-remote` **divergence tripwire**, counted
+    /// and warned, never auto-fixed).
     /// `None` = a local-only store (single-node deployments; every sync is a no-op).
     pub remote: Option<String>,
 }
@@ -165,6 +173,11 @@ impl Drop for CatFile {
         let _ = self.child.wait(); // reap — no zombie
     }
 }
+
+/// Process-global temp-name uniqueness (P6.4 finding: per-INSTANCE counters collided when N
+/// stores share one process + one checkout — same `.mycelium-index.{pid}.{seq}` names → concurrent
+/// private indexes corrupted each other, and colliding worktree temp names could cross-rename).
+static TMP_UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 // ── content hashing (version tokens) ────────────────────────────────────────────
 
@@ -309,7 +322,12 @@ impl GitStore {
         std::fs::create_dir_all(&cfg.dir)?;
         let me = Self { cfg, write_lock: Mutex::new(()), cat_file: Mutex::new(None), push_divergences: AtomicU64::new(0), tmp_seq: AtomicU64::new(0) };
         if !me.cfg.dir.join(".git").exists() {
-            me.git_ok(&["init", "-q", "-b", &me.cfg.branch.clone()], None)?;
+            // Tolerate losing an init race (P6.4 finding: N stores opening one shared checkout
+            // concurrently): a failed init is fine iff someone else.s init landed.
+            let (_, ok) = me.git_raw(&["init", "-q", "-b", &me.cfg.branch.clone()], None)?;
+            if !ok && !me.cfg.dir.join(".git").exists() {
+                return Err(WikiError::Io(io::Error::other("git init failed")));
+            }
         }
         if let Some(remote) = &me.cfg.remote {
             // (Re)point origin at the configured shared remote (P6.3).
@@ -512,7 +530,7 @@ impl GitStore {
         let idx = self.cfg.dir.join(".git").join(format!(
             ".mycelium-index.{}.{}",
             std::process::id(),
-            self.tmp_seq.fetch_add(1, Ordering::Relaxed)
+            TMP_UNIQUE.fetch_add(1, Ordering::Relaxed)
         ));
         let idx_s = idx.to_string_lossy().into_owned();
         let index_env: [(&str, &str); 1] = [("GIT_INDEX_FILE", &idx_s)];
@@ -581,7 +599,7 @@ impl GitStore {
                 let tmp = self.cfg.dir.join(format!(
                     ".mycelium-wt.{}.{}",
                     std::process::id(),
-                    self.tmp_seq.fetch_add(1, Ordering::Relaxed)
+                    TMP_UNIQUE.fetch_add(1, Ordering::Relaxed)
                 ));
                 std::fs::write(&tmp, content)?;
                 std::fs::rename(&tmp, &dst)?;
@@ -601,7 +619,10 @@ impl GitStore {
     {
         let rel = self.rel_path(page)?;
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        for _ in 0..16 {
+        for attempt in 0..32 {
+            if attempt > 0 {
+                self.backoff(attempt); // P6.4: queue briefly under ref contention, do not error
+            }
             let head = self.head()?;
             let current = match &head {
                 Some(h) => self.load_at(h, &rel)?,
@@ -628,6 +649,22 @@ impl GitStore {
             }
         }
         Err(WikiError::Conflict) // persistently losing the ref race — report as contention
+    }
+
+    /// Jittered EXPONENTIAL backoff between ref-contention retries (P6.4). The CAS window spans
+    /// the whole commit build (~100 ms of subprocesses), so under a write burst the backoff must
+    /// grow PAST the commit interval or losers retry straight into the storm and starve — the
+    /// first cut (linear, 24 ms cap) did exactly that in the ten-council gate. Doubling with
+    /// proportional jitter, capped at 800 ms: contention queues, never errors.
+    fn backoff(&self, attempt: usize) {
+        let step = (5u64 << attempt.min(8)).min(800); // 10, 20, 40, … 800 ms
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::from(d.subsec_nanos()))
+            .unwrap_or(0);
+        let salt = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
+        let jitter = fnv64(&(nanos ^ salt).to_le_bytes()) % (step / 2 + 1);
+        std::thread::sleep(std::time::Duration::from_millis(step + jitter));
     }
 
     fn message(&self, verb: &str, page: &str) -> String {
@@ -852,7 +889,10 @@ impl WikiStore for GitStore {
         let message = format!("{}: batch({label}) — {} page(s)", self.cfg.message_prefix, files.len());
         let refs: Vec<(&str, &str)> = files.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        for _ in 0..16 {
+        for attempt in 0..32 {
+            if attempt > 0 {
+                self.backoff(attempt);
+            }
             let head = self.head()?;
             if self.cfg.validate_cmd.is_some() {
                 self.gate_check_batch(&refs)?; // one gate run per batch; refusal refuses it all
@@ -890,12 +930,19 @@ impl WikiStore for GitStore {
         Ok(())
     }
 
-    /// P6.3 — make local commits visible to other nodes' clones: push the branch, with a
-    /// **worktree-free plumbing merge** retry for a non-fast-forward (another clone — a *different
-    /// council's* curator — pushed first: `merge-tree --write-tree` over the two heads, a
-    /// two-parent commit, CAS our ref, push again; disjoint subtrees merge cleanly, a genuine
-    /// same-path conflict surfaces as an error). After a successful push the **divergence
-    /// tripwire** checks `ls-remote` against the pushed head — counted and warned, never fixed.
+    /// P6.3/P6.4 — make local commits visible to other nodes' clones: push the branch, with a
+    /// **worktree-free subtree splice** retry on a non-fast-forward: their head's tree + this
+    /// store's scope files (from our head), a two-parent commit, CAS our ref, push again.
+    ///
+    /// Why a splice and not a merge: the P6.4 cold-start measurement **falsified** the first cut
+    /// (`merge-tree --write-tree`) — ten councils bootstrapping one empty origin create *unrelated
+    /// root commits*, and a merge-base merge cannot exist. The splice needs no ancestor and is
+    /// merge-*correct* for scoped stores: my `subdir` is mine alone (the topology rule), so
+    /// "their tree with my subtree's current files spliced in" IS the merge. Caveat (documented):
+    /// a clone hosting several groups' stores publishes the whole local branch's *history* even
+    /// though each store splices only its own scope's tree — clone-per-group is the deployed shape.
+    /// After a successful push the **divergence tripwire** checks `ls-remote` against the pushed
+    /// head — counted and warned, never fixed.
     fn publish(&self) -> Result<(), WikiError> {
         if self.cfg.remote.is_none() {
             return Ok(());
@@ -904,7 +951,10 @@ impl WikiStore for GitStore {
         let Some(mut local) = self.head()? else { return Ok(()) }; // nothing committed yet
         let refname = self.refname();
         let refspec = format!("{}:{}", self.cfg.branch, self.cfg.branch);
-        for _ in 0..4 {
+        for attempt in 0..8 {
+            if attempt > 0 {
+                self.backoff(attempt); // P6.4: concurrent publishers queue, not fail
+            }
             let (_, pushed) = self.git_raw(&["push", "-q", "origin", &refspec], None)?;
             if pushed {
                 let ls = self.git_ok(&["ls-remote", "origin", &refname], None)?;
@@ -917,20 +967,48 @@ impl WikiStore for GitStore {
                 }
                 return Ok(());
             }
-            // Non-fast-forward: merge theirs without touching any worktree or index.
+            // Non-fast-forward: splice our scope onto their head — no worktree, no index of the
+            // caller's, and no merge base required (unrelated cold-start roots splice fine).
             self.git_ok(&["fetch", "-q", "origin", &self.cfg.branch], None)?;
             let theirs =
                 String::from_utf8_lossy(&self.git_ok(&["rev-parse", "FETCH_HEAD"], None)?).trim().to_string();
             if theirs == local {
                 continue; // the remote already holds our head; the push failure was transient
             }
-            let (merged, mok) = self.git_raw(&["merge-tree", "--write-tree", &local, &theirs], None)?;
-            if !mok {
-                return Err(WikiError::Io(io::Error::other(
-                    "publish: merge conflict — concurrent writers touched the same paths",
-                )));
-            }
-            let tree = String::from_utf8_lossy(&merged).lines().next().unwrap_or("").trim().to_string();
+            let idx = self.cfg.dir.join(".git").join(format!(
+                ".mycelium-index.{}.{}",
+                std::process::id(),
+                TMP_UNIQUE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let idx_s = idx.to_string_lossy().into_owned();
+            let index_env: [(&str, &str); 1] = [("GIT_INDEX_FILE", &idx_s)];
+            let splice = (|| -> Result<String, WikiError> {
+                // Their head's tree is the base of the private index…
+                match self.git_env(&["read-tree", &theirs], None, &index_env)? {
+                    (_, true)  => {}
+                    (_, false) => return Err(WikiError::Io(io::Error::other("publish: read-tree failed"))),
+                }
+                // …and our scope's current files splice over it (`ls-tree -r -z` output is a valid
+                // `update-index -z --index-info` input).
+                let mut ls_args = vec!["ls-tree", "-r", "-z", &local];
+                let scope;
+                if !self.cfg.subdir.is_empty() {
+                    scope = self.cfg.subdir.clone();
+                    ls_args.push("--");
+                    ls_args.push(&scope);
+                }
+                let listing = self.git_ok(&ls_args, None)?;
+                match self.git_env(&["update-index", "-z", "--index-info"], Some(&listing), &index_env)? {
+                    (_, true)  => {}
+                    (_, false) => return Err(WikiError::Io(io::Error::other("publish: index splice failed"))),
+                }
+                match self.git_env(&["write-tree"], None, &index_env)? {
+                    (out, true) => Ok(String::from_utf8_lossy(&out).trim().to_string()),
+                    (_, false)  => Err(WikiError::Io(io::Error::other("publish: write-tree failed"))),
+                }
+            })();
+            let _ = std::fs::remove_file(&idx);
+            let tree = splice?;
             let ident: [(&str, &str); 4] = [
                 ("GIT_AUTHOR_NAME", &self.cfg.author_name),
                 ("GIT_AUTHOR_EMAIL", &self.cfg.author_email),
