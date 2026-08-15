@@ -86,26 +86,37 @@ impl BatchSource for FsBatchSource {
     }
 }
 
-/// Apply a batch to `store` **in batch order** — the deterministic serial write phase, factored
-/// pure so the byte-identical gate can prove it against a serial writer without an agent.
+/// Apply a batch to `store` **in batch order** via the store's batch primitive
+/// ([`write_pages`](crate::WikiStore::write_pages)) — the deterministic serial write phase,
+/// factored pure so the byte-identical gate can prove it against a serial writer without an agent.
+/// On `GitStore` the whole batch is **one commit** (the deployment's per-meeting boundary commit).
 ///
-/// A page the write gate refuses ([`WikiError::as_gate_refusal`](crate::WikiError::as_gate_refusal))
-/// is **recorded and skipped** — refusal is content-shaped, and dropping one page must not lose the
-/// rest of the meeting. Any other store error aborts with the error: the batch is resubmittable,
-/// and already-applied pages re-apply as no-ops.
+/// **Refusal semantics (P6.1, a recorded change from Phase 4):** a write-gate refusal refuses
+/// the **whole batch** — the summary reports every page refused with the gate's findings, and on
+/// an atomic store (`GitStore`) *nothing* was committed, matching the deployment's
+/// whole-meetings-only crash invariant. On a non-atomic store (the default per-page loop) a
+/// prefix may have applied before the refusal — either way, **resubmission converges**: applied
+/// pages re-apply as no-ops. Any non-gate store error aborts with the error; the batch is
+/// resubmittable.
 pub fn apply_batch<S: WikiStore>(store: &S, batch: &IngestBatch) -> Result<IngestSummary, crate::WikiError> {
-    let mut summary = IngestSummary::default();
-    for page in &batch.pages {
-        match store.write_page(&page.path, &page.sections, &page.attributes) {
-            Ok(()) => summary.applied += 1,
-            Err(e) => match e.as_gate_refusal() {
-                Some(findings) => {
-                    summary.refused += 1;
-                    summary.findings.push(format!("{}: {findings}", page.path));
-                }
-                None => return Err(e),
-            },
-        }
+    let pages: Vec<crate::store::PageWrite> = batch
+        .pages
+        .iter()
+        .map(|p| crate::store::PageWrite {
+            path:       p.path.clone(),
+            attributes: p.attributes.clone(),
+            sections:   p.sections.clone(),
+        })
+        .collect();
+    match store.write_pages(&pages, &batch.source) {
+        Ok(()) => Ok(IngestSummary { applied: batch.pages.len(), refused: 0, findings: Vec::new() }),
+        Err(e) => match e.as_gate_refusal() {
+            Some(findings) => Ok(IngestSummary {
+                applied:  0,
+                refused:  batch.pages.len(),
+                findings: vec![format!("batch refused by the write gate: {findings}")],
+            }),
+            None => Err(e),
+        },
     }
-    Ok(summary)
 }

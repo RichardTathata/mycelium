@@ -52,7 +52,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::{Manifest, Page, Predicate, Section, SectionId, SectionRef, WikiError};
-use crate::store::{VersionedPage, WikiStore};
+use crate::store::{PageWrite, VersionedPage, WikiStore};
 
 /// The section marker prefix — a line beginning with this opens a section block.
 const MARKER: &str = "<!-- mycelium-section ";
@@ -259,6 +259,8 @@ fn parse(text: &str) -> Result<PageFile, WikiError> {
 
 enum CommitOutcome {
     Committed,
+    /// The batch's tree equals the head tree — an idempotent re-apply; nothing to record.
+    NoChange,
     /// The branch ref moved between our HEAD read and the update — rebuild on the new head and retry.
     RefMoved,
 }
@@ -357,11 +359,26 @@ impl GitStore {
     fn commit_file(
         &self, head: Option<&str>, rel: &str, content: &str, message: &str,
     ) -> Result<CommitOutcome, WikiError> {
-        // Blob into the object database (content only; nothing touches the user's index).
-        let blob = String::from_utf8_lossy(&self.git_ok(&["hash-object", "-w", "--stdin"], Some(content.as_bytes()))?)
-            .trim()
-            .to_string();
-        // A private index: base it on the head tree, splice the blob, write the new tree.
+        self.commit_files(head, &[(rel, content)], message)
+    }
+
+    /// Commit `files` as **one commit** on top of `head`, with an atomic ref CAS (P6.1: the batch
+    /// primitive — a per-meeting batch lands as the deployment's per-meeting boundary commit). A
+    /// batch whose tree equals the head tree is [`CommitOutcome::NoChange`] — an idempotent
+    /// re-apply records nothing.
+    fn commit_files(
+        &self, head: Option<&str>, files: &[(&str, &str)], message: &str,
+    ) -> Result<CommitOutcome, WikiError> {
+        // Blobs into the object database (content only; nothing touches the user's index).
+        let mut blobs = Vec::with_capacity(files.len());
+        for (_, content) in files {
+            let blob =
+                String::from_utf8_lossy(&self.git_ok(&["hash-object", "-w", "--stdin"], Some(content.as_bytes()))?)
+                    .trim()
+                    .to_string();
+            blobs.push(blob);
+        }
+        // A private index: base it on the head tree, splice the blobs, write the new tree.
         let idx = self.cfg.dir.join(".git").join(format!(
             ".mycelium-index.{}.{}",
             std::process::id(),
@@ -380,8 +397,20 @@ impl GitStore {
                 Some(h) => plumb(&["read-tree", h])?,
                 None    => plumb(&["read-tree", "--empty"])?,
             };
-            plumb(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{rel}")])?;
+            for ((rel, _), blob) in files.iter().zip(&blobs) {
+                plumb(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{rel}")])?;
+            }
             let tree = String::from_utf8_lossy(&plumb(&["write-tree"])?).trim().to_string();
+            // Idempotent batch: identical tree ⇒ nothing to record (no empty commits).
+            if let Some(h) = head {
+                let spec = format!("{h}^{{tree}}");
+                let head_tree = String::from_utf8_lossy(&self.git_ok(&["rev-parse", &spec], None)?)
+                    .trim()
+                    .to_string();
+                if head_tree == tree {
+                    return Ok(CommitOutcome::NoChange);
+                }
+            }
             // The commit object (author/committer from config, not repo state).
             let ident: [(&str, &str); 4] = [
                 ("GIT_AUTHOR_NAME", &self.cfg.author_name),
@@ -405,19 +434,21 @@ impl GitStore {
             if !ok {
                 return Ok(CommitOutcome::RefMoved);
             }
-            // Sync the worktree copy (temp + rename — atomic, never torn) so direct readers and
-            // external validators see current files; truth remains the committed blob.
-            let dst = self.cfg.dir.join(rel);
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
+            // Sync the worktree copies (temp + rename — atomic, never torn) so direct readers and
+            // external validators see current files; truth remains the committed blobs.
+            for (rel, content) in files {
+                let dst = self.cfg.dir.join(rel);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let tmp = self.cfg.dir.join(format!(
+                    ".mycelium-wt.{}.{}",
+                    std::process::id(),
+                    self.tmp_seq.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::write(&tmp, content)?;
+                std::fs::rename(&tmp, &dst)?;
             }
-            let tmp = self.cfg.dir.join(format!(
-                ".mycelium-wt.{}.{}",
-                std::process::id(),
-                self.tmp_seq.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::write(&tmp, content)?;
-            std::fs::rename(&tmp, &dst)?;
             Ok(CommitOutcome::Committed)
         })();
         let _ = std::fs::remove_file(&idx); // best-effort cleanup of the private index
@@ -455,8 +486,8 @@ impl GitStore {
                 self.gate_check(&rel, &content)?;
             }
             match self.commit_file(head.as_deref(), &rel, &content, message)? {
-                CommitOutcome::Committed => return Ok(token),
-                CommitOutcome::RefMoved  => continue, // rebuilt on the new head next iteration
+                CommitOutcome::Committed | CommitOutcome::NoChange => return Ok(token),
+                CommitOutcome::RefMoved => continue, // rebuilt on the new head next iteration
             }
         }
         Err(WikiError::Conflict) // persistently losing the ref race — report as contention
@@ -472,21 +503,39 @@ impl GitStore {
     /// one must leave no residue). Exit 0 admits; anything else refuses with the command's output
     /// as the findings.
     fn gate_check(&self, rel: &str, candidate: &str) -> Result<(), WikiError> {
+        self.gate_check_batch(&[(rel, candidate)])
+    }
+
+    /// The write gate over a whole batch (P6.1): place **every** candidate file in the worktree,
+    /// run the gate **once** with the full file list as argv (the deployment's validator takes a
+    /// file list — one 38–90 s run per batch, not per page), restore the prior worktree state
+    /// either way, and refuse **the whole batch** on a nonzero exit.
+    fn gate_check_batch(&self, files: &[(&str, &str)]) -> Result<(), WikiError> {
         let Some(cmd) = &self.cfg.validate_cmd else { return Ok(()) };
         let (program, args) = cmd.split_first().ok_or_else(|| {
             WikiError::Io(io::Error::new(io::ErrorKind::InvalidInput, "validate_cmd must not be empty"))
         })?;
-        let dst = self.cfg.dir.join(rel);
-        let prior = std::fs::read(&dst).ok(); // None = the file did not exist before
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Place candidates, remembering each file's prior state for the restore.
+        let mut priors: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::with_capacity(files.len());
+        for (rel, candidate) in files {
+            let dst = self.cfg.dir.join(rel);
+            priors.push((dst.clone(), std::fs::read(&dst).ok())); // None = did not exist before
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dst, candidate)?;
         }
-        std::fs::write(&dst, candidate)?;
-        let run = Command::new(program).args(args).arg(rel).current_dir(&self.cfg.dir).output();
+        let run = Command::new(program)
+            .args(args)
+            .args(files.iter().map(|(rel, _)| *rel))
+            .current_dir(&self.cfg.dir)
+            .output();
         // Restore before judging the outcome, so every exit path leaves the worktree as found.
-        match &prior {
-            Some(bytes) => std::fs::write(&dst, bytes)?,
-            None        => { let _ = std::fs::remove_file(&dst); }
+        for (dst, prior) in &priors {
+            match prior {
+                Some(bytes) => std::fs::write(dst, bytes)?,
+                None        => { let _ = std::fs::remove_file(dst); }
+            }
         }
         let out = run.map_err(io_ctx("spawning the write gate"))?;
         if out.status.success() {
@@ -639,5 +688,43 @@ impl WikiStore for GitStore {
         }
         pages.sort();
         Ok(pages)
+    }
+
+    /// P6.1 — the batch lands as **one commit** (the deployment's per-meeting boundary commit),
+    /// the write gate runs **once** over the full batch, and a gate refusal is **whole-batch
+    /// atomic**: nothing commits, so the repository only ever holds whole batches. An idempotent
+    /// re-apply (identical tree) records nothing.
+    fn write_pages(&self, pages: &[PageWrite], label: &str) -> Result<(), WikiError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        // Resolve + render everything first — any content error refuses the batch before any
+        // side effect (batch atomicity starts at validation, not at the commit).
+        let mut files: Vec<(String, String)> = Vec::with_capacity(pages.len());
+        for p in pages {
+            let rel = self.rel_path(&p.path)?;
+            let pf = PageFile {
+                manifest: Some(Manifest {
+                    order:      p.sections.iter().map(|s| s.id.clone()).collect(),
+                    attributes: p.attributes.clone(),
+                }),
+                blocks: p.sections.to_vec(),
+            };
+            files.push((rel, render(&pf)?));
+        }
+        let message = format!("{}: batch({label}) — {} page(s)", self.cfg.message_prefix, files.len());
+        let refs: Vec<(&str, &str)> = files.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        for _ in 0..16 {
+            let head = self.head()?;
+            if self.cfg.validate_cmd.is_some() {
+                self.gate_check_batch(&refs)?; // one gate run per batch; refusal refuses it all
+            }
+            match self.commit_files(head.as_deref(), &refs, &message)? {
+                CommitOutcome::Committed | CommitOutcome::NoChange => return Ok(()),
+                CommitOutcome::RefMoved => continue, // rebuilt on the new head next iteration
+            }
+        }
+        Err(WikiError::Conflict)
     }
 }

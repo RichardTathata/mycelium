@@ -10,7 +10,7 @@ a written fuzz gate ≠ a validated sweep; a 3-page repo gate ≠ a 5,741-file c
 
 Ownership legend: **[M]** Mycelium-side · **[FTT]** deployment-side · **[D]** decision recorded here.
 
-## P6.1 — Batch commits + batch gate (Gaps 4 + 6) [M] — *first: small, unblocks two invariants*
+## P6.1 — Batch commits + batch gate (Gaps 4 + 6) [M] — ✅ BUILT 2026-08-15
 
 Per-page commits violate FTT's crash invariant (*"the repository only ever holds whole meetings"*)
 and run the write gate per page — hours against their 38–90 s validator.
@@ -26,6 +26,14 @@ and run the write gate per page — hours against their 38–90 s validator.
   FTT's abort-before-sync model; Phase 4's per-page-skip behaviour remains only on the per-page
   path. *Gate:* a batch with one invalid page commits nothing; a clean batch is exactly one commit;
   the byte-identical-tree test updated (tree identity unchanged; granularity asserted 1/batch).
+  *As built:* `PageWrite` + `WikiStore::write_pages(pages, label)` default method;
+  `GitStore::commit_files` (N blobs → one tree → one commit, tree-equality no-op skip) +
+  `gate_check_batch` (all candidates placed, ONE run with the full argv list, restore either way);
+  `apply_batch` rides `write_pages`, so an ingest batch = one `batch({source}) — N page(s)` commit.
+  The stub validator became a file-LIST validator — which itself caught the contract change: the
+  single-file stub silently passed a bad batch (checked only $1). Gates green:
+  `ingest_is_byte_identical_to_the_serial_writer_and_lands_as_one_commit` +
+  `a_gate_refusal_refuses_the_whole_batch_atomically`; exactly-once + curator suites unchanged.
 
 ## P6.2 — The read plane: `cat-file --batch` (Gap 5) [M]
 
