@@ -4,6 +4,10 @@
 (data plane · curator control plane · reconcile + change-driven lint · MCP tools + HTTP gateway + py/ts
 SDKs · worked example), all CI-green; audited in analysis Run 32 (one Major finding found + fixed —
 `Wiki::shutdown`). Companion page: [`docs/wiki/dev/companions/wiki.md`](../wiki/dev/companions/wiki.md).
+**Added 2026-08-15:** `ChangeSink` + the `GitMirror` projection (feature `git-mirror`) — git as a
+best-effort curator-emitted projection of the store (one commit per applied round, egress-gated
+push), deliberately **not** a `GitStore` backing store; rationale + the eligibility envelope for the
+rejected as-truth variant: [`wiki-git-store.md`](../design/wiki-git-store.md).
 **Open (additive):** the disconnected KV-native variant — the merge mechanism is settled
 ([`wiki-concurrent-edit.md`](../design/wiki-concurrent-edit.md) §1–§2), but its **eligibility envelope**
 (E1–E4 + a resident-corpus tripwire, §6) is the precondition a build must satisfy *first*: KV

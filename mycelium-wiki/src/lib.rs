@@ -45,6 +45,8 @@ mod lint;
 mod mcp;
 #[cfg(feature = "control-plane")]
 mod broker;
+#[cfg(feature = "control-plane")]
+mod sink;
 #[cfg(feature = "gateway")]
 mod http;
 
@@ -87,3 +89,15 @@ pub use mcp::WikiMcpTools;
 /// [`StoreGrant`] to; a one-time handshake, then reads go direct. [`AccessError`] on the deny/failure path.
 #[cfg(feature = "control-plane")]
 pub use broker::{AccessError, Membership, StoreGrant};
+
+/// **Change sinks** — best-effort downstream *projections* of the curator's applied rounds, never
+/// load-bearing (the store is the truth). [`GitMirror`] (feature `git-mirror`) renders the corpus
+/// into a git repo — reviewable one-commit-per-round history with an [`EgressPolicy`]-gated,
+/// tripwired optional push. Why a projection and not a `GitStore` backing store:
+/// `docs/design/wiki-git-store.md`.
+///
+/// [`EgressPolicy`]: mycelium::EgressPolicy
+#[cfg(feature = "control-plane")]
+pub use sink::{AppliedRound, ChangeSink};
+#[cfg(feature = "git-mirror")]
+pub use sink::{GitMirror, GitMirrorConfig};

@@ -71,18 +71,25 @@ pub struct CuratorBrain {
     pub semantic_lint: Option<Box<dyn SemanticLinter>>,
     /// The membership gate the curator applies to store-access requests (default [`Membership::Open`]).
     pub membership:    Membership,
+    /// Optional best-effort projection sink, notified after each applied drain round (e.g. the
+    /// [`GitMirror`](crate::sink) under feature `git-mirror`). Never load-bearing: sink failures are
+    /// the sink's to log; the apply neither waits on nor depends on it.
+    pub change_sink:   Option<Arc<dyn crate::sink::ChangeSink>>,
 }
 
 impl Default for CuratorBrain {
     fn default() -> Self {
-        Self { reconciler: Box::new(DirectReconciler), semantic_lint: None, membership: Membership::Open }
+        Self {
+            reconciler: Box::new(DirectReconciler), semantic_lint: None,
+            membership: Membership::Open, change_sink: None,
+        }
     }
 }
 
 impl CuratorBrain {
     /// A brain with a custom reconciler and no semantic lint.
     pub fn new(reconciler: Box<dyn Reconciler>) -> Self {
-        Self { reconciler, semantic_lint: None, membership: Membership::Open }
+        Self { reconciler, ..Self::default() }
     }
     /// Add the LLM self-consistency pass to the periodic lint.
     pub fn with_semantic_lint(mut self, linter: Box<dyn SemanticLinter>) -> Self {
@@ -92,6 +99,12 @@ impl CuratorBrain {
     /// Set the curator's membership gate for store-access requests.
     pub fn with_membership(mut self, membership: Membership) -> Self {
         self.membership = membership;
+        self
+    }
+    /// Attach a best-effort [`ChangeSink`](crate::sink::ChangeSink) projection (design:
+    /// `docs/design/wiki-git-store.md`).
+    pub fn with_change_sink(mut self, sink: Arc<dyn crate::sink::ChangeSink>) -> Self {
+        self.change_sink = Some(sink);
         self
     }
 }
@@ -130,6 +143,9 @@ pub struct Wiki<S: WikiStore + 'static> {
     semantic_lint:    Option<Box<dyn SemanticLinter>>,
     /// The curator's membership gate for store-access requests (only consulted while curating).
     membership:       Membership,
+    /// Optional projection sink, notified after each applied drain round (best-effort, never
+    /// load-bearing — see `docs/design/wiki-git-store.md`).
+    change_sink:      Option<Arc<dyn crate::sink::ChangeSink>>,
     /// The latest lint report (refreshed each lint tick while curating) — the group-function output.
     last_lint:        Mutex<LintReport>,
     /// Set whenever the curator writes the store; the periodic lint loop only runs a (whole-corpus)
@@ -176,6 +192,7 @@ impl<S: WikiStore + 'static> Wiki<S> {
             reconciler:       brain.reconciler,
             semantic_lint:    brain.semantic_lint,
             membership:       brain.membership,
+            change_sink:      brain.change_sink,
             last_lint:        Mutex::new(LintReport::default()),
             lint_dirty:       AtomicBool::new(true),
             lint_passes:      AtomicU64::new(0),
@@ -480,12 +497,30 @@ impl<S: WikiStore + 'static> Wiki<S> {
             batch.keys.push(key);
             batch.edits.push(ProposalEdit { heading: p.heading, body: p.body, attributes: p.attributes, author: p.author });
         }
+        let mut applied_pages: std::collections::BTreeSet<String> = Default::default();
+        let mut authors: std::collections::BTreeSet<String> = Default::default();
+        let mut proposals = 0usize;
         for ((page, section), batch) in groups {
             if self.apply_group(&page, &section, &batch.edits).await.is_ok() {
+                proposals += batch.edits.len();
+                authors.extend(batch.edits.iter().map(|e| e.author.clone()));
+                applied_pages.insert(page);
                 for key in batch.keys {
                     let _ = self.agent.kv().delete(key); // tombstone only after the store write landed
                 }
             }
+        }
+        // Notify the projection sink AFTER the store writes + tombstones land — best-effort, and
+        // deliberately not part of the apply's success (the store is the truth, the sink a derivation).
+        if !applied_pages.is_empty()
+            && let Some(sink) = &self.change_sink
+        {
+            sink.round_applied(&crate::sink::AppliedRound {
+                group:     self.cfg.group.to_string(),
+                pages:     applied_pages.into_iter().collect(),
+                proposals,
+                authors:   authors.into_iter().collect(),
+            });
         }
     }
 

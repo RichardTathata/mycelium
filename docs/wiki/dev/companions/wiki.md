@@ -132,12 +132,33 @@ Joined to **Postgres** (typed metrics/structure) + **RAG** (background) by a **s
 `attributes` on a section are **join keys + scope tags**, not computational facets. The wiki is the
 *specific / authoritative / maintained-meaning* layer — not a replacement for either.
 
+## Change sinks — git as a projection, never the substrate (2026-08-15)
+
+A `ChangeSink` on the `CuratorBrain` is notified after each applied drain round — **best-effort,
+never load-bearing** (a sink failure can neither fail nor delay an apply; the store stays the truth).
+The shipped **`GitMirror`** (feature `git-mirror`, zero added deps — the `git` CLI) renders touched
+pages as **pure markdown** (no CAS tokens; versioning is git's ancestry) into a worktree, **one
+commit per round** with proposal provenance, and optionally pushes to an operator remote —
+**`EgressPolicy`-gated fail-closed** (WS3), with a post-push `ls-remote` **divergence tripwire**
+(detection, not prevention). Contention discipline: `try_lock`-and-skip (snapshots are idempotent;
+the next round heals), so the sink never blocks the drain loop; pushes run on a background thread
+behind an in-flight guard. `rebuild()` regenerates the whole mirror from the record — also the second
+step of the **erasure** procedure (erase in the record, delete the mirror, rebuild a fresh history).
+**Why not a `GitStore: WikiStore`:** a branch ref is a global sequencer (the store contract promises
+independent per-section CAS slots), git history forfeits erasability, and a push remote is an
+unpoliced egress path — the rejected variant is retained behind an eligibility envelope (E1–E4) in
+the design record [`docs/design/wiki-git-store.md`](../../../design/wiki-git-store.md). Driving use
+case: a council-decisions deployment whose repo stays the *human* system of engagement while the
+store is the machine system of record.
+
 ## Gates
 
 `cargo test -p mycelium-wiki` (data plane) · `--features control-plane` (curator + `tests/failover.rs`)
 · `--features llm` (reconcile + semantic-lint wiring, EchoBackend) · `--features gateway`
-(`tests/gateway.rs` — the `/gateway/wiki/*` lifecycle) · `tests/access.rs` (the membership-gated broker,
-under `control-plane`) · `./mycelium-wiki/ci_smoke.sh` (the worked example, Docker-free) · clippy
-`--features control-plane|llm|gateway --all-targets -D warnings`. Wired as the CI **Wiki** job. **Only
-open remainder (additive):** the disconnected KV-native section-CRDT variant for the no-external-store
-case (design record `docs/design/wiki-concurrent-edit.md`).
+(`tests/gateway.rs` — the `/gateway/wiki/*` lifecycle) · `--features git-mirror` (`tests/git_mirror.rs`
+— one commit per round, pure documents, history retained, egress fail-closed, sink-failure isolation,
+rebuild, the drain→sink wiring) · `tests/access.rs` (the membership-gated broker, under
+`control-plane`) · `./mycelium-wiki/ci_smoke.sh` (the worked example, Docker-free) · clippy
+`--features control-plane|llm|gateway|git-mirror --all-targets -D warnings`. Wired as the CI **Wiki**
+job. **Only open remainder (additive):** the disconnected KV-native section-CRDT variant for the
+no-external-store case (design record `docs/design/wiki-concurrent-edit.md`).
