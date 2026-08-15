@@ -2,7 +2,7 @@
 name = "mycelium-wasm-host"
 version = "2.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "WASM Component host for Mycelium (v2.0 WS-E M12): pull + instantiate sandboxed capability components that talk to the local node through a capability-scoped WIT world — the runtime code-mobility / OSGi-bundle analogue, built on Mycelium's public API"
 license = "AGPL-3.0-only"
@@ -17,11 +17,11 @@ categories = ["wasm", "network-programming"]
 mycelium = { path = "..", default-features = false }
 
 # WASM Component Model runtime. component-model is the WIT/canonical-ABI half.
-wasmtime = "45"
+wasmtime = "46"
 # WASI host implementation. Real components (std-based guests) import wasi:* from libc
 # init; the host provides a *restricted, deny-by-default* WASI context (no fs/net/env/stdio)
 # as part of the sandbox — a component's only doors are our scoped imports + minimal WASI.
-wasmtime-wasi = "45"
+wasmtime-wasi = "46"
 
 anyhow   = "1"
 # The ArtifactRuntime kind-dispatch trait (docs/design/artifact-library.md §4) is async —
