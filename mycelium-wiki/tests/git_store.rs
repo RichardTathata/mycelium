@@ -570,3 +570,112 @@ fn the_read_plane_scales_without_per_page_process_spawns() {
     assert!(elapsed < std::time::Duration::from_secs(10),
         "corpus-scale reads must not spawn per page: {elapsed:?}");
 }
+
+// ── the P6.4 measured contention run ────────────────────────────────────────────
+
+/// The gate the hardening plan requires before ANY council-scale claim: ten councils writing
+/// concurrent per-meeting batches, in **both** topologies, with **zero spurious failures** and the
+/// throughput printed (recorded in `docs/plans/council-substrate-hardening.md`).
+///
+/// Topology (a) — the DISCOURAGED shape: ten groups' stores over ONE shared checkout. The branch
+/// ref is the global serializer; the jittered backoff must queue the contention, never error.
+/// Topology (b) — the DEPLOYED shape (P6.3): ten clones, one per "node", publishing to one bare
+/// origin. No shared local ref; contention moves to push + worktree-free merge.
+#[test]
+fn ten_councils_contend_without_spurious_failures_measured() {
+    use mycelium_wiki::PageWrite;
+    const COUNCILS: usize = 10;
+    const BATCHES: usize = 5;
+    let meeting = |c: usize, b: usize| -> Vec<PageWrite> {
+        (0..4)
+            .map(|p| PageWrite {
+                path: format!("minutes/2026-08-{:02}/page-{p}", b + 1),
+                attributes: attrs(&[("council", &format!("c{c}"))]),
+                sections: vec![sec(&format!("s{c}-{b}-{p}"), "H", &format!("body {c}/{b}/{p}"), &[])],
+            })
+            .collect()
+    };
+
+    // ── (a) shared checkout: the ceiling case ──
+    let tmp = tempfile::tempdir().unwrap();
+    let shared = tmp.path().join("shared");
+    let t0 = std::time::Instant::now();
+    // Stores construct serially (the realistic curator-startup shape; concurrent opens on one
+    // fresh checkout race git-init — tolerated in open(), but startup is not the measurement).
+    let stores: Vec<GitStore> =
+        (0..COUNCILS).map(|c| GitStore::open(GitStoreConfig::for_group(&shared, &format!("c{c}"))).unwrap()).collect();
+    std::thread::scope(|scope| {
+        for (c, s) in stores.iter().enumerate() {
+            let meeting = &meeting;
+            scope.spawn(move || {
+                for b in 0..BATCHES {
+                    s.write_pages(&meeting(c, b), &format!("run-{b}")).unwrap(); // zero spurious failures
+                }
+            });
+        }
+    });
+    let shared_elapsed = t0.elapsed();
+    let commits: usize = git(&shared, &["rev-list", "--count", "HEAD"]).trim().parse().unwrap();
+    assert_eq!(commits, COUNCILS * BATCHES, "every batch landed exactly once on the shared ref");
+
+    // ── (b) clone-per-node publishing to one origin: the deployed case ──
+    let origin = tmp.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    let remote = origin.to_string_lossy().into_owned();
+    let t1 = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        for c in 0..COUNCILS {
+            let remote = remote.clone();
+            let clone_dir = tmp.path().join(format!("clone-{c}"));
+            let meeting = &meeting;
+            scope.spawn(move || {
+                let s = GitStore::open(
+                    GitStoreConfig::for_group(&clone_dir, &format!("c{c}")).with_remote(&remote),
+                )
+                .unwrap();
+                for b in 0..BATCHES {
+                    s.write_pages(&meeting(c, b), &format!("run-{b}")).unwrap();
+                    // The curator's per-round publish semantic: retry a failed publish (bounded).
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    loop {
+                        match s.publish() {
+                            Ok(()) => break,
+                            Err(e) => assert!(
+                                std::time::Instant::now() < deadline,
+                                "publish never succeeded for c{c}/b{b}: {e}"
+                            ),
+                        }
+                    }
+                }
+                assert_eq!(s.push_divergences(), 0, "tripwire quiet for c{c}");
+            });
+        }
+    });
+    let deployed_elapsed = t1.elapsed();
+
+    // Every council's every meeting is present at the origin (verified through fresh clones).
+    for c in 0..COUNCILS {
+        let v = GitStore::open(
+            GitStoreConfig::for_group(tmp.path().join(format!("verify-{c}")), &format!("c{c}"))
+                .with_remote(&remote),
+        )
+        .unwrap();
+        v.refresh().unwrap();
+        for b in 0..BATCHES {
+            assert!(
+                v.read(&format!("minutes/2026-08-{:02}/page-0", b + 1)).unwrap().is_some(),
+                "c{c} batch {b} reached the origin"
+            );
+        }
+    }
+
+    let per = |d: std::time::Duration| (COUNCILS * BATCHES) as f64 / d.as_secs_f64();
+    eprintln!(
+        "P6.4 measurement — {} councils × {} per-meeting batches:\n\
+         (a) shared checkout: {shared_elapsed:?} ({:.1} batches/s)\n\
+         (b) clone-per-node → one origin: {deployed_elapsed:?} ({:.1} batches/s)",
+        COUNCILS, BATCHES, per(shared_elapsed), per(deployed_elapsed),
+    );
+    assert!(shared_elapsed.as_secs() < 120 && deployed_elapsed.as_secs() < 120, "no pathological stall");
+}

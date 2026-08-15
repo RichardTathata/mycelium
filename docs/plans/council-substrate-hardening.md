@@ -86,7 +86,7 @@ fallback via `WikiRole::Curator`.)
   publishes best-effort per applied round + after each ingest. Requires git ≥2.38 for the
   merge path (merge-tree --write-tree).
 
-## P6.4 — Write contention: backoff + topology guidance + a measured run (Gap 3) [M]
+## P6.4 — Write contention: backoff + topology guidance + a measured run (Gap 3) [M] — ✅ BUILT 2026-08-15
 
 The single-branch ref-CAS gives ~12 commits/s **global** when many curators share one checkout, and
 `write_with`'s 16-loss retry turns contention into spurious `Conflict`s.
@@ -98,8 +98,23 @@ The single-branch ref-CAS gives ~12 commits/s **global** when many curators shar
 - Document the topology rule: co-locating many councils' curators over ONE checkout re-introduces
   the shared-ref ceiling — prefer clone-per-group (cheap: worktrees of one object store are a
   follow-up if disk matters).
-- *Gate:* a 10-council contention run (10 curators, concurrent per-meeting batches) — zero spurious
-  failures, throughput measured and **recorded here** before any 391-council claim is made anywhere.
+- *Gate (green):* `ten_councils_contend_without_spurious_failures_measured` — 10 councils × 5
+  concurrent per-meeting batches, both topologies, zero spurious failures. **Measured 2026-08-15
+  (macOS dev machine):* (a) shared checkout 9.0 s = 5.5 batches/s (the discouraged ceiling);
+  (b) deployed clone-per-node → one origin 16.5 s = 3.0 batches/s under maximum cross-council
+  push contention (per-council throughput is the single writer.s, uncontended)**. The gate
+  surfaced FOUR real defects before passing — the measurement discipline working:
+  1. concurrent `open()`s race `git init` on a shared checkout → init is now race-tolerant;
+  2. temp index/worktree names used a per-INSTANCE counter → colliding private indexes corrupted
+     each other cross-instance (and temp renames could cross); now a process-global counter;
+  3. **`merge-tree --write-tree` falsified**: ten councils cold-starting one empty origin have
+     unrelated roots — no merge base exists. Replaced with the **worktree-free subtree splice**
+     (their tree + our scope.s files via `ls-tree -z` → `update-index -z --index-info`), which
+     needs no ancestor and is merge-correct for scoped stores (my subdir is mine alone);
+  4. the first-cut linear 24 ms-cap backoff STARVED under the burst (the CAS window spans the
+     ~100 ms commit build) → jittered **exponential** backoff, 10→800 ms cap.
+  391-council extrapolation stays unclaimed: these numbers are one machine, ten councils —
+  the deployment measures its own.
 
 ## P6.5 — The entity-format codec (Gap 1) [M trait + FTT impl] — *the substrate-fidelity gap*
 
