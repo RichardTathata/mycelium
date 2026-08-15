@@ -103,6 +103,38 @@ impl std::error::Error for WikiError {}
 impl From<std::io::Error>    for WikiError { fn from(e: std::io::Error)    -> Self { WikiError::Io(e) } }
 impl From<serde_json::Error> for WikiError { fn from(e: serde_json::Error) -> Self { WikiError::Serde(e) } }
 
+/// A write refused by a deployment **write gate** (e.g. the council-wiki Node validator run by
+/// `GitStore`'s `validate_cmd` — council-substrate Phase 3). Carried inside [`WikiError::Io`] as the
+/// error's inner payload rather than a new enum variant (additive, no downstream match breaks);
+/// construct with [`WikiError::gate_refusal`] and detect with [`WikiError::as_gate_refusal`].
+#[derive(Debug)]
+pub struct GateRefusal(pub String);
+
+impl std::fmt::Display for GateRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "write refused by the deployment gate: {}", self.0)
+    }
+}
+impl std::error::Error for GateRefusal {}
+
+impl WikiError {
+    /// A gate refusal carrying the validator's findings. **Not a retry signal**: unlike
+    /// [`Conflict`](WikiError::Conflict), re-applying the same content will refuse again — the
+    /// curator drops the refused proposals (with the findings logged) instead of re-queueing them.
+    pub fn gate_refusal(findings: impl Into<String>) -> Self {
+        WikiError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, GateRefusal(findings.into())))
+    }
+
+    /// The gate findings, when this error is a [`gate_refusal`](WikiError::gate_refusal). A real
+    /// filesystem `PermissionDenied` carries no [`GateRefusal`] payload and returns `None` here.
+    pub fn as_gate_refusal(&self) -> Option<&str> {
+        match self {
+            WikiError::Io(e) => e.get_ref().and_then(|r| r.downcast_ref::<GateRefusal>()).map(|g| g.0.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// Mint a **stable, content-independent** section id: `base32(fnv1a(group ‖ page ‖ mint-clock ‖
 /// nonce))`, truncated. Identity-stable after minting — derived from birth coordinates, never from
 /// the (freely-editable) heading or body.

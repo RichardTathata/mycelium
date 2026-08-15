@@ -23,7 +23,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ref-CAS race) + `tests/git_store_curator.rs` (a curator draining proposals into scoped, prefixed
   git commits). **Phase-2 wiring:** `GitStoreConfig::for_group` — the group-per-council convention
   made executable (one repo, one store per group, `councils/{group}` scope; gate: two curators, two
-  councils, one repo, concurrent applies, no cross-scope commits).
+  councils, one repo, concurrent applies, no cross-scope commits). **Phase-3 write gate:**
+  `GitStoreConfig::validate_cmd` — a deployment command (e.g. the council-wiki Node validator) run
+  pre-commit over the candidate file; nonzero exit refuses with findings
+  (`WikiError::gate_refusal`, carried inside `Io` — no new enum variant), worktree restored, no
+  commit; the curator **drops** refused proposals (never retries — the queue can't wedge) and
+  counts them via `Wiki::gate_refusals()`.
 - **`mycelium-wiki` change sinks — git as a projection of the store** (feature `git-mirror`): a
   `ChangeSink` on the `CuratorBrain` is notified after each applied drain round (best-effort, never
   load-bearing); the shipped `GitMirror` renders touched pages as pure markdown (no CAS tokens) into

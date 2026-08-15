@@ -385,3 +385,59 @@ fn the_worktree_mirrors_head_for_written_pages() {
     assert!(on_disk.contains("# Heading"), "the document is real markdown: {on_disk}");
     assert!(!on_disk.contains("\"v\":"), "no version tokens in the document");
 }
+
+// ── the write gate (council-substrate Phase 3) ──────────────────────────────────
+
+/// A stub validator: refuses any candidate containing "FORBIDDEN", with a finding on stdout —
+/// the contract stand-in for the council-wiki Node validator.
+fn gate_script(dir: &Path) -> Vec<String> {
+    let script = dir.join("stub-validate.sh");
+    std::fs::write(&script, "#!/bin/sh\nif grep -q FORBIDDEN \"$1\"; then echo \"GATE001/forbidden-term: $1\"; exit 1; fi\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    vec!["/bin/sh".into(), script.to_string_lossy().into_owned()]
+}
+
+#[test]
+fn the_write_gate_refuses_before_commit_and_leaves_no_residue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let s = GitStore::open(GitStoreConfig {
+        dir: repo.clone(),
+        subdir: "councils/testville".into(),
+        validate_cmd: Some(gate_script(tmp.path())),
+        ..Default::default()
+    })
+    .unwrap();
+
+    // A clean write passes the gate and commits.
+    s.write_page("p", &[sec("s1", "H", "wholesome text", &[])], &BTreeMap::new()).unwrap();
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]).trim(), "1");
+
+    // A forbidden write is refused: the findings surface, no commit lands, the worktree is restored.
+    let vp = s.read_versioned("p").unwrap().unwrap();
+    let ver = vp.sections.get(&SectionId::from("s1")).unwrap().0;
+    let refused = s.write_section("p", &sec("s1", "H", "FORBIDDEN text", &[]), Some(ver));
+    let findings = match &refused {
+        Err(e) => e.as_gate_refusal().map(str::to_owned),
+        Ok(_)  => None,
+    };
+    assert!(findings.as_deref().is_some_and(|f| f.contains("GATE001/forbidden-term")),
+        "the refusal carries the validator's finding: {refused:?}");
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]).trim(), "1", "no commit was created");
+    let on_disk = std::fs::read_to_string(repo.join("councils/testville/p.md")).unwrap();
+    assert!(on_disk.contains("wholesome text") && !on_disk.contains("FORBIDDEN"),
+        "the worktree was restored to the committed state");
+
+    // A refused NEW page leaves no file at all.
+    let refused_new = s.write_page("q", &[sec("s2", "H", "also FORBIDDEN", &[])], &BTreeMap::new());
+    assert!(matches!(&refused_new, Err(e) if e.as_gate_refusal().is_some()));
+    assert!(!repo.join("councils/testville/q.md").exists(), "a refused create leaves no residue");
+
+    // The store keeps working after refusals.
+    s.write_section("p", &sec("s1", "H", "amended wholesome text", &[]), Some(ver)).unwrap();
+    assert_eq!(s.read("p").unwrap().unwrap().sections[0].body, "amended wholesome text");
+}
