@@ -185,7 +185,7 @@ async fn gate_refused_proposals_are_dropped_and_the_curator_keeps_working() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     let script = tmp.path().join("stub-validate.sh");
-    std::fs::write(&script, "#!/bin/sh\nif grep -q FORBIDDEN \"$1\"; then echo \"GATE001/forbidden-term: $1\"; exit 1; fi\nexit 0\n").unwrap();
+    std::fs::write(&script, "#!/bin/sh\nfor f in \"$@\"; do\n  if grep -q FORBIDDEN \"$f\"; then echo \"GATE001/forbidden-term: $f\"; exit 1; fi\ndone\nexit 0\n").unwrap();
     let mut cfg = GitStoreConfig::for_group(&repo, "testville");
     cfg.validate_cmd = Some(vec!["/bin/sh".into(), script.to_string_lossy().into_owned()]);
     let store = Arc::new(GitStore::open(cfg).unwrap());

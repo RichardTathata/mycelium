@@ -56,7 +56,7 @@ mod http;
 pub use model::{
     mint_section_id, Manifest, Page, Predicate, Section, SectionId, SectionRef, WikiError,
 };
-pub use store::WikiStore;
+pub use store::{PageWrite, WikiStore};
 pub use fs::FsStore;
 /// **Bulk ingest** — the claim-check path (council-substrate Phase 4): workers stage an
 /// `IngestBatch` in a bulk store and submit only a *reference*; the curator fetches from its

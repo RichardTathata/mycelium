@@ -392,7 +392,8 @@ fn the_worktree_mirrors_head_for_written_pages() {
 /// the contract stand-in for the council-wiki Node validator.
 fn gate_script(dir: &Path) -> Vec<String> {
     let script = dir.join("stub-validate.sh");
-    std::fs::write(&script, "#!/bin/sh\nif grep -q FORBIDDEN \"$1\"; then echo \"GATE001/forbidden-term: $1\"; exit 1; fi\nexit 0\n").unwrap();
+    // A file-LIST validator (P6.1: the gate receives the whole batch's paths as argv).
+    std::fs::write(&script, "#!/bin/sh\nfor f in \"$@\"; do\n  if grep -q FORBIDDEN \"$f\"; then echo \"GATE001/forbidden-term: $f\"; exit 1; fi\ndone\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -468,10 +469,11 @@ fn meeting_batch() -> IngestBatch {
 }
 
 #[test]
-fn ingest_is_byte_identical_to_the_serial_writer_and_resubmit_is_a_noop() {
-    // The Phase-4 determinism gate: the same meeting applied (a) by a serial in-process writer and
-    // (b) via apply_batch produces IDENTICAL git trees with the same commit granularity — and
-    // resubmitting the batch records nothing (idempotent recovery after a partial failure).
+fn ingest_is_byte_identical_to_the_serial_writer_and_lands_as_one_commit() {
+    // The Phase-4 determinism gate, updated for P6.1: the same meeting applied (a) by a serial
+    // per-page writer and (b) via apply_batch produces IDENTICAL git trees — and the batch lands
+    // as ONE commit (the deployment's per-meeting boundary commit), while resubmitting records
+    // nothing (idempotent recovery after a partial failure).
     let tmp = tempfile::tempdir().unwrap();
     let batch = meeting_batch();
 
@@ -489,17 +491,22 @@ fn ingest_is_byte_identical_to_the_serial_writer_and_resubmit_is_a_noop() {
     let tree = |repo: &Path| git(repo, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
     assert_eq!(tree(&serial_repo), tree(&ingest_repo), "ingest is byte-identical to the serial writer");
     let count = |repo: &Path| git(repo, &["rev-list", "--count", "HEAD"]).trim().to_string();
-    assert_eq!(count(&serial_repo), count(&ingest_repo), "same commit granularity");
+    assert_eq!(count(&serial_repo), "2", "the serial per-page writer commits per page");
+    assert_eq!(count(&ingest_repo), "1", "P6.1: the batch is ONE commit — per-meeting granularity");
+    let msg = git(&ingest_repo, &["log", "-1", "--format=%s"]);
+    assert_eq!(msg.trim(), "wiki(testville): batch(pipeline/run-42) — 2 page(s)", "batch provenance");
 
     // Resubmission: everything already applied → no new commits, tree unchanged.
     let again = apply_batch(&ingest, &batch).unwrap();
     assert_eq!(again.applied, 2, "re-applies report success (no-ops)");
-    assert_eq!(count(&ingest_repo), "2", "an idempotent resubmit records nothing");
+    assert_eq!(count(&ingest_repo), "1", "an idempotent resubmit records nothing");
 }
 
 #[test]
-fn ingest_records_gate_refusals_per_page_and_applies_the_rest() {
-    // Phase 3 × Phase 4: a refused page must not lose the rest of the meeting.
+fn a_gate_refusal_refuses_the_whole_batch_atomically() {
+    // Phase 3 × P6.1 — the recorded semantics change from Phase 4: a gate refusal refuses the
+    // WHOLE batch, and nothing commits. The repository only ever holds whole meetings — a batch
+    // with one invalid page must not land a partial meeting (the deployment's crash invariant).
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     let s = GitStore::open(GitStoreConfig {
@@ -516,9 +523,15 @@ fn ingest_records_gate_refusals_per_page_and_applies_the_rest() {
     });
 
     let summary = apply_batch(&s, &batch).unwrap();
-    assert_eq!((summary.applied, summary.refused), (2, 1));
-    assert!(summary.findings.iter().any(|f| f.starts_with("minutes/2026-08-15/notes:")
-        && f.contains("GATE001/forbidden-term")), "the finding names the refused page: {:?}", summary.findings);
-    assert!(s.read("minutes/2026-08-15/decisions").unwrap().is_some(), "clean pages landed");
-    assert_eq!(s.read("minutes/2026-08-15/notes").unwrap(), None, "the refused page did not");
+    assert_eq!((summary.applied, summary.refused), (0, 3), "the whole batch is refused");
+    assert!(summary.findings.iter().any(|f| f.contains("GATE001/forbidden-term")),
+        "the gate's finding is carried: {:?}", summary.findings);
+    assert_eq!(s.list_pages().unwrap(), Vec::<String>::new(), "NOTHING committed — no partial meeting");
+    assert_eq!(s.read("minutes/2026-08-15/decisions").unwrap(), None, "clean pages did not land alone");
+
+    // Fixing the batch (dropping the invalid page) applies wholly, as one commit.
+    batch.pages.pop();
+    let fixed = apply_batch(&s, &batch).unwrap();
+    assert_eq!((fixed.applied, fixed.refused), (2, 0));
+    assert_eq!(git(&repo, &["rev-list", "--count", "HEAD"]).trim(), "1", "one commit, whole meeting");
 }

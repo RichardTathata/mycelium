@@ -31,6 +31,14 @@ use std::collections::BTreeMap;
 
 use crate::model::{Page, Predicate, Section, SectionId, SectionRef, WikiError};
 
+/// One whole page in a [`write_pages`](WikiStore::write_pages) batch (council-substrate P6.1).
+#[derive(Debug, Clone)]
+pub struct PageWrite {
+    pub path:       String,
+    pub attributes: BTreeMap<String, String>,
+    pub sections:   Vec<Section>,
+}
+
 /// A page read together with the compare-and-swap version tokens a curator needs to write it back
 /// safely. The curator reads this, reconciles, then writes each section (and, on a membership change,
 /// the manifest) against the versions it saw — a mismatch means someone else committed in between.
@@ -100,4 +108,21 @@ pub trait WikiStore: Send + Sync {
 
     /// List the paths of all pages that currently have a manifest.
     fn list_pages(&self) -> Result<Vec<String>, WikiError>;
+
+    /// **Batch write of whole pages** (council-substrate P6.1), applied in slice order. `label` is
+    /// provenance for stores that record it (a commit message fragment); others ignore it.
+    ///
+    /// The default is the plain per-page loop — `FsStore`/`S3Store` semantics unchanged, and an
+    /// error may leave a prefix applied (each page that did apply is a complete page; a retry
+    /// re-applies idempotently). A store with a cheaper or atomic batch primitive overrides it:
+    /// `GitStore` lands the whole batch as **one commit** (the deployment's per-meeting boundary
+    /// commit), runs its write gate **once over the full batch**, and makes a gate refusal
+    /// **whole-batch atomic** — nothing commits, so the repository only ever holds whole batches.
+    fn write_pages(&self, pages: &[PageWrite], label: &str) -> Result<(), WikiError> {
+        let _ = label;
+        for p in pages {
+            self.write_page(&p.path, &p.sections, &p.attributes)?;
+        }
+        Ok(())
+    }
 }
