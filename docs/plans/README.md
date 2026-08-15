@@ -55,6 +55,7 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 | [`example-suite.md`](example-suite.md) | The 11-demo Food-Rescue Co-op example suite | — |
 | [`legible-emergence.md`](legible-emergence.md) | Diagnosable coordinator-free fleets (Detect→Localize→Explain→Intervene) — phases 0–5, incl. the operator surface. ✅ complete 2026-07-03 | — |
 | [`mycelium-wiki.md`](mycelium-wiki.md) | The `mycelium-wiki` companion — group-scoped LLM-curated wiki (data plane · curator control plane · reconcile + change-driven lint · MCP + HTTP gateway + py/ts SDKs · access broker · worked example). ✅ phases 1–5 shipped 2026-07-03/04; audited Run 32. Remaining: the additive KV-native variant | — |
+| [`council-substrate-hardening.md`](council-substrate-hardening.md) | **Phase 6** of the Transparency-Platform council-wiki substrate ([design record](../design/transparency-council-substrate.md)): closing the six toy-scale → council-scale gaps the 2026-08-15 step-back critique named — batch commits + batch gate · `cat-file --batch` read plane · pull-on-promote/push-per-round failover · contention measurement · the pluggable `PageFormat` entity codec. ⏳ **planned 2026-08-15, not started**; council-scale claims gated on P6.4's measured run | — |
 
 ## Design sketches (rationale)
 

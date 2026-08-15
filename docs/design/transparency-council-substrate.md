@@ -1,12 +1,20 @@
 # Transparency Platform on Mycelium — the council-wiki substrate design
 
-**Status:** designed 2026-08-15; **ALL FIVE PHASES BUILT 2026-08-15** — the `GitStore` (feature
-`git-store`), the group-per-council wiring (`for_group`), the write gate (`validate_cmd`), the
-bulk-ingest claim-check (`BatchSource`/`apply_batch`/`submit_batch`), and the work-distribution
-assembly (tuple-space leases × idempotent ingest = exactly-once effect). Each phase carries its
-design-record gate as a passing test; the build list with as-built decisions is §6. What remains is
-**deployment** (FTT-side): an `S3BatchSource`, the real Node validator as `validate_cmd`, and
-running the assembly at council scale.
+**Status:** designed 2026-08-15; **five mechanism phases built 2026-08-15, gated at *meeting*
+scale** — the `GitStore` (feature `git-store`), the group-per-council wiring (`for_group`), the
+write gate (`validate_cmd`), the bulk-ingest claim-check (`BatchSource`/`apply_batch`/
+`submit_batch`), and the work-distribution assembly (tuple-space leases × idempotent ingest =
+exactly-once effect). Each phase carries its design-record gate as a passing test (§6).
+**Corrected same day:** an earlier revision of this line read "what remains is deployment" — a
+step-back critique found that overclaimed. **Six named gaps stand between meeting-scale mechanisms
+and the real 391-council corpus**, several Mycelium-side: the rendered page format is not
+council-wiki's entity format (their real validator would refuse it — the byte-identical gate proved
+self-consistency, not fidelity); the node-local checkout breaks the failover litmus (untested over
+`GitStore`); the single-branch ref ceiling under many curators; per-page commits vs their
+whole-meetings-only invariant; the O(subprocess × corpus) read plane; per-write gate cost vs their
+38–90 s validator. The hardening plan with owners, decisions, and gates:
+[`../plans/council-substrate-hardening.md`](../plans/council-substrate-hardening.md) (Phase 6).
+Council-scale claims wait on its P6.4 measured run.
 **Companion records:** [`wiki-git-store.md`](wiki-git-store.md) (the GitStore eligibility envelope this
 deployment satisfies — the first that does) · [`wiki-concurrent-edit.md`](wiki-concurrent-edit.md) ·
 [`../plans/mycelium-wiki.md`](../plans/mycelium-wiki.md) (council decisions is UC2, one of the two
