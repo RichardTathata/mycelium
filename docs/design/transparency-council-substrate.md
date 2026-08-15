@@ -1,6 +1,9 @@
 # Transparency Platform on Mycelium — the council-wiki substrate design
 
-**Status:** designed 2026-08-15, **not built** — the phased build list is §5.
+**Status:** designed 2026-08-15; **Phase 1 (`GitStore`) built 2026-08-15** — feature `git-store`,
+`mycelium-wiki/src/git_store.rs`, gated by `tests/git_store.rs` (the FsStore contract mirrored, 20
+tests) + `tests/git_store_curator.rs` (the hinge: a curator draining proposals into scoped git
+commits). Phases 2–5 remain open — the build list is §6.
 **Companion records:** [`wiki-git-store.md`](wiki-git-store.md) (the GitStore eligibility envelope this
 deployment satisfies — the first that does) · [`wiki-concurrent-edit.md`](wiki-concurrent-edit.md) ·
 [`../plans/mycelium-wiki.md`](../plans/mycelium-wiki.md) (council decisions is UC2, one of the two
@@ -115,12 +118,30 @@ Escape hatch if push contention ever bites: per-council branches + a merge queue
 
 ## 6. Build list (Mycelium side, phased)
 
-1. **`GitStore: WikiStore`** — the envelope build. Mapping: **page = leaf file** (one section),
-   identity = path (theirs already); CAS = per-file version check + scoped commit + ref-retry;
-   apply = commit to `councils/<slug>` with FTT's message/provenance conventions. Size ≈ `fs.rs`
-   (~320 lines) + the contract-test harness parameterised over `impl WikiStore` (run `fs::tests`
-   against it). *Gate:* the existing store contract suite green on `GitStore`, plus
-   history-retention and scoped-commit tests.
+1. **`GitStore: WikiStore`** — the envelope build. ✅ **Built 2026-08-15** (feature `git-store`,
+   zero new dependencies). As-built decisions that refined the sketch:
+   - **One page = one markdown file** (`{subdir}/{page}.md` — front-matter manifest, sections under
+     comment markers with visible `# headings`), so an FTT leaf is a real document. Bodies
+     round-trip **byte-exactly** (char-exact parser; the two reserved sequences are refused at
+     write, never mangled).
+   - **CAS tokens are content hashes, not counters, and never appear in the document** — resolving
+     the original F3 critique outright. Content-equality CAS also preserves **per-section
+     independence inside the single file** (a commit changing section X leaves Y's token valid) and
+     is the semantically right check for merge-based writers (conflict ⟺ your reconcile base is no
+     longer the committed content). Tokens are equality-only; the FsStore suite's version-ordering
+     assertion is adapted accordingly.
+   - **Writes are plumbing against a private temporary index** (`hash-object → read-tree →
+     update-index → write-tree → commit-tree`) landed by an atomic `update-ref <new> <old>` —
+     a true branch-head CAS; the user's real index/staging is never touched, and each commit
+     carries exactly the written path (the scoped-commit discipline falls out of the mechanism).
+   - **Reads are at HEAD, never the working tree** (FTT's own measurement rule), with the worktree
+     synced after each commit for humans/validators.
+   *Gates (green):* `tests/git_store.rs` — the FsStore contract suite mirrored (20 tests incl. the
+   idempotent-append exactly-once proof and a **two-instance ref-CAS race**) + git-specific
+   properties (history recoverable via `git show HEAD~1:`, scoped commits + message prefix, no
+   empty commits on idempotent re-applies, unborn-branch = empty store, worktree ≡ HEAD);
+   `tests/git_store_curator.rs` — the hinge end-to-end (curator drains a proposal → scoped,
+   prefixed git commits). In the CI Wiki job.
 2. **Group-per-council wiring** — `WikiConfig::group` = slug → store scope; a shard variant.
    Small; mostly a worked example + conventions. *Gate:* two curators on two councils in one repo,
    concurrent applies, no cross-scope commits.

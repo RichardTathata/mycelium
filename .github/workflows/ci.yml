@@ -149,6 +149,11 @@ jobs:
       # design: docs/design/wiki-git-store.md). Real `git` in a tempdir (present on runners).
       - run: ./scripts/ci-retest.sh -p mycelium-wiki --features git-mirror
       - run: cargo clippy -p mycelium-wiki --features git-mirror --all-targets -- -D warnings
+      # The git-as-truth store (GitStore — the eligibility-envelope build for the council-wiki
+      # substrate, docs/design/transparency-council-substrate.md Phase 1): the FsStore contract
+      # suite mirrored + the curator-to-scoped-commits end-to-end.
+      - run: ./scripts/ci-retest.sh -p mycelium-wiki --features "git-store,control-plane"
+      - run: cargo clippy -p mycelium-wiki --features "git-store,control-plane" --all-targets -- -D warnings
       # Phase 5 — the worked example: import documents → curator applies → a reader chat-agent answers
       # grounded in the wiki, over both use-case corpora (UC1 org twin + UC2 council). Docker-free.
       - run: ./mycelium-wiki/ci_smoke.sh

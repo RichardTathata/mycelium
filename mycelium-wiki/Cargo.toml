@@ -32,6 +32,12 @@ metrics = ["mycelium/metrics"]
 # sequencer and git history forfeits erasability) — design: docs/design/wiki-git-store.md.
 # Zero added dependencies: shells to the `git` CLI, which an operator wanting a git mirror has.
 git-mirror = ["control-plane"]
+# The git-as-truth WikiStore (GitStore) -- pages as markdown files in a git checkout, every write a
+# commit with an atomic update-ref CAS. The eligibility-envelope build of
+# docs/design/wiki-git-store.md, for deployments meeting E1-E4 (first: the Transparency-Platform
+# council-wiki, docs/design/transparency-council-substrate.md). Pure DATA PLANE (no mycelium dep);
+# zero added dependencies (the git CLI).
+git-store = []
 
 [dependencies]
 # `rc` so `Arc<str>` section ids (de)serialise (each Arc round-trips to a fresh allocation — fine, ids
@@ -86,3 +92,11 @@ required-features = ["llm"]
 [[example]]
 name = "wiki_council_viz"
 required-features = ["gateway", "llm"]
+
+[[test]]
+name = "git_store"
+required-features = ["git-store"]
+
+[[test]]
+name = "git_store_curator"
+required-features = ["git-store", "control-plane"]
