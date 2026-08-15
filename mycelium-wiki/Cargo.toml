@@ -26,6 +26,12 @@ llm = ["control-plane", "mycelium/llm"]
 gateway = ["control-plane", "mycelium/gateway", "dep:axum"]
 # Prometheus /metrics on the gateway — populates the Ops Console Metrics tab for the showcase.
 metrics = ["mycelium/metrics"]
+# The git projection sink (`GitMirror`): the curator renders applied rounds into a git repo —
+# reviewable one-commit-per-round history, optional EgressPolicy-gated push. A best-effort
+# *projection* of the store, deliberately NOT a `GitStore` backing store (a branch ref is a global
+# sequencer and git history forfeits erasability) — design: docs/design/wiki-git-store.md.
+# Zero added dependencies: shells to the `git` CLI, which an operator wanting a git mirror has.
+git-mirror = ["control-plane"]
 
 [dependencies]
 # `rc` so `Arc<str>` section ids (de)serialise (each Arc round-trips to a fresh allocation — fine, ids
@@ -63,6 +69,10 @@ required-features = ["control-plane"]
 [[test]]
 name = "gateway"
 required-features = ["gateway"]
+
+[[test]]
+name = "git_mirror"
+required-features = ["git-mirror"]
 
 # Phase 5 — the worked example: import documents, then chat grounded in the wiki. One template for both
 # use cases (UC1 org twin / UC2 council). Needs `llm` for the LLM backend abstraction.

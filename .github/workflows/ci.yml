@@ -145,6 +145,10 @@ jobs:
       # Phase 4 remainder — the HTTP gateway edge (/gateway/wiki/*), the path the Python/TS SDKs speak.
       - run: ./scripts/ci-retest.sh -p mycelium-wiki --features gateway
       - run: cargo clippy -p mycelium-wiki --features gateway --all-targets -- -D warnings
+      # The git projection sink (GitMirror — one commit per applied round, egress-gated push;
+      # design: docs/design/wiki-git-store.md). Real `git` in a tempdir (present on runners).
+      - run: ./scripts/ci-retest.sh -p mycelium-wiki --features git-mirror
+      - run: cargo clippy -p mycelium-wiki --features git-mirror --all-targets -- -D warnings
       # Phase 5 — the worked example: import documents → curator applies → a reader chat-agent answers
       # grounded in the wiki, over both use-case corpora (UC1 org twin + UC2 council). Docker-free.
       - run: ./mycelium-wiki/ci_smoke.sh
