@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mycelium::{GossipAgent, GossipConfig, NodeId};
-use mycelium_wiki::{mint_section_id, GitStore, GitStoreConfig, Wiki, WikiConfig, WikiRole, WikiStore};
+use mycelium_wiki::{mint_section_id, GitStore, GitStoreConfig, Section, Wiki, WikiConfig, WikiRole, WikiStore};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
@@ -332,4 +332,154 @@ async fn a_worker_submits_a_batch_reference_and_the_curator_applies_it() {
     worker.shutdown().await;
     agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
     agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// The P6.3 gate: **failover across nodes via the shared remote**. Curator A applies + publishes
+/// and dies; curator B — a *fresh clone* on another "node" — promotes, refreshes (pull-on-promote)
+/// and continues the same corpus: the companion's litmus ("failover transfers nothing… resumes
+/// against the same store") restored for the node-local GitStore. The **un-pushed-tail residual**
+/// is asserted too, not hidden: a commit A never published is absent after failover and re-lands
+/// by re-applying (at-least-once × idempotent apply).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn curator_failover_resumes_on_a_fresh_clone_via_the_shared_remote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    let remote = origin.to_string_lossy().into_owned();
+
+    // ── Node A: curator, applies a proposal; the drain round publishes to the shared remote. ──
+    let agent_a = loop {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        if a.start().await.is_ok() {
+            break a;
+        }
+    };
+    let store_a = Arc::new(
+        GitStore::open(GitStoreConfig::for_group(tmp.path().join("clone-a"), "testville").with_remote(&remote))
+            .unwrap(),
+    );
+    let wiki_a = Wiki::new(
+        Arc::clone(&agent_a),
+        WikiConfig::new("testville").role(WikiRole::Curator),
+        Arc::clone(&store_a),
+    )
+    .await;
+    let s1 = mint_section_id("testville", "minutes/2026-08-15", 1, 1);
+    wiki_a.propose("minutes/2026-08-15", s1, "Opening", "The meeting opened.", Default::default());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let published = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/main"])
+            .current_dir(&origin)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        if published && store_a.read("minutes/2026-08-15").unwrap().is_some() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "A never published the round");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A also commits a LOCAL tail it never publishes (a direct store write outside a drain round),
+    // then dies — the residual the design names.
+    wiki_a.shutdown().await;
+    store_a
+        .write_page("unpublished-tail", &[Section {
+            id: Arc::from("t1"),
+            heading: "Tail".into(),
+            body: "Never pushed.".into(),
+            attributes: Default::default(),
+        }], &Default::default())
+        .unwrap();
+    agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
+
+    // ── Node B: a FRESH clone promotes; pull-on-promote adopts the remote head. ──
+    let agent_b = loop {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        if a.start().await.is_ok() {
+            break a;
+        }
+    };
+    let store_b = Arc::new(
+        GitStore::open(GitStoreConfig::for_group(tmp.path().join("clone-b"), "testville").with_remote(&remote))
+            .unwrap(),
+    );
+    let wiki_b = Wiki::new(
+        Arc::clone(&agent_b),
+        WikiConfig::new("testville").role(WikiRole::Curator),
+        Arc::clone(&store_b),
+    )
+    .await;
+    assert!(wiki_b.is_curator(), "B promoted (refresh succeeded)");
+    let page = store_b.read("minutes/2026-08-15").unwrap().expect("THE LITMUS: B resumes A's corpus");
+    assert!(page.sections[0].body.contains("meeting opened"));
+    assert_eq!(store_b.read("unpublished-tail").unwrap(), None,
+        "the un-pushed tail is absent after failover — the named ≤1-round residual, not hidden");
+
+    // The tail re-lands by re-applying (at-least-once × idempotent), and B's round publishes.
+    let s2 = mint_section_id("testville", "unpublished-tail", 2, 2);
+    wiki_b.propose("unpublished-tail", s2, "Tail", "Never pushed.", Default::default());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if store_b.read("unpublished-tail").unwrap().is_some() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the tail never re-landed on B");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // No divergence: B's head equals the remote head, and the tripwire is quiet.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let local = git(&tmp.path().join("clone-b"), &["rev-parse", "refs/heads/main"]);
+        let remote_head = git(&origin, &["rev-parse", "refs/heads/main"]);
+        if local.trim() == remote_head.trim() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "B never converged with the remote");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(store_b.push_divergences(), 0, "the tripwire is quiet on an honest remote");
+
+    wiki_b.shutdown().await;
+    agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// P6.3's refusal path: a curator that cannot refresh (unreachable remote) must **never serve** —
+/// a knowingly-stale curator is the data-loss path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_curator_that_cannot_refresh_never_serves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = loop {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        if a.start().await.is_ok() {
+            break a;
+        }
+    };
+    let store = Arc::new(
+        GitStore::open(
+            GitStoreConfig::for_group(tmp.path().join("clone"), "testville")
+                .with_remote(tmp.path().join("no-such-origin.git").to_string_lossy()),
+        )
+        .unwrap(),
+    );
+    let wiki = Wiki::new(
+        Arc::clone(&agent),
+        WikiConfig::new("testville").role(WikiRole::Curator),
+        Arc::clone(&store),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!wiki.is_curator(), "an unrefreshable curator refuses to serve");
+
+    wiki.shutdown().await;
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
