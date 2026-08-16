@@ -109,7 +109,8 @@ council-wiki substrate (2026-08-15):** five mechanism phases built + gated at ME
 (`GitStore`, group-per-council, write gate, claim-check ingest, work distribution — exactly-once
 gate); a same-day critique found six gaps before council scale (format codec, failover sync,
 branch contention, batch commits, read plane, batch gate) — hardening plan
-`docs/plans/council-substrate-hardening.md` (Phase 6, not started); design record
+`docs/plans/council-substrate-hardening.md` (**Phase 6 complete M-side 2026-08-16**, incl. the
+measured ten-council contention run; remaining items are FTT-side); design record
 `docs/design/transparency-council-substrate.md`. Scale runs double as Paper 1.s case study. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

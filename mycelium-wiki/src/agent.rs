@@ -384,20 +384,32 @@ impl<S: WikiStore + 'static> Wiki<S> {
         Ok(summary)
     }
 
-    /// **Worker-side submission** (Phase 4): send a staged batch's *reference* to the group's
+    /// **Worker-side submission** (Phase 4): send a staged batch.s *reference* to the group.s
     /// curator over point-to-point RPC — the claim-check flow; the payload itself never rides the
     /// mesh. The curator fetches from its own [`BatchSource`](crate::ingest::BatchSource) and
     /// replies with the [`IngestSummary`](crate::ingest::IngestSummary). Membership-gated like
-    /// store access. Generous timeout: the curator applies (and commits) the whole batch before
-    /// replying.
+    /// store access.
+    ///
+    /// **Sizing contract (P6.6): a batch = one meeting.** The per-meeting boundary commit, the
+    /// batch-atomic write gate, and the default 60 s timeout are all sized to that unit; a
+    /// council-scale payload belongs in many meeting batches, not one giant one. For an unusually
+    /// large meeting use [`submit_batch_with_timeout`](Self::submit_batch_with_timeout) — the
+    /// curator applies (and commits, and publishes) the whole batch before replying.
     pub async fn submit_batch(&self, reference: &str) -> Result<crate::ingest::IngestSummary, IngestError> {
+        self.submit_batch_with_timeout(reference, Duration::from_secs(60)).await
+    }
+
+    /// [`submit_batch`](Self::submit_batch) with an explicit RPC deadline.
+    pub async fn submit_batch_with_timeout(
+        &self, reference: &str, timeout: Duration,
+    ) -> Result<crate::ingest::IngestSummary, IngestError> {
         if self.is_curator() {
             return self.ingest(reference); // local fast path — no RPC to ourselves
         }
         let curator = self.resolve_role("curator").into_iter().next().ok_or(IngestError::NoCurator)?;
         let kind = format!("wiki.{}.ingest", self.cfg.group);
         let raw = self.agent.service()
-            .rpc_call(curator, kind, reference.as_bytes().to_vec(), Duration::from_secs(60))
+            .rpc_call(curator, kind, reference.as_bytes().to_vec(), timeout)
             .await
             .map_err(|e| IngestError::Rpc(e.to_string()))?;
         let reply: IngestReply =
@@ -536,9 +548,13 @@ impl<S: WikiStore + 'static> Wiki<S> {
                         IngestReply { ok: false, error: Some("membership denied".into()), summary: None }
                     } else {
                         let reference = String::from_utf8_lossy(&req.payload()).into_owned();
-                        match me.ingest(&reference) {
-                            Ok(summary) => IngestReply { ok: true, error: None, summary: Some(summary) },
-                            Err(e)      => IngestReply { ok: false, error: Some(e.to_string()), summary: None },
+                        // P6.6: the apply is sync git/store I/O (fetch + commits + publish) —
+                        // run it on the blocking pool, not a tokio worker thread.
+                        let me2 = Arc::clone(&me);
+                        match tokio::task::spawn_blocking(move || me2.ingest(&reference)).await {
+                            Ok(Ok(summary)) => IngestReply { ok: true, error: None, summary: Some(summary) },
+                            Ok(Err(e))      => IngestReply { ok: false, error: Some(e.to_string()), summary: None },
+                            Err(join)       => IngestReply { ok: false, error: Some(format!("ingest task failed: {join}")), summary: None },
                         }
                     };
                     me.agent.service().rpc_respond(&req, serde_json::to_vec(&reply).unwrap_or_default());
@@ -701,10 +717,15 @@ impl<S: WikiStore + 'static> Wiki<S> {
                 });
             }
             // P6.3: make the round.s writes visible to other nodes. clones — best-effort; the
-            // commits are local truth and the next round retries a failed publish.
-            if let Err(e) = self.store.publish() {
-                tracing::warn!(group = %self.cfg.group, error = %e,
-                    "wiki: publish failed (will retry next round)");
+            // commits are local truth and the next round retries a failed publish. P6.6: publish
+            // can be network I/O — blocking pool, not a tokio worker.
+            let store = Arc::clone(&self.store);
+            match tokio::task::spawn_blocking(move || store.publish()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(group = %self.cfg.group, error = %e,
+                    "wiki: publish failed (will retry next round)"),
+                Err(join) => tracing::warn!(group = %self.cfg.group, error = %join,
+                    "wiki: publish task failed"),
             }
         }
     }

@@ -5,16 +5,20 @@ scale** — the `GitStore` (feature `git-store`), the group-per-council wiring (
 write gate (`validate_cmd`), the bulk-ingest claim-check (`BatchSource`/`apply_batch`/
 `submit_batch`), and the work-distribution assembly (tuple-space leases × idempotent ingest =
 exactly-once effect). Each phase carries its design-record gate as a passing test (§6).
-**Corrected same day:** an earlier revision of this line read "what remains is deployment" — a
-step-back critique found that overclaimed. **Six named gaps stand between meeting-scale mechanisms
-and the real 391-council corpus**, several Mycelium-side: the rendered page format is not
-council-wiki's entity format (their real validator would refuse it — the byte-identical gate proved
-self-consistency, not fidelity); the node-local checkout breaks the failover litmus (untested over
-`GitStore`); the single-branch ref ceiling under many curators; per-page commits vs their
-whole-meetings-only invariant; the O(subprocess × corpus) read plane; per-write gate cost vs their
-38–90 s validator. The hardening plan with owners, decisions, and gates:
-[`../plans/council-substrate-hardening.md`](../plans/council-substrate-hardening.md) (Phase 6).
-Council-scale claims wait on its P6.4 measured run.
+**Corrected same day, then HARDENED (Phase 6, all Mycelium-side items built 2026-08-15/16):** an
+earlier revision read "what remains is deployment" — a step-back critique found six gaps, and the
+hardening plan closed every Mycelium-side one with a gated build:
+batch commits restoring the whole-meetings-only invariant + the batch-atomic write gate (P6.1);
+the corpus-scale read plane, **measured 330 ms/600 pages** (P6.2); pull-on-promote/push-per-round
+failover restoring the litmus, with the un-pushed-tail residual tested not hidden (P6.3); the
+**measured ten-council contention run** — 5.5/3.0 batches/s shared/deployed, zero spurious
+failures, four real defects found by the gate incl. the merge-tree falsification → subtree splice
+(P6.4); the pluggable `PageFormat` codec proven end-to-end with a custom format (P6.5); and the
+lower tier (P6.6). Plan + measurements:
+[`../plans/council-substrate-hardening.md`](../plans/council-substrate-hardening.md).
+**What genuinely remains is FTT-side:** `CouncilWikiFormat` + their conformance gate,
+`S3BatchSource`, the real validator command, the DPIA line, and council-scale runs (whose numbers
+supersede the ten-council measurement — the 391 extrapolation stays deliberately unclaimed).
 **Companion records:** [`wiki-git-store.md`](wiki-git-store.md) (the GitStore eligibility envelope this
 deployment satisfies — the first that does) · [`wiki-concurrent-edit.md`](wiki-concurrent-edit.md) ·
 [`../plans/mycelium-wiki.md`](../plans/mycelium-wiki.md) (council decisions is UC2, one of the two

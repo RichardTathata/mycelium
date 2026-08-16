@@ -1,6 +1,10 @@
 # Council-substrate hardening (Phase 6) — closing the toy-scale → council-scale gaps
 
-**Status:** planned 2026-08-15, not started. **Origin:** the same-day step-back critique of the
+**Status: ALL MYCELIUM-SIDE ITEMS BUILT** (P6.1–P6.4 2026-08-15; P6.5–P6.6 2026-08-16), each with
+its gate green and every measurement recorded below. What remains is the **FTT-side list** (end of
+this file): `CouncilWikiFormat` + their conformance gate, `S3BatchSource`, the real validator as
+the batch gate command, the DPIA line, and council-scale runs — whose numbers supersede the
+ten-council measurements here. **Origin:** the same-day step-back critique of the
 five-phase build ([design record](../design/transparency-council-substrate.md)): the mechanisms are
 sound and their gates honest **at meeting scale**, but six named gaps stand between "mechanisms
 built" and "can serve the real 391-council corpus" — and calling the remainder "deployment" was an
@@ -141,13 +145,17 @@ not fidelity to their pipeline's output.
   Arc<dyn PageFormat>` (manual `Debug`). *Gate (FTT-side, open):* their conformance test over
   `CouncilWikiFormat` — the trait is ready for it.
 
-## P6.6 — Lower tier [M]
+## P6.6 — Lower tier [M] — ✅ BUILT 2026-08-16
 
-- Wrap the ingest responder's apply in `spawn_blocking` (sync git I/O off the async workers).
-- `submit_batch` timeout becomes a parameter (default 60 s); document **batch = one meeting** as
-  the sizing contract, not a convention.
+- ✅ The ingest responder.s apply AND the drain-round publish run on the blocking pool
+  (`spawn_blocking`) — sync git/network I/O off the tokio workers. The curator-local
+  `submit_batch` fast path stays sync-in-async (documented; the production remote path is the
+  wrapped one).
+- ✅ `submit_batch_with_timeout(reference, timeout)` + the **sizing contract documented on both
+  `IngestBatch` and `submit_batch`: a batch = one meeting** (the boundary commit, the batch-atomic
+  gate, and the 60 s default are all sized to that unit).
 - `councils/councils.md` (the sibling index outside any group scope): regenerable index — stays
-  pipeline/FTT-owned for now; noted, not built.
+  pipeline/FTT-owned; noted, not built.
 
 ## FTT-side list (for their tracker, not ours)
 
