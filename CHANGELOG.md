@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`mycelium-wiki`: the erase verb** — `WikiStore::remove_page(page, label)` (a default trait
+  method that **fails closed**; implementors: `FsStore` deletes the object bytes strictly,
+  `GitStore` commits a **redaction at tip** — history retained by design, per the git-as-truth
+  envelope) and the curator-authorized `Wiki::erase_page` (curator-local; deliberately not a mesh
+  RPC or gateway route). Completes the store-as-truth right-to-erasure story: erase in the record
+  via the same single-writer path as every write, then the projection step
+  (`GitMirror` delete + `rebuild()`) per `docs/operations/data-erasure.md`. Found as a gap in the
+  2026-08-16 Novus-i2 (org-twin) applicability assessment.
+
 ## [2.4.0] — 2026-08-16
 
 Wire **v12** (PREV 11) — unchanged since v2.0.0; a fully backwards-compatible rolling upgrade

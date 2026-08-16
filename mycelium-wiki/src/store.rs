@@ -126,6 +126,31 @@ pub trait WikiStore: Send + Sync {
         Ok(())
     }
 
+    /// **Remove a page from the store** — the right-to-erasure verb (GDPR Art. 17 / the
+    /// `docs/operations/data-erasure.md` procedure). Removes the page's manifest and every section
+    /// object so no read or query path can serve it; sub-pages nested under the path are **not**
+    /// touched. Returns `Ok(true)` if the page existed, `Ok(false)` if there was nothing to remove
+    /// (idempotent — a retry after a partial failure completes the erasure). `label` is provenance
+    /// for stores that record it.
+    ///
+    /// What "removed" means is the store's honest ceiling, and differs by store:
+    /// `FsStore` deletes the objects — the bytes are gone (modulo filesystem forensics — full
+    /// erasure of a corpus additionally follows the crypto-shred procedure). `GitStore` commits a
+    /// removal **at tip**: the page stops being served, but git *history retains it by design* —
+    /// that is redaction, not erasure, which is exactly why the git-as-truth envelope (E1) is
+    /// limited to public-record corpora. An erasable corpus belongs on an erasable store with
+    /// the `GitMirror` projection sink (erase here, then rebuild the mirror per its documented
+    /// erasure procedure — the sink is feature-gated behind `git-mirror`).
+    ///
+    /// The default **fails closed** (`Err`, "not implemented"): a store that has not implemented
+    /// erasure must never silently pretend it erased.
+    fn remove_page(&self, page: &str, label: &str) -> Result<bool, WikiError> {
+        let _ = (page, label);
+        Err(WikiError::Io(std::io::Error::other(
+            "this WikiStore does not implement remove_page (right-to-erasure)",
+        )))
+    }
+
     /// **Bring this store's local view up to date with its shared backing** (council-substrate
     /// P6.3). Default: no-op — `FsStore`/`S3Store` are inherently shared, so a promoted curator
     /// already sees the truth. A store with node-local state (`GitStore`: a per-node clone)

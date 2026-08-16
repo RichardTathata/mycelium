@@ -53,7 +53,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -569,15 +569,16 @@ impl GitStore {
     fn commit_file(
         &self, head: Option<&str>, rel: &str, content: &str, message: &str,
     ) -> Result<CommitOutcome, WikiError> {
-        self.commit_files(head, &[(rel, content)], message)
+        self.commit_files(head, &[(rel, content)], &[], message)
     }
 
-    /// Commit `files` as **one commit** on top of `head`, with an atomic ref CAS (P6.1: the batch
-    /// primitive — a per-meeting batch lands as the deployment's per-meeting boundary commit). A
-    /// batch whose tree equals the head tree is [`CommitOutcome::NoChange`] — an idempotent
-    /// re-apply records nothing.
+    /// Commit `files` (adds/replaces) and `removals` (path deletions) as **one commit** on top of
+    /// `head`, with an atomic ref CAS (P6.1: the batch primitive — a per-meeting batch lands as
+    /// the deployment's per-meeting boundary commit). A batch whose tree equals the head tree is
+    /// [`CommitOutcome::NoChange`] — an idempotent re-apply (or a removal of an absent path)
+    /// records nothing.
     fn commit_files(
-        &self, head: Option<&str>, files: &[(&str, &str)], message: &str,
+        &self, head: Option<&str>, files: &[(&str, &str)], removals: &[&str], message: &str,
     ) -> Result<CommitOutcome, WikiError> {
         // Blobs into the object database (content only; nothing touches the user's index).
         let mut blobs = Vec::with_capacity(files.len());
@@ -608,10 +609,15 @@ impl GitStore {
                 None    => plumb(&["read-tree", "--empty"])?,
             };
             // One index splice for the whole batch (P6.2): `--index-info` reads
-            // `mode SP sha TAB path` lines from stdin — N files, one subprocess.
-            let mut info = String::with_capacity(files.len() * 64);
+            // `mode SP sha TAB path` lines from stdin — N files, one subprocess. Mode `0` with the
+            // null sha is git's removal form; removing an absent path is a no-op, which is what
+            // makes `remove_page` idempotent (an already-gone page yields an unchanged tree).
+            let mut info = String::with_capacity((files.len() + removals.len()) * 64);
             for ((rel, _), blob) in files.iter().zip(&blobs) {
                 info.push_str(&format!("100644 {blob}\t{rel}\n"));
+            }
+            for rel in removals {
+                info.push_str(&format!("0 0000000000000000000000000000000000000000\t{rel}\n"));
             }
             match self.git_env(&["update-index", "--add", "--index-info"], Some(info.as_bytes()), &index_env)? {
                 (_, true)  => {}
@@ -665,6 +671,23 @@ impl GitStore {
                 ));
                 std::fs::write(&tmp, content)?;
                 std::fs::rename(&tmp, &dst)?;
+            }
+            for rel in removals {
+                let dst = self.cfg.dir.join(rel);
+                match std::fs::remove_file(&dst) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+                // Prune now-empty parent dirs up to the repo root (best effort — rmdir refuses
+                // non-empty dirs, which is exactly the stop condition we want).
+                let mut parent = dst.parent().map(Path::to_path_buf);
+                while let Some(p) = parent {
+                    if p == self.cfg.dir || std::fs::remove_dir(&p).is_err() {
+                        break;
+                    }
+                    parent = p.parent().map(Path::to_path_buf);
+                }
             }
             Ok(CommitOutcome::Committed)
         })();
@@ -926,6 +949,33 @@ impl WikiStore for GitStore {
         Ok(pages)
     }
 
+    /// **Redaction at tip, not erasure** — the honest ceiling of a git-as-truth store. This lands
+    /// one commit deleting the page file, so no read/query path serves it from HEAD onward, but
+    /// git history *retains the content by design* (the append-only public record is exactly what
+    /// the E1 envelope requires). A corpus that needs true erasure does not belong on this store —
+    /// see the trait doc and `docs/operations/data-erasure.md`. The write gate does not run: it
+    /// validates candidate *content*, and a removal has none — authorization is the caller's
+    /// (the curator's) concern.
+    fn remove_page(&self, page: &str, label: &str) -> Result<bool, WikiError> {
+        let rel = self.rel_path(page)?;
+        let message = format!("{}: erase {page} ({label})", self.cfg.message_prefix);
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        for attempt in 0..32 {
+            if attempt > 0 {
+                self.backoff(attempt);
+            }
+            // An unborn branch holds no pages — nothing to remove.
+            let Some(head) = self.head()? else { return Ok(false) };
+            match self.commit_files(Some(&head), &[], &[&rel], &message)? {
+                CommitOutcome::Committed => return Ok(true),
+                // Tree unchanged ⇒ the path was not at head (already gone / never existed).
+                CommitOutcome::NoChange => return Ok(false),
+                CommitOutcome::RefMoved => continue, // re-check against the new head
+            }
+        }
+        Err(WikiError::Conflict)
+    }
+
     /// P6.1 — the batch lands as **one commit** (the deployment's per-meeting boundary commit),
     /// the write gate runs **once** over the full batch, and a gate refusal is **whole-batch
     /// atomic**: nothing commits, so the repository only ever holds whole batches. An idempotent
@@ -959,7 +1009,7 @@ impl WikiStore for GitStore {
             if self.cfg.validate_cmd.is_some() {
                 self.gate_check_batch(&refs)?; // one gate run per batch; refusal refuses it all
             }
-            match self.commit_files(head.as_deref(), &refs, &message)? {
+            match self.commit_files(head.as_deref(), &refs, &[], &message)? {
                 CommitOutcome::Committed | CommitOutcome::NoChange => return Ok(()),
                 CommitOutcome::RefMoved => continue, // rebuilt on the new head next iteration
             }

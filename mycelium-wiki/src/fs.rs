@@ -318,6 +318,36 @@ impl WikiStore for FsStore {
         pages.sort();
         Ok(pages)
     }
+
+    fn remove_page(&self, page: &str, label: &str) -> Result<bool, WikiError> {
+        let _ = label; // the filesystem records no provenance; the caller's audit trail does
+        let dir = self.page_dir(page)?;
+        let existed = self.highest(&dir, "manifest")?.is_some();
+        // Erasure is strict, unlike GC: every deletion error propagates so the caller knows the
+        // erasure is incomplete (and retries — the verb is idempotent). Order matters for readers:
+        // the manifest files go first (readers enter via the manifest, so the page disappears
+        // before its bodies do), then the whole `sec/` tree. Sub-pages are sibling *directories*
+        // under `dir` and are deliberately left standing.
+        let rd = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in rd {
+            let entry = entry?;
+            // Regular files directly in the page dir are manifest versions + their temp files.
+            if entry.file_type()?.is_file() {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        match fs::remove_dir_all(Self::sec_dir(&dir)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let _ = fs::remove_dir(&dir); // best-effort: succeeds only when no sub-pages remain
+        Ok(existed)
+    }
 }
 
 #[cfg(test)]

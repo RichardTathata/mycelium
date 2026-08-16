@@ -118,7 +118,10 @@ The wiki has a genuinely different operational model: a **node-independent store
   - **Erasure interplay:** the mirror's git history retains erased content until you delete the
     mirror repo (local + remote) and `rebuild()` — see the erasure runbook
     ([data-erasure](data-erasure.md)). Only deploy the mirror for corpora where permanent history is
-    acceptable, or fold the mirror step into your erasure procedure.
+    acceptable, or fold the mirror step into your erasure procedure. The record-side step is
+    `Wiki::erase_page(page, label)` on the curator node (curator-local by design — no mesh RPC, no
+    gateway route): it removes the page from the system of record (`WikiStore::remove_page`),
+    after which you run the mirror step above.
   - Config: `GitMirrorConfig { dir, branch, remote, egress, author_name, author_email }`; zero new
     dependencies (shells to the `git` CLI — install git on the curator node). Design + the rejected
     git-as-datastore alternative: [`docs/design/wiki-git-store.md`](../design/wiki-git-store.md).
@@ -143,6 +146,10 @@ The wiki has a genuinely different operational model: a **node-independent store
     your `BatchSource` (S3), then submit the *reference* via `Wiki::submit_batch`, the
     `wiki.{group}.ingest` RPC, or **`POST /gateway/wiki/ingest`** (+ `ingest` on the py/ts SDKs) —
     the payload never rides the mesh. Resubmission after a partial failure is a no-op re-apply.
+  - **Removal is redaction, not erasure.** `Wiki::erase_page` on a git-as-truth store commits a
+    deletion at tip — the page stops being served, but **git history retains it by design** (the
+    public record is the point). If a corpus can receive erasure obligations, it fails the envelope
+    and belongs on an erasable store with the mirror ([data-erasure](data-erasure.md)).
   - Deployment architecture + the measured ten-council numbers:
     [`transparency-council-substrate.md`](../design/transparency-council-substrate.md) ·
     [`council-substrate-hardening.md`](../plans/council-substrate-hardening.md).

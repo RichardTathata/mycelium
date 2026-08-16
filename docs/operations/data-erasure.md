@@ -69,6 +69,14 @@ the *per-subject* layer above the KV value; the two are defence-in-depth.
   (`ChangeSink`): a projection is a copy, and your erasure procedure must enumerate the copies.
   Details: [companions runbook § git mirror](companions.md#mycelium-wiki--durable-curated-canon) ·
   [`docs/design/wiki-git-store.md`](../design/wiki-git-store.md).
+- **The wiki's page-level erase verb.** `WikiStore::remove_page(page, label)` removes a page —
+  manifest and every section — so no read/query path serves it; the curator-authorized entry point
+  is `Wiki::erase_page` (curator-local, deliberately not a mesh RPC or gateway route). Its meaning
+  is each store's honest ceiling: on `FsStore` the object bytes are deleted (combine with
+  crypto-shred + the backup policy for full erasure); on the git-as-truth `GitStore` it is
+  **redaction at tip, never erasure** — history retains the content by design, which is why the
+  git-as-truth envelope is restricted to public-record corpora. After erasing in the system of
+  record, complete the projection step above (delete mirror + `rebuild()`).
 
 ## Data residency
 

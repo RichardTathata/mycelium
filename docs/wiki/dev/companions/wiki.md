@@ -188,6 +188,20 @@ the pluggable **`PageFormat`** codec (a deployment's own entity format plugs in 
 with a custom codec; FTT's `CouncilWikiFormat` is theirs, gated by their conformance test).
 Deployment architecture: [`transparency-council-substrate.md`](../../../design/transparency-council-substrate.md).
 
+**The erase verb (post-v2.4.0, 2026-08-16).** `WikiStore::remove_page(page, label) -> bool`
+(default **fails closed** — a store that hasn't implemented erasure must never silently pretend it
+did), with the curator-authorized entry `Wiki::erase_page` (curator-local by design: not a mesh
+RPC, not a gateway route — erasure authorization must not ride an open surface). Semantics are
+each store's **honest ceiling**: `FsStore` deletes the object bytes (strict, error-propagating —
+unlike GC — and manifest-first so the page disappears before its bodies; nested sub-pages
+survive); `GitStore` commits a **redaction at tip** (`0 <null-sha>` index-info splice through the
+same private-index CAS path) — history retains the content *by design*, which is the E1 envelope
+restated as an API doc. The change sink is deliberately **not** notified: a tip-removal commit in
+a mirror would misrepresent erasure; the projection step stays delete-the-mirror + `rebuild()`
+([data-erasure runbook](../../../operations/data-erasure.md)). Closes the gap found in the
+2026-08-16 Novus-i2 assessment: the store-as-truth erasure story was architecturally right but had
+no store-level verb — "erase in the store" meant reaching around the trait.
+
 ## Gates
 
 `cargo test -p mycelium-wiki` (data plane) · `--features control-plane` (curator + `tests/failover.rs`)

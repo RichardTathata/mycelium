@@ -751,3 +751,42 @@ fn a_custom_page_format_plugs_in_end_to_end() {
     assert!(doc.trim_start().starts_with('['), "the on-disk document is the custom codec's: {doc}");
     assert!(!doc.contains("mycelium-section"), "no built-in markers leak into a custom format");
 }
+
+// ── the erase verb (redaction at tip; history retained by design) ───────────────
+
+#[test]
+fn remove_page_redacts_at_tip_and_history_retains_it() {
+    let (d, s) = store();
+    s.write_page("members/joined", &[sec("s-a", "Joined", "three new plot-holders", &[("k", "v")])],
+        &attrs(&[("season", "spring")])).unwrap();
+    s.write_page("minutes", &[sec("s-m", "Minutes", "agreed the seed swap", &[])], &BTreeMap::new()).unwrap();
+
+    assert!(s.remove_page("members/joined", "erasure request #7").unwrap());
+    // No read path serves the page from HEAD onward…
+    assert_eq!(s.read("members/joined").unwrap(), None);
+    assert!(s.read_versioned("members/joined").unwrap().is_none());
+    assert_eq!(s.list_pages().unwrap(), vec!["minutes".to_string()]);
+    assert!(s.query(&Predicate::new().with("k", "v")).unwrap().is_empty());
+    // …the worktree copy is gone…
+    assert!(!d.path().join("councils/testville/members/joined.md").exists(),
+        "the worktree copy of a removed page must not linger");
+    // …the removal is one commit with the erase provenance…
+    let subject = git(d.path(), &["log", "-1", "--format=%s"]);
+    assert_eq!(subject.trim(), "wiki(testville): erase members/joined (erasure request #7)");
+    // …and HISTORY RETAINS the content (the honest ceiling: redaction, not erasure).
+    let prior = git(d.path(), &["show", "HEAD~1:councils/testville/members/joined.md"]);
+    assert!(prior.contains("three new plot-holders"), "git history keeps the record by design");
+}
+
+#[test]
+fn remove_page_is_idempotent_and_absence_commits_nothing() {
+    let (d, s) = store();
+    assert!(!s.remove_page("never-written", "x").unwrap(), "unborn branch: nothing to remove");
+    s.write_page("p", &[sec("s-a", "H", "b", &[])], &BTreeMap::new()).unwrap();
+    assert!(s.remove_page("p", "x").unwrap());
+    let head_after = git(d.path(), &["rev-parse", "HEAD"]);
+    assert!(!s.remove_page("p", "x").unwrap(), "a retry is a no-op");
+    assert!(!s.remove_page("also-never-written", "x").unwrap());
+    assert_eq!(git(d.path(), &["rev-parse", "HEAD"]), head_after,
+        "an absent-page removal records no commit (no empty commits)");
+}

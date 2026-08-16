@@ -352,3 +352,37 @@ fn section_ids_are_stable_opaque_and_unique() {
     assert_ne!(a, mint_section_id("dev", "p", 42, 7), "group differs");
     assert!(a.starts_with('s') && a.len() == 13, "opaque fixed-width id: {a}");
 }
+
+#[test]
+fn remove_page_erases_it_and_leaves_sub_pages_standing() {
+    let (_d, s) = store();
+    s.write_page("gardens", &[sec("s-a", "Plots", "12 raised beds", &[("k", "v")])],
+        &attrs(&[("steward", "aisha")])).unwrap();
+    s.write_page("gardens/composting", &[sec("s-b", "Rota", "weekly turn", &[])], &BTreeMap::new()).unwrap();
+
+    assert!(s.remove_page("gardens", "erasure request #7").unwrap(), "the page existed");
+    assert_eq!(s.read("gardens").unwrap(), None, "erased page no longer served");
+    assert!(s.read_versioned("gardens").unwrap().is_none());
+    assert_eq!(s.list_pages().unwrap(), vec!["gardens/composting".to_string()],
+        "the nested sub-page survives its parent's erasure");
+    assert!(s.query(&Predicate::new().with("k", "v")).unwrap().is_empty(),
+        "no query path serves the erased sections");
+    // The bytes are gone, not just dereferenced: no object file under the page dir except sub-pages.
+    let dir = _d.path().join("ops/pages/gardens");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "composting")
+        .collect();
+    assert!(leftovers.is_empty(), "no manifest/section objects survive: {leftovers:?}");
+}
+
+#[test]
+fn remove_page_is_idempotent_and_reports_absence() {
+    let (_d, s) = store();
+    assert!(!s.remove_page("never-written", "x").unwrap(), "removing an absent page is Ok(false)");
+    s.write_page("p", &[sec("s-a", "H", "b", &[])], &BTreeMap::new()).unwrap();
+    assert!(s.remove_page("p", "x").unwrap());
+    assert!(!s.remove_page("p", "x").unwrap(), "a retry after success is a no-op, not an error");
+    assert!(matches!(s.remove_page("../escape", "x"), Err(WikiError::BadPath(_))),
+        "the path guard applies to erasure too");
+}
