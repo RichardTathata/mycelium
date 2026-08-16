@@ -3576,6 +3576,15 @@ classified.
   scale/resilience/entries, incl. 2026-08-15/16). Per the classification rule these are runner
   failures, not findings — but the consequence is a month without scale signal; dim 16's evidence is
   now doubly stale. **Needs an operator look at the Colima/registry path.**
+  **→ RESOLVED same day (addendum):** root-caused to the macOS **Local Network** TCC prompt raised
+  by the runner's between-rounds Colima restart — attributed to the *launchd session's own
+  identity* (interactive restarts ride the terminal's grant, which is why it never reproduced by
+  hand), so the unanswered 02:00 prompt left each night's VM without DNS. One supervised
+  `launchctl kickstart` + operator-clicked Allow (persists per-binary) fixed it; the stale
+  `~/Mycelium` runner clone (a month behind) was also fast-forwarded. Verified through the real
+  launchd path same day: **entries PASS** (first green row since 07-14), **resilience PASS 11/11**
+  on the post-grant re-run; the `scale` FAIL was the documented formation-variance ceiling (ran
+  fully, 100 containers up). Wiki ingest: `dev/testing/scale-tests.md` §CI status + dated `.log`.
 - **Minor (23 Documentation): the doctest probe came back vacuous** — `mycelium-wiki` has zero
   executable doctests; API-level examples are prose-only (the guide carries the runnable path).
   An improvement target, not a defect.
@@ -3604,7 +3613,7 @@ No calibration-ledger lines this run (no defect found that existed under a ≥8 
 | 13 | Security | **8** | **↑ from floor 7 — the named lift shipped.** Runs 54–57 pinned this at 7 pending "Phase 1+ with a poisoning-rejection gate." v2.3.0 (post-Run-58) shipped `sys/identity` authentication (CA anchor → signed `sys/identity-proof/` → `require_identity_proofs`) + rotate/revoke + crypto-shred, with the gates verified present and run in today's green CI (`test_identity_proof_rejects_poisoning_accepts_signed`, `test_require_identity_proofs_rejects_unsigned`, src/agent/http.rs:3297,3344); fresh `cargo audit` clean; wasmtime RUSTSEC fix in the shipped tag. Fixed structural weakness + deterministic gates → 8 (not 9: default-off posture and no external audit) |
 | 14 | Failure Mode Legibility | 8 | carried (v47); gate refusals surface findings; divergence tripwires name their misuse |
 | 15 | Performance | 8 | carried (v47), stale |
-| 16 | Scalability | 8 | carried (v49), **stale + evidence-outage** — last green nightly 2026-07-14 (resilience PASS 11/11, entries PASS); the runner has been environmentally dead a month (finding above). Possibly optimistic per the decay rule; re-earn on the next green nightly |
+| 16 | Scalability | 8 | **8, evidenced (same-day addendum)** — the runner outage (finding above) was root-caused + fixed within this run, and the nightly path re-ran green the same day: **entries PASS + resilience PASS 11/11** (2026-08-16 rows), `scale` FAIL = the documented formation-variance ceiling (ran fully, 100 containers). Nightly-grade evidence per the skill: supports 8, not 9 |
 | 17 | Testability | 8 | Re-demonstrated: the whole git-store family tests against tempdir repos with no cluster; the race probe took ~40 lines. carried-with-evidence |
 | 18 | Test Architecture | **8** | **↑ from floor 7.** The Run-44/54 pinning residual "mycelium-core suite compiled but never RUN in CI" is verified closed (`.github/workflows/ci.yml:39` — `ci-retest.sh -p mycelium-core`, green in today's run); since Run 58 the tiers also gained the input-fuzz gate, CI-gated Docker suites, measured wiki gates (read-plane, ten-council), and today's race probe as a permanent gate. Residual (honest, sub-9): nothing structurally catches bug-asserting tests (no mutation testing) |
 | 19 | Observability | 8 | carried (v49), stale |
@@ -3614,7 +3623,7 @@ No calibration-ledger lines this run (no defect found that existed under a ≥8 
 | 23 | Documentation | 8 | **Deep-dive.** Three audit skills ran this session: wiki-lint (one CODE finding fixed — docs held), doc-coverage run 15 (matrix refreshed, Ops gap closed), publication-lint run 16 (clean, no overclaim). Docs land in the same commit as code throughout the season. Held at 8, not 9: the doctest probe was vacuous (zero executable API examples in mycelium-wiki — the runnable path lives only in the guide) |
 | 24 | Developer Experience | 8 | carried (v49), stale |
 | 25 | Dependency Hygiene | 8 | **Deep-dive.** Fresh `cargo audit`: 0 vulns; the v2.4.0 tag is the first carrying the wasmtime RUSTSEC-2026-0222 fix (the v2.3.0 tag shipped 45.0.3 — recorded in CHANGELOG); heavy deps all feature-gated; Cargo.lock present; `--no-default-features` compiles (today's clippy). Warts keeping it at 8: `rustls-pemfile` unmaintained (allowed, documented), 3× `getrandom` majors in-graph |
-| — | **Floor (lowest 3)** | **7, 7, 8** | Configurability · Robustness · (Scalability — weakest 8: month-stale evidence) |
+| — | **Floor (lowest 3)** | **7, 7, 8** | Configurability · Robustness · (Scalability — re-evidenced same day, see addendum) |
 | — | Mean (continuity footnote) | 7.92 | up from 7.84 (Security 7→8, Test Architecture 7→8); not a target |
 
 **Delta vs Run 58:** the first run where two long-pinned floor dimensions lift, both on the exact terms
@@ -3624,4 +3633,8 @@ their pins named — Security's "scored up only when Phase 1+ ships with a poiso
 its pin demands a hunting pass that *finds nothing*, and none has run — holding it at 7 while lifting
 its neighbours is the discipline working, not an inconsistency. The floor narrows from four-at-7 to
 two-at-7. New standing worry: the scale-evidence pipeline (nightly runner) has been dark for a month —
-dim 16's 8 is the least-defended score on the board.
+dim 16's 8 is the least-defended score on the board. **Addendum (same day): that worry is closed** —
+the outage was root-caused (macOS Local-Network TCC in the launchd context), fixed with a persistent
+grant, and the nightly path re-ran green (entries + resilience PASS); dim 16's note upgraded from
+stale-carry to evidenced. The run's own finding-to-fix loop closing inside the run is the M2 shape
+working as intended.
