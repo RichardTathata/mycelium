@@ -47,6 +47,23 @@ a 2-core hosted runner hits the iptables ceiling above ~50 nodes, and each suite
 dozens-to-100 containers. The small correctness suites are the PR-path gate —
 [cluster-suites](cluster-suites.md).
 
+**The local nightly's macOS Local-Network trap (root-caused 2026-08-16).** The launchd runner
+(`scripts/launchd/`, 02:00 local, Colima/vz) went dark for a month — every row from 2026-07-15
+on was exit-2 at Docker image build ("load metadata … DeadlineExceeded" / registry unreachable).
+Root cause: the script's deliberate `colima stop -f && colima start` VM-restart raises the macOS
+**Local Network** privacy prompt, and TCC attributes it *per context* — interactive shells ride
+the terminal app's existing grant, but the **launchd session prompts on its own identity**, and
+an unanswered 02:00 prompt leaves that VM session unable to reach even its NAT gateway for DNS.
+Diagnosis rule: reproduce with `launchctl kickstart gui/$UID/com.mycelium.scale-nightly`, **not**
+an interactive `colima restart` — the interactive form silently succeeds and proves nothing.
+Fix: one supervised kickstart, click **Allow** — the grant is recorded per-binary and persists
+across VM restarts (verified same-day: entries PASS + resilience PASS post-grant). Two standing
+cautions: (1) a `brew upgrade` of colima/lima is a new binary → the prompt returns once — after
+upgrading, run one supervised kickstart; (2) the runner executes the **boot-volume clone**
+(`~/Mycelium`, because TCC blocks background agents from `/Volumes/Scratch`) — it does not
+auto-pull, so keep it fast-forwarded or the nightly silently tests stale code (it had drifted a
+month behind when the outage was found).
+
 ## The WSB-M5 SWIM divergence saga — lessons that outlive the bug
 
 Stage-4 SWIM cutover showed a long in-process/Docker divergence (in-process flat, Docker
