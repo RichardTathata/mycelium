@@ -68,7 +68,7 @@ pub use ingest::{apply_batch, BatchSource, FsBatchSource, IngestBatch, IngestPag
 /// E1-E4 eligibility envelope of `docs/design/wiki-git-store.md` -- see
 /// `docs/design/transparency-council-substrate.md` for the first (council-wiki).
 #[cfg(feature = "git-store")]
-pub use git_store::{GitStore, GitStoreConfig};
+pub use git_store::{GitStore, GitStoreConfig, MyceliumFormat, PageFormat};
 
 /// The Mycelium **control plane** (Phase 2) — the curator role, election + ring-failover, the
 /// evaporating proposal queue, and the single-writer apply. Behind the `control-plane` feature so the

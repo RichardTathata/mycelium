@@ -679,3 +679,75 @@ fn ten_councils_contend_without_spurious_failures_measured() {
     );
     assert!(shared_elapsed.as_secs() < 120 && deployed_elapsed.as_secs() < 120, "no pathological stall");
 }
+
+// ── the pluggable page codec (P6.5) ─────────────────────────────────────────────
+
+use mycelium_wiki::{Manifest, MyceliumFormat, PageFormat};
+
+#[test]
+fn the_default_format_round_trips_at_the_codec_level() {
+    // The codec contract, tested directly: parse(render(m, b)) == (m, b) — including the
+    // orphan-only shape (manifest None) the curator's two-step write depends on.
+    let f = MyceliumFormat;
+    let tricky = vec![
+        sec("s1", "Heading", "plain", &[("k", "v")]),
+        sec("s2", "H", "x\n", &[]),
+        sec("s3", "H", "", &[]),
+        sec("s4", "H", "# not a heading\n---\nnot front-matter", &[]),
+    ];
+    let manifest = Manifest {
+        order:      vec![SectionId::from("s1"), SectionId::from("s2")], // s3/s4 stay orphans
+        attributes: attrs(&[("meeting", "2026-08-15")]),
+    };
+    for (m, b) in [
+        (Some(&manifest), &tricky),                 // manifest + orphans
+        (None, &tricky),                            // orphan-only file (pre-membership)
+        (Some(&manifest), &Vec::new()),             // manifest, no blocks yet
+    ] {
+        let text = f.render(m, b).unwrap();
+        let (m2, b2) = f.parse(&text).unwrap();
+        assert_eq!(m2.as_ref(), m, "manifest round-trips byte-exactly");
+        assert_eq!(&b2, b, "blocks round-trip byte-exactly (orphans included)");
+    }
+}
+
+#[test]
+fn a_custom_page_format_plugs_in_end_to_end() {
+    // The P6.5 gate: the codec is genuinely pluggable — a stand-in for the deployment's
+    // CouncilWikiFormat. A JSON codec replaces the built-in; the store's whole contract (CAS,
+    // manifest-authoritative reads, batch writes) holds unchanged, and the committed document on
+    // disk is in the CUSTOM format.
+    struct JsonFormat;
+    impl PageFormat for JsonFormat {
+        fn render(&self, manifest: Option<&Manifest>, blocks: &[Section]) -> Result<String, mycelium_wiki::WikiError> {
+            Ok(serde_json::to_string_pretty(&(manifest, blocks))?)
+        }
+        fn parse(&self, text: &str) -> Result<(Option<Manifest>, Vec<Section>), mycelium_wiki::WikiError> {
+            Ok(serde_json::from_str(text)?)
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let s = GitStore::open(GitStoreConfig {
+        format: std::sync::Arc::new(JsonFormat),
+        ..GitStoreConfig::for_group(&repo, "testville")
+    })
+    .unwrap();
+
+    let a = sec("s-a", "Symptoms", "gateway 503s", &[("node", "e_rl_rk")]);
+    s.write_page("incidents/x", std::slice::from_ref(&a), &attrs(&[("domain", "retail")])).unwrap();
+
+    // The full read contract holds under the custom codec…
+    let page = s.read("incidents/x").unwrap().unwrap();
+    assert_eq!(page.sections, vec![a.clone()]);
+    // …CAS still conflicts on stale content…
+    let ver = s.read_versioned("incidents/x").unwrap().unwrap().sections.get(&SectionId::from("s-a")).unwrap().0;
+    s.write_section("incidents/x", &sec("s-a", "Symptoms", "resolved", &[("node", "e_rl_rk")]), Some(ver)).unwrap();
+    let stale = s.write_section("incidents/x", &sec("s-a", "S", "stale", &[]), Some(ver));
+    assert!(matches!(stale, Err(WikiError::Conflict)));
+    // …and the committed document is in the CUSTOM format (JSON, not the mycelium markers).
+    let doc = git(&repo, &["show", "HEAD:councils/testville/incidents/x.md"]);
+    assert!(doc.trim_start().starts_with('['), "the on-disk document is the custom codec's: {doc}");
+    assert!(!doc.contains("mycelium-section"), "no built-in markers leak into a custom format");
+}
