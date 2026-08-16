@@ -19,6 +19,22 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-08-16 (run 15)** — diff-gated. Since run 14 the delta is **one concept row: Companions
+  (the wiki third)** — the council-substrate arc (GitMirror change sink · `GitStore` + six
+  hardening items incl. two recorded measurements · the bulk-ingest claim-check with a gateway
+  edge + py/ts SDK verbs · the pluggable `PageFormat` codec), plus two design records and a
+  hardening plan; the only other commit in the window was a wiki-companion design note (8508bb4).
+  **Re-audit verdicts:** WHY richer (three cross-linked records) ✓; WHAT·Dev ✓ (crate rustdoc +
+  concepts unchanged); **HOW·Ops was Thin for the new surface** — the git-as-truth deployment
+  shape (topology, refresh-refusal semantics, the ≤1-round durability window, the batch-atomic
+  gate, ingest sizing) had design records but *zero operator-runbook landing* — fixed in-run: a
+  "Git-as-truth deployments" block in `operations/companions.md` mirroring the GitMirror block;
+  **HOW·Dev** had only the "deliberately not a GitStore" clause — fixed: the cookbook recipe now
+  names the envelope option + the ingest surface with the architecture link. Must-work spot-checks
+  on run-14→now snippets pass (GitMirrorConfig fields, `push_divergences`, `rebuild`). Row stays ✓
+  post-fix; **no new concept row** (GitStore/ingest are wiki-companion internals — the run-11
+  identity-auth precedent). No calibration entry: the Thin was new-surface drift since run 14,
+  caught by the first run after it. Floor unchanged: **0 ✗ cells, 0 Tier-1.**
 - **2026-07-26 (run 14)** — diff-gated. **Zero source change** since run 13 (`src/` · `mycelium-*/src/`
   untouched); the only `docs/` delta is `4ecc1aa` (install-story fix) + `7687242` (wiki lint). **No
   matrix cell moves — all rows carried.** One **must-work-if-followed** observation recorded — same
