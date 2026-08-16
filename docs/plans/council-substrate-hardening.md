@@ -159,6 +159,10 @@ not fidelity to their pipeline's output.
 
 ## FTT-side list (for their tracker, not ours)
 
+> **Boundary surface (closed 2026-08-16):** the fresh-pass closing assessment found the bulk-ingest
+> path was Rust-RPC only while their pipeline is Python — now `POST /gateway/wiki/ingest` + `ingest`
+> verbs on both SDKs, gateway-gated test green. The claim-check payload rule holds at the HTTP edge.
+
 `S3BatchSource` (impl of `BatchSource` over their bucket) · the real validator as the batch gate
 command (wrapping exit-2-warnings → 0) · `CouncilWikiFormat` + conformance gate (P6.5) · the
 councillor-GDPR line in the DPIA (envelope E1) · council-scale runs — which double as **Paper 1's

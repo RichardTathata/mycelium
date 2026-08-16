@@ -101,3 +101,85 @@ async fn gateway_propose_apply_read_query_lifecycle() {
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// The `/gateway/wiki/ingest` edge (the Python-reachable claim-check surface — the council-wiki
+/// pipeline is Python, and the ingest path must not be Rust-only): a staged batch's *reference*
+/// goes over HTTP; the curator fetches from its own `BatchSource`, applies, and the summary comes
+/// back. The payload never rides the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_ingest_submits_a_reference_and_returns_the_summary() {
+    use mycelium_wiki::{CuratorBrain, FsBatchSource, IngestBatch, IngestPage, Section, WikiStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    let batch = IngestBatch {
+        source: "pipeline/run-3".into(),
+        pages: vec![IngestPage {
+            path: "minutes/2026-08-16".into(),
+            attributes: Default::default(),
+            sections: vec![Section {
+                id: Arc::from("d1"),
+                heading: "Retrofit approved".into(),
+                body: "RESOLVED: the retrofit proceeds.".into(),
+                attributes: Default::default(),
+            }],
+        }],
+    };
+    std::fs::write(stage.join("run-3.json"), serde_json::to_vec(&batch).unwrap()).unwrap();
+
+    let mut started = None;
+    for _ in 0..16 {
+        let base = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let http_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = base;
+        cfg.http_port = Some(http_port);
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).unwrap(), cfg));
+        let store = Arc::new(FsStore::open(dir.path().join("store"), "council").unwrap());
+        let wcfg = WikiConfig {
+            group: "council".into(), role: WikiRole::Curator,
+            cap_refresh: Duration::from_millis(300), drain_interval: Duration::from_millis(100),
+            lint_interval: Duration::from_secs(5),
+        };
+        let wiki = Wiki::with_brain(
+            Arc::clone(&agent), wcfg, Arc::clone(&store),
+            CuratorBrain::default().with_batch_source(Arc::new(FsBatchSource::new(&stage))),
+        )
+        .await;
+        agent.with_http_routes(Arc::clone(&wiki).http_router());
+        if agent.start().await.is_ok() {
+            started = Some((agent, wiki, store, http_port));
+            break;
+        }
+        wiki.shutdown().await;
+    }
+    let (agent, wiki, store, http_port) = started.expect("could not bind agent + gateway");
+
+    let url = format!("http://127.0.0.1:{http_port}");
+    let http = reqwest::Client::new();
+    for _ in 0..100 {
+        if http.get(format!("{url}/health")).send().await.is_ok() { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let resp: serde_json::Value = http
+        .post(format!("{url}/gateway/wiki/ingest"))
+        .json(&serde_json::json!({ "group": "council", "reference": "run-3.json" }))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(resp["summary"]["applied"], 1, "the batch applied via the HTTP edge: {resp}");
+    assert_eq!(resp["summary"]["refused"], 0);
+    let page = store.read("minutes/2026-08-16").unwrap().expect("committed truth");
+    assert!(page.sections[0].body.contains("retrofit proceeds"));
+
+    // A bad reference surfaces as an error, not a hang.
+    let bad = http
+        .post(format!("{url}/gateway/wiki/ingest"))
+        .json(&serde_json::json!({ "group": "council", "reference": "no-such.json" }))
+        .send().await.unwrap();
+    assert_eq!(bad.status(), 502, "a fetch failure surfaces as an upstream error");
+
+    wiki.shutdown().await;
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

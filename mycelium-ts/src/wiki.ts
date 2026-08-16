@@ -96,4 +96,18 @@ export class Wiki {
     if (!r.ok) throw new Error(`wiki propose failed: ${r.status}`);
     return (await r.json()) as { proposal: string; section: string };
   }
+
+  /** Submit a staged batch.s claim-check reference for bulk ingest (council-substrate Phase 4).
+   * The payload never rides the request — the curator fetches from its own BatchSource, applies
+   * the whole batch atomically through its write gate, and returns the summary. Sizing contract:
+   * a batch = one meeting. */
+  async ingest(reference: string, timeoutSecs = 60): Promise<{ summary: { applied: number; refused: number; findings: string[] } }> {
+    const r = await fetch(`${this.baseUrl}/gateway/wiki/ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group: this.group, reference, timeout_secs: timeoutSecs }),
+    });
+    if (!r.ok) throw new Error(`wiki ingest failed: ${r.status}`);
+    return (await r.json()) as { summary: { applied: number; refused: number; findings: string[] } };
+  }
 }

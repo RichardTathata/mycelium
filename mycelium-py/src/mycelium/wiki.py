@@ -82,3 +82,17 @@ class Wiki:
             r = await c.post("/gateway/wiki/propose", json=payload)
         r.raise_for_status()
         return r.json()
+
+    async def ingest(self, reference: str, timeout_secs: int = 60) -> dict:
+        """Submit a staged batch's claim-check *reference* for bulk ingest (council-substrate
+        Phase 4). The payload never rides the request — the batch is staged in the curator's
+        ``BatchSource`` (S3 in the council deployment); the curator fetches, applies the whole
+        batch atomically through its write gate, publishes, and returns the summary:
+        ``{"summary": {"applied": n, "refused": n, "findings": [...]}}``. Sizing contract:
+        a batch = one meeting."""
+        payload = {"group": self._group, "reference": reference, "timeout_secs": timeout_secs}
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout_secs + 15.0) as c:
+            r = await c.post("/gateway/wiki/ingest", json=payload)
+        r.raise_for_status()
+        return r.json()
+
