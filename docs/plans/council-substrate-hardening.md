@@ -116,7 +116,7 @@ The single-branch ref-CAS gives ~12 commits/s **global** when many curators shar
   391-council extrapolation stays unclaimed: these numbers are one machine, ten councils —
   the deployment measures its own.
 
-## P6.5 — The entity-format codec (Gap 1) [M trait + FTT impl] — *the substrate-fidelity gap*
+## P6.5 — The entity-format codec (Gap 1) [M trait + FTT impl] — ✅ M-SIDE BUILT 2026-08-16
 
 `GitStore` renders the mycelium page format; the council-wiki corpus is `entity-type`-first
 kebab-case front-matter, labeled link lines, `decisions.md` row-stores — **their real validator
@@ -131,8 +131,15 @@ not fidelity to their pipeline's output.
   through the real codec, validate with the real `validate.js`, assert zero errors). Note the happy
   structural fit: their `decisions.md` row-store (N rows, `#N` anchors) maps naturally to one page
   with N sections.
-- *Gate (M-side):* the trait + round-trip properties + all existing tests green under the default
-  format. *Gate (FTT-side):* their conformance test over `CouncilWikiFormat`.
+- *Gate (M-side, green):* `the_default_format_round_trips_at_the_codec_level` (byte-exact incl.
+  the orphan-only pre-membership shape) + `a_custom_page_format_plugs_in_end_to_end` — a JSON
+  codec (the `CouncilWikiFormat` stand-in) replaces the built-in: the full store contract (CAS
+  conflicts, manifest-authoritative reads) holds unchanged and the committed document on disk is
+  in the CUSTOM format, no built-in markers leaking. All 27 git_store tests green under the
+  default. *As built:* `pub trait PageFormat { render/parse }` with the orphans-must-survive
+  contract in its docs; `MyceliumFormat` = the built-in; `GitStoreConfig.format:
+  Arc<dyn PageFormat>` (manual `Debug`). *Gate (FTT-side, open):* their conformance test over
+  `CouncilWikiFormat` — the trait is ready for it.
 
 ## P6.6 — Lower tier [M]
 

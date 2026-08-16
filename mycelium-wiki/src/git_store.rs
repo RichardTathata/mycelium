@@ -65,7 +65,7 @@ use crate::store::{PageWrite, VersionedPage, WikiStore};
 const MARKER: &str = "<!-- mycelium-section ";
 
 /// Configuration for a [`GitStore`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GitStoreConfig {
     /// The checkout root. Created (and `git init -b {branch}`ed) if absent.
     pub dir: PathBuf,
@@ -99,6 +99,24 @@ pub struct GitStoreConfig {
     /// and warned, never auto-fixed).
     /// `None` = a local-only store (single-node deployments; every sync is a no-op).
     pub remote: Option<String>,
+    /// The page codec (P6.5). Default: the built-in [`MyceliumFormat`]. A deployment with its own
+    /// entity contract (council-wiki) plugs its codec here; the store never cares what the
+    /// document looks like, only that it round-trips.
+    pub format: std::sync::Arc<dyn PageFormat>,
+}
+
+impl std::fmt::Debug for GitStoreConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitStoreConfig")
+            .field("dir", &self.dir)
+            .field("branch", &self.branch)
+            .field("subdir", &self.subdir)
+            .field("message_prefix", &self.message_prefix)
+            .field("remote", &self.remote)
+            .field("validate_cmd", &self.validate_cmd)
+            .field("format", &"<PageFormat>")
+            .finish()
+    }
 }
 
 impl Default for GitStoreConfig {
@@ -112,6 +130,7 @@ impl Default for GitStoreConfig {
             message_prefix: "wiki".to_string(),
             validate_cmd:   None,
             remote:         None,
+            format:         std::sync::Arc::new(MyceliumFormat),
         }
     }
 }
@@ -217,6 +236,35 @@ struct BlockMeta {
 
 fn bad_content(msg: String) -> WikiError {
     WikiError::Io(io::Error::new(io::ErrorKind::InvalidInput, msg))
+}
+
+/// The page codec (P6.5): how a page — manifest + section blocks — becomes the committed
+/// document and back. **Pluggable** so a deployment whose corpus has its own entity format (the
+/// council-wiki.s `entity-type` front-matter contract) supplies a codec that renders/parses THAT;
+/// the format.s correctness contract lives with the deployment.s validator, not here.
+///
+/// Contract: **byte-exact round-trip** — `parse(render(m, b))` must return exactly `(m, b)` for
+/// every page the format accepts (refuse unrepresentable content with a clear error; never mangle
+/// silently). `manifest` is `None` for an **orphan-only** file (sections written before their
+/// membership commit) — a format MUST persist orphan blocks and the manifest.s absence, or the
+/// curator.s two-step write (section, then membership) breaks.
+pub trait PageFormat: Send + Sync {
+    fn render(&self, manifest: Option<&Manifest>, blocks: &[Section]) -> Result<String, WikiError>;
+    fn parse(&self, text: &str) -> Result<(Option<Manifest>, Vec<Section>), WikiError>;
+}
+
+/// The built-in reference format: `manifest:` JSON front-matter + `<!-- mycelium-section -->`
+/// marker blocks with visible `# headings` (see the module docs. Layout + Reserved sequences).
+pub struct MyceliumFormat;
+
+impl PageFormat for MyceliumFormat {
+    fn render(&self, manifest: Option<&Manifest>, blocks: &[Section]) -> Result<String, WikiError> {
+        render(&PageFile { manifest: manifest.cloned(), blocks: blocks.to_vec() })
+    }
+    fn parse(&self, text: &str) -> Result<(Option<Manifest>, Vec<Section>), WikiError> {
+        let pf = parse(text)?;
+        Ok((pf.manifest, pf.blocks))
+    }
 }
 
 fn render(pf: &PageFile) -> Result<String, WikiError> {
@@ -471,7 +519,8 @@ impl GitStore {
         let Some(bytes) = self.read_blob(&format!("{head}:{rel}"))? else { return Ok(None) };
         let text = String::from_utf8(bytes)
             .map_err(|_| bad_content(format!("page file {rel:?} is not UTF-8")))?;
-        let pf = parse(&text)?;
+        let (manifest, blocks) = self.cfg.format.parse(&text)?;
+        let pf = PageFile { manifest, blocks };
         Ok(Some((text, pf)))
     }
 
@@ -633,7 +682,7 @@ impl GitStore {
                 None          => (None, PageFile::default()),
             };
             let token = validate_and_mutate(&mut pf)?; // Conflict propagates from here
-            let content = render(&pf)?;
+            let content = self.cfg.format.render(pf.manifest.as_ref(), &pf.blocks)?;
             if old_text.as_deref() == Some(content.as_str()) {
                 return Ok(token); // an idempotent re-apply: nothing to record, no empty commit
             }
@@ -884,7 +933,7 @@ impl WikiStore for GitStore {
                 }),
                 blocks: p.sections.to_vec(),
             };
-            files.push((rel, render(&pf)?));
+            files.push((rel, self.cfg.format.render(pf.manifest.as_ref(), &pf.blocks)?));
         }
         let message = format!("{}: batch({label}) — {} page(s)", self.cfg.message_prefix, files.len());
         let refs: Vec<(&str, &str)> = files.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
