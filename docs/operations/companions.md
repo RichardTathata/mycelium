@@ -122,6 +122,30 @@ The wiki has a genuinely different operational model: a **node-independent store
   - Config: `GitMirrorConfig { dir, branch, remote, egress, author_name, author_email }`; zero new
     dependencies (shells to the `git` CLI — install git on the curator node). Design + the rejected
     git-as-datastore alternative: [`docs/design/wiki-git-store.md`](../design/wiki-git-store.md).
+- **Git-as-truth deployments (`GitStore`, feature `git-store`) — envelope-gated.** Only for corpora
+  meeting the E1–E4 envelope (public record · single curator per scope · an operator-owned,
+  force-push-locked remote · git-native readers — the council-wiki shape;
+  [`wiki-git-store.md`](../design/wiki-git-store.md)). Operational facts:
+  - **Topology: one clone per curator node**, `GitStoreConfig::for_group(dir, group)` per group,
+    `remote` = your locked shared repo. Co-locating many groups over one checkout re-introduces a
+    shared-ref write ceiling (documented in the module docs) — prefer clone-per-group.
+  - **Failover = pull-on-promote / push-per-round**: a promoted curator adopts the remote head
+    before serving, and **refuses the curatorship if it cannot refresh** (a stale curator is the
+    data-loss path — watch for the `refusing the curatorship` error log). Durability window: a dead
+    curator's **un-pushed tail (≤ one round) is discarded on failover** and re-lands via
+    resubmission — size your push cadence expectations to that, and keep the remote
+    **force-push-locked** (the post-push `push_divergences()` tripwire warns if it moved outside
+    the store's own pushes; investigate, never auto-fix).
+  - **The write gate** (`validate_cmd`): your validator command runs once per batch with the
+    candidate file list; nonzero exit refuses the **whole batch** (nothing commits — no partial
+    meetings). Wrap warnings-only exits to 0 if your validator distinguishes them.
+  - **Bulk ingest**: workers stage a batch (one **meeting** per batch — the sizing contract) in
+    your `BatchSource` (S3), then submit the *reference* via `Wiki::submit_batch`, the
+    `wiki.{group}.ingest` RPC, or **`POST /gateway/wiki/ingest`** (+ `ingest` on the py/ts SDKs) —
+    the payload never rides the mesh. Resubmission after a partial failure is a no-op re-apply.
+  - Deployment architecture + the measured ten-council numbers:
+    [`transparency-council-substrate.md`](../design/transparency-council-substrate.md) ·
+    [`council-substrate-hardening.md`](../plans/council-substrate-hardening.md).
 - **Teardown — required.** `shutdown()` is **mandatory** to reclaim a `Wiki`: the background loops hold
   strong `Arc<Self>` references, so without it the wiki is a reference cycle that outlives its caller
   (a real leak for any process that creates and discards wikis). Idempotent; it aborts the loops,

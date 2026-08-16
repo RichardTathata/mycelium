@@ -186,6 +186,14 @@ The mirror is a **projection, never the record** — best-effort, rebuildable
 [`wiki-git-store.md`](../design/wiki-git-store.md)); operator side:
 [companions runbook](../operations/companions.md#mycelium-wiki--durable-curated-canon).
 
+For a corpus that meets the **E1–E4 envelope** (public record, one curator per scope, an
+operator-owned locked remote, git-native readers — a council-minutes archive is the worked case),
+the inversion exists too: **`GitStore`** (feature `git-store`) makes git *the* store — every apply a
+scoped commit, `PageFormat` pluggable for your own document schema, and **bulk ingest** for
+pipeline-scale writes (stage a batch, submit only its reference via `Wiki::submit_batch` /
+`POST /gateway/wiki/ingest` / the SDKs' `ingest`). Architecture + build:
+[`transparency-council-substrate.md`](../design/transparency-council-substrate.md).
+
 ### How do I make my agents reachable from LangChain / AutoGen (A2A)?
 
 Serve the A2A AgentCard — built automatically from your capabilities at
