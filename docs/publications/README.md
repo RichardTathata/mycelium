@@ -205,3 +205,18 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   *exercises* the substrate) is unchanged — only the trailing `<code>` run command was corrected. No
   overclaim, no roadmap-vs-shipped drift. The two new artifact-library showcases are examples, not a
   persuasion surface. No findings.
+- 2026-08-16 (lint run 16): **clean — reality moved twice, the claims held.** First run since both
+  v2.3.0 (2026-07-24: gateway TLS · audit export · authenticated `sys/identity` · rotate+revoke ·
+  crypto-shred) and the council-substrate arc (2026-08-15/16); the five targets themselves are
+  unchanged since run 15. Both drift directions swept: **no overclaim** (0 Byzantine/tamper-proof
+  hits — the decks correctly say tamper-*evident*; every "guarantee" is the qualified opt-in-ordering
+  framing; every "platform"/"control plane" occurrence describes competitors or the thing Mycelium
+  is not; 0 crisis-domain framing) and **no stale-limitation claims** (the decks never asserted the
+  pre-v2.3 gaps, so nothing reads as false now). Wire v12/PREV 11, scope vocabulary, and
+  "feature-complete v2" all verified current. Papers: paper1 makes no empirical claims of its own
+  (the "implemented + reproducible" line is a correctly-attributed *citation* of Rodriguez's repo)
+  and — correctly — does **not** claim the pending council-scale work-distribution case study;
+  paper2a's numbers trace to its committed `data/` sweeps. **One Minor author-flag, not a fix:**
+  the capabilities slides predate v2.3.0's SOC-2 additions and the wiki git-substrate — absence is
+  not mislabeling, but both are undersell *opportunities* (customer-pitch slide 354's security list
+  and the presentation's compliance card could each gain a line) — the author's call on deck scope.
