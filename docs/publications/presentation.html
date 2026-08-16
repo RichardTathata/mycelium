@@ -808,9 +808,9 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
 <div class="slide" id="sV2">
   <div class="slide-top"><span class="eyebrow"><span class="eyebrow-accent">v2.0</span> · Coordination</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
-    <div class="slide-title">Coordination, <em>two ways.</em></div>
-    <div class="slide-sub">Two companion crates — both built entirely on the public API — revive the Linda / JavaSpaces lineage: its two access modes, <em>coordinator-free</em>, minus the transaction monitor that made the original a single point of failure.</div>
-    <div class="cols2">
+    <div class="slide-title">Coordination, <em>three ways.</em></div>
+    <div class="slide-sub">Three companion crates — all built entirely on the public API — revive and extend the Linda / JavaSpaces lineage: its two <em>transient</em> access modes plus a <em>durable</em> third, coordinator-free, minus the transaction monitor that made the original a single point of failure.</div>
+    <div class="cols3">
       <div class="card card-accent-purple">
         <div class="card-icon">⬍</div>
         <div class="card-title">Tuple space — pull by <em>position</em></div>
@@ -821,9 +821,17 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
         <div class="card-title">Blackboard — claim by <em>content</em></div>
         <div class="card-body"><code>mycelium-blackboard</code>. Agents <code>post</code> facts; others <code>read</code> them non-destructively (Linda's <code>rd</code>) and <code>claim</code> a finite one competitively (<code>in</code>) — matched by an <em>attribute predicate</em>, not a stage. Which agent acts is decided by what the fact <em>says</em>, not where it sits.</div>
       </div>
+      <div class="card card-accent-green">
+        <div class="card-icon">▤</div>
+        <div class="card-title">Wiki — curate the <em>durable</em></div>
+        <div class="card-body"><code>mycelium-wiki</code>. Agents <code>propose</code>; a single elected <strong>curator</strong> reconciles (optionally LLM-merged) and applies — one writer of record with ring-failover, while everyone reads the store <em>directly</em>. The compounding knowledge canon the two transient modes feed.</div>
+      </div>
     </div>
     <div class="callout callout-purple" style="font-size:12.5px;">
-      <strong>The classical objection, dissolved.</strong> Gelernter's tuple space (1985) and JavaSpaces were always the right pull primitives; the standing complaint was that the shared space is itself a coordinator needing consistency machinery. Build the space <em>on</em> a coordinator-free substrate and that objection has no variable to inhabit — the ring is the failure detector, a standby self-promotes, acknowledged work never resurrects. <strong>Pull (position) and claim (content) are the two shapes — Mycelium ships both.</strong>
+      <strong>The classical objection, dissolved.</strong> Gelernter's tuple space (1985) and JavaSpaces were always the right pull primitives; the standing complaint was that the shared space is itself a coordinator needing consistency machinery. Build the space <em>on</em> a coordinator-free substrate and that objection has no variable to inhabit — the ring is the failure detector, a standby self-promotes, acknowledged work never resurrects. <strong>Pull (position), claim (content), curate (durable) — Mycelium ships all three.</strong>
+    </div>
+    <div class="callout callout-green" style="font-size:12.5px;">
+      <strong>Four wiki usage patterns, all shipped:</strong> <strong>store-as-truth</strong> (a shared FS/S3 corpus, curator-written, direct-read) with an optional <strong>git audit mirror</strong> — one reviewable commit per curated round; <strong>git-as-truth</strong> for public-record corpora — every apply a scoped git commit, so <em>history is the audit trail</em>, with a pluggable page schema and a pre-commit validator gate that refuses a bad batch whole; <strong>claim-check bulk ingest</strong> for pipelines — submit a staged batch's <em>reference</em> (HTTP + Python/TS SDKs), batch-atomic, byte-identical to a serial writer, resubmit-safe; and <strong>tuple-space-leased extraction</strong> — at-least-once redelivery × idempotent apply = <em>exactly-once through worker death</em>, proven by test.
     </div>
   </div>
 </div>
@@ -1048,7 +1056,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
         </div>
         <div class="card card-accent-green">
           <div class="card-title">v1.x compliance layer (<code>compliance</code> feature)</div>
-          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. The Production Readiness Gap, closed.</div>
+          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. The Production Readiness Gap, closed. <strong>v2.3 closes the SOC 2 audit gaps:</strong> native <strong>gateway TLS</strong>, <strong>audit export</strong> (<code>AuditSink</code>) with retention checkpointing, <strong>authenticated identity</strong> (CA-anchored, proof-chained rotation — a forged <code>sys/identity</code> write is rejected, not just detected), operator <strong>key revocation</strong>, and <strong>GDPR crypto-shred</strong> erasure (destroy the key, the data is cryptographically dead fleet-wide).</div>
         </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;">

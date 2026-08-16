@@ -256,7 +256,7 @@
     <div class="slide-title good">Your data <em>never leaves your control.</em></div>
     <div class="slide-sub">There is no central custodian — by construction, not by policy. Each node holds its own state. Identity is self-certified (no central authority issues it). Across organisations or borders, domains <strong>federate as sovereign peers</strong> — each self-certifies, none surrenders custody.</div>
     <div class="cols3">
-      <div class="card card-accent-green"><div class="card-title">Regulated industries</div><div class="card-body">Finance, health: "who holds the data" is a compliance question with legal weight — answered structurally, because the answer is "you do."</div></div>
+      <div class="card card-accent-green"><div class="card-title">Regulated industries</div><div class="card-body">Finance, health: "who holds the data" is a compliance question with legal weight — answered structurally, because the answer is "you do." And when the law says <em>erase</em>: per-subject <strong>crypto-shred</strong> — destroy one key and that subject's data is cryptographically dead everywhere at once.</div></div>
       <div class="card card-accent-green"><div class="card-title">Cross-jurisdiction</div><div class="card-body">No central store in one jurisdiction holding another's data. Data residency is a property of where you run nodes, not a vendor's promise.</div></div>
       <div class="card card-accent-green"><div class="card-title">Multi-org consortia</div><div class="card-body">Supply chains, federated AI: no party hands authoritative state to a competitor or a third-party chokepoint. Sovereignty is the trust model.</div></div>
     </div>
@@ -294,6 +294,7 @@
       <span class="pattern-pill">Shared State</span>
       <span class="pattern-pill">Pull Work-Queues</span>
       <span class="pattern-pill">Content Claiming</span>
+      <span class="pattern-pill">Curated Knowledge</span>
       <span class="pattern-pill">Consensus</span>
     </div>
     <div class="callout callout-purple">Pick the pattern the problem wants — <strong>not the one the framework forces.</strong> And because they share one substrate, mixing them is free: a pipeline can pull work, broadcast an event, and reach agreement without three separate systems to operate.</div>
@@ -331,7 +332,7 @@
     <div class="cols2">
       <div class="card card-accent-green">
         <div class="card-title">Node-level legibility — shipped</div>
-        <div class="card-body">Every node explains itself: <em>why</em> it is busy, <em>why</em> it shed load, <em>why</em> it is unavailable. A tamper-evident, signed audit trail. Standard health, readiness, and metrics endpoints that drop into your existing monitoring.</div>
+        <div class="card-body">Every node explains itself: <em>why</em> it is busy, <em>why</em> it shed load, <em>why</em> it is unavailable. A tamper-evident, signed audit trail — <strong>exportable to your SIEM</strong>, with retention checkpointing. Standard health, readiness, and metrics endpoints that drop into your existing monitoring.</div>
       </div>
       <div class="card card-accent-green">
         <div class="card-title">Fleet-level legibility — shipped</div>
@@ -351,7 +352,7 @@
     <div class="cols3">
       <div class="card card-accent-green">
         <div class="card-title">✓ Built</div>
-        <div class="card-body" style="line-height:1.75;">Three-layer substrate. Security &amp; compliance: signed identity, role-based access, OIDC single sign-on, tamper-evident audit, data-at-rest encryption, live key rotation. Sovereign federation. Coordinator-free fleet diagnosis (detect → localize → explain → intervene, no central collector). Polyglot SDKs (Rust · Python · TypeScript). Feature-complete v2.</div>
+        <div class="card-body" style="line-height:1.75;">Three-layer substrate. Security &amp; compliance: authenticated identity (CA-anchored, proof-chained rotation) with revocation, role-based access, OIDC single sign-on, tamper-evident audit with SIEM export, native gateway TLS, data-at-rest encryption, live key rotation, GDPR crypto-shred erasure. Durable curated knowledge canon — group-scoped, optionally <strong>git-backed</strong>, so history is the audit trail; agents, pipelines, and humans co-edit one record. Sovereign federation. Coordinator-free fleet diagnosis (detect → localize → explain → intervene, no central collector). Polyglot SDKs (Rust · Python · TypeScript). Feature-complete v2.</div>
       </div>
       <div class="card card-accent-blue">
         <div class="card-title">✓ Demonstrated</div>
