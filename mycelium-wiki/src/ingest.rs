@@ -38,6 +38,9 @@ pub struct IngestPage {
 }
 
 /// A staged batch of extracted pages — what the claim-check reference points at.
+///
+/// **Sizing contract (P6.6): a batch = one meeting.** The per-meeting boundary commit, the
+/// batch-atomic write gate, and the submit timeout are all sized to that unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestBatch {
     /// Provenance label for logs and the change-sink round (e.g. `pipeline/run-42`).
