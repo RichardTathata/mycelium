@@ -22,6 +22,42 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.4.0 release — 2026-08-16 (tag `v2.4.0`)
+
+The **wiki-substrate** MINOR since v2.3.0. Wire **v12** (PREV 11) unchanged — a fully
+backwards-compatible rolling upgrade (rolling-upgrade + prev-wire gates green). Release gate:
+**CI-green before tagging**. Cut from CHANGELOG `[Unreleased]`. Highlights:
+
+- **`GitStore`** (feature `git-store`) — the git-as-truth `WikiStore`, built strictly inside the
+  E1–E4 eligibility envelope of `design/wiki-git-store.md` (first qualifying deployment: a
+  public-record council-minutes corpus, `design/transparency-council-substrate.md`). Content-hash
+  CAS tokens that never appear in the document; plumbing commits behind an atomic `update-ref`
+  branch-head CAS; six-phase hardening with **recorded measurements** (reads: 330 ms/600 pages;
+  contention: 5.5/3.0 batches/s over ten councils, zero spurious failures — the gate surfaced and
+  fixed four real defects, incl. the merge-tree→subtree-splice falsification) — full trail:
+  `plans/council-substrate-hardening.md`.
+- **`GitMirror`** (feature `git-mirror`) — the git audit-projection `ChangeSink` for
+  store-as-truth deployments: one reviewable commit per curated round, `EgressPolicy`-gated push,
+  divergence tripwire, `rebuild()` as the erasure path. The keep-all decision (2026-08-16): both
+  git shapes stay — the mirror is the general answer, the store the envelope exception.
+- **Bulk ingest** — the claim-check stack: `IngestBatch`/`BatchSource`/`apply_batch` (batch-atomic
+  through the write gate; byte-identical to a serial writer; resubmit is a no-op),
+  `Wiki::submit_batch` RPC, and the boundary surface a consumer's-eye pass demanded:
+  **`POST /gateway/wiki/ingest`** + `ingest` verbs on both SDKs. A batch = one meeting (the
+  sizing contract).
+- **Failover over node-local stores** — `WikiStore::refresh`/`publish` default methods;
+  pull-on-promote (a curator that cannot refresh never serves), push-per-round, the ≤1-round
+  un-published-tail residual tested rather than hidden.
+- **`PageFormat`** — the pluggable entity codec (byte-exact round-trip; orphans-must-survive),
+  proven end-to-end with a custom format; a deployment's own schema plugs in.
+- **Exactly-once work distribution across companions** — tuple-space leases × idempotent ingest,
+  with the kill at the worst point (after submit, before ack).
+- **Security note:** the first tagged release carrying the **wasmtime RUSTSEC-2026-0222** fix
+  (46.0.2) — the v2.3.0 tag was cut from a lineage predating the 2026-07-16 bump and ships 45.0.3
+  with that low-severity advisory open.
+
+Full notes: `CHANGELOG.md` § [2.4.0].
+
 ## v2.3.0 release — 2026-07-24 (tag `v2.3.0`)
 
 Wire **v12** (PREV 11) unchanged — a fully backwards-compatible rolling upgrade; additive public API

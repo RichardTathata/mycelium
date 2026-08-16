@@ -15,11 +15,17 @@ a cluster is emergent from network reachability (peer-exchange + CA admission �
 `cluster_name`, which is a cosmetic label). v2.0 complete (all 16 milestones, 2026-06-21); v2.1.0
 2026-07-15 (`LockService`, CI-gated Docker suites, #164 lock fixes);
 v2.2.0 2026-07-16 (five-pass adversarial self-audit, input-fuzz gate, identity-auth Phase 1a, `/ready`
-fix); **v2.3.0 released 2026-07-24** (tag `v2.3.0` — the **SOC 2 audit-gap** MINOR: gateway TLS
-(`gateway_tls`) · audit export (`AuditSink`) + retention checkpointing · `sys/identity` authentication
-(CA anchor → signed `sys/identity-proof/` → `require_identity_proofs`, default-off) · rotate+revoke ·
-GDPR crypto-shred (`SubjectKeyRegistry`) — all additive, wire unchanged; the shared-responsibility
-matrix is `docs/operations/shared-responsibility-matrix.md`); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
+fix); v2.3.0 2026-07-24 (the **SOC 2 audit-gap** MINOR: gateway TLS (`gateway_tls`) · audit export
+(`AuditSink`) + retention checkpointing · `sys/identity` authentication (CA anchor → signed
+`sys/identity-proof/` → `require_identity_proofs`, default-off) · rotate+revoke · GDPR crypto-shred
+(`SubjectKeyRegistry`) — the shared-responsibility matrix is
+`docs/operations/shared-responsibility-matrix.md`); **v2.4.0 released 2026-08-16** (tag `v2.4.0` —
+the **wiki-substrate** MINOR: the git-as-truth `GitStore` (`git-store`, six-phase hardening with
+recorded measurements) · `GitMirror` projection sink (`git-mirror`) · claim-check **bulk ingest**
+(`submit_batch` + `POST /gateway/wiki/ingest` + py/ts SDK verbs) · pluggable `PageFormat` codec ·
+curator failover over node-local stores — all additive, wire unchanged; records
+`docs/design/transparency-council-substrate.md` + `docs/plans/council-substrate-hardening.md`;
+first tagged release with the wasmtime RUSTSEC-2026-0222 fix); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
 shared by `SignalScope` and consensus (`cluster_propose` / `group_propose`). *Renamed 2026-07-10:*
 `System` → `Cluster` (wire-compatible; `system_propose` kept as a `#[deprecated]` alias, gateway
 still accepts `"system"`); `system_stats()` is unrelated — node-local runtime state, not a scope.

@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-08-16
+
+Wire **v12** (PREV 11) — unchanged since v2.0.0; a fully backwards-compatible rolling upgrade
+(rolling-upgrade + prev-wire gates green). The **wiki-substrate MINOR**: everything here is
+additive, dominated by the council-wiki substrate arc — the git-as-truth `GitStore` with its
+six-phase hardening (two recorded measurements), the `GitMirror` projection sink, the claim-check
+bulk-ingest stack with an HTTP edge + SDK verbs, and the pluggable `PageFormat` codec. Design
+records: `docs/design/wiki-git-store.md` · `docs/design/transparency-council-substrate.md` ·
+`docs/plans/council-substrate-hardening.md`.
+
+**Security note:** this is the **first tagged release carrying the wasmtime RUSTSEC-2026-0222
+fix** (46.0.2) — the v2.3.0 tag was cut from a lineage that predated the 2026-07-16 bump and
+ships wasmtime 45.0.3 with that low-severity (3.8) advisory open; upgrade rather than build the
+v2.3.0 tag with the `wasm` feature in hardened environments.
+
 ### Added
 - **`mycelium-wiki` `GitStore` — the git-as-truth `WikiStore`** (feature `git-store`, zero added
   dependencies): pages are real markdown files in a git checkout, every write a commit behind an
