@@ -3554,3 +3554,74 @@ reorder buffer, the `sys/identity` "signed" claim, and now `reconnect_backoff` �
 or corrected to stop overclaiming. *Remaining, all scoped:* the honest Robustness-lift path (a sweep-plus-clean-
 pass, not just the gate now written), `sys/identity` Phase 1b/2 (Security lift), and the live-retune
 window-desync (Low, self-healing, documented residual).
+
+## 2026-08-16 — Run 59 (M2)
+
+Deep-dive dimensions this run: **5 API Design · 7 Configurability · 22 Evolvability · 23 Documentation ·
+25 Dependency Hygiene** (rotation: Runs 54–58 clustered on 9–13/18/19/21; these five are the diff-heavy
+neglected set — the diff since Run 58 is 197 commits across three MINOR releases: v2.2.0 hardening,
+v2.3.0 SOC 2, v2.4.0 wiki-substrate, + today's erase verb). Execution evidence this run: full CI matrix
+**green** on `fd87f2d` (run 31946778170 — all jobs success incl. Loom model-check and the
+`ci-retest.sh -p mycelium-core` suite job); `make check` clippy matrix green; mycelium-wiki suites
+unfiltered (git_store 30/30 incl. the new race probe, git_store_curator 7/7, git_mirror 5/5, fs lib
+tests); fresh `cargo audit` (0 vulnerabilities, 3 allowed unmaintained warnings); `cargo tree -d`;
+`cargo test --doc -p mycelium-wiki` (vacuous — finding below); nightly scale CSV read + FAIL logs
+classified.
+
+### Findings
+
+- **Minor (16 Scalability / evidence infra, not substrate): the local nightly scale runner has been
+  environmentally dead since 2026-07-14** — every row since is exit-2 at Docker image build
+  (`load metadata for rust:1.88-slim` — registry unreachable; identical signature across
+  scale/resilience/entries, incl. 2026-08-15/16). Per the classification rule these are runner
+  failures, not findings — but the consequence is a month without scale signal; dim 16's evidence is
+  now doubly stale. **Needs an operator look at the Colima/registry path.**
+- **Minor (23 Documentation): the doctest probe came back vacuous** — `mycelium-wiki` has zero
+  executable doctests; API-level examples are prose-only (the guide carries the runnable path).
+  An improvement target, not a defect.
+- Probes that passed: the **erase-vs-write two-instance ref-CAS race** (new permanent gate
+  `concurrent_erase_and_batch_write_serialise_through_the_ref_cas` — head state always a whole batch
+  or clean absence, read/list agree, erasure completes after the storm); `cargo audit` clean
+  (wasmtime RUSTSEC-2026-0222 confirmed shipped-fixed in the v2.4.0 tag); `cargo tree -d` only
+  expected transitive duplicate families (3× getrandom, 2× rand/core-foundation/socket2).
+
+No calibration-ledger lines this run (no defect found that existed under a ≥8 score).
+
+| # | Dimension | Score | Notes |
+|---|-----------|:-----:|-------|
+| 1 | Philosophy / Coherence with Goal | 8 | Re-earned (was carried v47): philosophy re-read; the wiki-substrate arc is the philosophy *applied* — projection-not-substrate, the E1–E4 envelope, detection-not-prevention tripwires, honest-ceiling erasure semantics; publication-lint run 16 verified the persuasion surface clean |
+| 2 | Conceptual Integrity | 8 | The new verbs match house idiom (additive default trait methods, fail-closed defaults, honest-ceiling docs); one-mind feel holds across companions |
+| 3 | Architecture | 8 | carried-with-touch: the whole bulk-ingest stack keeps payloads out of gossiped KV (claim-check), no Layer-I law added; e2e suites green today |
+| 4 | Modularity | 8 | carried (v47), stale |
+| 5 | API Design | 8 | **Deep-dive.** `src/lib.rs` 26 top-level pub items (lean); the season's additions are all semver-safe default trait methods (`write_pages`/`refresh`/`publish`/`remove_page`), `remove_page` default fails closed, erasure deliberately not on any open surface. Wart: `WikiError::Io` payload-stuffing (gate refusal, not-curator) is pragmatic but stringly → 8 |
+| 6 | Error Handling Model | 8 | carried (v49) |
+| 7 | Configurability | 7 | **Deep-dive — floor, holds.** Feature flags exemplary (per-flag rationale + disable recipes in Cargo.toml); env overrides opt-in via `apply_env_overrides`; new Git*Config structs small + defaulted. But the pinning residual is verified still open: `validate()` field coverage still partial (`swim_udp_port` has no zero/conflict validation; bool-env leniency unaddressed) → 7 |
+| 8 | Language Best Practices | 8 | carried (v49); clippy matrix green today incl. `--no-default-features`; spot unwrap-check on two files: 0 outside tests |
+| 9 | Concurrency Correctness | 8 | carried (v51); the erase verb reuses `write_lock` flat (no new lock-table rows needed); today's race probe passed |
+| 10 | Resource Management | 8 | carried (v51) |
+| 11 | Semantic Correctness | 8 | carried, evidenced-touch: the new ref-CAS race gate passed (whole-batch-or-absent invariant); curator/store suites green. Not 9 (reserve — five passes, five hauls) |
+| 12 | Robustness | 7 | **held at floor — deliberately.** The Run-55 discipline stands: the lift needs a hunting pass that finds *nothing*, and no such pass has run since pass 5 (Run 57) refuted the gate's comprehensiveness. The input-fuzz gate is in CI; the clean-pass validation remains undone → 7 |
+| 13 | Security | **8** | **↑ from floor 7 — the named lift shipped.** Runs 54–57 pinned this at 7 pending "Phase 1+ with a poisoning-rejection gate." v2.3.0 (post-Run-58) shipped `sys/identity` authentication (CA anchor → signed `sys/identity-proof/` → `require_identity_proofs`) + rotate/revoke + crypto-shred, with the gates verified present and run in today's green CI (`test_identity_proof_rejects_poisoning_accepts_signed`, `test_require_identity_proofs_rejects_unsigned`, src/agent/http.rs:3297,3344); fresh `cargo audit` clean; wasmtime RUSTSEC fix in the shipped tag. Fixed structural weakness + deterministic gates → 8 (not 9: default-off posture and no external audit) |
+| 14 | Failure Mode Legibility | 8 | carried (v47); gate refusals surface findings; divergence tripwires name their misuse |
+| 15 | Performance | 8 | carried (v47), stale |
+| 16 | Scalability | 8 | carried (v49), **stale + evidence-outage** — last green nightly 2026-07-14 (resilience PASS 11/11, entries PASS); the runner has been environmentally dead a month (finding above). Possibly optimistic per the decay rule; re-earn on the next green nightly |
+| 17 | Testability | 8 | Re-demonstrated: the whole git-store family tests against tempdir repos with no cluster; the race probe took ~40 lines. carried-with-evidence |
+| 18 | Test Architecture | **8** | **↑ from floor 7.** The Run-44/54 pinning residual "mycelium-core suite compiled but never RUN in CI" is verified closed (`.github/workflows/ci.yml:39` — `ci-retest.sh -p mycelium-core`, green in today's run); since Run 58 the tiers also gained the input-fuzz gate, CI-gated Docker suites, measured wiki gates (read-plane, ten-council), and today's race probe as a permanent gate. Residual (honest, sub-9): nothing structurally catches bug-asserting tests (no mutation testing) |
+| 19 | Observability | 8 | carried (v49), stale |
+| 20 | Debuggability | 8 | carried (v41), possibly optimistic per decay rule — longest-carried dimension |
+| 21 | Operational Readiness | 8 | carried (v55) + touched: data-erasure runbook gained the page-level verb procedure; companions runbook covers both store shapes; shared-responsibility matrix current |
+| 22 | Evolvability | 8 | **Deep-dive.** Wire `v12`/`PREV 11` verified in code (framing.rs:93,95) — unchanged across three MINOR releases, all additive by design (default trait methods, `#[deprecated]` aliases, GateRefusal-without-new-variant); CHANGELOG discipline observed live today ([Unreleased] populated in the same merge as the change); tags-only release convention consistent. Not 9: the prev-wire/rolling-upgrade gates weren't individually re-verified this run |
+| 23 | Documentation | 8 | **Deep-dive.** Three audit skills ran this session: wiki-lint (one CODE finding fixed — docs held), doc-coverage run 15 (matrix refreshed, Ops gap closed), publication-lint run 16 (clean, no overclaim). Docs land in the same commit as code throughout the season. Held at 8, not 9: the doctest probe was vacuous (zero executable API examples in mycelium-wiki — the runnable path lives only in the guide) |
+| 24 | Developer Experience | 8 | carried (v49), stale |
+| 25 | Dependency Hygiene | 8 | **Deep-dive.** Fresh `cargo audit`: 0 vulns; the v2.4.0 tag is the first carrying the wasmtime RUSTSEC-2026-0222 fix (the v2.3.0 tag shipped 45.0.3 — recorded in CHANGELOG); heavy deps all feature-gated; Cargo.lock present; `--no-default-features` compiles (today's clippy). Warts keeping it at 8: `rustls-pemfile` unmaintained (allowed, documented), 3× `getrandom` majors in-graph |
+| — | **Floor (lowest 3)** | **7, 7, 8** | Configurability · Robustness · (Scalability — weakest 8: month-stale evidence) |
+| — | Mean (continuity footnote) | 7.92 | up from 7.84 (Security 7→8, Test Architecture 7→8); not a target |
+
+**Delta vs Run 58:** the first run where two long-pinned floor dimensions lift, both on the exact terms
+their pins named — Security's "scored up only when Phase 1+ ships with a poisoning-rejection gate"
+(v2.3.0 shipped it, gates verified + green) and Test Architecture's "mycelium-core suite not run in CI"
+(the retest job exists and ran green today). Robustness deliberately does NOT lift on the same day:
+its pin demands a hunting pass that *finds nothing*, and none has run — holding it at 7 while lifting
+its neighbours is the discipline working, not an inconsistency. The floor narrows from four-at-7 to
+two-at-7. New standing worry: the scale-evidence pipeline (nightly runner) has been dark for a month —
+dim 16's 8 is the least-defended score on the board.

@@ -790,3 +790,55 @@ fn remove_page_is_idempotent_and_absence_commits_nothing() {
     assert_eq!(git(d.path(), &["rev-parse", "HEAD"]), head_after,
         "an absent-page removal records no commit (no empty commits)");
 }
+
+#[test]
+fn concurrent_erase_and_batch_write_serialise_through_the_ref_cas() {
+    // M2 Run-59 falsification probe, kept as a regression gate: two store instances on one
+    // repo, one hammering whole-page batch writes while the other erases the page. The branch-ref
+    // CAS must serialise them: neither errors, every observable state is either a complete page
+    // or an absent one, and the final head agrees with what the store serves.
+    let dir = tempfile::tempdir().unwrap();
+    let open = || {
+        GitStore::open(GitStoreConfig {
+            dir: dir.path().to_path_buf(),
+            subdir: "councils/testville".into(),
+            message_prefix: "wiki(testville)".into(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let a = open();
+    let b = open();
+    a.write_page("roster", &[sec("s-0", "Roster", "seed", &[])], &BTreeMap::new()).unwrap();
+
+    let writer = std::thread::spawn(move || {
+        for i in 0..6 {
+            let pages = vec![mycelium_wiki::PageWrite {
+                path:       "roster".into(),
+                attributes: BTreeMap::new(),
+                sections:   vec![sec(&format!("s-{i}"), "Roster", &format!("round {i}"), &[])],
+            }];
+            a.write_pages(&pages, &format!("round-{i}")).unwrap();
+        }
+    });
+    let eraser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        b.remove_page("roster", "probe").unwrap();
+    });
+    writer.join().unwrap();
+    eraser.join().unwrap();
+
+    // Whatever interleaving happened, the head state is coherent: a complete page or a clean
+    // absence — and a fresh instance agrees with itself between read() and list_pages().
+    let s = open();
+    let read = s.read("roster").unwrap();
+    let listed = s.list_pages().unwrap().contains(&"roster".to_string());
+    assert_eq!(read.is_some(), listed, "read() and list_pages() must agree at head");
+    if let Some(p) = read {
+        assert_eq!(p.sections.len(), 1, "every committed state is a whole batch");
+    }
+    // And erasure still completes deterministically after the storm.
+    s.remove_page("roster", "probe-final").unwrap();
+    assert_eq!(s.read("roster").unwrap(), None);
+    assert!(!s.list_pages().unwrap().contains(&"roster".to_string()));
+}
