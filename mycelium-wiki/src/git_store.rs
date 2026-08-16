@@ -514,6 +514,19 @@ impl GitStore {
         Ok(Some(buf))
     }
 
+    /// `load_at` for the WRITE path only: a plain `git show` spawn instead of the shared
+    /// `cat_file` child, so the write path never nests `write_lock` → `cat_file` — the
+    /// lock-order table.s flat invariant (one lock per function) holds workspace-wide. The cost
+    /// is one extra spawn per write iteration, noise next to the ~7 the commit itself makes;
+    /// the corpus-scale READ paths keep the persistent child (P6.2).
+    fn load_at_spawned(&self, head: &str, rel: &str) -> Result<Option<(String, PageFile)>, WikiError> {
+        let Some(bytes) = self.git_try(&["show", &format!("{head}:{rel}")])? else { return Ok(None) };
+        let text = String::from_utf8(bytes)
+            .map_err(|_| bad_content(format!("page file {rel:?} is not UTF-8")))?;
+        let (manifest, blocks) = self.cfg.format.parse(&text)?;
+        Ok(Some((text, PageFile { manifest, blocks })))
+    }
+
     /// The committed page file at `head`, parsed. `Ok(None)` if the file does not exist there.
     fn load_at(&self, head: &str, rel: &str) -> Result<Option<(String, PageFile)>, WikiError> {
         let Some(bytes) = self.read_blob(&format!("{head}:{rel}"))? else { return Ok(None) };
@@ -674,7 +687,7 @@ impl GitStore {
             }
             let head = self.head()?;
             let current = match &head {
-                Some(h) => self.load_at(h, &rel)?,
+                Some(h) => self.load_at_spawned(h, &rel)?, // flat: no cat_file under write_lock
                 None    => None,
             };
             let (old_text, mut pf) = match current {

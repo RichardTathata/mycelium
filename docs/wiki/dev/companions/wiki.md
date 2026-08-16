@@ -170,6 +170,24 @@ rule); reads are **at HEAD, never the working tree**; zero added dependencies. P
 (no `mycelium` dep) — the curator slots straight over it, proven by the
 `git_store_curator` end-to-end.
 
+**Phases 2–6 (built 2026-08-15/16; measurements + four gate-found defects recorded in the
+[hardening plan](../../../plans/council-substrate-hardening.md)):**
+`GitStoreConfig::for_group` (group-per-council: one repo, one store per group, scoped commits by
+mechanism) · `validate_cmd` (the pre-commit **write gate**: a deployment command over the candidate
+files — batch-atomic refusal with findings; the curator drops refused proposals,
+`Wiki::gate_refusals()`) · **bulk ingest** (`IngestBatch`/`BatchSource`/`apply_batch` +
+`Wiki::submit_batch` RPC + `POST /gateway/wiki/ingest` and `ingest` verbs on both SDKs — the
+claim-check reference travels, never the payload; byte-identical to a serial writer; resubmit is a
+no-op; **a batch = one meeting** is the sizing contract) · `WikiStore::write_pages` (one commit per
+batch — the per-meeting boundary commit) · `refresh`/`publish` (**failover**: pull-on-promote — a
+curator that cannot refresh never serves — and push-per-round with a worktree-free subtree-splice
+merge + divergence tripwire; the ≤1-round un-published-tail residual is tested, not hidden) ·
+the persistent `cat-file --batch` read child (**measured 330 ms / 600-page query**) · jittered
+exponential backoff (**measured ten-council run: 5.5/3.0 batches/s, zero spurious failures**) ·
+the pluggable **`PageFormat`** codec (a deployment's own entity format plugs in — proven end-to-end
+with a custom codec; FTT's `CouncilWikiFormat` is theirs, gated by their conformance test).
+Deployment architecture: [`transparency-council-substrate.md`](../../../design/transparency-council-substrate.md).
+
 ## Gates
 
 `cargo test -p mycelium-wiki` (data plane) · `--features control-plane` (curator + `tests/failover.rs`)
@@ -178,7 +196,10 @@ rule); reads are **at HEAD, never the working tree**; zero added dependencies. P
 — one commit per round, pure documents, history retained, egress fail-closed, sink-failure isolation,
 rebuild, the drain→sink wiring) · `--features git-store,control-plane` (`tests/git_store.rs` — the
 FsStore contract mirrored onto the git-as-truth store, 20 tests + the two-instance ref-CAS race;
-`tests/git_store_curator.rs` — a curator draining proposals into scoped git commits) · `tests/access.rs` (the membership-gated broker, under
+`tests/git_store_curator.rs` — curator→scoped-commits, two-council isolation, failover via the
+shared remote, gate-refusal drop) · `tests/work_distribution.rs` (tuple-space leases × idempotent
+ingest = exactly-once through worker death) · the gateway suite includes the `/gateway/wiki/ingest`
+edge · `tests/access.rs` (the membership-gated broker, under
 `control-plane`) · `./mycelium-wiki/ci_smoke.sh` (the worked example, Docker-free) · clippy
 `--features control-plane|llm|gateway|git-mirror --all-targets -D warnings`. Wired as the CI **Wiki**
 job. **Only open remainder (additive):** the disconnected KV-native section-CRDT variant for the
