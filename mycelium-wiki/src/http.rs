@@ -28,6 +28,7 @@ impl<S: WikiStore + 'static> Wiki<S> {
             .route("/gateway/wiki/read", post(gw_read::<S>))
             .route("/gateway/wiki/query", post(gw_query::<S>))
             .route("/gateway/wiki/propose", post(gw_propose::<S>))
+            .route("/gateway/wiki/ingest", post(gw_ingest::<S>))
             .with_state(self)
     }
 }
@@ -111,4 +112,33 @@ async fn gw_propose<S: WikiStore + 'static>(State(w): State<Arc<Wiki<S>>>, Json(
     };
     let key = w.propose(&b.page, section.clone(), b.heading, b.body, b.attributes);
     Json(json!({ "proposal": key, "section": section.as_ref() })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct IngestBody {
+    group:        Option<String>,
+    /// The claim-check reference (never the payload — the batch is staged in the curator's
+    /// `BatchSource`; the council-substrate payload rule holds at the HTTP edge too).
+    reference:    String,
+    /// RPC deadline in seconds when this node must forward to the curator (default 60 — sized to
+    /// the batch = one-meeting contract).
+    timeout_secs: Option<u64>,
+}
+
+/// `POST /gateway/wiki/ingest` — the bulk-ingest claim-check submission for non-Rust pipelines
+/// (the council-wiki extraction pipeline is Python): submit a staged batch's *reference*; the
+/// group's curator fetches from its own `BatchSource`, applies (batch-atomic through the write
+/// gate), publishes, and the summary comes back. Membership-gated at the curator like every
+/// submission path.
+async fn gw_ingest<S: WikiStore + 'static>(State(w): State<Arc<Wiki<S>>>, Json(b): Json<IngestBody>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if group_mismatch(&w, &b.group) {
+        return bad_request("unknown group");
+    }
+    let timeout = std::time::Duration::from_secs(b.timeout_secs.unwrap_or(60));
+    match w.submit_batch_with_timeout(&b.reference, timeout).await {
+        Ok(summary) => Json(serde_json::json!({ "summary": summary })).into_response(),
+        Err(e) => (axum::http::StatusCode::BAD_GATEWAY,
+                   Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
 }
