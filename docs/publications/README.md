@@ -220,3 +220,13 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   the capabilities slides predate v2.3.0's SOC-2 additions and the wiki git-substrate — absence is
   not mislabeling, but both are undersell *opportunities* (customer-pitch slide 354's security list
   and the presentation's compliance card could each gain a line) — the author's call on deck scope.
+  **RESOLVED 2026-08-16 (same day, user-directed):** both decks updated to shipped reality — the
+  presentation's compliance card gains the v2.3 wave (gateway TLS · audit export · authenticated
+  identity · revocation · crypto-shred) and its coordination slide goes **two ways → three** (the
+  wiki as the durable mode) plus a **"Four wiki usage patterns, all shipped"** callout
+  (store-as-truth + git audit mirror · git-as-truth · claim-check bulk ingest ·
+  tuple-space-leased extraction — the user asked for the patterns to be called out explicitly);
+  the customer pitch gains crypto-shred on the regulated-industries card, SIEM export on the audit
+  card, a **Curated Knowledge** pattern pill, and the Built card's security list + knowledge-canon
+  line. Every added claim is shipped-and-gated (v2.3.0 tag; the wiki patterns on main, CI-green,
+  27+ store tests + the exactly-once gate); tamper-*evident* language preserved; no numbers added.
