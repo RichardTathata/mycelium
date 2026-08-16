@@ -384,6 +384,36 @@ impl<S: WikiStore + 'static> Wiki<S> {
         Ok(summary)
     }
 
+    /// **Curator-local right-to-erasure** — remove `page` from the system of record via
+    /// [`WikiStore::remove_page`], through the same single-writer discipline as every other store
+    /// mutation. Curator-only (an `Err` on any other node): erasure is an *authorized operator
+    /// action*, so it is deliberately **not** exposed as a mesh RPC or gateway route — the caller
+    /// runs it on the curating node. Returns whether the page existed. Synchronous (store I/O) —
+    /// call via `spawn_blocking` from async contexts.
+    ///
+    /// The change sink is deliberately **not** notified: a projection (e.g. `GitMirror`) keeps the
+    /// erased content in its git *history*, so a tip-removal commit there would misrepresent the
+    /// erasure — the projection side of the procedure is delete-the-mirror + `rebuild()`, per the
+    /// sink's documented erasure procedure and `docs/operations/data-erasure.md`.
+    pub fn erase_page(&self, page: &str, label: &str) -> Result<bool, WikiError> {
+        if !self.is_curator() {
+            return Err(WikiError::Io(std::io::Error::other(
+                "wiki erase: this node is not the curator (erasure is a curator-local action)",
+            )));
+        }
+        let existed = self.store.remove_page(page, label)?;
+        if existed {
+            self.lint_dirty.store(true, Ordering::Release);
+            if let Err(e) = self.store.publish() {
+                // P6.3, best-effort: the removal is committed local truth; the next applied
+                // round or ingest retries the publish.
+                tracing::warn!(group = %self.cfg.group, page, error = %e,
+                    "wiki: publish after erase failed");
+            }
+        }
+        Ok(existed)
+    }
+
     /// **Worker-side submission** (Phase 4): send a staged batch.s *reference* to the group.s
     /// curator over point-to-point RPC — the claim-check flow; the payload itself never rides the
     /// mesh. The curator fetches from its own [`BatchSource`](crate::ingest::BatchSource) and

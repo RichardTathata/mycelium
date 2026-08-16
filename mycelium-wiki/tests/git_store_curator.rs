@@ -483,3 +483,68 @@ async fn a_curator_that_cannot_refresh_never_serves() {
     wiki.shutdown().await;
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// The erase verb through the curator: `Wiki::erase_page` is curator-only, lands the redaction
+/// commit through the same single-writer path as every apply, and a reader-role node is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn erase_page_is_curator_only_and_redacts_at_tip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        GitStore::open(GitStoreConfig {
+            dir: tmp.path().to_path_buf(),
+            subdir: "councils/testville".into(),
+            message_prefix: "wiki(testville)".into(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+
+    let agent = loop {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        if a.start().await.is_ok() {
+            break a;
+        }
+    };
+    let curator = Wiki::new(
+        Arc::clone(&agent),
+        WikiConfig::new("testville").role(WikiRole::Curator),
+        Arc::clone(&store),
+    )
+    .await;
+    let reader = Wiki::new(
+        Arc::clone(&agent),
+        WikiConfig::new("testville").role(WikiRole::Reader),
+        Arc::clone(&store),
+    )
+    .await;
+
+    let section = mint_section_id("testville", "members/joined", 1, 1);
+    curator.propose("members/joined", section, "Joined", "three new plot-holders", Default::default());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if store.read("members/joined").unwrap().is_some() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the curator never applied the proposal");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A reader is refused — erasure is an authorized curator-local action.
+    assert!(reader.erase_page("members/joined", "erasure request #7").is_err());
+    assert!(store.read("members/joined").unwrap().is_some(), "the refused erase changed nothing");
+
+    // The curator erases: served no more, provenance in the subject, history retained by design.
+    assert!(curator.erase_page("members/joined", "erasure request #7").unwrap());
+    assert_eq!(store.read("members/joined").unwrap(), None);
+    assert!(!curator.erase_page("members/joined", "erasure request #7").unwrap(), "idempotent retry");
+    let subject = git(tmp.path(), &["log", "-1", "--format=%s"]);
+    assert_eq!(subject.trim(), "wiki(testville): erase members/joined (erasure request #7)");
+    let prior = git(tmp.path(), &["show", "HEAD~1:councils/testville/members/joined.md"]);
+    assert!(prior.contains("three new plot-holders"), "redaction at tip; the record's history remains");
+
+    reader.shutdown().await;
+    curator.shutdown().await;
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
