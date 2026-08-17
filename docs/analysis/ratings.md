@@ -3638,3 +3638,12 @@ the outage was root-caused (macOS Local-Network TCC in the launchd context), fix
 grant, and the nightly path re-ran green (entries + resilience PASS); dim 16's note upgraded from
 stale-carry to evidenced. The run's own finding-to-fix loop closing inside the run is the M2 shape
 working as intended.
+**Addendum 2 (2026-08-17): the closure claim above was premature** — the first unattended 02:00 run
+failed again (all three suites, same registry-metadata deadline), including a round on a VM session
+that had working network hours earlier; the machine never sleeps and the Wi-Fi link stayed up. The
+TCC trap was real and its fix stands (proven via the supervised launchd run), but it was not the
+whole outage; current suspect is an upstream/WAN window around 02:00, with a host-side probe
+(no VM/TCC in the path) deployed at 01:58/02:02/04:30 to discriminate. Dim 16's **8, evidenced**
+stands — the same-day PASS rows really ran — but the *pipeline-reliability* claim is reopened until
+the probe closes it. Recording the premature closure here, in the entry that made it, is the
+ledger discipline applied to the loop's own narrative.

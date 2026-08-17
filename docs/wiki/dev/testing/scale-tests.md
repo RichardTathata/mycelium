@@ -57,12 +57,24 @@ an unanswered 02:00 prompt leaves that VM session unable to reach even its NAT g
 Diagnosis rule: reproduce with `launchctl kickstart gui/$UID/com.mycelium.scale-nightly`, **not**
 an interactive `colima restart` — the interactive form silently succeeds and proves nothing.
 Fix: one supervised kickstart, click **Allow** — the grant is recorded per-binary and persists
-across VM restarts (verified same-day: entries PASS + resilience PASS post-grant). Two standing
-cautions: (1) a `brew upgrade` of colima/lima is a new binary → the prompt returns once — after
-upgrading, run one supervised kickstart; (2) the runner executes the **boot-volume clone**
-(`~/Mycelium`, because TCC blocks background agents from `/Volumes/Scratch`) — it does not
-auto-pull, so keep it fast-forwarded or the nightly silently tests stale code (it had drifted a
-month behind when the outage was found).
+across VM restarts (verified same-day: entries PASS + resilience PASS post-grant, through the
+real launchd path). Standing caution: a `brew upgrade` of colima/lima is a new binary → the
+prompt returns once — after upgrading, run one supervised kickstart. (The runner executes the
+**boot-volume clone** `~/Mycelium` because TCC blocks background agents from `/Volumes/Scratch`;
+it **auto-fast-forwards at each run** — "runner checkout updated to …" in `launchd.out.log` — so
+between nightlies it lags main by at most a day, not indefinitely; an earlier version of this
+note claimed otherwise.)
+
+**2026-08-17 — the trap was real but not the whole outage.** The first unattended 02:00 run
+after the grant failed again (all three suites, same ~60 s registry-metadata `DeadlineExceeded`),
+*including* a round on a VM session that had working network the previous afternoon — so TCC
+cannot explain it, the machine never sleeps (`sleep 0`), and the Wi-Fi link stayed up all night.
+Current suspect: an **upstream/WAN outage window around 02:00** (router/ISP nightly maintenance —
+invisible to macOS logs when the AP stays up). Discriminator deployed: a host-side probe
+(`~/mycelium-scale-results/netprobe.sh`, launchd `com.mycelium.netprobe`, no VM/TCC in the path)
+tests gateway/DNS/registry at 01:58, 02:02, and 04:30 nightly → `netprobe.log`. If 02:00 is dead
+and 04:30 healthy, the fix is moving `StartCalendarInterval`. Diagnosis open; read `scale`-row
+FAILs from this period as environmental until it closes.
 
 ## The WSB-M5 SWIM divergence saga — lessons that outlive the bug
 
