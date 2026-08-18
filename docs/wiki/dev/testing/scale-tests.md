@@ -81,7 +81,7 @@ of the grant-day (every supervised run green) and was gone by the next night. Un
 a sleeping hour therefore re-prompt and die *by construction*. Fix: `StartCalendarInterval`
 moved **02:00 → 13:00** (all plist copies + the installed agent) — the operator is present, a
 prompt (if any) gets one click, and that day's grant covers the whole run. The 01:58/02:02/04:30
-`com.mycelium.netprobe` agent stays until the first green 13:00 run confirms, then can be
+`com.mycelium.netprobe` agent stays until the first green 08:00 run confirms, then can be
 `launchctl bootout`-ed. Lesson for any macOS launchd job whose tooling starts a VM: **schedule it
 when a human is at the screen, or the TCC prompt will silently kill it** — do not burn time on
 "the network must be down."
