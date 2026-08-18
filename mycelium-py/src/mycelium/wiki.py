@@ -35,6 +35,8 @@ from typing import Optional
 
 import httpx
 
+from ._pool import ClientPool
+
 
 class Wiki:
     """Async client for one group's wiki via a node's HTTP gateway."""
@@ -42,11 +44,16 @@ class Wiki:
     def __init__(self, host: str, port: int, group: str = "wiki"):
         self._base_url = f"http://{host}:{port}"
         self._group = group
+        self._pool = ClientPool(self._base_url, 15.0)
+
+    async def aclose(self) -> None:
+        """Close the pooled HTTP client (optional; sockets are reclaimed on exit)."""
+        await self._pool.aclose()
 
     async def read(self, page: str) -> Optional[dict]:
         """Read a page (manifest joined with its live sections, in render order), or ``None`` if the
         page has no manifest. Served directly from the store."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/wiki/read", json={"group": self._group, "page": page})
         r.raise_for_status()
         return r.json()["page"]
@@ -54,7 +61,7 @@ class Wiki:
     async def query(self, equals: Optional[dict[str, str]] = None) -> list[dict]:
         """Query sections by attribute (all-of equality — a structured filter, not similarity search).
         Returns ``[{page, id, heading, attributes}, …]``."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/wiki/query", json={"group": self._group, "equals": equals or {}})
         r.raise_for_status()
         return r.json()["hits"]
@@ -78,7 +85,7 @@ class Wiki:
         }
         if section is not None:
             payload["section"] = section
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/wiki/propose", json=payload)
         r.raise_for_status()
         return r.json()
@@ -91,7 +98,7 @@ class Wiki:
         ``{"summary": {"applied": n, "refused": n, "findings": [...]}}``. Sizing contract:
         a batch = one meeting."""
         payload = {"group": self._group, "reference": reference, "timeout_secs": timeout_secs}
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout_secs + 15.0) as c:
+        async with self._pool.asy(timeout=timeout_secs + 15.0) as c:
             r = await c.post("/gateway/wiki/ingest", json=payload)
         r.raise_for_status()
         return r.json()

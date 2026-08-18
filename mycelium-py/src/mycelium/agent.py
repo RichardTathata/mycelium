@@ -54,6 +54,8 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 from httpx_sse import aconnect_sse
 
+from ._pool import ClientPool
+
 
 @dataclass
 class CapabilityHandle:
@@ -73,13 +75,12 @@ class CapabilityHandle:
 
     def drop(self) -> None:
         """Retract the advertised capability synchronously."""
-        import httpx as _httpx
-        with _httpx.Client(base_url=self._agent._base_url, timeout=5.0) as c:
+        with self._agent._pool.sync(timeout=5.0) as c:
             c.delete(f"/gateway/capability/{self.handle_id}")
 
     async def adrop(self) -> None:
         """Retract the advertised capability asynchronously."""
-        async with httpx.AsyncClient(base_url=self._agent._base_url, timeout=5.0) as c:
+        async with self._agent._pool.asy(timeout=5.0) as c:
             await c.delete(f"/gateway/capability/{self.handle_id}")
 
     def heartbeat(self) -> None:
@@ -89,13 +90,12 @@ class CapabilityHandle:
         retracts the advert.  Raises :class:`httpx.HTTPStatusError` on a
         retracted handle (404) or one advertised without a lease (409).
         """
-        import httpx as _httpx
-        with _httpx.Client(base_url=self._agent._base_url, timeout=5.0) as c:
+        with self._agent._pool.sync(timeout=5.0) as c:
             c.post(f"/gateway/capability/{self.handle_id}/heartbeat").raise_for_status()
 
     async def aheartbeat(self) -> None:
         """Async variant of :meth:`heartbeat`."""
-        async with httpx.AsyncClient(base_url=self._agent._base_url, timeout=5.0) as c:
+        async with self._agent._pool.asy(timeout=5.0) as c:
             (await c.post(f"/gateway/capability/{self.handle_id}/heartbeat")).raise_for_status()
 
     def __enter__(self) -> "CapabilityHandle":
@@ -186,13 +186,12 @@ class LockGuard:
 
     def release(self) -> None:
         """Release the lock synchronously."""
-        import httpx as _httpx
-        with _httpx.Client(base_url=self._agent._base_url, timeout=5.0) as c:
+        with self._agent._pool.sync(timeout=5.0) as c:
             c.delete(f"/gateway/overlay/lock/{self.guard_id}")
 
     async def arelease(self) -> None:
         """Release the lock asynchronously."""
-        async with httpx.AsyncClient(base_url=self._agent._base_url, timeout=5.0) as c:
+        async with self._agent._pool.asy(timeout=5.0) as c:
             await c.delete(f"/gateway/overlay/lock/{self.guard_id}")
 
     def __enter__(self) -> "LockGuard":
@@ -229,6 +228,33 @@ class MyceliumAgent:
     ) -> None:
         self._base_url = f"http://{host}:{port}"
         self._timeout  = timeout
+        # One persistent keep-alive client pool for every request/response call
+        # (a fresh client per call exhausts macOS ephemeral ports at Group-scale
+        # write rates — see mycelium/_pool.py). SSE streams stay dedicated.
+        self._pool     = ClientPool(self._base_url, timeout)
+
+    # ── Lifecycle ───────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Close the pooled HTTP client. Optional — the OS reclaims sockets on
+        process exit — but tidy for long-lived hosts creating many agents."""
+        self._pool.close()
+
+    async def aclose(self) -> None:
+        """Async variant of :meth:`close` (also closes this loop's async client)."""
+        await self._pool.aclose()
+
+    def __enter__(self) -> "MyceliumAgent":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    async def __aenter__(self) -> "MyceliumAgent":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.aclose()
 
     # ── Capability advertisement ────────────────────────────────────────────
 
@@ -279,7 +305,7 @@ class MyceliumAgent:
         if authorized_callers:
             body["authorized_callers"] = authorized_callers
 
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             resp = c.post("/gateway/capability/advertise", json=body)
             resp.raise_for_status()
             handle_id = resp.json()["handle_id"]
@@ -309,7 +335,7 @@ class MyceliumAgent:
         if caller_id is not None:
             params["caller_id"] = caller_id
 
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             resp = c.get("/gateway/capability/resolve", params=params)
             resp.raise_for_status()
             return resp.json()["providers"]
@@ -340,7 +366,7 @@ class MyceliumAgent:
             "scope":       scope,
             "payload_b64": base64.b64encode(payload).decode(),
         }
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             resp = c.post("/gateway/signal/emit", json=body)
             resp.raise_for_status()
             return bool(resp.json().get("ok", False))
@@ -380,7 +406,7 @@ class MyceliumAgent:
         ``demand_pressure > 1.0`` means more requirers than providers —
         a supply gap that may warrant spinning up additional nodes.
         """
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             resp = c.get("/gateway/demand", params={"ns": ns, "name": name})
             resp.raise_for_status()
             data = resp.json()
@@ -423,7 +449,7 @@ class MyceliumAgent:
             "payload_b64":  base64.b64encode(payload).decode(),
             "timeout_secs": timeout_secs,
         }
-        with httpx.Client(base_url=self._base_url, timeout=timeout_secs + 5.0) as c:
+        with self._pool.sync(timeout=timeout_secs + 5.0) as c:
             resp = c.post("/gateway/rpc/call", json=body)
             if resp.status_code == 504:
                 raise TimeoutError(f"rpc_call to {target} timed out after {timeout_secs}s")
@@ -441,7 +467,7 @@ class MyceliumAgent:
         Returns the raw bytes value, or ``None`` when the key is absent or
         tombstoned.
         """
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             resp = c.get("/gateway/kv", params={"key": key})
             resp.raise_for_status()
             data = resp.json()
@@ -459,7 +485,7 @@ class MyceliumAgent:
             "key":       key,
             "value_b64": base64.b64encode(value).decode(),
         }
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             c.post("/gateway/kv", json=body).raise_for_status()
 
     def delete(self, key: str) -> None:
@@ -467,7 +493,7 @@ class MyceliumAgent:
 
         The tombstone is gossiped so all live nodes remove the key.
         """
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             c.delete("/gateway/kv", params={"key": key}).raise_for_status()
 
     def keys(self, prefix: str | None = None) -> list[str]:
@@ -479,7 +505,7 @@ class MyceliumAgent:
         params: dict[str, str] = {}
         if prefix is not None:
             params["prefix"] = prefix
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             resp = c.get("/gateway/kv/keys", params=params)
             resp.raise_for_status()
             return resp.json()["keys"]
@@ -581,7 +607,7 @@ class MyceliumAgent:
             "sender":     request.sender,
             "result_b64": base64.b64encode(result).decode(),
         }
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             c.post("/gateway/rpc/respond", json=body).raise_for_status()
 
     # ── Scatter-gather ──────────────────────────────────────────────────────
@@ -618,7 +644,7 @@ class MyceliumAgent:
             "timeout_secs": timeout_secs,
             "min_ok":       min_ok,
         }
-        with httpx.Client(base_url=self._base_url, timeout=timeout_secs + 5.0) as c:
+        with self._pool.sync(timeout=timeout_secs + 5.0) as c:
             resp = c.post("/gateway/scatter", json=body)
             if resp.status_code == 504:
                 raise TimeoutError(
@@ -685,7 +711,7 @@ class MyceliumAgent:
             "kind":        kind,
             "payload_b64": base64.b64encode(payload).decode(),
         }
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             c.post("/gateway/mailbox/deliver", json=body).raise_for_status()
 
     # ── Overlay: consistent KV ─────────────────────────────────────────────
@@ -695,7 +721,7 @@ class MyceliumAgent:
         Concurrent writes to the same key are totally ordered by ballot number.
         ``consistent_get`` is a local read and may lag by up to one anti-entropy round."""
         body = {"key": key, "value_b64": base64.b64encode(value).decode()}
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             r = c.post("/gateway/overlay/consistent/set", json=body)
             r.raise_for_status()
             data = r.json()
@@ -704,7 +730,7 @@ class MyceliumAgent:
 
     def consistent_get(self, key: str) -> Optional[bytes]:
         """Read the latest ballot-committed value for ``key`` visible to this node (local, eventually consistent). Returns ``None`` if not found."""
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             data = c.get("/gateway/overlay/consistent/get", params={"key": key}).raise_for_status().json()
         if data.get("found"):
             return base64.b64decode(data["value_b64"])
@@ -722,7 +748,7 @@ class MyceliumAgent:
                 print("fencing token:", guard.token)
         """
         body = {"name": name, "ttl_secs": ttl_secs}
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             data = c.post("/gateway/overlay/lock/acquire", json=body).raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "lock acquisition failed"))
@@ -733,7 +759,7 @@ class MyceliumAgent:
     def elect_leader(self, group: str) -> str:
         """Elect a leader for ``group`` via consensus. Returns the winner's ``"IP:PORT"``."""
         body = {"group": group}
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             data = c.post("/gateway/overlay/elect", json=body).raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "election failed"))
@@ -772,7 +798,7 @@ class MyceliumAgent:
                 for g in groups
             ],
         }
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             data = c.post("/gateway/consensus/cross_group_propose", json=body).raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "cross_group_propose failed"))
@@ -782,7 +808,7 @@ class MyceliumAgent:
     def append(self, stream: str, value: bytes) -> int:
         """Append ``value`` to ``stream``. Returns the HLC timestamp of the entry."""
         body = {"stream": stream, "value_b64": base64.b64encode(value).decode()}
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             data = c.post("/gateway/overlay/log/append", json=body).raise_for_status().json()
         return data["hlc"]
 
@@ -795,14 +821,14 @@ class MyceliumAgent:
     ) -> list[LogEntry]:
         """Range scan of ``stream``. Returns entries with HLC in ``[from_hlc, to_hlc)``."""
         params: dict[str, Any] = {"stream": stream, "from": from_hlc, "to": to_hlc}
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             data = c.get("/gateway/overlay/log/scan", params=params).raise_for_status().json()
         return [LogEntry(hlc=e["hlc"], value=base64.b64decode(e["value_b64"])) for e in data]
 
     def compact_log(self, stream: str, before_hlc: int) -> None:
         """Tombstone all entries in ``stream`` with HLC < ``before_hlc``."""
         body = {"stream": stream, "before_hlc": before_hlc}
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             c.post("/gateway/overlay/log/compact", json=body).raise_for_status()
 
     async def subscribe_log(
@@ -869,7 +895,7 @@ class MyceliumAgent:
             "payload_b64":  base64.b64encode(payload).decode(),
             "timeout_secs": timeout_secs,
         }
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             data = c.post("/gateway/overlay/emit_reliable", json=body).raise_for_status().json()
         return data["ack"]
 
@@ -880,7 +906,7 @@ class MyceliumAgent:
 
         Raises :class:`KeyError` when no providers match the filter.
         """
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             r = c.get(f"/gateway/shard/{ns}/{name}", params={"key": key})
             if r.status_code == 404:
                 raise KeyError(f"no providers for {ns}/{name}")
@@ -907,7 +933,7 @@ class MyceliumAgent:
             "shard_key":   key,
             "payload_b64": base64.b64encode(payload).decode(),
         }
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as c:
+        with self._pool.sync() as c:
             r = c.post("/gateway/shard/emit", json=body)
             if r.status_code == 404:
                 raise KeyError(f"no providers for {ns}/{name}")
@@ -918,10 +944,10 @@ class MyceliumAgent:
 
     def health(self) -> dict[str, Any]:
         """Return the node's health response."""
-        with httpx.Client(base_url=self._base_url, timeout=5.0) as c:
+        with self._pool.sync(timeout=5.0) as c:
             return c.get("/health").raise_for_status().json()
 
     def stats(self) -> dict[str, Any]:
         """Return the node's stats (store entries, dropped frames, etc.)."""
-        with httpx.Client(base_url=self._base_url, timeout=5.0) as c:
+        with self._pool.sync(timeout=5.0) as c:
             return c.get("/stats").raise_for_status().json()

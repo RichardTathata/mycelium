@@ -40,6 +40,8 @@ from typing import Optional
 
 import httpx
 
+from ._pool import ClientPool
+
 
 class BlackboardNotFoundError(Exception):
     """Unknown claim id — already acked, released, re-queued by the deadline, or never claimed."""
@@ -51,11 +53,16 @@ class Blackboard:
     def __init__(self, host: str, port: int, ns: str = "board"):
         self._base_url = f"http://{host}:{port}"
         self._ns = ns
+        self._pool = ClientPool(self._base_url, 15.0)
+
+    async def aclose(self) -> None:
+        """Close the pooled HTTP client (optional; sockets are reclaimed on exit)."""
+        await self._pool.aclose()
 
     async def post(self, attributes: dict[str, str], payload: bytes) -> int:
         """Post a fact (Linda ``out``) — non-destructive; readable + claimable cluster-wide.
         Returns the fact id."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/bb/post", json={
                 "ns": self._ns,
                 "attributes": attributes,
@@ -70,7 +77,7 @@ class Blackboard:
         """Non-destructive read (Linda ``rd``): all facts matching the predicate
         (attribute equality ``eq`` + presence ``present``). Returns
         ``[(id, attributes, payload), …]``."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/bb/read", json={
                 "ns": self._ns, "eq": eq or {}, "present": present or [],
             })
@@ -82,7 +89,7 @@ class Blackboard:
     ) -> Optional[tuple[int, dict[str, str], bytes]]:
         """Competitive destructive claim (Linda ``in``): claim one fact matching the
         predicate, or ``None`` if none match. Returns ``(id, attributes, payload)``."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/bb/claim", json={
                 "ns": self._ns, "eq": eq or {}, "present": present or [],
             })
@@ -94,7 +101,7 @@ class Blackboard:
 
     async def ack(self, fact_id: int) -> None:
         """Terminal ack: the claimed fact was consumed."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/bb/ack", json={"ns": self._ns, "id": fact_id})
         if r.status_code == 404:
             raise BlackboardNotFoundError(f"unknown claim id {fact_id}")
@@ -102,7 +109,7 @@ class Blackboard:
 
     async def release(self, fact_id: int) -> None:
         """Release a claim: the fact returns to claimable (the abort path)."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/bb/release", json={"ns": self._ns, "id": fact_id})
         if r.status_code == 404:
             raise BlackboardNotFoundError(f"unknown claim id {fact_id}")
@@ -110,7 +117,7 @@ class Blackboard:
 
     async def depth(self) -> tuple[int, int]:
         """Live ``(available, inflight)`` counts for the board."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.get("/gateway/bb/depth", params={"ns": self._ns})
         r.raise_for_status()
         body = r.json()

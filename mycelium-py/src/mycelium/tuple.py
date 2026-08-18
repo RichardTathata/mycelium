@@ -41,6 +41,8 @@ from typing import Any, Optional
 
 import httpx
 
+from ._pool import ClientPool
+
 
 class TupleBackpressureError(Exception):
     """The primary is saturated (HTTP 503). Back off and retry."""
@@ -60,6 +62,11 @@ class TupleSpace:
     def __init__(self, host: str, port: int, ns: str = "pipeline"):
         self._base_url = f"http://{host}:{port}"
         self._ns = ns
+        self._pool = ClientPool(self._base_url, 15.0)
+
+    async def aclose(self) -> None:
+        """Close the pooled HTTP client (optional; sockets are reclaimed on exit)."""
+        await self._pool.aclose()
 
     # ── Producer API ─────────────────────────────────────────────────────────
 
@@ -92,7 +99,7 @@ class TupleSpace:
                 delay = min(delay * 2, 5.0)
 
     async def _put_once(self, stage: str, payload: bytes) -> int:
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/tuple/put", json={
                 "ns": self._ns,
                 "stage": stage,
@@ -133,7 +140,7 @@ class TupleSpace:
         """Put ``payload`` on ``stage`` under correlation ``key`` (M13). Claimed
         only by a matching :meth:`take_by_key` — the two-stream rendezvous ("an
         invoice AND its matching purchase order"). Returns the item id."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/tuple/put", json={
                 "ns": self._ns,
                 "stage": stage,
@@ -173,7 +180,7 @@ class TupleSpace:
         in one WAL record — no crash window between stages. PREFERRED over
         separate put + ack for every mid-pipeline transition. Returns the
         new item id."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/tuple/complete", json={
                 "ns": self._ns,
                 "id": item_id,
@@ -187,7 +194,7 @@ class TupleSpace:
 
     async def ack(self, item_id: int) -> None:
         """Terminal ack: last stage of a pipeline or explicit abandonment."""
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.post("/gateway/tuple/ack", json={
                 "ns": self._ns,
                 "id": item_id,
@@ -203,7 +210,7 @@ class TupleSpace:
         params: dict[str, Any] = {"ns": self._ns}
         if stage is not None:
             params["stage"] = stage
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as c:
+        async with self._pool.asy() as c:
             r = await c.get("/gateway/tuple/depth", params=params)
         r.raise_for_status()
         return {

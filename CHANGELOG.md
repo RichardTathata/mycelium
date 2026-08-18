@@ -11,6 +11,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium-py` 0.2.0: persistent pooled HTTP client** — the bridge opened a fresh TCP
+  connection per gateway call, exhausting macOS ephemeral ports at Group-scale write rates
+  (~16k rapid KV calls; found by a downstream test session). All request/response call sites now
+  share loop-aware persistent keep-alive clients (`mycelium/_pool.py`); SSE streams stay
+  dedicated. New: `MyceliumAgent.close()/aclose()` + context-manager support, `aclose()` on the
+  companion clients. Gate: `tests/test_connection_reuse.py` (fails on pre-fix code).
 - **`mycelium-wiki`: the erase verb** — `WikiStore::remove_page(page, label)` (a default trait
   method that **fails closed**; implementors: `FsStore` deletes the object bytes strictly,
   `GitStore` commits a **redaction at tip** — history retained by design, per the git-as-truth
