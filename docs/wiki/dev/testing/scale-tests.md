@@ -79,7 +79,8 @@ found a **fresh permission prompt on screen again** — the Local Network grant 
 (non-bundled) CLI tools under launchd **does not survive to the next day**; it held for the rest
 of the grant-day (every supervised run green) and was gone by the next night. Unattended runs at
 a sleeping hour therefore re-prompt and die *by construction*. Fix: `StartCalendarInterval`
-moved **02:00 → 13:00** (all plist copies + the installed agent) — the operator is present, a
+moved **02:00 → 08:00** (all plist copies + the installed agent; 13:00 briefly, then 08:00 at
+the operator's preference) — the operator is present, a
 prompt (if any) gets one click, and that day's grant covers the whole run. The 01:58/02:02/04:30
 `com.mycelium.netprobe` agent stays until the first green 08:00 run confirms, then can be
 `launchctl bootout`-ed. Lesson for any macOS launchd job whose tooling starts a VM: **schedule it
