@@ -144,6 +144,7 @@ live outside `examples/` and are easy to miss:
 | [17](17-federation.md) | **Federation** — cross-domain discovery with self-certified AgentFacts: serve and pull the edge document, verify a peer domain without a shared CA, and the multi-author domain board | `cargo run -p mycelium-coop-examples --bin federation_facts` | 10 min |
 | [Artifacts & deploy](../operations/artifacts.md#solutiondev--authoring--publishing-an-artifact) | **Deploying & installing artifacts** — publish to the gossip catalogue, then a node **discovers → pulls the bytes over the mesh → verifies provenance → installs** (surviving the publisher's death). Dev walkthrough + full API live in operations (no separate chapter) | `cargo run -p mycelium-coop-examples --features wasm --bin catalog` | 10 min |
 | [Error handling](error-handling.md) | Error type taxonomy, recoverability, propagation strategy | — | — |
+| [Agentic control plane](agentic-control-plane.md) | **The enterprise control-plane mapping** — which slot Mycelium fills beside a deterministic workflow engine (Temporal-class): the five pillars, what ships vs. what the adopter owns, adoption triggers | — | 8 min |
 
 Read chapters 01–04 to build the mental model. Jump to 05–08 for the application
 pattern that matches your use case. Chapter 09 covers the security and compliance
