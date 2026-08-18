@@ -19,10 +19,12 @@
         <string>all</string>
     </array>
 
-    <!-- Nightly at 02:00 local. Change Hour/Minute to taste. -->
+    <!-- Daily at 13:00 local — a user-present hour ON PURPOSE: the macOS Local Network
+         grant does not persist for bare CLI tools under launchd, so an unattended run
+         re-prompts and dies (see docs/wiki/dev/testing/scale-tests.md). -->
     <key>StartCalendarInterval</key>
     <dict>
-        <key>Hour</key><integer>2</integer>
+        <key>Hour</key><integer>13</integer>
         <key>Minute</key><integer>0</integer>
     </dict>
 

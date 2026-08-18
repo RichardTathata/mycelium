@@ -69,12 +69,22 @@ note claimed otherwise.)
 after the grant failed again (all three suites, same ~60 s registry-metadata `DeadlineExceeded`),
 *including* a round on a VM session that had working network the previous afternoon — so TCC
 cannot explain it, the machine never sleeps (`sleep 0`), and the Wi-Fi link stayed up all night.
-Current suspect: an **upstream/WAN outage window around 02:00** (router/ISP nightly maintenance —
-invisible to macOS logs when the AP stays up). Discriminator deployed: a host-side probe
-(`~/mycelium-scale-results/netprobe.sh`, launchd `com.mycelium.netprobe`, no VM/TCC in the path)
-tests gateway/DNS/registry at 01:58, 02:02, and 04:30 nightly → `netprobe.log`. If 02:00 is dead
-and 04:30 healthy, the fix is moving `StartCalendarInterval`. Diagnosis open; read `scale`-row
-FAILs from this period as environmental until it closes.
+Suspects were an upstream/WAN window vs. a recurring prompt; a host-side probe (no VM/TCC in the
+path) discriminated them overnight.
+
+**2026-08-18 — CLOSED: the grant is session-scoped, so the schedule moved to a user-present
+hour.** The probe's verdict: host gateway/DNS/registry all **green at 01:58, 02:02, and 04:30**
+while the 02:00 suites died between the first two — WAN refuted. Simultaneously the operator
+found a **fresh permission prompt on screen again** — the Local Network grant for bare
+(non-bundled) CLI tools under launchd **does not survive to the next day**; it held for the rest
+of the grant-day (every supervised run green) and was gone by the next night. Unattended runs at
+a sleeping hour therefore re-prompt and die *by construction*. Fix: `StartCalendarInterval`
+moved **02:00 → 13:00** (all plist copies + the installed agent) — the operator is present, a
+prompt (if any) gets one click, and that day's grant covers the whole run. The 01:58/02:02/04:30
+`com.mycelium.netprobe` agent stays until the first green 13:00 run confirms, then can be
+`launchctl bootout`-ed. Lesson for any macOS launchd job whose tooling starts a VM: **schedule it
+when a human is at the screen, or the TCC prompt will silently kill it** — do not burn time on
+"the network must be down."
 
 ## The WSB-M5 SWIM divergence saga — lessons that outlive the bug
 

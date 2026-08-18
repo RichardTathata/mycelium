@@ -3647,3 +3647,10 @@ whole outage; current suspect is an upstream/WAN window around 02:00, with a hos
 stands — the same-day PASS rows really ran — but the *pipeline-reliability* claim is reopened until
 the probe closes it. Recording the premature closure here, in the entry that made it, is the
 ledger discipline applied to the loop's own narrative.
+**Addendum 3 (2026-08-18): probe verdict — closed for real this time, with mechanism.** Host
+network green at 01:58/02:02/04:30 while the 02:00 suites died (WAN refuted), and the operator
+found a fresh prompt on screen again: the Local Network grant for bare CLI tools under launchd is
+**session-scoped** — it held all grant-day (supervised runs green) and was gone by the next
+night, so an unattended 02:00 run re-prompts and dies by construction. Fix is structural, not
+another click: the schedule moved 02:00 → 13:00 (a user-present hour). Full mechanism + lesson:
+`docs/wiki/dev/testing/scale-tests.md`.
