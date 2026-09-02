@@ -25,6 +25,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fresh clients per borrow) and all pool-map access is lock-guarded. The connection-reuse gate now
   also runs in CI and covers all three (each test fails on the pre-fix code).
 
+- **`mycelium-py` 0.2.2: one client-lifecycle pattern** — `PromptSkillClient`, `ReasonClient`,
+  and `A2aClient` migrate onto `ClientPool` (prompt-skill/reason handles previously built an
+  eager `AsyncClient` in `__init__`, loop-bound on first use — a second `asyncio.run()` against
+  the same handle failed; regression-gated). `ClientPool` grows the SDK-wide `DEFAULT_TIMEOUT`
+  (one literal instead of three) and the `PoolOwner` mixin (one `aclose()` definition for
+  Wiki/TupleSpace/Blackboard). A2A's SSE `stream()` stays dedicated, per the streaming policy.
+
+### Changed
+
+- **`GitStore`: one ref-CAS retry driver** — the 32-attempt/backoff/`Conflict` retry skeleton
+  that `write_with`, `write_pages`, and `remove_page` each hand-rolled now lives once
+  (`with_ref_cas`), so the contention policy (already retuned once, P6.4) has a single home.
+  No behavior change.
+
 ### Fixed
 
 - **`FsStore`: erase-vs-write serialization** — a `remove_page` racing a concurrent

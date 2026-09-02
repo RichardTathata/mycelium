@@ -67,11 +67,16 @@ class _Bound:
 
 _UNSET = object()
 
+#: The SDK-wide default request timeout for pooled clients (seconds). The one
+#: place to tune it — every handle that doesn't take a user-facing ``timeout``
+#: parameter (Wiki/TupleSpace/Blackboard) constructs its pool with this.
+DEFAULT_TIMEOUT = 15.0
+
 
 class ClientPool:
     """Lazily-created persistent httpx clients (one sync; one async per loop)."""
 
-    def __init__(self, base_url: str, timeout: float) -> None:
+    def __init__(self, base_url: str, timeout: float = DEFAULT_TIMEOUT) -> None:
         self._base_url = base_url
         self._timeout = timeout
         self._lock = threading.Lock()
@@ -130,3 +135,14 @@ class ClientPool:
         if entry is not None:
             await entry[1].aclose()
         self.close()
+
+
+class PoolOwner:
+    """Mixin for gateway handles that own a :class:`ClientPool` — the one
+    definition of the shared ``aclose()`` surface."""
+
+    _pool: ClientPool
+
+    async def aclose(self) -> None:
+        """Close the pooled HTTP client (optional; sockets are reclaimed on exit)."""
+        await self._pool.aclose()

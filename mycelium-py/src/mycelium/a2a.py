@@ -22,6 +22,8 @@ from typing import Dict, Iterator, Optional
 
 import httpx
 
+from ._pool import ClientPool
+
 __all__ = ["A2aClient"]
 
 
@@ -40,7 +42,7 @@ class A2aClient:
     def __init__(self, base_url: str, *, timeout_secs: float = 30.0) -> None:
         self._base   = base_url.rstrip("/")
         self._timeout = timeout_secs
-        self._http   = httpx.Client(timeout=timeout_secs)
+        self._pool   = ClientPool(self._base, timeout_secs)
 
     # ── Discovery ─────────────────────────────────────────────────────────────
 
@@ -57,7 +59,8 @@ class A2aClient:
         httpx.HTTPStatusError
             If the server returns a non-2xx status.
         """
-        resp = self._http.get(f"{self._base}/.well-known/agent.json")
+        with self._pool.sync() as c:
+            resp = c.get("/.well-known/agent.json")
         resp.raise_for_status()
         return resp.json()
 
@@ -106,11 +109,8 @@ class A2aClient:
                 "message":  {"role": "user", "parts": [{"type": "text", "text": message}]},
             },
         }
-        resp = self._http.post(
-            f"{self._base}/a2a",
-            json=payload,
-            timeout=timeout + 5.0,  # network headroom
-        )
+        with self._pool.sync(timeout=timeout + 5.0) as c:  # network headroom
+            resp = c.post("/a2a", json=payload)
         resp.raise_for_status()
         body = resp.json()
         if "error" in body:
@@ -181,7 +181,7 @@ class A2aClient:
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
-        self._http.close()
+        self._pool.close()
 
     def __enter__(self) -> "A2aClient":
         return self

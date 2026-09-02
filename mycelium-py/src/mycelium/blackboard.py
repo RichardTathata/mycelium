@@ -40,24 +40,20 @@ from typing import Optional
 
 import httpx
 
-from ._pool import ClientPool
+from ._pool import ClientPool, PoolOwner
 
 
 class BlackboardNotFoundError(Exception):
     """Unknown claim id — already acked, released, re-queued by the deadline, or never claimed."""
 
 
-class Blackboard:
+class Blackboard(PoolOwner):
     """Async client for one board namespace via a node's HTTP gateway."""
 
     def __init__(self, host: str, port: int, ns: str = "board"):
         self._base_url = f"http://{host}:{port}"
         self._ns = ns
-        self._pool = ClientPool(self._base_url, 15.0)
-
-    async def aclose(self) -> None:
-        """Close the pooled HTTP client (optional; sockets are reclaimed on exit)."""
-        await self._pool.aclose()
+        self._pool = ClientPool(self._base_url)
 
     async def post(self, attributes: dict[str, str], payload: bytes) -> int:
         """Post a fact (Linda ``out``) — non-destructive; readable + claimable cluster-wide.

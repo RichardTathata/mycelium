@@ -695,19 +695,38 @@ impl GitStore {
         result
     }
 
-    /// The write loop shared by every mutating call: read head → validate → mutate → commit, with
-    /// ref-moved retries. `validate_and_mutate` sees the current `PageFile` (empty if absent) and
-    /// either returns the version token to report or a `Conflict`.
-    fn write_with<F>(&self, page: &str, message: &str, mut validate_and_mutate: F) -> Result<u64, WikiError>
-    where
-        F: FnMut(&mut PageFile) -> Result<u64, WikiError>,
-    {
-        let rel = self.rel_path(page)?;
+    /// The ref-CAS retry driver shared by every mutating call (`write_with` / `write_pages` /
+    /// `remove_page`): serialize on `write_lock`, then run `one_attempt` until it lands —
+    /// `Ok(Some(v))` is done, `Ok(None)` means the ref moved (rebuild against the new head and
+    /// retry, after the P6.4 backoff), an `Err` propagates. Persistently losing the ref race is
+    /// reported as `Conflict`. The retry *policy* — the 32-attempt cap, the backoff shape, the
+    /// exhaustion outcome — lives only here: it has been retuned once already (the linear-backoff
+    /// starvation found in the ten-council gate), and a policy change must reach every mutator.
+    fn with_ref_cas<T>(
+        &self, mut one_attempt: impl FnMut() -> Result<Option<T>, WikiError>,
+    ) -> Result<T, WikiError> {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         for attempt in 0..32 {
             if attempt > 0 {
                 self.backoff(attempt); // P6.4: queue briefly under ref contention, do not error
             }
+            if let Some(v) = one_attempt()? {
+                return Ok(v);
+            }
+        }
+        Err(WikiError::Conflict) // persistently losing the ref race — report as contention
+    }
+
+    /// The write loop shared by every single-page mutating call: read head → validate → mutate →
+    /// commit, with ref-moved retries via [`with_ref_cas`](Self::with_ref_cas).
+    /// `validate_and_mutate` sees the current `PageFile` (empty if absent) and either returns the
+    /// version token to report or a `Conflict`.
+    fn write_with<F>(&self, page: &str, message: &str, mut validate_and_mutate: F) -> Result<u64, WikiError>
+    where
+        F: FnMut(&mut PageFile) -> Result<u64, WikiError>,
+    {
+        let rel = self.rel_path(page)?;
+        self.with_ref_cas(|| {
             let head = self.head()?;
             let current = match &head {
                 Some(h) => self.load_at_spawned(h, &rel)?, // flat: no cat_file under write_lock
@@ -720,7 +739,7 @@ impl GitStore {
             let token = validate_and_mutate(&mut pf)?; // Conflict propagates from here
             let content = self.cfg.format.render(pf.manifest.as_ref(), &pf.blocks)?;
             if old_text.as_deref() == Some(content.as_str()) {
-                return Ok(token); // an idempotent re-apply: nothing to record, no empty commit
+                return Ok(Some(token)); // an idempotent re-apply: nothing to record, no empty commit
             }
             // The write gate (Phase 3): candidate on disk → run the deployment's validator →
             // refuse (a non-retry error carrying the findings) or admit. A refusal is checked
@@ -729,11 +748,10 @@ impl GitStore {
                 self.gate_check(&rel, &content)?;
             }
             match self.commit_file(head.as_deref(), &rel, &content, message)? {
-                CommitOutcome::Committed | CommitOutcome::NoChange => return Ok(token),
-                CommitOutcome::RefMoved => continue, // rebuilt on the new head next iteration
+                CommitOutcome::Committed | CommitOutcome::NoChange => Ok(Some(token)),
+                CommitOutcome::RefMoved => Ok(None), // rebuilt on the new head next attempt
             }
-        }
-        Err(WikiError::Conflict) // persistently losing the ref race — report as contention
+        })
     }
 
     /// Jittered EXPONENTIAL backoff between ref-contention retries (P6.4). The CAS window spans
@@ -959,21 +977,16 @@ impl WikiStore for GitStore {
     fn remove_page(&self, page: &str, label: &str) -> Result<bool, WikiError> {
         let rel = self.rel_path(page)?;
         let message = format!("{}: erase {page} ({label})", self.cfg.message_prefix);
-        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        for attempt in 0..32 {
-            if attempt > 0 {
-                self.backoff(attempt);
-            }
+        self.with_ref_cas(|| {
             // An unborn branch holds no pages — nothing to remove.
-            let Some(head) = self.head()? else { return Ok(false) };
+            let Some(head) = self.head()? else { return Ok(Some(false)) };
             match self.commit_files(Some(&head), &[], &[&rel], &message)? {
-                CommitOutcome::Committed => return Ok(true),
+                CommitOutcome::Committed => Ok(Some(true)),
                 // Tree unchanged ⇒ the path was not at head (already gone / never existed).
-                CommitOutcome::NoChange => return Ok(false),
-                CommitOutcome::RefMoved => continue, // re-check against the new head
+                CommitOutcome::NoChange => Ok(Some(false)),
+                CommitOutcome::RefMoved => Ok(None), // re-check against the new head
             }
-        }
-        Err(WikiError::Conflict)
+        })
     }
 
     /// P6.1 — the batch lands as **one commit** (the deployment's per-meeting boundary commit),
@@ -1000,21 +1013,16 @@ impl WikiStore for GitStore {
         }
         let message = format!("{}: batch({label}) — {} page(s)", self.cfg.message_prefix, files.len());
         let refs: Vec<(&str, &str)> = files.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
-        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        for attempt in 0..32 {
-            if attempt > 0 {
-                self.backoff(attempt);
-            }
+        self.with_ref_cas(|| {
             let head = self.head()?;
             if self.cfg.validate_cmd.is_some() {
                 self.gate_check_batch(&refs)?; // one gate run per batch; refusal refuses it all
             }
             match self.commit_files(head.as_deref(), &refs, &[], &message)? {
-                CommitOutcome::Committed | CommitOutcome::NoChange => return Ok(()),
-                CommitOutcome::RefMoved => continue, // rebuilt on the new head next iteration
+                CommitOutcome::Committed | CommitOutcome::NoChange => Ok(Some(())),
+                CommitOutcome::RefMoved => Ok(None), // rebuilt on the new head next attempt
             }
-        }
-        Err(WikiError::Conflict)
+        })
     }
 
     /// P6.3 — the promotion step: fetch the shared remote and **adopt its head as local truth**.

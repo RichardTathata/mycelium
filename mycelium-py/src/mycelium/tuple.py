@@ -39,7 +39,7 @@ import asyncio
 import base64
 from typing import Any, Optional
 
-from ._pool import ClientPool
+from ._pool import ClientPool, PoolOwner
 
 
 class TupleBackpressureError(Exception):
@@ -54,17 +54,13 @@ class TupleNotFoundError(Exception):
     """Unknown item id — already acked, expired back to the queue, or never existed."""
 
 
-class TupleSpace:
+class TupleSpace(PoolOwner):
     """Async client for one tuple space namespace via a node's HTTP gateway."""
 
     def __init__(self, host: str, port: int, ns: str = "pipeline"):
         self._base_url = f"http://{host}:{port}"
         self._ns = ns
-        self._pool = ClientPool(self._base_url, 15.0)
-
-    async def aclose(self) -> None:
-        """Close the pooled HTTP client (optional; sockets are reclaimed on exit)."""
-        await self._pool.aclose()
+        self._pool = ClientPool(self._base_url)
 
     # ── Producer API ─────────────────────────────────────────────────────────
 

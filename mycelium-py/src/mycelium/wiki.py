@@ -35,20 +35,16 @@ from typing import Optional
 
 import httpx
 
-from ._pool import ClientPool
+from ._pool import ClientPool, PoolOwner
 
 
-class Wiki:
+class Wiki(PoolOwner):
     """Async client for one group's wiki via a node's HTTP gateway."""
 
     def __init__(self, host: str, port: int, group: str = "wiki"):
         self._base_url = f"http://{host}:{port}"
         self._group = group
-        self._pool = ClientPool(self._base_url, 15.0)
-
-    async def aclose(self) -> None:
-        """Close the pooled HTTP client (optional; sockets are reclaimed on exit)."""
-        await self._pool.aclose()
+        self._pool = ClientPool(self._base_url)
 
     async def read(self, page: str) -> Optional[dict]:
         """Read a page (manifest joined with its live sections, in render order), or ``None`` if the

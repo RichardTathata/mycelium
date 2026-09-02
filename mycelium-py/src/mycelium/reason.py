@@ -28,6 +28,8 @@ from typing import Any, Optional
 
 import httpx
 
+from ._pool import ClientPool
+
 
 class ReasonError(Exception):
     """Base class for ``mycelium-reason`` gateway errors."""
@@ -71,7 +73,10 @@ class ReasonClient:
     ) -> None:
         self._base = f"http://{host}:{port}"
         self._timeout = timeout
-        self._client = httpx.AsyncClient(base_url=self._base, timeout=timeout)
+        # Pooled, loop-aware (see _pool.py): the previous eager AsyncClient was
+        # bound to whichever loop first used it, breaking a handle reused
+        # across separate asyncio.run() calls.
+        self._pool = ClientPool(self._base, timeout)
 
     # ── Routed inference (wedge ①) ─────────────────────────────────────────────
 
@@ -114,11 +119,8 @@ class ReasonClient:
         }
         if run_id is not None:
             body["run_id"] = run_id
-        resp = await self._client.post(
-            "/gateway/reason/route",
-            json=body,
-            timeout=timeout_ms / 1000.0 + 5.0,
-        )
+        async with self._pool.asy(timeout=timeout_ms / 1000.0 + 5.0) as c:
+            resp = await c.post("/gateway/reason/route", json=body)
         if resp.status_code == 404:
             raise NoProviderError(model)
         if resp.status_code == 502:
@@ -137,7 +139,8 @@ class ReasonClient:
         Returns ``{"run_id", "events", "narrative"}``. An unknown run yields an
         empty ``events`` list (not an error).
         """
-        resp = await self._client.get(f"/gateway/reason/trace/{run_id}")
+        async with self._pool.asy() as c:
+            resp = await c.get(f"/gateway/reason/trace/{run_id}")
         resp.raise_for_status()
         return resp.json()
 
@@ -149,7 +152,8 @@ class ReasonClient:
 
         Returns the blob id (hex content address).
         """
-        resp = await self._client.put("/gateway/reason/blob", content=data)
+        async with self._pool.asy() as c:
+            resp = await c.put("/gateway/reason/blob", content=data)
         resp.raise_for_status()
         return resp.json()["id"]
 
@@ -159,7 +163,8 @@ class ReasonClient:
 
         Returns the bytes, or ``None`` if no node holds the blob (404).
         """
-        resp = await self._client.get(f"/gateway/reason/blob/{blob_id}")
+        async with self._pool.asy() as c:
+            resp = await c.get(f"/gateway/reason/blob/{blob_id}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -167,7 +172,7 @@ class ReasonClient:
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
-        await self._client.aclose()
+        await self._pool.aclose()
 
     async def __aenter__(self) -> "ReasonClient":
         return self

@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from mycelium import MyceliumAgent
+from mycelium.prompt_skill import PromptSkillClient
 from mycelium.tuple import TupleSpace
 from mycelium.wiki import Wiki
 
@@ -127,6 +128,17 @@ def test_async_calls_reuse_connections_across_event_loops(stub):
     assert stub.connections <= 6, (
         f"100 async reads across two loops used {stub.connections} connections"
     )
+
+
+def test_prompt_skill_handle_survives_separate_asyncio_runs(stub):
+    """PromptSkillClient (and ReasonClient, same shape) used to build one eager
+    AsyncClient in __init__, bound to whichever loop first used it — a second
+    asyncio.run() against the same handle then failed on the dead loop's
+    connections. Pooled, the handle works across loops."""
+    port = stub.server_address[1]
+    client = PromptSkillClient("127.0.0.1", port)
+    asyncio.run(client.list())
+    asyncio.run(client.list())  # pre-fix: RuntimeError("Event loop is closed")
 
 
 def test_pool_evicts_only_closed_loops_never_live_siblings(stub):

@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-import httpx
+from ._pool import ClientPool
 
 
 @dataclass
@@ -89,7 +89,10 @@ class PromptSkillClient:
     ) -> None:
         self._base = f"http://{host}:{port}"
         self._timeout = timeout
-        self._client = httpx.AsyncClient(base_url=self._base, timeout=timeout)
+        # Pooled, loop-aware (see _pool.py): the previous eager AsyncClient was
+        # bound to whichever loop first used it, breaking a handle reused
+        # across separate asyncio.run() calls.
+        self._pool = ClientPool(self._base, timeout)
 
     # ── Template management ────────────────────────────────────────────────────
 
@@ -100,7 +103,8 @@ class PromptSkillClient:
         Returns a list of dicts with keys ``ns``, ``name``, ``max_tokens``,
         ``temperature``, ``metadata``.
         """
-        resp = await self._client.get("/gateway/prompts")
+        async with self._pool.asy() as c:
+            resp = await c.get("/gateway/prompts")
         resp.raise_for_status()
         result = resp.json()
         return result if isinstance(result, list) else []
@@ -111,7 +115,8 @@ class PromptSkillClient:
 
         Returns ``None`` if the key does not exist.
         """
-        resp = await self._client.get(f"/gateway/prompts/{ns}/{name}")
+        async with self._pool.asy() as c:
+            resp = await c.get(f"/gateway/prompts/{ns}/{name}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -125,10 +130,11 @@ class PromptSkillClient:
         template fresh from KV on every invocation, so the update takes effect
         immediately without restarting any skill handler.
         """
-        resp = await self._client.put(
-            f"/gateway/prompts/{ns}/{name}",
-            json=template.to_dict(),
-        )
+        async with self._pool.asy() as c:
+            resp = await c.put(
+                f"/gateway/prompts/{ns}/{name}",
+                json=template.to_dict(),
+            )
         resp.raise_for_status()
 
     async def delete_prompt(self, ns: str, name: str) -> None:
@@ -139,7 +145,8 @@ class PromptSkillClient:
         expire (within 30 s). For a graceful drain, drop all ``PromptSkillHandle``
         objects on the Rust side first so capability entries evaporate naturally.
         """
-        resp = await self._client.delete(f"/gateway/prompts/{ns}/{name}")
+        async with self._pool.asy() as c:
+            resp = await c.delete(f"/gateway/prompts/{ns}/{name}")
         resp.raise_for_status()
 
     # ── Skill invocation ───────────────────────────────────────────────────────
@@ -178,17 +185,14 @@ class PromptSkillClient:
             "context": context or {},
             "timeout_ms": timeout_ms,
         }
-        resp = await self._client.post(
-            "/gateway/llm/call",
-            json=body,
-            timeout=timeout_ms / 1000.0 + 5.0,
-        )
+        async with self._pool.asy(timeout=timeout_ms / 1000.0 + 5.0) as c:
+            resp = await c.post("/gateway/llm/call", json=body)
         resp.raise_for_status()
         return resp.json()
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
-        await self._client.aclose()
+        await self._pool.aclose()
 
     async def __aenter__(self) -> "PromptSkillClient":
         return self
