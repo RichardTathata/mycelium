@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::DeserializeOwned;
@@ -31,6 +32,15 @@ use crate::store::{VersionedPage, WikiStore};
 pub struct FsStore {
     group_root: PathBuf,
     tmp_seq:    AtomicU64,
+    /// Serializes this process's mutators (leaf; never nested). Per-object CAS
+    /// already resolves write-write races, but `remove_page` deletes *many*
+    /// objects and must not interleave with a write recreating the page
+    /// mid-erasure (a manifest published between the manifest deletions and the
+    /// `sec/` sweep would survive pointing at deleted sections). In-process
+    /// only — the curator hosts apply/ingest/erase on one process; across
+    /// processes the CAS versioning remains the (weaker) backstop, and erasure
+    /// stays idempotent so a torn cross-process race is repaired by retrying.
+    mutate:     Mutex<()>,
 }
 
 /// Parse a versioned object filename `{base}.v{N}.json` → `(base, N)`. `None` if it doesn't match
@@ -53,7 +63,7 @@ impl FsStore {
     pub fn open(root: impl AsRef<Path>, group: &str) -> Result<Self, WikiError> {
         let group_root = root.as_ref().join(group);
         fs::create_dir_all(group_root.join("pages"))?;
-        Ok(Self { group_root, tmp_seq: AtomicU64::new(0) })
+        Ok(Self { group_root, tmp_seq: AtomicU64::new(0), mutate: Mutex::new(()) })
     }
 
     fn pages_root(&self) -> PathBuf { self.group_root.join("pages") }
@@ -276,6 +286,7 @@ impl WikiStore for FsStore {
     }
 
     fn write_section(&self, page: &str, section: &Section, expected: Option<u64>) -> Result<u64, WikiError> {
+        let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
         let sec_dir = Self::sec_dir(&self.page_dir(page)?);
         self.write_object_cas(&sec_dir, &section.id, expected, &serde_json::to_vec_pretty(section)?)
     }
@@ -283,6 +294,7 @@ impl WikiStore for FsStore {
     fn update_manifest(
         &self, page: &str, order: &[SectionId], attributes: &BTreeMap<String, String>, expected: Option<u64>,
     ) -> Result<u64, WikiError> {
+        let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
         let dir = self.page_dir(page)?;
         let manifest = Manifest { order: order.to_vec(), attributes: attributes.clone() };
         self.write_object_cas(&dir, "manifest", expected, &serde_json::to_vec_pretty(&manifest)?)
@@ -291,6 +303,7 @@ impl WikiStore for FsStore {
     fn write_page(
         &self, page: &str, sections: &[Section], attributes: &BTreeMap<String, String>,
     ) -> Result<(), WikiError> {
+        let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
         let dir = self.page_dir(page)?;
         let sec_dir = Self::sec_dir(&dir);
         // 1. Section objects first (each force-published) — so the manifest's referents all exist.
@@ -321,6 +334,7 @@ impl WikiStore for FsStore {
 
     fn remove_page(&self, page: &str, label: &str) -> Result<bool, WikiError> {
         let _ = label; // the filesystem records no provenance; the caller's audit trail does
+        let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
         let dir = self.page_dir(page)?;
         let existed = self.highest(&dir, "manifest")?.is_some();
         // Erasure is strict, unlike GC: every deletion error propagates so the caller knows the

@@ -9,9 +9,14 @@ connections for the whole session.
 Async caveat: an ``httpx.AsyncClient``'s connections are bound to the event
 loop they were created on, and bridge users routinely run several separate
 ``asyncio.run(...)`` calls against one long-lived handle object. The pool is
-therefore **loop-aware**: it keeps one ``AsyncClient`` per running loop and
-lazily replaces a client whose loop is gone (the orphan is abandoned to GC —
-its loop is dead, so its close coroutine can never run).
+therefore **loop-aware**: it keeps one ``AsyncClient`` per event loop and
+lazily evicts clients whose loop has *closed* (the orphan is abandoned to GC —
+its loop is dead, so its close coroutine can never run). Eviction checks the
+loop, never mere "not the current loop": several threads may each be running a
+live loop against one handle concurrently, and evicting a live sibling would
+put every borrow back on a fresh client — the per-call regression this module
+exists to prevent. All map access is under a ``threading.Lock`` for the same
+reason (borrows themselves never hold it across I/O).
 
 Long-lived SSE streams deliberately do NOT use the pool: a stream occupies a
 connection for its lifetime, and streams are per-subscription singletons, not
@@ -71,9 +76,12 @@ class ClientPool:
         self._timeout = timeout
         self._lock = threading.Lock()
         self._sync_client: Optional[httpx.Client] = None
-        # id(loop) -> AsyncClient. Loop-aware (see module doc); at most a
-        # handful of entries in practice (usually exactly one).
-        self._async_clients: dict[int, httpx.AsyncClient] = {}
+        # id(loop) -> (loop, AsyncClient). Loop-aware (see module doc); at most
+        # one entry per thread running a loop (usually exactly one overall).
+        # Storing the loop object both enables the is_closed() liveness check
+        # and pins the id — a dead loop can't be GC'd and its id reused for a
+        # different loop while its entry is still in the map.
+        self._async_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
 
     # ── borrows (context managers so call sites keep their `with … as c` shape) ──
 
@@ -91,13 +99,18 @@ class ClientPool:
     async def asy(self, timeout: float | None | object = _UNSET) -> AsyncIterator[_Bound]:
         loop = asyncio.get_running_loop()
         key = id(loop)
-        client = self._async_clients.get(key)
-        if client is None or client.is_closed:
-            # Drop clients whose loops are gone (their sockets are already dead).
-            for k in [k for k, c in self._async_clients.items() if k != key]:
-                self._async_clients.pop(k, None)
-            client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
-            self._async_clients[key] = client
+        with self._lock:  # never held across I/O — map lookup/insert only
+            entry = self._async_clients.get(key)
+            client = entry[1] if entry is not None else None
+            if client is None or client.is_closed:
+                # Drop clients whose loops have CLOSED (their sockets are dead).
+                # A sibling entry whose loop is still live belongs to another
+                # thread mid-flight — leave it alone.
+                for k, (l, _c) in list(self._async_clients.items()):
+                    if k != key and l.is_closed():
+                        self._async_clients.pop(k, None)
+                client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
+                self._async_clients[key] = (loop, client)
         yield _Bound(client, timeout)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -112,7 +125,8 @@ class ClientPool:
     async def aclose(self) -> None:
         """Close this loop's async client and the sync client."""
         key = id(asyncio.get_running_loop())
-        client = self._async_clients.pop(key, None)
-        if client is not None:
-            await client.aclose()
+        with self._lock:
+            entry = self._async_clients.pop(key, None)
+        if entry is not None:
+            await entry[1].aclose()
         self.close()

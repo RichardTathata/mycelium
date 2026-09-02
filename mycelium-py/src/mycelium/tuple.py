@@ -39,8 +39,6 @@ import asyncio
 import base64
 from typing import Any, Optional
 
-import httpx
-
 from ._pool import ClientPool
 
 
@@ -119,10 +117,10 @@ class TupleSpace:
         Raises :class:`TimeoutError` when no item arrives in time. The HTTP
         request blocks server-side for up to ``timeout_secs``.
         """
-        async with httpx.AsyncClient(
-            base_url=self._base_url,
-            timeout=timeout_secs + 5.0,  # park decides, not the transport
-        ) as c:
+        # Pooled with a per-borrow timeout: park decides, not the transport.
+        # This is the worker hot loop — a fresh client per take() is exactly
+        # the per-call-connection regression the pool exists to prevent.
+        async with self._pool.asy(timeout=timeout_secs + 5.0) as c:
             r = await c.post("/gateway/tuple/take", json={
                 "ns": self._ns,
                 "stage": stage,
@@ -159,10 +157,7 @@ class TupleSpace:
         """Blocking keyed claim (M13): claims the item on ``stage`` whose
         correlation key is ``key``, or parks until it arrives. Returns
         ``(item_id, payload)``; raises :class:`TimeoutError` on timeout."""
-        async with httpx.AsyncClient(
-            base_url=self._base_url,
-            timeout=timeout_secs + 5.0,
-        ) as c:
+        async with self._pool.asy(timeout=timeout_secs + 5.0) as c:
             r = await c.post("/gateway/tuple/take_by_key", json={
                 "ns": self._ns,
                 "stage": stage,

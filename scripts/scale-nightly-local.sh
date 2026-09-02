@@ -4,7 +4,8 @@
 # by hand. Starts Colima if Docker isn't reachable, runs the scale suites, tees each to a
 # timestamped log, appends one result line per suite to a local CSV, and always tears the
 # clusters down. Docker Desktop is deliberately NOT used — it needs a GUI session; Colima is
-# headless and works for an unattended 02:00 run.
+# headless and works unattended (the schedule itself runs at 08:00, when the operator is
+# present — the Local Network grant for bare CLI tools under launchd is session-scoped).
 #
 #   scripts/scale-nightly-local.sh            # all three suites
 #   scripts/scale-nightly-local.sh resilience # one suite: all|scale|resilience|entries

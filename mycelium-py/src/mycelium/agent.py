@@ -543,10 +543,7 @@ class MyceliumAgent:
             "min_acks":     min_acks,
             "timeout_secs": timeout_secs,
         }
-        with httpx.Client(
-            base_url=self._base_url,
-            timeout=timeout_secs + 2.0,
-        ) as c:
+        with self._pool.sync(timeout=timeout_secs + 2.0) as c:
             resp = c.post("/gateway/kv/quorum", json=body)
             resp.raise_for_status()
             data = resp.json()

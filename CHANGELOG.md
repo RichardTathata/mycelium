@@ -17,6 +17,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   share loop-aware persistent keep-alive clients (`mycelium/_pool.py`); SSE streams stay
   dedicated. New: `MyceliumAgent.close()/aclose()` + context-manager support, `aclose()` on the
   companion clients. Gate: `tests/test_connection_reuse.py` (fails on pre-fix code).
+- **`mycelium-py` 0.2.1: pooling fixes from the 2026-09-02 360° review** — three sites the 0.2.0
+  conversion missed or got wrong: `TupleSpace.take`/`take_by_key` (the worker hot loop — one
+  connection per claimed item) and `MyceliumAgent.set_with_min_acks` now ride the pool with
+  per-borrow timeouts; `ClientPool` eviction now checks *loop liveness* instead of evicting every
+  non-current loop's client (two threads each running a live loop no longer degrade each other to
+  fresh clients per borrow) and all pool-map access is lock-guarded. The connection-reuse gate now
+  also runs in CI and covers all three (each test fails on the pre-fix code).
+
+### Fixed
+
+- **`FsStore`: erase-vs-write serialization** — a `remove_page` racing a concurrent
+  `write_page`/apply in the same process could leave a persistent torn page (a recreated manifest
+  surviving the erasure with its section objects deleted). All FsStore mutators now serialize
+  through a flat leaf mutex (`FsStore::mutate`, lock-order row 35); per-object CAS remains the
+  cross-process backstop and erasure stays idempotent. Tripwire:
+  `concurrent_erase_and_write_never_leave_a_torn_page`.
 - **`mycelium-wiki`: the erase verb** — `WikiStore::remove_page(page, label)` (a default trait
   method that **fails closed**; implementors: `FsStore` deletes the object bytes strictly,
   `GitStore` commits a **redaction at tip** — history retained by design, per the git-as-truth

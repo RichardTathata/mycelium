@@ -140,6 +140,15 @@ Assert cluster state with a predicate poll (`poll_until(|| !a.peers().is_empty()
 `sleep(300ms)`. A fixed sleep passes by luck on fast machines and hides the race on slow
 ones; the structural poll converts a timing race into a deterministic failure.
 
+The dual of that rule: **verify a new concurrency regression test against the broken code
+before trusting it.** A timing-shaped test can pass on the bug it was written to catch — the
+2026-09-02 pool-eviction gate's first draft (two threads + a start barrier) passed on the
+pre-fix code because the barrier synchronized both first borrows past the buggy path, and even
+a staggered start self-damped under real scheduling. The reliable gate asserted the *rule*
+deterministically (drive two `asyncio.new_event_loop()`s and check which entries survive a
+miss) rather than hoping timing exposes its violation
+([.log entry](../.log/2026-09-02-360-review-fixes.md)).
+
 ## Env-var tests serialise on a lock
 
 `apply_env_overrides` reads **all** `GOSSIP_*` vars, so any test that mutates one races

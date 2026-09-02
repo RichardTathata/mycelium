@@ -386,3 +386,46 @@ fn remove_page_is_idempotent_and_reports_absence() {
     assert!(matches!(s.remove_page("../escape", "x"), Err(WikiError::BadPath(_))),
         "the path guard applies to erasure too");
 }
+
+#[test]
+fn concurrent_erase_and_write_never_leave_a_torn_page() {
+    // Erase-vs-write atomicity (the 360-review finding): a write_page racing a
+    // remove_page must never leave a *persistent* torn state — a manifest that
+    // survives the erasure pointing at deleted sections. The in-process
+    // `mutate` lock serializes mutators; without it the eraser can interleave
+    // between the writer's section publish and manifest publish (or delete the
+    // `sec/` tree after a recreated manifest lands). A reader mid-erasure may
+    // still transiently miss (manifest goes first, by design) — so the
+    // tripwire asserts wholeness after each race round, not during it.
+    let dir = tempfile::tempdir().unwrap();
+    let s = Arc::new(FsStore::open(dir.path(), "ops").unwrap());
+    for round in 0..25 {
+        let writer = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                for i in 0..20 {
+                    let body = format!("harvest round {round}.{i}");
+                    s.write_page("orchard/plan", &[sec("s-a", "Plan", &body, &[])], &BTreeMap::new())
+                        .unwrap();
+                }
+            })
+        };
+        let eraser = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    s.remove_page("orchard/plan", "rotation").unwrap();
+                }
+            })
+        };
+        writer.join().unwrap();
+        eraser.join().unwrap();
+        // Whichever mutation landed last, the settled state is whole: absent,
+        // or a page whose manifest resolves every section it references.
+        match s.read("orchard/plan") {
+            Ok(Some(p)) => assert_eq!(p.sections.len(), 1, "manifest must resolve its section"),
+            Ok(None) => {}
+            Err(e) => panic!("persistent torn page after round {round}: {e}"),
+        }
+    }
+}
