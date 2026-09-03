@@ -27,6 +27,18 @@ such finding.
 Records bugs later found in dimensions that scored ≥ 8 while the bug already
 existed. This is the framework's own report card.
 
+- 2026-09-02 (360° review of `v2.4.0..HEAD`, recorded 2026-09-03): **Concurrency Correctness (9)**
+  scored **8** at Run 59 on the explicit justification *"the erase verb reuses `write_lock` flat (no
+  new lock-table rows needed)"* — true for `GitStore`, **false for `FsStore`**: `FsStore::remove_page`
+  is a multi-object delete with no serialization against a concurrent `write_page`/apply, so an
+  in-process race could leave a *persistent* torn page (a recreated manifest surviving the erasure
+  with its section objects deleted). The race existed at scoring time — the erase verb and Run 59
+  are the same day. Found by the review, fixed same day (flat leaf `FsStore::mutate`, lock-order
+  **row 35**, tripwire `concurrent_erase_and_write_never_leave_a_torn_page`), shipped green in
+  `af52750`. The miss mechanism, for the ledger: the Run-59 claim verified the store that *has* a
+  write lock and generalized to the trait; the review checked each implementor separately. (The
+  same review also found three mycelium-py 0.2.0 pooling bugs — no ledger entries: 0.2.0 shipped
+  two days after Run 59, so no dimension scored over a then-existing bug.)
 - 2026-07-15 (audit **pass 5**, recorded Run 57): a *fifth* adversarial pass — five hunters over the
   last barely-probed subsystems (rate/opacity/backpressure, emergent/explain diagnostics, the artifact
   library, bootstrap/topology, the timing governor) — found **~9** more defects. **The load-bearing
@@ -3654,3 +3666,16 @@ found a fresh prompt on screen again: the Local Network grant for bare CLI tools
 night, so an unattended 02:00 run re-prompts and dies by construction. Fix is structural, not
 another click: the schedule moved 02:00 → 13:00 (a user-present hour). Full mechanism + lesson:
 `docs/wiki/dev/testing/scale-tests.md`.
+**Addendum 4 (2026-09-03): the user-present schedule's first stretch — one clean night, one infra
+regression; and a ledger entry lands against this run's dim 9.** The schedule has since settled at
+**08:00** (13:00 → 08:00 at the operator's preference, `c0577a1`). The **2026-09-01 08:00 nightly was
+fully green — scale, resilience, and entries all PASS: the first clean full nightly on record**, meeting
+the standing "update the analysis entry once resilience passes" condition. 2026-09-02 then regressed to
+exit-2 on all three with the same registry `DeadlineExceeded` signature (infra class per the
+classification rule, not substrate — a user-present hour makes the Allow *grantable*, it does not grant
+it). Netprobe retirement (recorded trigger: the first green 08:00 run) is deliberately **held for a
+second consecutive clean morning** given the 09-02 regression. Separately, the 2026-09-02 360° review
+of `v2.4.0..HEAD` falsified this run's dim-9 justification as applied to `FsStore` (fixed + gated same
+day, lock-order row 35) — recorded where accountability lives, in the Calibration Ledger (2026-09-02
+entry), per the current-state principle. Next full run: hold until a second clean nightly, then score
+with the review arc + the dim-16 evidence in hand rather than appending a near-duplicate now.
