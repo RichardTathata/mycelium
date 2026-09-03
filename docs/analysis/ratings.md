@@ -3679,3 +3679,14 @@ of `v2.4.0..HEAD` falsified this run's dim-9 justification as applied to `FsStor
 day, lock-order row 35) — recorded where accountability lives, in the Calibration Ledger (2026-09-02
 entry), per the current-state principle. Next full run: hold until a second clean nightly, then score
 with the review arc + the dim-16 evidence in hand rather than appending a near-duplicate now.
+**Addendum 5 (2026-09-03, later): two corrections to Addendum 4, both from reading the logs
+rather than the CSV.** (i) The 09-01 green run *was* the TCC mechanism confirmed in timing — it sat
+blocked from 08:00 until the operator saw the prompt at ~11:08, then passed all three suites in six
+minutes; and 09-03's failure is **not** the prompt but the documented FORWARD-chain formation
+timeout (`? of 100 visible` = runner→mgmt curl failing; network verified healthy the same
+afternoon) — re-run-once territory, not a regression. (ii) **The nightly has been testing a stale
+checkout since 2026-08-17**: the runner clone had a dirty tree, `pull --ff-only` refused silently,
+and the script reported it as "offline / no auth" on every run including the green one. Scale-relevant
+code is unchanged over that window, so dim 16's evidence survives — but the *evidence pipeline* had
+a false statement in its log for 17 days, which this run's own addenda repeated without checking. The
+script now names its failure mode; the clone is at HEAD. Details: `scale-tests.md` (2026-09-03 block).

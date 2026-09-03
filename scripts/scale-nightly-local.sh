@@ -31,9 +31,15 @@ log() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 # Keep this runner checkout current with the committed state (best-effort — if the box is offline
 # or git auth isn't available to the background session, just run whatever is checked out).
-git -C "${REPO}" pull --ff-only >/dev/null 2>&1 \
-  && log "runner checkout updated to $(git -C "${REPO}" rev-parse --short HEAD)" \
-  || log "git pull skipped (offline / no auth) — running current checkout"
+# Say WHY a pull didn't happen: a dirty checkout aborts `--ff-only` silently, and for 17 days
+# (2026-08-17 → 09-03) that read as "offline" in this log while the nightly tested a stale HEAD.
+if [ -n "$(git -C "${REPO}" status --porcelain)" ]; then
+  log "git pull skipped: runner checkout has LOCAL CHANGES — running stale HEAD $(git -C "${REPO}" rev-parse --short HEAD)"
+elif git -C "${REPO}" pull --ff-only >/dev/null 2>&1; then
+  log "runner checkout updated to $(git -C "${REPO}" rev-parse --short HEAD)"
+else
+  log "git pull failed (offline / auth / diverged) — running current checkout $(git -C "${REPO}" rev-parse --short HEAD)"
+fi
 
 # ── Docker runtime (Colima; headless, unlike Docker Desktop) ────────────────────────────────
 # A 100-node run saturates the VM's conntrack/iptables; the documented remedy is to restart the VM

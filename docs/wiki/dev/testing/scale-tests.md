@@ -87,6 +87,38 @@ prompt (if any) gets one click, and that day's grant covers the whole run. The 0
 when a human is at the screen, or the TCC prompt will silently kill it** — do not burn time on
 "the network must be down."
 
+**2026-09-03 — the 08:00 schedule's first stretch, read correctly (two more traps).** Results:
+**09-01 fully green** (scale · resilience · entries — the first clean full nightly on record),
+09-02 all exit-2, 09-03 all exit-2. Three things the logs settle:
+
+- **The green run confirms the mechanism, in timing:** it started 08:00:18 and the *scale* suite
+  passed at **11:11** — a three-hour "run" that was really the Docker step blocked on the Allow
+  prompt until the operator saw it; once clicked, all three suites finished in **six minutes**.
+  So a present operator makes the grant *grantable*; it still has to be seen. 09-02 (one-minute
+  registry `DeadlineExceeded` on all three) is that prompt not being seen in time.
+- **09-03 is a different signature — the documented ceiling, not the prompt.** Docker was
+  unreachable at 08:00 (the runner force-recovered Colima), the image build then succeeded
+  (~20 min, so the registry path was fine), all 100 containers started, seed + mgmt went healthy,
+  and formation timed out: `only ? of 100 nodes visible to mgmt` — the `?` is `curl` to mgmt
+  failing, i.e. **runner→node connections timing out**, the FORWARD-chain symptom described at
+  the top of this page. Per the rule above: restart and re-run once before calling it a
+  regression. It was also confirmed *the same afternoon, operator present*: host→registry 401 in
+  0.3 s, VM→registry 401 in 0.3 s, `docker pull` fine — the network was never the problem on 09-03.
+- **Trap 3 — the runner tested a stale checkout for 17 days.** Every run's log said
+  `git pull skipped (offline / no auth)`, including the green one. It was neither: the runner
+  clone (`~/Mycelium`) had an **uncommitted local edit** (the plist hour, made in place on 08-18),
+  and `pull --ff-only` refuses a dirty tree — silently, under the script's `2>/dev/null`. The
+  clone sat at `b082802` (2026-08-17) through 09-03. Scale-relevant code (`src/`, core,
+  `tests/integration`) is unchanged across that window, so the 09-01 evidence still stands for
+  current `src`; but the message lied. Fixed: the script now distinguishes *dirty checkout* /
+  *updated* / *pull failed* and prints the HEAD it runs; the clone was fast-forwarded (its edit
+  was already upstream as `c0577a1`) and its origin repointed from the pre-move `RichardEko`
+  URL. Lesson: **a best-effort step that swallows stderr must still name its failure mode** — a
+  wrong reason in a log costs more than no reason, because it gets believed.
+
+The netprobe retirement now waits for a second clean morning *with the operator watching for
+the prompt at 08:00* — and a 09-03-style formation timeout should first be re-run once.
+
 ## The WSB-M5 SWIM divergence saga — lessons that outlive the bug
 
 Stage-4 SWIM cutover showed a long in-process/Docker divergence (in-process flat, Docker
