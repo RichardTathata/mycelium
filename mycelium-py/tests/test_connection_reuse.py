@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -40,8 +41,14 @@ class _CountingHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
         if self.path.startswith("/gateway/tuple/take"):
+            try:
+                stage = json.loads(raw or b"{}").get("stage")
+            except ValueError:
+                stage = None
+            if stage == "park":
+                time.sleep(2.0)  # emulate a server-side parked long-poll
             self._reply({"id": 1, "payload_b64": _PAYLOAD_B64})
         elif self.path == "/gateway/kv/quorum":
             self._reply({"ok": True, "acks_received": 1})
@@ -110,6 +117,31 @@ def test_tuple_take_loop_reuses_connections(stub):
     asyncio.run(worker())
     assert stub.connections <= 5, (
         f"200 take calls used {stub.connections} TCP connections"
+    )
+
+
+def test_parked_takes_are_not_capped_by_the_pool(stub):
+    """A worker fleet with >100 tasks parked on take() against ONE handle must
+    have every take parked at the server, not queued behind the client pool
+    (httpx's default cap is 100 connections; the per-call clients the pool
+    replaced never capped concurrency). At the 1 s mark all 120 parked takes
+    must hold a connection — under the default limits exactly 100 do."""
+    port = stub.server_address[1]
+    ts = TupleSpace("127.0.0.1", port)
+
+    async def fleet():
+        takes = [
+            asyncio.create_task(ts.take("park", timeout_secs=10.0)) for _ in range(120)
+        ]
+        await asyncio.sleep(1.0)
+        parked = stub.connections
+        await asyncio.gather(*takes)
+        return parked
+
+    parked = asyncio.run(fleet())
+    assert parked >= 120, (
+        f"only {parked} of 120 parked takes held a connection at t=1s — "
+        "the pool is capping long-poll concurrency"
     )
 
 
@@ -183,11 +215,11 @@ def test_pool_evicts_only_closed_loops_never_live_siblings(stub):
 
 
 def test_concurrent_threads_each_with_a_live_loop_keep_their_clients(stub):
-    """Two threads, each running its own event loop, against ONE handle at the
-    same time. The pool must give each live loop its own persistent client —
-    evicting a *live* sibling loop's client (rather than only closed loops)
-    degrades every borrow to a fresh client, and this test's connection count
-    explodes."""
+    """Concurrency smoke: two threads, each running its own event loop, against
+    ONE handle at the same time — no errors, bounded connections. This is NOT
+    the gate for the eviction rule (the buggy evict-anything-that-isn't-me
+    version self-damped under real scheduling and passed this test); the
+    deterministic gate is test_pool_evicts_only_closed_loops_never_live_siblings."""
     port = stub.server_address[1]
     wiki = Wiki("127.0.0.1", port)
     errors: list[BaseException] = []

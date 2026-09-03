@@ -72,6 +72,15 @@ _UNSET = object()
 #: parameter (Wiki/TupleSpace/Blackboard) constructs its pool with this.
 DEFAULT_TIMEOUT = 15.0
 
+#: No connection cap. httpx's default (100 total / 20 keep-alive) is sized for
+#: request/response traffic; this bridge also carries long-polls (``take()``
+#: parks a connection server-side for up to ``timeout_secs``), and a worker
+#: fleet with >100 tasks parked on one handle must not have its 101st take
+#: queued behind the pool — the per-call clients this pool replaced never
+#: capped concurrency, so neither does this. Concurrency stays bounded by the
+#: caller's own tasks; idle connections still expire (default 5 s).
+_LIMITS = httpx.Limits(max_connections=None, max_keepalive_connections=None)
+
 
 class ClientPool:
     """Lazily-created persistent httpx clients (one sync; one async per loop)."""
@@ -95,7 +104,7 @@ class ClientPool:
         with self._lock:
             if self._sync_client is None or self._sync_client.is_closed:
                 self._sync_client = httpx.Client(
-                    base_url=self._base_url, timeout=self._timeout
+                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS
                 )
             client = self._sync_client
         yield _Bound(client, timeout)
@@ -114,7 +123,9 @@ class ClientPool:
                 for k, (l, _c) in list(self._async_clients.items()):
                     if k != key and l.is_closed():
                         self._async_clients.pop(k, None)
-                client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
+                client = httpx.AsyncClient(
+                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS
+                )
                 self._async_clients[key] = (loop, client)
         yield _Bound(client, timeout)
 

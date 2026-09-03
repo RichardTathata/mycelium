@@ -23,7 +23,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-borrow timeouts; `ClientPool` eviction now checks *loop liveness* instead of evicting every
   non-current loop's client (two threads each running a live loop no longer degrade each other to
   fresh clients per borrow) and all pool-map access is lock-guarded. The connection-reuse gate now
-  also runs in CI and covers all three (each test fails on the pre-fix code).
+  also runs in CI and covers all three — one targeted test per fix, each proven to fail on the
+  pre-fix code (the two-thread test alongside them is a concurrency smoke, not a gate).
 
 - **`mycelium-py` 0.2.2: one client-lifecycle pattern** — `PromptSkillClient`, `ReasonClient`,
   and `A2aClient` migrate onto `ClientPool` (prompt-skill/reason handles previously built an
@@ -31,6 +32,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same handle failed; regression-gated). `ClientPool` grows the SDK-wide `DEFAULT_TIMEOUT`
   (one literal instead of three) and the `PoolOwner` mixin (one `aclose()` definition for
   Wiki/TupleSpace/Blackboard). A2A's SSE `stream()` stays dedicated, per the streaming policy.
+
+- **`mycelium-py` 0.2.3: no connection cap on pooled long-polls** — the second 360° pass
+  (2026-09-03) caught a regression of the first's fix: pooling `take()` put parked workers under
+  httpx's default `max_connections=100`, so a fleet with >100 tasks parked on one handle had its
+  101st take queued behind the pool (worst case `httpx.PoolTimeout`) instead of parked at the
+  server; the per-call clients never capped concurrency and now neither does the pool
+  (`Limits(max_connections=None, max_keepalive_connections=None)`; gate: 120 concurrent parked
+  takes must all hold a connection — exactly 100 did before). Also `emit_reliable` now borrows
+  with `timeout_secs + 5.0` like every other server-parked call (pre-existing: a `timeout_secs`
+  at or above the client timeout raised `ReadTimeout` instead of returning `"timeout"`).
 
 ### Changed
 

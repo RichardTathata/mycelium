@@ -892,7 +892,7 @@ class MyceliumAgent:
             "payload_b64":  base64.b64encode(payload).decode(),
             "timeout_secs": timeout_secs,
         }
-        with self._pool.sync() as c:
+        with self._pool.sync(timeout=timeout_secs + 5.0) as c:  # the server parks for timeout_secs
             data = c.post("/gateway/overlay/emit_reliable", json=body).raise_for_status().json()
         return data["ack"]
 
