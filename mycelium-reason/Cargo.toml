@@ -94,3 +94,9 @@ required-features = ["llm", "gateway"]
 # ad, and expose the OpenAI-compatible façade so any OpenAI client routes through the fleet.
 name = "ollama_serve"
 required-features = ["llm", "gateway", "ollama"]
+
+[[example]]
+# The stacking example: Mycelium over ANY OpenAI-compatible engine (PAIR, LM Studio, vLLM,
+# Ollama /v1, a cloud API) — static `llm-meta` ad, no engine probe. `mock_llm.py` stands in.
+name = "openai_serve"
+required-features = ["llm", "gateway"]

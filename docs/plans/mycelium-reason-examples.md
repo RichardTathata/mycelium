@@ -161,3 +161,6 @@ the OpenAI-compatible façade. It sits *beside* the ladder, not on it — the ru
 substrate-native wedges through Python; this one teaches nothing new about the mesh and exists so
 an OpenAI client can be pointed at a node without reading the ladder. Manual (needs a daemon),
 deliberately not in CI; the façade itself is CI-gated in Rust and driven from Python on `reason_node`.
+`openai_serve` is its engine-agnostic sibling — the *stacking* form (Mycelium over PAIR / LM Studio
+/ vLLM / a cloud API), static ad, and it runs against `examples/community/mock_llm.py` with nothing
+installed; also manual, same reasoning.

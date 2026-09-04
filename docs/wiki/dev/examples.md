@@ -106,7 +106,9 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   LangGraph-on-Mycelium ladder (Python) over a Rust reason mesh — `reason_node` (the long-running
   gateway node the rungs drive), `reheal_node` (the deploy/reheal flagship, rung 6), `ollama_serve`
   (one binary: a local Ollama model served into the mesh with a live `llm-meta` ad + the
-  OpenAI-compatible façade; manual, needs a daemon — 0.6.0), `fleet_reasoning`
+  OpenAI-compatible façade; manual, needs a daemon — 0.6.0), `openai_serve` (the **stacking**
+  example: Mycelium over *any* OpenAI-compatible engine — PAIR, LM Studio, vLLM — static ad, runs
+  deterministically against `examples/community/mock_llm.py`; 0.6.0), `fleet_reasoning`
   (all three Tier-3 wedges in-process). Guide:
   [15-reasoning-and-langgraph](../../guide/15-reasoning-and-langgraph.md).
 - **Guardrails** (`mycelium-guardrails/examples/`): `guardrail_wedge` (an off-allowlist caller

@@ -2,10 +2,11 @@
 
 ## Objective
 
-The **Rust mesh side** of the reasoning / LangGraph-on-Mycelium work: four layer-IV
-(capability/agent) examples that stand up a real Mycelium mesh serving models, routing
-inference, exposing it as an OpenAI-compatible endpoint, and rehealing a model dependency
-across a node failure — all on the **public API**, no private hooks. The Python ladder that *drives* two of them lives next door in
+The **Rust mesh side** of the reasoning / LangGraph-on-Mycelium work: five layer-IV
+(capability/agent) examples that stand up a real Mycelium mesh serving models (through Ollama
+or any OpenAI-compatible engine), routing inference, exposing it as an OpenAI-compatible
+endpoint, and rehealing a model dependency across a node failure — all on the **public API**,
+no private hooks. The Python ladder that *drives* two of them lives next door in
 [`../../examples/langgraph/`](../../examples/langgraph/README.md); the concept walkthrough is
 guide [ch. 15](../../docs/guide/15-reasoning-and-langgraph.md).
 
@@ -17,11 +18,12 @@ variant, not this echo fixture.
 
 ## How to run
 
-All four share the [repo setup](../../examples/README.md#shared-setup) (Rust toolchain;
-Ollama only if you want a real model — required for `ollama_serve`). `fleet_reasoning` is a
-one-shot CLI that exits 0; `reason_node`, `reheal_node`, and `ollama_serve` run a **Mycelium
-gateway** and **stay running** (Ctrl-C to stop) so the Python side and the Ops Console can
-reach them — each prints its HTTP gateway port on startup.
+All five share the [repo setup](../../examples/README.md#shared-setup) (Rust toolchain;
+Ollama only if you want a real model — required for `ollama_serve`; `openai_serve` runs against
+the mock engine with nothing installed). `fleet_reasoning` is a one-shot CLI that exits 0;
+`reason_node`, `reheal_node`, `ollama_serve`, and `openai_serve` run a **Mycelium gateway** and
+**stay running** (Ctrl-C to stop) so the Python side and the Ops Console can reach them — each
+prints its HTTP gateway port on startup.
 
 ### `fleet_reasoning`
 
@@ -115,6 +117,41 @@ their API key).
 `warm`, `vram_used_mb`, `family`, `ctx_window`, `param_size`, `quant`) and kept current by
 `spawn_meta_refresher`; the router's load + reservation rank across the nodes; the drop-in
 adoption path. Manual — not a CI example. Source: [`ollama_serve.rs`](ollama_serve.rs).
+
+### `openai_serve`
+
+**Objective.** The **stacking** example — Mycelium *over* any OpenAI-compatible engine: NVIDIA
+PAIR's proxy, LM Studio, vLLM, Ollama's `/v1`, a cloud API. The engine (or PAIR) places the GPU
+work; Mycelium routes the *capability* `llm/{MODEL}` across every node running this (load +
+local reservations, failover) and exposes the OpenAI-compatible façade. Unlike `ollama_serve`
+the `llm-meta` ad is **static** (declared by env), so it works against endpoints that are not
+Ollama.
+
+**How to run** (deterministic, nothing installed — the repo's mock engine stands in on `:11434`):
+```bash
+python3 examples/community/mock_llm.py &
+BIND_PORT=7211 HTTP_PORT=8211 ENGINE=pair CTX_WINDOW=8192 \
+  cargo run -p mycelium-reason --features llm,gateway --example openai_serve
+BIND_PORT=7212 HTTP_PORT=8212 BOOTSTRAP=127.0.0.1:7211 \
+  cargo run -p mycelium-reason --features llm,gateway --example openai_serve
+curl -s http://127.0.0.1:8211/gateway/reason/v1/models          # "providers": 2
+curl -s http://127.0.0.1:8211/gateway/reason/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"llama3","messages":[{"role":"user","content":"Name three root vegetables."}]}'
+```
+For a real engine set `OPENAI_BASE_URL` (PAIR: `http://<pair-host>:11434/v1`; LM Studio:
+`http://127.0.0.1:1234/v1`) and `OPENAI_API_KEY` if it wants one; `MODEL` (default `llama3`),
+optional `ENGINE` / `CTX_WINDOW` / `FAMILY` for the ad, `GOSSIP_GATEWAY_AUTH_TOKEN` to protect the
+gateway (clients then pass it as their API key). Each node may point at a *different* engine.
+
+**What it demonstrates.** The division of labour the PAIR comparison settled on
+(`docs/plans/mycelium-reason.md`, 2026-09-04 addendum): no proxy process of Mycelium's own —
+every node routes from its own view; the reply's `mycelium.provider` names the node that
+answered. Note what a *sequential* run shows: with equal load every call lands on the lowest
+node id (the deterministic tiebreak) — reservations spread **concurrent** calls, not serial ones;
+run several clients at once to see both providers answer. Verified 2026-09-04 against the mock
+engine: two nodes, both providers listed, calls routed from either node's façade. Manual — not a
+CI example (the façade and router it composes are CI-gated in the crate's suites). Source:
+[`openai_serve.rs`](openai_serve.rs).
 
 ## CI
 

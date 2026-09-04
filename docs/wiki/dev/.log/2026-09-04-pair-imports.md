@@ -76,6 +76,10 @@ reservation default and the façade's mapping loss; neither is in the ratings ye
   sampled the connection count at a fixed 1 s; a hosted runner had opened 88 of 120 by then.
   Now polls to the plateau inside a longer park window (structural, not a sample). The
   lesson already on the page applies to its author.
+- **`openai_serve` added (same evening, on request):** the stacking example — Mycelium over any
+  OpenAI-compatible engine with a static ad; proven two-node against the mock engine (both providers
+  listed, calls routed from either façade). Honest note recorded in its README: serial calls all
+  land on the lowest id — reservations spread *concurrent* calls.
 - **Run 60 (M2) ran the same evening** (`docs/analysis/ratings.md`): floor 7/7/7 (Modularity ↓ from a
   carried 8 — the `http.rs` assembly seam + core naming companion paths; Configurability; Robustness
   held at its Run-55 floor). Three probes passed and stay as tests (path-shape auth bypass, reservation

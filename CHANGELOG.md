@@ -45,6 +45,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
      `vram_used_mb`) and `/api/show` (family, ctx window, param size, quant);
      `spawn_meta_refresher` keeps a served model's ad current. Example `ollama_serve`: one
      binary that serves a local Ollama model into the mesh with a live ad and the façade.
+     Example **`openai_serve`** (the stacking path): Mycelium over *any* OpenAI-compatible engine
+     — PAIR, LM Studio, vLLM, a cloud API — with a static ad; runs deterministically against the
+     repo's mock engine (verified two-node, both façades).
      Gates: the collector against a fake daemon; five warm/cold flips each visible within 3 s.
 
 ### Fixed

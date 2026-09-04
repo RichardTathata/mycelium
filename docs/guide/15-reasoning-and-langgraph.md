@@ -184,7 +184,9 @@ placement of independent inference requests over Ollama/LM Studio behind drop-in
 for one household's machines. PAIR is the GPU plane; Mycelium is the agent plane (capabilities,
 state, tools, traces, resume), and where PAIR is not available it can be both. The two stack
 cleanly: point `OpenAiBackend` at a PAIR proxy and Mycelium routes capabilities while PAIR
-places GPU work. Do not run both routers over the same replica pool: with PAIR underneath, all
+places GPU work — the runnable form is the **`openai_serve`** example (any OpenAI-compatible
+engine per node, static `llm-meta` ad; `examples/community/mock_llm.py` stands in for the
+engine so it runs with nothing installed). Do not run both routers over the same replica pool: with PAIR underneath, all
 `llm/{model}` providers collapse to one endpoint and the mesh router's failover is moot — fine
 if deliberate.
 
