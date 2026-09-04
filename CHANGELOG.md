@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+---
+
+## [2.4.1] — 2026-09-04
+
+A **security PATCH** on the 2.4 line. Wire **v12** (`PREV = 11`) unchanged; no public-API change in `mycelium` — a rolling upgrade holds. Companions on their own lines: `mycelium-reason` **0.6.0** (tag `mycelium-reason-v0.6.0`), `mycelium-py` **0.2.3**.
+
+### Security
+
+- **Routes merged via `with_http_routes` answered without the gateway bearer** — every companion
+  `/gateway/…` surface (reason, wiki, tuple-space, blackboard) was open even with
+  `gateway_auth_token` set, in every tagged release since companion gateway routes existed
+  (v2.0.0 →). Fixed: a prefix-guarded auth layer on merged routers + companion **scope families**
+  under `compliance`. **Upgrade note for scoped-token deployments:** companion routes now need
+  `llm:*` / `wiki:*` / `board:*` / `tuple:*` (or `*`) — see `docs/operations/rbac.md`. Details
+  below (Fixed) and in the calibration ledger.
+- **wasmtime 46.0.2 → 46.0.3 — RUSTSEC-2026-0269** (trailing-slash sandbox escape; the v2.4.0
+  tag ships the vulnerable version). Whole 15-crate wasmtime family moved together.
+- **h2 0.4.14 → 0.4.16 — RUSTSEC-2026-0258** (unbounded empty DATA frames).
+- **`chacha20` 0.10.0 (yanked) → 0.10.2** — a yanked crate in the lock; `cargo audit` only warns
+  on yanks, so it had passed CI (Run 60 finding).
+
+
 ### Added
 
 - **`mycelium-reason` 0.6.0 — three imports from the NVIDIA PAIR comparison (2026-09-04).**
@@ -52,10 +76,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **`mycelium-py` connection-reuse gate: the parked-takes test was timing-based** — it sampled
-  the stub's connection count at a fixed 1 s and read 88/120 on a hosted runner (CI red on a
-  docs-only commit, 2026-09-04). Now polls the count to its plateau inside a 5 s park window
-  before any take returns; the pre-fix pool still plateaus at exactly 100.
 - **Routes merged via `with_http_routes` bypassed the gateway auth boundary** (core, since
   the first companion gateway routes). The auth `route_layer` wrapped only the library's
   nested `/gateway` router; a merged router's `/gateway/reason/route`, `/gateway/wiki/ingest`,
@@ -75,7 +95,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for scoped-token deployments:* companion routes that were (wrongly) open now need these
   family scopes or `*`. Gate: `test_scoped_tokens_on_merged_companion_routes`; runbook
   `docs/operations/rbac.md`.
-
+- **`mycelium-py` connection-reuse gate: the parked-takes test was timing-based** — it sampled
+  the stub's connection count at a fixed 1 s and read 88/120 on a hosted runner (CI red on a
+  docs-only commit, 2026-09-04). Now polls the count to its plateau inside a 5 s park window
+  before any take returns; the pre-fix pool still plateaus at exactly 100.
 - **`mycelium-py` 0.2.0: persistent pooled HTTP client** — the bridge opened a fresh TCP
   connection per gateway call, exhausting macOS ephemeral ports at Group-scale write rates
   (~16k rapid KV calls; found by a downstream test session). All request/response call sites now

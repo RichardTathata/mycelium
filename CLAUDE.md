@@ -25,7 +25,11 @@ recorded measurements) · `GitMirror` projection sink (`git-mirror`) · claim-ch
 (`submit_batch` + `POST /gateway/wiki/ingest` + py/ts SDK verbs) · pluggable `PageFormat` codec ·
 curator failover over node-local stores — all additive, wire unchanged; records
 `docs/design/transparency-council-substrate.md` + `docs/plans/council-substrate-hardening.md`;
-first tagged release with the wasmtime RUSTSEC-2026-0222 fix); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
+first tagged release with the wasmtime RUSTSEC-2026-0222 fix); **v2.4.1 released 2026-09-04** (tag
+`v2.4.1` — a **security PATCH**: merged `with_http_routes` routers now behind gateway auth + companion
+scope families · wasmtime 46.0.3 (RUSTSEC-2026-0269) · h2 0.4.16 (RUSTSEC-2026-0258) · `FsStore`
+erase serialization; wire unchanged, no API change; companions `mycelium-reason` 0.6.0 /
+`mycelium-py` 0.2.3 on their own lines); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
 shared by `SignalScope` and consensus (`cluster_propose` / `group_propose`). *Renamed 2026-07-10:*
 `System` → `Cluster` (wire-compatible; `system_propose` kept as a `#[deprecated]` alias, gateway
 still accepts `"system"`); `system_stats()` is unrelated — node-local runtime state, not a scope.

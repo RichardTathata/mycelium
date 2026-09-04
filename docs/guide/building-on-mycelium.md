@@ -17,10 +17,10 @@ Mycelium is distributed **by git tag, not crates.io** — pin a release tag:
 
 ```toml
 # Full runtime (KV + signals + consensus + capabilities + gateway/MCP/A2A + TLS).
-mycelium = { git = "https://github.com/RichardEko/mycelium", tag = "v2.4.0" }
+mycelium = { git = "https://github.com/RichardEko/mycelium", tag = "v2.4.1" }
 
 # Or the minimal substrate — Layers I+II only, ~⅓ the dep tree, no Axum:
-mycelium-core = { git = "https://github.com/RichardEko/mycelium", tag = "v2.4.0" }
+mycelium-core = { git = "https://github.com/RichardEko/mycelium", tag = "v2.4.1" }
 
 # Companion crates — independent version lines, same repo (a git dep on a
 # companion resolves the workspace-internal `mycelium` automatically):

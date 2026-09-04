@@ -22,7 +22,14 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Since v2.4.0 — 2026-09-02 → 09-04 (unreleased)
+## v2.4.1 release — 2026-09-04 (tag `v2.4.1`)
+
+A **security PATCH** on the 2.4 line (wire **v12**/PREV 11 unchanged; no `mycelium` public-API
+change — rolling upgrade holds). Release gate: **CI-green before tagging** (`65e0df6`). Why a
+release: the v2.4.0 tag ships wasmtime 46.0.2 (RUSTSEC-2026-0269) and has every companion
+`/gateway/…` surface open to unauthenticated callers when a gateway token is set. Cut from
+CHANGELOG `[Unreleased]`; the auth fix carries an upgrade note for scoped-token deployments
+(companion scope families). What accumulated since v2.4.0:
 
 - **Two 360° review passes over `v2.4.0..HEAD`** (2026-09-02/03): mycelium-py 0.2.1 → 0.2.3
   (pooling bugs, lifecycle unification, uncapped long-poll pool), `FsStore` erase-vs-write
@@ -37,6 +44,11 @@ The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/expl
   **scope families** (`llm`/`wiki`/`board`/`tuple`). Position (plan addendum): PAIR = GPU plane,
   Mycelium = agent plane, stackable. Coherence assessment + log:
   `.log/2026-09-04-pair-imports.md`; ledger entry (Security 8 at Run 59) in `docs/analysis/ratings.md`.
+- **Same day:** `openai_serve` (the stacking example, mock-engine runnable); analysis **Run 60**
+  (floor 7/7/7 — Modularity/Configurability/Robustness; yanked `chacha20` fixed); a **wiki-lint**
+  pass (8 findings incl. the compliance clippy CI gap and the `audit/` KV row; 3 ledger entries);
+  advisories h2 0.4.16 (RUSTSEC-2026-0258) and wasmtime 46.0.3 (RUSTSEC-2026-0269) from the
+  review days.
 
 ## v2.4.0 release — 2026-08-16 (tag `v2.4.0`)
 
