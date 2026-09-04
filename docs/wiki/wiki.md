@@ -21,8 +21,8 @@ tagged release carrying the wasmtime RUSTSEC-2026-0222 fix (the v2.3.0 tag preda
 `sys/identity` authentication (CA anchor → signed `sys/identity-proof/` → `require_identity_proofs`,
 default-off), rotate+revoke, and GDPR crypto-shred (`SubjectKeyRegistry`) — all additive, wire
 unchanged; identity design [`design/identity-authentication.md`](../design/identity-authentication.md),
-the adopter control map [`operations/shared-responsibility-matrix.md`](../../operations/shared-responsibility-matrix.md),
-plan [`plans/soc2-audit-gap-closure.md`](../../plans/soc2-audit-gap-closure.md). Prior: **v2.2.0**
+the adopter control map [`operations/shared-responsibility-matrix.md`](../operations/shared-responsibility-matrix.md),
+plan [`plans/soc2-audit-gap-closure.md`](../plans/soc2-audit-gap-closure.md). Prior: **v2.2.0**
 (2026-07-16) — a hardening MINOR (five-pass adversarial self-audit, input-fuzz gate,
 identity-authentication Phase 1a, `/ready` fix). **v2.1.0** (2026-07-15) — `LockService`, CI-gated Docker suites, the #164
 distributed-lock fixes; **v2.0.0** (all 16 milestones, 2026-06-21, + the v1.x production-readiness

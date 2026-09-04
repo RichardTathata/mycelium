@@ -141,3 +141,27 @@ Entry format:
   project does not own on crates.io is a finding; the supported form is the `git =`/`tag =` dep. Fixed:
   building-on §1 rewritten to git-tag deps + a why-not-crates.io note (commit 4ecc1aa); the constraint
   now has a wiki home on `companions.md` + `history.md` (2026-07-26).
+- 2026-09-04: **§1 watch-RMW sweep — a "known false positive" note that covered one shape hid two
+  others.** The 2026-07-21 first run recorded "one known false-positive shape (receiver-borrow relay,
+  `capability_handle.rs`)" and every later pass (07-24, 07-26, 08-16) reported the sweep clean "in the
+  delta" — but the file has *three* hits, and two are the *sender*-borrow compare-then-send shape
+  (`*tx.borrow() == next` → `tx.send(next)`) the rule is literally about. Not a bug (the value is
+  independent of the read), but never classified. Sharpening: the sweep classifies *every* hit by
+  shape, in the log, each pass — "clean in the delta" is not a classification; and compare-then-send
+  is written as `send_if_modified` (done for `watch_wiring`/`watch_demand`) so hits are zero, not
+  "known".
+- 2026-09-04: **§1 KV-namespace table — third miss.** `audit/{ts}/{node}` (SkillRunner's plain audit
+  trail, `src/bin/skillrunner/audit.rs`, the `not(compliance)` path) was absent from `src/lib.rs` and
+  the guide through every pass since 2026-07-07 although it is a raw `format!("audit/…")` writer the
+  2026-07-07 sharpening's grep matches — under `src/bin/`, which the sweeps' `src/` glob covers but
+  no pass ever *listed* the `src/bin` hits separately, so the skillrunner writer was skimmed past as
+  "the compliance audit row". Also: `building-on` keeps the reserved prefixes in **two** forms (a
+  table-ish list at §KV keys and a bullet in the copy-paste block); the 2026-07-20 fix updated one.
+  Sharpening: the front-door check diffs *every* occurrence of the reserved list (grep the prefix
+  set, not the first match); the namespace sweep prints hits grouped by crate incl. `src/bin`.
+- 2026-09-04: **§3 dead-link sweep declared `wiki.md` clean with two dead links in it** (added
+  2026-07-24 with one `../` too many; passes 07-24, 07-26, 08-16 all reported "dead links: none").
+  The prior sweeps resolved links from section pages; the front door itself was either skipped or
+  resolved relative to `docs/` rather than the file. Sharpening: the sweep script resolves every link
+  relative to *its own file's directory* and includes `wiki.md` and the front-door guide docs in the
+  same pass (this pass's script does; keep it — it is in the log).

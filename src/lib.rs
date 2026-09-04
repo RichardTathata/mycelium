@@ -89,6 +89,7 @@
 //! | `sys/rate/{observer}/{sender}`      | Distributed rate observation (WS-C M7) — per-observer rate evidence, fps as ASCII u64, short-TTL |
 //! | `sys/role/{node}`                   | RBAC — signature-verified role claim (checked against `sys/identity/{node}` at read) |
 //! | `sys/audit/{node}/{seq}`            | WS2 audit — per-node hash-chained, Ed25519-signed tamper-evident record (`compliance`) |
+//! | `audit/{ts_unix_nanos}/{node}`      | SkillRunner's **plain** audit trail *without* `compliance` (`src/bin/skillrunner/audit.rs`) — unsigned, time-keyed JSON; with `compliance` the same records go to `sys/audit/…` instead |
 //! | `sys/audit-checkpoint/{node}/{seq}` | WS-D audit — signed mid-chain boundary enabling export-then-prune retention (`compliance`) |
 //! | `sys/revocation/{node}/{key-hex}`   | WS-D — signed key revocation; excluded on all verify paths incl. consensus (`compliance`) |
 //! | `sys/capauthz/{ns}/{name}`          | Gossip-level capability-authz policy (`required_roles`; resolve-time enforcement) (`compliance`) |

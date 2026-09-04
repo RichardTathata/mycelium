@@ -97,6 +97,11 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   as first-class mesh citizens (skills = capabilities, live load-balancing). The de-facto **audit**
   demo — every invocation writes a signed audit record; the mgmt UI (`:9050/mgmt`) shows the trail
   (also `GET /gateway/audit` on `compliance`-built nodes).
+- **Operational launchers** (`mycelium-tuple-space/examples/scrape_{fleet,worker}_node.rs`): not
+  demos — env-configured, WAL-backed Primary + per-worker Client sidecars for an external scraper
+  fleet (documented in that crate's examples README). Listed here because a category is a category
+  even when it holds two files. **Config presets** (`examples/presets/*.toml`): `NodeCapabilityConfig`
+  starting points for `capability_config`, not runnable examples.
 - **Reasoning / LangGraph** (`examples/langgraph/` + `mycelium-reason/examples/`): the 7-rung
   LangGraph-on-Mycelium ladder (Python) over a Rust reason mesh — `reason_node` (the long-running
   gateway node the rungs drive), `reheal_node` (the deploy/reheal flagship, rung 6), `ollama_serve`

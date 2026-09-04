@@ -11,7 +11,7 @@ them to every new papaya call site:
 1. **`compute` closures must be retry-safe.** papaya re-invokes the closure on concurrent
    change. Never `take()` a single-use value inside one (panics on retry); clone per
    invocation and reset captured outputs at the top of the closure (see
-   `apply_and_notify`'s `old_ts_if_live`).
+   `apply_and_notify`'s `old_live`, reset at the top of every CAS retry — `mycelium-core/src/store.rs`).
 2. **Never act on a stale read.** Collect-then-`remove()`, check-then-act
    (`is_empty()` → spawn), unconditional remove keyed by something another caller may have
    replaced — all must re-validate inside a `compute` (conditional remove), behind an atomic
@@ -39,7 +39,12 @@ holds the channel's internal lock, making the RMW atomic (reference:
 `mycelium-core/src/connection.rs`, the `peer_list_tx.send_if_modified` site). Model-checked:
 `loom-spike/tests/bounded_append.rs` proves the lost-update schedule against the broken shape
 and the single-hold shape's correctness; `/wiki-lint` §1 now runs a mechanical
-`borrow()`-then-`send(` sweep so the next such site is a lint finding, not an incident.
+`borrow()`-then-`send(` sweep so the next such site is a lint finding, not an incident. **Classify every sweep hit by shape:** a *receiver*-borrow relayed into a different sender
+(`raw_rx.borrow()` → `tx.send`) is not an RMW; a *sender*-borrow compare-then-send
+(`*tx.borrow() == next` → `tx.send(next)`) is not a lost update either when `next` is computed
+independently of the borrowed value — but it is the flagged shape, so write it as
+`send_if_modified` (the `watch_wiring`/`watch_demand` publishers, converted 2026-09-04) and keep
+the sweep mechanically clean.
 
 ## Memory-ordering policy for atomics
 

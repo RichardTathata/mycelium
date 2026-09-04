@@ -454,9 +454,11 @@ impl CapabilitiesHandle {
                     }
                 }
                 let next = wiring_snapshot(&kv_state, &filter);
-                let unchanged = { *tx.borrow() == next };
-                if unchanged { continue; }
-                if tx.send(next).is_err() { return; }
+                // Compare-and-publish inside one hold (lock-free-and-atomics rule: watch
+                // state is mutated only via send_if_modified) — a separate borrow()+send()
+                // is the shape the 2026-07-21 sweep flags, even when no lost update is possible.
+                tx.send_if_modified(|cur| { if *cur == next { return false; } *cur = next; true });
+                if tx.is_closed() { return; }
             }
         });
         rx
@@ -525,9 +527,8 @@ impl CapabilitiesHandle {
                     }
                 }
                 let next = demand_snapshot(&kv_state, &filter);
-                let unchanged = { *tx.borrow() == next };
-                if unchanged { continue; }
-                if tx.send(next).is_err() { return; }
+                tx.send_if_modified(|cur| { if *cur == next { return false; } *cur = next; true });
+                if tx.is_closed() { return; }
             }
         });
         rx

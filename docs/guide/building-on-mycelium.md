@@ -139,7 +139,7 @@ inherits the contract without reading everything:
 - **Our KV keys live under `myapp/…`.** Never write under the substrate's reserved
   prefixes: grp/ sys/ consensus/ cap/ req/ cap-group/ gcap/ mailbox/ schemas/ tools/
   agent/ svc/ log/ clog/ lock/ prompts/ skills/ installable/ comp/ tuple/ wiki/ ckpt/ ckptw/
-  (authoritative table: mycelium `src/lib.rs` → KV namespace ownership).
+  facts/ manifest/ audit/ (authoritative table: mycelium `src/lib.rs` → KV namespace ownership).
 - Always `shutdown()` the agent + any companion handle (background loops won't stop on
   drop). KV writes are size-gated (chunk large values). Consistency is opt-in — default
   to eventually-consistent kv(); use consensus() only where linearisability is required.
