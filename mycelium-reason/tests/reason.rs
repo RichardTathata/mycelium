@@ -96,6 +96,7 @@ async fn route_and_failover_across_providers() {
         call_timeout: Duration::from_secs(2), // fast per-attempt failover under test
         failover_timeout: Duration::from_secs(1),
         load_max_age: Duration::from_secs(10),
+        ..RouterConfig::default()
     };
     let router_a = InferenceRouter::new(Arc::clone(&agent_a), cfg.clone());
     let q = ModelQuery::new("fable-mini");
@@ -353,4 +354,64 @@ async fn trace_record_replay_round_trips() {
     assert!(events[0].hlc <= events[1].hlc, "events must be HLC-ordered");
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// A backend that holds each call open long enough for concurrent calls to overlap.
+struct SlowEcho(Duration);
+
+#[async_trait::async_trait]
+impl mycelium::LlmBackend for SlowEcho {
+    async fn complete(
+        &self,
+        _system: &str,
+        user: &str,
+        _max_tokens: u32,
+        _temperature: f32,
+    ) -> Result<mycelium::LlmResult, mycelium::LlmError> {
+        tokio::time::sleep(self.0).await;
+        Ok(mycelium::LlmResult { output: format!("slow: {user}"), model_used: "slow".into(), tokens_used: 1 })
+    }
+}
+
+/// Local reservations (2026-09-04): four concurrent calls from one router against two
+/// equal-fill providers must land on **both**. Neither provider writes a load pheromone in
+/// this test (no `manage_opacity`), so the fill is 0.0 for both and the pre-reservation
+/// rank was `(0.0, id)` for every caller — all four went to the lower id (the thundering
+/// herd). With reservations, each open call raises its provider's score by
+/// `reservation_weight`, so the second caller prefers the other node. Deterministic
+/// against the mechanism, not timing: the backend holds calls open for 400 ms, far longer
+/// than the four dispatches take. Fails on the pre-fix router.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reservations_spread_concurrent_calls_across_equal_providers() {
+    let (agent_a, agent_b) = start_pair().await;
+    let slow = || Arc::new(SlowEcho(Duration::from_millis(400)));
+    let _reg_a = serve_model(&agent_a, profile("fable-mini"), echo_template(), slow()).await.unwrap();
+    let _reg_b = serve_model(&agent_b, profile("fable-mini"), echo_template(), slow()).await.unwrap();
+
+    let router = Arc::new(InferenceRouter::new(Arc::clone(&agent_a), RouterConfig::default()));
+    let q = ModelQuery::new("fable-mini");
+    assert!(
+        poll_until(|| router.candidates(&q).len() == 2, Duration::from_secs(20)).await,
+        "both providers visible to the router"
+    );
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..4 {
+        let router = Arc::clone(&router);
+        let q = q.clone();
+        tasks.spawn(async move {
+            router.call(&q, &format!("call-{i}"), &HashMap::new(), None).await.unwrap().provider
+        });
+    }
+    let mut providers = std::collections::HashSet::new();
+    while let Some(r) = tasks.join_next().await {
+        providers.insert(r.unwrap());
+    }
+    assert_eq!(providers.len(), 2, "concurrent calls spread across both providers: {providers:?}");
+    // Every reservation released once the calls returned.
+    assert_eq!(router.inflight(agent_a.node_id()), 0);
+    assert_eq!(router.inflight(agent_b.node_id()), 0);
+
+    agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

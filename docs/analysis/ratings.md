@@ -27,6 +27,22 @@ such finding.
 Records bugs later found in dimensions that scored ≥ 8 while the bug already
 existed. This is the framework's own report card.
 
+- 2026-09-04 (PAIR-imports session): **Security (13)** scored **8** at Run 59 (the "named lift
+  shipped" upgrade from the floor 7) while **every companion's gateway surface was
+  unauthenticated**: `with_http_routes` merges an application router *outside* the library's
+  nested `/gateway` router, and the auth `route_layer` wrapped only the latter — so with
+  `gateway_auth_token` set, `/gateway/kv` returned 401 without a bearer while
+  `/gateway/reason/route`, `/gateway/wiki/ingest`, `/gateway/tuple/put`, `/gateway/board/…`
+  answered. Present since the first companion gateway routes (2026-07-0x); the companions'
+  own module docs stated the opposite ("`/gateway/…` routes pass the gateway auth
+  middleware"). Found by reading the router assembly while deciding where to mount the
+  OpenAI façade (the question "is a bare `/v1` public by path?" led to "is `/gateway/reason`
+  actually protected?"); fixed same day with a prefix-guarded layer on merged routers, gated
+  in core and in `mycelium-reason` (both fail pre-fix). The miss mechanism, for the ledger:
+  Runs 54–59 audited the auth *policy* (token table, scopes, OIDC, deny-by-default) and the
+  library's own routes end-to-end, and took the companions' doc claim as read — no test ever
+  sent a companion route a request without a bearer. A doc claim about a security boundary
+  is exactly the kind of statement the doc-vs-code lint should have refused to trust.
 - 2026-09-02 (360° review of `v2.4.0..HEAD`, recorded 2026-09-03): **Concurrency Correctness (9)**
   scored **8** at Run 59 on the explicit justification *"the erase verb reuses `write_lock` flat (no
   new lock-table rows needed)"* — true for `GitStore`, **false for `FsStore`**: `FsStore::remove_page`

@@ -55,7 +55,16 @@ via wasm-host).
   (`examples/langgraph/` rungs 0–6 incl. the echo-CI **deploy/reheal flagship** + a router-robustness
   fix it surfaced — live-SWIM filter + fast failover, #134), the repo's first Python CI job, and guide
   chapter 15 + an Ollama-manual real-model variant. Plans: `docs/plans/mycelium-reason.md` +
-  `…-examples.md`.
+  `…-examples.md`. **0.6.0 (2026-09-04, the PAIR imports — plan addendum of that date):** ①
+  gained **local in-flight reservations** (open calls per provider weighted into the rank,
+  `reservation_weight`; node-local, never gossiped — lock-order row 36; the herd gate
+  `reservations_spread_concurrent_calls_across_equal_providers`), the **OpenAI-compatible
+  façade** `/gateway/reason/v1/{chat/completions,models}` (any OpenAI client → mesh client by
+  base URL; same router as `/route`), and the **`llm_meta` vocabulary** (`engine`/`warm`/
+  `vram_used_mb`/…) with `ModelReg::refresh_meta` (retract observed before re-advertise — makes
+  a tokio ordering explicit; the race did not reproduce) and the `ollama` feature's collector (`OllamaProbe`, `spawn_meta_refresher`,
+  example `ollama_serve`). Found on the way: merged `with_http_routes` routers bypassed the
+  gateway auth layer — fixed in core ([security](../security.md)).
 - **`mycelium-guardrails/`** — the **v3.0 structural-guardrails companion** (the second primary;
   *different axis* again — [pattern-coverage](../../domain/pattern-coverage.md) → Structural guardrails).
   *What an agent may do*, one tier-labelled `Policy` → `apply()` compiling to **Tier A** boundary
@@ -70,7 +79,7 @@ via wasm-host).
 > **Versioning & distribution (companions).** The two v3.0 companions ride **independent version
 > lines**, *not* the 2.x substrate train (they compose the public `mycelium` API only):
 > `mycelium-guardrails` **1.0.0** — scope feature-complete, **API frozen** (the remaining limits are
-> by-design of the coordinator-free model, not gaps); `mycelium-reason` **0.5.0** — mature but
+> by-design of the coordinator-free model, not gaps); `mycelium-reason` **0.6.0** — mature but
 > deliberately **pre-freeze** (real-backend / chunked-blob / conversation-memory / run-level-evals
 > still open). **"v3.0" is the epoch, not a crate version** — the substrate stays 2.x (`ROADMAP.md` →
 > v3.0). The whole workspace is distributed **by git tag, not crates.io** — the `mycelium`/

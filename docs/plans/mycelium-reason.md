@@ -217,6 +217,64 @@ blob tier, gateway routes, multi-node tests, `ci_smoke` example, CI job, lock-or
 **PR 2** — `langgraph-checkpoint-mycelium` (Tier 2) + `call_typed` in `mycelium-py` (Tier 1) +
 the repo's **first Python CI job** (none exists today; the SDK's tests are run-manually-only).
 
+## Addendum (2026-09-04) — NVIDIA PAIR: the comparison, and what was imported
+
+NVIDIA announced the **Personal AI Router (PAIR)** on 3 Sept 2026 (IFA; Apache-2.0; beta
+v0.1.x): a proxy in front of Ollama / LM Studio that discovers a household's machines, pairs
+them (six-digit PIN → mTLS), and places each *independent* inference request on the machine
+with capacity — per-node ranking on pending-job counts plus local reservations, no global
+schedule, explicit "we do not split a model or move a running request". It virtualises
+inference capacity for existing apps by taking over the Ollama/OpenAI endpoint.
+
+**Read against wedge ①, verified in code.** PAIR is exactly the slice `InferenceRouter` covers
+(model-aware, load-aware, failover-capable placement) productised for one household with a
+drop-in endpoint. Two places our own story over-credited us: (a) the load signal —
+`LoadState.fill_ratio` is a self-reported handler-channel fill, no richer than PAIR's
+pending-job count (the *constraint* vocabulary via `llm-meta` is richer; the *load* input was
+not); (b) the rank was `(fill, node id)` with a deterministic tiebreak, so N concurrent callers
+on one node all chose the same provider until its pheromone caught up — the herd PAIR's
+reservations exist for. Position: **PAIR is the GPU plane, Mycelium the agent plane**
+(capabilities, state, tools, traces, resume); where PAIR is absent Mycelium can be both; they
+stack (point `OpenAiBackend` at a PAIR proxy). Not competing on installer UX, pairing flows, or
+engine integrations — NVIDIA's leverage, and not a library's job.
+
+**Imported (all shipped 2026-09-04, `mycelium-reason` 0.6.0), bindings:**
+
+1. **Local reservations** — `InferenceRouter::inflight` (`Mutex<HashMap<node, u32>>`,
+   lock-order row 36): each open call against a provider adds `reservation_weight` (default
+   0.1) to its rank score. *Philosophy check:* node-local knowledge composed with the shared
+   medium — the reservation is neither gossiped nor written as a pheromone; the provider's own
+   trail stays the fleet-wide signal. No wire change, no core change. The trace `route` event's
+   per-candidate value is now `score`, not `fill`.
+2. **The OpenAI-compatible façade** — `/gateway/reason/v1/{chat/completions,models}` on the
+   same `reason_router`, sharing one `InferenceRouter` (so reservations span concurrent gateway
+   requests — a router-per-request would see an empty map). Mounted **under `/gateway/`** on
+   purpose: it rides the gateway auth boundary (bearer = API key) rather than a bare `/v1`
+   that would be public by path. The mapping to a prompt skill is stated in the module doc
+   (last user message → `input`; `system`/`history` context; template-bound sampling params;
+   one-chunk SSE for `stream: true`). Ollama-native `/api/chat` is *not* served — a follow-up
+   if a consumer needs it.
+3. **The `llm-meta` vocabulary + collector** — `llm_meta::*` constants with types and sources
+   (the honest split: `warm`/`vram_used_mb` come from the engine's process list;
+   `vram_free_mb`/`tokens_per_sec` are embedder-measured because engines do not report them);
+   `ModelReg::refresh_meta` for the dynamic attributes — retract-then-advertise on one key
+   *could* lose to the persist task's tombstone on the node's HLC, so the retraction is
+   *observed* (bounded structural poll on `resolve`) before the new ad publishes. Stated
+   honestly: the bare form did **not** blink in 60 measured flips (tokio runs the woken old
+   task before the new interval's first tick), so the sequencing makes an incidental
+   ordering explicit rather than fixing a reproduced bug; feature `ollama` for
+   the collector (`/api/ps` + `/api/show`) and `spawn_meta_refresher`. The router remains
+   engine-blind: attributes are the only thing the mesh sees.
+
+**Found on the way (core, fixed same day):** routers merged via `with_http_routes` were
+*outside* the gateway auth `route_layer` — every companion's `/gateway/…` surface answered
+without a bearer while its docs claimed coverage. Fixed with a prefix-guarded layer on merged
+routers; ledger entry in `docs/analysis/ratings.md` (Security scored 8 at Run 59).
+
+**Not imported, deliberately:** the pairing-PIN bootstrap (CA admission is the fleet-scale
+equivalent), the installer, the licence (theirs affects vendors embedding the GPU plane —
+not the layer this project sells; the dual licence stands).
+
 ## Expressible ≠ validated
 
 Every wedge and the checkpointer fit are **hypotheses until tested**. The checkpointer mapping

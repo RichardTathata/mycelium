@@ -18,7 +18,14 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    `authorized_callers` at the served path (the one place it's genuinely enforceable).
 3. **OAuth2 scope gateway ACLs:** `gateway_scoped_tokens` maps bearer→`resource:verb`
    scopes; deny-by-default (unmapped route ⇒ `admin`). `/health|/ready|/stats|/metrics`
-   stay public (M16 edge criterion).
+   stay public (M16 edge criterion). **Merged application routers** (`with_http_routes` —
+   every companion's gateway surface, A2A) get the same bearer-then-scope layer on their
+   `/gateway/…` paths via a prefix-guarded `route_layer` (`gateway_auth_if_gateway_path`);
+   their paths outside `/gateway/` stay public by construction. *Fixed 2026-09-04:* the
+   layer wrapped only the library's nested router, so `/gateway/reason/route`,
+   `/gateway/wiki/ingest`, `/gateway/tuple/put` … answered without a bearer while the
+   companion docs claimed coverage — gates in core and `mycelium-reason`, ledger entry
+   in `docs/analysis/ratings.md`.
 4. **`sys/` namespace tripwire (core, feature-free):** inbound writes naming *self* under
    `sys/identity|load|role|tuple/{node}` → `warn!` + `sys_namespace_violations`. Detection
    only — never make it a write guard.

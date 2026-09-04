@@ -196,3 +196,152 @@ async fn gateway_route_endpoint_routes_and_reports_no_provider() {
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// Start one gateway-carrying agent with the reason routes mounted (the bind-race
+/// hardening the tests above use), optionally token-protected. Returns the agent, its
+/// gossip port, and the HTTP port once `/health` answers.
+async fn start_gateway_node(store: Arc<FsBlobStore>, auth_token: Option<&str>) -> (Arc<GossipAgent>, u16, u16) {
+    let mut started = None;
+    for _ in 0..16 {
+        let base = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let http_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = base;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = auth_token.map(str::to_owned);
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).unwrap(), cfg));
+        agent.with_http_routes(reason_router(Arc::clone(&agent), Arc::clone(&store)));
+        if agent.start().await.is_ok() {
+            started = Some((agent, base, http_port));
+            break;
+        }
+    }
+    let (agent, base, http_port) = started.expect("could not bind agent + gateway after 16 attempts");
+    let http = reqwest::Client::new();
+    for _ in 0..100 {
+        if http.get(format!("http://127.0.0.1:{http_port}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    (agent, base, http_port)
+}
+
+/// The OpenAI-compatible façade: an OpenAI chat request against `/gateway/reason/v1`
+/// routes to the served `llm/{model}` and comes back in OpenAI's shape (JSON, and as a
+/// one-chunk SSE stream when `stream: true`); errors use OpenAI's envelope with the
+/// statuses clients map (`404 model_not_found`, `400` without a user message); `/models`
+/// lists what the mesh serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openai_facade_speaks_the_chat_wire_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let (agent, base, http_port) = start_gateway_node(store, None).await;
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason/v1");
+    let http = reqwest::Client::new();
+
+    let template = PromptTemplate {
+        system: "deterministic echo".into(),
+        user_template: "{{input}}".into(),
+        max_tokens: 512,
+        temperature: 0.0,
+        metadata: HashMap::new(),
+    };
+    let _model = serve_model(&agent, ModelProfile::new("fable-mini"), template, Arc::new(EchoBackend)).await.unwrap();
+
+    let chat = serde_json::json!({
+        "model": "fable-mini",
+        "messages": [
+            { "role": "system", "content": "be brief" },
+            { "role": "user", "content": "hello-facade" },
+        ],
+    });
+    // Poll structurally until the served cap resolves and the route lands.
+    let mut got: Option<serde_json::Value> = None;
+    for _ in 0..100 {
+        let resp = http.post(format!("{url}/chat/completions")).json(&chat).send().await.unwrap();
+        if resp.status().as_u16() == 200 {
+            got = Some(resp.json().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let got = got.expect("a provider answered the façade within the poll window");
+    assert_eq!(got["object"], "chat.completion");
+    assert!(got["id"].as_str().unwrap().starts_with("chatcmpl-"));
+    assert_eq!(got["choices"][0]["message"]["role"], "assistant");
+    assert!(got["choices"][0]["message"]["content"].as_str().unwrap().contains("hello-facade"));
+    assert_eq!(got["choices"][0]["finish_reason"], "stop");
+    assert!(got["usage"]["total_tokens"].is_number());
+    assert_eq!(got["mycelium"]["provider"], format!("127.0.0.1:{base}"));
+    assert_eq!(got["mycelium"]["attempt"], 1);
+
+    // stream: true → one-chunk SSE, terminated by [DONE].
+    let mut streamed = chat.clone();
+    streamed["stream"] = serde_json::json!(true);
+    let resp = http.post(format!("{url}/chat/completions")).json(&streamed).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap().starts_with("text/event-stream"));
+    let body = resp.text().await.unwrap();
+    assert!(body.starts_with("data: {"), "SSE data frames: {body}");
+    assert!(body.contains("chat.completion.chunk"));
+    assert!(body.contains("hello-facade"));
+    assert!(body.trim_end().ends_with("data: [DONE]"), "terminated by [DONE]: {body}");
+
+    // Unknown model → 404 in OpenAI's envelope.
+    let resp = http
+        .post(format!("{url}/chat/completions"))
+        .json(&serde_json::json!({ "model": "no-such-model", "messages": [{ "role": "user", "content": "x" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+    let err: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "model_not_found");
+    assert_eq!(err["error"]["param"], "model");
+
+    // No user message → 400.
+    let resp = http
+        .post(format!("{url}/chat/completions"))
+        .json(&serde_json::json!({ "model": "fable-mini", "messages": [{ "role": "system", "content": "x" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // /models lists the served model with its provider count.
+    let models: serde_json::Value = http.get(format!("{url}/models")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(models["object"], "list");
+    let ids: Vec<&str> = models["data"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
+    assert_eq!(ids, vec!["fable-mini"]);
+    assert_eq!(models["data"][0]["mycelium"]["providers"], 1);
+
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// The reason routes — merged via `with_http_routes` — sit behind the gateway's auth
+/// boundary: with `gateway_auth_token` set, `/gateway/reason/*` demands the bearer and the
+/// façade accepts it as the OpenAI API key. Fails on the pre-2026-09-04 core, where merged
+/// routers never saw the auth layer (every companion's gateway surface was open).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reason_routes_require_the_gateway_bearer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let (agent, _base, http_port) = start_gateway_node(store, Some("mesh-key")).await;
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason");
+    let http = reqwest::Client::new();
+
+    let route_body = serde_json::json!({ "model": "any", "input": "x" });
+    let r = http.post(format!("{url}/route")).json(&route_body).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401, "no bearer → 401 on /route");
+    let r = http.get(format!("{url}/v1/models")).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401, "no bearer → 401 on the façade");
+    let r = http.get(format!("{url}/v1/models")).bearer_auth("wrong").send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401, "wrong bearer → 401");
+    let r = http.get(format!("{url}/v1/models")).bearer_auth("mesh-key").send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "the gateway token is the façade's API key");
+    let r = http.post(format!("{url}/route")).bearer_auth("mesh-key").json(&route_body).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 404, "authenticated: the usual no_provider answer");
+
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

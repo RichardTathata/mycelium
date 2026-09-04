@@ -75,3 +75,33 @@ async def test_route_with_run_id_records_trace() -> None:
         assert events, "a routed call under a run_id must record at least one event"
         kinds = {e["kind"] for e in events}
         assert "route" in kinds, f"expected a route event, got kinds {kinds}"
+
+
+@pytest.mark.asyncio
+async def test_openai_facade_routes_a_chat_completion() -> None:
+    """The OpenAI-compatible façade: a plain OpenAI chat request against
+    ``/gateway/reason/v1`` routes to the served ``llm/{MODEL}`` and answers in the
+    OpenAI shape — what any OpenAI client sees after changing only its base URL."""
+    import httpx
+
+    base = f"http://{TEST_HOST}:{TEST_PORT}/gateway/reason/v1"
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as c:
+        models = (await c.get("/models")).json()
+        assert TEST_MODEL in [m["id"] for m in models["data"]]
+
+        resp = await c.post(
+            "/chat/completions",
+            json={"model": TEST_MODEL, "messages": [{"role": "user", "content": "facade-hello"}]},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["object"] == "chat.completion"
+        assert "facade-hello" in body["choices"][0]["message"]["content"]
+        assert body["mycelium"]["provider"]
+
+        missing = await c.post(
+            "/chat/completions",
+            json={"model": "no-such-model", "messages": [{"role": "user", "content": "x"}]},
+        )
+        assert missing.status_code == 404
+        assert missing.json()["error"]["code"] == "model_not_found"

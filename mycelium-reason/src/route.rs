@@ -3,7 +3,19 @@
 //! Capability **resolution is load-blind** (`resolve` ranks by freshness/attributes/
 //! locality only — an overloaded node's entry ages out, nothing more), so this module is
 //! the routing layer the substrate deliberately does not bake in: *resolve → drop opaque
-//! nodes → rank by pheromone fill → fail over down the candidate list.*
+//! nodes → rank by pheromone fill + this node's in-flight reservations → fail over down
+//! the candidate list.*
+//!
+//! **Reservations (2026-09-04).** The pheromone is the provider's *self-report*, and it
+//! reaches this node only after the provider writes it and gossip carries it. Between our
+//! dispatch and that update, the only evidence that a provider is busier than its trail
+//! says is *what we ourselves sent it* — so each in-flight call this router has open
+//! against a provider counts as a local reservation, weighted into the rank. Without it,
+//! N concurrent callers on one node all read the same stale fill and, via the
+//! deterministic id tiebreak, all pick the same provider (the thundering herd NVIDIA's
+//! PAIR router documents its local reservations against). Node-local knowledge composed
+//! with the shared medium — never a global schedule: the reservation is neither gossiped
+//! nor written as a pheromone; the provider's own trail stays the fleet-wide signal.
 //!
 //! Convention (bound in `docs/plans/mycelium-reason.md`, 2026-07-08 addendum): **a model
 //! is a prompt skill** — capability `llm/{model-id}` via `register_prompt_skill`
@@ -14,19 +26,69 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use mycelium::signal::signal_kind;
 use mycelium::{CapConstraint, CapFilter, GossipAgent, NodeId};
+#[cfg(feature = "llm")]
+use mycelium::Capability;
 
 use crate::trace::TraceRecorder;
+
+// ── The `llm-meta/{model}` attribute vocabulary (core-only) ───────────────────
+
+/// Attribute names for the `llm-meta/{model}` ad — the **vocabulary** a serving node
+/// speaks and a [`ModelQuery::constraints`] caller matches against. The ad is a plain
+/// attributed capability, so any key is *expressible*; this module fixes the names and
+/// types that mean the same thing fleet-wide, so a constraint written on one node matches
+/// an ad written on another.
+///
+/// | attribute | `CapValue` | source | meaning |
+/// |---|---|---|---|
+/// | [`CTX_WINDOW`] | `Integer` | engine (`/api/show`) or profile | context window, tokens |
+/// | [`FAMILY`] | `Text` | engine or profile | model family (`llama`, `qwen2`, …) |
+/// | [`ENGINE`] | `Text` | serve side | `ollama` · `lmstudio` · `openai` · `echo` · … |
+/// | [`WARM`] | `Bool` | engine process list (`/api/ps`) | weights resident in memory now — a cold model pays a load before its first token |
+/// | [`VRAM_USED_MB`] | `Integer` | engine process list | MiB of accelerator memory this model holds while warm |
+/// | [`VRAM_FREE_MB`] | `Integer` | embedder-measured (`nvidia-smi`, Metal) | MiB free on the serving device — engines do not report it |
+/// | [`TOKENS_PER_SEC`] | `Float` | embedder-measured | recent decode throughput on this device |
+/// | [`PARAM_SIZE`] | `Text` | engine (`/api/show`) | parameter count as the engine prints it (`8B`) |
+/// | [`QUANT`] | `Text` | engine (`/api/show`) | quantization level (`Q4_K_M`) |
+///
+/// Static attributes ride the profile once; dynamic ones (`warm`, `vram_used_mb`,
+/// `tokens_per_sec`) are refreshed via [`ModelReg::refresh_meta`] — the Ollama collector
+/// (`feature = "ollama"`) drives that loop. A constraint on an attribute a provider does
+/// not advertise excludes that provider (the substrate's `CapFilter` rule) — so callers
+/// constrain only on what their fleet actually publishes.
+pub mod llm_meta {
+    /// Context window in tokens (`Integer`).
+    pub const CTX_WINDOW: &str = "ctx_window";
+    /// Model family (`Text`).
+    pub const FAMILY: &str = "family";
+    /// Serving engine (`Text`): `ollama`, `lmstudio`, `openai`, `echo`, ….
+    pub const ENGINE: &str = "engine";
+    /// Weights resident now (`Bool`).
+    pub const WARM: &str = "warm";
+    /// Accelerator memory this model holds while warm, MiB (`Integer`).
+    pub const VRAM_USED_MB: &str = "vram_used_mb";
+    /// Free accelerator memory on the serving device, MiB (`Integer`, embedder-measured).
+    pub const VRAM_FREE_MB: &str = "vram_free_mb";
+    /// Recent decode throughput (`Float`, embedder-measured).
+    pub const TOKENS_PER_SEC: &str = "tokens_per_sec";
+    /// Parameter count as the engine prints it (`Text`).
+    pub const PARAM_SIZE: &str = "param_size";
+    /// Quantization level (`Text`).
+    pub const QUANT: &str = "quant";
+}
 
 // ── Serve side (feature `llm`) ────────────────────────────────────────────────
 
 /// What a serving node says about its model — the payload of the `llm-meta/{model}` ad.
+/// Attribute names: [`llm_meta`].
 #[cfg(feature = "llm")]
+#[derive(Clone, Debug)]
 pub struct ModelProfile {
     /// Model id — becomes the capability name in both `llm/{model}` and `llm-meta/{model}`.
     pub model: String,
@@ -38,13 +100,105 @@ pub struct ModelProfile {
     pub extra: Vec<(String, mycelium::CapValue)>,
 }
 
+#[cfg(feature = "llm")]
+impl ModelProfile {
+    /// A profile with only the model id — add attributes with [`with`](Self::with).
+    pub fn new(model: impl Into<String>) -> Self {
+        Self { model: model.into(), ctx_window: None, family: None, extra: Vec::new() }
+    }
+
+    /// Builder-style attribute (see [`llm_meta`] for the shared vocabulary). A repeated
+    /// key replaces the earlier value; [`llm_meta::CTX_WINDOW`] / [`llm_meta::FAMILY`]
+    /// land in the typed fields.
+    pub fn with(mut self, attr: &str, value: mycelium::CapValue) -> Self {
+        self.set(attr, value);
+        self
+    }
+
+    /// In-place form of [`with`](Self::with).
+    pub fn set(&mut self, attr: &str, value: mycelium::CapValue) {
+        match (attr, &value) {
+            (llm_meta::CTX_WINDOW, mycelium::CapValue::Integer(n)) => self.ctx_window = Some(*n),
+            (llm_meta::FAMILY, mycelium::CapValue::Text(t)) => self.family = Some(t.to_string()),
+            _ => {
+                self.extra.retain(|(k, _)| k != attr);
+                self.extra.push((attr.to_owned(), value));
+            }
+        }
+    }
+
+    /// The `llm-meta/{model}` capability this profile advertises.
+    pub fn meta_capability(&self) -> Capability {
+        let mut meta = Capability::new("llm-meta", self.model.as_str());
+        if let Some(ctx) = self.ctx_window {
+            meta = meta.with(llm_meta::CTX_WINDOW, mycelium::CapValue::Integer(ctx));
+        }
+        if let Some(family) = &self.family {
+            meta = meta.with(llm_meta::FAMILY, mycelium::CapValue::Text(Arc::from(family.as_str())));
+        }
+        for (k, v) in &self.extra {
+            meta = meta.with(k.as_str(), v.clone());
+        }
+        meta
+    }
+}
+
 /// RAII registration for a served model: the prompt skill + the metadata ad.
 /// Dropping retracts both (skill dispatch entry, `llm/…` cap, `llm-meta/…` cap).
 #[cfg(feature = "llm")]
 pub struct ModelReg {
+    model: String,
     _skill: mycelium::PromptSkillHandle,
-    _meta: mycelium::CapabilityReg,
+    meta: Option<mycelium::CapabilityReg>,
+    advertised: Capability,
 }
+
+#[cfg(feature = "llm")]
+impl ModelReg {
+    /// The `llm-meta` capability currently advertised.
+    pub fn advertised_meta(&self) -> &Capability {
+        &self.advertised
+    }
+
+    /// Re-advertise the `llm-meta/{model}` ad with `profile`'s attributes (the dynamic
+    /// ones — [`llm_meta::WARM`], [`llm_meta::VRAM_USED_MB`], … — change over a model's
+    /// life). The skill registration is untouched. A no-op when nothing changed.
+    ///
+    /// **Why this is sequenced rather than a bare drop-and-advertise:** retracting an ad
+    /// tombstones its KV key from the old persist task, and a fresh ad on the same key
+    /// writes on the new task's first tick — two tasks on one node's HLC, where the later
+    /// write wins LWW. If the tombstone ever landed second the ad would vanish until the
+    /// new task's next 30 s tick. In practice it does not: measured over 60 warm/cold
+    /// flips (2026-09-04), the bare form never blinked — tokio's timer driver runs the
+    /// already-woken old task before the new interval's first tick. That ordering is a
+    /// runtime detail, not a contract, so this method makes it explicit: the retraction
+    /// is *observed* (a bounded structural poll on `resolve`) before the new ad is
+    /// advertised. Cost: one scheduler hop. Returns `true` when the ad was replaced.
+    pub async fn refresh_meta(&mut self, agent: &Arc<GossipAgent>, profile: &ModelProfile) -> bool {
+        let next = profile.meta_capability();
+        if next == self.advertised {
+            return false;
+        }
+        let caps = agent.capabilities();
+        drop(self.meta.take());
+        let filter = CapFilter::new("llm-meta", self.model.as_str());
+        let me = agent.node_id().clone();
+        // Bounded structural wait for the tombstone (typically one scheduler hop).
+        for _ in 0..200 {
+            if !caps.resolve(&filter).iter().any(|(n, _)| *n == me) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.meta = Some(caps.advertise_capability(next.clone(), META_INTERVAL));
+        self.advertised = next;
+        true
+    }
+}
+
+/// Re-advertise interval for the `llm-meta` ad (freshness window is 3× this).
+#[cfg(feature = "llm")]
+const META_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Serve `profile.model` on this node: register the prompt skill (capability
 /// `llm/{model}`, template in KV, `llm.invoke` dispatch) and advertise the parallel
@@ -58,19 +212,10 @@ pub async fn serve_model(
 ) -> Result<ModelReg, mycelium::PromptSkillError> {
     let skill = agent.llm().register_prompt_skill("llm", &profile.model, template, backend).await?;
 
-    let mut meta = mycelium::Capability::new("llm-meta", profile.model.as_str());
-    if let Some(ctx) = profile.ctx_window {
-        meta = meta.with("ctx_window", mycelium::CapValue::Integer(ctx));
-    }
-    if let Some(family) = &profile.family {
-        meta = meta.with("family", mycelium::CapValue::Text(Arc::from(family.as_str())));
-    }
-    for (k, v) in profile.extra {
-        meta = meta.with(k.as_str(), v);
-    }
-    let meta_reg = agent.capabilities().advertise_capability(meta, Duration::from_secs(30));
+    let meta = profile.meta_capability();
+    let meta_reg = agent.capabilities().advertise_capability(meta.clone(), META_INTERVAL);
 
-    Ok(ModelReg { _skill: skill, _meta: meta_reg })
+    Ok(ModelReg { model: profile.model, _skill: skill, meta: Some(meta_reg), advertised: meta })
 }
 
 // ── Call side (core-only — no feature gate) ───────────────────────────────────
@@ -93,6 +238,11 @@ pub struct RouterConfig {
     pub failover_timeout: Duration,
     /// Freshness window for opacity + pheromone load reads.
     pub load_max_age: Duration,
+    /// How much rank score one of *this router's* in-flight calls adds to a provider —
+    /// the local reservation (module doc). Fill is 0.0–1.0, so the default `0.1` reads
+    /// as "ten of our own open calls weigh like a fully loaded trail". `0.0` disables
+    /// reservations (pure pheromone + id order).
+    pub reservation_weight: f32,
 }
 
 impl Default for RouterConfig {
@@ -102,6 +252,7 @@ impl Default for RouterConfig {
             call_timeout: Duration::from_secs(30),
             failover_timeout: Duration::from_secs(8),
             load_max_age: Duration::from_secs(10),
+            reservation_weight: 0.1,
         }
     }
 }
@@ -169,18 +320,60 @@ impl std::error::Error for RouteError {}
 pub struct InferenceRouter {
     agent: Arc<GossipAgent>,
     cfg: RouterConfig,
+    /// Local reservations: calls this router currently has open, per provider (node id
+    /// string). Leaf lock — taken for a map read/write only, never across an await
+    /// (lock-order row 36). Node-local by design: see the module doc.
+    inflight: Mutex<HashMap<String, u32>>,
+}
+
+/// RAII reservation on one provider for the duration of one attempt.
+struct Reservation<'r> {
+    router: &'r InferenceRouter,
+    node: String,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let mut map = self.router.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.node) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.node);
+            }
+        }
+        metrics::gauge!("mycelium_reason_route_inflight").decrement(1.0);
+    }
 }
 
 impl InferenceRouter {
     pub fn new(agent: Arc<GossipAgent>, cfg: RouterConfig) -> Self {
-        Self { agent, cfg }
+        Self { agent, cfg, inflight: Mutex::new(HashMap::new()) }
+    }
+
+    /// Calls this router currently has open against `node` (the local reservation count).
+    pub fn inflight(&self, node: &NodeId) -> u32 {
+        let map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&node.to_string()).copied().unwrap_or(0)
+    }
+
+    fn reserve(&self, node: &NodeId) -> Reservation<'_> {
+        let key = node.to_string();
+        {
+            let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            *map.entry(key.clone()).or_insert(0) += 1;
+        }
+        metrics::gauge!("mycelium_reason_route_inflight").increment(1.0);
+        Reservation { router: self, node: key }
     }
 
     /// The ranked candidate list for `q`: resolve `llm/{model}`, intersect with the
     /// `llm-meta` ad when constraints are given, **drop nodes SWIM believes are dead**,
-    /// drop opaque nodes, then sort by (pheromone fill, node id) — the id tiebreak makes
-    /// the order deterministic. Fill is the max `fill_ratio` across the node's fresh load
-    /// entries; a node with no pheromone trail is 0.0 (transparent).
+    /// drop opaque nodes, then sort by (score, node id) — the id tiebreak makes the order
+    /// deterministic. The score is the pheromone fill (max `fill_ratio` across the node's
+    /// fresh load entries; no trail is 0.0, transparent) **plus this router's open calls
+    /// against the node × [`RouterConfig::reservation_weight`]** — the local reservation
+    /// that covers the trail's propagation lag (module doc). The returned `f32` is that
+    /// score.
     ///
     /// The liveness filter is load-bearing for failover. A killed node lingers in the
     /// capability *freshness* window for ~90 s (3× the 30 s re-advertise interval) — it
@@ -217,8 +410,12 @@ impl InferenceRouter {
 
         nodes.retain(|n| !caps.is_node_opaque(n, signal_kind::LLM_INVOKE, self.cfg.load_max_age));
 
-        // Pheromone fill per node: max fill_ratio over that node's fresh load entries.
+        // Pheromone fill per node (max fill_ratio over its fresh load entries) plus the
+        // local reservation — a snapshot of the in-flight map, taken once, lock released
+        // before ranking.
         let load = caps.peer_load(self.cfg.load_max_age);
+        let inflight: HashMap<String, u32> =
+            self.inflight.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut ranked: Vec<(NodeId, f32)> = nodes
             .into_iter()
             .map(|n| {
@@ -228,12 +425,11 @@ impl InferenceRouter {
                     .filter(|(node, _, _)| node.as_ref() == ns)
                     .map(|(_, _, s)| s.fill_ratio)
                     .fold(0.0_f32, f32::max);
-                (n, fill)
+                let reserved = inflight.get(&ns).copied().unwrap_or(0) as f32;
+                (n, fill + reserved * self.cfg.reservation_weight)
             })
             .collect();
-        ranked.sort_by(|(na, fa), (nb, fb)| {
-            fa.total_cmp(fb).then_with(|| na.to_string().cmp(&nb.to_string()))
-        });
+        rank(&mut ranked);
         ranked
     }
 
@@ -279,11 +475,15 @@ impl InferenceRouter {
                 self.cfg.failover_timeout
             };
             let started = std::time::Instant::now();
-            let reply = self
-                .agent
-                .service()
-                .rpc_call(node.clone(), signal_kind::LLM_INVOKE, payload.clone(), per_attempt_timeout)
-                .await;
+            let reply = {
+                // Reserved for exactly the attempt: the guard drops when the reply (or the
+                // timeout) comes back, whether or not we fail over.
+                let _reservation = self.reserve(node);
+                self.agent
+                    .service()
+                    .rpc_call(node.clone(), signal_kind::LLM_INVOKE, payload.clone(), per_attempt_timeout)
+                    .await
+            };
             let duration_ms = started.elapsed().as_millis() as u64;
 
             let err = match reply {
@@ -326,12 +526,19 @@ impl InferenceRouter {
     }
 }
 
+/// The candidate order: score ascending, then node-id string (deterministic ties).
+fn rank(ranked: &mut [(NodeId, f32)]) {
+    ranked.sort_by(|(na, fa), (nb, fb)| {
+        fa.total_cmp(fb).then_with(|| na.to_string().cmp(&nb.to_string()))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The candidate ordering contract, tested as a pure sort (the same comparator
-    /// `candidates()` applies): fill ascending, then node-id string for determinism.
+    /// `candidates()` applies): score ascending, then node-id string for determinism.
     #[test]
     fn candidate_ordering_is_deterministic() {
         let n = |p: u16| NodeId::new("127.0.0.1", p).unwrap();
@@ -341,9 +548,7 @@ mod tests {
             (n(9001), 0.5),
             (n(9000), 0.0),
         ];
-        ranked.sort_by(|(na, fa), (nb, fb)| {
-            fa.total_cmp(fb).then_with(|| na.to_string().cmp(&nb.to_string()))
-        });
+        rank(&mut ranked);
         let order: Vec<String> = ranked.iter().map(|(n, _)| n.to_string()).collect();
         assert_eq!(
             order,
@@ -352,9 +557,7 @@ mod tests {
         // Re-sorting an already-sorted list is a fixpoint (stability under repetition).
         let again = {
             let mut r = ranked.clone();
-            r.sort_by(|(na, fa), (nb, fb)| {
-                fa.total_cmp(fb).then_with(|| na.to_string().cmp(&nb.to_string()))
-            });
+            rank(&mut r);
             r
         };
         assert_eq!(
@@ -375,5 +578,30 @@ mod tests {
         assert!(s.contains("all 2 attempted provider(s) failed"));
         assert!(s.contains("127.0.0.1:9000: timeout"));
         assert!(s.contains("127.0.0.1:9001: llm_error: boom"));
+    }
+
+    /// The reservation guard: `reserve` counts up, dropping counts down (and clears the
+    /// entry at zero), and a reserved provider's score rises by `reservation_weight`
+    /// per open call — enough to lose an equal-fill tie it would otherwise win on id.
+    #[tokio::test]
+    async fn reservations_count_and_release() {
+        let node = NodeId::new("127.0.0.1", 9100).unwrap();
+        let agent = Arc::new(GossipAgent::new(node.clone(), mycelium::GossipConfig::default()));
+        let router = InferenceRouter::new(agent, RouterConfig::default());
+        let a = NodeId::new("127.0.0.1", 9000).unwrap();
+        let b = NodeId::new("127.0.0.1", 9001).unwrap();
+        assert_eq!(router.inflight(&a), 0);
+        {
+            let _r1 = router.reserve(&a);
+            let _r2 = router.reserve(&a);
+            assert_eq!(router.inflight(&a), 2);
+            // Scoring as candidates() does it: fill 0 for both, a carries two reservations.
+            let w = router.cfg.reservation_weight;
+            let mut ranked = vec![(a.clone(), 0.0 + 2.0 * w), (b.clone(), 0.0)];
+            rank(&mut ranked);
+            assert_eq!(ranked[0].0, b, "the reserved provider loses the tie it wins on id alone");
+        }
+        assert_eq!(router.inflight(&a), 0, "guards released, entry cleared");
+        assert!(router.inflight.lock().unwrap().is_empty());
     }
 }

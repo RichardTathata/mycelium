@@ -98,9 +98,36 @@ in — an honest consequence of eventual consistency, not a bug).
 each call to a healthy `llm/{model}` provider and fail over down a ranked candidate list.
 This is a *real routing layer*, not a byproduct of resolution: capability resolution is
 deliberately **load-blind** (it ranks by freshness/attributes/locality), so the router adds
-what the substrate leaves out — *resolve → drop dead/opaque nodes → rank by pheromone fill →
-fail over.* Contrast `/gateway/llm/call`, which resolves one provider and does a single RPC
-with no failover.
+what the substrate leaves out — *resolve → drop dead/opaque nodes → rank by pheromone fill +
+local reservations → fail over.* Contrast `/gateway/llm/call`, which resolves one provider and
+does a single RPC with no failover.
+
+*Reservations (2026-09-04).* The pheromone is the provider's self-report and reaches you a
+gossip hop after it changes; between your dispatch and that update, the only evidence a
+provider is busier than its trail says is what *you* sent it. So each call the router has
+open against a provider counts as a **node-local reservation** weighted into the rank
+(`RouterConfig::reservation_weight`, default 0.1). Without it, N concurrent callers on one node
+read the same stale fill and — via the deterministic id tiebreak — all pick the same provider.
+The reservation is never gossiped and never written as a pheromone: local knowledge composed
+with the shared medium, not a global schedule.
+
+**The drop-in path — the OpenAI-compatible façade.** `POST /gateway/reason/v1/chat/completions`
+and `GET /gateway/reason/v1/models` speak the OpenAI chat wire shape, so any OpenAI-speaking
+client becomes a mesh client by changing its base URL to
+`http://node:port/gateway/reason/v1` (when the gateway is token-protected, the gateway bearer
+is its API key). The `model` field is the `llm/{model}` capability; the call is routed exactly
+as `/route` routes it. Mapping, honestly: the last `user` message is the prompt skill's
+`input`, `system` messages join into context `system`, earlier turns render into context
+`history` (a template that wants them says `{{system}}`/`{{history}}`); `max_tokens` and
+`temperature` are bound by the serving template, not the request; `stream: true` is honoured
+as a one-chunk SSE stream (the mesh RPC is not streamed); `usage.total_tokens` is what the
+backend reported and the prompt/completion split is unknown (reported `0`).
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8201/gateway/reason/v1", api_key="mesh-key")
+client.chat.completions.create(model="llama3", messages=[{"role": "user", "content": "hi"}])
+```
 
 **Rung 5 — fleet-reasoning traces.** Pass a `run_id` to a routed call and the route decision
 and each attempt are recorded to the event-log overlay (`reason/{run_id}/{node}`, one
@@ -124,8 +151,42 @@ Rungs 4–6 surface the three things a single-process framework structurally can
    in where the thread landed. See rung 6.
 
 The convention that ties them together: **a served model is a prompt skill** — capability
-`llm/{model}` via `serve_model`, plus a parallel attributed `llm-meta/{model}` ad (context
-window, family) for constraint-based routing.
+`llm/{model}` via `serve_model`, plus a parallel attributed `llm-meta/{model}` ad for
+constraint-based routing.
+
+**The `llm-meta` vocabulary (2026-09-04).** The ad is a plain attributed capability, so any key
+is *expressible*; `mycelium_reason::llm_meta` fixes the names, types, and sources that mean the
+same thing fleet-wide, so a constraint written on one node matches an ad written on another:
+
+| attribute | type | source |
+|---|---|---|
+| `ctx_window` | Integer | engine (`/api/show`) or profile |
+| `family` | Text | engine or profile |
+| `engine` | Text | serve side: `ollama` · `lmstudio` · `openai` · `echo` |
+| `warm` | Bool | engine process list — weights resident now (a cold model pays its load first) |
+| `vram_used_mb` | Integer | engine process list |
+| `vram_free_mb` | Integer | embedder-measured (`nvidia-smi`, Metal) — engines do not report it |
+| `tokens_per_sec` | Float | embedder-measured decode throughput |
+| `param_size` · `quant` | Text | engine (`/api/show`) |
+
+Static attributes ride the profile (`ModelProfile::new(m).with(llm_meta::CTX_WINDOW, …)`);
+dynamic ones are re-advertised by `ModelReg::refresh_meta`, which retracts the old ad and
+*observes* the retraction before publishing the new one (the ordering of the tombstone and
+the new ad's first write on one node's HLC is otherwise a runtime scheduling detail; it held
+in 60 measured flips, so the sequencing is explicitness, not a fix). The **Ollama
+collector** (feature `ollama`: `OllamaProbe` + `spawn_meta_refresher`) fills the vocabulary
+from a local daemon — `/api/ps` for `warm`/`vram_used_mb`, `/api/show` for the statics — and
+keeps the ad current. The `ollama_serve` example is the whole story in one binary: serve a
+local model into the mesh with a live ad and the façade, on as many machines as you like.
+
+*Positioning note.* NVIDIA's PAIR (Sept 2026) productises exactly this slice — per-node
+placement of independent inference requests over Ollama/LM Studio behind drop-in endpoints —
+for one household's machines. PAIR is the GPU plane; Mycelium is the agent plane (capabilities,
+state, tools, traces, resume), and where PAIR is not available it can be both. The two stack
+cleanly: point `OpenAiBackend` at a PAIR proxy and Mycelium routes capabilities while PAIR
+places GPU work. Do not run both routers over the same replica pool: with PAIR underneath, all
+`llm/{model}` providers collapse to one endpoint and the mesh router's failover is moot — fine
+if deliberate.
 
 ---
 

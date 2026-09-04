@@ -69,14 +69,16 @@ impl TraceRecorder {
         self.agent.kv().append(&format!("reason/{}/{node}", self.run_id), bytes)
     }
 
-    /// A routing decision — candidate fills and the chosen provider (wedge ①, recorded once per call).
+    /// A routing decision — candidate scores and the chosen provider (wedge ①, recorded once per call).
     pub fn route(&self, model: &str, candidates: &[(NodeId, f32)], chosen: &NodeId) -> u64 {
         self.record(
             "route",
             json!({
                 "model": model,
+                // `score` = pheromone fill + local reservations (route.rs module doc);
+                // was `fill` before 2026-09-04, when the rank was fill alone.
                 "candidates": candidates.iter()
-                    .map(|(n, fill)| json!({ "node": n.to_string(), "fill": fill }))
+                    .map(|(n, score)| json!({ "node": n.to_string(), "score": score }))
                     .collect::<Vec<_>>(),
                 "chosen": chosen.to_string(),
             }),
@@ -246,7 +248,7 @@ mod tests {
     fn narrate_typed_glosses() {
         let events = vec![
             ev(1, "route", json!({ "model": "fable-mini", "chosen": "127.0.0.1:9001",
-                "candidates": [{ "node": "127.0.0.1:9001", "fill": 0.0 }] })),
+                "candidates": [{ "node": "127.0.0.1:9001", "score": 0.0 }] })),
             ev(2, "llm_call", json!({ "provider": "127.0.0.1:9001", "ok": true,
                 "tokens": 42, "duration_ms": 12, "error": null })),
             ev(3, "llm_call", json!({ "provider": "127.0.0.1:9002", "ok": false,

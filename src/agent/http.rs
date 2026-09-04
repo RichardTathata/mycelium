@@ -265,9 +265,20 @@ pub(super) async fn run_http_server(
     #[cfg(feature = "consensus")]
     let app = app.route("/consensus/{slot}", get(consensus_slot_handler));
 
-    let app = app.with_state(state);
+    let app = app.with_state(Arc::clone(&state));
 
+    // Application routes merged in via `with_http_routes` (companion crates, A2A). Their
+    // `/gateway/…` paths must sit behind the SAME auth boundary as the library's own — a
+    // merged router is not inside the `.nest("/gateway", …)` above, so without this layer a
+    // companion's `/gateway/reason/route` or `/gateway/wiki/ingest` answered without a bearer
+    // while `/gateway/kv` demanded one (found 2026-09-04 while adding the OpenAI façade; the
+    // companion docs had claimed coverage all along). Prefix-guarded: an application's
+    // deliberately public path (`/.well-known/agent.json`, `/a2a`) stays open.
     let app = if let Some(extra) = extra_routes {
+        let extra = extra.route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            gateway_auth_if_gateway_path,
+        ));
         app.merge(extra)
     } else {
         app
@@ -470,6 +481,22 @@ async fn gateway_auth(
     let _ = &scopes;
 
     next.run(request).await
+}
+
+/// [`gateway_auth`] for routes merged via `with_http_routes`: applied only when the request
+/// path is under `/gateway/`, so a companion's gateway routes get the library's auth
+/// boundary (bearer, then scope — an unmapped `/gateway/` route is deny-by-default `admin`)
+/// while its intentionally public paths pass straight through.
+async fn gateway_auth_if_gateway_path(
+    State(ctx): State<Arc<HttpCtx>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.uri().path().starts_with("/gateway/") {
+        gateway_auth(State(ctx), request, next).await
+    } else {
+        next.run(request).await
+    }
 }
 
 /// Map a presented bearer token to its scope grant, or `None` if unrecognised.
@@ -3903,6 +3930,46 @@ mod tests {
         // Valid 64-hex still parses; wrong lengths rejected.
         assert!(parse_hex32(&"ab".repeat(32)).is_some());
         assert_eq!(parse_hex32("abcd"), None);
+    }
+
+    /// Routes merged via `with_http_routes` sit behind the same auth boundary as the
+    /// library's own gateway routes: a merged `/gateway/…` path demands the bearer, a merged
+    /// path outside `/gateway/` stays public. Pre-fix (2026-09-04) the merged `/gateway/`
+    /// route answered 200 with no token — every companion's gateway surface was open.
+    #[tokio::test]
+    async fn test_merged_app_routes_under_gateway_prefix_require_auth() {
+        use axum::http::header::AUTHORIZATION;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        async fn ok() -> &'static str { "ok" }
+        agent.with_http_routes(
+            axum::Router::new()
+                .route("/gateway/app/protected", axum::routing::get(ok))
+                .route("/app/public", axum::routing::get(ok)),
+        );
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        let r = client.get(format!("{base}/gateway/app/protected")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "a merged /gateway/ route must demand the bearer");
+        let r = client.get(format!("{base}/gateway/app/protected"))
+            .header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+        assert_eq!(r.status(), 200, "the configured token admits the merged /gateway/ route");
+        let r = client.get(format!("{base}/app/public")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "a merged route outside /gateway/ stays public");
+
+        agent.shutdown().await;
     }
 
     /// End-to-end: a scoped token is admitted on routes within its grant,

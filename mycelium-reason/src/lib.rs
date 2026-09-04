@@ -7,7 +7,12 @@
 //! - **① Capability-routed inference** ([`InferenceRouter`], [`serve_model`]) — route each
 //!   call to a healthy model-serving node with no central proxy. Capability *resolution*
 //!   is load-blind, so this is a real routing layer: resolve → drop opaque nodes →
-//!   rank by pheromone fill → fail over down the candidate list.
+//!   rank by pheromone fill + local in-flight reservations → fail over down the
+//!   candidate list. Reachable three ways: the Rust API, `POST /gateway/reason/route`,
+//!   and the **OpenAI-compatible façade** `POST /gateway/reason/v1/chat/completions`
+//!   (feature `gateway`) — point any OpenAI-speaking client at
+//!   `http://node:port/gateway/reason/v1` and its `model` field becomes an `llm/{model}`
+//!   route across the fleet.
 //! - **② Fleet-reasoning traces** ([`TraceRecorder`], [`replay`], [`narrate`]) — causal,
 //!   HLC-ordered, gossip-replicated records of why the whole fleet reasoned as it did,
 //!   replayable from any node; optionally anchored into the WS2 audit chain
@@ -33,9 +38,12 @@
 //!
 //! A served model **is a prompt skill**: capability `llm/{model-id}` via
 //! `register_prompt_skill` (the `model_deploy` precedent), plus a parallel *attributed*
-//! metadata ad `llm-meta/{model-id}` (ctx window, family, extras) — parallel because
-//! re-advertising the same `(node, ns, name)` with attributes would LWW-churn against
-//! the skill's own persist task. Both retract together via [`ModelReg`].
+//! metadata ad `llm-meta/{model-id}` — parallel because re-advertising the same
+//! `(node, ns, name)` with attributes would LWW-churn against the skill's own persist
+//! task. Both retract together via [`ModelReg`]. The ad's attribute names are the shared
+//! vocabulary in [`llm_meta`] (`ctx_window`, `family`, `engine`, `warm`, `vram_used_mb`,
+//! …); the dynamic ones are kept current by [`ModelReg::refresh_meta`], driven for Ollama
+//! by the `ollama` feature's collector.
 //!
 //! ## Namespaces claimed
 //!
@@ -48,6 +56,8 @@
 mod blob;
 #[cfg(feature = "gateway")]
 mod http;
+#[cfg(feature = "ollama")]
+mod ollama;
 mod resume;
 mod route;
 mod trace;
@@ -57,9 +67,11 @@ pub use blob::{
     spawn_blob_server,
 };
 #[cfg(feature = "gateway")]
-pub use http::reason_router;
+pub use http::{reason_router, reason_router_with};
+#[cfg(feature = "ollama")]
+pub use ollama::{MetaRefresher, OllamaError, OllamaModelState, OllamaProbe, spawn_meta_refresher};
 pub use resume::{ModelDependency, ResumeError, require_model};
 #[cfg(feature = "llm")]
 pub use route::{ModelProfile, ModelReg, serve_model};
-pub use route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig};
+pub use route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig, llm_meta};
 pub use trace::{TraceEvent, TraceRecorder, narrate, replay};

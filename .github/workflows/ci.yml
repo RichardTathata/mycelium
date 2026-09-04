@@ -173,9 +173,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Cross-node integration suites bind real sockets — route through the flake tier.
       - run: ./scripts/ci-retest.sh -p mycelium-reason --features llm
-      - run: ./scripts/ci-retest.sh -p mycelium-reason --features llm,gateway
+      - run: ./scripts/ci-retest.sh -p mycelium-reason --features llm,gateway,ollama
       - run: cargo clippy -p mycelium-reason --all-targets -- -D warnings
-      - run: cargo clippy -p mycelium-reason --features llm,gateway --all-targets -- -D warnings
+      - run: cargo clippy -p mycelium-reason --features llm,gateway,ollama --all-targets -- -D warnings
       # The fleet-reasoning worked example (all three wedges, three-node mesh), Docker-free.
       - run: ./mycelium-reason/ci_smoke.sh
 

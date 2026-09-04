@@ -11,6 +11,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium-reason` 0.6.0 — three imports from the NVIDIA PAIR comparison (2026-09-04).**
+  A same-day comparative read of NVIDIA's Personal AI Router (a per-node inference placer over
+  Ollama/LM Studio, Apache-2.0, 3 Sept 2026) against wedge ① found one lesson to take, one
+  adoption path to add, and one convention to fix; the position (PAIR is the GPU plane,
+  Mycelium the agent plane, stackable) is recorded in `docs/plans/mycelium-reason.md`.
+  1. **Local in-flight reservations in `InferenceRouter`** — the pheromone is the provider's
+     self-report and lags dispatch by a gossip hop; between our send and its update the only
+     evidence a provider is busier is *what we sent it*. Each open call now counts as a
+     node-local reservation weighted into the rank (`RouterConfig::reservation_weight`,
+     default 0.1; `0.0` restores the old order). Without it N concurrent callers on one node
+     read the same stale fill and, via the deterministic id tiebreak, all chose the same
+     provider — the thundering herd PAIR documents its reservations against. Never gossiped,
+     never a pheromone (lock-order **row 36**). Gate:
+     `reservations_spread_concurrent_calls_across_equal_providers` (fails pre-fix). Trace
+     `route` events now record `score` (fill + reservations) where they recorded `fill`.
+  2. **The OpenAI-compatible façade** — `POST /gateway/reason/v1/chat/completions` +
+     `GET /gateway/reason/v1/models`: any OpenAI-speaking client becomes a mesh client by
+     changing its base URL (and using the gateway bearer as its API key). `model` is the
+     `llm/{model}` capability; same router, reservations and failover as `/route`;
+     `stream: true` honoured as a one-chunk SSE stream; OpenAI's error envelope with the
+     statuses clients map. The mapping is documented honestly (last user message → `input`;
+     `system`/`history` context keys; template-bound `max_tokens`/`temperature`; unknown
+     prompt/completion split). `reason_router_with(…, RouterConfig)` tunes the shared router.
+     Python CI exercises it from an ordinary HTTP client.
+  3. **The `llm-meta` attribute vocabulary + the Ollama collector** — `llm_meta::{CTX_WINDOW,
+     FAMILY, ENGINE, WARM, VRAM_USED_MB, VRAM_FREE_MB, TOKENS_PER_SEC, PARAM_SIZE, QUANT}` with
+     types and sources fixed so a constraint written on one node matches an ad written on
+     another; `ModelProfile::new/with/set`; **`ModelReg::refresh_meta`** re-advertises the
+     dynamic attributes, observing the old ad's retraction before publishing the new one
+     (the retract-vs-advertise LWW ordering is otherwise a tokio scheduling detail — it held
+     in 60 measured flips, so this is explicitness, not a fix). Feature `ollama`: `OllamaProbe` reads `/api/ps` (warm,
+     `vram_used_mb`) and `/api/show` (family, ctx window, param size, quant);
+     `spawn_meta_refresher` keeps a served model's ad current. Example `ollama_serve`: one
+     binary that serves a local Ollama model into the mesh with a live ad and the façade.
+     Gates: the collector against a fake daemon; five warm/cold flips each visible within 3 s.
+
+### Fixed
+
+- **Routes merged via `with_http_routes` bypassed the gateway auth boundary** (core, since
+  the first companion gateway routes). The auth `route_layer` wrapped only the library's
+  nested `/gateway` router; a merged router's `/gateway/reason/route`, `/gateway/wiki/ingest`,
+  `/gateway/tuple/put`, … answered **without a bearer** while `/gateway/kv` demanded one — and
+  the companions' docs claimed coverage. Found while adding the façade (2026-09-04). Fix: a
+  prefix-guarded layer on merged routers — `/gateway/…` paths get the same bearer-then-scope
+  check (an unmapped `/gateway/` route is deny-by-default `admin` under `compliance`), paths
+  outside stay public (`/.well-known/agent.json`, `/a2a`). Gates in core
+  (`test_merged_app_routes_under_gateway_prefix_require_auth`) and in `mycelium-reason`
+  (`reason_routes_require_the_gateway_bearer`), both failing pre-fix. Calibration-ledger entry
+  (Security scored 8 at Run 59 while this existed).
+
 - **`mycelium-py` 0.2.0: persistent pooled HTTP client** — the bridge opened a fresh TCP
   connection per gateway call, exhausting macOS ephemeral ports at Group-scale write rates
   (~16k rapid KV calls; found by a downstream test session). All request/response call sites now
