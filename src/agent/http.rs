@@ -4011,6 +4011,48 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// Falsification probe (Run 60): path shapes that a naive prefix guard might let past
+    /// the bearer on a merged route — percent-encoded prefix, double slash, trailing slash,
+    /// upper-case, dot-segments. None may reach the handler without a bearer: either the
+    /// guard fires (401) or the router does not match the shape (404). Never 200.
+    #[tokio::test]
+    async fn probe_merged_route_guard_survives_path_shapes() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        async fn ok() -> &'static str { "ok" }
+        agent.with_http_routes(
+            axum::Router::new()
+                .route("/gateway/app/protected", axum::routing::get(ok))
+                .route("/gateway/app/{*rest}", axum::routing::get(ok)),
+        );
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        for shape in [
+            "/gateway/app/protected",
+            "/%67ateway/app/protected",
+            "/gateway%2Fapp/protected",
+            "/gateway//app/protected",
+            "/gateway/app/protected/",
+            "/GATEWAY/app/protected",
+            "/gateway/app/../app/protected",
+            "/gateway/app/deep/wild/card",
+            "/gateway/app/%2e%2e/protected",
+        ] {
+            let r = client.get(format!("{base}{shape}")).send().await.unwrap();
+            assert_ne!(r.status(), 200, "shape {shape} reached a merged /gateway/ handler without a bearer");
+        }
+        agent.shutdown().await;
+    }
+
     /// Scoped tokens on merged companion routes (compliance): a route in the companion
     /// scope table is admitted by its family and refused (403) outside it; an unlisted
     /// merged `/gateway/` path is deny-by-default `admin`, which only the wildcard reaches.

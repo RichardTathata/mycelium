@@ -423,3 +423,48 @@ async fn facade_requests_share_one_router_and_spread_across_providers() {
     agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
     agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// Falsification probe (Run 60): hostile inputs to the façade — wrong types, empty
+/// messages, non-JSON, an oversized body, absurd model ids — must answer a 4xx and leave
+/// the node serviceable. A 5xx or a dead `/health` would be a finding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn probe_facade_hostile_inputs_never_5xx_and_node_stays_serviceable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let (agent, _base, http_port) = start_gateway_node(store, None).await;
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason/v1/chat/completions");
+    let http = reqwest::Client::new();
+
+    let bodies: Vec<(&str, serde_json::Value)> = vec![
+        ("content is a number", serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": 7 }] })),
+        ("content is an object", serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": { "a": 1 } }] })),
+        ("parts with no text", serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": [{ "type": "image_url", "image_url": "x" }] }] })),
+        ("empty messages", serde_json::json!({ "model": "m", "messages": [] })),
+        ("messages not an array", serde_json::json!({ "model": "m", "messages": "hi" })),
+        ("stream is a string", serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": "x" }], "stream": "yes" })),
+        ("model is a number", serde_json::json!({ "model": 3, "messages": [{ "role": "user", "content": "x" }] })),
+        ("absurd model id", serde_json::json!({ "model": "../../etc/passwd\u{0}", "messages": [{ "role": "user", "content": "x" }] })),
+        ("no role", serde_json::json!({ "model": "m", "messages": [{ "content": "x" }] })),
+    ];
+    for (what, body) in bodies {
+        let r = http.post(&url).json(&body).send().await.unwrap();
+        let st = r.status().as_u16();
+        assert!((400..500).contains(&st), "{what}: expected 4xx, got {st}: {}", r.text().await.unwrap_or_default());
+    }
+    // Non-JSON, wrong content type, and an oversized body.
+    let r = http.post(&url).header("content-type", "application/json").body("{not json").send().await.unwrap();
+    assert!((400..500).contains(&r.status().as_u16()), "non-JSON → 4xx");
+    let r = http.post(&url).body("model=m").send().await.unwrap();
+    assert!((400..500).contains(&r.status().as_u16()), "wrong content type → 4xx");
+    let huge = serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": "x".repeat(3 * 1024 * 1024) }] });
+    let r = http.post(&url).json(&huge).send().await.unwrap();
+    assert!((400..500).contains(&r.status().as_u16()), "3 MiB body → 4xx (413), got {}", r.status());
+
+    // Still serviceable.
+    let h = http.get(format!("http://127.0.0.1:{http_port}/health")).send().await.unwrap();
+    assert_eq!(h.status().as_u16(), 200);
+    let models = http.get(format!("http://127.0.0.1:{http_port}/gateway/reason/v1/models")).send().await.unwrap();
+    assert_eq!(models.status().as_u16(), 200);
+
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

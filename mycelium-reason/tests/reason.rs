@@ -433,3 +433,52 @@ async fn refresh_meta_is_a_noop_when_unchanged_and_replaces_when_changed() {
     agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
     agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// Falsification probe (Run 60): the reservation guard is released on every exit path —
+/// a per-attempt timeout (the RPC future completes with an error) and a **dropped**
+/// in-flight call (the caller's future is cancelled mid-await). A leaked reservation would
+/// bias every later rank against that provider for the router's lifetime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn probe_reservations_release_on_timeout_and_cancellation() {
+    let (agent_a, agent_b) = start_pair().await;
+    // Both providers hold calls open far longer than the router's timeouts.
+    let slow = || Arc::new(SlowEcho(Duration::from_secs(6)));
+    let _ra = serve_model(&agent_a, profile("fable-mini"), echo_template(), slow()).await.unwrap();
+    let _rb = serve_model(&agent_b, profile("fable-mini"), echo_template(), slow()).await.unwrap();
+
+    let cfg = RouterConfig {
+        max_attempts: 2,
+        call_timeout: Duration::from_millis(600),
+        failover_timeout: Duration::from_millis(300),
+        ..RouterConfig::default()
+    };
+    let router = Arc::new(InferenceRouter::new(Arc::clone(&agent_a), cfg));
+    let q = ModelQuery::new("fable-mini");
+    assert!(poll_until(|| router.candidates(&q).len() == 2, Duration::from_secs(20)).await);
+
+    // 1. Timeouts on both attempts → Exhausted, and nothing left reserved.
+    let r = router.call(&q, "t", &HashMap::new(), None).await;
+    assert!(matches!(r, Err(mycelium_reason::RouteError::Exhausted(_))), "{r:?}");
+    assert_eq!(router.inflight(agent_a.node_id()), 0);
+    assert_eq!(router.inflight(agent_b.node_id()), 0);
+
+    // 2. Cancel a call mid-await (drop the future) → the guard's Drop releases it.
+    let call = {
+        let router = Arc::clone(&router);
+        let q = q.clone();
+        tokio::spawn(async move { router.call(&q, "c", &HashMap::new(), None).await.map(|_| ()) })
+    };
+    assert!(
+        poll_until(|| router.inflight(agent_a.node_id()) + router.inflight(agent_b.node_id()) == 1, Duration::from_secs(5)).await,
+        "one reservation held while the call is in flight"
+    );
+    call.abort();
+    let _ = call.await;
+    assert!(
+        poll_until(|| router.inflight(agent_a.node_id()) + router.inflight(agent_b.node_id()) == 0, Duration::from_secs(5)).await,
+        "cancellation released the reservation"
+    );
+
+    agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

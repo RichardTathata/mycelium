@@ -76,3 +76,10 @@ reservation default and the façade's mapping loss; neither is in the ratings ye
   sampled the connection count at a fixed 1 s; a hosted runner had opened 88 of 120 by then.
   Now polls to the plateau inside a longer park window (structural, not a sample). The
   lesson already on the page applies to its author.
+- **Run 60 (M2) ran the same evening** (`docs/analysis/ratings.md`): floor 7/7/7 (Modularity ↓ from a
+  carried 8 — the `http.rs` assembly seam + core naming companion paths; Configurability; Robustness
+  held at its Run-55 floor). Three probes passed and stay as tests (path-shape auth bypass, reservation
+  release on timeout/cancel, hostile façade inputs). Found + fixed: a **yanked** `chacha20 0.10.0` in
+  the lock (`cargo audit` only warns) → 0.10.2; the three unmaintained transitives still lack a written
+  allowlist. Nightly 09-04 classified environmental (prompt again after the Colima restart; `scale`
+  hit the harness-side ceiling a second morning) — a supervised re-run is owed.

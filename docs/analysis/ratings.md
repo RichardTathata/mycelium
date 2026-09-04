@@ -3706,3 +3706,99 @@ and the script reported it as "offline / no auth" on every run including the gre
 code is unchanged over that window, so dim 16's evidence survives — but the *evidence pipeline* had
 a false statement in its log for 17 days, which this run's own addenda repeated without checking. The
 script now names its failure mode; the clone is at HEAD. Details: `scale-tests.md` (2026-09-03 block).
+
+## 2026-09-04 — Run 60 (M2)
+
+Deep-dive dimensions this run: **3 Architecture · 4 Modularity · 14 Failure Mode Legibility · 19
+Observability · 20 Debuggability** (rotation: Runs 54–59 covered 5/7/9–13/18/21–23/25; these five are
+the longest un-deep-dived, and today's diff — the reason 0.6.0 PAIR imports + the core merged-route
+auth fix — touches all five). Cadence: 22 commits since Run 59 (`v2.4.0..4730f39`, 1 542 lines of
+src/tests). Execution evidence this run (all produced today, 2026-09-04): full CI matrix **green** on
+`32bdd15` and `4730f39` (runs 33888301740 / 33893664319 — 18/18 jobs incl. Loom, fuzz, the Docker
+cluster suites, the Python SDK job); `make check` clippy matrix green ×2; `mycelium-reason` suites
+under `llm` and `llm,gateway,ollama` (lib 14, gateway 5→6, ollama 2, reason 9→10 — all pass); core
+`agent::http` tests under `compliance` (31) and `tls,metrics,a2a,llm` (18); every new gate run
+against pre-fix code (core auth test **fails** pre-fix; herd gate **fails** at
+`reservation_weight = 0.0`; parked-takes test **fails** on the capped pool; the refresh gate did
+*not* fail on the naive refresh → that claim was downgraded in the docs); pytest connection-reuse
+7/7 + a live `reason_node` driven by pytest 6/6 and a raw `curl` through the façade; fresh
+`cargo audit`; nightly scale CSV read + the 09-04 FAIL logs classified; three falsification probes
+(below).
+
+### Findings
+
+- **Minor (25 Dependency Hygiene) — fixed this run:** `chacha20 0.10.0` (via `rand`) is **yanked**
+  on crates.io and sat in `Cargo.lock`; `cargo audit` reports it only as an "allowed warning", so CI
+  stayed green. `cargo update -p chacha20` → 0.10.2 (not yanked). The three unmaintained
+  transitives remain allowed-by-default with **no written allowlist**: `backoff` (+ its `instant`)
+  via `async-openai`, and `rustls-pemfile` (a *direct* optional dep — rustls 0.23 parses PEM via
+  `rustls-pki-types`; a small swap, deferred). Improvement target: an `audit.toml` that names each
+  allowed advisory and why. No ledger line — whether 0.10.0 was already yanked at Run 59 is not
+  verifiable from here.
+- **Minor (4 Modularity) — design coupling, current state:** with the merged-route auth fix the
+  core `required_scope` table now **names companion paths** (`/gateway/reason/*`, `/gateway/wiki/*`,
+  `/gateway/bb/*`, `/gateway/tuple/*`). Correct for deny-by-default, but a companion cannot register
+  its own scope family — core knows the companions' routes. Together with `src/agent/http.rs` at
+  ~4 000 lines (router assembly, auth, ~40 handlers, tests in one file — the merge-outside-the-nest
+  slip lived there), this is the modularity weakness the deep-dive names. Not a defect; scored.
+- **Minor (16 Scalability / evidence infra):** the 09-04 08:00 nightly is all exit-2 —
+  classified from the logs: `scale` **ran** (100 containers, ~25 min) and hit the documented
+  FORWARD-chain signature (`only ? of 100 nodes visible to mgmt` — runner→mgmt curl failing, the
+  harness-side ceiling), second morning running; `resilience`/`entries` died at image build
+  (`DeadlineExceeded`) right after the between-rounds Colima restart — the session-scoped Local
+  Network prompt again, unanswered. **Environmental, not substrate.** Dim 16 keeps its 09-01
+  evidence but a *supervised* re-run is owed before the next run may keep 8 on it.
+- **Security context (13), already in the ledger (entry dated 2026-09-04, recorded before this
+  run):** every companion `/gateway/…` surface answered without a bearer while Security scored 8 at
+  Run 59. Current state: fixed in core (prefix-guarded layer), scope families, gates in core +
+  reason (both fail pre-fix), and today's path-shape probe. Scored at its fixed end-state.
+- **Probes (all passed, all kept as permanent tests):** ① **13 Security** —
+  `probe_merged_route_guard_survives_path_shapes`: nine path shapes (percent-encoded prefix,
+  encoded slash, double slash, trailing slash, upper-case, dot-segments, encoded dot-segments, a
+  `{*rest}` wildcard route) against a token-protected node — none reaches a merged `/gateway/`
+  handler without a bearer (401 or 404, never 200). ② **9 Concurrency** —
+  `probe_reservations_release_on_timeout_and_cancellation`: providers holding calls open past the
+  router's timeouts → `Exhausted` with zero reservations left; a call **aborted mid-await** releases
+  its reservation via the guard's `Drop`. ③ **12 Robustness** —
+  `probe_facade_hostile_inputs_never_5xx_and_node_stays_serviceable`: nine malformed bodies, non-JSON,
+  wrong content-type, a 3 MiB body → all 4xx; `/health` and `/v1/models` still 200.
+
+New ledger lines this run: none beyond the 2026-09-04 Security entry recorded earlier today.
+
+| # | Dimension | Score | Notes |
+|---|-----------|:-----:|-------|
+| 1 | Philosophy / Coherence with Goal | 8 | Re-earned: philosophy re-read for the PAIR coherence assessment (`.log/2026-09-04-pair-imports.md`); the three imports sit inside the rules (no proxy, no global schedule, no Layer-I law, no wire change) and the one tension — the façade is an adapter over prompt skills — is labelled, not hidden. Paremus lesson extended by one sentence |
+| 2 | Conceptual Integrity | 8 | New verbs in house idiom: RAII `Reservation`, `ModelProfile::with/set` builder, `llm_meta` constants (convention in the companion, not core), one shared router in gateway state. The façade's error envelope is OpenAI's, by design — the adapter boundary is explicit |
+| 3 | Architecture | 8 | **Deep-dive.** Companion contract verified in every `Cargo.toml` (7 companions → `mycelium` public API only); reason writes only table-listed prefixes (`cap/{node}/llm|llm-meta|reason/blob-cache`, `log/reason/…` — `src/lib.rs` table rows 130–133); the auth gap was an *assembly* seam (merged router outside the nested `/gateway` layer) — fixed at the seam, not by teaching companions to authenticate. e2e + CI green today. Not 9: layer separation is asserted by reading, not executed |
+| 4 | Modularity | 7 | **Deep-dive — down from a carried 8.** Handles compose through `TaskCtx` as designed (llm 5 / service 8 / capability 34 / consensus 23 `self.ctx` uses, no cross-handle internals); the router composes three handles cleanly. But: `http.rs` ~4 000 lines with hand-built router assembly (the seam that shipped the auth gap), and core's scope table now hard-codes companion paths (finding above). A current structural weakness, scored as such |
+| 5 | API Design | 8 | carried (v59) + touched: `reason_router_with`, `ModelProfile::new/with/set`, `llm_meta::*`, `ModelReg::refresh_meta/advertised_meta`, `InferenceRouter::inflight`. Honest wart: `RouterConfig` gained a field without `#[non_exhaustive]` — struct-literal constructors broke (0.x companion, CHANGELOG'd) |
+| 6 | Error Handling Model | 8 | carried (v49), stale — touched: OpenAI error envelope maps `RouteError` to the statuses clients handle (404 `model_not_found` / 502 `exhausted` / 400); `OllamaError` hand-implemented `Display`+`Error` like `RouteError` |
+| 7 | Configurability | 7 | carried (v59 floor) + one more static knob: `reservation_weight = 0.1` is a hand-set default in a codebase whose governors auto-derive; named in the coherence assessment as belonging under the tuning governor if it ever matters. Floor holds |
+| 8 | Language Best Practices | 8 | clippy matrix green today (`make check` ×2 + reason `--all-targets` under two feature sets, incl. the feature-gated-import trap caught once); `unsafe`: one production site (`erasure.rs` `write_volatile` zeroize, rationale inline), three in `config.rs` tests with `SAFETY:` comments; `http.rs` non-test `unwrap/expect`: 4, all justified |
+| 9 | Concurrency Correctness | 8 | Fresh: probe ② (reservation guard released on timeout **and** on cancellation), the herd gate (fails at weight 0.0), Loom CI job green; new lock-table row 36 (leaf, snapshot-then-rank, never across an await); `refresh_meta`'s retract-vs-advertise ordering was *measured* (60 naive flips, no blink) rather than asserted. Not 9: this dimension has repeated ledger entries (row-35 miss two days ago) — structural skepticism |
+| 10 | Resource Management | 8 | carried (v51), stale — touched: `Reservation` RAII (probe ②), `MetaRefresher::drop` aborts its task → the owned `ModelReg` retracts both ads; `ClientPool` (py) lifecycle unified 0.2.2. Possibly optimistic — no fd/task-count probe this run |
+| 11 | Semantic Correctness | 8 | carried, evidenced-touch: rank comparator + reservation scoring unit tests; OpenAI message→skill mapping unit-tested (last user → input, system/history context); `refresh_meta` no-op-when-unchanged gate; py parked-takes plateau gate. Not 9 (reserve) |
+| 12 | Robustness | 7 | **held at floor.** Probe ③ found nothing on the *new* surface (hostile façade inputs, 3 MiB body → 413, node stays serviceable) and CI's time-boxed fuzz job is green — but the Run-55 lift criterion is a *hunting pass over core that finds nothing*, and a probe of one new companion endpoint is not that pass |
+| 13 | Security | 8 | **Current state after the fix.** Merged routers now behind the bearer-then-scope layer (prefix-guarded; paths outside `/gateway/` stay public by construction), companion scope families exact-match with deny-by-default for unlisted paths, gates in core + reason failing pre-fix, probe ① (nine path shapes) passed, runbook + wiki updated. Not 9: the miss mechanism (a doc claim about a boundary taken as read) is exactly an unknown-unknown signature — other companion-claimed boundaries have not been sent a bare request |
+| 14 | Failure Mode Legibility | 8 | **Deep-dive.** Errors name the cause and the remedy: 403 carries `required_scope`; the façade's envelope carries `code`+`param`; `RouteError::Exhausted` lists per-node failures in attempt order; `OllamaError::UnknownModel` names the model; the nightly script now names *which* of dirty/updated/failed a pull was (the 17-day "offline" lie, fixed 09-03). Logs: `refresh_meta` logs a refresh, a failed probe warns and keeps the last-good ad. No panics on user input paths (probe ③) |
+| 15 | Performance | 8 | carried (v47), stale — possibly optimistic. The reservation path adds one µs-scale map clone per `candidates()`; unmeasured, plausibly invisible next to an RPC. No benchmark this run |
+| 16 | Scalability | 8 | evidenced by the **09-01 nightly (scale · resilience · entries all PASS, six minutes once unblocked)** — prior evidence, supports 8 not 9. 09-03 and 09-04 classified environmental from their logs (finding above); a supervised `make test-scale` re-run is owed and this 8 should not be carried past the next run without it |
+| 17 | Testability | 8 | Fresh discipline evidence: four new gates each proven to fail on pre-fix code, one claim *downgraded* when its gate did not fail (the tombstone race), a stub-server keep-alive counter for the py pool, `tests/common` shared double. Against it: a timing-based test of my own (0.2.3) went red on a hosted runner today and was made structural — the page's own lesson, re-learned |
+| 18 | Test Architecture | 8 | CI feature matrix extended (`ollama`), the façade driven from Python in CI, gateway/reason/ollama suites now 6/10/2 + 3 permanent probes; the connection-reuse gate is in CI since 09-02. Cost: each reason suite takes ~45 s dominated by agent shutdown waits — a fixed cost worth trimming |
+| 19 | Observability | 8 | **Deep-dive.** `docs/operations/metrics.md` reconciled against every `counter!/gauge!/histogram!` site across core + 6 companions: all documented (the gossip_* family, guardrails, reason counters + the new `mycelium_reason_route_inflight` gauge). No live scrape executed this run → 8 |
+| 20 | Debuggability | 8 | **Deep-dive** (longest-carried, v41). Re-examined by reading: `/gateway/fleet|explain|diagnose` + public `fleet_snapshot()/fleet_diagnosis()`, `/consensus/{slot}`, `/gateway/kv/keys`, reason traces (`score` per candidate now, `replay`/`narrate`), `InferenceRouter::inflight(node)`; a routed failure names every provider tried. Re-earned by reading, not by reproducing a failure with the tools alone — possibly optimistic, honestly labelled |
+| 21 | Operational Readiness | 8 | carried (v55) + touched: `rbac.md` gained the companion scope families and the behaviour note for scoped-token deployments; the nightly runner names its pull failure mode; `ollama_serve` env-driven like `reason_node`. The 08:00 prompt still needs a human — recorded, not solved |
+| 22 | Evolvability | 8 | Wire v12 unchanged; all additive; `mycelium-reason` re-versioned 0.6.0 + tagged at the CI-green commit; CHANGELOG `[Unreleased]` carries every change with its gate. Wart: `RouterConfig` field addition without `#[non_exhaustive]` (dim 5) |
+| 23 | Documentation | 8 | Large pass today (guide 15, both decks, README, ROADMAP, philosophy, wiki pages, runbooks, examples README + matrix, CLAUDE.md), and two of my own overclaims corrected in the same session (tombstone race; the 0.2.1 write-up's "gate" that was a smoke). Doc-vs-code held: every symbol the docs cite grep-verified. The Run-59 vacuous-doctest gap is untouched |
+| 24 | Developer Experience | 8 | carried (v49), stale — touched: the `ollama_serve` one-binary path, `reason_router_with`, the OpenAI base-URL story (any client, no SDK). Cold-build timing not re-measured |
+| 25 | Dependency Hygiene | 8 | **Fixed this run:** yanked `chacha20 0.10.0` → 0.10.2; `cargo audit` 0 vulnerabilities, 3 unmaintained warnings allowed with no written rationale (finding above — the `audit.toml` is the improvement target); new deps: `reqwest` optional under `ollama`, `async-trait` dev-only |
+| — | **Floor (lowest 3)** | **7, 7, 7** | 4 Modularity · 7 Configurability · 12 Robustness |
+| — | Mean (continuity footnote) | 7.9 | not a target; see M2 preamble |
+
+**Delta vs Run 59.** Modularity **8 → 7** (deep-dived for the first time since v47: the `http.rs`
+assembly seam that shipped the auth gap + core now naming companion paths); Dependency Hygiene held
+at 8 only because the yanked crate was fixed in-run. Everything else holds at its Run-59 value on
+today's evidence. The headline is not the numbers: it is that a security boundary the companions'
+docs asserted for two months had never been sent a bare request — the ledger entry recorded this
+morning — and that the loop's own timing-test lesson bit its author two days after being written.
+Next run's rotation: 1 · 2 · 6 · 8 · 15 (plus 16 only with a supervised nightly re-run in hand).
