@@ -985,6 +985,58 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
   </div>
 </div>
 
+<!-- 9b PAIR-shaped -->
+<div class="slide" id="s9b">
+  <div class="slide-top"><span class="eyebrow eyebrow-accent">Positioning · NVIDIA PAIR</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-body">
+    <div class="slide-title" style="font-size:clamp(24px,3.2vw,44px);margin-bottom:8px;">PAIR-shaped. <em>Without the proxy.</em></div>
+    <div class="slide-sub" style="margin-bottom:14px;max-width:none;">NVIDIA's Personal AI Router (Sept 2026, Apache-2.0) pools a household's GPUs behind one Ollama/OpenAI endpoint — each machine placing work from its own view, no global scheduler. That is the <strong>GPU plane</strong>. Mycelium ships the same shape as a <em>library</em>, and is the <strong>agent plane</strong> above it: capabilities, shared state, tools, traces, recovery. They stack.</div>
+    <div class="cols2" style="gap:18px;">
+      <div class="code-block" style="font-size:12px;line-height:1.55;white-space:pre;overflow:hidden;">
+<span class="cm">// one logical LLM call, two planes</span>
+
+     agents · LangGraph · SkillRunner
+                  │
+   ┌──────────────▼──────────────┐
+   │           <span class="cs">MYCELIUM</span>            │ <span class="cm">agent plane</span>
+   │ capabilities · KV · tools     │
+   │ <span class="cv">InferenceRouter</span>: resolve →    │
+   │ drop dead/opaque → rank by    │
+   │ fill + reservations → fail    │
+   │ over · <span class="cv">llm/{model}</span> ads        │
+   └──────────────┬──────────────┘
+                  │ <span class="ck">OpenAiBackend</span> → any OpenAI endpoint
+   ┌──────────────▼──────────────┐
+   │    <span class="ck">PAIR</span> · LM Studio · vLLM    │ <span class="cm">GPU plane</span>
+   │ engine discovery · model      │
+   │ inventory · placement         │
+   └──────────────┬──────────────┘
+       RTX PC · DGX Spark · Mac
+
+<span class="cm">// one router per replica pool: with PAIR</span>
+<span class="cm">// underneath, providers collapse to one endpoint</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div class="card card-accent-green">
+          <div class="card-title">PAIR-shaped — <code>ollama_serve</code></div>
+          <div class="card-body">One binary per machine. A local Ollama model becomes the mesh capability <code>llm/{model}</code> with a live <code>llm-meta</code> ad (<code>warm</code>, <code>vram_used_mb</code>, <code>ctx_window</code>, refreshed from the daemon) and an <strong>OpenAI-compatible endpoint on every node</strong>. Any client, any node, routed across all of them. No proxy process — the library is the router.</div>
+        </div>
+        <div class="card card-accent-blue">
+          <div class="card-title">Stacked — <code>openai_serve</code></div>
+          <div class="card-body">Mycelium <em>over</em> PAIR, LM Studio, vLLM or a cloud API: the engine places GPU work, Mycelium routes the capability with failover and its own endpoint. Static ad; runs with nothing installed against the repo's mock engine.</div>
+        </div>
+        <div class="card card-accent-purple">
+          <div class="card-title">Two lessons taken into <code>mycelium-reason</code> 0.6.0</div>
+          <div class="card-body"><strong>Local in-flight reservations</strong> in the router — N concurrent callers no longer herd onto one provider while its pheromone lags. <strong>A drop-in endpoint</strong> — change a base URL, keep the client.</div>
+        </div>
+      </div>
+    </div>
+    <div class="callout callout-orange" style="margin-top:12px;font-size:12px;">
+      <strong>Honest bounds.</strong> Verified against Ollama and the mock engine, not a PAIR install (PAIR speaks the OpenAI wire shape; the stacking claim stays unverified until someone runs it). Serial calls land on the lowest node id — reservations spread <em>concurrent</em> calls. We do not compete on installer, pairing UX or engine integrations — NVIDIA's leverage, not a library's job.
+    </div>
+  </div>
+</div>
+
 <!-- 10 Language Bridges -->
 <div class="slide" id="s10">
   <div class="slide-top"><span class="eyebrow">Language Bridges</span><span class="slide-num">11 / 25</span></div>

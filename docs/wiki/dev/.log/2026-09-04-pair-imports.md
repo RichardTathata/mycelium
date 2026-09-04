@@ -87,3 +87,9 @@ reservation default and the façade's mapping loss; neither is in the ratings ye
   the lock (`cargo audit` only warns) → 0.10.2; the three unmaintained transitives still lack a written
   allowlist. Nightly 09-04 classified environmental (prompt again after the Colima restart; `scale`
   hit the harness-side ceiling a second morning) — a supervised re-run is owed.
+- **Engineer deck: a dedicated PAIR-shaped slide** (`presentation.html`, slide 16/35 at render —
+  the deck auto-numbers; the HTML's baked labels are stale): the two-plane stack diagram, the
+  `ollama_serve` (PAIR-shaped) and `openai_serve` (stacked) examples, the two imported lessons,
+  and an honest-bounds callout (not verified against a PAIR install; serial calls land on the
+  lowest id). Verified by headless render — the deck's `.code-block` collapses whitespace, so
+  the diagram uses `white-space:pre`.
