@@ -142,8 +142,11 @@ the caveat below is discharged for what shipped.
 **Strategy — build-vs-adopt resolved to three tiers (don't roll a full framework).** The popular DX
 (LangGraph, Instructor, Pydantic AI) is almost all **Python** and sits *above* a substrate, so:
 - **BUILD** only the un-adoptable, substrate-native differentiators — ① **capability-routed inference**
-  (`InferenceRouter`: resolve → drop opaque → rank by pheromone fill → failover; resolution is
-  load-blind, so this is a real routing layer, not a byproduct), ② **fleet-reasoning traces**
+  (`InferenceRouter`: resolve → drop dead/opaque → rank by pheromone fill + local reservations →
+  failover; resolution is load-blind, so this is a real routing layer, not a byproduct; reachable as an
+  OpenAI-compatible endpoint on every node since 0.6.0 — the 2026-09-04 PAIR comparison in
+  `docs/plans/mycelium-reason.md` fixes the position: PAIR is the GPU plane, this is the agent plane),
+  ② **fleet-reasoning traces**
   (`TraceRecorder`/`replay`/`narrate` on per-node log substreams `reason/{run_id}/{node}`, optional
   WS2 audit-chain anchoring), and ③ **artifact-aware resume** (`require_model` demand half; install
   half is `model_deploy`). **✅ shipped** — `mycelium-reason` crate, #130.

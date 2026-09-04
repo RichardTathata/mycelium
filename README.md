@@ -122,7 +122,7 @@ reference (API surface, observability, design notes) — one home per fact.
 | **Capabilities** | Discovery by *what a node does*: advertise/resolve, schema registry, requirements & demand pressure, emergent groups, locality | [ch. 02](docs/guide/02-capabilities.md) |
 | **Service layer** | RPC, bulk transfer, scatter-gather, actor mailboxes — on the mesh, no broker | [cookbook](docs/guide/cookbook.md#reference--the-service-layer-rpc-bulk-scatter-gather-mailbox) |
 | **Skills & prompt skills** | LLM agents as mesh nodes (TOML manifests, composition) + LLM-backed capabilities in KV | [ch. 05](docs/guide/05-skills.md) |
-| **Companions** | `mycelium-tuple-space` (pull pipeline by lane *position*) · `mycelium-blackboard` (claims by *content* predicate) | crate docs ([tuple-space](mycelium-tuple-space/) · [blackboard](mycelium-blackboard/)) |
+| **Companions** | `mycelium-tuple-space` (pull pipeline by lane *position*) · `mycelium-blackboard` (claims by *content* predicate) · `mycelium-reason` (fleet inference routing with local reservations + failover, an **OpenAI-compatible endpoint on every node**, fleet-reasoning traces, model-following resume) | crate docs ([tuple-space](mycelium-tuple-space/) · [blackboard](mycelium-blackboard/) · [reason](mycelium-reason/)) · [ch. 15](docs/guide/15-reasoning-and-langgraph.md)) |
 
 ## Security
 

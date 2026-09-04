@@ -13,6 +13,11 @@ import base64
 import json
 import threading
 import time
+
+# How long the stub parks a `stage == "park"` take. Long enough that the parked-takes
+# test can *poll* the connection count to its plateau on a slow runner before any take
+# returns (a fixed 1 s sample read 88/120 on a hosted runner, 2026-09-04).
+PARK_SECS = 5.0
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -48,7 +53,7 @@ class _CountingHandler(BaseHTTPRequestHandler):
             except ValueError:
                 stage = None
             if stage == "park":
-                time.sleep(2.0)  # emulate a server-side parked long-poll
+                time.sleep(PARK_SECS)  # emulate a server-side parked long-poll
             self._reply({"id": 1, "payload_b64": _PAYLOAD_B64})
         elif self.path == "/gateway/kv/quorum":
             self._reply({"ok": True, "acks_received": 1})
@@ -124,8 +129,10 @@ def test_parked_takes_are_not_capped_by_the_pool(stub):
     """A worker fleet with >100 tasks parked on take() against ONE handle must
     have every take parked at the server, not queued behind the client pool
     (httpx's default cap is 100 connections; the per-call clients the pool
-    replaced never capped concurrency). At the 1 s mark all 120 parked takes
-    must hold a connection — under the default limits exactly 100 do."""
+    replaced never capped concurrency). While the takes are parked, the
+    connection count must reach 120 — under the default limits it plateaus at
+    exactly 100 until the first take returns. Structural: poll the count until
+    it reaches 120 or the park window is nearly over, never a fixed sample."""
     port = stub.server_address[1]
     ts = TupleSpace("127.0.0.1", port)
 
@@ -133,14 +140,19 @@ def test_parked_takes_are_not_capped_by_the_pool(stub):
         takes = [
             asyncio.create_task(ts.take("park", timeout_secs=10.0)) for _ in range(120)
         ]
-        await asyncio.sleep(1.0)
-        parked = stub.connections
+        deadline = time.monotonic() + PARK_SECS - 0.5  # before any parked take returns
+        peak = 0
+        while time.monotonic() < deadline:
+            peak = max(peak, stub.connections)
+            if peak >= 120:
+                break
+            await asyncio.sleep(0.05)
         await asyncio.gather(*takes)
-        return parked
+        return peak
 
     parked = asyncio.run(fleet())
     assert parked >= 120, (
-        f"only {parked} of 120 parked takes held a connection at t=1s — "
+        f"only {parked} of 120 parked takes held a connection during the park window — "
         "the pool is capping long-poll concurrency"
     )
 

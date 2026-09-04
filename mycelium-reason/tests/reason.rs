@@ -5,11 +5,14 @@
 //! TOCTOU flake class, 2026-07-07); every started agent is shut down at test end.
 #![allow(clippy::field_reassign_with_default)] // GossipConfig is built the way mycelium's own tests do
 
+mod common;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use common::SlowEcho;
 use mycelium::{CapEntry, CapFilter, Capability, EchoBackend, GossipAgent, GossipConfig, NodeId, PromptTemplate};
 use mycelium_reason::{
     FsBlobStore, InferenceRouter, MeshBlobStore, ModelProfile, ModelQuery, RouterConfig,
@@ -356,23 +359,6 @@ async fn trace_record_replay_round_trips() {
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
-/// A backend that holds each call open long enough for concurrent calls to overlap.
-struct SlowEcho(Duration);
-
-#[async_trait::async_trait]
-impl mycelium::LlmBackend for SlowEcho {
-    async fn complete(
-        &self,
-        _system: &str,
-        user: &str,
-        _max_tokens: u32,
-        _temperature: f32,
-    ) -> Result<mycelium::LlmResult, mycelium::LlmError> {
-        tokio::time::sleep(self.0).await;
-        Ok(mycelium::LlmResult { output: format!("slow: {user}"), model_used: "slow".into(), tokens_used: 1 })
-    }
-}
-
 /// Local reservations (2026-09-04): four concurrent calls from one router against two
 /// equal-fill providers must land on **both**. Neither provider writes a load pheromone in
 /// this test (no `manage_opacity`), so the fill is 0.0 for both and the pre-reservation
@@ -411,6 +397,38 @@ async fn reservations_spread_concurrent_calls_across_equal_providers() {
     // Every reservation released once the calls returned.
     assert_eq!(router.inflight(agent_a.node_id()), 0);
     assert_eq!(router.inflight(agent_b.node_id()), 0);
+
+    agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// `refresh_meta` is a no-op when the profile's attributes are unchanged (the refresher
+/// relies on this so an unchanged probe re-advertises nothing), and replaces the ad — the
+/// new attribute resolvable, the old value gone — when they differ.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_meta_is_a_noop_when_unchanged_and_replaces_when_changed() {
+    use mycelium::{CapConstraint, CapValue};
+    use mycelium_reason::llm_meta;
+
+    let (agent_a, agent_b) = start_pair().await;
+    let base = profile("fable-mini");
+    let mut reg = serve_model(&agent_a, base.clone(), echo_template(), Arc::new(EchoBackend)).await.unwrap();
+    let before = reg.advertised_meta().clone();
+
+    assert!(!reg.refresh_meta(&agent_a, &base).await, "identical profile → no-op");
+    assert_eq!(reg.advertised_meta(), &before);
+
+    let warm = base.clone().with(llm_meta::WARM, CapValue::Bool(true));
+    assert!(reg.refresh_meta(&agent_a, &warm).await, "changed attributes → replaced");
+    assert_ne!(reg.advertised_meta(), &before);
+    let q = CapFilter::new("llm-meta", "fable-mini").with(llm_meta::WARM, CapConstraint::Eq(CapValue::Bool(true)));
+    assert!(
+        poll_until(|| !agent_a.capabilities().resolve(&q).is_empty(), Duration::from_secs(5)).await,
+        "the refreshed attribute resolves locally"
+    );
+    let stale = CapFilter::new("llm-meta", "fable-mini").with(llm_meta::WARM, CapConstraint::Eq(CapValue::Bool(false)));
+    assert!(agent_a.capabilities().resolve(&stale).is_empty(), "no stale value alongside");
+    assert!(!reg.refresh_meta(&agent_a, &warm).await, "and steady again");
 
     agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
     agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;

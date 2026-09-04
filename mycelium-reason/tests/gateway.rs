@@ -5,10 +5,13 @@
 #![cfg(all(feature = "gateway", feature = "llm"))]
 #![allow(clippy::field_reassign_with_default)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::SlowEcho;
 use mycelium::{EchoBackend, GossipAgent, GossipConfig, NodeId, PromptTemplate};
 use mycelium_reason::{FsBlobStore, ModelProfile, TraceRecorder, reason_router, serve_model};
 
@@ -344,4 +347,79 @@ async fn reason_routes_require_the_gateway_bearer() {
     assert_eq!(r.status().as_u16(), 404, "authenticated: the usual no_provider answer");
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// The shared router behind the façade: four concurrent HTTP requests to one gateway node
+/// land on **both** providers (the gateway node and a peer), which only holds if the
+/// reservations live in one `InferenceRouter` shared across requests — a router built per
+/// request would see an empty map every time and herd onto the lower id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn facade_requests_share_one_router_and_spread_across_providers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let (agent_a, base_a, http_port) = start_gateway_node(store, None).await;
+
+    // Peer B joins A's mesh (no gateway needed on B).
+    let mut peer = None;
+    for _ in 0..16 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", base_a).unwrap()];
+        let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        if b.start().await.is_ok() {
+            peer = Some(b);
+            break;
+        }
+    }
+    let agent_b = peer.expect("could not start peer B");
+
+    let template = || PromptTemplate {
+        system: "slow echo".into(),
+        user_template: "{{input}}".into(),
+        max_tokens: 64,
+        temperature: 0.0,
+        metadata: HashMap::new(),
+    };
+    let slow = || Arc::new(SlowEcho(Duration::from_millis(400)));
+    let _ra = serve_model(&agent_a, ModelProfile::new("fable-mini"), template(), slow()).await.unwrap();
+    let _rb = serve_model(&agent_b, ModelProfile::new("fable-mini"), template(), slow()).await.unwrap();
+
+    // Wait until A's router sees both providers (both cap ads gossiped + B live in SWIM).
+    let filter = mycelium::CapFilter::new("llm", "fable-mini");
+    for _ in 0..200 {
+        if agent_a.capabilities().resolve(&filter).len() == 2 && agent_a.peers().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(agent_a.capabilities().resolve(&filter).len(), 2, "both providers visible");
+
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason/v1/chat/completions");
+    let http = reqwest::Client::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..4 {
+        let http = http.clone();
+        let url = url.clone();
+        tasks.spawn(async move {
+            let body: serde_json::Value = http
+                .post(&url)
+                .json(&serde_json::json!({ "model": "fable-mini", "messages": [{ "role": "user", "content": format!("c{i}") }] }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            body["mycelium"]["provider"].as_str().unwrap().to_owned()
+        });
+    }
+    let mut providers = std::collections::HashSet::new();
+    while let Some(r) = tasks.join_next().await {
+        providers.insert(r.unwrap());
+    }
+    assert_eq!(providers.len(), 2, "façade requests spread across both providers: {providers:?}");
+
+    agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

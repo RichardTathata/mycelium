@@ -152,3 +152,12 @@ Rungs 0–5 + the rung-6 echo variant are deterministic → CI (extend the `pyth
 - Re-teaching A2A tool-calling (that's `examples/a2a_langchain/`, kept separate — the anti-scatter map
   in the checkpointer README already distinguishes the layers).
 - A production LangGraph deployment guide — this is a teaching ladder, not an ops runbook.
+
+## Addendum (2026-09-04) — the drop-in rung
+
+`ollama_serve` (feature `ollama`) is the "install tonight" path the PAIR comparison asked for:
+one binary that serves a local Ollama model into the mesh with a live `llm-meta` ad and exposes
+the OpenAI-compatible façade. It sits *beside* the ladder, not on it — the rungs teach the
+substrate-native wedges through Python; this one teaches nothing new about the mesh and exists so
+an OpenAI client can be pointed at a node without reading the ladder. Manual (needs a daemon),
+deliberately not in CI; the façade itself is CI-gated in Rust and driven from Python on `reason_node`.

@@ -2,10 +2,10 @@
 
 ## Objective
 
-The **Rust mesh side** of the reasoning / LangGraph-on-Mycelium work: three layer-IV
+The **Rust mesh side** of the reasoning / LangGraph-on-Mycelium work: four layer-IV
 (capability/agent) examples that stand up a real Mycelium mesh serving models, routing
-inference, and rehealing a model dependency across a node failure — all on the **public
-API**, no private hooks. The Python ladder that *drives* two of them lives next door in
+inference, exposing it as an OpenAI-compatible endpoint, and rehealing a model dependency
+across a node failure — all on the **public API**, no private hooks. The Python ladder that *drives* two of them lives next door in
 [`../../examples/langgraph/`](../../examples/langgraph/README.md); the concept walkthrough is
 guide [ch. 15](../../docs/guide/15-reasoning-and-langgraph.md).
 
@@ -17,11 +17,11 @@ variant, not this echo fixture.
 
 ## How to run
 
-All three share the [repo setup](../../examples/README.md#shared-setup) (Rust toolchain;
-Ollama only if you want a real model). `fleet_reasoning` is a one-shot CLI that exits 0;
-`reason_node` and `reheal_node` run a **Mycelium gateway** and **stay running** (Ctrl-C to
-stop) so the Python side and the Ops Console can reach them — each prints its HTTP gateway
-port on startup.
+All four share the [repo setup](../../examples/README.md#shared-setup) (Rust toolchain;
+Ollama only if you want a real model — required for `ollama_serve`). `fleet_reasoning` is a
+one-shot CLI that exits 0; `reason_node`, `reheal_node`, and `ollama_serve` run a **Mycelium
+gateway** and **stay running** (Ctrl-C to stop) so the Python side and the Ops Console can
+reach them — each prints its HTTP gateway port on startup.
 
 ### `fleet_reasoning`
 
@@ -90,6 +90,31 @@ dies, routed inference lands on B. This touches consensus (layer III) alongside 
 capability/agent layer. The blob here is a tiny echo fixture, not real weights — the honest
 seam (demand → mesh fetch + content-address verify → `serve_model` bridge → routed resume) is
 what's real; see the source header for the caveat. Source: [`reheal_node.rs`](reheal_node.rs).
+
+### `ollama_serve`
+
+**Objective.** One binary, PAIR-shaped (0.6.0): serve a **local Ollama model** into the mesh
+with a live `llm-meta` ad and expose the **OpenAI-compatible façade** — so any OpenAI-speaking
+client, pointed at `http://127.0.0.1:HTTP_PORT/gateway/reason/v1`, has its calls routed across
+every node running this for the same model id. No proxy process; each node routes from its
+own view.
+
+**How to run** (two machines or two terminals; needs a running Ollama with `MODEL` pulled):
+```bash
+BIND_PORT=7201 HTTP_PORT=8201 cargo run -p mycelium-reason --features llm,gateway,ollama --example ollama_serve
+BIND_PORT=7202 HTTP_PORT=8202 BOOTSTRAP=127.0.0.1:7201 cargo run -p mycelium-reason --features llm,gateway,ollama --example ollama_serve
+curl -s http://127.0.0.1:8201/gateway/reason/v1/models
+curl -s http://127.0.0.1:8201/gateway/reason/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"llama3","messages":[{"role":"user","content":"Name three root vegetables."}]}'
+```
+Env: `OLLAMA_URL` (default `http://127.0.0.1:11434`), `MODEL` (default `llama3`), `BIND_PORT`,
+`HTTP_PORT`, optional `BOOTSTRAP`, optional `GOSSIP_GATEWAY_AUTH_TOKEN` (then clients pass it as
+their API key).
+
+**What it demonstrates.** The `llm_meta` vocabulary filled from the daemon (`engine=ollama`,
+`warm`, `vram_used_mb`, `family`, `ctx_window`, `param_size`, `quant`) and kept current by
+`spawn_meta_refresher`; the router's load + reservation rank across the nodes; the drop-in
+adoption path. Manual — not a CI example. Source: [`ollama_serve.rs`](ollama_serve.rs).
 
 ## CI
 

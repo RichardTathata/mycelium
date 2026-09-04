@@ -589,6 +589,35 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/fleet"               => "fleet:read",
         "/gateway/explain"             => "fleet:read",
         "/gateway/diagnose"            => "fleet:read",
+        // Companion-crate gateway surfaces (merged via `with_http_routes`; behind this
+        // layer since 2026-09-04). Exact paths only — a companion route not listed here
+        // stays deny-by-default `admin`, like any other unmapped route.
+        //   mycelium-reason → the `llm` family (routed inference is an LLM call).
+        "/gateway/reason/route"               => "llm:invoke",
+        "/gateway/reason/v1/chat/completions" => "llm:invoke",
+        "/gateway/reason/v1/models"           => "llm:read",
+        "/gateway/reason/trace/{run_id}"      => "llm:read",
+        "/gateway/reason/blob/{id}"           => "llm:read",
+        "/gateway/reason/blob"                => "llm:write",
+        //   mycelium-wiki → `wiki:*`.
+        "/gateway/wiki/read"    => "wiki:read",
+        "/gateway/wiki/query"   => "wiki:read",
+        "/gateway/wiki/propose" => "wiki:write",
+        "/gateway/wiki/ingest"  => "wiki:write",
+        //   mycelium-blackboard → `board:*`.
+        "/gateway/bb/read"    => "board:read",
+        "/gateway/bb/depth"   => "board:read",
+        "/gateway/bb/post"    => "board:write",
+        "/gateway/bb/claim"   => "board:write",
+        "/gateway/bb/ack"     => "board:write",
+        "/gateway/bb/release" => "board:write",
+        //   mycelium-tuple-space → `tuple:*`.
+        "/gateway/tuple/depth"       => "tuple:read",
+        "/gateway/tuple/put"         => "tuple:write",
+        "/gateway/tuple/take"        => "tuple:write",
+        "/gateway/tuple/take_by_key" => "tuple:write",
+        "/gateway/tuple/complete"    => "tuple:write",
+        "/gateway/tuple/ack"         => "tuple:write",
         // Deny-by-default.
         _ => "admin",
     }
@@ -3881,8 +3910,18 @@ mod tests {
         assert_eq!(required_scope(&Method::GET,  "/gateway/fleet"), "fleet:read");
         assert_eq!(required_scope(&Method::GET,  "/gateway/explain"), "fleet:read");
         assert_eq!(required_scope(&Method::GET,  "/gateway/diagnose"), "fleet:read");
-        // deny-by-default: anything unmapped requires admin.
+        // companion families (merged routes, 2026-09-04).
+        assert_eq!(required_scope(&Method::POST, "/gateway/reason/route"), "llm:invoke");
+        assert_eq!(required_scope(&Method::POST, "/gateway/reason/v1/chat/completions"), "llm:invoke");
+        assert_eq!(required_scope(&Method::GET,  "/gateway/reason/trace/{run_id}"), "llm:read");
+        assert_eq!(required_scope(&Method::PUT,  "/gateway/reason/blob"), "llm:write");
+        assert_eq!(required_scope(&Method::POST, "/gateway/wiki/query"), "wiki:read");
+        assert_eq!(required_scope(&Method::POST, "/gateway/wiki/ingest"), "wiki:write");
+        assert_eq!(required_scope(&Method::GET,  "/gateway/bb/depth"), "board:read");
+        assert_eq!(required_scope(&Method::POST, "/gateway/tuple/take"), "tuple:write");
+        // deny-by-default: anything unmapped requires admin — including an unlisted companion path.
         assert_eq!(required_scope(&Method::POST, "/gateway/some/future/route"), "admin");
+        assert_eq!(required_scope(&Method::POST, "/gateway/wiki/some/future/verb"), "admin");
     }
 
     #[cfg(feature = "compliance")]
@@ -3968,6 +4007,53 @@ mod tests {
         assert_eq!(r.status(), 200, "the configured token admits the merged /gateway/ route");
         let r = client.get(format!("{base}/app/public")).send().await.unwrap();
         assert_eq!(r.status(), 200, "a merged route outside /gateway/ stays public");
+
+        agent.shutdown().await;
+    }
+
+    /// Scoped tokens on merged companion routes (compliance): a route in the companion
+    /// scope table is admitted by its family and refused (403) outside it; an unlisted
+    /// merged `/gateway/` path is deny-by-default `admin`, which only the wildcard reaches.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn test_scoped_tokens_on_merged_companion_routes() {
+        use axum::http::header::AUTHORIZATION;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "llmro".into(), scopes: vec!["llm:read".into()] },
+            crate::GatewayToken { token: "wikiw".into(), scopes: vec!["wiki:write".into()] },
+            crate::GatewayToken { token: "super".into(), scopes: vec!["*".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        async fn ok() -> &'static str { "ok" }
+        agent.with_http_routes(
+            axum::Router::new()
+                .route("/gateway/reason/trace/{run_id}", axum::routing::get(ok))
+                .route("/gateway/wiki/ingest", axum::routing::post(ok))
+                .route("/gateway/wiki/some/future/verb", axum::routing::post(ok)),
+        );
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let get = |path: &str, tok: &str| client.get(format!("{base}{path}")).header(AUTHORIZATION, format!("Bearer {tok}")).send();
+        let post = |path: &str, tok: &str| client.post(format!("{base}{path}")).header(AUTHORIZATION, format!("Bearer {tok}")).send();
+
+        assert_eq!(get("/gateway/reason/trace/r1", "llmro").await.unwrap().status(), 200, "llm:read reaches a reason read route");
+        assert_eq!(post("/gateway/wiki/ingest", "llmro").await.unwrap().status(), 403, "llm:read is refused on wiki:write");
+        assert_eq!(post("/gateway/wiki/ingest", "wikiw").await.unwrap().status(), 200, "wiki:write reaches wiki/ingest");
+        let r = post("/gateway/wiki/some/future/verb", "wikiw").await.unwrap();
+        assert_eq!(r.status(), 403, "an unlisted companion path is deny-by-default");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["required_scope"], "admin");
+        assert_eq!(post("/gateway/wiki/some/future/verb", "super").await.unwrap().status(), 200, "wildcard reaches it");
 
         agent.shutdown().await;
     }

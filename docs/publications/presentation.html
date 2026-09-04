@@ -970,6 +970,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
           <tr><td>Cluster sharding</td><td class="td-yes td-my">Built-in (FNV hash ring)</td><td>Via JetStream</td><td class="td-no">No</td><td>Yes (coordinator)</td><td class="td-no">You build it</td></tr>
           <tr><td>Agentic Flow Networks</td><td class="td-yes td-my">Built-in (5 properties)</td><td class="td-no">No</td><td class="td-no">No</td><td>Akka Streams (partial)</td><td class="td-no">You build it</td></tr>
           <tr><td>Prompt Skills (LLM)</td><td class="td-yes td-my">Built-in (llm feature)</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">You build it</td></tr>
+          <tr><td>Fleet inference routing</td><td class="td-yes td-my">Built-in — load + local reservations · failover · OpenAI-compatible façade</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">You build it</td></tr>
           <tr><td>Air-gapped / edge</td><td class="td-yes td-my">Yes — zero external deps</td><td>Complex</td><td>Complex</td><td>Possible</td><td>Possible</td></tr>
           <tr><td>Ops burden</td><td class="td-yes td-my">Zero — no processes</td><td>Broker + config</td><td>Registry + agents</td><td>Cluster manager</td><td class="td-no">Everything</td></tr>
         </tbody>
@@ -977,6 +978,9 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
     </div>
     <div class="callout callout-green" style="margin-top:10px;">
       <strong>Each "separate system" row is a new process to operate, a new failure mode to handle, and a new ops surface to audit.</strong> Mycelium collapses them all.
+    </div>
+    <div class="callout callout-blue" style="margin-top:8px;font-size:12px;">
+      <strong>Adjacent, not competing — NVIDIA PAIR (Sept 2026).</strong> A per-node, coordinator-free placer for <em>inference</em> across a household's GPUs (Ollama / LM Studio, Apache-2.0). It is the GPU plane; Mycelium is the agent plane — capabilities, state, tools, traces, resume. They stack: point <code>OpenAiBackend</code> at a PAIR proxy. Two lessons taken into <code>mycelium-reason</code> 0.6.0: local in-flight reservations in the router, and a drop-in OpenAI endpoint per node.
     </div>
   </div>
 </div>
@@ -1619,6 +1623,10 @@ agent.<span class="cs">service</span>().<span class="cs">emit_sharded</span>(
         <div class="card card-accent-purple">
           <div class="card-title">SkillRunner — no Rust required</div>
           <div class="card-body">Define your skill in a <code>.skill.toml</code> manifest. Same capability gossip, same mesh, zero library code. SkillRunner nodes coexist transparently.</div>
+        </div>
+        <div class="card card-accent-blue">
+          <div class="card-title">Fleet routing + the OpenAI façade (<code>mycelium-reason</code>)</div>
+          <div class="card-body">A served model is a prompt skill <code>llm/{model}</code> with a typed <code>llm-meta</code> ad (<code>warm</code>, <code>vram_used_mb</code>, <code>ctx_window</code>, …). <code>InferenceRouter</code>: resolve → drop dead/opaque → rank by pheromone fill <strong>+ local reservations</strong> → fail over. Any OpenAI client becomes a mesh client by base URL: <code>http://node:port/gateway/reason/v1</code> — no proxy process, every node routes from its own view.</div>
         </div>
       </div>
       <div>

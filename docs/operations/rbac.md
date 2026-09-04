@@ -50,7 +50,15 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `audit:read` / `transparency:read` | audit-trail query / revocation transparency log |
 | `identity:write` | key revocation (`POST /gateway/identity/revoke`) |
 | `*` | everything (the legacy `gateway_auth_token` is equivalent) |
-| `admin` | the deny-by-default fallback for any route not in the table |
+| `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` |
+| `wiki:read` / `wiki:write` | `mycelium-wiki`: `/wiki/read`, `/wiki/query` / `/wiki/propose`, `/wiki/ingest` |
+| `board:read` / `board:write` | `mycelium-blackboard`: `/bb/read`, `/bb/depth` / `/bb/post`, `claim`, `ack`, `release` |
+| `tuple:read` / `tuple:write` | `mycelium-tuple-space`: `/tuple/depth` / `put`, `take`, `take_by_key`, `complete`, `ack` |
+| `admin` | the deny-by-default fallback for any route not in the table — including any companion path not listed above |
+
+> **Since 2026-09-04** companion routes (merged via `with_http_routes`) sit behind this gate at
+> all. Before, they answered without a bearer even when the library's own routes demanded one.
+> A scoped-token deployment that used companion routes must now grant the family scopes above.
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`,
 `/stats`, `/metrics`, and the A2A descriptor (`/.well-known/agent.json`).

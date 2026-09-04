@@ -117,6 +117,10 @@ gate); a same-day critique found six gaps before council scale (format codec, fa
 branch contention, batch commits, read plane, batch gate) — hardening plan
 `docs/plans/council-substrate-hardening.md` (**Phase 6 complete M-side 2026-08-16**, incl. the
 measured ten-council contention run; remaining items are FTT-side); design record
-`docs/design/transparency-council-substrate.md`. Scale runs double as Paper 1.s case study. Delivery ledger:
+`docs/design/transparency-council-substrate.md`. Scale runs double as Paper 1.s case study. **mycelium-reason 0.6.0 (2026-09-04):** the NVIDIA-PAIR imports — router local reservations, the
+OpenAI-compatible façade `/gateway/reason/v1/*`, the `llm_meta` vocabulary + `ollama` collector;
+position: PAIR = GPU plane, Mycelium = agent plane, stackable (`docs/plans/mycelium-reason.md`
+addendum). Core fix on the way: merged `with_http_routes` routers now sit behind gateway auth with
+companion scope families. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

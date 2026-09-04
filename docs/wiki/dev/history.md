@@ -22,6 +22,22 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Since v2.4.0 — 2026-09-02 → 09-04 (unreleased)
+
+- **Two 360° review passes over `v2.4.0..HEAD`** (2026-09-02/03): mycelium-py 0.2.1 → 0.2.3
+  (pooling bugs, lifecycle unification, uncapped long-poll pool), `FsStore` erase-vs-write
+  serialization (lock-order row 35), one ref-CAS retry driver in `GitStore`; two RUSTSEC bumps.
+  Log: `.log/2026-09-02-360-review-fixes.md`.
+- **The nightly runner read correctly** (2026-09-03): stale checkout for 17 days, TCC timing,
+  FORWARD-chain ceiling — `.log/2026-09-03-nightly-stale-checkout-and-ceiling.md`.
+- **`mycelium-reason` 0.6.0 — the PAIR imports** (2026-09-04, tag `mycelium-reason-v0.6.0`):
+  router **local reservations** (row 36), the **OpenAI-compatible façade** `/gateway/reason/v1/*`,
+  the **`llm_meta` vocabulary** + `ollama` collector + `ollama_serve`. **Core fix:** routers merged
+  via `with_http_routes` had bypassed the gateway auth layer — prefix-guarded layer + companion
+  **scope families** (`llm`/`wiki`/`board`/`tuple`). Position (plan addendum): PAIR = GPU plane,
+  Mycelium = agent plane, stackable. Coherence assessment + log:
+  `.log/2026-09-04-pair-imports.md`; ledger entry (Security 8 at Run 59) in `docs/analysis/ratings.md`.
+
 ## v2.4.0 release — 2026-08-16 (tag `v2.4.0`)
 
 The **wiki-substrate** MINOR since v2.3.0. Wire **v12** (PREV 11) unchanged — a fully

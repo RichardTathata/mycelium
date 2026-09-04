@@ -144,8 +144,8 @@ unconditional but only fires when the gate runs. Both counters.
 
 ## Reason routing
 
-Inference-router counters from `mycelium-reason` (`route.rs`) — the call side that picks a
-model provider and fails over. All counters.
+Inference-router metrics from `mycelium-reason` (`route.rs`) — the call side that picks a
+model provider and fails over. Counters, plus one gauge (0.6.0).
 
 | Metric | Type | Meaning | Watch for / alert |
 |---|---|---|---|
@@ -153,6 +153,7 @@ model provider and fails over. All counters.
 | `mycelium_reason_route_failovers_total` | counter | attempts that failed over from one provider to the next | **a rising value = inference providers dying or going opaque** — the router is working around them; check which providers dropped out |
 | `mycelium_reason_route_no_provider_total` | counter | routes that found no eligible provider at all | rising = no provider advertises the requested capability — a coverage gap in inference |
 | `mycelium_reason_route_exhausted_total` | counter | routes that tried every provider and still failed | rising = *all* providers for a request are failing — an inference outage, not a single dead node |
+| `mycelium_reason_route_inflight` | gauge | calls this node's router currently has open (its local reservations, summed over providers) | a value that stays high while `attempts_total` stalls = providers holding calls open (parked or slow); per-provider detail is `InferenceRouter::inflight(node)` |
 
 ---
 

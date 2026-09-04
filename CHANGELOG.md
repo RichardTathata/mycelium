@@ -49,6 +49,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`mycelium-py` connection-reuse gate: the parked-takes test was timing-based** — it sampled
+  the stub's connection count at a fixed 1 s and read 88/120 on a hosted runner (CI red on a
+  docs-only commit, 2026-09-04). Now polls the count to its plateau inside a 5 s park window
+  before any take returns; the pre-fix pool still plateaus at exactly 100.
 - **Routes merged via `with_http_routes` bypassed the gateway auth boundary** (core, since
   the first companion gateway routes). The auth `route_layer` wrapped only the library's
   nested `/gateway` router; a merged router's `/gateway/reason/route`, `/gateway/wiki/ingest`,
@@ -59,7 +63,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outside stay public (`/.well-known/agent.json`, `/a2a`). Gates in core
   (`test_merged_app_routes_under_gateway_prefix_require_auth`) and in `mycelium-reason`
   (`reason_routes_require_the_gateway_bearer`), both failing pre-fix. Calibration-ledger entry
-  (Security scored 8 at Run 59 while this existed).
+  (Security scored 8 at Run 59 while this existed). **Scope families for companion routes
+  (`compliance`, follow-up the same week):** `required_scope` now maps the merged companion
+  paths — `mycelium-reason` to the `llm` family (`/route` and `/v1/chat/completions` ⇒
+  `llm:invoke`; trace/blob-GET/`/v1/models` ⇒ `llm:read`; blob PUT ⇒ `llm:write`), and new
+  `wiki:*`, `board:*`, `tuple:*` families for the wiki, blackboard, and tuple-space routes.
+  Exact paths only: an unlisted companion path stays deny-by-default `admin`. *Behaviour note
+  for scoped-token deployments:* companion routes that were (wrongly) open now need these
+  family scopes or `*`. Gate: `test_scoped_tokens_on_merged_companion_routes`; runbook
+  `docs/operations/rbac.md`.
 
 - **`mycelium-py` 0.2.0: persistent pooled HTTP client** — the bridge opened a fresh TCP
   connection per gateway call, exhausting macOS ephemeral ports at Group-scale write rates

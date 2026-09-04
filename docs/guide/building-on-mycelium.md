@@ -25,7 +25,7 @@ mycelium-core = { git = "https://github.com/RichardEko/mycelium", tag = "v2.4.0"
 # Companion crates — independent version lines, same repo (a git dep on a
 # companion resolves the workspace-internal `mycelium` automatically):
 mycelium-guardrails = { git = "https://github.com/RichardEko/mycelium", tag = "mycelium-guardrails-v1.0.0" }
-mycelium-reason     = { git = "https://github.com/RichardEko/mycelium", tag = "mycelium-reason-v0.5.0", features = ["llm", "gateway"] }
+mycelium-reason     = { git = "https://github.com/RichardEko/mycelium", tag = "mycelium-reason-v0.6.0", features = ["llm", "gateway"] }
 ```
 
 > **Why git, not `cargo add mycelium`.** The `mycelium`/`mycelium-core` names on

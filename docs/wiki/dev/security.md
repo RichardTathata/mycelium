@@ -25,7 +25,9 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    layer wrapped only the library's nested router, so `/gateway/reason/route`,
    `/gateway/wiki/ingest`, `/gateway/tuple/put` … answered without a bearer while the
    companion docs claimed coverage — gates in core and `mycelium-reason`, ledger entry
-   in `docs/analysis/ratings.md`.
+   in `docs/analysis/ratings.md`. Companion paths have **scope families** in
+   `required_scope` (`llm:*` for reason, `wiki:*`, `board:*`, `tuple:*`), exact paths only;
+   unlisted companion paths stay `admin`.
 4. **`sys/` namespace tripwire (core, feature-free):** inbound writes naming *self* under
    `sys/identity|load|role|tuple/{node}` → `warn!` + `sys_namespace_violations`. Detection
    only — never make it a write guard.

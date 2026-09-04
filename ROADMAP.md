@@ -3010,6 +3010,16 @@ to first-class. Sketch: [`docs/plans/mycelium-reason.md`](docs/plans/mycelium-re
 this axis (not yet built): conversation memory, run-level evals, and the harder Tier-3 demos (a real LLM
 backend beyond `EchoBackend`; chunked blob transfer past the 8 MiB single-frame v1 ceiling).
 
+**`mycelium-reason` 0.6.0 — the PAIR imports (✅ 2026-09-04).** NVIDIA's Personal AI Router (3 Sept
+2026) productised wedge ①'s slice for one household's GPUs; a code-verified comparison (plan addendum of
+that date) fixed the position — *PAIR is the GPU plane, Mycelium the agent plane, and they stack* — and
+imported three things: **local in-flight reservations** in `InferenceRouter` (node-local, never gossiped;
+closes the deterministic-tiebreak herd), the **OpenAI-compatible façade** `/gateway/reason/v1/*` (any
+OpenAI client → mesh client by base URL, behind the gateway auth boundary), and the **`llm_meta` attribute
+vocabulary** + the `ollama` feature's collector (`warm`/`vram_used_mb`/… kept current on the ad). Found on
+the way and fixed in core: merged `with_http_routes` routers had bypassed the gateway auth layer; companion
+scope families added. Not imported: pairing/installer UX, licence change.
+
 **Structural guardrails — `mycelium-guardrails` (✅ shipped 2026-07-08, PRs #137–#139; primary v3.0
 deliverable alongside the DX companion).** *What an agent may do* — which tools / data / spend / groups —
 enforced with **no central chokepoint** (the mainstream "guardrail proxy" is itself a coordinator;

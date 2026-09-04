@@ -60,3 +60,19 @@ two tensions named rather than hidden.
 
 Open for the next `/mycelium-analysis` (gated on the second clean nightly): score the static
 reservation default and the façade's mapping loss; neither is in the ratings yet.
+
+## Follow-up (same day): scope families + the three tests the review asked for
+
+- **Scope families for companion routes** (`compliance`): the auth fix made merged routes
+  deny-by-default `admin`, which for scoped-token deployments turned "wrongly open" into
+  "needs `*`". `required_scope` now lists the companion paths — reason → the `llm` family,
+  new `wiki:*` / `board:*` / `tuple:*` — exact paths only (an unlisted companion path stays
+  `admin`). Runbook `docs/operations/rbac.md`; gate `test_scoped_tokens_on_merged_companion_routes`.
+- Tests: façade requests spread across providers (proves the *shared* router — a router per
+  request would herd), `refresh_meta` no-op-when-unchanged, and the scoped-token gate above.
+  `tests/common/mod.rs` now holds the `SlowEcho` double both suites use.
+- **A timing test of my own, caught by CI the same day:** `test_parked_takes_are_not_capped_by_
+  the_pool` (0.2.3, two days after the testing-page paragraph warning against exactly this)
+  sampled the connection count at a fixed 1 s; a hosted runner had opened 88 of 120 by then.
+  Now polls to the plateau inside a longer park window (structural, not a sample). The
+  lesson already on the page applies to its author.
