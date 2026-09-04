@@ -56,6 +56,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # The DEFAULT feature set (cli+gateway+consensus, no tls): an item live only under
+      # `tls` is dead here — the matrix line below and `--no-default-features` both missed
+      # `consensus::signer_authorized` (v2.4.1 release day finding).
+      - run: cargo clippy --lib --tests -- -D warnings
       # Full feature matrix — `--lib --tests` alone misses code behind
       # #[cfg(feature = "tls")] etc. (same set CLAUDE.md mandates locally).
       - run: cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings

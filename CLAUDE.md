@@ -71,6 +71,7 @@ check-full` adds the test suites + wasm-host clippy. The underlying set:
 
 ```bash
 cargo test --lib --features tls,metrics,a2a,llm
+cargo clippy --lib --tests -- -D warnings                 # default features — catches tls-only dead code
 cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 cargo test --lib --features compliance
 cargo test --lib --no-default-features --features gateway

@@ -155,6 +155,7 @@ build:
 ## lib that CI's "Gateway-free build" and "WASM host" jobs compile — so this is fast (~3 min, no
 ## wasmtime). Run it before every push.
 check:
+	cargo clippy --lib --tests -- -D warnings
 	cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 	cargo clippy --lib --tests --features compliance -- -D warnings
 	cargo clippy --lib --no-default-features -- -D warnings

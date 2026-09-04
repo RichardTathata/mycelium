@@ -1306,6 +1306,10 @@ pub(crate) fn decode_consensus_msg(bytes: &Bytes) -> Option<ConsensusMsg> {
 /// writes (mirroring how `sys/revocation/` validates signatures at read) and is tracked as a
 /// follow-up. The bind still prevents impersonation among honest nodes and by any node that does not
 /// hold a key present in the (possibly poisoned) target set — do not read it as insider-proof.
+///
+/// Only the `tls` decode path calls this (signed frames exist only with `tls`); it stays
+/// compiled under `test` so the impersonation gates run in every feature set.
+#[cfg(any(feature = "tls", test))]
 fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
     match msg {
         ConsensusMsg::Vote { voter, .. }             => voter == signer,

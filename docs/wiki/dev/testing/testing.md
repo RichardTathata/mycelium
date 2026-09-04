@@ -14,6 +14,7 @@ release or when you have touched wasm-host / a feature-conditional path.
 
 ```bash
 cargo test --lib --features tls,metrics,a2a,llm
+cargo clippy --lib --tests -- -D warnings                        # DEFAULT features — the middle of the matrix; an item live only under `tls` is dead here (2026-09-04)
 cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 cargo clippy --lib --tests --features compliance -- -D warnings   # in make check since 2026-07-22 — WITHOUT this, compliance-gated code went un-linted locally (the guardrails CI job caught it)
 cargo test --lib --features compliance          # WS1 RBAC + WS2 audit + WS4 OIDC + WS5 rotation
