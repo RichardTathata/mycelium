@@ -26,3 +26,37 @@ Mycelium. Verified its Mycelium claims in code first; position + bindings record
   companions' claim as read; no test ever sent a companion route a bare request.
 - **Not imported:** pairing PIN / installer (product, not library); the licence question is the
   owner's.
+
+## Coherence assessment (asked and answered 2026-09-04)
+
+*Do the three imports comply with the philosophy, strategy, and architecture?* **Yes**, with
+two tensions named rather than hidden.
+
+- **Reservations — compliant, the cleanest of the three.** The router stays a companion over a
+  deliberately load-blind substrate (where the 2026-07-08 addendum bound routing policy to
+  live). The reservation is a node's own knowledge composed with the shared medium: never
+  gossiped, never a pheromone, no wire change, no core change — the Hayek/local-knowledge
+  framing the philosophy rests on, not a global schedule. One flat leaf lock (row 36). Soft
+  spot: `reservation_weight = 0.1` is a static default in a codebase that prefers auto-derived
+  tuning; if it ever matters it belongs under the tuning governor.
+- **The façade — compliant in structure, an adapter in concept.** Not a central proxy: every
+  node serves `/gateway/reason/v1` from its own view and the client chooses its entry node —
+  the posture of every existing gateway route. Mounted under `/gateway/` so it rides the auth
+  boundary (which is how the core gap surfaced). Tension: OpenAI clients expect a raw chat
+  model; the served side is a *prompt skill*. The mapping is stated honestly (template-bound
+  sampling params, unknown token split) but it is a translation layer, not a native primitive
+  — acceptable as the adoption path, and to stay labelled so.
+- **The vocabulary + collector — compliant and native.** Typed capability attributes matched by
+  `CapFilter` constraints are the substrate's own mechanism; this adds convention, not
+  machinery, and the convention lives in the companion (no higher-layer law taught to Layer
+  I). Serve-side collection, engine-blind router, feature-gated dependency — the companion
+  contract holds.
+- **The core change is a bug fix, not a new law.** Auth at the HTTP edge is prevention by
+  design (WS1), unlike Layer I's detection-only rule; the fix restores what the docs claimed.
+- **Strategy:** the imports strengthen wedge ① without moving the crate's boundary. Position
+  recorded in the plan addendum: PAIR is the GPU plane, Mycelium the agent plane; the façade
+  is the drop-in path that lets them stack instead of compete. Not imported: pairing PIN,
+  installer, licence change.
+
+Open for the next `/mycelium-analysis` (gated on the second clean nightly): score the static
+reservation default and the façade's mapping loss; neither is in the ratings yet.

@@ -64,7 +64,9 @@ via wasm-host).
   `vram_used_mb`/…) with `ModelReg::refresh_meta` (retract observed before re-advertise — makes
   a tokio ordering explicit; the race did not reproduce) and the `ollama` feature's collector (`OllamaProbe`, `spawn_meta_refresher`,
   example `ollama_serve`). Found on the way: merged `with_http_routes` routers bypassed the
-  gateway auth layer — fixed in core ([security](../security.md)).
+  gateway auth layer — fixed in core ([security](../security.md)). Coherence assessment (philosophy /
+  strategy / architecture — compliant; the façade is an adapter over prompt skills, labelled so; the
+  reservation default is a static knob): [.log/2026-09-04](../.log/2026-09-04-pair-imports.md).
 - **`mycelium-guardrails/`** — the **v3.0 structural-guardrails companion** (the second primary;
   *different axis* again — [pattern-coverage](../../domain/pattern-coverage.md) → Structural guardrails).
   *What an agent may do*, one tier-labelled `Policy` → `apply()` compiling to **Tier A** boundary
