@@ -50,7 +50,9 @@ via wasm-host).
   (`FsBlobStore`/`MeshBlobStore`/`spawn_blob_server`, ≤ 8 MiB v1) + `/gateway/reason/{blob,trace,route}`
   routes (`route` is the load-aware routing surface, #132). Zero core changes, zero new locks. **Python tier** (separate packages): the
   **`langgraph-checkpoint-mycelium`** `BaseCheckpointSaver` (index rows in KV `ckpt/`/`ckptw/`,
-  payloads in the blob tier, cross-node `StateGraph` resume proven in CI) and `mycelium.call_typed`.
+  payloads in the blob tier, cross-node `StateGraph` resume proven in CI; **0.1.1, 2026-09-05:**
+  `alist` selects rows on the async client — a pure window/filter core with sync + async drivers,
+  parity-gated without a node, `.log/2026-09-05-checkpointer-async-rows.md`) and `mycelium.call_typed`.
   **COMPLETE (PRs #130–#136, 2026-07-08):** the crate + Python tier, the LangGraph example ladder
   (`examples/langgraph/` rungs 0–6 incl. the echo-CI **deploy/reheal flagship** + a router-robustness
   fix it surfaced — live-SWIM filter + fast failover, #134), the repo's first Python CI job, and guide

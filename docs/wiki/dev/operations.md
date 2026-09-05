@@ -2,7 +2,9 @@
 
 ↑ [dev/](dev.md) · operator runbooks: `docs/operations/` (deployment, observability, tuning, dynamic-scaling…). Before a go-live, the [`production-readiness.md`](../../operations/production-readiness.md) pre-flight ties the topic runbooks into one sweep; for a first customer engagement, [`customer-pilot.md`](../../operations/customer-pilot.md) scopes it as external validation.
 
-## Public HTTP endpoints (`gateway` feature; no auth by design — M16 edge criterion)
+## Node-level HTTP endpoints (`gateway` feature)
+
+The four probes are **public by design** (M16 edge criterion — what a balancer or scraper needs with no credential); `/consensus/{slot}` sits behind the gateway bearer when a token model is set (2026-09-05, with `/mcp` and `/signals/{kind}` — [security](security.md) §3). The whole public surface is the probes, `/bulk/{id}` (nonce-capability URL) and the A2A descriptor — `docs/operations/rbac.md`.
 
 | Endpoint | Tells you |
 |---|---|
