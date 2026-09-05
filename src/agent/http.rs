@@ -1,12 +1,18 @@
 //! Embedded HTTP server — Layer 3 + Layer 4 gateway.
 //!
 //! ## Library-level endpoints
+//! Public (the M16 edge criterion — what a probe, balancer or scraper needs without a credential):
 //! - `GET  /health`                — liveness probe
 //! - `GET  /ready`                 — readiness probe (startup complete → serving; caps gossip independently)
 //! - `GET  /stats`                 — KV store metrics (node_id, store_entries, dropped_frames, task_count)
-//! - `GET  /consensus/{slot}`      — inspect committed value + ballot for a consensus slot
-//! - `GET  /signals/{kind}`        — SSE stream of admitted signals
-//! - `POST /mcp`                   — JSON-RPC 2.0 MCP protocol bridge
+//! - `GET  /metrics`               — Prometheus exposition
+//! - `GET  /bulk/{corr_id}`        — staged bulk payload; the per-call random nonce *is* the credential
+//!
+//! Behind the gateway bearer (and scope) boundary whenever a token model is configured — open only
+//! when none is, exactly like `/gateway/*` (since 2026-09-05; before, these answered with no token):
+//! - `GET  /consensus/{slot}`      — inspect committed value + ballot for a consensus slot (`consensus:read`)
+//! - `GET  /signals/{kind}`        — SSE stream of admitted signals (`mesh:read`)
+//! - `POST /mcp`                   — JSON-RPC 2.0 MCP protocol bridge (`mcp:invoke`)
 //!
 //! ## Language-bridge gateway endpoints (`/gateway/*`)
 //! These endpoints let Python/TypeScript agents participate in the mesh
@@ -167,8 +173,9 @@ pub(super) async fn run_http_server(
     });
 
     // ── Language-bridge gateway routes (optionally auth-protected) ────────────
-    // Nested under /gateway so the auth middleware applies to all of them while
-    // leaving /health, /ready, /stats, /metrics, /signals, and /mcp public.
+    // Nested under /gateway so the auth middleware applies to all of them; the node-level
+    // `/mcp`, `/signals/{kind}`, `/consensus/{slot}` get the same layer below, leaving only
+    // /health, /ready, /stats, /metrics and the nonce-capability /bulk/{id} public.
     // route_layer is applied once at the end so all routes (including
     // cfg-gated llm routes) are covered by a single middleware instance.
     let gateway = Router::new()
@@ -250,20 +257,36 @@ pub(super) async fn run_http_server(
 
     // ── Main router ───────────────────────────────────────────────────────────
     let app = Router::new()
-        // Library endpoints — always public
+        // Library endpoints — public by the M16 edge criterion: what a probe, load balancer or
+        // scraper needs with no credential. This list and /bulk are the WHOLE public surface
+        // (docs/operations/rbac.md) — anything else goes behind `gateway_auth`.
         .route("/health",               get(health_handler))
         .route("/ready",                get(ready_handler))
         .route("/stats",                get(stats_handler))
         .route("/metrics",              get(metrics_handler))
-        .route("/signals/{kind}",       get(signal_sse_handler))
-        .route("/mcp",                  post(mcp_handler))
+        // Bulk staging is a capability URL: the 64-bit random per-call nonce (`bulk.rs`, dropped
+        // when the call completes) is the credential. The serving PEER fetches it node-to-node
+        // with no shared bearer, so it cannot sit behind the token layer.
         .route("/bulk/{corr_id}",       get(bulk_staging_handler))
         // Gateway — auth-protected when gateway_auth_token is set
         .nest("/gateway", gateway);
 
-    // Consensus slot inspection — public, but consensus-gated (v2 M2).
+    // Node-level routes behind the SAME bearer-then-scope boundary as `/gateway/*` (open when no
+    // token model is configured, like the gateway). Found by external review 2026-09-05: with a
+    // token set, `POST /mcp` `tools/call` still invoked any tool in the cluster **with this node's
+    // identity** (provider-side `authorized_callers` sees the node, not the HTTP caller — a
+    // confused deputy), `/signals/{kind}` streamed live mesh traffic and `/consensus/{slot}`
+    // disclosed committed values (lock holders) — while rbac.md and the wiki listed only
+    // /health|/ready|/stats|/metrics as public. Scope entries live in `required_scope`
+    // (`mcp:invoke`, `mesh:read`, `consensus:read`); the same layer instance the gateway uses.
+    let gated = Router::new()
+        .route("/signals/{kind}",       get(signal_sse_handler))
+        .route("/mcp",                  post(mcp_handler));
     #[cfg(feature = "consensus")]
-    let app = app.route("/consensus/{slot}", get(consensus_slot_handler));
+    let gated = gated.route("/consensus/{slot}", get(consensus_slot_handler));
+    let gated = gated
+        .route_layer(middleware::from_fn_with_state(Arc::clone(&state), gateway_auth));
+    let app = app.merge(gated);
 
     let app = app.with_state(Arc::clone(&state));
 
@@ -395,8 +418,9 @@ async fn shutdown_signal(mut rx: watch::Receiver<bool>) {
 ///    (compliance) any `gateway_scoped_tokens` are configured, every gateway
 ///    request must carry a valid `Authorization: Bearer <token>`. With neither
 ///    set the gateway is open (loopback-only deployments). `/health`, `/ready`,
-///    `/stats`, `/metrics`, and the descriptor path are NOT under `/gateway`
-///    and stay public regardless.
+///    `/stats`, `/metrics`, `/bulk/{id}` and the descriptor path stay public
+///    regardless; the node-level `/mcp`, `/signals/{kind}` and `/consensus/{slot}`
+///    carry this same layer (2026-09-05).
 ///
 /// 2. **OAuth2 scope authorization** (`compliance` feature): the presented
 ///    token resolves to a scope grant — `gateway_auth_token` ⇒ the `"*"`
@@ -558,6 +582,11 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/mailbox/deliver" => "mesh:write",
         "/gateway/mailbox/{kind}"  => "mesh:read",
         "/gateway/shard/emit"      => "mesh:write",
+        // Node-level routes behind the gate since 2026-09-05 (MatchedPath is the bare pattern —
+        // these are merged, not nested under /gateway).
+        "/mcp"              => "mcp:invoke",
+        "/signals/{kind}"   => "mesh:read",
+        "/consensus/{slot}" => "consensus:read",
         // Layer III consensus / consistency overlay
         "/gateway/overlay/consistent/set"      => "consensus:write",
         "/gateway/overlay/consistent/get"      => "consensus:read",
@@ -3914,6 +3943,10 @@ mod tests {
         assert_eq!(required_scope(&Method::GET,  "/gateway/diagnose"), "fleet:read");
         // companion families (merged routes, 2026-09-04).
         assert_eq!(required_scope(&Method::POST, "/gateway/reason/route"), "llm:invoke");
+        // Node-level routes gated since 2026-09-05.
+        assert_eq!(required_scope(&Method::POST, "/mcp"),              "mcp:invoke");
+        assert_eq!(required_scope(&Method::GET,  "/signals/{kind}"),   "mesh:read");
+        assert_eq!(required_scope(&Method::GET,  "/consensus/{slot}"), "consensus:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/reason/v1/chat/completions"), "llm:invoke");
         assert_eq!(required_scope(&Method::GET,  "/gateway/reason/trace/{run_id}"), "llm:read");
         assert_eq!(required_scope(&Method::PUT,  "/gateway/reason/blob"), "llm:write");
@@ -3971,6 +4004,112 @@ mod tests {
         // Valid 64-hex still parses; wrong lengths rejected.
         assert!(parse_hex32(&"ab".repeat(32)).is_some());
         assert_eq!(parse_hex32("abcd"), None);
+    }
+
+    /// Review 2026-09-05 finding 4: `/mcp`, `/signals/{kind}` and `/consensus/{slot}` answered
+    /// without a bearer when `gateway_auth_token` was set — `tools/call` invoked any cluster tool
+    /// with this node's identity. They now sit behind the gateway's bearer boundary. The M16
+    /// public set (`/health`, `/ready`, `/stats`, `/metrics`) and the nonce-capability
+    /// `/bulk/{id}` stay open — never 401.
+    #[tokio::test]
+    async fn regression_node_level_routes_require_bearer_when_token_set() {
+        use axum::http::header::AUTHORIZATION;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+
+        // Gated: 401 bare, 200 with the configured token.
+        let r = client.post(format!("{base}/mcp")).json(&init).send().await.unwrap();
+        assert_eq!(r.status(), 401, "/mcp must demand the bearer when a token is set");
+        let r = client.post(format!("{base}/mcp")).header(AUTHORIZATION, "Bearer secret")
+            .json(&init).send().await.unwrap();
+        assert_eq!(r.status(), 200, "the configured token admits /mcp");
+
+        let r = client.get(format!("{base}/signals/probe-kind")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "/signals/{{kind}} must demand the bearer");
+        let r = client.get(format!("{base}/signals/probe-kind"))
+            .header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+        assert_eq!(r.status(), 200, "the configured token admits the SSE stream");
+        drop(r);
+
+        #[cfg(feature = "consensus")]
+        {
+            let r = client.get(format!("{base}/consensus/some-slot")).send().await.unwrap();
+            assert_eq!(r.status(), 401, "/consensus/{{slot}} must demand the bearer");
+            let r = client.get(format!("{base}/consensus/some-slot"))
+                .header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+            assert_eq!(r.status(), 200, "the configured token admits slot inspection");
+        }
+
+        // Public by design — never 401. (`/ready` may be 503 this early; `/metrics` is 404
+        // without the `metrics` feature — the property under test is "no bearer demanded".)
+        for path in ["/health", "/ready", "/stats", "/metrics"] {
+            let r = client.get(format!("{base}{path}")).send().await.unwrap();
+            assert_ne!(r.status(), 401, "{path} is public (M16 edge criterion)");
+        }
+        let r = client.get(format!("{base}/bulk/0000000000000001")).send().await.unwrap();
+        assert_eq!(r.status(), 404, "/bulk/{{id}} is a nonce-capability URL: public, unknown nonce → 404");
+
+        agent.shutdown().await;
+    }
+
+    /// Scoped tokens on the node-level routes (compliance): `/mcp` needs `mcp:invoke`,
+    /// `/signals/{kind}` needs `mesh:read`; a token outside the family is refused 403 naming
+    /// the required scope; the wildcard admits everything.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn node_level_routes_honour_scoped_tokens() {
+        use axum::http::header::AUTHORIZATION;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "mcp-tok".into(),  scopes: vec!["mcp:invoke".into()] },
+            crate::GatewayToken { token: "mesh-tok".into(), scopes: vec!["mesh:read".into()] },
+            crate::GatewayToken { token: "kv-tok".into(),   scopes: vec!["kv:read".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+
+        let r = client.post(format!("{base}/mcp")).header(AUTHORIZATION, "Bearer mcp-tok")
+            .json(&init).send().await.unwrap();
+        assert_eq!(r.status(), 200, "mcp:invoke admits /mcp");
+        let r = client.post(format!("{base}/mcp")).header(AUTHORIZATION, "Bearer kv-tok")
+            .json(&init).send().await.unwrap();
+        assert_eq!(r.status(), 403, "kv:read must not reach /mcp");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["required_scope"], "mcp:invoke");
+
+        let r = client.get(format!("{base}/signals/k")).header(AUTHORIZATION, "Bearer mesh-tok")
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "mesh:read admits the SSE stream");
+        drop(r);
+        let r = client.get(format!("{base}/signals/k")).header(AUTHORIZATION, "Bearer mcp-tok")
+            .send().await.unwrap();
+        assert_eq!(r.status(), 403, "mcp:invoke must not reach /signals");
+
+        agent.shutdown().await;
     }
 
     /// Routes merged via `with_http_routes` sit behind the same auth boundary as the

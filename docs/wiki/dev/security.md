@@ -27,7 +27,17 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    companion docs claimed coverage — gates in core and `mycelium-reason`, ledger entry
    in `docs/analysis/ratings.md`. Companion paths have **scope families** in
    `required_scope` (`llm:*` for reason, `wiki:*`, `board:*`, `tuple:*`), exact paths only;
-   unlisted companion paths stay `admin`.
+   unlisted companion paths stay `admin`. *Fixed 2026-09-05 (external review, finding 4):*
+   the **node-level** `/mcp`, `/signals/{kind}`, `/consensus/{slot}` were public by routing
+   comment while this page and `rbac.md` listed only the four probes — `POST /mcp` `tools/call`
+   invoked any cluster tool **with the node's identity** (confused deputy: provider-side
+   `authorized_callers` sees the node, not the HTTP caller). Now behind the same `gateway_auth`
+   layer with scopes `mcp:invoke` / `mesh:read` / `consensus:read`. `GET /bulk/{id}` stays
+   public **by design** — a capability URL (64-bit random per-call nonce, fetched peer-to-peer
+   with no shared bearer). The public surface is exactly: `/health|/ready|/stats|/metrics`,
+   `/bulk/{id}`, the A2A descriptor. Gates:
+   `regression_node_level_routes_require_bearer_when_token_set`,
+   `node_level_routes_honour_scoped_tokens` (`src/agent/http.rs`).
 4. **`sys/` namespace tripwire (core, feature-free):** inbound writes naming *self* under
    `sys/identity|load|role|tuple/{node}` → `warn!` + `sys_namespace_violations`. Detection
    only — never make it a write guard.
