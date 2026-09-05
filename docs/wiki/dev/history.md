@@ -22,7 +22,15 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Since v2.4.2 — unreleased
+## v2.4.3 release — 2026-09-05 (tag `v2.4.3`)
+
+A **durability PATCH** cut the same day as v2.4.2 (wire **v12**/PREV 11 unchanged; on-disk format
+unchanged; no `mycelium` API change). Why: the v2.4.2 snapshot merge's WAL read-back used
+`unwrap_or_default()` — a transient read error during a snapshot would have installed a snapshot *without*
+the tail and then truncated it, a data-loss path one step past the race v2.4.2 fixed. Found by the
+deterministic-replay design review's storage section ("schedule this failure explicitly"), confirmed and
+fixed the same day (#181); the snapshot now aborts on read failure. Release gate: **CI-green on `a439f69`
+and on the release PR before tagging**. Log `.log/2026-09-05-v2.4.3-release.md`. Also between the tags:
 
 - **SDK gateway bearer + `persisted`** (2026-09-05, #178 / #179; tags `mycelium-py-v0.2.4`,
   `mycelium-ts-v0.1.1`): every handle takes `token=` / `{ token }` (fallback `MYCELIUM_GATEWAY_TOKEN`),

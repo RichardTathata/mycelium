@@ -34,7 +34,10 @@ erase serialization; wire unchanged, no API change; companions `mycelium-reason`
 `/consensus/{slot}` behind gateway auth (`mcp:invoke`/`mesh:read`/`consensus:read`) · three P1
 persistence fixes (snapshot merges the WAL tail, LWW replay, honest acks + forced fsync,
 `Committed { persisted }` — the one API note: add `..` to an exhaustive `Committed` destructure) ·
-`langgraph-checkpoint-mycelium` 0.1.1 async row selection; wire unchanged); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
+`langgraph-checkpoint-mycelium` 0.1.1 async row selection; wire unchanged); **v2.4.3 released 2026-09-05**
+(tag `v2.4.3` — a **durability PATCH**: the snapshot now aborts on an unreadable WAL tail instead of
+treating it as empty and truncating; plus the SDK bearer + `CommitResult { persisted }` companion work,
+`mycelium-py` 0.2.4 / `mycelium-ts` 0.1.1 on their own tags; wire unchanged); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
 shared by `SignalScope` and consensus (`cluster_propose` / `group_propose`). *Renamed 2026-07-10:*
 `System` → `Cluster` (wire-compatible; `system_propose` kept as a `#[deprecated]` alias, gateway
 still accepts `"system"`); `system_stats()` is unrelated — node-local runtime state, not a scope.
