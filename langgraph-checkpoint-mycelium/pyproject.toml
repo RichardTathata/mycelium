@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name        = "langgraph-checkpoint-mycelium"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "LangGraph checkpointer backed by the Mycelium mesh — metadata in gossiped KV, payloads in the content-addressed blob tier"
 requires-python = ">=3.10"
 dependencies = [

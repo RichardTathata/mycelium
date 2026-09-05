@@ -26,6 +26,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`langgraph-checkpoint-mycelium` 0.1.1 — `alist` no longer blocks the event loop.** The
+  async checkpoint listing ran the *sync* row-selection driver (`_list_rows`: the `kv/keys` scan
+  and one `kv` GET per candidate row on `httpx.Client`), so a large history or a slow gateway
+  stalled every other task on the loop; only the payload half was awaited. Row selection is now
+  factored into a pure window/filter core with sync and async drivers (`_alist_rows` on
+  `httpx.AsyncClient`), gated for parity and for "never touches the sync client" by
+  `tests/test_alist_async.py` — which needs no running node (external review 2026-09-05,
+  finding 5). Companion package on its own line; no Rust change.
 - **Persistence: three P1 durability defects** (external review 2026-09-05, each reproduced by a
   probe before the fix; regression gates in `mycelium-core/src/persistence.rs::durability_tests`).
   Wire unchanged; on-disk format unchanged (`snapshot_hlc` is still written, now informational).

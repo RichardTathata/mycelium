@@ -358,16 +358,25 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             if tup is not None:
                 yield tup
 
-    def _list_rows(
-        self,
+    # ── Row selection (shared by list / alist) ───────────────────────────────
+    #
+    # The pure half — which KV prefix to scan, which keys fall inside the
+    # request's (ns, id, before) window, which rows pass the metadata filter — is
+    # factored out so the sync and async drivers below are the same code modulo
+    # `await`. Review 2026-09-05 (finding 5): `alist` used to run the sync driver,
+    # so every `kv/keys` scan and per-row `kv` GET blocked the event loop; the
+    # payload half was awaited but row selection was not. `_alist_rows` now uses
+    # the async client end to end. The two drivers are gated for parity by
+    # `tests/test_alist_async.py`.
+
+    @staticmethod
+    def _row_window(
         config: RunnableConfig | None,
-        filter: dict[str, Any] | None,
         before: RunnableConfig | None,
-        limit: int | None,
-    ) -> Iterator[tuple[str, str, str, dict[str, Any]]]:
-        """The row-selection half of list(): yields (thread, ns, id, row) after
-        all KV-side filtering, newest first, so both list/alist share the logic.
-        Fetches rows synchronously — acceptable because rows are tiny."""
+    ) -> tuple[str, Any]:
+        """Returns ``(prefix, select)``: the KV prefix to scan and a selector
+        mapping a key to ``(thread, ns, id)`` — or ``None`` when the key is
+        outside the request's namespace / checkpoint-id / ``before`` window."""
         config_ns = config["configurable"].get("checkpoint_ns") if config else None
         config_id = get_checkpoint_id(config) if config else None
         before_id = get_checkpoint_id(before) if before else None
@@ -375,37 +384,93 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             prefix = f"{CKPT_PREFIX}/{_seg(config['configurable']['thread_id'])}/"
         else:
             prefix = f"{CKPT_PREFIX}/"
-        remaining = limit
-        # Newest first within each (thread, ns): full-key descending sort gives
-        # descending checkpoint ids per prefix group (fixed-width UUID6).
-        for key in sorted(self._kv_keys(prefix), reverse=True):
+
+        def select(key: str) -> tuple[str, str, str] | None:
             parts = key.split("/")
             if len(parts) != 4:
-                continue
+                return None
             thread_id, checkpoint_ns, checkpoint_id = (
                 _unseg(parts[1]), _unseg(parts[2]), _unseg(parts[3]),
             )
             if config_ns is not None and checkpoint_ns != config_ns:
-                continue
+                return None
             if config_id and checkpoint_id != config_id:
-                continue
+                return None
             if before_id and checkpoint_id >= before_id:
+                return None
+            return thread_id, checkpoint_ns, checkpoint_id
+
+        return prefix, select
+
+    @staticmethod
+    def _row_if_matches(raw: bytes, filter: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Decodes a checkpoint row and applies the metadata ``filter``;
+        ``None`` for an undecodable row or a filter miss."""
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            return None
+        metadata = row.get("metadata") or {}
+        if filter and not all(v == metadata.get(k) for k, v in filter.items()):
+            return None
+        return row
+
+    def _list_rows(
+        self,
+        config: RunnableConfig | None,
+        filter: dict[str, Any] | None,
+        before: RunnableConfig | None,
+        limit: int | None,
+    ) -> Iterator[tuple[str, str, str, dict[str, Any]]]:
+        """The row-selection half of :meth:`list`: yields ``(thread, ns, id, row)``
+        after all KV-side filtering, newest first. Sync client throughout."""
+        prefix, select = self._row_window(config, before)
+        remaining = limit
+        # Newest first within each (thread, ns): full-key descending sort gives
+        # descending checkpoint ids per prefix group (fixed-width UUID6).
+        for key in sorted(self._kv_keys(prefix), reverse=True):
+            selected = select(key)
+            if selected is None:
                 continue
             raw = self._kv_get(key)
             if raw is None:
                 continue  # tombstoned between keys() and get()
-            try:
-                row = json.loads(raw)
-            except ValueError:
-                continue
-            metadata = row.get("metadata") or {}
-            if filter and not all(v == metadata.get(k) for k, v in filter.items()):
+            row = self._row_if_matches(raw, filter)
+            if row is None:
                 continue
             if remaining is not None:
                 if remaining <= 0:
                     return
                 remaining -= 1
-            yield thread_id, checkpoint_ns, checkpoint_id, row
+            yield (*selected, row)
+
+    async def _alist_rows(
+        self,
+        config: RunnableConfig | None,
+        filter: dict[str, Any] | None,
+        before: RunnableConfig | None,
+        limit: int | None,
+    ) -> AsyncIterator[tuple[str, str, str, dict[str, Any]]]:
+        """Async :meth:`_list_rows` — the same selection over the async client,
+        so :meth:`alist` never blocks the event loop on key enumeration or row
+        reads (review 2026-09-05, finding 5)."""
+        prefix, select = self._row_window(config, before)
+        remaining = limit
+        for key in sorted(await self._akv_keys(prefix), reverse=True):
+            selected = select(key)
+            if selected is None:
+                continue
+            raw = await self._akv_get(key)
+            if raw is None:
+                continue  # tombstoned between keys() and get()
+            row = self._row_if_matches(raw, filter)
+            if row is None:
+                continue
+            if remaining is not None:
+                if remaining <= 0:
+                    return
+                remaining -= 1
+            yield (*selected, row)
 
     # ── Sync write path ──────────────────────────────────────────────────────
 
@@ -544,9 +609,9 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
-        """Async :meth:`list` (row selection is sync — rows are tiny; payload
-        fetches, the heavy half, are awaited)."""
-        for thread_id, checkpoint_ns, checkpoint_id, row in self._list_rows(
+        """Async :meth:`list` — row selection *and* payload fetches on the
+        async client; nothing here blocks the event loop."""
+        async for thread_id, checkpoint_ns, checkpoint_id, row in self._alist_rows(
             config, filter, before, limit
         ):
             tup = await self._aread_tuple(thread_id, checkpoint_ns, checkpoint_id, row=row)
