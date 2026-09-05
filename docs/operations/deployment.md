@@ -126,6 +126,27 @@ persisted `auto_cert_dir` it keeps its identity; with persistence enabled it
 replays its WAL. Capability advertisements evaporate while a node is down and
 reappear on restart (see [00 · Concepts](../guide/00-concepts.md) on evaporation).
 
+### Persistence modes
+
+`PersistenceConfig` (`base_path` · `sync_mode` · `snapshot_wal_threshold`, default 10 000 ·
+`snapshot_interval_secs`, default 300) writes `{base_path}/{node_id}/kv/{wal.bin,snapshot.bin}`.
+What a write acknowledgement means is the one operator decision:
+
+| `sync_mode` | Meaning of an acked write | Cost |
+|---|---|---|
+| `Flush` | on stable storage (`fdatasync` per record); a stopped WAL writer or disk error is an `Err`, never a silent `Ok` | ~1 ms/write on SSD |
+| `Async` (default) | OS-buffered; the last few writes can be lost on power failure | none |
+| `Os` | no explicit sync — development only | none |
+
+In every mode: **consensus committed slots and leases are fsynced** (`append_sync` forces it) and
+the commit result carries `persisted` (gateway JSON `"persisted"`; `false` = committed
+cluster-wide but not on this node's disk — logged at `error`, repaired from peers by anti-entropy
+after a restart; treat a run of `false` as a disk or writer fault on that node). A snapshot merges
+the on-disk WAL tail before truncating, so it never discards a record; replay is last-writer-wins
+over every record. Tune `snapshot_interval_secs` / `snapshot_wal_threshold` so replay time is
+bounded; the snapshot pass raises the node's opacity for its duration. Since v2.4.2
+(`CHANGELOG § [2.4.2]`); the invariants are canon in `mycelium-core/src/persistence.rs`.
+
 ## Rolling upgrades
 
 Mycelium tolerates a **mixed-version cluster** during an upgrade: `read_frame` accepts both the
@@ -160,8 +181,9 @@ restore are just directory operations:
   the volume, or copy the dirs while the node runs — the WAL makes a copy taken mid-write
   self-consistent on replay.
 - **Restore** = put the dirs back where the node expects them and start it. On boot it
-  replays the WAL up to the latest snapshot, then re-bootstraps and re-learns any newer KV
-  from peers via anti-entropy (same path as [restart](#restart-behaviour)). Keeping
+  loads the latest snapshot and replays the WAL tail on top of it (last-writer-wins per key,
+  every record), then re-bootstraps and re-learns any newer KV from peers via anti-entropy
+  (same path as [restart](#restart-behaviour)). Keeping
   `auto_cert_dir` means the node comes back with the *same* identity — no re-issue, no
   signature churn, and its audit/consensus history stays attributable to it.
 

@@ -175,3 +175,10 @@ Entry format:
   the lib.rs set has that the occurrence lacks — a non-empty diff on *any* occurrence is the finding.
   Companion prefixes may live in the blockquote's second paragraph ("Companion claims"); core ones must
   be in the first. Fixed: `audit/` added to the blockquote.
+- 2026-09-05: **§3 dead-link sweep — scope gap: guide chapters outside the two front-door docs.** The
+  same-day lint declared "0 dead, 0 orphans" over `docs/wiki/**` + `faq` + `building-on`, but
+  `docs/guide/cookbook.md` carried `README.md#which-crate--mycelium-vs-mycelium-core` pointing at
+  `docs/guide/README.md` (no such heading — it lives in the repo-root `README.md`) since the 2026-07-13
+  anchor-checker commit. Found by doc-coverage run 16's link check over the pages it touched.
+  Sharpening: §3's script sweeps **every** `docs/guide/*.md` and `docs/operations/*.md` (not only the
+  wiki + two front doors), with anchor resolution, each pass — the guide is where cross-links break.

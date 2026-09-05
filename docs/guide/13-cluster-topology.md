@@ -358,8 +358,10 @@ persistence (`SyncMode::Flush`) to eliminate this window:
 
 ```rust
 seed_config.persistence = Some(PersistenceConfig {
-    path: "/data/mycelium.db".into(),
-    sync_mode: SyncMode::Flush,
+    base_path:              "/data/mycelium".into(),   // {base_path}/{node_id}/kv/
+    sync_mode:              SyncMode::Flush,
+    snapshot_wal_threshold: 10_000,
+    snapshot_interval_secs: 300,
 });
 ```
 

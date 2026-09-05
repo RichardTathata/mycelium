@@ -158,6 +158,36 @@ The wiki has a genuinely different operational model: a **node-independent store
   (a real leak for any process that creates and discards wikis). Idempotent; it aborts the loops,
   awaits cancellation so the `Arc`s drop, then retracts the advertisements.
 
+## mycelium-reason — routed inference, the OpenAI façade, fleet traces
+
+The Tier-3 reasoning companion (`mycelium-reason`, its own version line — 0.6.0 since 2026-09-04).
+Nothing to persist: routing state is capability pheromone + **node-local** in-flight reservations
+(never gossiped); traces ride the KV log (`log/reason/{run}`); payload blobs live in the blob tier
+(`BLOB_DIR`, content-addressed, fetched peer-to-peer on demand).
+
+- **Run.** A serving node is one of the examples (`mycelium-reason/examples/README.md`):
+  `reason_node` (blob tier + gateway routes the LangGraph checkpointer needs), `ollama_serve`
+  (serve a local Ollama model, `--features llm,gateway,ollama`; env `OLLAMA_URL`, `MODEL`), or
+  `openai_serve` (Mycelium **over** any OpenAI-compatible engine — PAIR, vLLM, LM Studio — the
+  `llm-meta` ad declared by env, `--features llm,gateway`). Common env: `BIND_PORT`, `HTTP_PORT`,
+  optional `BOOTSTRAP`, optional `GOSSIP_GATEWAY_AUTH_TOKEN`.
+- **What is exposed** (all under `/gateway/reason/`, all behind the gateway bearer since 2026-09-04):
+  `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
+  (scope `llm:invoke` / `llm:read`) — point any OpenAI client at `http://node:HTTP_PORT/gateway/reason/v1`;
+  its `model` field becomes an `llm/{model}` route across the fleet and its API key is the gateway
+  bearer. `GET trace/{run_id}`, `GET`/`PUT blob/{id}` (`llm:read` / `llm:write`). A scoped-token
+  deployment grants the `llm:*` family — [rbac.md](rbac.md) §2.
+- **Routing you can observe.** Each node ranks providers by advertised load (the pheromone) plus its
+  own reservations (`RouterConfig::reservation_weight`, default 0.1), drops opaque nodes, and fails over
+  down the candidate list; there is no proxy process to run or scale. Metrics family
+  `mycelium_reason_route_*` — [metrics.md](metrics.md#reason-routing).
+- **The Ollama collector** (`ollama` feature): `OllamaProbe` fills the `llm_meta` vocabulary
+  (`engine`, `warm`, `vram_used_mb`, `family`, `ctx_window`, …) and `spawn_meta_refresher(interval)`
+  re-advertises only on change — the ad is the daemon's view, so a stale daemon shows as a stale ad.
+- **Position.** PAIR-class GPU planes place the GPU work; Mycelium is the agent plane — stackable,
+  not competing (`docs/plans/mycelium-reason.md`, 2026-09-04 addendum; Dev chapter
+  [15 · Reasoning and LangGraph](../guide/15-reasoning-and-langgraph.md)).
+
 ## See also
 
 - [production-readiness §7](production-readiness.md#7--the-companions-you-actually-use) — the go-live checklist.

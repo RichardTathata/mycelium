@@ -325,8 +325,13 @@ let _listener = agent.start_consensus_listener();
 // Propose within a group — blocks until quorum or timeout.
 let cfg = ConsensusConfig { quorum_size: 0, ..ConsensusConfig::default() };
 match agent.group_propose("workers", "coordinator", Bytes::from("node-7"), cfg).await {
-    ConsensusResult::Committed { slot, value, ballot } => {
+    ConsensusResult::Committed { slot, value, ballot, persisted } => {
         println!("committed: {} = {:?} @ ballot {}", slot, value, ballot);
+        if !persisted {
+            // Committed cluster-wide and applied here, but this node's WAL append failed
+            // (writer stopped / disk error) — after a restart it recovers only via anti-entropy.
+            eprintln!("slot {slot} committed but not on local stable storage");
+        }
     }
     ConsensusResult::Timeout { ballots_tried, votes_last_ballot, quorum_required, .. } => {
         println!("no quorum after {} ballots; last ballot got {}/{} votes",
@@ -338,6 +343,11 @@ match agent.group_propose("workers", "coordinator", Bytes::from("node-7"), cfg).
         println!("superseded at ballot {}: {:?}", ballot, v);
     }
 }
+
+// `persisted` (since v2.4.2) reports *local* durability of the committed slot: the WAL append is
+// forced to fdatasync in every SyncMode; `false` means the cluster commit stands but this node did
+// not get it onto disk (logged at error). Match with `..` if you don't need it. The gateway's
+// propose / overlay/consistent/set JSON carries the same field as "persisted".
 
 // System-wide proposal (all known peers vote).
 let _ = agent.cluster_propose("global/epoch", Bytes::from("42"), ConsensusConfig::default()).await;

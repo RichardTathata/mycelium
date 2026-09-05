@@ -29,7 +29,7 @@ The [example portfolio](README.md#example-portfolio) lists what each one teaches
 
 ### How do I embed Mycelium in my service?
 
-Pick the crate ([guide intro](README.md#which-crate--mycelium-vs-mycelium-core)): `mycelium` (full) or
+Pick the crate ([repo README](../../README.md#which-crate--mycelium-vs-mycelium-core)): `mycelium` (full) or
 `mycelium-core` (Layers I+II only). Then:
 
 ```rust
@@ -159,7 +159,10 @@ elected **curator** reconciles + lint-checks them into a node-independent store,
 and every agent **reads directly** (no curator on the read path). Reach it as MCP
 tools (`wiki.read`/`query`/`propose`), over the HTTP gateway (`/gateway/wiki/*` +
 Python/TS `Wiki` SDKs), or via `Wiki::request_store_access` for a membership-gated
-grant. Demo: [`wiki_chat`](../../mycelium-wiki/examples/wiki_chat.rs) — import
+grant. To remove a page: `Wiki::erase_page(page, label)` on the curator node (curator-local by
+design — no mesh RPC, no gateway route; on a git-as-truth store it is *redaction*, the history
+keeps the bytes — see [operations/companions.md](../operations/companions.md#mycelium-wiki--durable-curated-canon)
+and [data-erasure.md](../operations/data-erasure.md)). Demo: [`wiki_chat`](../../mycelium-wiki/examples/wiki_chat.rs) — import
 documents, then chat grounded in the wiki (one template for both the org-twin and
 council use cases). It **composes** with Postgres (metrics) + RAG (background) by a
 shared id namespace — it is the authoritative/maintained layer, not a similarity
