@@ -152,9 +152,11 @@ cfg.persistence = Some(PersistenceConfig {
 });
 ```
 
-What an acknowledged write means depends on `sync_mode`: `Flush` — `set_async` returns after the
-record is on stable storage (a dead WAL writer or disk error surfaces as the append's `Err`, never a
-silent `Ok`); `Async` (the default) — OS-buffered, the last few writes may be lost on power failure;
+What an acknowledged write means depends on `sync_mode`: `Flush` — `set_async` awaits the record's
+`fdatasync` before returning, **but its `bool` is the gossip-queue result, not a durability receipt**:
+a dead WAL writer or disk error is logged at `warn` and the call still returns `true` (surfacing
+per-write durability to callers is the v3.0 contracts plan's first deliverable — `ROADMAP.md`
+§ contracts axis); `Async` (the default) — OS-buffered, the last few writes may be lost on power failure;
 `Os` — no explicit sync, development only. Consensus committed slots and leases are fsynced in
 **every** mode. A snapshot never discards a WAL record (it merges the WAL tail before truncating),
 and replay is last-writer-wins over every record — the same rule the live store applies. Operator

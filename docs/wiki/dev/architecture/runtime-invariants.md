@@ -244,8 +244,11 @@ would repair it from peers eventually; a single node or a cold cluster restart l
 record is now replayed through `apply_fn` = `apply_and_notify`, whose LWW lets the snapshot's newer
 entry win on its own. `KvSnapshot::snapshot_hlc` stays on disk, informational only.
 
-**An ack is a durability claim.** `append` (Flush), `append_sync`, `trigger_snapshot` return
-`BrokenPipe` when the writer task is gone — never `Ok` by default (`rx.await.unwrap_or(Ok(()))`
+**An ack is a durability claim — at the `WalHandle` level.** `append` (Flush), `append_sync`,
+`trigger_snapshot` return `BrokenPipe` when the writer task is gone — never `Ok` by default. The
+*public* `set_async`/`delete_async` do **not** propagate it: their `bool` is the gossip-queue result and
+the WAL error is logged at `warn` (since Run 61, 2026-09-05 — it was silently discarded before; the
+per-write receipt is the contracts plan's PR 2/3). Do not document `set_async`'s return as durability (`rx.await.unwrap_or(Ok(()))`
 was the pre-fix shape). `append_sync` forces `fdatasync` in every `SyncMode` (its doc always
 claimed so; the writer only synced in `Flush`). Consensus folds the result into
 `ConsensusResult::Committed { persisted }` — `false` is *committed cluster-wide, not on this

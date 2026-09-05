@@ -134,7 +134,7 @@ What a write acknowledgement means is the one operator decision:
 
 | `sync_mode` | Meaning of an acked write | Cost |
 |---|---|---|
-| `Flush` | on stable storage (`fdatasync` per record); a stopped WAL writer or disk error is an `Err`, never a silent `Ok` | ~1 ms/write on SSD |
+| `Flush` | the write returns after the record's `fdatasync`; a stopped WAL writer or disk error is **logged at `warn`** — plain `set`/`set_async` do not surface it (their `bool` is the gossip-queue result; a per-write durability receipt is the v3.0 contracts plan's first item). Consensus commits and leases *do* surface it via `persisted` | ~1 ms/write on SSD |
 | `Async` (default) | OS-buffered; the last few writes can be lost on power failure | none |
 | `Os` | no explicit sync — development only | none |
 
