@@ -145,10 +145,20 @@ survive an unclean shutdown, configure a WAL:
 
 ```rust
 cfg.persistence = Some(PersistenceConfig {
-    data_dir:  PathBuf::from("/var/lib/mynode/wal"),
-    sync_mode: SyncMode::Flush,  // fsync on every write — forensic grade
+    base_path:              PathBuf::from("/var/lib/mynode"),   // data lands in {base_path}/{node_id}/kv/
+    sync_mode:              SyncMode::Flush,   // fdatasync per write (~1 ms on SSD); Async = OS-buffered
+    snapshot_wal_threshold: 10_000,            // compact the WAL into a snapshot every N records …
+    snapshot_interval_secs: 300,               // … or every 5 min, whichever first
 });
 ```
+
+What an acknowledged write means depends on `sync_mode`: `Flush` — `set_async` returns after the
+record is on stable storage (a dead WAL writer or disk error surfaces as the append's `Err`, never a
+silent `Ok`); `Async` (the default) — OS-buffered, the last few writes may be lost on power failure;
+`Os` — no explicit sync, development only. Consensus committed slots and leases are fsynced in
+**every** mode. A snapshot never discards a WAL record (it merges the WAL tail before truncating),
+and replay is last-writer-wins over every record — the same rule the live store applies. Operator
+side: [deployment.md § Persistence modes](../operations/deployment.md#persistence-modes).
 
 **The KV ring as pipeline buffer.** The fluid pipeline example
 ([07-pipelines.md](07-pipelines.md)) uses `scan_prefix("pipeline/stage-a/")`

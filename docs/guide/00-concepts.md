@@ -95,6 +95,13 @@ gossips and heals via anti-entropy. Use a Signal to *notify*; use KV to *record*
 The mailbox is the bridge: durable, ordered event delivery built on KV. →
 [`mailbox_llm`](../../examples/coop/src/bin/mailbox_llm.rs).
 
+**Replication vs. persistence.** KV *replication* (gossip + anti-entropy) is what makes a value
+survive a **node** dying — peers hold it. *Persistence* (`PersistenceConfig`: a local WAL +
+snapshot, off by default) is what makes a value survive the **whole cluster** restarting, or a
+single node that was the only holder. They compose: a restarted node replays its own WAL, then
+re-learns anything newer from peers. → [01 · Gossip KV § Persistence](01-gossip-kv.md),
+[deployment § Persistence modes](../operations/deployment.md#persistence-modes).
+
 **The two "TTL"s — don't conflate them.** The wire frame's **hop-count TTL**
 (`u8`, decremented per forward) bounds how far a frame travels. Key
 **evaporation** is a *read-side convention*: capability/load entries carry a

@@ -19,6 +19,50 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-09-05 (run 16)** — diff-gated over **20 commits since run 15**: the reason 0.6.0 PAIR imports
+  (OpenAI façade, router reservations, `llm_meta` + Ollama collector, `openai_serve`), two gateway-auth
+  fixes (companion routes 09-04; node-level `/mcp` `/signals` `/consensus/{slot}` 09-05), the three P1
+  persistence fixes + `Committed { persisted }` (v2.4.2), the wiki erase verb, mycelium-py 0.2.3
+  pooling, checkpointer 0.1.1. Four clusters re-audited (the parallel auditors were rate-limited before
+  reporting; the audit was run inline against the same rubric — every verdict below was made by
+  opening the doc and diffing against code). **One new row:** *KV persistence (WAL + snapshot)*, split
+  out of Layer I — its durability contract is now a named invariant with five distinct landings, and
+  it is where this run's misses cluster. **Moves:**
+  - **Persistence · HOW·Dev was ✗ in effect** (carried ✓ since run 1): both Dev-guide
+    `PersistenceConfig { … }` literals **did not compile** — `01-gossip-kv.md` used `data_dir`,
+    `13-cluster-topology.md` used `path` (the field is `base_path`) and both omitted the two required
+    snapshot fields. Fixed (+ a paragraph on what an ack means per `SyncMode`). Calibration entry —
+    the config-literal class, second hit; **structural fix:** a mechanical literal-vs-struct sweep over
+    every `*Config`/`*Token`/`*Policy` literal in `docs/guide` + the three operations pages (0 unknown
+    fields after the fix) — reproduce it each run, do not spot-check.
+  - **Persistence · WHAT/HOW·Ops Thin → ✓:** `deployment.md` gained *§ Persistence modes* (the
+    ack-meaning table per `sync_mode`, consensus always-fsynced, `persisted`, snapshot knobs) and its
+    restore step no longer says "replays the WAL *up to* the latest snapshot" (backwards: snapshot,
+    then WAL tail, LWW). **WHAT·Dev Thin → ✓:** `00-concepts.md` gained the *replication vs.
+    persistence* pair (survives a node vs. survives the cluster).
+  - **Layer III · HOW·Dev:** `04-consensus.md`'s example `Committed { slot, value, ballot }` stopped
+    compiling the moment v2.4.2 added `persisted` (same-day drift, not a prior miss). Fixed and the flag
+    landed for Devs (what `false` means; match with `..` if unneeded).
+  - **Reasoning · HOW·Ops Thin → ✓:** `operations/companions.md` had **no reason section at all** —
+    the façade's exposure, scopes, the collector, and "what to run" lived only in the crate's
+    examples README and the Dev chapter. Block added. WHY/WHAT/HOW·Dev ✓ (chapter 15 covers façade
+    routes — verified against `http.rs` — reservations with `reservation_weight` default 0.1 verified,
+    `llm_meta`, the PAIR positioning; run commands' feature flags exist).
+  - **Security:** all five cells ✓ *after* the two fixes; but two prior-run `Clear` verdicts were
+    false in code — calibration entries below (the public-surface statement; the "always fsynced"
+    guarantee). Must-work re-checked: scope names in `rbac.md`/`09-security.md` = `required_scope`;
+    the curl checklist statuses match the middleware; `GOSSIP_GATEWAY_AUTH_TOKEN` is applied by
+    `apply_env_overrides`; the OpenAI-client "API key = bearer" path works because the façade sits under
+    the same layer.
+  - **Companions:** carried ✓; the erase verb has Ops (`companions.md`, `data-erasure.md`) and now a
+    Dev pointer in the cookbook wiki recipe (Tier 3). Pooling is internal (`_pool.py`, no knob) — no
+    doc needed beyond the changelog.
+  **Code gaps surfaced (not papered):** (1) **neither SDK can present a gateway bearer** — the Python
+  `Agent(host, port, timeout)` and the TS client send no `Authorization` header — so every
+  token-protected deployment the docs recommend for non-loopback exposure is unusable from the SDKs
+  (see *Bugs the audit surfaced*); (2) the SDKs read only `ok` from consensus responses, dropping
+  `persisted`. Floor after fixes: **0 ✗ cells, 0 Tier-1 open**; before fixes this run found **1 ✗ in
+  effect** (non-compiling Dev literals) and 3 Thin.
 - **2026-08-16 (run 15)** — diff-gated. Since run 14 the delta is **one concept row: Companions
   (the wiki third)** — the council-substrate arc (GitMirror change sink · `GitStore` + six
   hardening items incl. two recorded measurements · the bulk-ingest claim-check with a gateway
@@ -219,8 +263,9 @@ closed it.
 | Concept | WHY | WHAT·Dev | HOW·Dev | WHAT·Ops | HOW·Ops |
 |---|:--:|:--:|:--:|:--:|:--:|
 | Layer I — Gossip KV | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ |
+| KV persistence (WAL + snapshot) — split from Layer I, run 16 | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ |
 | Layer II — Signal mesh | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Layer III — Consensus | ✓ | ✓ | ✓ ᵀ² | ✓ ᵀ¹ | ✓ ᵀ¹ |
+| Layer III — Consensus | ✓ | ✓ | ✓ ᵀ² ᴿ¹⁶ | ✓ ᵀ¹ | ✓ ᵀ¹ |
 | Capabilities / groups | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Distributed locks | ✓ | ✓ | ✓ | ✓ ᵀ¹ | ✓ ᵀ¹ |
 | Services / RPC | — | ✓ | ✓ ᵀ² | ✓ | ✓ |
@@ -233,11 +278,11 @@ closed it.
 | Data erasure (crypto-shred) | ✓ | ✓ ᴿ¹³ | ✓ ᴿ¹³ | ✓ | ✓ |
 | Artifacts / library | ✓ | ✓ | ✓ ᵀ² ᴿ⁹ | ✓ | ✓ |
 | Federation / AgentFacts | ✓ | ✓ | ✓ ᵀ¹ | ✓ | ✓ |
-| Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ |
+| Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ ᴿ¹⁶ |
 | Companions | ✓ | ✓ | ✓ | ✓ | ✓ ᵀ² |
 | Rolling upgrade (wire compat) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ² |
 
-ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24).
+ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 
 ## What was found, and how it was closed
 
@@ -279,6 +324,17 @@ scalars. Deliberately **no per-lock gauge** (cardinality) — locks are consensu
 
 ## Bugs the audit surfaced (correctness, not coverage)
 
+- **2026-09-05 (run 16) — the language SDKs cannot authenticate to the gateway.** `mycelium-py`'s
+  `Agent(host, port, timeout)` and `mycelium-ts`'s client send no `Authorization` header and expose no
+  token option (grep of both `src/` trees for `Bearer`/`Authorization`: zero hits), while every
+  operations page tells operators to set `gateway_auth_token` for any non-loopback exposure and the
+  companion/node-level routes are now all behind it. A token-protected node is therefore unreachable
+  from both SDKs; the OpenAI façade path works only because OpenAI clients send their API key as a
+  bearer. **Code gap, not a doc gap** — the docs never claimed SDK token support. Fix shape: a
+  `token=`/`authToken` constructor option that sets `Authorization: Bearer …` on every request (the
+  pooled client already centralises headers), mirrored in the SDK READMEs and `rbac.md`. Related: both
+  SDKs read only `ok` from propose / `consistent_set` responses and drop the new `persisted` field.
+
 The digging turned up defects that reading-for-coverage exposed — the recurring lesson that
 verifying-against-code finds real problems:
 
@@ -309,6 +365,36 @@ Prior `Clear` cells later found Thin/Missing — the ledger that scores this aud
 doc analogue of `ratings.md`'s calibration ledger). A cell with repeated hits deserves structural
 skepticism, not a re-asserted ✓.
 
+- **2026-09-05 (run 16) — Security · WHAT·Ops + HOW·Ops** read `Clear` in runs 1–15 while `rbac.md`
+  (and the wiki security page) stated the public surface as exactly `/health|/ready|/stats|/metrics`
+  + descriptor — but `POST /mcp` (tool invocation **with the node's identity**), `GET /signals/{kind}`
+  and `GET /consensus/{slot}` answered without a bearer, and until 2026-09-04 so did every companion
+  `/gateway/…` route. Found by an **external code review** (finding 4) and the 09-04 façade work, not by
+  this audit. **The 5th "asserted guarantee false in code" hit, and the first where the claim is a
+  *boundary enumeration* ("the public set is exactly X")** rather than a property of one mechanism.
+  **Sharpening:** a `Clear` on any doc that *enumerates a security boundary* (public routes, allowlist,
+  gated set, reserved prefixes) must be diffed **mechanically** against the code table that defines it
+  (here the router + `required_scope`) — the wiki-lint's per-occurrence diff recipe applies; reading
+  the sentence is not verification. Fixed 2026-09-05 (#172): routes gated, every statement of the set
+  aligned (rbac.md, 09-security, config.rs doc, observability, wiki).
+- **2026-09-05 (run 16) — Layer I persistence · HOW·Ops** read `Clear` in runs 1–15 while
+  `production-readiness.md` §3 asserted "consensus committed slots are always fsynced regardless" of
+  `sync_mode` — **false in code**: `append_sync` only synced in `Flush` mode, and a stopped WAL writer
+  acknowledged every append as `Ok`. Found by the same external review (finding 3). **6th false-guarantee
+  hit** ("fsynced"). Fixed in code (v2.4.2 forces the sync in every mode; acks are `BrokenPipe` on a
+  dead writer) so the sentence is now true; the page also points at `persisted`. Reinforces the
+  2026-07-15 sharpening — a durability word ("fsynced", "durable", "survives") is an asserted guarantee
+  and must trace to the syscall.
+- **2026-09-05 (run 16) — Layer I persistence · HOW·Dev** read `Clear` in runs 1–15 while **both**
+  Dev-guide `PersistenceConfig { … }` literals failed to compile (`01-gossip-kv.md` `data_dir`,
+  `13-cluster-topology.md` `path`; the field is `base_path`, and two required fields were absent).
+  Found by this run's spot-check. **Second hit of the config-literal class** (`TlsConfig { key_path }`,
+  2026-07-24) — and the 07-24 sharpening ("diff every `Config { … }` literal against the struct") was
+  applied to the security chapter only. **Structural fix, not another point patch:** run 16 wrote and ran
+  a mechanical sweep — every `*Config`/`*Token`/`*Policy { field: … }` literal in `docs/guide/*.md` +
+  `operations/{deployment,rbac,companions}.md`, fields diffed against `pub struct` fields across all
+  crates — 0 unknown fields after the fix. Re-run it every pass (it is in the run-16 transcript; ~30
+  lines of Python) instead of spot-checking.
 - **2026-07-24 — Security · HOW·Dev** was `Clear` in runs 1–12 while `09-security.md`'s Dev Notes held
   two `must-work-if-followed` defects: a `TlsConfig { key_path: … }` example that **does not compile**
   (the field is `key_pem`) and a false "`TlsConfig::default()` regenerates the key every restart" claim
@@ -404,8 +490,8 @@ skepticism, not a re-asserted ✓.
 ## Re-run guidance
 
 The audit was a one-time systematic sweep; a re-run should be a **diff**. Re-audit a concept only
-when its code/docs changed since the last run (run 8 baseline commit `6ff383f`: `git log 6ff383f..HEAD -- docs/ src/
-mycelium-*/src/`). The matrix
+when its code/docs changed since the last run (run 16 baseline: tag `v2.4.2` + the 2026-09-05 lint —
+`git log v2.4.2..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
 above is the baseline: any cell dropping below ✓ is a regression. The method (four auditors, the
 Clear/Thin/Missing rubric, the exact prompts) is reproducible from this session's transcript. New
 concepts (a new sub-handle, a new companion, a new external standard) each need a fresh row audited
