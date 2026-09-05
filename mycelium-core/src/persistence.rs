@@ -453,6 +453,25 @@ async fn wal_append(
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
 
+/// `fsync` the directory itself so a preceding `rename` is on stable storage.
+///
+/// Honoured by ext4 / XFS / btrfs (the deployment targets). On macOS `fsync` does not
+/// force the drive cache either way (`F_FULLFSYNC` would) — that caveat applies to every
+/// sync in this module and is documented in `deployment.md § Persistence modes`, not
+/// special-cased here. Windows has no directory fsync; the call is a no-op there.
+async fn fsync_dir(dir: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let d = tfs::File::open(dir).await?;
+        d.sync_all().await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
 /// `lww_wins` over two WAL/snapshot records — the store's exact conflict rule, so
 /// the snapshot merge and a later replay agree.
 fn sync_entry_wins(incoming: &SyncEntry, current: &SyncEntry) -> bool {
@@ -567,6 +586,13 @@ async fn do_snapshot(
         f.sync_data().await?;
     }
     tfs::rename(&tmp_path, &snap_path).await?;
+    // 3b. Make the RENAME durable before the WAL is truncated. `sync_data` on the file
+    // covers its bytes, not the directory entry; without this, a power loss / kernel
+    // panic after step 4 could leave the OLD snapshot.bin on disk next to an EMPTY,
+    // fsynced wal.bin — every record since the previous snapshot gone, each of them
+    // acknowledged. A process crash is not affected (the page cache still writes the
+    // rename out), which is why the process-kill suite could never see this.
+    fsync_dir(dir).await?;
 
     // 4. Truncate WAL.
     wal_file.seek(std::io::SeekFrom::Start(0)).await?;
@@ -743,6 +769,29 @@ mod durability_tests {
     }
 
     // ── Invariant 1: a snapshot never discards a WAL record ───────────────────
+
+    #[tokio::test]
+    async fn snapshot_install_syncs_the_directory() {
+        // The power-loss property (rename durable before the WAL truncation) is not
+        // observable without a filesystem adapter — the replay plan's point. What can be
+        // pinned today: the helper is wired into the snapshot path and behaves (succeeds
+        // on a real directory, surfaces a missing one as an error rather than a silent skip).
+        let dir = unique_dir("dirsync");
+        fsync_dir(&dir).await.expect("fsync of a real directory succeeds");
+        assert!(fsync_dir(&dir.join("does-not-exist")).await.is_err(),
+            "a missing directory must be an error, not a no-op");
+        // And the full snapshot path still installs cleanly with the extra sync in place.
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        apply_and_notify(&state, &make_gossip_update(&node, 1, Arc::from("k"), Bytes::from_static(b"v"), false, &hlc));
+        let mut wal = open_wal(&dir.join("wal.bin")).await.unwrap();
+        do_snapshot(&dir, &state, &node, &hlc, 1, &mut wal, None).await.unwrap();
+        assert!(dir.join("snapshot.bin").exists() && !dir.join("snapshot.tmp").exists());
+        let restored = replay_into_fresh_store(&dir).await;
+        assert_eq!(live_value(&restored, "k").as_deref(), Some(&b"v"[..]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[tokio::test]
     async fn regression_snapshot_aborts_when_wal_tail_is_unreadable() {

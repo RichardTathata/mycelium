@@ -142,8 +142,12 @@ In every mode: **consensus committed slots and leases are fsynced** (`append_syn
 the commit result carries `persisted` (gateway JSON `"persisted"`; `false` = committed
 cluster-wide but not on this node's disk — logged at `error`, repaired from peers by anti-entropy
 after a restart; treat a run of `false` as a disk or writer fault on that node). A snapshot merges
-the on-disk WAL tail before truncating, so it never discards a record; replay is last-writer-wins
-over every record. Tune `snapshot_interval_secs` / `snapshot_wal_threshold` so replay time is
+the on-disk WAL tail before truncating, so it never discards a record, and the snapshot rename is
+fsynced at the directory before the WAL is truncated, so a power loss cannot leave an old snapshot
+beside an emptied WAL; replay is last-writer-wins over every record. **Storage assumptions:** directory
+fsync honoured (ext4, XFS, btrfs — the deployment targets); on **macOS** `fsync` does not force the
+drive's write cache (`F_FULLFSYNC` would), so a laptop's power-loss durability is weaker than Linux's for
+every sync in the WAL, not only this one — development only. Tune `snapshot_interval_secs` / `snapshot_wal_threshold` so replay time is
 bounded; the snapshot pass raises the node's opacity for its duration. Since v2.4.2
 (`CHANGELOG § [2.4.2]`); the invariants are canon in `mycelium-core/src/persistence.rs`.
 

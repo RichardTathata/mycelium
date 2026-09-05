@@ -3122,7 +3122,8 @@ is not yet supportable (only process-kill is tested).
 
 **Two ordering adjustments:** pull the exact-identity ack (4a) forward — it corrects a live overclaim on a
 shipped API; and make the snapshot **directory fsync** a Phase-0 fix, not a caveat (a few lines; the
-difference between a power-loss claim we can and cannot make). **Missing from the plan, to add:** a core API
+difference between a power-loss claim we can and cannot make) — **done 2026-09-05** (`fsync_dir` between
+rename and truncation; the property itself stays unobservable until the storage adapter exists). **Missing from the plan, to add:** a core API
 to submit a *pre-stamped* update (every local write path ticks a fresh HLC; retries must not become newer
 LWW writes — today only the replay path does this); a mapping of the existing at-least-once primitives
 (`emit_reliable`, mailbox, tuple-space lease) into the receipt vocabulary; and the in-tree prior art the

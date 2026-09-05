@@ -227,7 +227,12 @@ ordering** — invariant 1 is defence in depth, this is the guarantee. The write
 nothing lands between the read-back and the truncation. **A failed read-back aborts the snapshot**
 (returns the error; nothing installed, nothing truncated) — treating it as an empty tail would turn a
 transient read error into loss (found by the replay-design review the same day, fixed the same day;
-gate `regression_snapshot_aborts_when_wal_tail_is_unreadable`). Cost: one bounded read (≤
+gate `regression_snapshot_aborts_when_wal_tail_is_unreadable`). **The rename is made durable before the
+WAL is truncated** (`fsync_dir` between steps 3 and 4): a file `sync_data` covers bytes, not the directory
+entry, so a power loss after the truncation could otherwise leave the *old* `snapshot.bin` beside an *empty*
+fsynced `wal.bin` — the whole inter-snapshot window lost. Process kills never show this (the page cache
+writes the rename out), which is why the suite could not see it; the property is unobservable without a
+filesystem adapter (replay plan, Phase 0) — `snapshot_install_syncs_the_directory` pins the wiring only. Cost: one bounded read (≤
 `snapshot_wal_threshold` records) per snapshot. `wal_file.flush()` precedes the read-back because
 tokio's `File::write_all` may still be in flight in `Async`/`Os` mode.
 
