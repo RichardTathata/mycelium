@@ -165,3 +165,13 @@ Entry format:
   resolved relative to `docs/` rather than the file. Sharpening: the sweep script resolves every link
   relative to *its own file's directory* and includes `wiki.md` and the front-door guide docs in the
   same pass (this pass's script does; keep it — it is in the log).
+- 2026-09-05: **§1 front-door reserved-prefix list — "two lists, one updated", third time.** The
+  2026-09-04 pass fixed `audit/` into `building-on`'s *bullet* form (line ~142) and declared both forms
+  reconciled, but the *blockquote* form (line ~72, the one adopters read first) still lacked `audit/`
+  (found by this pass diffing the `src/lib.rs` prefix set against **each** occurrence separately). The
+  2026-09-04 sharpening said "diff every occurrence" but was applied by eye. Sharpening (mechanical):
+  extract the lib.rs set (`grep -oE '^//! \| \`[a-z_-]+/' src/lib.rs`), then for each list occurrence in
+  `building-on` (`grep -n 'grp/' docs/guide/building-on-mycelium.md` finds them all) print the prefixes
+  the lib.rs set has that the occurrence lacks — a non-empty diff on *any* occurrence is the finding.
+  Companion prefixes may live in the blockquote's second paragraph ("Companion claims"); core ones must
+  be in the first. Fixed: `audit/` added to the blockquote.

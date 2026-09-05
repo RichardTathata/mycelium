@@ -71,7 +71,7 @@ prefixes; **do not write under them:**
 
 > `grp/` · `sys/` · `consensus/` · `cap/` · `req/` · `cap-group/` · `gcap/` · `mailbox/` ·
 > `schemas/` · `tools/` · `agent/` · `svc/` · `log/` · `clog/` · `lock/` · `prompts/` ·
-> `skills/` · `manifest/` (the full authoritative table with per-key semantics is in
+> `skills/` · `manifest/` · `audit/` (the full authoritative table with per-key semantics is in
 > [`src/lib.rs`](../../src/lib.rs) → *KV namespace ownership*). Note `log/` in particular:
 > `KvHandle::append` writes `log/{stream}/…`, so give your streams an app-scoped name —
 > don't write raw `log/` keys.
