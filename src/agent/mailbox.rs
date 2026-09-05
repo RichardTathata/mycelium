@@ -165,10 +165,10 @@ pub(crate) fn deliver_event_ctx(
     );
     let value = encode_value(self_node_id, &payload);
     let update = make_gossip_update(self_node_id, ctx.default_ttl, key, value, false, &ctx.hlc);
+    apply_and_notify(&ctx.kv_state, &update); // apply, then persist (persistence.rs invariant 1)
     if let Some(wal) = ctx.wal.get() {
         wal.append_try(crate::framing::sync_entry_from(&update));
     }
-    apply_and_notify(&ctx.kv_state, &update);
     dispatch_gossip_try_send(
         &ctx.gossip_txs, WireMessage::Data(update),
         self_node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,

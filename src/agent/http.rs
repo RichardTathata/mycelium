@@ -1883,10 +1883,10 @@ fn kv_write(ctx: &Arc<TaskCtx>, key: Arc<str>, value: Bytes, tombstone: bool) ->
     use crate::framing::{dispatch_gossip_try_send, make_gossip_update, ForwardHint, WireMessage};
     use crate::store::apply_and_notify;
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, value, tombstone, &ctx.hlc);
+    apply_and_notify(&ctx.kv_state, &update); // apply, then persist (persistence.rs invariant 1)
     if let Some(wal) = ctx.wal.get() {
         wal.append_try(crate::framing::sync_entry_from(&update));
     }
-    apply_and_notify(&ctx.kv_state, &update);
     dispatch_gossip_try_send(
         &ctx.gossip_txs,
         WireMessage::Data(update),
@@ -2237,8 +2237,10 @@ async fn gw_cross_group_propose(
     ).await;
 
     match result {
-        crate::consensus::ConsensusResult::Committed { .. } =>
-            Json(json!({ "ok": true })).into_response(),
+        // `persisted: false` = committed cluster-wide but not on this node's stable storage
+        // (see `ConsensusResult::Committed::persisted`) — additive field, `ok` unchanged.
+        crate::consensus::ConsensusResult::Committed { persisted, .. } =>
+            Json(json!({ "ok": true, "persisted": persisted })).into_response(),
         crate::consensus::ConsensusResult::Timeout { ballots_tried, .. } =>
             (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": format!("consensus timed out after {ballots_tried} ballot(s)") }))).into_response(),
         crate::consensus::ConsensusResult::Superseded { .. } =>
@@ -2279,7 +2281,7 @@ async fn gw_overlay_consistent_set(
     ).await;
 
     match result {
-        crate::consensus::ConsensusResult::Committed { .. } => {
+        crate::consensus::ConsensusResult::Committed { persisted, .. } => {
             let key_arc: Arc<str> = Arc::from(key.as_str());
             let update = crate::framing::make_gossip_update(
                 &ctx.agent_ctx.node_id, ctx.agent_ctx.default_ttl,
@@ -2293,7 +2295,7 @@ async fn gw_overlay_consistent_set(
                 crate::framing::ForwardHint::All,
                 &ctx.agent_ctx.kv_state.dropped_frames,
             );
-            Json(json!({ "ok": true })).into_response()
+            Json(json!({ "ok": true, "persisted": persisted })).into_response()
         }
         crate::consensus::ConsensusResult::Timeout { ballots_tried, .. } =>
             (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": format!("consensus timed out after {ballots_tried} ballot(s)") }))).into_response(),

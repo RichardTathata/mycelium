@@ -205,3 +205,50 @@ reach for the HLC of the commit, never the ballot. Gates: `distributed_lock_gran
 (`src/agent/overlay_consistent.rs`), `fencing_token_is_monotonic_across_acquisitions`
 (`src/agent/lock_service.rs`).
 The runnable demo is `examples/distributed_lock.rs`.
+
+## Persistence: the store is never behind the WAL, and a snapshot never discards a WAL record
+
+Three durability invariants, written down after an external review (2026-09-05) reproduced three
+P1 defects with deterministic probes — each had shipped in every tagged release with persistence
+(`mycelium-core/src/persistence.rs` module doc is canon; gates in its `durability_tests`).
+
+**1. Apply, then persist.** Every write site (`ops.rs` `kv_set*`/`kv_delete*`, `connection.rs`
+gossip receive + anti-entropy + quorum evidence, `mailbox.rs`, gateway `kv_write`) calls
+`apply_and_notify` *before* `WalHandle::append*`. Pre-fix the async paths awaited the Flush-mode
+ack first, and the writer runs its threshold snapshot **in the same poll as the ack, with no yield**
+— so the store scan lacked the acknowledged write and step 4 (WAL truncation) erased its only
+copy. Do not "restore" WAL-first ordering for a durability-before-visibility feel: the sync path
+never had it, and the snapshot is taken from the store.
+
+**2. The snapshot merges the WAL tail before truncating.** `do_snapshot` reads `wal.bin` (every
+record since the last truncation) and folds it into the store scan under the store's own
+`lww_wins` (`sync_entry_wins`), so the persistence layer is correct **regardless of caller
+ordering** — invariant 1 is defence in depth, this is the guarantee. The writer is single-task:
+nothing lands between the read-back and the truncation. Cost: one bounded read (≤
+`snapshot_wal_threshold` records) per snapshot. `wal_file.flush()` precedes the read-back because
+tokio's `File::write_all` may still be in flight in `Async`/`Os` mode.
+
+**3. Replay is LWW, not a watermark.** `replay` used to skip records with
+`timestamp <= snapshot_hlc`, treating an HLC as a WAL *position*. A delayed remote update carries
+an older HLC than the local clock at snapshot time yet is accepted and WAL-appended *after* the
+snapshot — the filter dropped it on restart even for a key the snapshot lacked (anti-entropy
+would repair it from peers eventually; a single node or a cold cluster restart lost it). Every
+record is now replayed through `apply_fn` = `apply_and_notify`, whose LWW lets the snapshot's newer
+entry win on its own. `KvSnapshot::snapshot_hlc` stays on disk, informational only.
+
+**An ack is a durability claim.** `append` (Flush), `append_sync`, `trigger_snapshot` return
+`BrokenPipe` when the writer task is gone — never `Ok` by default (`rx.await.unwrap_or(Ok(()))`
+was the pre-fix shape). `append_sync` forces `fdatasync` in every `SyncMode` (its doc always
+claimed so; the writer only synced in `Flush`). Consensus folds the result into
+`ConsensusResult::Committed { persisted }` — `false` is *committed cluster-wide, not on this
+node's stable storage* (logged at `error`; gateway JSON carries `"persisted"`). The
+Async/Os-mode `append` and `append_try` remain fire-and-forget by documented design.
+
+Gates (`persistence.rs::durability_tests`): `regression_snapshot_retains_wal_record_acked_before_local_apply`,
+`regression_writer_threshold_snapshot_right_after_ack_keeps_write` (through the real writer task,
+replay taken while it is alive — a clean shutdown would mask the loss), `snapshot_wal_merge_follows_store_lww`,
+`regression_replay_keeps_wal_record_older_than_snapshot_watermark`,
+`replay_without_watermark_still_lets_snapshot_win_same_key`, `regression_closed_writer_never_acks_success`,
+`regression_writer_dying_mid_request_is_an_error`, `append_sync_fdatasyncs_in_async_mode`.
+Not gated: `Committed { persisted: false }` end-to-end (needs a writer death or disk fault inside
+a running agent — the unit path is covered by the closed-writer test).

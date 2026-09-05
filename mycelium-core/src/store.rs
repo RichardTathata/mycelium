@@ -453,7 +453,7 @@ pub fn bucket_for_key(key: &str) -> usize {
 ///   practice: two writers in the same wall-clock millisecond whose HLCs have
 ///   not yet observed each other both stamp `(ms, logical=0)`.
 #[inline]
-fn lww_wins(incoming_ts: u64, incoming_tombstone: bool, incoming_val: &Option<Bytes>, curr: &StoreEntry) -> bool {
+pub(crate) fn lww_wins(incoming_ts: u64, incoming_tombstone: bool, incoming_val: &Option<Bytes>, curr: &StoreEntry) -> bool {
     if incoming_ts != curr.timestamp {
         return incoming_ts > curr.timestamp;
     }

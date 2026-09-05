@@ -106,6 +106,10 @@ the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
   [testing](docs/wiki/dev/testing/testing.md).
 - **KV writes are size-gated** (`framing::MAX_KV_WRITE_BYTES`); anti-entropy is chunked;
   a `FrameTooLarge` frame is dropped without tearing down the connection.
+- **Apply to the store, then hand the record to the WAL** — never the reverse — and a WAL ack is
+  a durability claim (`Err` when the writer is gone; `append_sync` fsyncs in every `SyncMode`).
+  The snapshot merges the WAL tail before truncating; replay is LWW, not a watermark —
+  [runtime-invariants](docs/wiki/dev/architecture/runtime-invariants.md) §Persistence.
 - Ports via `test_util::alloc_port`; env-var tests hold `config::tests::env_test_lock()`.
 
 ## Active work

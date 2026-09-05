@@ -9,7 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Fixed
+
+- **Persistence: three P1 durability defects** (external review 2026-09-05, each reproduced by a
+  probe before the fix; regression gates in `mycelium-core/src/persistence.rs::durability_tests`).
+  Wire unchanged; on-disk format unchanged (`snapshot_hlc` is still written, now informational).
+  1. **A snapshot could erase an acknowledged, fsynced write.** The WAL writer acked an append and
+     ran its threshold snapshot in the same poll, while `kv_set_async` (and the gossip receive path)
+     applied the write to the store only *after* the ack — the store scan lacked the key and the
+     WAL record was then truncated. Fixed twice over: every write site now **applies to the store
+     before it hands the record to the WAL** (`ops.rs`, `connection.rs`, `mailbox.rs`, gateway
+     `kv_write`), and `do_snapshot` **merges the on-disk WAL tail into the snapshot under the store's
+     own LWW rule** before truncating, so the persistence layer no longer depends on caller ordering.
+  2. **Replay treated HLC timestamps as WAL positions.** `replay` skipped every WAL record with
+     `timestamp <= snapshot_hlc`, dropping a delayed remote update (older HLC, accepted after the
+     snapshot) even for a key the snapshot lacked. Every record is now replayed; `apply_and_notify`'s
+     LWW resolves per key.
+  3. **Success reported without durable storage.** `append` (Flush) / `append_sync` /
+     `trigger_snapshot` returned `Ok(())` when the writer task was gone (`unwrap_or(Ok(()))`); now
+     `BrokenPipe`. `append_sync` documented an unconditional `fdatasync` but only synced in `Flush`
+     mode; it now forces the sync in every `SyncMode` (consensus committed slots + leases).
+     Consensus discarded the append result: **`ConsensusResult::Committed` gains `persisted: bool`**
+     (`false` = committed cluster-wide and applied locally, but not on this node's stable storage;
+     logged at `error`), and the gateway's propose / `overlay/consistent/set` responses carry
+     `"persisted"` alongside `"ok"`. Additive: all in-tree matchers use `{ .. }`.
 
 ---
 

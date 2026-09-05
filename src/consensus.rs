@@ -189,6 +189,14 @@ pub enum ConsensusResult {
         slot:   Arc<str>,
         value:  Bytes,
         ballot: u64,
+        /// `true` when the committed slot (and its lease, if any) reached stable
+        /// storage on this node — the forced-`fdatasync` WAL append succeeded, or
+        /// persistence is not configured (nothing was promised). `false` means the
+        /// value **is committed cluster-wide and applied locally**, but this node's
+        /// WAL does not hold it (writer stopped, disk error): after a restart it
+        /// recovers only via anti-entropy from peers. Logged at `error` with the
+        /// slot; a caller that requires local durability must check this flag.
+        persisted: bool,
     },
     /// All ballot attempts timed out without reaching quorum.
     Timeout {
@@ -1050,14 +1058,10 @@ impl ConsensusEngine {
                                 self.sign_payload(encode_consensus_msg(&commit_msg)),
                             ).await;
                             let committed_upd = self.set_async(&commit_key, value.clone()).await;
-                            if let Some(wal) = self.task_ctx.wal.get() {
-                                let _ = wal.append_sync(
-                                    crate::framing::sync_entry_from(&committed_upd)
-                                ).await;
-                            }
-                            self.write_lease(&slot, lease_ms).await;
+                            let persisted = self.persist_committed(&slot, &committed_upd).await
+                                & self.write_lease(&slot, lease_ms).await;
                             self.kv_delete(&ballot_key);
-                            return ConsensusResult::Committed { slot, value: value.clone(), ballot };
+                            return ConsensusResult::Committed { slot, value: value.clone(), ballot, persisted };
                         }
                     }
                     Some(sig) = nack_rx.recv() => {
@@ -1138,16 +1142,35 @@ impl ConsensusEngine {
             Arc::from(consensus_kind::COMMIT), scope.clone(), self.sign_payload(encode_consensus_msg(&commit)),
         ).await;
         let committed_upd = self.set_async(commit_key, value.clone()).await;
-        if let Some(wal) = self.task_ctx.wal.get() {
-            let _ = wal.append_sync(sync_entry_from(&committed_upd)).await;
-        }
-        self.write_lease(slot, lease_ms).await;
+        let persisted = self.persist_committed(slot, &committed_upd).await
+            & self.write_lease(slot, lease_ms).await;
         self.kv_delete(ballot_key);
         Some(ConsensusResult::Committed {
             slot:   Arc::clone(slot),
             value:  value.clone(),
             ballot,
+            persisted,
         })
+    }
+
+    /// Forces the committed-slot record to stable storage (`append_sync` —
+    /// `fdatasync` in every `SyncMode`). Returns `false` on failure, which the
+    /// commit surfaces as `Committed { persisted: false }` rather than swallowing:
+    /// the cluster commit already happened (COMMIT emitted, value applied), so the
+    /// honest report is "committed, not locally durable". `true` when persistence
+    /// is not configured — no promise was made.
+    async fn persist_committed(&self, slot: &Arc<str>, upd: &crate::framing::GossipUpdate) -> bool {
+        let Some(wal) = self.task_ctx.wal.get() else { return true; };
+        match wal.append_sync(sync_entry_from(upd)).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(
+                    slot = %slot, error = %e,
+                    "consensus: committed slot did not reach stable storage on this node",
+                );
+                false
+            }
+        }
     }
 
     /// Writes (or clears) the epoch-lease window for `slot` at commit time.
@@ -1156,19 +1179,31 @@ impl ConsensusEngine {
     /// committed value so a restart cannot resurrect an expired slot as
     /// permanent). `None` → tombstone any stale lease left by a previous
     /// leased commitment, so the new permanent commit cannot be expired by it.
-    async fn write_lease(&self, slot: &Arc<str>, lease_ms: Option<u64>) {
+    ///
+    /// Returns whether the lease record reached stable storage (`true` when there
+    /// is nothing to persist) — folded into `Committed::persisted`.
+    async fn write_lease(&self, slot: &Arc<str>, lease_ms: Option<u64>) -> bool {
         let lease_key = format!("{}{}", consensus_ns::LEASE, &**slot);
         match lease_ms {
             Some(ms) => {
                 let upd = self.set_async(&lease_key, encode_lease_ms(ms)).await;
-                if let Some(wal) = self.task_ctx.wal.get() {
-                    let _ = wal.append_sync(sync_entry_from(&upd)).await;
+                let Some(wal) = self.task_ctx.wal.get() else { return true; };
+                match wal.append_sync(sync_entry_from(&upd)).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(
+                            slot = %slot, error = %e,
+                            "consensus: lease for committed slot did not reach stable storage on this node",
+                        );
+                        false
+                    }
                 }
             }
             None => {
                 if self.get(&lease_key).is_some() {
                     self.kv_delete(&lease_key);
                 }
+                true
             }
         }
     }

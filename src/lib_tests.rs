@@ -3862,6 +3862,61 @@ async fn test_ws3_data_at_rest_cipher_encrypts_wal_and_round_trips() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Review 2026-09-05 finding 3: consensus discarded the committed-slot WAL result and reported
+/// `Committed` regardless. With persistence on, the commit must report `persisted: true`, the
+/// forced-fsync append must actually land (`append_sync` in *Async* mode — the mode that used to
+/// skip the sync), and the slot must survive a restart via replay — including a leased commit's
+/// lease record (folded into the same flag).
+#[tokio::test]
+#[cfg(feature = "consensus")]
+async fn consensus_commit_reports_persisted_and_survives_restart() {
+    use crate::{ConsensusConfig, ConsensusResult, PersistenceConfig, SyncMode};
+
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("myc-cpersist-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mk = || {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: base.clone(),
+            sync_mode: SyncMode::Async, // append_sync must force the fsync here
+            snapshot_wal_threshold: 1_000_000,
+            snapshot_interval_secs: 3_600,
+        });
+        GossipAgent::new(id.clone(), cfg)
+    };
+
+    let a1 = Arc::new(mk());
+    a1.start().await.unwrap();
+    let _listener = a1.consensus().start_consensus_listener(ConsensusConfig::default());
+    let permanent = ConsensusConfig { quorum_size: 1, ..ConsensusConfig::default() };
+    let leased    = ConsensusConfig { quorum_size: 1, committed_lease_secs: Some(3_600), ..ConsensusConfig::default() };
+
+    let r1 = a1.consensus().cluster_propose("durable/perm", Bytes::from_static(b"v-perm"), permanent).await;
+    assert!(matches!(r1, ConsensusResult::Committed { persisted: true, .. }),
+        "permanent commit with a live writer must report persisted: true; got {r1:?}");
+    let r2 = a1.consensus().cluster_propose("durable/leased", Bytes::from_static(b"v-leased"), leased).await;
+    assert!(matches!(r2, ConsensusResult::Committed { persisted: true, .. }),
+        "leased commit (slot + lease record) must report persisted: true; got {r2:?}");
+    a1.shutdown_with_timeout(Duration::from_secs(5)).await;
+
+    // Restart: both slots come back from disk (replay), the leased one still live.
+    let a2 = Arc::new(mk());
+    a2.start().await.unwrap();
+    let mut got = (None, None);
+    for _ in 0..80 {
+        got = (a2.consensus().consensus_get("durable/perm"), a2.consensus().consensus_get("durable/leased"));
+        if got.0.is_some() && got.1.is_some() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(got.0, Some(Bytes::from_static(b"v-perm")),   "permanent committed slot lost across restart");
+    assert_eq!(got.1, Some(Bytes::from_static(b"v-leased")), "leased committed slot lost across restart");
+    a2.shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ── WS5: hot identity rotation under live traffic ─────────────────────────
 
 /// WS5 increment 3: rotating node A's identity mid-stream does not break peer B's
