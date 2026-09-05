@@ -3329,8 +3329,65 @@ belongs to the example deployment only** — a library embedding shares fate, an
 does; hold it). Depends on: contracts (effectful retries) · knowledge (catalog summaries as attributable
 observations, optional) · mandates (cross-domain mandates need explicit recognition).
 
-Status: **proposed.** No harness or companion code; all five seven-PR plans (contracts · replay · knowledge ·
-mandates · domains) are the reviewer's artefacts and can be vendored into `docs/plans/` when work is
+**Adaptive stability discipline (item 4, seven PRs — external review artefact, 2026-09-05; framed as a later
+epoch — an epoch, not a version).** Central decision, agreed: **every adaptive mechanism keeps its local decision
+rule but submits actions through a shared node-local admission contract** — an operating envelope, not a fleet
+scheduler. Agreed elements: **three promises kept apart** — *hard resource bounds* (need exclusive spending rights
++ durable accounting; probabilistic self-election cannot establish a strict fleet maximum) · *stability
+objectives* (overshoot, churn, oscillation — spacing, hysteresis, settling, combined testing) · *service
+objectives* (work progresses and backlog recovers — admission control and fair scheduling; **rejected work is
+reported beside completions so stability cannot be won by refusing everything**); a **`ControlSpec` per
+governor** (what it observes with units/freshness/coverage · permitted actions with max step/interval/concurrency
+· cost vector across separate dimensions · feedback delay and readiness · behaviour under stale/missing/
+conflicting inputs · when a reservation may be released) and the flow **observe → propose → reserve → act →
+reconcile** with stable action IDs (repeat proposals idempotent; an uncertain install keeps its reservation
+until the runtime's state is established; one owner per actuator); **`ViewConfidence` made actionable and
+per-input** — a `ControlView` with observation/receipt times, scope and coverage denominator, separate ages for
+demand/readiness/membership, pending actions, settling time — driving *policy predicates*, never one confidence
+scalar, with the asymmetric rule: **uncertainty holds speculative growth and routine scale-down, never
+protective shedding or rescue from zero capacity**; **strict budgets as fixed, disjoint allocated rights** whose
+sum is the fleet ceiling, counting installing/warming/serving/draining/unknown, persisted before acting,
+reconciled after crashes, **never reclaimed because an owner vanished from discovery** (it may still be running
+— availability traded for a defensible bound; online transfer is a later fenced protocol); the **concrete
+loop-breaking points** (measure demand as *work*, count the pipeline incl. pending installs, space actions by
+install + visibility delay, require sustained slack before shrinking, coalesce progress chatter, one retry owner
+with aggregate credits, reserve capacity for useful work, use elapsed time not ticks); deployment profiles
+`legacy` / `observe` / `enforce-local` / `enforce-allocated` with **shadow mode before enforcement**. PRs: (1) ADR
++ actuator inventory + fixture acceptance contract · (2) pure `ControlSpec`/`ControlView`/decision APIs · (3)
+atomic budgets, durable ledger, static allocations · (4) provisioner + membership + work/retry admission · (5)
+opacity, timing, tuning · (6) the deterministic combined-feedback scenario (ten hosts, four-worker baseline,
+eight-worker surge; hard ceiling 10, overshoot ≤ 2, bounded churn/retries, recovery ≤ 120 s, no starvation —
+*fixture targets, not demonstrated guarantees*) · (7) real-process validation + shadow rollout.
+
+*Assessed 2026-09-05 — agree with the whole shape; this is item 4 with the one coordination-requiring piece named
+honestly.* Anchors verified: `demand.rs` is a derived **declaring-node / provider count** over `req/ cap/ gcap/`
+(the plan is right that it is not queue depth, and the crate doc already says the library never auto-advertises);
+the provisioner **self-elects probabilistically**, holds an `Installing` reservation with headroom eligibility and
+a detection tripwire; `opacity.rs` is a 100 ms loop with a pure decision function and the full-channel veto
+override; **`ViewConfidence::max_staleness_ms` is a max over heard peers and therefore 0 when none were heard**
+(read with `peers_heard`, as the wiki says — but a bare 0 is not "fresh"); **the membership cooldown is
+`3 × health_check_interval`** — elapsed time, but *scaled by the tick interval*, so a timing intent that shortens
+the interval shortens the cooldown proportionally: the plan's "a faster tick must not multiply the permitted
+action rate" is a live coupling, not a hypothetical. **Seven reconciliations for its PR 1:** (a) **hard allocated
+rights are prevention** — keep them in the opt-in `enforce-allocated` profile and state the promise strength in
+the **guardrails crate's existing tier vocabulary** (`Strength::HardPrevention` / `SelfImposed…`) rather than a
+new one — a budget the node enforces on itself is Tier A, a fleet ceiling only holds with exclusive rights;
+(b) **the workload probe consumes the companions' existing depth signals** (`TupleSpace::depth`,
+`Blackboard::depth`, the KV-ring stage prefixes) before inventing a metric; (c) **the combined-feedback harness
+is the replay plan's stage 6** — build it once, on `mycelium-sim`, with the governors' pure decision functions
+(`membership_governor::decide`, `opacity_state_for`, `tuning_governor::gate`) as the reused logic; (d) **fix the
+cooldown coupling first** — express it as an absolute `Duration` independent of `health_check_interval`, or
+declare the dependency in the timing governor's bounds; small, standalone, gateable now; (e) **`max_staleness_ms`
+needs a "no observation" state** — an additive `staleness_known: bool` (or `Option` in a future minor) so a
+`ControlView` cannot read 0 as fresh; (f) **one owner per deficit** — the presence provisioner and the membership
+governor can both react to the same absence today; the ADR names the owner per actuator; (g) **hold "detection,
+not prevention" for everything but the rights ledger** — repeated safety activations are a failed stability
+objective to *diagnose* (emergent detectors), never a reason to suppress protection. Depends on: replay (the
+harness) · contracts (action-ID / unknown-outcome conventions, receipts at the actuator) · domains (a future
+allocation scope; v1 uses one configured scope).
+
+Status: **proposed.** No harness or companion code; all six seven-PR plans (contracts · replay · knowledge ·
+mandates · domains · stability) are the reviewer's artefacts and can be vendored into `docs/plans/` when work is
 committed. Assessment record: `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
 
 ## Deferred Patterns
