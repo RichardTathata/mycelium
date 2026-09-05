@@ -61,8 +61,11 @@ concern). WHY is usually shared Dev+Ops.
   `Agent(host, port, timeout)` and the TS client send no `Authorization` header — so every
   token-protected deployment the docs recommend for non-loopback exposure is unusable from the SDKs
   (see *Bugs the audit surfaced*); (2) the SDKs read only `ok` from consensus responses, dropping
-  `persisted`. Floor after fixes: **0 ✗ cells, 0 Tier-1 open**; before fixes this run found **1 ✗ in
-  effect** (non-compiling Dev literals) and 3 Thin.
+  `persisted`. Also fixed in passing: the cookbook's crate-choice link pointed at `docs/guide/README.md`
+  for a heading that lives in the repo-root `README.md` (dead since 2026-07-13; the lint's link sweep
+  never covered the cookbook — ledger entry in `wiki/dev/.log/lint-calibration.md`). Floor after fixes:
+  **0 ✗ cells, 0 Tier-1 open**; before fixes this run found **1 ✗ in effect** (non-compiling Dev
+  literals) and 3 Thin.
 - **2026-08-16 (run 15)** — diff-gated. Since run 14 the delta is **one concept row: Companions
   (the wiki third)** — the council-substrate arc (GitMirror change sink · `GitStore` + six
   hardening items incl. two recorded measurements · the bulk-ingest claim-check with a gateway
