@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+---
+
+## [2.4.3] — 2026-09-05
+
+A **durability PATCH** on the 2.4 line, cut the same day as v2.4.2 to close a data-loss path one step
+past the race v2.4.2 fixed. Wire **v12** (`PREV = 11`) unchanged; on-disk format unchanged; no `mycelium`
+public-API change. Companions already on their own tags: `mycelium-py` **0.2.4**
+(`mycelium-py-v0.2.4`), `mycelium-ts` **0.1.1** (`mycelium-ts-v0.1.1`) — their entries below shipped
+between the two tags.
+
 ### Fixed
 
 - **Snapshot aborts when the WAL tail is unreadable.** The v2.4.2 WAL-tail merge read `wal.bin` back with
