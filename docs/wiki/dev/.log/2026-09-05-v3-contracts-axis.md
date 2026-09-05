@@ -73,3 +73,30 @@ with item 1's receipts.
 `unwrap_or_default()` on a read in a path that later *truncates* is a data-loss primitive. The review found
 it by asking "what does the model do on a read error?" — the question a filesystem adapter forces at every
 call site; without one, grep `unwrap_or_default\|unwrap_or(Vec::new` in persistence code each lint.
+
+## Addendum — the knowledge layer (item 3), same day
+
+Seven-PR plan for an optional `mycelium-knowledge` companion: four record types (claim · observation ·
+assessment · acceptance decision — the *assessment* split from *observation* is the plan's best move),
+signed immutable records with explicit links, discovery manifests in KV under `knowledge/head/…` with records
+and evidence in an authorized store, evidence-aware resolution wrapping `resolve_for_caller` with a
+deterministic reader policy and four-way outcomes with reasons, contextual competence (no reputation scalar),
+identity ≠ independence, active expiry/correction. Verdict: agree with the whole shape — "converge on what
+participants said and reported; leave what should be believed explicit, contextual, revisable" is item 3 as
+the September proposal meant it, and it stays above the substrate.
+
+**Anchors verified:** `resolve_for_caller` (`is_fresh` + schema gates) is the wrap point; the capability
+refresh is the evaporation lease; `blob.rs` verify-on-read + `llm:read` gate (hash still = credential);
+AgentFacts Ed25519 self-signed; `tls::verify_bytes` pub; wiki `SectionId` minting. **Trace has no parent
+link** — `TraceEvent { hlc, node, kind, detail }` — so its causal claim is HLC adjacency; the plan's
+`derived_from` is the fix, not an import of HLC order.
+
+**Six PR-1 reconciliations** (in ROADMAP): reserve `knowledge/` in lib.rs + both front-door lists; add
+trace parent links rather than promote HLC order; reuse `schemas/` as the schema locator; expiry timers on
+the replay clock seam; rank within the accepted class then hand to the reason router (state composition
+order); PR 6's demo ships as a CI gallery entry.
+
+## Reusable lesson (knowledge)
+A signature proves who said it; a hash proves what was said; neither proves it is true, and a "causal"
+trace without parent links proves only order. Every record type in the plan names which of these it
+carries — keep that discipline when the adapters import today's traces and advertisements.
