@@ -24,6 +24,11 @@ The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/expl
 
 ## Since v2.4.1 — unreleased
 
+- **`langgraph-checkpoint-mycelium` 0.1.1** (2026-09-05, branch `fix/checkpointer-async-rows`):
+  `alist` ran the sync row-selection driver on the event loop (finding 5 of the external
+  review). Now a pure window/filter core + sync and async drivers, parity-gated without a node
+  (`tests/test_alist_async.py`). Log `.log/2026-09-05-checkpointer-async-rows.md`.
+
 - **Node-level routes behind gateway auth** (2026-09-05, branch
   `fix/public-routes-behind-gateway-auth`, stacked on the persistence fix): `/mcp`,
   `/signals/{kind}`, `/consensus/{slot}` answered without a bearer (finding 4 of the same

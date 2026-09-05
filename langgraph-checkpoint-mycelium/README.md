@@ -20,7 +20,10 @@ graph.invoke(inputs, {"configurable": {"thread_id": "my-thread"}})
 
 Both the sync and async LangGraph paths are supported (`get_tuple`/`list`/`put`/
 `put_writes`/`delete_thread` and their `a*` variants, over `httpx.Client` /
-`httpx.AsyncClient`).
+`httpx.AsyncClient`). The `a*` variants never touch the sync client — including
+`alist`'s key enumeration and per-row reads (fixed in 0.1.1; before that, `alist`
+selected rows synchronously and blocked the event loop on large histories or a
+slow gateway).
 
 ## Installation
 
