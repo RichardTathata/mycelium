@@ -2930,7 +2930,7 @@ evolution needing field-level migration.
 
 ---
 
-## v3.0 — two primaries (one shipped its first tranche) · packaging candidates · one adapter
+## v3.0 — two primaries (one shipped its first tranche) · packaging candidates · one adapter · the contracts axis (proposed)
 
 > **Naming note — "v3.0" is a roadmap _epoch_, not a version.** The released substrate is at
 > **`2.3.0`** (wire v12, additive-only); there is no `3.0.0` crate. "v3.0" labels this *body of
@@ -3036,6 +3036,103 @@ chokepoint non-goal). Distinct from *content* guardrails (a use-case function, e
 mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consistent policy** (gossip-speed).
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
+
+### The contracts axis — six enhancements + a seven-PR contracts plan (proposed 2026-09-05, not committed)
+
+A third-party review of v2.4.2 proposed the next epoch as **making explicit what local autonomy can
+safely compose into** — strengthening the *contracts between* the mechanisms the substrate already has.
+Six enhancements, in the reviewer's order, with our reading of what already exists:
+
+1. **Invariants and failure semantics as part of the programming model.** A small catalogue of *supported*
+   contracts, each bound to an implementation, its assumptions, and executable tests — no policy DSL, no
+   automatic algorithm selection. *Exists:* `Committed { persisted }` (v2.4.2) is the first typed durability
+   receipt; `docs/design/exactly-once-effect.md` already states that an idempotent ack is not an effect
+   happening once. *New:* the catalogue itself, and one complete external-effect adapter.
+2. **Bounded, federated coordination domains.** An explicit domain with its own dissemination scope,
+   budget, admission policy and failure boundary; crossing is explicit via replaceable gateways; forwarding
+   *within* a domain stays unconditional. *Exists:* trust domain = CA admission, propagation domain =
+   reachability, groups organise action, AgentFacts federates discovery. *New:* the boundary object and the
+   statement of what never crosses (consensus membership, `sys/`). **The one item likely to touch the wire —
+   and therefore the first honest trigger for a real `3.0.0` substrate version** (see the naming note above).
+3. **Assertions vs observations vs accepted knowledge.** An optional application-layer assertion format
+   (issuer, subject, schema version, evidence refs, observation time, validity, supersession); transport LWW
+   kept, contested knowledge retains attributable versions; evidence payloads outside KV. *Exists:*
+   self-certified AgentFacts, capability leases, the audit chain, reasoning traces, wiki curation. *New:*
+   their common interpretation. First step: resolution that distinguishes self-advertisement from observed
+   performance. **Companion, not core.**
+4. **A shared stability and resource discipline for adaptive behaviour.** Each governor declares what it
+   observes, staleness, actuation rate, resource use, and behaviour under an unreliable view; shared limits
+   bound retries/spawning/expansion. *Exists:* five governors, the emergent detectors, `ViewConfidence`
+   (not yet moderating any control decision). *New:* the combined demand → provisioning → membership →
+   opacity scenario with bounded overshoot/churn/recovery/starvation. A **strict fleet-wide budget is
+   prevention, not detection** — the one place this asks for coordination, and it must say so.
+5. **Coordination authority as an explicit, scoped mandate.** One lifecycle across leases, fencing tokens,
+   identity revocation and governance intents: expiry, loss of permission, and invalidation of outstanding
+   operations are three events (the #164/#166 lock lesson); turnover ≠ capture resistance. First case:
+   curator handover with provenance inheritance and rejection of the former curator's delayed writes.
+   **Companion, not core.**
+6. **Deterministic replay.** Decision logic separated from clock, randomness, transport and persistence so
+   the same logic runs under controlled execution; a failure yields a seed + event history. *Motivating
+   evidence:* the v2.4.2 snapshot/WAL race was deterministic on a single-thread runtime, shipped in every
+   release with persistence, and was found by an external probe, not the suite; Loom covers micro-schedules
+   only. *Honest cost:* the task loops entangle tokio time/rand/fs — start by injecting clock/RNG/fs traits
+   at the `CoreCtx` boundary for the persistence writer + consensus commit path, then widen to governors.
+
+**Order** (agreed with the reviewer): **1 + 6 together** — one states what must hold, the other attacks it —
+then **2** as the structural investment; **3** and **5** stay optional compositions above the substrate
+("library, not platform").
+
+**The contracts implementation plan (item 1, seven PRs — external review artefact, 2026-09-05).** Vocabulary
+of four receipts kept strictly separate — *local application* (applied / superseded under LWW) · *local
+sync* (the exact operation crossed the local persistence barrier) · *replica sync* (named distinct peers,
+origin excluded, persisted that exact operation) · *destination commit* (the destination committed the
+business change **and** its dedup result in one transaction). Every operation gets a caller-generated
+identity before dispatch, stable across retries and worker replacement; same id + different content is a
+conflict; a timeout returns partial evidence or *uncertainty*, never "nothing happened". PRs: (1) contract
+ADR + regression floor · (2) operation identity, typed receipts, explicit failure vocabulary · (3) required
+local sync + retained operation status · (4) exact-write peer acknowledgement replacing the inferred one ·
+(5) an optional effects companion with a SQLite-backed transactional reference destination · (6) a
+tuple-space consumer with effect recovery (worker dies after destination commit, before ack → retry with the
+same id returns the same result) · (7) HTTP/py/ts parity. PRs 2–3 are the first usable release.
+
+**Verified against the code (2026-09-05):** the plan's anchors hold. In particular **`set_with_min_acks`
+counts any peer update for the key with `timestamp >= write_ts` as an ack** — a newer competing write from
+a peer satisfies a quorum for a payload that peer never held, and no ack says anything about disk; and the
+snapshot path is write → fsync file → rename **with no directory fsync**, so a power-loss durability claim
+is not yet supportable (only process-kill is tested).
+
+**Four reconciliations the plan's PR-1 ADR must make before work starts:**
+
+1. **Ordering.** The plan's strong path is *persist → sync → apply*; the v2.4.2 invariant is *apply → persist*
+   with the snapshot's **WAL-tail merge** as the guarantee that makes ordering irrelevant
+   ([runtime-invariants §Persistence](docs/wiki/dev/architecture/runtime-invariants.md)). Persist-first is
+   safe **only because the merge holds** — the ADR must state that dependency and a test must pin it, or the
+   two paths drift and one loses the race again.
+2. **Scope of PR 4.** An exact-write persistence RPC is a new protocol (negotiation, authenticated peer
+   identity, failure-domain metadata, status retention across origin loss) — the bulk of the plan. Split it:
+   **4a** the exact-identity ack replacing the `timestamp >=` test on the *existing* quorum path (fixes the
+   live overclaim cheaply); **4b** the persisted-by-peer protocol.
+3. **PR 3's mechanism already exists.** Forced per-record `fdatasync` is in the WAL writer since v2.4.2
+   (`WalMsg::Append { force_sync }`, used by consensus); exposing it as a per-write contract is a small API
+   change, not a redesign — which is what makes PRs 2–3 the first release.
+4. **Reconcile with the prior "declined" decision.** `docs/design/exactly-once-effect.md` defines the
+   claim/ack/requeue discipline and **declined to extract it as code, with evidence** (WS-G Phase 6). The
+   effects companion is not the same thing (destination-side dedup, not the claim shape) — the ADR must say
+   why this extraction is justified when that one was not, or the two records contradict.
+
+**Two ordering adjustments:** pull the exact-identity ack (4a) forward — it corrects a live overclaim on a
+shipped API; and make the snapshot **directory fsync** a Phase-0 fix, not a caveat (a few lines; the
+difference between a power-loss claim we can and cannot make). **Missing from the plan, to add:** a core API
+to submit a *pre-stamped* update (every local write path ticks a fresh HLC; retries must not become newer
+LWW writes — today only the replay path does this); a mapping of the existing at-least-once primitives
+(`emit_reliable`, mailbox, tuple-space lease) into the receipt vocabulary; and the in-tree prior art the
+reference adapter must cite — the wiki's idempotent bulk ingest and the v2.4.0 exactly-once work
+distribution proof (tuple-space leases × idempotent ingest) — stating what a SQLite destination adds (a
+transactional dedup result bound to an operation identity).
+
+Status: **proposed.** No code, no plan file in-tree yet; the seven-PR plan is the reviewer's artefact and can
+be vendored into `docs/plans/` when work is committed. Assessment record:
+`docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
 
 ## Deferred Patterns
 
