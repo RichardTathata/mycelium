@@ -3216,9 +3216,71 @@ ship PR 6's scenario as a CI-tested example at the coop/blackboard bar (the v3.0
 thrust), or it stays a claim. Depends on: the contracts axis for durable evidence receipts (the plan says so);
 the federation item only for PR 7's export adapter.
 
-Status: **proposed.** No harness or companion code; all three seven-PR plans (contracts · replay · knowledge)
-are the reviewer's artefacts and can be vendored into `docs/plans/` when work is committed. Assessment record:
-`docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
+**Scoped mandates (item 5, seven PRs — external review artefact, 2026-09-05; the reviewer frames it as the
+epoch after the knowledge layer, "5.0" — an epoch, not a version).** Central decision, agreed: **authority is
+a condition checked by the protected resource, not something inferred from a role advertisement** — election
+identifies a candidate, an advertisement helps discovery, neither authorizes a mutation. Agreed elements: a
+**common mandate contract** (holder, establishing authority, purpose, scope, enumerated operations, **authority
+epoch** *and* a separate **term identity** — epochs fence superseded writers, terms carry tenure rules —
+not-before/expiry/renewal, revocation and outstanding-operation policies, provenance refs) shared by curator /
+primary / proposer **without** shared powers or shared election rules; **CAS ≠ authorization** — the wiki's
+section/manifest CAS defeats stale *content*, but a former curator who re-reads fresh content passes it, so every
+canonical mutation checks *both* current revision *and* current mandate, and a stale mandate is
+`MandateSuperseded`, never a `Conflict` fed back into the CAS retry loop; **every mutation path** is protected
+(apply, bulk ingest, erase, bootstrap, imports, admin, raw backend credentials — no curator holds direct
+canonical write access); the **three lifecycle events** recorded separately — role expiry · permission
+withdrawal · outstanding-operation invalidation (the #164/#166 lock lesson; v1 curator policy: replacement
+advances the epoch and invalidates old-epoch mutations not yet past the commit boundary; committed history
+stays; a late ack does not un-commit; lost acks resolve via durable receipts); **handover transfers
+institutional memory** — a durable journal (proposals incl. unresolved, decisions + rationale, revisions,
+receipts, disputes) that the successor inherits *as history, not as conclusions*, with a readiness gate; the
+**incumbency rules** (consecutive terms, cumulative tenure, cooling-off, eligibility, affiliated principals,
+who may nominate/appoint/renew/revoke — TTL alone cannot prevent capture; enforcement of configured rules, not
+proof of independence); restart of the authority **fails closed** (advance epochs, re-establish); the explicit
+**partition table** (reach-the-resource, not reach-the-mesh, decides writability; a handover is effective when
+the resource commits it, not when gossip announces it). Deferred, agreed: delegation, replicated authority,
+renaming every role before each resource's enforcement boundary exists. PRs: (1) ADR + exhaustive wiki
+mutation-path inventory · (2) mandate types + lifecycle state machine + vectors · (3) the transactional
+authority/commit boundary · (4) strict wiki write paths · (5) durable proposals + provenance + handover
+readiness · (6) partition/crash/expiry/eligibility tests (the decisive one: pause A after reconciliation,
+activate B at e+1, resume A's delayed write → rejected even after re-reading fresh content; B recovers
+provenance and pending proposals without A) · (7) migration, diagnostics, deployment profiles
+(`legacy` / `mandated`).
+
+*Assessed 2026-09-05 — agree with the contract, the lifecycle, the partition policy and the tests; **one
+architectural reconciliation on v1's shape.*** Anchors verified: the curator's write entitlement is a local
+`is_curator: AtomicBool` (`mycelium-wiki/src/agent.rs`) — exactly the "inferred from a role" the plan indicts;
+the store's CAS returns `Conflict` on a *version* mismatch only; `GitStore` serialises through `update-ref` CAS
++ push to a remote under a single-writer assumption; proposals are **evaporating KV**
+(`wiki/{group}/proposal/{id}`) — a delivery hint, as the plan says; `LockService` documents the fencing token
+(commit HLC, #166); `revocation.rs` / `transparency.rs` and leased consensus slots exist. **The reconciliation
+(a):** the plan's v1 puts the mandate and the canonical commit in a **new resource-authoritative service
+process** (one SQLite-backed daemon per wiki scope). That is a control plane for the scope — the philosophy's
+*"No daemon, no orchestrator, no control plane"* (§ Not a platform) — and the substrate already has the pieces
+to put the check **inside the canonical store's own atomic boundary** instead: for `GitStore` a
+`refs/mycelium/mandate/{group}` object updated under the *same* `update-ref` CAS as content, and for the
+shared remote a **pre-receive hook** verifying the signed epoch (in that deployment the git remote *already is*
+the external authority — use it, don't add a second); for `FsStore` the epoch in the same mutator critical
+section (node-local, so the fence matters only on the shared path). A SQLite service is acceptable **only as
+an application-owned reference resource** (the effects companion's destination shape), never a
+Mycelium-shipped daemon; the ADR must choose this or argue the exception. **(b) Establishment via the
+substrate's own consensus:** a mandate is a **leased consensus slot** `mandate/{scope}` whose committed value
+is (holder, epoch) — the commit HLC is the epoch (the #166 fencing-token precedent: monotonic across holders)
+and `committed_lease_secs` is the term; owner-signed appointment stays as the pinned-deployment alternative
+(`force curator` exists today). **(c) Durable proposals via the existing log verb:** `KvHandle::append`
+(`log/wiki/{group}/proposals`) + the contracts plan's receipts give `Submitted` its durable meaning — not a
+service database; the evaporating queue becomes the discovery hint the plan wants it to be. **(d) Do not
+build a second fence beside `LockService`:** the plan declines to certify the converged-view issuance; audit it
+under the replay harness (item 6, scenario B) before either certifying or replacing it. **(e) The decisive
+test *is* the replay plan's scenario B** — build it once, on the sim harness, not as a bespoke real-process
+rig first. **(f) Reserve `mandate/` + `log/wiki/`** in `src/lib.rs` and both front-door lists at PR 1.
+**(g)** Keep product claims at "enforces configured eligibility rules" — the plan says so; hold it. Depends on:
+contracts (receipts) · replay (scenario B) · knowledge (provenance references, optional) · domains (cross-scope
+mandates need explicit recognition, never imported trust).
+
+Status: **proposed.** No harness or companion code; all four seven-PR plans (contracts · replay · knowledge ·
+mandates) are the reviewer's artefacts and can be vendored into `docs/plans/` when work is committed.
+Assessment record: `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
 
 ## Deferred Patterns
 

@@ -100,3 +100,31 @@ order); PR 6's demo ships as a CI gallery entry.
 A signature proves who said it; a hash proves what was said; neither proves it is true, and a "causal"
 trace without parent links proves only order. Every record type in the plan names which of these it
 carries — keep that discipline when the adapters import today's traces and advertisements.
+
+## Addendum — scoped mandates (item 5), same day
+
+Seven-PR plan: a common mandate contract (epoch ≠ term), CAS ≠ authorization, every mutation path protected,
+three lifecycle events, a handover journal the successor inherits as history, incumbency rules, an explicit
+partition table, a fail-closed authority restart. Verdict: agree with all of that.
+
+**Anchors verified:** `is_curator: AtomicBool` is the write entitlement (the indicted inference); store CAS =
+`Conflict` on version only; `GitStore` `update-ref` CAS + push, single-writer assumption; proposals evaporating
+KV `wiki/{group}/proposal/{id}`; `LockService` fencing token = commit HLC; `revocation.rs`/`transparency.rs`;
+leased consensus slots; `KvHandle::append`.
+
+**The one disagreement — v1's shape.** The plan's reference authority is a new SQLite-backed service process
+per wiki scope. That is a control plane for the scope; philosophy § Not a platform: *"No daemon, no
+orchestrator, no control plane."* The check belongs *inside the canonical store's own atomic boundary* — a
+mandate ref under the same `update-ref` CAS, a pre-receive hook on the shared remote (already the external
+authority in that deployment), the epoch in `FsStore`'s mutator section — with establishment as a leased
+consensus slot (`mandate/{scope}`, commit HLC = epoch, lease = term) and durable proposals via the existing
+log verb. A SQLite service is fine as an *application's* reference resource; never Mycelium-shipped.
+
+**Further reconciliations:** don't build a second fence beside `LockService` — audit it under the replay
+harness first; the decisive test *is* replay scenario B — build it once there; reserve `mandate/` +
+`log/wiki/` at PR 1; hold the claim at "enforces configured rules".
+
+## Reusable lesson (mandates)
+When a plan says "the resource must enforce", ask *which* resource already has an atomic boundary. Adding a
+process to hold the truth is the coordinator arriving through the side door; the substrate's answer is to put
+the fence where the bytes already serialise.
