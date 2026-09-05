@@ -29,7 +29,12 @@ first tagged release with the wasmtime RUSTSEC-2026-0222 fix); **v2.4.1 released
 `v2.4.1` — a **security PATCH**: merged `with_http_routes` routers now behind gateway auth + companion
 scope families · wasmtime 46.0.3 (RUSTSEC-2026-0269) · h2 0.4.16 (RUSTSEC-2026-0258) · `FsStore`
 erase serialization; wire unchanged, no API change; companions `mycelium-reason` 0.6.0 /
-`mycelium-py` 0.2.3 on their own lines); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
+`mycelium-py` 0.2.3 on their own lines); **v2.4.2 released 2026-09-05** (tag `v2.4.2` — a
+**security + durability PATCH** from one external review: `/mcp`, `/signals/{kind}`,
+`/consensus/{slot}` behind gateway auth (`mcp:invoke`/`mesh:read`/`consensus:read`) · three P1
+persistence fixes (snapshot merges the WAL tail, LWW replay, honest acks + forced fsync,
+`Committed { persisted }` — the one API note: add `..` to an exhaustive `Committed` destructure) ·
+`langgraph-checkpoint-mycelium` 0.1.1 async row selection; wire unchanged); wire **v12** (`PREV = 11`). Scopes are **`Cluster · Group · Individual`** (all / subset / one),
 shared by `SignalScope` and consensus (`cluster_propose` / `group_propose`). *Renamed 2026-07-10:*
 `System` → `Cluster` (wire-compatible; `system_propose` kept as a `#[deprecated]` alias, gateway
 still accepts `"system"`); `system_stats()` is unrelated — node-local runtime state, not a scope.
