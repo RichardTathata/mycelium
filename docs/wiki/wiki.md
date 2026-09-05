@@ -6,10 +6,14 @@ canon, the wiki cites it**). Start here, follow links down.
 Mycelium is an embedded, broker-less Rust library: a three-layer substrate (gossip KV /
 signal mesh / epidemic consensus) for AI agent fleets and storage replication, built on the
 thesis that a coordinator is not just slower but *epistemically incapable* for heterogeneous
-fleets. Purpose anchor: `docs/philosophy.md`. Version state: **v2.4.1 released** (2026-09-04, tag `v2.4.1` — a **security PATCH**: merged
+fleets. Purpose anchor: `docs/philosophy.md`. Version state: **v2.4.2 released** (2026-09-05, tag `v2.4.2` — a
+**security + durability PATCH** from one external review: node-level `/mcp`, `/signals/{kind}`,
+`/consensus/{slot}` behind gateway auth; three P1 persistence fixes (WAL-tail snapshot merge, LWW
+replay, honest acks, `Committed { persisted }`); `langgraph-checkpoint-mycelium` 0.1.1; wire v12
+unchanged — [dev/history](dev/history.md)). Prior: **v2.4.1** (2026-09-04, tag `v2.4.1` — a **security PATCH**: merged
 application routers now behind the gateway auth boundary + companion scope families, wasmtime
 46.0.3 / h2 0.4.16 advisories, `FsStore` erase serialization; wire v12 unchanged; companions
-`mycelium-reason` 0.6.0 and `mycelium-py` 0.2.3 on their own lines). Prior: **v2.4.0** (2026-08-16, tag
+`mycelium-reason` 0.6.0 and `mycelium-py` 0.2.3 on their own lines). Then **v2.4.0** (2026-08-16, tag
 `v2.4.0`) — the **wiki-substrate** MINOR: the git-as-truth `GitStore` (feature `git-store`; six-phase
 hardening with recorded measurements — 330 ms/600-page reads, 5.5/3.0 batches/s ten-council
 contention), the `GitMirror` projection sink (`git-mirror`), the claim-check **bulk-ingest** stack

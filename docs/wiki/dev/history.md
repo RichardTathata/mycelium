@@ -22,7 +22,15 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Since v2.4.1 — unreleased
+## v2.4.2 release — 2026-09-05 (tag `v2.4.2`)
+
+A **security + durability PATCH** on the 2.4 line, cut the day after v2.4.1 from a single external
+code review whose five findings were each reproduced by a probe before being fixed and each gated
+by a regression test. Wire **v12**/PREV 11 unchanged; on-disk persistence format unchanged. **One API
+note:** `ConsensusResult::Committed { persisted }` — additive, every in-tree matcher uses `{ .. }`,
+but a downstream exhaustive destructure must add `..`. Release gate: **CI-green before tagging**
+(the three merges #169 / #172 / #171 on `main`, then the release PR). Log
+`.log/2026-09-05-v2.4.2-release.md`. What went in (the three PRs, merged in this order):
 
 - **`langgraph-checkpoint-mycelium` 0.1.1** (2026-09-05, branch `fix/checkpointer-async-rows`):
   `alist` ran the sync row-selection driver on the event loop (finding 5 of the external

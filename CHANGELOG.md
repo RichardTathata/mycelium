@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_(nothing yet)_
+
+---
+
+## [2.4.2] — 2026-09-05
+
+A **security + durability PATCH** on the 2.4 line, cut from a single external code review
+(2026-09-05) whose five findings were each reproduced before being fixed. Wire **v12** (`PREV = 11`)
+unchanged; on-disk persistence format unchanged — a rolling upgrade holds. **One API note:**
+`ConsensusResult::Committed` gains a `persisted: bool` field. Every in-tree matcher uses `{ .. }`,
+but a downstream `match` that destructures the variant exhaustively (`Committed { slot, value,
+ballot }` without `..`) must add `..` to compile. Companions on their own lines:
+`langgraph-checkpoint-mycelium` **0.1.1**; `mycelium-reason` 0.6.0 / `mycelium-py` 0.2.3 unchanged.
+
 ### Security
 
 - **`POST /mcp`, `GET /signals/{kind}`, `GET /consensus/{slot}` answered without the gateway
