@@ -3162,8 +3162,62 @@ while the harness is built; (e) keep the merge-removed witness as a `cfg(test)` 
 manual edit (the 2026-09-05 fix was verified that way). Pairing with item 1: the durability oracle's
 receipt is `Committed { persisted }` / the local-sync receipt, not a boolean.
 
-Status: **proposed.** No harness code; both seven-PR plans are the reviewer's artefacts and can be vendored
-into `docs/plans/` when work is committed. Assessment record:
+**The knowledge layer (item 3, seven PRs — external review artefact, 2026-09-05; the reviewer frames it as
+the epoch *after* this one, "4.0" — a roadmap epoch, not a version).** Central decision, agreed: **accepted
+knowledge is a reader-specific interpretation of attributable evidence, not another globally convergent
+value.** An optional `mycelium-knowledge` companion over the public API; core keeps transport + LWW. Four
+record types, deliberately not grades of truth — **Claim** (what an issuer asserts) · **Observation** (what an
+observer reports encountering, with trial/attempt identity and transport outcome) · **Assessment** (an
+interpretation under a named evaluator/rubric — *recording a response and judging it are different
+activities*) · **Acceptance decision** (what a reader adopts, for a purpose, under a named policy, with
+expiry). Records are signed and immutable with explicit links (`supports` · `challenges` · `derived_from` ·
+`supersedes` · `retracts` · `adopts`); an issuer may retract its own statement, never a critic's. **Gossip KV
+carries only bounded signed discovery manifests / current-head pointers** (`knowledge/head/{issuer}/{stream}`);
+records and evidence live in an authorized companion store — so LWW moves a *pointer* without erasing competing
+statements; equivocation (two records for one stream sequence) is preserved and marked, never resolved by HLC.
+**Evidence-aware resolution** wraps `resolve_for_caller` — native freshness/schema/visibility gates first, then
+bind to the exact advertisement/release context, verify + classify (retraction, expiry, trust, independence,
+task applicability), evaluate a deterministic reader policy, return `Accepted` / `Rejected` /
+`InsufficientEvidence` / `Conflicted` **with reasons**, then compose with load/locality; **evidence never
+grants what authorization denies**, a decision is not an authorization token. **Competence stays contextual**
+(task × rubric × release × window × observer; no universal reputation scalar); **identity ≠ independence**
+(v1: reader-configured control groups); missing evidence is `InsufficientEvidence`, not failure; a successful
+RPC is a response, not competence. **Expiry and correction are active**: a dependency index recomputes
+decisions on retraction, revocation, evaluator correction, release change or artefact loss; expiry fires
+without traffic; refreshing an advertisement never refreshes old evidence; historical decisions stay
+inspectable. Deferred, agreed: aggregated reputation, inferred independence, mandatory LLM judgment,
+consensus over truth. PRs: (1) contract ADR + typed records + canonical encoding + vectors · (2) signed
+record archive + authorized evidence store · (3) manifests, history, expiry, retraction, gap detection ·
+(4) invocation observer + deterministic evaluators · (5) reader policies + evidence-aware resolver · (6) the
+multi-node demonstration (two sorting providers, one silently dropping duplicates; two independent observers;
+one reader reaching *different* decisions for all-integers vs unique-integers profiles; retraction, expiry
+without traffic, release change, artefact loss, partition — each a distinct outcome) + HTTP/py/ts · (7)
+optional trace / wiki-adoption / federation adapters.
+
+*Assessed 2026-09-05 — agree with the whole shape; it is item 3 done properly, and it stays a companion.*
+Anchors verified: `resolve_for_caller` applies `is_fresh` + schema gates today (the wrap point exists);
+capability refresh is the evaporation lease (so "refresh must not refresh evidence" is a real, separate
+timer); `blob.rs` verifies on read and its gateway routes sit behind `llm:read` since 09-04 — but content
+addressing still makes the hash the credential, so the plan's *opaque-address-for-confidential-evidence* rule
+is necessary, not optional; AgentFacts is Ed25519 self-signed (the identity pattern to reuse);
+`tls::verify_bytes` is the public verification primitive the plan asks for; the wiki mints `SectionId`s (the
+adoption anchor). **Six reconciliations for its PR 1:** (a) **`knowledge/` is not a reserved KV prefix** —
+PR 1 adds the `src/lib.rs` namespace row *and both* `building-on` lists (the lint's three-time miss class);
+(b) **the reasoning trace has no parent link** (`TraceEvent { hlc, node, kind, detail }`) — its "causal story"
+rests on HLC order, which the plan itself says is not causality; the trace adapter should add
+`derived_from` links rather than import HLC adjacency as causation; (c) **reuse the schema registry**
+(`schemas/{schema_id}`, `publish_schema`) as the *locator* for `ImmutableSchemaRef` and add the content digest,
+rather than a second registry; (d) **expiry-without-traffic timers are a new nondeterminism source** — build
+them on the replay plan's clock seam (or at least behind a clock trait) from PR 3, not on `tokio::time`
+directly; (e) **two rankers** — `mycelium-reason`'s router already composes load + local reservations; the
+knowledge resolver must rank *within* the accepted class and hand the survivors to the existing ranker, never
+re-rank across it (state the composition order in the ADR); (f) **the demonstration is a gallery entry** —
+ship PR 6's scenario as a CI-tested example at the coop/blackboard bar (the v3.0 "validated pattern gallery"
+thrust), or it stays a claim. Depends on: the contracts axis for durable evidence receipts (the plan says so);
+the federation item only for PR 7's export adapter.
+
+Status: **proposed.** No harness or companion code; all three seven-PR plans (contracts · replay · knowledge)
+are the reviewer's artefacts and can be vendored into `docs/plans/` when work is committed. Assessment record:
 `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
 
 ## Deferred Patterns
