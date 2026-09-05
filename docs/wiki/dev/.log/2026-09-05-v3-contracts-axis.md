@@ -43,3 +43,33 @@ a SQLite destination adds.
 A receipt vocabulary is only as honest as its weakest ack. The `>=` quorum ack sat under a "durability
 counting" label since it shipped because nobody asked *which payload* and *which barrier* the ack attested.
 Every future ack-like API states both.
+
+## Addendum — the deterministic-replay plan (item 6), same day
+
+Seven-PR plan for a `mycelium-sim` harness (exploration / exact replay / scenario replay; adapters for
+clocks, RNG streams, scheduling, network, storage, external work; failure bundles + minimisation). Verdict:
+sound; incremental seam-based approach is right for a multi-thread tokio runtime; its storage section is
+the strongest part.
+
+**It found a real defect in the same-day fix:** `do_snapshot`'s WAL read-back used `unwrap_or_default()`,
+so a transient read error → snapshot written *without* the tail → WAL truncated → loss. Fixed: the snapshot
+aborts on read failure (absent file = empty tail); gate
+`regression_snapshot_aborts_when_wal_tail_is_unreadable` (models the failure as `wal.bin` being a
+directory — the one read failure injectable without a filesystem adapter, which is the plan's point).
+
+**Entanglement measured** (grep counts, hot files): HLC → `SystemTime::now()` ×1 (one seam);
+persistence.rs `tokio::fs` ×25 (one module — first target); tasks.rs `fastrand` ×6, timers ×6;
+connection.rs `Instant::now` ×9; consensus.rs `Instant`/`physical_ms` ×7 + rand ×2; wasm-host provisioner
+timers ×14. `membership_governor::decide(am_member, is_drain, join_p, leave_p, roll)` and
+`tuning_governor::gate` are pure as claimed; `timing_governor` applies effects directly.
+
+**Reconciliations for the plan's PR 1:** papaya CAS-retry nondeterminism is outside a one-transition
+kernel (coverage map must say Loom/real threads own it); `AHashMap` iteration order is per-process-random
+except the store's fixed-seed state; clock injection must reach `causal_now_ms` lease checks; the static
+forbidden-call check moves to PR 3; the witness becomes a `cfg(test)` toggle. Pair the durability oracle
+with item 1's receipts.
+
+## Reusable lesson (replay)
+`unwrap_or_default()` on a read in a path that later *truncates* is a data-loss primitive. The review found
+it by asking "what does the model do on a read error?" — the question a filesystem adapter forces at every
+call site; without one, grep `unwrap_or_default\|unwrap_or(Vec::new` in persistence code each lint.

@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Snapshot aborts when the WAL tail is unreadable.** The v2.4.2 WAL-tail merge read `wal.bin` back with
+  `unwrap_or_default()`, so a transient read error during a snapshot would have produced a snapshot
+  *without* those records and then truncated them — a data-loss path one step past the race it fixed.
+  `do_snapshot` now returns the read error (absent file = empty tail); nothing is installed or truncated.
+  Flagged as a "target for investigation" by the 2026-09-05 deterministic-replay design review, confirmed
+  and fixed the same day; gate `regression_snapshot_aborts_when_wal_tail_is_unreadable`.
+
 ### Added
 
 - **The language SDKs can authenticate to a token-protected gateway.** `mycelium-py` **0.2.4** —

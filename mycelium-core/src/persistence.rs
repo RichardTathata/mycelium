@@ -524,7 +524,14 @@ async fn do_snapshot(
     // (store ∪ WAL) would have produced. The writer is single-task, so no record
     // lands between this read and the truncation.
     wal_file.flush().await?; // complete any in-flight (Async/Os-mode) write before read-back
-    let wal_bytes = tfs::read(dir.join("wal.bin")).await.unwrap_or_default();
+    // A read failure here must ABORT the snapshot: proceeding as if the tail were empty
+    // would write a snapshot without those records and then truncate them in step 4 —
+    // turning a transient read error into data loss. Absent file = empty tail (fresh dir).
+    let wal_bytes = match tfs::read(dir.join("wal.bin")).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
     if !wal_bytes.is_empty() {
         let mut tail: AHashMap<Arc<str>, SyncEntry> = AHashMap::new();
         decode_wal_records(&wal_bytes, cipher, |rec| {
@@ -736,6 +743,31 @@ mod durability_tests {
     }
 
     // ── Invariant 1: a snapshot never discards a WAL record ───────────────────
+
+    #[tokio::test]
+    async fn regression_snapshot_aborts_when_wal_tail_is_unreadable() {
+        // Flagged by the 2026-09-05 deterministic-replay design review: the merge's read-back
+        // mapped a read error to an empty tail (`unwrap_or_default`), so a transient read
+        // failure during a snapshot would have truncated acknowledged records. The snapshot
+        // must fail instead — no snapshot.bin installed, the WAL handle untouched.
+        let dir  = unique_dir("unreadable");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        // Make `wal.bin` unreadable-as-a-file: a directory in its place (EISDIR on read).
+        std::fs::create_dir_all(dir.join("wal.bin")).unwrap();
+        // The writer's handle is modelled by a scratch file elsewhere; it must not be truncated.
+        let mut scratch = open_wal(&dir.join("scratch.log")).await.unwrap();
+        wal_append(&mut scratch, &entry("k", b"v", 1, false), true, None).await.unwrap();
+        let before = std::fs::metadata(dir.join("scratch.log")).unwrap().len();
+
+        let r = do_snapshot(&dir, &state, &node, &hlc, 1, &mut scratch, None).await;
+        assert!(r.is_err(), "an unreadable WAL tail must abort the snapshot, not be treated as empty");
+        assert!(!dir.join("snapshot.bin").exists(), "no snapshot may be installed on a failed read-back");
+        assert_eq!(std::fs::metadata(dir.join("scratch.log")).unwrap().len(), before,
+            "the WAL handle must not be truncated when the snapshot aborted");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[tokio::test]
     async fn regression_snapshot_retains_wal_record_acked_before_local_apply() {

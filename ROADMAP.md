@@ -3130,8 +3130,39 @@ reference adapter must cite — the wiki's idempotent bulk ingest and the v2.4.0
 distribution proof (tuple-space leases × idempotent ingest) — stating what a SQLite destination adds (a
 transactional dedup result bound to an operation identity).
 
-Status: **proposed.** No code, no plan file in-tree yet; the seven-PR plan is the reviewer's artefact and can
-be vendored into `docs/plans/` when work is committed. Assessment record:
+**The deterministic-replay plan (item 6, seven PRs — external review artefact, 2026-09-05).** A
+`mycelium-sim` harness with three modes — *exploration* (seeded schedules + faults, capture failures),
+*exact replay* (pinned build, stop at first divergence), *scenario replay* (same causal workload against
+changed code) — because a seed alone is not a durable reproduction artefact. Production decision logic runs
+unchanged behind replaceable adapters for monotonic and wall clocks (separately), named RNG streams,
+scheduling/channel readiness, network, storage (volatile bytes · durable bytes · directory entries kept
+distinct; process death ≠ power loss; write completion ≠ sync), and external work. Failure bundle = build
+manifest + seed + scenario + choices trace + boundary events + checkpoints + the failed contract, then
+minimisation. First scenarios: the WAL/snapshot race as an explicitly controlled schedule with a merge-removed
+witness that must fail, then partitioned ownership handover (depends on item 5's mandate enforcement), then
+interacting governors. PRs: (1) nondeterminism inventory + coverage map + trace schema · (2) event kernel,
+clock/RNG interfaces, record/replay · (3) storage/channel adapters + WAL writer seams · (4) WAL/snapshot
+scenario + fault sweep + witness · (5) handover · (6) governors · (7) CI corpus, tooling.
+
+*Assessed 2026-09-05 — sound, and its storage section already paid for itself:* it flagged that the v2.4.2
+merge's WAL read-back mapped a read error to an empty tail (`unwrap_or_default`) — confirmed a real
+data-loss path and **fixed the same day** (snapshot now aborts on read failure). Entanglement measured:
+HLC reads `SystemTime::now()` at one site (a clean seam), `persistence.rs` holds ~25 `tokio::fs` calls in
+one module (the right first target), `tasks.rs` ~6 `fastrand` + ~6 timer sites, `connection.rs` ~9
+`Instant::now`; `membership_governor::decide(…, roll)` and `tuning_governor::gate` are already pure
+(the plan's claim holds), the timing governor is effectful. **Reconciliations for its PR 1:** add to the
+nondeterminism inventory (a) **papaya `compute` CAS retries** (the wiki's recurring race family — a
+kernel that runs one transition at a time cannot represent them; they stay with Loom/real-thread tests,
+say so in the coverage map) and (b) **`AHashMap` iteration order** — `ahash::RandomState` is
+per-process-random except where the store fixes the seed (consensus voter maps iterate in random order);
+(c) clock injection must cover `causal_now_ms` / lease-expiry reads in consensus, not only the HLC; (d) the
+static "no direct clock/RNG/I/O in covered modules" check belongs in PR 3, not PR 7, or the seams erode
+while the harness is built; (e) keep the merge-removed witness as a `cfg(test)` toggle — today it is a
+manual edit (the 2026-09-05 fix was verified that way). Pairing with item 1: the durability oracle's
+receipt is `Committed { persisted }` / the local-sync receipt, not a boolean.
+
+Status: **proposed.** No harness code; both seven-PR plans are the reviewer's artefacts and can be vendored
+into `docs/plans/` when work is committed. Assessment record:
 `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
 
 ## Deferred Patterns

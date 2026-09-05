@@ -224,7 +224,10 @@ never had it, and the snapshot is taken from the store.
 record since the last truncation) and folds it into the store scan under the store's own
 `lww_wins` (`sync_entry_wins`), so the persistence layer is correct **regardless of caller
 ordering** — invariant 1 is defence in depth, this is the guarantee. The writer is single-task:
-nothing lands between the read-back and the truncation. Cost: one bounded read (≤
+nothing lands between the read-back and the truncation. **A failed read-back aborts the snapshot**
+(returns the error; nothing installed, nothing truncated) — treating it as an empty tail would turn a
+transient read error into loss (found by the replay-design review the same day, fixed the same day;
+gate `regression_snapshot_aborts_when_wal_tail_is_unreadable`). Cost: one bounded read (≤
 `snapshot_wal_threshold` records) per snapshot. `wal_file.flush()` precedes the read-back because
 tokio's `File::write_all` may still be in flight in `Async`/`Os` mode.
 
