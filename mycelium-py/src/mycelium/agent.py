@@ -166,6 +166,35 @@ class LogEntry:
     value:  bytes
 
 
+@dataclass(frozen=True)
+class CommitResult:
+    """Outcome of a consensus-backed write (``consistent_set``, ``cross_group_propose``).
+
+    The commit itself is cluster-wide — the call only returns after quorum. ``persisted``
+    reports whether the committed slot also reached **the gateway node's own stable
+    storage** (its WAL append is forced to ``fdatasync`` in every ``sync_mode``):
+
+    * ``True``  — on disk on that node.
+    * ``False`` — committed and applied, but that node's WAL append failed (writer
+      stopped / disk error; logged at ``error`` there). After a restart it recovers the
+      slot only from peers via anti-entropy — treat a run of ``False`` as a disk fault on
+      the node you are talking to.
+    * ``None``  — the gateway predates v2.4.2 and did not report the field.
+
+    Truthiness is *not* the commit status (the method raises on a failed commit); it is
+    ``persisted is True``.
+    """
+    persisted: Optional[bool]
+
+    def __bool__(self) -> bool:
+        return self.persisted is True
+
+    @staticmethod
+    def _from_json(data: dict) -> "CommitResult":
+        p = data.get("persisted")
+        return CommitResult(persisted=None if p is None else bool(p))
+
+
 @dataclass
 class LockGuard:
     """A distributed lock guard returned by :meth:`MyceliumAgent.distributed_lock`.
@@ -717,10 +746,14 @@ class MyceliumAgent:
 
     # ── Overlay: consistent KV ─────────────────────────────────────────────
 
-    def consistent_set(self, key: str, value: bytes) -> None:
+    def consistent_set(self, key: str, value: bytes) -> CommitResult:
         """Ballot-serialized (consensus-durable) write. Runs a consensus round before writing ``key``.
         Concurrent writes to the same key are totally ordered by ballot number.
-        ``consistent_get`` is a local read and may lag by up to one anti-entropy round."""
+        ``consistent_get`` is a local read and may lag by up to one anti-entropy round.
+
+        Returns a :class:`CommitResult` — ``.persisted`` says whether the committed slot also
+        reached the gateway node's own disk (since 0.2.4; ``None`` from a pre-v2.4.2 node).
+        Raises ``RuntimeError`` if the commit itself failed."""
         body = {"key": key, "value_b64": base64.b64encode(value).decode()}
         with self._pool.sync() as c:
             r = c.post("/gateway/overlay/consistent/set", json=body)
@@ -728,6 +761,7 @@ class MyceliumAgent:
             data = r.json()
             if not data.get("ok"):
                 raise RuntimeError(data.get("error", "consistent_set failed"))
+        return CommitResult._from_json(data)
 
     def consistent_get(self, key: str) -> Optional[bytes]:
         """Read the latest ballot-committed value for ``key`` visible to this node (local, eventually consistent). Returns ``None`` if not found."""
@@ -773,8 +807,10 @@ class MyceliumAgent:
         slot: str,
         value: bytes,
         groups: list[dict],
-    ) -> None:
+    ) -> CommitResult:
         """Propose ``value`` for ``slot`` requiring independent quorum from each group.
+        Returns a :class:`CommitResult` (``.persisted`` — local durability on the gateway node;
+        since 0.2.4). Raises ``RuntimeError`` if the commit failed.
 
         ``groups`` is a list of dicts with keys ``group`` (str), ``quorum`` (float,
         default ``0.5``), and ``veto`` (bool, default ``False``).  The proposal commits
@@ -803,6 +839,7 @@ class MyceliumAgent:
             data = c.post("/gateway/consensus/cross_group_propose", json=body).raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "cross_group_propose failed"))
+        return CommitResult._from_json(data)
 
     # ── Overlay: ordered log ────────────────────────────────────────────────
 

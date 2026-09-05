@@ -28,6 +28,11 @@ TypeScript. Reported as a code gap in the matrix, fixed the same day.
 - **CI:** the `sdk-ts` job now runs `npx jest` after `tsc --noEmit` (the live suite self-skips).
   This closes the review's TypeScript-CI coverage note.
 
+## Same-day follow-up — `persisted` surfaced
+`consistent_set` / `cross_group_propose` (py) and `consistentSet` / `crossGroupPropose` (ts) return
+a `CommitResult { persisted }` (`None`/`null` when the gateway predates v2.4.2). Both returned
+nothing before → additive. Python truthiness is `persisted is True`, deliberately *not* the commit
+status (the methods raise on a failed commit). Gates: `test_commit_result.py`, `commit_result.test.ts`.
+
 ## Not done
-- Exposing `persisted` (consensus local-durability flag, v2.4.2) through the SDKs — additive, separate.
 - Browser builds of the TS SDK have no `process.env`; pass the token explicitly (documented).

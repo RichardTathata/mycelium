@@ -7,6 +7,7 @@ from .agent import (
     MailboxEvent,
     LogEntry,
     LockGuard,
+    CommitResult,
 )
 from .a2a import A2aClient
 from .prompt_skill import PromptTemplate, PromptSkillClient

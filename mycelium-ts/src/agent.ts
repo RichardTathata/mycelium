@@ -8,6 +8,7 @@ import {
   MailboxEvent,
   RpcRequest,
   Signal,
+  CommitResult,
 } from "./types";
 
 function b64(buf: Buffer | Uint8Array): string {
@@ -16,6 +17,11 @@ function b64(buf: Buffer | Uint8Array): string {
 
 function fromb64(s: string): Buffer {
   return Buffer.from(s, "base64");
+}
+
+/** Reads the gateway's `"persisted"` field; absent (pre-v2.4.2 node) → `null`. */
+function commitResult(data: { persisted?: boolean }): CommitResult {
+  return { persisted: typeof data.persisted === "boolean" ? data.persisted : null };
 }
 
 /**
@@ -403,12 +409,16 @@ export class MyceliumAgent {
    * Ballot-serialized (consensus-durable) write: runs a consensus round before writing.
    * Concurrent writes to the same key are totally ordered by ballot number.
    * `consistentGet` is a local read and may lag by up to one anti-entropy round.
+   * Resolves to a {@link CommitResult} — `.persisted` says whether the committed slot also
+   * reached the gateway node's own disk (since 0.1.1; `null` from a pre-v2.4.2 node).
+   * Rejects if the commit itself failed.
    */
-  async consistentSet(key: string, value: Buffer | Uint8Array): Promise<void> {
-    await this._post("/gateway/overlay/consistent/set", {
+  async consistentSet(key: string, value: Buffer | Uint8Array): Promise<CommitResult> {
+    const data = await this._post("/gateway/overlay/consistent/set", {
       key,
       value_b64: b64(value),
-    });
+    }) as { persisted?: boolean };
+    return commitResult(data);
   }
 
   /** Read latest ballot-committed value visible to this node (local, eventually consistent). */
@@ -455,6 +465,7 @@ export class MyceliumAgent {
    * @param slot   - Consensus slot name (namespaced by the caller).
    * @param value  - Payload bytes to commit.
    * @param groups - Per-group quorum requirements.
+   * @returns a {@link CommitResult} (`.persisted` — local durability on the gateway node).
    *
    * @example
    * ```ts
@@ -468,8 +479,8 @@ export class MyceliumAgent {
     slot: string,
     value: Buffer | Uint8Array,
     groups: Array<{ group: string; quorum?: number; veto?: boolean }>,
-  ): Promise<void> {
-    await this._post("/gateway/consensus/cross_group_propose", {
+  ): Promise<CommitResult> {
+    const data = await this._post("/gateway/consensus/cross_group_propose", {
       slot,
       value_b64: b64(value),
       groups: groups.map((g) => ({
@@ -477,7 +488,8 @@ export class MyceliumAgent {
         quorum: g.quorum ?? 0.5,
         veto:   g.veto   ?? false,
       })),
-    });
+    }) as { persisted?: boolean };
+    return commitResult(data);
   }
 
   /**

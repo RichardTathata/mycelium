@@ -253,9 +253,15 @@ writes to the same key are totally ordered by ballot number. `consistent_get` is
 and may lag by up to one anti-entropy round.
 
 ```python
-agent.consistent_set("config/endpoint", b"https://api.v2/")
+res = agent.consistent_set("config/endpoint", b"https://api.v2/")
 val = agent.consistent_get("config/endpoint")  # → b"https://api.v2/"
+res.persisted   # True: on the gateway node's disk · False: committed but that node's WAL
+                # append failed (anti-entropy repairs it after a restart) · None: pre-v2.4.2 node
 ```
+
+`consistent_set` and `cross_group_propose` return a `CommitResult` (since 0.2.4; both returned
+`None` before, so existing callers are unaffected). The commit is cluster-wide either way —
+`persisted` is the *gateway node's* local durability, the same flag the Rust API reports.
 
 #### `distributed_lock(name, *, ttl_secs=30) → LockGuard`
 

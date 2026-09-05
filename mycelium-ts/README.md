@@ -243,9 +243,15 @@ const id = await agent.nodeId;  // cached property
 Linearizable KV: runs a consensus round before writing.
 
 ```typescript
-await agent.consistentSet("config/endpoint", Buffer.from("https://api.v2/"));
+const res = await agent.consistentSet("config/endpoint", Buffer.from("https://api.v2/"));
 const val = await agent.consistentGet("config/endpoint");
+res.persisted;  // true: on the gateway node's disk · false: committed but that node's WAL
+                // append failed (anti-entropy repairs it after a restart) · null: pre-v2.4.2 node
 ```
+
+`consistentSet` and `crossGroupPropose` resolve to a `CommitResult` (since 0.1.1; both resolved
+`void` before, so existing callers are unaffected). The commit is cluster-wide either way —
+`persisted` is the *gateway node's* local durability, the same flag the Rust API reports.
 
 #### `distributedLock(name, options?) → Promise<LockGuard>`
 
