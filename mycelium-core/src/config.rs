@@ -765,9 +765,13 @@ pub struct GossipConfig {
     /// ```
     /// Requests without this header — or with the wrong token — receive `401 Unauthorized`.
     ///
-    /// Health, readiness, stats, and metrics endpoints (`/health`, `/ready`,
-    /// `/stats`, `/metrics`, `/signals/{kind}`) are always public regardless of
-    /// this setting, so load-balancer probes keep working without credentials.
+    /// The probe endpoints (`/health`, `/ready`, `/stats`, `/metrics`) and the
+    /// nonce-capability `/bulk/{id}` are always public regardless of this setting,
+    /// so load-balancer probes keep working without credentials. **Everything else
+    /// requires the bearer once it is set** — `/gateway/*` and, since 2026-09-05, the
+    /// node-level `/mcp`, `/signals/{kind}` and `/consensus/{slot}` (an MCP client
+    /// must send `Authorization: Bearer …`; scoped tokens need `mcp:invoke` /
+    /// `mesh:read` / `consensus:read` — see `docs/operations/rbac.md`).
     ///
     /// `None` (the default) leaves the gateway unauthenticated — suitable for
     /// loopback-only deployments (`http_addr = "127.0.0.1"`). Set to `Some(token)`

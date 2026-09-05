@@ -196,7 +196,10 @@ cfg.gateway_scoped_tokens = vec![
 
 `POST /gateway/kv` with the `ro` token → `403 {"required_scope":"kv:write"}`;
 with `rw` → admitted. The legacy `gateway_auth_token` maps to `["*"]`. The public
-edge (`/health`, `/ready`, `/stats`, `/metrics`, descriptor) is never scope-gated.
+edge (`/health`, `/ready`, `/stats`, `/metrics`, descriptor, and the nonce-capability
+`/bulk/{id}`) is never scope-gated. Everything else is — including the node-level `/mcp`
+(`mcp:invoke`), `/signals/{kind}` (`mesh:read`) and `/consensus/{slot}` (`consensus:read`),
+gated since 2026-09-05; before that they answered without a bearer.
 
 **4. The `sys/` namespace tripwire** (core — on without `compliance`). A remote
 write naming *this* node in a self-owned `sys/` prefix (`identity`, `load`,

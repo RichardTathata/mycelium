@@ -137,7 +137,8 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
 - **Means:** callers block on `lock(name, …)` or repeatedly get `Superseded` for the same lock.
   Either the holder crashed mid-section (the lock clears at **lease expiry**, not before), the
   critical section is overrunning its `ttl`, or there is genuine high contention on one lock.
-- **Read:** inspect the lock's authoritative slot — `GET /consensus/lock/{name}` →
+- **Read:** inspect the lock's authoritative slot — `GET /consensus/lock/{name}` (send the gateway
+  bearer when a token is set; scope `consensus:read`) →
   `{committed, ballot, lease_ms, lease_expired}`. A non-null `committed` with a live `lease_ms` ⇒
   **held**; `lease_expired: true` ⇒ the lease lapsed and the slot has **reopened** — the lock is
   effectively free (a stale holder cannot win). Repeated `Superseded` in caller logs is
