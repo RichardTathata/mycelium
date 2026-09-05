@@ -22,6 +22,18 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Since v2.4.1 — unreleased
+
+- **Persistence durability — three P1 fixes** (2026-09-05, branch `fix/persistence-durability-p1`):
+  an external review reproduced (1) a threshold snapshot erasing an acked, fsynced write (writer
+  acks then snapshots in the same poll; callers applied after the ack), (2) replay filtering WAL
+  records by HLC as if it were a log position, (3) `Ok` acks from a dead writer + `append_sync`
+  not syncing outside `Flush` + consensus discarding the result. Fixed with apply-then-append at
+  every write site, a WAL-tail LWW merge inside `do_snapshot`, LWW replay of every record,
+  `BrokenPipe` acks, forced fsync, and `ConsensusResult::Committed { persisted }`. Invariants:
+  [runtime-invariants §Persistence](architecture/runtime-invariants.md); log
+  `.log/2026-09-05-persistence-durability-p1.md`.
+
 ## v2.4.1 release — 2026-09-04 (tag `v2.4.1`)
 
 A **security PATCH** on the 2.4 line (wire **v12**/PREV 11 unchanged; no `mycelium` public-API

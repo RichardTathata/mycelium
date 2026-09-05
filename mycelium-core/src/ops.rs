@@ -261,7 +261,7 @@ fn reject_oversized_write(key: &str, value_len: usize) -> bool {
     true
 }
 
-/// Stores `value` under `key`, queues WAL (try-send), applies locally, gossips (try-send).
+/// Stores `value` under `key`, applies locally, queues WAL (try-send), gossips (try-send).
 ///
 /// Returns `false` without applying anything if `key.len() + value.len()` exceeds
 /// [`MAX_KV_WRITE_BYTES`](crate::framing::MAX_KV_WRITE_BYTES) — such a write cannot be
@@ -271,10 +271,13 @@ pub fn kv_set(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
         return false;
     }
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, value, false, &ctx.hlc);
+    // Apply first, then persist: the store is never behind the WAL, so a writer-side
+    // snapshot scan always contains every record the writer has been handed
+    // (persistence.rs durability invariant 1).
+    apply_and_notify(&ctx.kv_state, &update);
     if let Some(wal) = ctx.wal.get() {
         wal.append_try(sync_entry_from(&update));
     }
-    apply_and_notify(&ctx.kv_state, &update);
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_writes_total").increment(1);
     let tls = ctx.tls.get().map(Arc::as_ref);
@@ -285,7 +288,7 @@ pub fn kv_set(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
     )
 }
 
-/// Writes `value` under `key`, appends to WAL, applies locally, awaits gossip capacity.
+/// Writes `value` under `key`, applies locally, appends to WAL, awaits gossip capacity.
 ///
 /// Returns `false` without applying anything if `key.len() + value.len()` exceeds
 /// [`MAX_KV_WRITE_BYTES`](crate::framing::MAX_KV_WRITE_BYTES) — see [`kv_set`].
@@ -294,10 +297,13 @@ pub async fn kv_set_async(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
         return false;
     }
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, value, false, &ctx.hlc);
+    // Apply first, then persist (persistence.rs durability invariant 1): awaiting the
+    // Flush-mode ack *before* applying left a window in which the writer's threshold
+    // snapshot scanned a store without this write and then truncated its WAL record.
+    apply_and_notify(&ctx.kv_state, &update);
     if let Some(wal) = ctx.wal.get() {
         let _ = wal.append(sync_entry_from(&update)).await;
     }
-    apply_and_notify(&ctx.kv_state, &update);
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_writes_total").increment(1);
     let tls = ctx.tls.get().map(Arc::as_ref);
@@ -308,13 +314,16 @@ pub async fn kv_set_async(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
     ).await
 }
 
-/// Tombstones `key`, queues WAL (try-send), applies locally, gossips (try-send).
+/// Tombstones `key`, applies locally, queues WAL (try-send), gossips (try-send).
 pub fn kv_delete(ctx: &CoreCtx, key: Arc<str>) -> bool {
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, &ctx.hlc);
+    // Apply first, then persist: the store is never behind the WAL, so a writer-side
+    // snapshot scan always contains every record the writer has been handed
+    // (persistence.rs durability invariant 1).
+    apply_and_notify(&ctx.kv_state, &update);
     if let Some(wal) = ctx.wal.get() {
         wal.append_try(sync_entry_from(&update));
     }
-    apply_and_notify(&ctx.kv_state, &update);
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_deletes_total").increment(1);
     let tls = ctx.tls.get().map(Arc::as_ref);
@@ -325,13 +334,16 @@ pub fn kv_delete(ctx: &CoreCtx, key: Arc<str>) -> bool {
     )
 }
 
-/// Tombstones `key`, appends to WAL, applies locally, awaits gossip capacity.
+/// Tombstones `key`, applies locally, appends to WAL, awaits gossip capacity.
 pub async fn kv_delete_async(ctx: &CoreCtx, key: Arc<str>) -> bool {
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, &ctx.hlc);
+    // Apply first, then persist (persistence.rs durability invariant 1): awaiting the
+    // Flush-mode ack *before* applying left a window in which the writer's threshold
+    // snapshot scanned a store without this write and then truncated its WAL record.
+    apply_and_notify(&ctx.kv_state, &update);
     if let Some(wal) = ctx.wal.get() {
         let _ = wal.append(sync_entry_from(&update)).await;
     }
-    apply_and_notify(&ctx.kv_state, &update);
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_deletes_total").increment(1);
     let tls = ctx.tls.get().map(Arc::as_ref);

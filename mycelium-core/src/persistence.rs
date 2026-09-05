@@ -7,12 +7,32 @@
 //!
 //! [`WalHandle`] is stored in `TaskCtx` and cloned into `ConnContext`.
 //! `store.rs` and `framing.rs` are not modified — no circular imports.
+//!
+//! # Durability contract (review 2026-09-05)
+//!
+//! Three invariants, each with a regression test in `durability_tests`:
+//!
+//! 1. **A snapshot never discards a WAL record.** `do_snapshot` merges the on-disk
+//!    WAL tail (every record appended since the last truncation) into the store scan
+//!    under the store's own LWW rule before it truncates. The writer therefore does
+//!    not depend on callers having applied an acknowledged record to memory yet —
+//!    the ack-then-snapshot window (`kv_set_async` awaiting the ack while the writer
+//!    hits its threshold) cannot lose the write. Callers *also* apply-then-append
+//!    (`ops.rs`, `connection.rs`) so the store is never behind the WAL.
+//! 2. **Replay is LWW, not a watermark.** Every WAL record is replayed through
+//!    `apply_fn` (which is `apply_and_notify` — LWW). `snapshot_hlc` is informational.
+//!    A delayed remote update carrying an HLC older than the snapshot's watermark is
+//!    still a record this node accepted and acknowledged; a timestamp filter dropped it.
+//! 3. **An ack is a durability claim.** `append` (Flush), `append_sync` and
+//!    `trigger_snapshot` return `Err` when the writer task is gone (channel closed) —
+//!    never `Ok` by default. `append_sync` forces `fdatasync` in every `SyncMode`.
 
 use crate::config::SyncMode;
 use crate::framing::SyncEntry;
 use crate::node_id::NodeId;
 use crate::serde_fixint as codec;
-use crate::store::{apply_and_notify, KvState};
+use crate::store::{apply_and_notify, lww_wins, KvState, StoreEntry};
+use ahash::AHashMap;
 use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -61,8 +81,10 @@ type Cipher<'a> = Option<&'a Arc<dyn DataAtRestCipher>>;
 
 #[derive(Serialize, Deserialize)]
 pub struct KvSnapshot {
-    /// HLC timestamp of the most-recent entry included in this snapshot.
-    /// WAL replay skips entries with `timestamp <= snapshot_hlc`.
+    /// HLC reading at the moment the snapshot was taken. **Informational only** —
+    /// replay does *not* use it as a filter (durability invariant 2, module doc):
+    /// a WAL record with an older HLC is a record this node accepted after the
+    /// snapshot and must be replayed through LWW. Kept for on-disk compatibility.
     pub snapshot_hlc: u64,
     pub entries: Vec<SyncEntry>,
 }
@@ -76,9 +98,12 @@ const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 pub enum WalMsg {
     Append {
         entry: SyncEntry,
-        /// `Some` → caller awaits fsync result.
+        /// `Some` → caller awaits the append (and, when synced, fsync) result.
         /// `None` → fire-and-forget.
         ack: Option<oneshot::Sender<io::Result<()>>>,
+        /// `true` → `fdatasync` this record regardless of the writer's `SyncMode`
+        /// (`append_sync`: consensus committed slots + leases).
+        force_sync: bool,
     },
     TriggerSnapshot {
         ack: oneshot::Sender<io::Result<()>>,
@@ -94,17 +119,23 @@ pub struct WalHandle {
     sync_mode: SyncMode,
 }
 
+/// The writer task has exited (channel closed) — nothing awaited on it can be a
+/// durability claim. Surfaced as `BrokenPipe` so callers can distinguish it from a
+/// disk error (durability invariant 3, module doc).
+fn writer_gone() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer task has stopped")
+}
+
 impl WalHandle {
     /// Append and — in `Flush` mode — await the `fdatasync` ack.
+    ///
+    /// `Flush`: `Err` if the writer is gone or the append/fsync failed.
+    /// `Async`/`Os`: fire-and-forget (`try_send`); always `Ok`.
     pub async fn append(&self, entry: SyncEntry) -> io::Result<()> {
         match self.sync_mode {
-            SyncMode::Flush => {
-                let (tx, rx) = oneshot::channel();
-                let _ = self.tx.send(WalMsg::Append { entry, ack: Some(tx) }).await;
-                rx.await.unwrap_or(Ok(()))
-            }
+            SyncMode::Flush => self.send_and_await(entry, false).await,
             SyncMode::Async | SyncMode::Os => {
-                let _ = self.tx.try_send(WalMsg::Append { entry, ack: None });
+                let _ = self.tx.try_send(WalMsg::Append { entry, ack: None, force_sync: false });
                 Ok(())
             }
         }
@@ -114,22 +145,39 @@ impl WalHandle {
     /// Never awaits fsync. Silently drops if the channel is full —
     /// consistent with `GossipAgent::set`'s existing try_send semantics.
     pub fn append_try(&self, entry: SyncEntry) {
-        let _ = self.tx.try_send(WalMsg::Append { entry, ack: None });
+        let _ = self.tx.try_send(WalMsg::Append { entry, ack: None, force_sync: false });
     }
 
-    /// Always awaits `fdatasync` regardless of `sync_mode`.
-    /// Used for consensus committed-slot writes.
+    /// Append and await `fdatasync` **regardless of `sync_mode`** — the record is on
+    /// stable storage when this returns `Ok`. Used for consensus committed-slot and
+    /// lease writes. `Err` if the writer is gone or the append/fsync failed; the
+    /// caller must not report durability on `Err`.
     pub async fn append_sync(&self, entry: SyncEntry) -> io::Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.tx.send(WalMsg::Append { entry, ack: Some(tx) }).await;
-        rx.await.unwrap_or(Ok(()))
+        self.send_and_await(entry, true).await
     }
 
-    /// Ask the writer to snapshot immediately. Awaits completion.
+    /// Ask the writer to snapshot immediately. Awaits completion; `Err` if the
+    /// writer is gone or the snapshot failed.
     pub async fn trigger_snapshot(&self) -> io::Result<()> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.tx.send(WalMsg::TriggerSnapshot { ack: tx }).await;
-        rx.await.unwrap_or(Ok(()))
+        self.tx.send(WalMsg::TriggerSnapshot { ack: tx }).await.map_err(|_| writer_gone())?;
+        rx.await.unwrap_or_else(|_| Err(writer_gone()))
+    }
+
+    async fn send_and_await(&self, entry: SyncEntry, force_sync: bool) -> io::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(WalMsg::Append { entry, ack: Some(tx), force_sync })
+            .await
+            .map_err(|_| writer_gone())?;
+        // A dropped ack sender means the writer exited mid-request — not `Ok`.
+        rx.await.unwrap_or_else(|_| Err(writer_gone()))
+    }
+
+    /// Test-only constructor over a raw channel (writer-death probes).
+    #[cfg(test)]
+    pub(crate) fn from_parts(tx: mpsc::Sender<WalMsg>, sync_mode: SyncMode) -> Self {
+        Self { tx, sync_mode }
     }
 
     #[allow(dead_code)]
@@ -158,7 +206,9 @@ where
     let wal_path      = dir.join("wal.bin");
 
     // 1. Snapshot ─────────────────────────────────────────────────────────────
-    let snapshot_hlc = if snapshot_path.exists() {
+    // The watermark is decoded for format compatibility but deliberately unused
+    // (durability invariant 2, module doc).
+    let _snapshot_hlc = if snapshot_path.exists() {
         match tfs::read(&snapshot_path).await {
             Ok(raw) => {
                 // Decrypt the snapshot blob if a cipher is configured; a decrypt
@@ -199,43 +249,53 @@ where
     };
 
     // 2. WAL ──────────────────────────────────────────────────────────────────
+    // Every record is replayed — `apply_fn` is LWW, so a record older than the
+    // snapshot's entry for the same key loses on its own and a record for a key the
+    // snapshot lacks (a delayed remote update with an old HLC, accepted after the
+    // snapshot) is restored. The former `timestamp > snapshot_hlc` watermark dropped
+    // the latter (durability invariant 2, module doc). `snapshot_hlc` stays
+    // informational only.
     if wal_path.exists() {
         match tfs::read(&wal_path).await {
-            Ok(bytes) => {
-                let mut pos = 0usize;
-                while pos + 4 <= bytes.len() {
-                    let len = u32::from_le_bytes([
-                        bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
-                    ]) as usize;
-                    pos += 4;
-                    if len == 0 || len > MAX_RECORD_BYTES { break; }
-                    if pos + len > bytes.len()            { break; } // truncated tail
-                    let record_bytes = &bytes[pos..pos + len];
-                    pos += len;
-                    // Decrypt the record if a cipher is configured; a decrypt
-                    // failure is a corrupt tail — stop, matching the decode-Err path.
-                    let decrypted = match cipher {
-                        Some(c) => match c.decrypt(record_bytes) {
-                            Some(b) => b,
-                            None    => break,
-                        },
-                        None => record_bytes.to_vec(),
-                    };
-                    match codec::from_slice::<SyncEntry>(&decrypted) {
-                        Ok(entry) if entry.timestamp > snapshot_hlc => {
-                            if entry.timestamp > max_ts { max_ts = entry.timestamp; }
-                            apply_fn(entry);
-                        }
-                        Ok(_)    => {} // already covered by snapshot
-                        Err(_)   => break, // corrupt tail — stop
-                    }
-                }
-            }
+            Ok(bytes) => decode_wal_records(&bytes, cipher, |entry| {
+                if entry.timestamp > max_ts { max_ts = entry.timestamp; }
+                apply_fn(entry);
+            }),
             Err(e) => warn!("persistence: failed to read wal.bin: {e}"),
         }
     }
 
     Ok(max_ts)
+}
+
+/// Walks the length-prefixed records of a WAL image, decrypting when a cipher is
+/// configured, and hands each decoded [`SyncEntry`] to `f` in file order. Stops at
+/// the first zero/oversized length, truncated tail, decrypt failure or decode error
+/// (a corrupt tail — the same stop rule for replay and for the snapshot merge, so
+/// the two never disagree about what the WAL holds).
+fn decode_wal_records<F: FnMut(SyncEntry)>(bytes: &[u8], cipher: Cipher<'_>, mut f: F) {
+    let mut pos = 0usize;
+    while pos + 4 <= bytes.len() {
+        let len = u32::from_le_bytes([
+            bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
+        ]) as usize;
+        pos += 4;
+        if len == 0 || len > MAX_RECORD_BYTES { break; }
+        if pos + len > bytes.len()            { break; } // truncated tail
+        let record_bytes = &bytes[pos..pos + len];
+        pos += len;
+        let decrypted = match cipher {
+            Some(c) => match c.decrypt(record_bytes) {
+                Some(b) => b,
+                None    => break,
+            },
+            None => record_bytes.to_vec(),
+        };
+        match codec::from_slice::<SyncEntry>(&decrypted) {
+            Ok(entry) => f(entry),
+            Err(_)    => break, // corrupt tail — stop
+        }
+    }
 }
 
 // ── WalWriter task ───────────────────────────────────────────────────────────
@@ -320,8 +380,9 @@ async fn wal_writer_task(
                         let _ = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
                         break;
                     }
-                    Some(WalMsg::Append { entry, ack }) => {
-                        let result = wal_append(&mut wal_file, &entry, sync_mode, cipher.as_ref()).await;
+                    Some(WalMsg::Append { entry, ack, force_sync }) => {
+                        let sync = force_sync || sync_mode == SyncMode::Flush;
+                        let result = wal_append(&mut wal_file, &entry, sync, cipher.as_ref()).await;
                         wal_entry_count += 1;
                         if let Some(ack) = ack { let _ = ack.send(result); }
                         if wal_entry_count >= snapshot_wal_threshold {
@@ -362,11 +423,13 @@ async fn open_wal(path: &std::path::Path) -> io::Result<tfs::File> {
         .await
 }
 
+/// Appends one record; `fdatasync`s it when `sync` is set (Flush mode, or a
+/// forced-sync request such as `append_sync`).
 async fn wal_append(
-    file:      &mut tfs::File,
-    entry:     &SyncEntry,
-    sync_mode: SyncMode,
-    cipher:    Cipher<'_>,
+    file:   &mut tfs::File,
+    entry:  &SyncEntry,
+    sync:   bool,
+    cipher: Cipher<'_>,
 ) -> io::Result<()> {
     // Encode the record, then optionally encrypt the payload. The length prefix
     // frames whatever lands on disk (ciphertext when a cipher is configured).
@@ -382,13 +445,24 @@ async fn wal_append(
     buf.extend_from_slice(&payload);
 
     file.write_all(&buf).await?;
-    if sync_mode == SyncMode::Flush {
+    if sync {
         file.sync_data().await?;
     }
     Ok(())
 }
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
+
+/// `lww_wins` over two WAL/snapshot records — the store's exact conflict rule, so
+/// the snapshot merge and a later replay agree.
+fn sync_entry_wins(incoming: &SyncEntry, current: &SyncEntry) -> bool {
+    let inc_val = if incoming.is_tombstone { None } else { Some(incoming.value.clone()) };
+    let cur = StoreEntry {
+        data:      if current.is_tombstone { None } else { Some(current.value.clone()) },
+        timestamp: current.timestamp,
+    };
+    lww_wins(incoming.timestamp, incoming.is_tombstone, &inc_val, &cur)
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn do_snapshot(
@@ -420,7 +494,7 @@ async fn do_snapshot(
 
     // 2. Scan store.
     let snapshot_hlc = hlc.current();
-    let entries: Vec<SyncEntry> = {
+    let mut entries: Vec<SyncEntry> = {
         let guard = kv_state.store.pin();
         guard.iter()
             // Include TOMBSTONES, not just live entries. The in-memory store retains a tombstone for
@@ -439,6 +513,34 @@ async fn do_snapshot(
             })
             .collect()
     };
+
+    // 2b. Merge the WAL tail — durability invariant 1 (module doc). Every record
+    // appended since the last truncation is on disk and may have been acknowledged
+    // to a caller that has not yet applied it to the store (the writer runs the
+    // threshold snapshot straight after sending the ack, with no yield; on a
+    // multi-thread runtime the caller need not have been polled). Step 4 truncates
+    // the WAL, so anything not carried into the snapshot here is gone. Merging
+    // under the store's own `lww_wins` keeps the snapshot exactly what replay of
+    // (store ∪ WAL) would have produced. The writer is single-task, so no record
+    // lands between this read and the truncation.
+    wal_file.flush().await?; // complete any in-flight (Async/Os-mode) write before read-back
+    let wal_bytes = tfs::read(dir.join("wal.bin")).await.unwrap_or_default();
+    if !wal_bytes.is_empty() {
+        let mut tail: AHashMap<Arc<str>, SyncEntry> = AHashMap::new();
+        decode_wal_records(&wal_bytes, cipher, |rec| {
+            match tail.get(&rec.key) {
+                Some(cur) if !sync_entry_wins(&rec, cur) => {}
+                _ => { tail.insert(Arc::clone(&rec.key), rec); }
+            }
+        });
+        for e in entries.iter_mut() {
+            if let Some(rec) = tail.remove(&e.key)
+                && sync_entry_wins(&rec, e) {
+                    *e = rec;
+                }
+        }
+        entries.extend(tail.into_values());
+    }
 
     // 3. Write snapshot.tmp → fdatasync → rename to snapshot.bin.
     let tmp_path  = dir.join("snapshot.tmp");
@@ -532,6 +634,230 @@ mod persist_tests {
         assert!(restored.store.pin().get("k").unwrap().data.is_none(),
             "an ancient replayed write must not resurrect the deleted key");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Regression tests for the durability contract in the module doc (review
+/// 2026-09-05, three P1 findings; probes contributed by the reviewer, adapted).
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+    use crate::framing::{make_gossip_update, sync_entry_from, GossipUpdate};
+    use crate::store::KvState;
+    use bytes::Bytes;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "myc-durab-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn entry(key: &str, val: &'static [u8], ts: u64, tomb: bool) -> SyncEntry {
+        SyncEntry { key: Arc::from(key), value: Bytes::from_static(val), timestamp: ts, is_tombstone: tomb }
+    }
+
+    /// Replays `dir` into a fresh store through the production apply path (LWW).
+    async fn replay_into_fresh_store(dir: &std::path::Path) -> Arc<KvState> {
+        let restored = KvState::new(0);
+        let r = Arc::clone(&restored);
+        replay(dir, None, move |e: SyncEntry| {
+            apply_and_notify(&r, &GossipUpdate {
+                nonce: crate::framing::ANTI_ENTROPY_NONCE, sender: 0, ttl: 1,
+                is_tombstone: e.is_tombstone, timestamp: e.timestamp, key: e.key, value: e.value,
+            });
+        }).await.unwrap();
+        restored
+    }
+
+    fn live_value(state: &KvState, key: &str) -> Option<Vec<u8>> {
+        state.store.pin().get(key).and_then(|e| e.data.as_ref().map(|b| b.to_vec()))
+    }
+
+    // ── Invariant 3: an ack is a durability claim ─────────────────────────────
+
+    #[tokio::test]
+    async fn regression_closed_writer_never_acks_success() {
+        // Finding 3a: `rx.await.unwrap_or(Ok(()))` turned a dead writer into a
+        // successful fsync. Every awaiting path must report BrokenPipe instead.
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx); // the writer task is gone
+        let flush = WalHandle::from_parts(tx.clone(), SyncMode::Flush);
+        let e = flush.append_sync(entry("user/key", b"durable", 1, false)).await
+            .expect_err("append_sync on a closed writer returned Ok");
+        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+        assert!(flush.append(entry("user/key", b"durable", 2, false)).await.is_err(),
+            "Flush-mode append on a closed writer returned Ok");
+        assert!(flush.trigger_snapshot().await.is_err(),
+            "trigger_snapshot on a closed writer returned Ok");
+        // Documented exception: Async/Os `append` is fire-and-forget (try_send) —
+        // it never claimed durability, so it stays Ok. `append_sync` does not.
+        let asynch = WalHandle::from_parts(tx, SyncMode::Async);
+        assert!(asynch.append(entry("user/key", b"x", 3, false)).await.is_ok());
+        assert!(asynch.append_sync(entry("user/key", b"x", 4, false)).await.is_err(),
+            "append_sync must not report durability in Async mode either");
+    }
+
+    #[tokio::test]
+    async fn regression_writer_dying_mid_request_is_an_error() {
+        // The ack sender is dropped without a reply (writer panicked/exited after
+        // taking the message): the awaiting caller must see Err, not Ok.
+        let (tx, mut rx) = mpsc::channel::<WalMsg>(1);
+        let handle = WalHandle::from_parts(tx, SyncMode::Flush);
+        let waiter = tokio::spawn(async move { handle.append_sync(entry("k", b"v", 1, false)).await });
+        let msg = rx.recv().await.unwrap();
+        drop(msg); // drops the ack sender unanswered
+        assert!(waiter.await.unwrap().is_err(), "dropped ack must surface as Err");
+    }
+
+    #[tokio::test]
+    async fn append_sync_fdatasyncs_in_async_mode() {
+        // Finding 3b: `append_sync` promised an unconditional fdatasync but the
+        // writer only synced in Flush mode. Observable proxy: the record is fully
+        // on disk (not merely in tokio's in-flight write) the moment `Ok` returns,
+        // with the writer spawned in Async mode.
+        let dir  = unique_dir("sync");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let handle = spawn_wal_writer(dir.clone(), SyncMode::Async, 1_000_000, 3_600,
+            Arc::clone(&state), node, hlc, 1, None, None);
+        handle.append_sync(entry("k", b"v", 7, false)).await.unwrap();
+        let mut found = false;
+        decode_wal_records(&std::fs::read(dir.join("wal.bin")).unwrap(), None, |e| {
+            found |= e.key.as_ref() == "k" && e.timestamp == 7;
+        });
+        assert!(found, "append_sync returned Ok before the record was on disk");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Invariant 1: a snapshot never discards a WAL record ───────────────────
+
+    #[tokio::test]
+    async fn regression_snapshot_retains_wal_record_acked_before_local_apply() {
+        // Finding 1 (reviewer's probe, verbatim shape): the writer acks an fsynced
+        // append and snapshots before the caller has applied the write to the store.
+        // The store scan lacks the key; the WAL held it — truncation must not lose it.
+        let dir  = unique_dir("merge");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let update = make_gossip_update(&node, 1, Arc::from("user/key"), Bytes::from_static(b"durable"), false, &hlc);
+        let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+        wal_append(&mut file, &sync_entry_from(&update), true, None).await.unwrap();
+        do_snapshot(&dir, &state, &node, &hlc, 1, &mut file, None).await.unwrap();
+        assert_eq!(std::fs::metadata(dir.join("wal.bin")).unwrap().len(), 0, "snapshot truncates the WAL");
+        apply_and_notify(&state, &update); // the caller resumes — too late for the scan
+
+        let restored = replay_into_fresh_store(&dir).await;
+        assert_eq!(live_value(&restored, "user/key").as_deref(), Some(&b"durable"[..]),
+            "fsynced write vanished when snapshot ran before in-memory apply");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn snapshot_wal_merge_follows_store_lww() {
+        // The merge must be exactly the store's conflict rule, or a restart would
+        // resolve (store ∪ WAL) differently from a live node:
+        //  a) store newer than WAL  → store wins
+        //  b) WAL newer than store  → WAL wins (incl. a tombstone over a live value)
+        //  c) two WAL records, same key → later timestamp wins
+        let dir  = unique_dir("lww");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let t = |n: u64| crate::hlc::pack(1_000 + n, 0);
+        let put = |key: &str, val: &'static [u8], tomb: bool, ts: u64| GossipUpdate {
+            nonce: 1, sender: 0, ttl: 1, is_tombstone: tomb, timestamp: ts,
+            key: Arc::from(key), value: Bytes::from_static(val),
+        };
+        apply_and_notify(&state, &put("a", b"store-new", false, t(9)));
+        apply_and_notify(&state, &put("b", b"store-old", false, t(1)));
+        let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+        for e in [
+            entry("a", b"wal-old", t(2), false),   // (a) loses to the store
+            entry("b", b"",        t(5), true),    // (b) tombstone beats the live store value
+            entry("c", b"first",   t(3), false),   // (c) …
+            entry("c", b"second",  t(4), false),   //     … later record wins
+        ] {
+            wal_append(&mut file, &e, false, None).await.unwrap();
+        }
+        do_snapshot(&dir, &state, &node, &hlc, 1, &mut file, None).await.unwrap();
+
+        let restored = replay_into_fresh_store(&dir).await;
+        assert_eq!(live_value(&restored, "a").as_deref(), Some(&b"store-new"[..]));
+        assert_eq!(restored.store.pin().get("b").map(|e| e.data.is_none()), Some(true),
+            "newer WAL tombstone must win over the older live store value");
+        assert_eq!(live_value(&restored, "c").as_deref(), Some(&b"second"[..]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn regression_writer_threshold_snapshot_right_after_ack_keeps_write() {
+        // End-to-end through the real writer task: threshold 1 makes the writer
+        // snapshot in the same poll as the ack, before the awaiting caller can apply.
+        // Replay is taken from disk WHILE the writer is alive — a clean shutdown
+        // would re-snapshot the (by then updated) store and mask the loss.
+        let dir  = unique_dir("writer");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let handle = spawn_wal_writer(dir.clone(), SyncMode::Flush, 1, 3_600,
+            Arc::clone(&state), node.clone(), Arc::clone(&hlc), 1, None, None);
+
+        let update = make_gossip_update(&node, 1, Arc::from("user/key"), Bytes::from_static(b"durable"), false, &hlc);
+        handle.append_sync(sync_entry_from(&update)).await.unwrap();
+        // Structural poll: the threshold snapshot has run (snapshot.bin exists, WAL truncated).
+        for _ in 0..400 {
+            let snapped = dir.join("snapshot.bin").exists()
+                && std::fs::metadata(dir.join("wal.bin")).map(|m| m.len() == 0).unwrap_or(false);
+            if snapped { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(dir.join("snapshot.bin").exists(), "writer never snapshotted at threshold 1");
+        apply_and_notify(&state, &update); // the caller applies only now
+
+        let restored = replay_into_fresh_store(&dir).await;
+        assert_eq!(live_value(&restored, "user/key").as_deref(), Some(&b"durable"[..]),
+            "acked write lost: writer snapshotted (and truncated) before the caller applied");
+        drop(handle);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Invariant 2: replay is LWW, not a watermark ───────────────────────────
+
+    #[tokio::test]
+    async fn regression_replay_keeps_wal_record_older_than_snapshot_watermark() {
+        // Finding 2 (reviewer's probe): a delayed remote update with an HLC below
+        // `snapshot_hlc`, accepted and WAL-appended after the snapshot, was dropped
+        // by the `timestamp > snapshot_hlc` filter — even for a key the snapshot lacks.
+        let dir = unique_dir("watermark");
+        let snapshot = KvSnapshot { snapshot_hlc: 100, entries: vec![] };
+        tfs::write(dir.join("snapshot.bin"), codec::to_vec(&snapshot).unwrap()).await.unwrap();
+        let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+        wal_append(&mut file, &entry("user/key", b"durable", 50, false), true, None).await.unwrap();
+
+        let restored = replay_into_fresh_store(&dir).await;
+        assert_eq!(live_value(&restored, "user/key").as_deref(), Some(&b"durable"[..]),
+            "post-snapshot arrival with older HLC was skipped on replay");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn replay_without_watermark_still_lets_snapshot_win_same_key() {
+        // Dropping the filter must not let an older WAL record clobber the snapshot's
+        // newer value for the same key — LWW in `apply_fn` decides.
+        let dir = unique_dir("lww-replay");
+        let snapshot = KvSnapshot { snapshot_hlc: 100, entries: vec![entry("k", b"newer", 90, false)] };
+        tfs::write(dir.join("snapshot.bin"), codec::to_vec(&snapshot).unwrap()).await.unwrap();
+        let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+        wal_append(&mut file, &entry("k", b"older", 40, false), true, None).await.unwrap();
+        let restored = replay_into_fresh_store(&dir).await;
+        assert_eq!(live_value(&restored, "k").as_deref(), Some(&b"newer"[..]));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

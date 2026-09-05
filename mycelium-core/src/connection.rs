@@ -483,11 +483,12 @@ pub async fn handle_connection(
                         key,
                         value:        entry.value,
                     };
+                    flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
+                    // Apply, then persist (persistence.rs durability invariant 1).
+                    apply_and_notify(&kv_state, &update);
                     if let Some(ref wal) = wal {
                         let _ = wal.append(sync_entry_from(&update)).await;
                     }
-                    flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
-                    apply_and_notify(&kv_state, &update);
                 }
                 #[cfg(feature = "metrics")]
                 metrics::counter!("gossip_anti_entropy_rounds_total").increment(1);
@@ -558,10 +559,10 @@ pub async fn handle_connection(
                             &sig.kind, &sig.sender,
                         ) {
                             let upd = make_gossip_update(&node_id, max_ttl, q_key, q_val, false, &hlc);
+                            apply_and_notify(&kv_state, &upd); // apply, then persist
                             if let Some(ref wal) = wal {
                                 let _ = wal.append(sync_entry_from(&upd)).await;
                             }
-                            apply_and_notify(&kv_state, &upd);
                             dispatch_gossip_try_send(
                                 &gossip_txs, WireMessage::Data(upd),
                                 node_id.id_hash(), ForwardHint::All, &kv_state.dropped_frames,
@@ -613,11 +614,12 @@ pub async fn handle_connection(
                 // happens-before across the cluster even under wall-clock skew.
                 hlc.observe(update.timestamp);
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
+                flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
+                // Apply, then persist (persistence.rs durability invariant 1).
+                apply_and_notify(&kv_state, &update);
                 if let Some(ref wal) = wal {
                     let _ = wal.append(sync_entry_from(&update)).await;
                 }
-                flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
-                apply_and_notify(&kv_state, &update);
                 #[cfg(feature = "metrics")]
                 metrics::counter!("gossip_messages_received_total").increment(1);
 
@@ -725,11 +727,12 @@ pub async fn handle_connection(
                 // Absorb HLC and apply to local store.
                 hlc.observe(update.timestamp);
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
+                flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
+                // Apply, then persist (persistence.rs durability invariant 1).
+                apply_and_notify(&kv_state, &update);
                 if let Some(ref wal) = wal {
                     let _ = wal.append(sync_entry_from(&update)).await;
                 }
-                flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
-                apply_and_notify(&kv_state, &update);
                 #[cfg(feature = "metrics")]
                 metrics::counter!("gossip_messages_received_total").increment(1);
 
