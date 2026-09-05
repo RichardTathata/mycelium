@@ -4065,6 +4065,43 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// Run-61 falsification probe (Security): bearer header *shapes* that a lax parser might
+    /// admit — lowercase scheme, double space, trailing space, scheme only, token in a query
+    /// string, Basic scheme, and the token as a cookie. None may reach a gated handler: every
+    /// one is 401; only the exact `Bearer <token>` is 200.
+    #[tokio::test]
+    async fn probe_bearer_header_shapes_are_not_accepted() {
+        use axum::http::header::{AUTHORIZATION, COOKIE};
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        // Not in the list: a *trailing* space (`"Bearer secret "`) — HTTP parsers strip trailing
+        // OWS from field values (RFC 9110 §5.5), so the server sees the exact token; the probe's
+        // first run asserted it must be refused and learned that it is admitted *by the spec*, not
+        // by a lax comparison. Internal double space is NOT stripped → refused.
+        for bad in ["bearer secret", "Bearer  secret", "Bearer", "BEARER secret",
+                    "Basic c2VjcmV0", "Token secret", "Bearer secre", "Bearer secrett"] {
+            let r = client.get(format!("{base}/gateway/kv/keys")).header(AUTHORIZATION, bad).send().await.unwrap();
+            assert_eq!(r.status(), 401, "header {bad:?} must be refused");
+        }
+        let r = client.get(format!("{base}/gateway/kv/keys?token=secret")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "a query-string token must be refused");
+        let r = client.get(format!("{base}/gateway/kv/keys")).header(COOKIE, "token=secret").send().await.unwrap();
+        assert_eq!(r.status(), 401, "a cookie token must be refused");
+        let r = client.get(format!("{base}/gateway/kv/keys")).header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+        assert_eq!(r.status(), 200, "the exact form is admitted");
+        agent.shutdown().await;
+    }
+
     /// Scoped tokens on the node-level routes (compliance): `/mcp` needs `mcp:invoke`,
     /// `/signals/{kind}` needs `mesh:read`; a token outside the family is refused 403 naming
     /// the required scope; the wildcard admits everything.

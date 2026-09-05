@@ -528,6 +528,7 @@ Readiness · Evolvability · Documentation · Developer Experience · Dependency
 - 2026-07-07: Test Architecture scored 8 in Runs 32–36 while the `mycelium-wiki` integration tests carried the `free_port()` bind-TOCTOU flake class (bare-unwrap re-bind, CI-gating) (found by a CI `AddrInUse` failure on an unrelated push; class retired with pair-granularity retries same day).
 - 2026-07-07: Documentation scored 8 in Runs 33–37 while `docs/wiki/dev/examples.md` counted eleven coop demos though the smoke had run twelve since 2026-07-03 (found by wiki-lint 8 — the first lint that *counted*).
 - 2026-07-15: Documentation scored 8 in Runs 33–48 while the `catalog`/`provisioning` demo run commands omitted the `--features wasm` those bins require — a documented instruction that fails if followed literally (`error: target … requires the features: wasm`) — across `coop/README.md`, `operations/artifacts.md`, the guide-ladder row, `presentation.html`, and the `.rs` `//! Run:` lines (found by doc-coverage run 9's must-work-if-followed check, specifically by *running the binary*; the 3rd hit of the "instruction present but no-ops/fails" class after the wire-version constant 2026-07-11 and `GOSSIP_CLUSTER_NAME` 2026-07-14). Fixed all seven same day.
+- 2026-09-05: Error Handling scored 8 in Run 60 (and the runs before it) while `kv_set_async` / `kv_delete_async` discarded the WAL append result with `let _ =` — in `Flush` mode a dead writer or disk error returned `true` with no log line (found by Run 61's doc-vs-code check of the durability vocabulary; the `WalHandle`-level acks had been made honest in v2.4.2 but the public path never propagated them). Legibility fixed (`warn!`); the receipt is the contracts plan's PR 2/3.
 
 ## 2026-06-04 — Run 1
 
@@ -3802,3 +3803,87 @@ today's evidence. The headline is not the numbers: it is that a security boundar
 docs asserted for two months had never been sent a bare request — the ledger entry recorded this
 morning — and that the loop's own timing-test lesson bit its author two days after being written.
 Next run's rotation: 1 · 2 · 6 · 8 · 15 (plus 16 only with a supervised nightly re-run in hand).
+
+## 2026-09-05 — Run 61 (M2)
+
+Deep-dive dimensions this run: **6 Error Handling · 9 Concurrency · 16 Scalability · 17 Testability · 25
+Dependency Hygiene** (rotation: the five longest-uncovered among those the diff touches). Diff since Run 60
+(`ac4d2cb`): 36 commits / 104 files — the external code review's five findings fixed (v2.4.2: persistence
+P1s ×3, node-level gateway auth, checkpointer 0.1.1), v2.4.3 (snapshot read-back abort), the snapshot
+directory fsync, SDK bearer + `CommitResult { persisted }` (py 0.2.4 / ts 0.1.1), wiki-lint, doc-coverage
+run 16, the v3.0 contracts axis recorded. **Execution evidence this run:** `make check` ×2 (clippy across
+the feature matrix, all green); `cargo test -p mycelium-core --lib durability_tests` **12/12** (incl. the
+two new probes); `cargo test --lib -- http::tests::probe_bearer_header` (**passed after one expectation was corrected — see P1**); CI on `main`
+green on every merge today incl. **Test**, **Loom**, **Fuzz**, **Dependency audit (RUSTSEC)**, the 13-scenario
+4-node and S11–S13 3-node **Docker cluster suites**, the Python live-node job and the TS `jest` job (new);
+local `jest` 10/10 (19 live skipped) and py node-free suites 18/18. Nightly scale runner: **no green in the
+window** — 2026-09-04 `scale` = the documented formation-variance ceiling ("did not converge within 240 s"),
+09-04 `resilience`/`entries` and all three 09-05 suites died in the **Docker image build**
+(`DeadlineExceeded` on `target seed/mgmt`) — environmental, not substrate findings; but it means Scalability
+has no fresh evidence.
+
+### Findings
+- **Major — Error Handling (6) + Documentation (23).** The public `set_async` / `delete_async` return the
+  gossip-queue `bool`; the WAL append result was **discarded silently** (`let _ = wal.append(...)`, both
+  async sites in `mycelium-core/src/ops.rs`) — in `Flush` mode a dead writer or disk error produced a
+  `true` with no trace. Two sentences written *this morning* (guide 01 § Persistence, `deployment.md`
+  § Persistence modes) claimed the error "surfaces as an `Err`, never a silent `Ok`" — true at the
+  `WalHandle` level, false at the public API. Found by this run's doc-vs-code check of the durability
+  vocabulary. **Fixed the legibility half:** both sites now `warn!` with key + error; both sentences
+  corrected to state that plain writes do *not* surface durability and that the per-write receipt is the
+  contracts plan's first deliverable; runtime-invariants updated. **Unfixed by design (pending the plan):**
+  the public write path still cannot report durability → dimension 6 capped at **6**. Ledger line added.
+- **No defect from P1** — its first run flagged `"Bearer secret "` as admitted; that is HTTP parsing (trailing OWS is not part of a field value, RFC 9110 §5.5), so the server compared the exact token. The probe's expectation was corrected and the case documented; the other eight header shapes, a query-string token and a cookie token were all refused (401). All three probes stay as permanent gates.
+
+**Falsification probes** (three highest provisional scores — Concurrency, Robustness/Semantic, Security):
+- **P1 Security** — `probe_bearer_header_shapes_are_not_accepted` (`src/agent/http.rs`): eight header
+  shapes a lax parser might admit (lowercase scheme, double space, scheme-only, `BEARER`,
+  Basic, `Token`, truncated/extended token) + query-string token + cookie token → all must be 401; exact
+  `Bearer <token>` → 200. **Passed** — eight shapes + query + cookie refused; the trailing-space case is admitted *by the HTTP spec* (trailing OWS stripped before the header reaches the middleware), so the probe now documents it rather than asserting it.
+- **P2 Concurrency/Semantic** — `probe_concurrent_append_sync_across_threshold_snapshots_loses_nothing`:
+  64 tasks `append_sync` distinct keys through the real writer with threshold 3, applying to memory only
+  after the ack + a yield, so every snapshot's WAL-tail merge races the callers' applies; replay taken
+  from disk while the writer is alive. **Passed — all 64 keys present.**
+- **P3 Robustness** — `probe_replay_stops_at_corrupt_tail_and_keeps_prior_records`: three good records +
+  a torn fourth (length prefix > bytes present), and separately a `u32::MAX` length prefix. **Passed** —
+  prior records kept, decode stops, no panic.
+
+| # | Dimension | Score | Notes |
+|---|-----------|:-----:|-------|
+| 1 | Philosophy / Coherence with Goal | 8 | The v3.0 contracts-axis assessment was made *against* the philosophy (subsidiarity → "coordinate only where the invariant requires it"; domains keep unconditional forwarding); PAIR positioning held (09-04). No execution evidence applies → 8. |
+| 2 | Conceptual Integrity | 8 | Same option shape on all seven py handles / six ts classes (`token=` / `{ token }`), one `CommitResult`, one durability vocabulary now stated identically in guide/ops/wiki after this run's correction. |
+| 3 | Architecture | 8 | carried (v60) — the gated-routes fix stayed in the gateway layer; no Layer-I law added (`persisted` is a receipt, not a guard). stale/unverified this run. |
+| 4 | Modularity | 7 | carried (v60) — stale/unverified this run. |
+| 5 | API Design | 7 | `Committed { persisted }` is additive but broke exhaustive destructures (the guide's own example, fixed); `persisted` reads `true` when persistence is unconfigured ("no promise broken") — conflation flagged by the contracts plan, unfixed; `set_async`'s `bool` invites the durability misreading this run fell into. |
+| 6 | Error Handling Model | **6** | **Deep-dive.** `WalHandle` acks are honest since v2.4.2 (`BrokenPipe` on a gone writer, gates ×2); consensus propagates to `persisted`. But the public write path discards the WAL result — now `warn!`ed, still not surfaced (Finding). Cap 6 until the contracts plan's typed receipt lands. |
+| 7 | Configurability | 7 | carried (v59 deep-dive) — `SyncMode` semantics now documented per mode in `deployment.md`; stale otherwise. |
+| 8 | Language Best Practices | 8 | 43 `unwrap/expect` in non-test code across both crates (top file 5), `#![deny(unsafe_code)]`, clippy `-D warnings` green across the whole feature matrix twice today (`make check`). |
+| 9 | Concurrency Correctness | 8 | **Deep-dive.** The ack-then-snapshot race (shipped in every release with persistence) fixed twice over (apply-first + WAL-tail merge), the three invariant-1 gates verified *failing* with the merge disabled; P2 passed under 64-way contention; Loom CI job green; lock table reconciled 36 rows vs 75 sites (lint). 8, not 9: the ledger for this dimension is the longest in the file. |
+| 10 | Resource Management | 8 | carried (v60) — stale/unverified this run. |
+| 11 | Semantic Correctness | 8 | Replay is LWW over every record (watermark filter removed, gate); snapshot merge follows `lww_wins` exactly (gate); P2/P3 passed. Fresh evidence, but the dimension had a shipped watermark bug for months → 8. |
+| 12 | Robustness | 8 | Snapshot aborts on unreadable tail (gate) + directory fsync; P3 torn/absurd tail passed; Fuzz CI job green. |
+| 13 | Security | 8 | `/mcp` `tools/call` ran with the node's identity for any unauthenticated caller until today — fixed with bearer+scope gates ×2; SDKs can now present a bearer (14 node-free gates); P1 passed (8 header shapes + query + cookie refused; trailing OWS is the exact token per RFC 9110). Fixed end-state → 8. |
+| 14 | Failure Mode Legibility | 7 | `persisted:false` logs at `error` with the slot; the plain-write WAL failure was **silent** until this run's `warn!` (Finding) — legibility improved but the caller still sees `true`. |
+| 15 | Performance | 8 | carried (v60) — stale/unverified this run; the snapshot merge adds one bounded WAL read per snapshot (≤ threshold records), the directory fsync one syscall per snapshot. |
+| 16 | Scalability | 7 | **Deep-dive.** No green nightly in the window: 09-04 `scale` hit the documented 240 s formation ceiling; 09-04 `resilience`/`entries` and all three 09-05 suites failed in the Docker image build (`DeadlineExceeded`) — environmental (classified from the logs), not findings. SWIM oracle not run this run (no long suite just to unlock a number). Carried 7, **stale**; the runner needs its image-build deadline looked at. |
+| 17 | Testability | 7 | **Deep-dive.** Strength: this run's probes and today's 25+ new gates all run without a node (stub servers, fetch recorders, in-process writer). Weakness (structural, current): the WAL/snapshot race was invisible to the suite for months because clock/fs/scheduling are not injectable — the replay plan's whole premise; the only injectable read failure is "wal.bin is a directory". 7 until seams exist. |
+| 18 | Test Architecture | 8 | Pyramid intact and grew: 12 durability gates, 14 SDK node-free gates, `jest` now in CI; Docker suites green on every merge today. Not 9: a stub-server flake (`request_queue_size` 5 vs 120 conns) failed a PR today before being fixed (#184). |
+| 19 | Observability | 8 | carried (v60) — stale/unverified this run. |
+| 20 | Debuggability | 8 | carried (v60) — stale/unverified this run. |
+| 21 | Operational Readiness | 8 | `deployment.md § Persistence modes` (new): ack meaning per mode, `persisted`, storage assumptions incl. the macOS fsync caveat; three releases cut CI-green-before-tag. |
+| 22 | Evolvability | 8 | v2.4.2 + v2.4.3 + two companion tags in one day, each with a CHANGELOG section and upgrade notes; wire v12 unchanged; the one API note documented rather than hidden. |
+| 23 | Documentation | 8 | doc-coverage run 16 fixed two non-compiling Dev literals + the consensus example; this run fixed two durability overclaims written the same morning (Finding — a same-day drift, not a prior-run miss). Every statement of the public route set aligned (lint). |
+| 24 | Developer Experience | 8 | carried (v60) — pinned toolchain, `make check` ~3 min matrix; stale/unverified this run. |
+| 25 | Dependency Hygiene | 8 | **Deep-dive.** 38 deps / 23 optional in the root crate; `cargo audit` CI job green today (post RUSTSEC-2026-0269/0258 bumps); no new dependency in 36 commits (the SDK work used existing `httpx`/`fetch`); `Cargo.lock` committed, `--no-default-features` job green. 8 (audit is prior-to-this-run execution). |
+| — | **Floor (lowest 3)** | **6, 7, 7** | Error Handling Model · Scalability · Testability |
+| — | Mean (continuity footnote) | 7.7 | not a target; see M2 preamble |
+
+**Delta vs Run 60:** Error Handling 8→**6** (finding, live), Scalability 8→7 (no fresh evidence, environmental
+nightly failures), Testability 8→7 (structural: non-injectable clock/fs proven by a months-old shipped race),
+API Design 8→7 (`persisted` conflation + `bool`-as-durability footgun), Failure Mode Legibility 8→7 (silent WAL
+failure, now warned). Everything else held at 8 with fresh evidence or carried. The day's work moved
+*current state* up on 9/11/12/13 (defects removed + gated) without moving the numbers above 8 — the ledger
+says those dimensions had scored 8 while the defects existed, so 8 is the ceiling until fresh whole-dimension
+evidence exists beyond the fixes' own gates.
+
+**Score-motivated work check:** none — no commit in the window references ratings.

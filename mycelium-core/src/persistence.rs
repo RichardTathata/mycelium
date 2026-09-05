@@ -771,6 +771,67 @@ mod durability_tests {
     // ── Invariant 1: a snapshot never discards a WAL record ───────────────────
 
     #[tokio::test]
+    async fn probe_concurrent_append_sync_across_threshold_snapshots_loses_nothing() {
+        // Run-61 falsification probe (Concurrency / Semantic): 64 tasks append_sync distinct
+        // keys through the real writer with threshold 3, so snapshots interleave with appends
+        // and each snapshot's WAL-tail merge races the callers' in-memory applies. Replay from
+        // disk WHILE the writer is alive must hold every key (no clean-shutdown masking).
+        let dir  = unique_dir("concurrent");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let handle = Arc::new(spawn_wal_writer(dir.clone(), SyncMode::Flush, 3, 3_600,
+            Arc::clone(&state), node.clone(), Arc::clone(&hlc), 1, None, None));
+        let mut tasks = Vec::new();
+        for i in 0..64u32 {
+            let (h, st, n, c) = (Arc::clone(&handle), Arc::clone(&state), node.clone(), Arc::clone(&hlc));
+            tasks.push(tokio::spawn(async move {
+                let upd = make_gossip_update(&n, 1, Arc::from(format!("c/{i}").as_str()),
+                    Bytes::from(format!("v{i}")), false, &c);
+                h.append_sync(sync_entry_from(&upd)).await.unwrap(); // ack, then a possibly-late apply
+                tokio::task::yield_now().await;
+                apply_and_notify(&st, &upd);
+            }));
+        }
+        for t in tasks { t.await.unwrap(); }
+        // Let the writer finish any snapshot it started for the last acks (structural: wait for
+        // the WAL to be short, i.e. the threshold snapshot for the final batch has run or nothing is pending).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let restored = replay_into_fresh_store(&dir).await;
+        let missing: Vec<u32> = (0..64).filter(|i| live_value(&restored, &format!("c/{i}")).is_none()).collect();
+        assert!(missing.is_empty(), "acked keys missing after concurrent appends + snapshots: {missing:?}");
+        drop(handle);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn probe_replay_stops_at_corrupt_tail_and_keeps_prior_records() {
+        // Run-61 falsification probe (Robustness): three good records then a torn fourth
+        // (length prefix promises more bytes than exist) and, separately, an absurd length
+        // prefix. Replay must keep the three, stop cleanly, never panic.
+        let dir = unique_dir("torn");
+        let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+        for i in 0..3u64 { wal_append(&mut file, &entry(&format!("t/{i}"), b"ok", 10 + i, false), true, None).await.unwrap(); }
+        // torn tail: a plausible length, then only 3 bytes of payload
+        file.write_all(&[200u8, 0, 0, 0, 1, 2, 3]).await.unwrap();
+        file.sync_data().await.unwrap();
+        let restored = replay_into_fresh_store(&dir).await;
+        for i in 0..3 { assert_eq!(live_value(&restored, &format!("t/{i}")).as_deref(), Some(&b"ok"[..])); }
+        assert_eq!(restored.store.pin().len(), 3, "the torn record must not produce an entry");
+        // absurd length prefix (> MAX_RECORD_BYTES) after valid records → stop, no panic
+        let dir2 = unique_dir("absurd");
+        let mut f2 = open_wal(&dir2.join("wal.bin")).await.unwrap();
+        wal_append(&mut f2, &entry("a/0", b"ok", 1, false), true, None).await.unwrap();
+        f2.write_all(&u32::MAX.to_le_bytes()).await.unwrap();
+        f2.write_all(b"garbage").await.unwrap();
+        f2.sync_data().await.unwrap();
+        let r2 = replay_into_fresh_store(&dir2).await;
+        assert_eq!(live_value(&r2, "a/0").as_deref(), Some(&b"ok"[..]));
+        assert_eq!(r2.store.pin().len(), 1);
+        std::fs::remove_dir_all(&dir).ok(); std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[tokio::test]
     async fn snapshot_install_syncs_the_directory() {
         // The power-loss property (rename durable before the WAL truncation) is not
         // observable without a filesystem adapter — the replay plan's point. What can be

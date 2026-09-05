@@ -301,8 +301,13 @@ pub async fn kv_set_async(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
     // Flush-mode ack *before* applying left a window in which the writer's threshold
     // snapshot scanned a store without this write and then truncated its WAL record.
     apply_and_notify(&ctx.kv_state, &update);
-    if let Some(wal) = ctx.wal.get() {
-        let _ = wal.append(sync_entry_from(&update)).await;
+    if let Some(wal) = ctx.wal.get()
+        && let Err(e) = wal.append(sync_entry_from(&update)).await
+    {
+        // The public `set_async`/`delete_async` return the gossip-queue bool, not durability;
+        // surfacing per-write durability is the contracts plan's PR 2/3. Until then the
+        // failure must at least be legible (Run 61 finding: it was silently discarded).
+        tracing::warn!(key = %update.key, error = %e, "kv write applied and gossiped but its WAL append failed");
     }
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_writes_total").increment(1);
@@ -341,8 +346,13 @@ pub async fn kv_delete_async(ctx: &CoreCtx, key: Arc<str>) -> bool {
     // Flush-mode ack *before* applying left a window in which the writer's threshold
     // snapshot scanned a store without this write and then truncated its WAL record.
     apply_and_notify(&ctx.kv_state, &update);
-    if let Some(wal) = ctx.wal.get() {
-        let _ = wal.append(sync_entry_from(&update)).await;
+    if let Some(wal) = ctx.wal.get()
+        && let Err(e) = wal.append(sync_entry_from(&update)).await
+    {
+        // The public `set_async`/`delete_async` return the gossip-queue bool, not durability;
+        // surfacing per-write durability is the contracts plan's PR 2/3. Until then the
+        // failure must at least be legible (Run 61 finding: it was silently discarded).
+        tracing::warn!(key = %update.key, error = %e, "kv write applied and gossiped but its WAL append failed");
     }
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_deletes_total").increment(1);
