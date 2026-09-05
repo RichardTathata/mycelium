@@ -138,6 +138,10 @@ measured ten-council contention run; remaining items are FTT-side); design recor
 OpenAI-compatible façade `/gateway/reason/v1/*`, the `llm_meta` vocabulary + `ollama` collector;
 position: PAIR = GPU plane, Mycelium = agent plane, stackable (`docs/plans/mycelium-reason.md`
 addendum). Core fix on the way: merged `with_http_routes` routers now sit behind gateway auth with
-companion scope families. Delivery ledger:
+companion scope families. **The contracts axis (2026-09-05):** an external review's five defects fixed and
+released (v2.4.2 / v2.4.3, SDK 0.2.4 / 0.1.1); its six enhancement plans assessed, reconciled and adopted as
+**one plan** — `docs/plans/v3-contracts-axis.md` (posture · dependency graph · phase gates · 23-row decision
+register); externals vendored under `docs/plans/external/`. No code yet; next: item 1 PR 1 (contract ADR) + item
+6 PR 1 (nondeterminism inventory) + the membership-cooldown coupling fix. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

@@ -175,3 +175,21 @@ detection-not-prevention for everything but the ledger.
 A cooldown expressed in ticks is a cooldown that the thing tuning the tick can shorten. Every damping constant
 should be a Duration the governor that damps owns — or its coupling should be written down where the other
 governor's bounds are.
+
+## Consolidation — one plan of record (end of day)
+
+The six ROADMAP entries written today were appended in arrival order as ~6,000 words of prose: a 360 review found
+them coherent in substance (a real dependency DAG; every item passes the litmus tests once its reconciliations are
+applied) but incoherent in form — no index, a stale naming note (2.3.0 / reason 0.5.0 / "the LLM-DX axis"), three
+separate justifications of the same prevention tension, the Property 6/7 and subsidiarity ties unnamed, packaging
+candidates overlapping the axis unreferenced, and six load-bearing citations to files on one person's Desktop.
+
+Fixed by consolidation: **`docs/plans/v3-contracts-axis.md`** is the plan of record (posture · map · per-item
+adopt/verified/diverge · **decision register D1–D23** · our own corrections · cross-cutting rules · next steps ·
+verified-anchor appendix); the six external plans are vendored under `docs/plans/external/` with attribution
+headers; ROADMAP § v3.0 now carries a refreshed naming note (two axes) + an index table + posture + pointer. A PDF
+of the plan was produced for the reviewer with every divergence marked.
+
+## Reusable lesson (consolidation)
+Six good plans appended one at a time are not one plan. The moment a section cites artefacts outside the repo, or
+justifies the same tension three ways, stop appending and write the document that owns the graph.
