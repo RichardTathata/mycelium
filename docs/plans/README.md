@@ -19,6 +19,11 @@ record, not duplicates of those.
 > the only remaining slice is the *additive* disconnected KV-native variant). The one open
 > non-engineering item is a **research experiment** (three-arm work distribution, for Paper 1).
 >
+> **v3.0 — the contracts axis (adopted plan, 2026-09-05):** [`v3-contracts-axis.md`](v3-contracts-axis.md) —
+> six items (typed contracts · deterministic replay · federated domains · knowledge layer · adaptive stability ·
+> scoped mandates), one dependency graph, phase gates, and a decision register of every departure from the
+> external review's six plans, which are vendored unmodified under [`external/`](external/). No code yet.
+>
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).
 > **Two primary deliverables**, each substrate-native: [`mycelium-reason.md`](mycelium-reason.md) — the
