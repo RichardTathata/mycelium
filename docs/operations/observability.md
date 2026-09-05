@@ -19,7 +19,7 @@ uncredentialed:
 | `GET /stats` | `node_id`, `cluster_name`, `store_entries`, `dropped_frames`, `task_count`, and the tripwire counters (`commit_conflicts`, `sys_namespace_violations`, `cap_authz_violations`, `schema_mismatch`, `rate_limited_senders`, `individual_flood_fallbacks`), plus liveness (`dead_shards`, `gc_alive`, `health_monitor_alive`) |
 | `GET /metrics` | Prometheus scrape (requires the `metrics` feature). Carries a `cluster` label on every series when `cluster_name` is set |
 | `GET /.well-known/agent-facts.json` | this node's self-certified AgentFacts (when the [facts lens](#viewing-agentfacts) is mounted) |
-| `GET /consensus/{slot}` | a consensus slot's committed value + ballot + lease state |
+| `GET /consensus/{slot}` | a consensus slot's committed value + ballot + lease state. **Bearer required** when a token model is set (scope `consensus:read`, since 2026-09-05); the four rows above stay public |
 
 ### Reading `/stats`
 

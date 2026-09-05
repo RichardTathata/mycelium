@@ -24,6 +24,13 @@ The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/expl
 
 ## Since v2.4.1 — unreleased
 
+- **Node-level routes behind gateway auth** (2026-09-05, branch
+  `fix/public-routes-behind-gateway-auth`, stacked on the persistence fix): `/mcp`,
+  `/signals/{kind}`, `/consensus/{slot}` answered without a bearer (finding 4 of the same
+  external review) — `tools/call` with the node's identity. Now behind `gateway_auth` with
+  `mcp:invoke` / `mesh:read` / `consensus:read`; `/bulk/{id}` stays a nonce-capability URL.
+  Security PATCH material. Log `.log/2026-09-05-public-routes-behind-auth.md`.
+
 - **Persistence durability — three P1 fixes** (2026-09-05, branch `fix/persistence-durability-p1`):
   an external review reproduced (1) a threshold snapshot erasing an acked, fsynced write (writer
   acks then snapshots in the same poll; callers applied after the ack), (2) replay filtering WAL

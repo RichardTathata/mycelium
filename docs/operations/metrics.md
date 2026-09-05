@@ -88,7 +88,8 @@ tick — so they need `GOSSIP_EMERGENT_DETECTORS=1`, like the emergent family; t
 scalars themselves are always present). `_timeouts_total` is event-emitted at each no-quorum
 exit and needs only `consensus` + `metrics`. Distributed locks are
 consensus slots (`lock/{name}`), so they ride these metrics — there is deliberately **no
-per-lock gauge** (cardinality); inspect an individual lock with `GET /consensus/lock/{name}`.
+per-lock gauge** (cardinality); inspect an individual lock with `GET /consensus/lock/{name}` (bearer
+when a token is set — `consensus:read`).
 
 | Metric | Type | Labels | Meaning | Watch for / alert |
 |---|---|---|---|---|

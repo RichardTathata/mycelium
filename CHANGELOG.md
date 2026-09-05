@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **`POST /mcp`, `GET /signals/{kind}`, `GET /consensus/{slot}` answered without the gateway
+  bearer** — with `gateway_auth_token` set, an unauthenticated caller could invoke **any tool in the
+  cluster with the node's own identity** via `tools/call` (provider-side `authorized_callers` sees
+  the node, not the HTTP caller), stream live mesh signals, and read committed slot values (lock
+  holders). Present in every tagged release with the HTTP gateway; the RBAC page and the wiki listed
+  only `/health|/ready|/stats|/metrics` as public. Exposure requires the HTTP listener bound beyond
+  loopback (default off, default `127.0.0.1`). Fixed: the three routes now carry the same
+  bearer-then-scope layer as `/gateway/*` (external review 2026-09-05, finding 4). **Upgrade note
+  for scoped-token deployments:** grant `mcp:invoke` (MCP clients), `mesh:read` (`/signals`),
+  `consensus:read` (`/consensus/{slot}`); a legacy `gateway_auth_token` covers all three. Open
+  deployments (no token model) are unchanged. `GET /bulk/{id}` stays public by design — a
+  capability URL whose 64-bit per-call nonce is the credential, fetched peer-to-peer.
+
 ### Fixed
 
 - **Persistence: three P1 durability defects** (external review 2026-09-05, each reproduced by a

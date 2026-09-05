@@ -181,7 +181,8 @@ agent.consensus().group_propose("workers", "epoch/leader", value, cfg).await;
 
 The read side is **lease-aware**: `consistent_get` / `live_committed_value` return `None` once the
 lease has lapsed — even though the raw committed entry lingers in KV until anti-entropy GCs it (the
-`GET /consensus/{slot}` endpoint distinguishes the two with `lease_expired: true`). Leases are the
+`GET /consensus/{slot}` endpoint — bearer-gated when a token is set, scope `consensus:read` —
+distinguishes the two with `lease_expired: true`). Leases are the
 basis for the [distributed lock](#the-distributed-lock-service)'s `ttl` — a crashed holder's lock
 clears when its commit lease lapses — and for any "reopen after N seconds" pattern (time-boxed
 config epochs, auto-reopening leader election). A permanent commit (`None`, the default) never
