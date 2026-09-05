@@ -9,7 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Fixed
+
+- **Snapshot install is now crash-durable: the rename is fsynced at the directory before the WAL is
+  truncated.** A file `sync_data` covers the snapshot's bytes, not the directory entry, so a power loss or
+  kernel panic after the WAL truncation could leave the *old* `snapshot.bin` beside an *empty* fsynced
+  `wal.bin` — every acknowledged record since the previous snapshot lost. Process kills never showed it (the
+  page cache writes the rename out), which is why the suite could not. The Phase-0 item from the v3.0
+  contracts axis; storage assumptions (directory fsync honoured; the macOS `fsync` caveat) documented in
+  `deployment.md § Persistence modes`.
 
 ---
 
