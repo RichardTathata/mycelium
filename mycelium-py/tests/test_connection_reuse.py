@@ -66,6 +66,12 @@ class _CountingHandler(BaseHTTPRequestHandler):
 
 class _CountingServer(ThreadingHTTPServer):
     daemon_threads = True
+    # `socketserver.TCPServer` listens with a backlog of 5. The parked-takes test opens
+    # 120 connections at once; on a loaded CI runner the accept loop falls behind, the
+    # kernel resets connections past the backlog, and httpx surfaces `ReadError` /
+    # the stub logs `BrokenPipeError` — a flake of the *stub*, not the pool (seen
+    # 2026-09-05 on #183 and once on main). The real gateway listens with 1024.
+    request_queue_size = 256
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
