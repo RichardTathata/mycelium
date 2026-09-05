@@ -41,6 +41,19 @@ export interface DemandStatus {
 }
 
 /** Held while a distributed lock is acquired. Use as async context manager. */
+/**
+ * Outcome of a consensus-backed write (`consistentSet`, `crossGroupPropose`). The commit is
+ * cluster-wide — the call resolves only after quorum. `persisted` reports whether the committed
+ * slot also reached **the gateway node's own stable storage** (its WAL append is forced to
+ * fdatasync in every sync mode): `true` = on disk there; `false` = committed and applied, but
+ * that node's WAL append failed (writer stopped / disk error — logged at error there; recovered
+ * from peers by anti-entropy after a restart — treat a run of `false` as a disk fault on the node
+ * you are talking to); `null` = the gateway predates v2.4.2 and did not report the field.
+ */
+export interface CommitResult {
+  persisted: boolean | null;
+}
+
 export class LockGuard {
   /** Opaque guard ID used to release via HTTP. */
   readonly guardId: string;

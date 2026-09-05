@@ -23,6 +23,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium-ts/tests/auth.test.ts` (fetch recorder). **CI now runs `jest` for the TS SDK** (the suite
   was type-checked only; the live-node tests skip, the auth tests do not) — closing the TS-CI
   coverage note from the same review.
+- **The SDKs surface `persisted`.** `consistent_set` / `cross_group_propose` (py) and
+  `consistentSet` / `crossGroupPropose` (ts) now return a `CommitResult { persisted }` — the
+  v2.4.2 local-durability flag the gateway already emitted and the SDKs dropped (`None`/`null` from a
+  pre-v2.4.2 node). Both previously returned nothing, so this is additive. Gated without a node
+  (`test_commit_result.py`, `commit_result.test.ts`).
 
 ---
 

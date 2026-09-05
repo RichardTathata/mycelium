@@ -1,6 +1,7 @@
 export { MyceliumAgent } from "./agent";
 export {
   CapabilityHandle,
+  CommitResult,
   DemandStatus,
   LockGuard,
   LogEntry,
