@@ -1,3 +1,4 @@
+import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/prompt_skill — TypeScript client for LLM Prompt Skills.
  *
@@ -104,15 +105,18 @@ function templateFromWire(w: TemplateWire): PromptTemplate {
  */
 export class PromptSkillClient {
   private readonly baseUrl: string;
+  private readonly auth: Record<string, string>;
   private readonly defaultTimeoutMs: number;
 
   constructor(
     host: string,
     port = 8080,
     timeoutMs = 30_000,
+    opts: AuthOptions = {},
   ) {
     this.baseUrl = `http://${host}:${port}`;
     this.defaultTimeoutMs = timeoutMs;
+    this.auth = authHeaders(resolveToken(opts.token));
   }
 
   // ── Template management ────────────────────────────────────────────────────
@@ -220,7 +224,11 @@ export class PromptSkillClient {
     path: string,
     opts: RequestInit & { ignoreNotFound?: boolean } = {},
   ): Promise<Response> {
-    const { ignoreNotFound, ...fetchOpts } = opts;
+    const { ignoreNotFound, headers, ...rest } = opts;
+    const fetchOpts: RequestInit = {
+      ...rest,
+      headers: { ...this.auth, ...((headers as Record<string, string> | undefined) ?? {}) },
+    };
     const resp = await globalThis.fetch(`${this.baseUrl}${path}`, fetchOpts);
     if (!resp.ok && !(ignoreNotFound && resp.status === 404)) {
       const text = await resp.text().catch(() => "");

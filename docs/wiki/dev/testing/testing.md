@@ -113,7 +113,7 @@ the manual `model_deploy`; the other demos — e.g. `cargo run --bin diagnostics
 **without** compiling wasmtime. `ci_smoke.sh` enables `--features wasm` for the three CI demos
 that need it; a dev iterating on any non-wasm demo skips the heavy build entirely.
 
-CI additionally gates `tsc --noEmit` (mycelium-ts), the AFN smoke (pull+push), the coop
+CI additionally gates `tsc --noEmit` + `jest` (mycelium-ts — the node-free `auth.test.ts`; the live suite self-skips), the AFN smoke (pull+push), the coop
 smoke, time-boxed fuzz (skipped on PRs), and `cargo audit` (RUSTSEC). **Don't trust a
 memorised test count** — the counts grow every PR; run the suites for the live total (the
 CLAUDE.md count bullet drifted twice before this rule).

@@ -9,7 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Added
+
+- **The language SDKs can authenticate to a token-protected gateway.** `mycelium-py` **0.2.4** —
+  every handle (`MyceliumAgent`, `Wiki`, `TupleSpace`, `Blackboard`, `PromptSkillClient`,
+  `ReasonClient`, `A2aClient`) takes `token=`; `mycelium-ts` **0.1.1** — every client class takes a
+  trailing `{ token }`. Both fall back to `MYCELIUM_GATEWAY_TOKEN`; no token → no header (open
+  gateways unchanged). The bearer rides the pooled clients *and* the dedicated SSE / stream clients.
+  Before this, neither SDK could send `Authorization` at all, so a node with `gateway_auth_token` set
+  — which every operations page recommends beyond loopback — was unreachable from Python and
+  TypeScript (found by doc-coverage run 16, 2026-09-05). Gated without a node:
+  `mycelium-py/tests/test_gateway_token.py` (stub server records the header, incl. the SSE path) and
+  `mycelium-ts/tests/auth.test.ts` (fetch recorder). **CI now runs `jest` for the TS SDK** (the suite
+  was type-checked only; the live-node tests skip, the auth tests do not) — closing the TS-CI
+  coverage note from the same review.
 
 ---
 

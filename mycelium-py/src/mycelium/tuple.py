@@ -57,10 +57,10 @@ class TupleNotFoundError(Exception):
 class TupleSpace(PoolOwner):
     """Async client for one tuple space namespace via a node's HTTP gateway."""
 
-    def __init__(self, host: str, port: int, ns: str = "pipeline"):
+    def __init__(self, host: str, port: int, ns: str = "pipeline", *, token: Optional[str] = None):
         self._base_url = f"http://{host}:{port}"
         self._ns = ns
-        self._pool = ClientPool(self._base_url)
+        self._pool = ClientPool(self._base_url, token=token)
 
     # ── Producer API ─────────────────────────────────────────────────────────
 

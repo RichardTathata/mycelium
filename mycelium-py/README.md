@@ -44,7 +44,7 @@ asyncio.run(main())
 
 ## API reference
 
-### `MyceliumAgent(host, port, timeout)`
+### `MyceliumAgent(host, port, timeout, *, token=None)`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -53,6 +53,24 @@ asyncio.run(main())
 | `timeout` | `30.0` | Default request timeout (seconds) |
 
 ---
+
+### Authentication (gateway bearer)
+
+A node with `gateway_auth_token` (or scoped tokens / OIDC) set answers every `/gateway/*` route
+with `401` unless the request carries `Authorization: Bearer <token>`. Every handle in this
+package takes `token=`; when omitted, the `MYCELIUM_GATEWAY_TOKEN` environment variable is used.
+No token → no header (a loopback node with no token model is unchanged).
+
+```python
+agent = MyceliumAgent("10.0.0.5", 8300, token="…")          # explicit
+agent = MyceliumAgent("10.0.0.5", 8300)                     # MYCELIUM_GATEWAY_TOKEN, if set
+Wiki("10.0.0.5", 8300, "council", token="…")                # companions too — same option
+```
+
+The header rides the pooled clients *and* the dedicated SSE/stream clients (`on_signal`,
+`rpc_serve`, `mailbox`, `subscribe_log*`, A2A streaming). Under scoped tokens the token must
+carry the route's scope (`kv:read`, `mesh:write`, `wiki:*`, … — the node's
+`docs/operations/rbac.md`). Since 0.2.4.
 
 ### Capability advertisement
 

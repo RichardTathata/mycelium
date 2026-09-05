@@ -1,4 +1,5 @@
 import { sseStream } from "./sse";
+import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 import {
   CapabilityHandle,
   DemandStatus,
@@ -26,20 +27,24 @@ function fromb64(s: string): Buffer {
 export class MyceliumAgent {
   private readonly base: string;
   private readonly timeout: number;
+  private readonly auth: Record<string, string>;
   private _nodeId: string | null = null;
 
   /**
    * @param host    Gateway host (default "127.0.0.1")
    * @param port    HTTP port the Mycelium node listens on (default 7946)
    * @param timeout Default request timeout in milliseconds (default 30_000)
+   * @param opts    `{ token }` — gateway bearer; defaults to `MYCELIUM_GATEWAY_TOKEN`
    */
   constructor(
     host = "127.0.0.1",
     port = 7946,
     timeout = 30_000,
+    opts: AuthOptions = {},
   ) {
     this.base = `http://${host}:${port}`;
     this.timeout = timeout;
+    this.auth = authHeaders(resolveToken(opts.token));
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -50,6 +55,7 @@ export class MyceliumAgent {
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     }
     const resp = await fetch(url.toString(), {
+      headers: this.auth,
       signal: AbortSignal.timeout(this.timeout),
     });
     if (!resp.ok) throw new Error(`GET ${path} failed: ${resp.status}`);
@@ -59,7 +65,7 @@ export class MyceliumAgent {
   private async _post(path: string, body: unknown): Promise<unknown> {
     const resp = await fetch(`${this.base}${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...this.auth },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeout),
     });
@@ -73,6 +79,7 @@ export class MyceliumAgent {
   private async _delete(path: string): Promise<void> {
     const resp = await fetch(`${this.base}${path}`, {
       method: "DELETE",
+      headers: this.auth,
       signal: AbortSignal.timeout(this.timeout),
     });
     if (!resp.ok) throw new Error(`DELETE ${path} failed: ${resp.status}`);
@@ -207,7 +214,7 @@ export class MyceliumAgent {
    */
   async *onSignal(kind: string): AsyncGenerator<Signal> {
     const url = this._sseUrl(`/gateway/signal/sse/${encodeURIComponent(kind)}`);
-    yield* sseStream<Signal>(url, (data) => {
+    yield* sseStream<Signal>({ url, headers: this.auth }, (data) => {
       const raw = JSON.parse(data) as {
         kind: string; sender: string; payload_b64: string; nonce: string;
       };
@@ -237,6 +244,7 @@ export class MyceliumAgent {
   async delete(key: string): Promise<void> {
     const resp = await fetch(`${this.base}/gateway/kv?key=${encodeURIComponent(key)}`, {
       method: "DELETE",
+      headers: this.auth,
       signal: AbortSignal.timeout(this.timeout),
     });
     if (!resp.ok) throw new Error(`DELETE /gateway/kv failed: ${resp.status}`);
@@ -311,7 +319,7 @@ export class MyceliumAgent {
    */
   async *rpcServe(kind: string): AsyncGenerator<RpcRequest> {
     const url = this._sseUrl(`/gateway/rpc/serve/${encodeURIComponent(kind)}`);
-    yield* sseStream<RpcRequest>(url, (data) => {
+    yield* sseStream<RpcRequest>({ url, headers: this.auth }, (data) => {
       const raw = JSON.parse(data) as {
         kind: string; nonce_hex: string; sender: string; payload_b64: string;
       };
@@ -377,7 +385,7 @@ export class MyceliumAgent {
    */
   async *mailbox(kind: string): AsyncGenerator<MailboxEvent> {
     const url = this._sseUrl(`/gateway/mailbox/${encodeURIComponent(kind)}`);
-    yield* sseStream<MailboxEvent>(url, (data) => {
+    yield* sseStream<MailboxEvent>({ url, headers: this.auth }, (data) => {
       const raw = JSON.parse(data) as {
         kind: string; sender: string; payload_b64: string;
       };
@@ -518,7 +526,7 @@ export class MyceliumAgent {
     const params: Record<string, string> = { stream };
     if (options.sinceHlc !== undefined) params.since_hlc = options.sinceHlc.toString();
     const url = this._sseUrl("/gateway/overlay/log/subscribe", params);
-    yield* sseStream<LogEntry>(url, (data) => {
+    yield* sseStream<LogEntry>({ url, headers: this.auth }, (data) => {
       const raw = JSON.parse(data) as { hlc: string; value_b64: string };
       return { hlc: BigInt(raw.hlc), value: fromb64(raw.value_b64) };
     });
@@ -530,7 +538,7 @@ export class MyceliumAgent {
    */
   async *subscribeLogGroup(stream: string, group: string): AsyncGenerator<LogEntry> {
     const url = this._sseUrl("/gateway/overlay/log/group/subscribe", { stream, group });
-    yield* sseStream<LogEntry>(url, (data) => {
+    yield* sseStream<LogEntry>({ url, headers: this.auth }, (data) => {
       const raw = JSON.parse(data) as { hlc: string; value_b64: string };
       return { hlc: BigInt(raw.hlc), value: fromb64(raw.value_b64) };
     });
@@ -564,6 +572,7 @@ export class MyceliumAgent {
   async shardFor(ns: string, name: string, key: string): Promise<string> {
     const resp = await fetch(
       `${this.base}/gateway/shard/${encodeURIComponent(ns)}/${encodeURIComponent(name)}?key=${encodeURIComponent(key)}`,
+      { headers: this.auth },
     );
     if (resp.status === 404) throw new Error(`no providers for ${ns}/${name}`);
     if (!resp.ok) throw new Error(`shardFor failed: ${resp.status}`);

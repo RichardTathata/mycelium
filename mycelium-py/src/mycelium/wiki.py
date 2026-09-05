@@ -41,10 +41,10 @@ from ._pool import ClientPool, PoolOwner
 class Wiki(PoolOwner):
     """Async client for one group's wiki via a node's HTTP gateway."""
 
-    def __init__(self, host: str, port: int, group: str = "wiki"):
+    def __init__(self, host: str, port: int, group: str = "wiki", *, token: Optional[str] = None):
         self._base_url = f"http://{host}:{port}"
         self._group = group
-        self._pool = ClientPool(self._base_url)
+        self._pool = ClientPool(self._base_url, token=token)
 
     async def read(self, page: str) -> Optional[dict]:
         """Read a page (manifest joined with its live sections, in render order), or ``None`` if the

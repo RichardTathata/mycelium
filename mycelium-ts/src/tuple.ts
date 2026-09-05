@@ -1,3 +1,4 @@
+import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/tuple — TypeScript client for the Mycelium TupleSpace.
  *
@@ -62,13 +63,16 @@ function fromB64(b64: string): Uint8Array {
 /** Async client for one tuple space namespace via a node's HTTP gateway. */
 export class TupleSpace {
   private baseUrl: string;
+  private readonly auth: Record<string, string>;
 
   constructor(
     host: string,
     port: number,
     private ns: string = "pipeline",
+    opts: AuthOptions = {},
   ) {
     this.baseUrl = `http://${host}:${port}`;
+    this.auth = authHeaders(resolveToken(opts.token));
   }
 
   /**
@@ -105,7 +109,7 @@ export class TupleSpace {
   private async putOnce(stage: string, payload: Uint8Array): Promise<number> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/put`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({
         ns: this.ns,
         stage,
@@ -131,7 +135,7 @@ export class TupleSpace {
   ): Promise<[number, Uint8Array]> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/take`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, stage, timeout_secs: timeoutSecs }),
       signal: AbortSignal.timeout((timeoutSecs + 5) * 1000),
     });
@@ -153,7 +157,7 @@ export class TupleSpace {
   async putKeyed(stage: string, key: string, payload: Uint8Array): Promise<number> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/put`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, stage, key, payload_b64: toB64(payload) }),
     });
     if (r.status === 503) {
@@ -177,7 +181,7 @@ export class TupleSpace {
   ): Promise<[number, Uint8Array]> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/take_by_key`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, stage, key, timeout_secs: timeoutSecs }),
       signal: AbortSignal.timeout((timeoutSecs + 5) * 1000),
     });
@@ -201,7 +205,7 @@ export class TupleSpace {
   ): Promise<number> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/complete`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({
         ns: this.ns,
         id: itemId,
@@ -219,7 +223,7 @@ export class TupleSpace {
   async ack(itemId: number): Promise<void> {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/ack`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, id: itemId }),
     });
     if (r.status === 404) throw new TupleNotFoundError(itemId);
@@ -232,6 +236,7 @@ export class TupleSpace {
     if (stage !== undefined) params.set("stage", stage);
     const r = await fetch(
       `${this.baseUrl}/gateway/tuple/depth?${params.toString()}`,
+      { headers: this.auth },
     );
     if (!r.ok) throw new Error(`tuple depth failed: ${r.status}`);
     const body = (await r.json()) as {

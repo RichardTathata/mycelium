@@ -337,6 +337,9 @@ scalars. Deliberately **no per-lock gauge** (cardinality) — locks are consensu
   `token=`/`authToken` constructor option that sets `Authorization: Bearer …` on every request (the
   pooled client already centralises headers), mirrored in the SDK READMEs and `rbac.md`. Related: both
   SDKs read only `ok` from propose / `consistent_set` responses and drop the new `persisted` field.
+  **Fixed 2026-09-05, same day** (mycelium-py 0.2.4 / mycelium-ts 0.1.1: `token=` / `{ token }` on
+  every handle, `MYCELIUM_GATEWAY_TOKEN` fallback, bearer on pooled + SSE clients; node-free gates in
+  both SDKs, `jest` added to CI). The `persisted` drop remains open (additive; SDK feature).
 
 The digging turned up defects that reading-for-coverage exposed — the recurring lesson that
 verifying-against-code finds real problems:

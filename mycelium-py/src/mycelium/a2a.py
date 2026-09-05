@@ -39,10 +39,10 @@ class A2aClient:
         Default RPC timeout in seconds (can be overridden per call).
     """
 
-    def __init__(self, base_url: str, *, timeout_secs: float = 30.0) -> None:
+    def __init__(self, base_url: str, *, timeout_secs: float = 30.0, token: Optional[str] = None) -> None:
         self._base   = base_url.rstrip("/")
         self._timeout = timeout_secs
-        self._pool   = ClientPool(self._base, timeout_secs)
+        self._pool   = ClientPool(self._base, timeout_secs, token=token)
 
     # ── Discovery ─────────────────────────────────────────────────────────────
 
@@ -167,6 +167,7 @@ class A2aClient:
             "POST",
             f"{self._base}/a2a",
             json=payload,
+            headers=self._pool.headers,
             timeout=timeout + 5.0,
         ) as resp:
             resp.raise_for_status()

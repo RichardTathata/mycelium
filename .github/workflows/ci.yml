@@ -347,8 +347,9 @@ jobs:
     runs-on: ubuntu-latest
     # The TS SDK shipped 8 tsc errors — including a runtime-breaking
     # `this._base` typo in shardFor() — because nothing in CI ever ran the
-    # compiler over it (M2 Run-21). The jest suite skips without a live node,
-    # so `tsc --noEmit` is the gate.
+    # compiler over it (M2 Run-21). `tsc --noEmit` is the type gate; since
+    # 2026-09-05 `jest` runs too — the live-node suite skips itself without
+    # MYCELIUM_TEST_HOST, the node-free suites (auth.test.ts) do not.
     defaults:
       run:
         working-directory: mycelium-ts
@@ -361,6 +362,7 @@ jobs:
           cache-dependency-path: mycelium-ts/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      - run: npx jest
 
   fuzz:
     name: Fuzz (wire + capability decoders, time-boxed)

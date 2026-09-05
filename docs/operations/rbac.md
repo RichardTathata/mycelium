@@ -67,6 +67,8 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 > the node's own identity**. A scoped-token deployment must now grant `mcp:invoke` to MCP clients
 > (e.g. an LLM host's `Authorization: Bearer …` header), `mesh:read` for the SSE stream and
 > `consensus:read` for slot inspection; a legacy `gateway_auth_token` grants all of them.
+> **SDK clients:** `mycelium-py` ≥ 0.2.4 and `mycelium-ts` ≥ 0.1.1 take the bearer at construction
+> (`token=` / `{ token }`) or from `MYCELIUM_GATEWAY_TOKEN`; earlier versions cannot present one.
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`, `/stats`, `/metrics`,
 the A2A descriptor (`/.well-known/agent.json`), and `GET /bulk/{id}` — a **capability URL**: the
