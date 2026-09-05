@@ -36,6 +36,11 @@ and on the release PR before tagging**. Log `.log/2026-09-05-v2.4.3-release.md`.
   `mycelium-ts-v0.1.1`): every handle takes `token=` / `{ token }` (fallback `MYCELIUM_GATEWAY_TOKEN`),
   riding pooled + SSE clients; `consistent_set` / `cross_group_propose` return `CommitResult { persisted }`.
   `jest` now CI-gated. Logs `.log/2026-09-05-sdk-bearer-token.md`.
+- **ROADMAP v3.0 — federated domains recorded as proposed** (2026-09-05): the fifth and last external plan
+  (seven PRs — independently admitted meshes, HTTPS federation at gateways, three trust relationships,
+  allowlist catalogs, `RemoteCapability`, no leader, `DeliveryUnknown`); anchors verified (SWIM is
+  unauthenticated UDP); **my "touches the wire / 3.0.0 trigger" note withdrawn** — v1 leaves the wire
+  untouched; seven reconciliations (compose with A2A, OIDC verifier, `EgressPolicy`). Same log, addendum.
 - **ROADMAP v3.0 — scoped mandates recorded as proposed** (2026-09-05): the fourth external plan (seven
   PRs — mandate contract, CAS ≠ authorization, three lifecycle events, handover journal, incumbency rules);
   anchors verified; **one architectural reconciliation** (no new authority daemon — fence inside the store's

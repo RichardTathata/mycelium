@@ -3052,8 +3052,10 @@ Six enhancements, in the reviewer's order, with our reading of what already exis
    budget, admission policy and failure boundary; crossing is explicit via replaceable gateways; forwarding
    *within* a domain stays unconditional. *Exists:* trust domain = CA admission, propagation domain =
    reachability, groups organise action, AgentFacts federates discovery. *New:* the boundary object and the
-   statement of what never crosses (consensus membership, `sys/`). **The one item likely to touch the wire —
-   and therefore the first honest trigger for a real `3.0.0` substrate version** (see the naming note above).
+   statement of what never crosses (consensus membership, `sys/`). *Corrected 2026-09-05 after reading its plan:* v1 federates over **HTTPS between gateways** and leaves the
+   gossip wire untouched (it requires separate CA roots and SWIM disabled instead), so it is **not** a `3.0.0`
+   trigger; only a later *authenticated, domain-bound SWIM / handshake* milestone would be (see the naming
+   note above).
 3. **Assertions vs observations vs accepted knowledge.** An optional application-layer assertion format
    (issuer, subject, schema version, evidence refs, observation time, validity, supersession); transport LWW
    kept, contested knowledge retains attributable versions; evidence payloads outside KV. *Exists:*
@@ -3278,9 +3280,58 @@ rig first. **(f) Reserve `mandate/` + `log/wiki/`** in `src/lib.rs` and both fro
 contracts (receipts) · replay (scenario B) · knowledge (provenance references, optional) · domains (cross-scope
 mandates need explicit recognition, never imported trust).
 
-Status: **proposed.** No harness or companion code; all four seven-PR plans (contracts · replay · knowledge ·
-mandates) are the reviewer's artefacts and can be vendored into `docs/plans/` when work is committed.
-Assessment record: `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
+**Bounded, federated domains (item 2, seven PRs — external review artefact, 2026-09-05; framed as a later
+epoch — an epoch, not a version).** Central decision, agreed: **a domain is one independently admitted gossip
+mesh** (its own transport membership, KV replication, signal dissemination, policy, consensus electorate);
+**federation connects explicitly exported services between meshes over a separate authenticated protocol** and
+never joins their gossip transports — foreign nodes never enter membership, native `cap/`/`grp/`/`sys/`/
+`consensus/`, anti-entropy state or a quorum. Agreed elements: an enforced **`DomainId` + signed
+`DomainDescriptor` + revisioned `DomainPolicy`** bound to the membership root, gateway identities, export/import
+rules and budgets (`cluster_name` stays the display label it is); **three trust relationships kept apart** —
+membership (join the mesh) · federation identity (recognise a foreign domain's issuers and gateways) · service
+authorization (this foreign principal may invoke this export) — a self-signed AgentFacts document proves
+integrity, not permission, and foreign anchors are never installed as gossip admission roots; **filtered,
+attributable catalogs** built from a field *allowlist* (the full AgentFacts board is not a safe default export;
+two gateways' catalogs are two observations, never one fleet snapshot); a **distinct `RemoteCapability`** that
+cannot pose as a native `NodeId`, join a group or vote; **origin preserved** — the destination provider sees
+`FederatedCaller { source_domain, principal, … }` through a federation-aware adapter, never an unrestricted call
+under the gateway's own identity, and both egress and admission policy apply; **≥2 replaceable gateways, no
+federation leader**, failover only for exports certified repeatable/read-only, a lost reply after dispatch is
+`DeliveryUnknown`; **bounded everything** with fixed per-gateway quota slots and no automatic reallocation under
+partition; on disconnect cached discovery expires and calls fail explicitly, issued authority lasts only to its
+declared expiry, reconnect refreshes before new work and **never merges membership or replays expired
+requests**. Deferred, agreed: authenticated SWIM, transitive federation, streaming/bulk, dynamic quota, effectful
+retries (wait for the contracts receipts). PRs: (1) domain ADR + enforced profile + two-mesh harness · (2)
+identity, trust bundles, typed policy, protocol vectors · (3) filtered catalogs + remote resolver · (4)
+authenticated unary calls + provider adapter · (5) two-gateway operation, budgets, outcomes · (6)
+partition/reconnect, revocation, rotation · (7) runnable example, SDKs, diagnostics, docs. Release gate: the
+two-mesh demonstration — discover selected exports, invoke, lose a gateway, sever every link, keep working
+locally, change permissions mid-partition, reconnect, and show from membership tables, consensus state and
+traces that the meshes never merged.
+
+*Assessed 2026-09-05 — agree with the whole shape; it is the "explicit boundary object" item 2 asked for, built as
+a companion.* Anchors verified: SWIM control datagrams are **unauthenticated UDP** (`swim.rs` drops malformed
+frames, signs nothing) — "disable SWIM in the enforced v1 profile" is grounded, not cautious; intra-domain
+admission is a per-node CA `RootCertStore` (`tls.rs`) — the "never install foreign anchors there" rule has a
+concrete target; `examples/coop/src/bin/federation_facts.rs` + guide 17 are the two-domain discovery starting
+point the plan names; `FACTS_PREFIX` is the full board it says not to export by default. **Seven reconciliations
+for its PR 1:** (a) **compose with the A2A adapter** (`/.well-known/agent.json`, `/a2a` — the standards-based
+inter-agent invocation edge already shipped): either the federation call *is* A2A with domain-bound origin
+credentials, or the ADR states why `POST /federation/v1/call` must be a second protocol; (b) **reuse the OIDC
+verifier** (`oidc.rs`, `jsonwebtoken`, JWKS refresh, alg allowlist) for JWS validation rather than a new
+signed-object stack; (c) **`EgressPolicy` already exists** (`allow_hosts`) — the source-side egress rule extends
+it rather than duplicating it; (d) **AgentFacts stays the public well-known descriptor** with a filtered builder,
+so the two discovery surfaces don't diverge; (e) **the wire claim above is withdrawn** — v1 needs no wire
+change, and the ADR must say what *would* (authenticated domain-bound SWIM); (f) **reserve nothing in KV** —
+foreign observations live in the companion's cache, which is the point; the ADR should make "no `federation/`
+KV prefix" an explicit invariant, checked by the lint's namespace sweep; (g) the **process-isolation claim
+belongs to the example deployment only** — a library embedding shares fate, and docs must say so (the plan
+does; hold it). Depends on: contracts (effectful retries) · knowledge (catalog summaries as attributable
+observations, optional) · mandates (cross-domain mandates need explicit recognition).
+
+Status: **proposed.** No harness or companion code; all five seven-PR plans (contracts · replay · knowledge ·
+mandates · domains) are the reviewer's artefacts and can be vendored into `docs/plans/` when work is
+committed. Assessment record: `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.
 
 ## Deferred Patterns
 
