@@ -22,6 +22,16 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Since v2.4.2 — unreleased
+
+- **SDK gateway bearer + `persisted`** (2026-09-05, #178 / #179; tags `mycelium-py-v0.2.4`,
+  `mycelium-ts-v0.1.1`): every handle takes `token=` / `{ token }` (fallback `MYCELIUM_GATEWAY_TOKEN`),
+  riding pooled + SSE clients; `consistent_set` / `cross_group_propose` return `CommitResult { persisted }`.
+  `jest` now CI-gated. Logs `.log/2026-09-05-sdk-bearer-token.md`.
+- **ROADMAP v3.0 — the contracts axis recorded as proposed** (2026-09-05): the third-party six-enhancement
+  proposal + seven-PR contracts plan, our verification of its anchors (the `>=` quorum ack; no directory
+  fsync), four PR-1 reconciliations, two ordering adjustments. `.log/2026-09-05-v3-contracts-axis.md`.
+
 ## v2.4.2 release — 2026-09-05 (tag `v2.4.2`)
 
 A **security + durability PATCH** on the 2.4 line, cut the day after v2.4.1 from a single external
