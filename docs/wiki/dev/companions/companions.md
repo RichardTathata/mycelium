@@ -53,6 +53,10 @@ via wasm-host).
   payloads in the blob tier, cross-node `StateGraph` resume proven in CI; **0.1.1, 2026-09-05:**
   `alist` selects rows on the async client — a pure window/filter core with sync + async drivers,
   parity-gated without a node, `.log/2026-09-05-checkpointer-async-rows.md`) and `mycelium.call_typed`.
+  **Gateway bearer (2026-09-05):** `mycelium-py` 0.2.4 / `mycelium-ts` 0.1.1 take `token=` /
+  `{ token }` on every handle (fallback `MYCELIUM_GATEWAY_TOKEN`), riding the pooled *and* SSE
+  clients — before this neither SDK could reach a token-protected node at all (doc-coverage run 16;
+  `.log/2026-09-05-sdk-bearer-token.md`).
   **COMPLETE (PRs #130–#136, 2026-07-08):** the crate + Python tier, the LangGraph example ladder
   (`examples/langgraph/` rungs 0–6 incl. the echo-CI **deploy/reheal flagship** + a router-robustness
   fix it surfaced — live-SWIM filter + fast failover, #134), the repo's first Python CI job, and guide

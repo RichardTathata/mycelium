@@ -47,7 +47,7 @@ await handle.drop();
 
 ## API reference
 
-### `new MyceliumAgent(host, port, timeout)`
+### `new MyceliumAgent(host, port, timeout, { token })`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -56,6 +56,24 @@ await handle.drop();
 | `timeout` | `30_000` | Default request timeout (milliseconds) |
 
 ---
+
+### Authentication (gateway bearer)
+
+A node with `gateway_auth_token` (or scoped tokens / OIDC) set answers every `/gateway/*` route
+with `401` unless the request carries `Authorization: Bearer <token>`. Every client class takes a
+trailing `{ token }` option; when omitted, `MYCELIUM_GATEWAY_TOKEN` is read from `process.env`
+(Node only — in a browser pass it explicitly). No token → no header.
+
+```ts
+const agent = new MyceliumAgent("10.0.0.5", 8300, 30_000, { token: "…" });
+const wiki  = new Wiki("10.0.0.5", 8300, "council", { token: "…" });
+const a2a   = new A2aClient("http://10.0.0.5:8300", { token: "…" });
+```
+
+The header rides every request including the SSE streams (`onSignal`, `rpcServe`, `mailbox`,
+`subscribeLog*`). Under scoped tokens the token must carry the route's scope (`kv:read`,
+`mesh:write`, `wiki:*`, … — the node's `docs/operations/rbac.md`). Since 0.1.1; the
+`auth.test.ts` suite runs without a node and is CI-gated.
 
 ### Capability advertisement
 

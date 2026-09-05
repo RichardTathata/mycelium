@@ -70,13 +70,15 @@ class ReasonClient:
         host: str,
         port: int = 8080,
         timeout: float = 30.0,
+        *,
+        token: Optional[str] = None,
     ) -> None:
         self._base = f"http://{host}:{port}"
         self._timeout = timeout
         # Pooled, loop-aware (see _pool.py): the previous eager AsyncClient was
         # bound to whichever loop first used it, breaking a handle reused
-        # across separate asyncio.run() calls.
-        self._pool = ClientPool(self._base, timeout)
+        # across separate asyncio.run() calls. `token` → gateway bearer.
+        self._pool = ClientPool(self._base, timeout, token=token)
 
     # ── Routed inference (wedge ①) ─────────────────────────────────────────────
 

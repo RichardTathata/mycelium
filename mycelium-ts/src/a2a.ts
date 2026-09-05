@@ -1,3 +1,4 @@
+import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 /**
  * A2A (Agent-to-Agent) protocol client for Mycelium.
  *
@@ -68,11 +69,13 @@ export interface TaskStatusUpdate {
  */
 export class A2aClient {
   private readonly baseUrl: string;
+  private readonly auth: Record<string, string>;
   private readonly timeoutMs: number;
 
-  constructor(agentCardUrl: string, { timeoutMs = 30_000 }: { timeoutMs?: number } = {}) {
+  constructor(agentCardUrl: string, { timeoutMs = 30_000, token }: { timeoutMs?: number } & AuthOptions = {}) {
     this.baseUrl   = agentCardUrl.replace(/\/$/, "");
     this.timeoutMs = timeoutMs;
+    this.auth      = authHeaders(resolveToken(token));
   }
 
   // ── Discovery ───────────────────────────────────────────────────────────
@@ -80,6 +83,7 @@ export class A2aClient {
   /** Fetch the AgentCard from `/.well-known/agent.json`. */
   async fetchCard(): Promise<AgentCard> {
     const resp = await fetch(`${this.baseUrl}/.well-known/agent.json`, {
+      headers: this.auth,
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!resp.ok) throw new Error(`AgentCard fetch failed: ${resp.status}`);
@@ -111,7 +115,7 @@ export class A2aClient {
 
     const resp = await fetch(`${this.baseUrl}/a2a`, {
       method:  "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body:    JSON.stringify(payload),
       signal:  AbortSignal.timeout(this.timeoutMs + 5_000),
     });
@@ -148,7 +152,7 @@ export class A2aClient {
 
     const resp = await fetch(`${this.baseUrl}/a2a`, {
       method:  "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body:    JSON.stringify(payload),
       signal:  AbortSignal.timeout(this.timeoutMs + 5_000),
     });

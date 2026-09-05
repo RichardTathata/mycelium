@@ -10,10 +10,11 @@ interface Waiter {
  * Terminates when the server closes the connection or the caller breaks out.
  */
 export async function* sseStream<T>(
-  url: string,
+  target: string | { url: string; headers?: Record<string, string> },
   parse: (data: string) => T,
 ): AsyncGenerator<T> {
-  const resp = await fetch(url);
+  const { url, headers } = typeof target === "string" ? { url: target, headers: undefined } : target;
+  const resp = await fetch(url, headers ? { headers } : undefined);
   if (!resp.ok || !resp.body) {
     throw new Error(`SSE request failed: ${resp.status} ${resp.statusText}`);
   }

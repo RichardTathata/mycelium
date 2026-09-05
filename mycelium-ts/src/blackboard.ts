@@ -1,3 +1,4 @@
+import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/blackboard — TypeScript client for the Mycelium Blackboard.
  *
@@ -45,19 +46,22 @@ function decodeFact(f: { id: number; attributes: Record<string, string>; payload
 /** Async client for one board namespace via a node's HTTP gateway. */
 export class Blackboard {
   private readonly baseUrl: string;
+  private readonly auth: Record<string, string>;
   constructor(
     host: string,
     port: number,
     private readonly ns: string = "board",
+    opts: AuthOptions = {},
   ) {
     this.baseUrl = `http://${host}:${port}`;
+    this.auth = authHeaders(resolveToken(opts.token));
   }
 
   /** Post a fact (Linda `out`) — non-destructive. Returns the fact id. */
   async post(attributes: Record<string, string>, payload: Uint8Array): Promise<number> {
     const r = await fetch(`${this.baseUrl}/gateway/bb/post`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, attributes, payload_b64: toB64(payload) }),
     });
     if (!r.ok) throw new Error(`blackboard post failed: ${r.status}`);
@@ -68,7 +72,7 @@ export class Blackboard {
   async read(eq: Record<string, string> = {}, present: string[] = []): Promise<Fact[]> {
     const r = await fetch(`${this.baseUrl}/gateway/bb/read`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, eq, present }),
     });
     if (!r.ok) throw new Error(`blackboard read failed: ${r.status}`);
@@ -80,7 +84,7 @@ export class Blackboard {
   async claim(eq: Record<string, string> = {}, present: string[] = []): Promise<Fact | null> {
     const r = await fetch(`${this.baseUrl}/gateway/bb/claim`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, eq, present }),
     });
     if (!r.ok) throw new Error(`blackboard claim failed: ${r.status}`);
@@ -92,7 +96,7 @@ export class Blackboard {
   async ack(id: number): Promise<void> {
     const r = await fetch(`${this.baseUrl}/gateway/bb/ack`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, id }),
     });
     if (r.status === 404) throw new BlackboardNotFoundError(id);
@@ -103,7 +107,7 @@ export class Blackboard {
   async release(id: number): Promise<void> {
     const r = await fetch(`${this.baseUrl}/gateway/bb/release`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ ns: this.ns, id }),
     });
     if (r.status === 404) throw new BlackboardNotFoundError(id);
@@ -112,7 +116,7 @@ export class Blackboard {
 
   /** Live `[available, inflight]` counts for the board. */
   async depth(): Promise<[number, number]> {
-    const r = await fetch(`${this.baseUrl}/gateway/bb/depth?ns=${encodeURIComponent(this.ns)}`);
+    const r = await fetch(`${this.baseUrl}/gateway/bb/depth?ns=${encodeURIComponent(this.ns)}`, { headers: this.auth });
     if (!r.ok) throw new Error(`blackboard depth failed: ${r.status}`);
     const body = (await r.json()) as { available: number; inflight: number };
     return [body.available, body.inflight];

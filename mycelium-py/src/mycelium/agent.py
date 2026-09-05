@@ -218,6 +218,7 @@ class MyceliumAgent:
         host: Gateway host (usually ``"127.0.0.1"``).
         port: HTTP port the Mycelium node is listening on.
         timeout: Default request timeout in seconds.
+        token: Gateway bearer token; defaults to ``MYCELIUM_GATEWAY_TOKEN`` when unset.
     """
 
     def __init__(
@@ -225,13 +226,16 @@ class MyceliumAgent:
         host:    str = "127.0.0.1",
         port:    int = 7946,
         timeout: float = 30.0,
+        *,
+        token:   Optional[str] = None,
     ) -> None:
         self._base_url = f"http://{host}:{port}"
         self._timeout  = timeout
         # One persistent keep-alive client pool for every request/response call
         # (a fresh client per call exhausts macOS ephemeral ports at Group-scale
-        # write rates — see mycelium/_pool.py). SSE streams stay dedicated.
-        self._pool     = ClientPool(self._base_url, timeout)
+        # write rates — see mycelium/_pool.py). SSE streams stay dedicated but
+        # carry the same headers (the gateway bearer).
+        self._pool     = ClientPool(self._base_url, timeout, token=token)
 
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -385,7 +389,7 @@ class MyceliumAgent:
                     break
         """
         url = f"{self._base_url}/gateway/signal/sse/{kind}"
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=None, headers=self._pool.headers) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 async for event in event_source.aiter_sse():
                     import json as _json
@@ -579,7 +583,7 @@ class MyceliumAgent:
                 agent.rpc_respond(req, result)
         """
         url = f"{self._base_url}/gateway/rpc/serve/{kind}"
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=None, headers=self._pool.headers) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 async for event in event_source.aiter_sse():
                     import json as _json
@@ -673,7 +677,7 @@ class MyceliumAgent:
                 print(event.sender, event.payload)
         """
         url = f"{self._base_url}/gateway/mailbox/{kind}"
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=None, headers=self._pool.headers) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 async for event in event_source.aiter_sse():
                     import json as _json
@@ -842,7 +846,7 @@ class MyceliumAgent:
                 print(entry.hlc, entry.value)
         """
         params = {"stream": stream, "since": since_hlc}
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=None) as c:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=None, headers=self._pool.headers) as c:
             async with aconnect_sse(c, "GET", "/gateway/overlay/log/subscribe", params=params) as es:
                 async for event in es.aiter_sse():
                     import json as _json
@@ -864,7 +868,7 @@ class MyceliumAgent:
                 process(entry)
         """
         params = {"stream": stream, "group": group}
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=None) as c:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=None, headers=self._pool.headers) as c:
             async with aconnect_sse(c, "GET", "/gateway/overlay/log/group/subscribe", params=params) as es:
                 async for event in es.aiter_sse():
                     import json as _json

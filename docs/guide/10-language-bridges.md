@@ -218,6 +218,26 @@ for the full reference including SSE streaming and error types.
 
 ---
 
+## Authenticating to a token-protected gateway
+
+Any node exposed beyond loopback should carry `gateway_auth_token` (or scoped tokens / OIDC —
+[operations/rbac.md](../operations/rbac.md)); it then answers every `/gateway/*` route, and the
+node-level `/mcp`, `/signals/{kind}`, `/consensus/{slot}`, with `401` unless the request bears
+`Authorization: Bearer <token>`. Both bridges take the token at construction and fall back to the
+`MYCELIUM_GATEWAY_TOKEN` environment variable; it rides every request, SSE streams included.
+
+```python
+agent = MyceliumAgent("10.0.0.5", 8300, token="…")        # mycelium-py ≥ 0.2.4
+```
+```ts
+const agent = new MyceliumAgent("10.0.0.5", 8300, 30_000, { token: "…" }); // mycelium-ts ≥ 0.1.1
+```
+
+Companion handles (`Wiki`, `TupleSpace`, `Blackboard`, `PromptSkillClient`, `ReasonClient`,
+`A2aClient`) take the same option. Under scoped tokens, grant the route families the client
+uses (`kv:*`, `mesh:*`, `wiki:*`, `tuple:*`, …). Before these versions the bridges could not
+present a bearer at all — a token-protected node was unreachable from Python and TypeScript.
+
 ## The sidecar in practice — fluid pipeline
 
 `examples/fluid_pipeline/` is the reference implementation of language bridge

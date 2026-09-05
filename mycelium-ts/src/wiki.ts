@@ -1,3 +1,4 @@
+import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/wiki — TypeScript client for the Mycelium group wiki.
  *
@@ -56,19 +57,22 @@ export interface ProposeArgs {
 /** Async client for one group's wiki via a node's HTTP gateway. */
 export class Wiki {
   private readonly baseUrl: string;
+  private readonly auth: Record<string, string>;
   constructor(
     host: string,
     port: number,
     private readonly group: string = "wiki",
+    opts: AuthOptions = {},
   ) {
     this.baseUrl = `http://${host}:${port}`;
+    this.auth = authHeaders(resolveToken(opts.token));
   }
 
   /** Read a page (manifest + live sections), or `null` if it has no manifest. Served directly from the store. */
   async read(page: string): Promise<Page | null> {
     const r = await fetch(`${this.baseUrl}/gateway/wiki/read`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ group: this.group, page }),
     });
     if (!r.ok) throw new Error(`wiki read failed: ${r.status}`);
@@ -79,7 +83,7 @@ export class Wiki {
   async query(equals: Record<string, string> = {}): Promise<SectionRef[]> {
     const r = await fetch(`${this.baseUrl}/gateway/wiki/query`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ group: this.group, equals }),
     });
     if (!r.ok) throw new Error(`wiki query failed: ${r.status}`);
@@ -90,7 +94,7 @@ export class Wiki {
   async propose(args: ProposeArgs): Promise<{ proposal: string; section: string }> {
     const r = await fetch(`${this.baseUrl}/gateway/wiki/propose`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ group: this.group, ...args }),
     });
     if (!r.ok) throw new Error(`wiki propose failed: ${r.status}`);
@@ -104,7 +108,7 @@ export class Wiki {
   async ingest(reference: string, timeoutSecs = 60): Promise<{ summary: { applied: number; refused: number; findings: string[] } }> {
     const r = await fetch(`${this.baseUrl}/gateway/wiki/ingest`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.auth },
       body: JSON.stringify({ group: this.group, reference, timeout_secs: timeoutSecs }),
     });
     if (!r.ok) throw new Error(`wiki ingest failed: ${r.status}`);

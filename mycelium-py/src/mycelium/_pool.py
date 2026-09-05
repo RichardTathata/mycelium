@@ -26,6 +26,7 @@ the hot path — pooling them would only starve request/response traffic.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncIterator, Iterator, Optional
@@ -67,6 +68,27 @@ class _Bound:
 
 _UNSET = object()
 
+#: Environment variable consulted when a handle is constructed without ``token=``.
+TOKEN_ENV = "MYCELIUM_GATEWAY_TOKEN"
+
+
+def resolve_token(token: Optional[str]) -> Optional[str]:
+    """Explicit ``token`` wins; then :data:`TOKEN_ENV`; empty strings mean *none*."""
+    if token is not None:
+        return token or None
+    return os.environ.get(TOKEN_ENV) or None
+
+
+def auth_headers(token: Optional[str]) -> dict[str, str]:
+    """``{"Authorization": "Bearer …"}`` for a token, ``{}`` otherwise.
+
+    A node with ``gateway_auth_token`` (or scoped tokens / OIDC) set answers every
+    ``/gateway/*`` route — and the node-level ``/mcp``, ``/signals/{kind}``,
+    ``/consensus/{slot}`` — with 401 unless this header is present. No token → no
+    header: the open (loopback) gateway is unchanged.
+    """
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
 #: The SDK-wide default request timeout for pooled clients (seconds). The one
 #: place to tune it — every handle that doesn't take a user-facing ``timeout``
 #: parameter (Wiki/TupleSpace/Blackboard) constructs its pool with this.
@@ -85,9 +107,14 @@ _LIMITS = httpx.Limits(max_connections=None, max_keepalive_connections=None)
 class ClientPool:
     """Lazily-created persistent httpx clients (one sync; one async per loop)."""
 
-    def __init__(self, base_url: str, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self, base_url: str, timeout: float = DEFAULT_TIMEOUT, *, token: Optional[str] = None,
+    ) -> None:
         self._base_url = base_url
         self._timeout = timeout
+        #: Headers every pooled request carries (the gateway bearer, if any). Handles
+        #: that open dedicated clients (SSE streams) pass this to them too.
+        self.headers: dict[str, str] = auth_headers(resolve_token(token))
         self._lock = threading.Lock()
         self._sync_client: Optional[httpx.Client] = None
         # id(loop) -> (loop, AsyncClient). Loop-aware (see module doc); at most
@@ -104,7 +131,7 @@ class ClientPool:
         with self._lock:
             if self._sync_client is None or self._sync_client.is_closed:
                 self._sync_client = httpx.Client(
-                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS
+                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS, headers=self.headers
                 )
             client = self._sync_client
         yield _Bound(client, timeout)
@@ -124,7 +151,7 @@ class ClientPool:
                     if k != key and l.is_closed():
                         self._async_clients.pop(k, None)
                 client = httpx.AsyncClient(
-                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS
+                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS, headers=self.headers
                 )
                 self._async_clients[key] = (loop, client)
         yield _Bound(client, timeout)
