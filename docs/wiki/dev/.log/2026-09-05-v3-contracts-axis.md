@@ -152,3 +152,26 @@ explicit invariant; process isolation is the example's claim, not the library's.
 Before writing "touches the wire" about a proposal, read how it moves bytes. A boundary can be enforced
 entirely at the edges (roots, listeners, catalogs) while the medium inside stays exactly as it is — which is
 the substrate's own design, applied once more.
+
+## Addendum — adaptive stability discipline (item 4), same day
+
+Seven-PR plan for `mycelium-control`: three promises kept apart (hard bounds / stability / service), a
+`ControlSpec` per governor and observe → propose → reserve → act → reconcile with stable action IDs, an
+actionable per-input `ControlView`, strict budgets as fixed disjoint rights never reclaimed on disappearance,
+concrete loop-breaking points, shadow-before-enforce profiles. Verdict: agree with the whole shape.
+
+**Anchors verified:** `demand.rs` = declaring-node/provider count over `req/ cap/ gcap/` (not work);
+provisioner self-elects probabilistically with an `Installing` reservation; opacity 100 ms loop + pure decision
++ full-channel veto override; **`max_staleness_ms` = 0 when no peers heard**; **membership cooldown =
+3 × `health_check_interval`** — a live coupling to the timing governor; tuning floors/ceilings/ratchets;
+`provisioning.rs` example; guardrails `Strength` tiers; `TupleSpace::depth` / `Blackboard::depth`.
+
+**Reconciliations:** rights = prevention → opt-in profile, promise strength in the guardrails tier vocabulary;
+workload probe reads the companions' depth signals; the harness is replay stage 6; fix the cooldown coupling
+now (absolute Duration or declared bound); give staleness a "no observation" state; one owner per deficit;
+detection-not-prevention for everything but the ledger.
+
+## Reusable lesson (stability)
+A cooldown expressed in ticks is a cooldown that the thing tuning the tick can shorten. Every damping constant
+should be a Duration the governor that damps owns — or its coupling should be written down where the other
+governor's bounds are.

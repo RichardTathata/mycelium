@@ -36,6 +36,11 @@ and on the release PR before tagging**. Log `.log/2026-09-05-v2.4.3-release.md`.
   `mycelium-ts-v0.1.1`): every handle takes `token=` / `{ token }` (fallback `MYCELIUM_GATEWAY_TOKEN`),
   riding pooled + SSE clients; `consistent_set` / `cross_group_propose` return `CommitResult { persisted }`.
   `jest` now CI-gated. Logs `.log/2026-09-05-sdk-bearer-token.md`.
+- **ROADMAP v3.0 — adaptive stability discipline recorded as proposed** (2026-09-05): the sixth external
+  plan (`mycelium-control`, seven PRs — shared admission contract, actionable `ControlView`, fixed allocated
+  rights, loop-breaking points, shadow-before-enforce); verified `max_staleness_ms` = 0 with no peers heard and
+  the membership cooldown scaling with the health-check interval; seven reconciliations (guardrails tiers,
+  companion depth signals, harness = replay stage 6, fix the cooldown coupling). Same log, addendum.
 - **ROADMAP v3.0 — federated domains recorded as proposed** (2026-09-05): the fifth and last external plan
   (seven PRs — independently admitted meshes, HTTPS federation at gateways, three trust relationships,
   allowlist catalogs, `RemoteCapability`, no leader, `DeliveryUnknown`); anchors verified (SWIM is
