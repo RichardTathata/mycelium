@@ -128,3 +128,27 @@ harness first; the decisive test *is* replay scenario B — build it once there;
 When a plan says "the resource must enforce", ask *which* resource already has an atomic boundary. Adding a
 process to hold the truth is the coordinator arriving through the side door; the substrate's answer is to put
 the fence where the bytes already serialise.
+
+## Addendum — bounded, federated domains (item 2), same day
+
+Seven-PR plan: a domain = one independently admitted mesh; federation = explicitly exported services over a
+separate authenticated protocol (HTTPS between gateways); three trust relationships; allowlist catalogs;
+`RemoteCapability`; preserved origin; ≥2 gateways, no leader; `DeliveryUnknown`; fixed quota slots; no merge
+on reconnect. Verdict: agree with the whole shape.
+
+**Anchors verified:** SWIM = unauthenticated UDP (drops malformed, signs nothing) → disabling it in the
+enforced profile is grounded; per-node CA `RootCertStore` is the admission root the plan says never to
+pollute; `federation_facts.rs` + guide 17 exist; `FACTS_PREFIX` is the full board.
+
+**Correction to my own earlier note:** I had called domains "the one item likely to touch the wire, the first
+honest `3.0.0` trigger". The plan keeps the gossip wire untouched (separate roots + SWIM off); only a later
+authenticated domain-bound SWIM/handshake would trigger a substrate major. Corrected in the ROADMAP.
+
+**Reconciliations:** compose with the shipped A2A edge or say why not; reuse the OIDC verifier for JWS; extend
+`EgressPolicy`; AgentFacts stays the public descriptor via a filtered builder; no `federation/` KV prefix as an
+explicit invariant; process isolation is the example's claim, not the library's.
+
+## Reusable lesson (domains)
+Before writing "touches the wire" about a proposal, read how it moves bytes. A boundary can be enforced
+entirely at the edges (roots, listeners, catalogs) while the medium inside stays exactly as it is — which is
+the substrate's own design, applied once more.
