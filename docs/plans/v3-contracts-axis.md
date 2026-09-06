@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan, 2026-09-05 · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan · **rev 1.1, 2026-09-06** (rev 1.0 2026-09-05; §11 lists what changed after the reviewer's response) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -59,8 +59,14 @@ These are the philosophy's litmus tests applied once, so the six entries do not 
    (`HardPrevention` / `SelfImposedPrevention` / `SelfImposedTransition`).
 4. **Expressible ≠ supported.** A contract, a decision, a boundary exists when a CI-tested example or gate exercises
    it. Each item's decisive demonstration ships as a gallery entry at the coop/blackboard bar, or it stays a claim.
-5. **Roles evaporate; authority expires.** Every role this axis introduces — gateway, curator, holder, observer —
-   carries an expiry, and its authority is recomputed, not inherited, on renewal.
+5. **Roles evaporate; authority expires; attribution does not.** Every role this axis introduces — gateway, curator,
+   holder, observer — carries an expiry, and its authority is recomputed, not inherited, on renewal. Three lifecycles
+   are distinct and never conflated: the *permission to issue new statements* (expires with the role), the
+   *evidential freshness* of an existing statement (expires on its own validity), and the *historical attribution* of a
+   statement (never expires — an observation keeps its provenance after its observer's appointment ends).
+6. **A named mechanism is not the composed guarantee.** Consensus, a lease, a CAS, a signature — each proves what it
+   proves and no more. Every composed guarantee in this plan is established by an explicit safety argument *and* a
+   replay/CI gate, never by the presence of an appropriately named primitive.
 
 ### 1.4 How this is the philosophy's own trajectory
 The axis is not an import. Item 5's term/epoch split with incumbency rules **is Property 6** (the mandate-TTL
@@ -101,7 +107,7 @@ ADR):
 | Phase | Contents | Exit gate |
 |-------|----------|-----------|
 | **A** | 1·PR1–3 (ADR, identities + receipts, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown-coupling fix (4, standalone) | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails |
-| **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) | `set_with_min_acks` acknowledges the *exact* payload only; two meshes discover selected exports without merging |
+| **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) | `set_with_min_acks` acknowledges the *exact* payload only; **a peer that acknowledged persistence holds the record across its own crash/restart** (a crash-before-ack peer does not count); two meshes discover selected exports without merging |
 | **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 | the adversarial release demos of 1 and 2 pass in CI |
 | **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 | evidence-aware resolution and curator handover both replay deterministically |
 | **E** | 3·PR7 · 4·PR6–7 · 5·PR7 · 6·PR7 | combined-feedback scenario green; shadow-mode rollout documented |
@@ -131,6 +137,15 @@ PR7 gateway/SDK parity. PRs 2–3 are the first usable release.
 - **Ordering of the strong path.** Reviewer: persist → sync → apply. We keep v2.4.2's *apply → persist* as the
   invariant and permit persist-first on the strong path **only because the snapshot's WAL-tail merge holds**; the
   ADR states that dependency and a test pins it. *Why:* two write orderings drifting apart is how the race shipped.
+  **Rev 1.1 — the application-visible half.** The orderings are not only a snapshot detail: an apply-first operation
+  is *observable* (readers, subscribers, effects) before its sync can fail, so a caller receiving a durability
+  failure cannot infer that nothing happened. The ADR defines, independently, for each receipt kind: when the value
+  becomes visible · when the exact operation becomes durable · whether subscribers or effects may run before
+  durability · what remains true after a synchronisation failure. Both orderings may have legitimate contracts;
+  they may not silently share one meaning.
+- **`persisted` becomes a representational tri-state (item 1, PR 2).** Today it reads `true` when persistence is
+  unconfigured. Documentation is inadequate for a contracts programme: the Rust type gains a `NotConfigured` state
+  (the SDKs already model absence as `None`/`null`), additively.
 - **PR 4 split.** Reviewer: one "explicit peer persistence service" PR. We split 4a/4b. *Why:* 4a fixes a live overclaim
   on a shipped API in a few lines; 4b is a new protocol (negotiation, authenticated peers, failure-domain metadata,
   status retention) and the bulk of the plan. Pulling 4a forward is the honest priority.
@@ -174,8 +189,11 @@ tooling.
   Clock injection must reach `causal_now_ms` lease-expiry reads in consensus, not only the HLC.
 - **Static check moves from PR 7 to PR 3.** *Why:* without it the seams erode while the harness is built.
 - **The witness is a `cfg(test)` toggle**, not a manual edit (the 2026-09-05 fix was verified by hand-disabling the merge).
-- **Bundle format ships light first**: manifest + choices trace in PR 2; boundary events and checkpoints when a real
-  failure needs them.
+- **Bundle format ships light first — but sufficient for *exact* reproduction from PR 2**: build identity, configuration,
+  initial state (disk images / fixtures), the choices trace (scheduling, time, RNG, faults) and every external input
+  are captured or reproducibly derived; boundary-event views and checkpoints follow when a real failure needs them.
+  Exact replay **detects divergence** (each requested effect is checked against the recorded next effect) — it never
+  merely consumes the same seed.
 - **4.2 — the `3.0.0` candidate.** Nothing here changes the wire. The only wire-touching work anywhere in this axis is a
   *later* authenticated, domain-bound SWIM/handshake (item 2's deferred milestone); that, and nothing else, would
   justify a substrate major.
@@ -209,9 +227,11 @@ mid-partition, reconnect, and prove from membership tables, consensus state and 
   standards-based inter-agent invocation edge already shipped. Either the federation call *is* A2A with domain-bound
   origin credentials, or the ADR states why `POST /federation/v1/call` must exist. *Why:* two invocation edges with
   different auth models is the drift the gateway-auth fixes just cleaned up.
-- **Reuse the OIDC verifier** (`jsonwebtoken`, JWKS refresh, algorithm allowlist) for JWS validation; **extend
+- **Reuse the OIDC verifier's cryptography — not its trust policy.** `jsonwebtoken`, JWKS refresh and the algorithm
+  allowlist are shared; federation objects carry their own issuer, audience, object-type and authority rules, so a
+  token valid for one purpose is never valid for another through shared verification code. **Extend
   `EgressPolicy`** (`allow_hosts`) for the source-side rule; **AgentFacts stays the public well-known descriptor** via
-  a filtered builder. *Why:* three existing mechanisms, three proposed duplicates.
+  a filtered builder. *Why:* three existing mechanisms, three proposed duplicates — reuse the code, not the trust.
 - **No `federation/` KV prefix — as an explicit invariant.** Foreign observations live in the companion's cache. The
   wiki lint's namespace sweep checks it.
 - **Our own correction.** We had recorded domains as "the one item likely to touch the wire". Withdrawn: v1 federates over
@@ -241,6 +261,9 @@ opaque-address rule for confidential evidence is necessary. AgentFacts is Ed2551
 public; the wiki mints `SectionId`s. **`TraceEvent { hlc, node, kind, detail }` has no parent link** — its "causal story"
 is HLC adjacency.
 
+**Status wording.** PR 1's typed records are an *initial API release*, not completion of the knowledge contract; the
+contract is complete at PR 6 (the demonstration), and adapters (PR 7) extend it.
+
 **⚠ Divergences.** Reserve `knowledge/` in the namespace table and both front-door lists at PR 1 · the trace adapter adds
 `derived_from` links rather than importing HLC order as causation · reuse `schemas/{schema_id}` as the schema *locator*
 plus a content digest, not a second registry · expiry timers on the replay clock seam, not `tokio::time` · rank *within*
@@ -261,14 +284,19 @@ before enforcement. The reviewer's fixture targets are targets, not guarantees.
 **Verified.** `demand.rs` is a declaring-node/provider count (not work). The provisioner self-elects probabilistically
 with an `Installing` reservation. `opacity.rs` is a 100 ms loop with a pure decision and the full-channel veto override.
 **`ViewConfidence::max_staleness_ms` is 0 when no peers were heard.** **The membership cooldown is
-`3 × health_check_interval`** — elapsed time scaled by the tick, so a timing intent that shortens the interval shortens the
-cooldown: the plan's warning is a live coupling.
+`3 × health_check_interval`, computed once at start** from the immutable config snapshot, and `converge` checks
+elapsed monotonic time against that fixed `Duration`. **Rev 1.1 correction:** rev 1.0 claimed a timing intent that
+shortens the interval shortens the cooldown *live*; it does not — the timing governor writes `ctx.hot`, which this
+governor never reads. What is true: the cooldown *derives* from the health-check interval at configuration time (a
+coupling worth removing), and this governor ignores live timing intents altogether (its tick is also fixed at start),
+which is a separate consistency gap against the timing governor's "live re-timing" claim.
 
 **⚠ Divergences.** Promise strength stated in the **guardrails tier vocabulary**, not a new one (a self-enforced budget is
 Tier A; a fleet ceiling holds only with exclusive rights) · the workload probe **consumes the companions' existing depth
 signals** (`TupleSpace::depth`, `Blackboard::depth`, KV-ring stages) before a new metric · the combined-feedback harness
-**is replay stage 6**, built once, reusing the governors' pure decision functions · **fix the cooldown coupling first**
-(absolute `Duration`, or a declared bound in the timing governor) — small, standalone, gateable now · give staleness a
+**is replay stage 6**, built once, reusing the governors' pure decision functions · **make the cooldown an explicit parameter with a declared bound** (an absolute `Duration`, not a multiple of the
+health-check interval), and decide in the same change whether this governor honours live timing intents — small,
+standalone, gateable now · give staleness a
 "no observation" state (`staleness_known`) · one owner per deficit named in the ADR · detection-not-prevention for
 everything except the rights ledger.
 
@@ -289,6 +317,11 @@ The reviewer's partition table and decisive test.
 Proposals are **evaporating KV** — a delivery hint. `LockService`'s fencing token is the commit HLC (#166).
 
 **⚠ Divergences — including the one architectural disagreement of the axis.**
+- **The decisive invariant (rev 1.1, adopted verbatim from the reviewer's response):** *once the protected resource
+  acknowledges installation of epoch E2, no operation authorized only under E1 can commit there — even if its holder
+  refreshes the content revision, retries, reconnects or restarts.* Every mechanism below is judged against this
+  sentence, and the partition policy follows from it: a disconnected curator may prepare proposals but cannot promise
+  canonical acceptance without reaching the enforcing resource.
 - **No resource-authoritative service process.** Reviewer: v1 puts the mandate and the canonical commit in a new
   SQLite-backed daemon per wiki scope. That is a control plane for the scope — *"No daemon, no orchestrator, no control
   plane"* (philosophy § Not a platform). We put the check **inside the canonical store's own atomic boundary**: for
@@ -297,10 +330,25 @@ Proposals are **evaporating KV** — a delivery hint. `LockService`'s fencing to
   deployment); for `FsStore` the epoch in the same mutator critical section. A SQLite service is acceptable **only as an
   application-owned reference resource** (the effects companion's destination shape). *Why:* the reviewer's own
   criterion — "the resource must enforce" — is met by the store that already serialises the bytes; adding a process to
-  hold the truth is the coordinator arriving through the side door.
-- **Establishment via the substrate's own consensus.** A mandate is a **leased consensus slot** `mandate/{scope}` whose
-  committed value is (holder, epoch): the commit HLC is the epoch (monotonic across holders, #166), `committed_lease_secs`
-  is the term. Owner-signed appointment remains the pinned-deployment alternative.
+  hold the truth is the coordinator arriving through the side door. **Rev 1.1 — what "inside the boundary" must mean,
+  per mechanism (the reviewer's qualification, accepted):** *(i) `GitStore`:* the mandate check and the content commit
+  are **one git ref transaction** — `git update-ref --stdin` (`start` / `prepare` / `commit`) updating
+  `refs/mycelium/mandate/{group}` and the content ref together, each with its expected old value, so two separately
+  successful CAS operations can never interleave; *(ii) the shared remote:* the **pre-receive hook** verifies the
+  signed epoch **and** the expected old values of both refs in the same push, rejecting the whole push on any
+  mismatch — a hook that only validates a signature before an update does not establish the guarantee; *(iii)
+  `FsStore`:* its mutator `Mutex` is per store instance and does **not** serialise separate processes, so the strict
+  profile on `FsStore` is **out of scope** unless an OS-level exclusive lock is added; legacy semantics are declared,
+  not implied. The replay gate (scenario B) covers competing appointments, delayed holders, resource restart, expiry,
+  and revocation with no subsequent content write.
+- **Establishment via the substrate's own consensus — conditional (rev 1.1).** A mandate *may* be a **leased consensus
+  slot** `mandate/{scope}` whose committed value is (holder, epoch), the commit HLC as epoch, `committed_lease_secs` as
+  term — **only after** its safety assumptions (membership, quorum overlap, durable state) and the resource's
+  installation protocol are shown to satisfy the handover contract under the replay gate. Until then **owner-authorized
+  appointment is the supported baseline.** *Why:* the consensus module's own commentary describes near-simultaneous
+  optimistic commitments that later converge on a holder; eventually agreeing on a holder does not prove that
+  conflicting holders could never both act, and a commit HLC orders epochs without proving its bearer was authorized
+  to establish one. D2 is therefore conditional on D4.
 - **Durable proposals via the existing log verb** (`KvHandle::append` → `log/wiki/{group}/proposals`) plus item 1's
   receipts — not a service database; the evaporating queue becomes the discovery hint the plan wants.
 - **Do not build a second fence beside `LockService`.** The plan declines to certify its converged-view issuance; we audit
@@ -317,28 +365,29 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | # | Item | Reviewer proposed | We decided | Why |
 |---|------|-------------------|------------|-----|
 | D1 | 5 | A resource-authoritative **service process** (SQLite daemon) holds mandates + canonical commits | Fence **inside the canonical store's atomic boundary** (mandate ref under the same `update-ref` CAS; pre-receive hook on the shared remote; epoch in `FsStore`'s mutator section). SQLite only as an application-owned reference resource | *Not a platform*: no daemon, no control plane. The store already serialises the bytes; put the fence where they serialise |
-| D2 | 5 | Owner-signed appointment as the establishment mechanism | **Leased consensus slot** `mandate/{scope}` (commit HLC = epoch, lease = term) as the default; owner-signed appointment for pinned deployments | Uses the substrate's own agreement + the #166 fencing-token precedent instead of a new authority |
+| D2 | 5 | Owner-signed appointment as the establishment mechanism | **Rev 1.1:** owner-authorized appointment is the **baseline**; a leased consensus slot becomes the establishment mechanism **only after** D4's replay gate + an explicit safety argument (membership, quorum overlap, durable state) | A commit HLC orders epochs; it does not prove its bearer was authorized. Conditional on D4 |
 | D3 | 5 | A durable proposal journal in the authority service | `KvHandle::append` log stream + item-1 receipts | Composition over a new store |
 | D4 | 5 | The lock service's issuance is "insufficient" for strict mode; build the new fence | Audit `LockService` under replay scenario B first; no second fence | Two fences beside each other is how guarantees drift |
 | D5 | 2 | A new `POST /federation/v1/call` protocol | Compose with the shipped **A2A** edge, or write the ADR argument for a second protocol | Two invocation edges with different auth models is the drift we just cleaned up |
-| D6 | 2 | New JWS / signed-object stack; new egress rule; new public descriptor | Reuse the **OIDC verifier**, extend **`EgressPolicy`**, keep **AgentFacts** as the public descriptor via a filtered builder | Three existing mechanisms; no duplicates |
+| D6 | 2 | New JWS / signed-object stack; new egress rule; new public descriptor | Reuse the **OIDC verifier's cryptography** (not its trust policy — federation objects carry their own issuer/audience/type/authority rules), extend **`EgressPolicy`**, keep **AgentFacts** as the public descriptor via a filtered builder | Reuse the code, never the trust |
 | D7 | 2 | (implicit) foreign observations disseminated in KV later | **No `federation/` KV prefix** as an explicit, lint-checked invariant | Foreign state never enters the medium |
-| D8 | 1 | Strong path: persist → sync → apply | Keep **apply → persist** as the invariant; persist-first permitted only because the WAL-tail merge holds; dependency pinned by a test | The race shipped because two orderings drifted |
+| D8 | 1 | Strong path: persist → sync → apply | Keep **apply → persist** as the invariant; persist-first permitted only because the WAL-tail merge holds; dependency pinned by a test. **Rev 1.1:** the ADR defines visibility, durability, pre-durability effects and post-failure truth *independently* per receipt kind | The race shipped because two orderings drifted; the orderings are also application-visible |
 | D9 | 1 | One PR for the peer-persistence service | **Split 4a/4b**; 4a (exact-identity ack) pulled forward | 4a fixes a live overclaim cheaply; 4b is a protocol |
 | D10 | 1 | Directory fsync noted as a caveat | **Phase 0 fix** — done 2026-09-05 | A few lines; the difference between a power-loss claim we can and cannot make |
 | D11 | 1 | (absent) | Reconcile with `exactly-once-effect.md`'s **declined** extraction; add pre-stamped updates; map `emit_reliable` / mailbox / tuple lease into the vocabulary; cite in-tree prior art | Two design records must not contradict; retries must not tick a fresh HLC |
 | D12 | 6 | Static forbidden-call check in PR 7 | **PR 3** | Seams erode while the harness is built |
 | D13 | 6 | (absent from inventory) | Add **papaya CAS retries** (owned by Loom), **`AHashMap` iteration order**, **lease-expiry clock reads** | Real nondeterminism sources in the covered paths |
-| D14 | 6 | Full failure-bundle format from the start | Manifest + choices trace first; events/checkpoints when a failure needs them | Ship the reproducible core early |
+| D14 | 6 | Full failure-bundle format from the start | Minimum bundle **sufficient for exact reproduction** from PR 2 (build, config, initial state, choices, external inputs) with divergence detection; event views/checkpoints later | Ship the reproducible core early — but reproducible, not merely re-seeded |
 | D15 | 3 | (absent) | Reserve `knowledge/`; reuse `schemas/` as the schema locator; **trace `derived_from` links** rather than HLC order as causation | The trace has no parent link today; HLC adjacency is not causality |
 | D16 | 3 | A second ranker in the resolver | Rank **within the accepted class**, then hand survivors to the reasoning router | Two rankers must compose in one stated order |
 | D17 | 4 | A new promise-strength vocabulary | The **guardrails tiers** | One vocabulary for "how strong is this promise" |
 | D18 | 4 | A new `WorkloadProbe` metric | Consume the companions' **depth** signals first | Backlog is already measured where work queues |
 | D19 | 4 | A bespoke combined-feedback harness | **Replay stage 6**, built once | One harness, one clock seam |
-| D20 | 4 | Cooldown coupling listed as a design concern | **Fix it now** (absolute `Duration` / declared bound) | Small, standalone, gateable; live today |
+| D20 | 4 | Cooldown coupling listed as a design concern | **Rev 1.1:** an explicit cooldown parameter with a declared bound, decoupled from the health-check interval; decide whether the governor honours live timing intents | Small, standalone, gateable. *Rev 1.0 overstated this as a live runtime feedback defect — corrected, see §8* |
 | D21 | 4·6 | Combined tests as their own rigs | Every item's decisive demonstration is a **CI gallery entry** | *Expressible ≠ supported* |
 | D22 | all | Six separate seven-PR plans | **One plan, one dependency graph, one posture** (this document); the six kept vendored for attribution | The six overlap at receipts, clock, harness, namespaces — one order avoids six orderings |
 | D23 | 2 | ("4.0", "5.0" epochs) | Roadmap **epochs, not versions**; the only `3.0.0` candidate is a later authenticated domain-bound SWIM | Version numbers follow breaking changes, not ambitions |
+| D24 | 1 | `persisted: bool` documented as "true = no promise broken" when unconfigured | A **representational** `NotConfigured` state in the Rust type (PR 2), additive | Documentation is inadequate for a contracts programme (the reviewer's point, accepted) |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
 lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disappearance; the asymmetric uncertainty rule;
@@ -351,7 +400,10 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 - Two sentences we wrote the same morning claimed a plain `set_async` surfaces a WAL error as an `Err`. It does not — its
   `bool` is the gossip-queue result and the WAL error was silently discarded. Now logged at `warn`; the receipt is item 1.
 - Our `persisted` flag reads `true` when persistence is unconfigured ("no promise broken"). The SDKs model absence as
-  `None`/`null`; the Rust type needs a tri-state or documentation — item 1's ADR.
+  `None`/`null`; the Rust type gains a `NotConfigured` state in item 1 PR 2 (D24).
+- **(2026-09-06)** Rev 1.0 §6.2 claimed the membership cooldown shortens *live* when a timing intent shortens the
+  health-check interval. False: both are fixed at start from the config snapshot; the governor never reads the hot
+  timing value. Corrected in §6.2 and D20; the ROADMAP row and the wiki carry dated corrections. The reviewer found it.
 
 ---
 
@@ -374,6 +426,16 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 4. **Item 1, PR 4a** — the exact-identity ack; fixes the live `>=` overclaim.
 5. Item 2's ADR (D5–D7) in parallel, since it has no code dependency on 1 or 6 for its discovery release.
 
+## 11. Revision log
+- **rev 1.1 (2026-09-06)** — after the reviewer's response to rev 1.0. Adopted: the decisive mandate invariant and the
+  per-mechanism transaction specification (§6.3, D1); D2 made conditional on D4; D8's application-visible
+  visibility/durability contract; D24 (`persisted` tri-state); D6 crypto-not-trust; D14 minimum-bundle sufficiency +
+  divergence detection; posture rules 5 (attribution outlives authority) and 6 (a named mechanism is not the composed
+  guarantee); Phase B's peer-durability crash/restart gate; item 3's "initial API release" wording. **Corrected:** the
+  live cooldown coupling (§6.2, D20, §8). The reviewer's closing risk — *treating the existence of an appropriately named
+  mechanism as evidence that the stronger composed guarantee follows* — is now posture rule 6.
+- **rev 1.0 (2026-09-05)** — consolidation of the six entries into one plan.
+
 ## Appendix A — verified anchors (2026-09-05)
 | Claim in a plan | Where verified | Holds? |
 |---|---|---|
@@ -388,7 +450,7 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 | proposals are evaporating KV | `wiki/{group}/proposal/{id}` | yes |
 | `TraceEvent` has no parent link | `mycelium-reason/src/trace.rs` | yes |
 | `max_staleness_ms` = 0 with no peers heard | `emergent.rs:370` | yes |
-| membership cooldown = 3 × health-check interval | `membership_governor.rs:216` | yes |
+| membership cooldown = 3 × health-check interval, **fixed at start**; not re-derived from live timing intents | `membership_governor.rs:215–216`, `converge` | yes — rev 1.0's "live shortening" was wrong |
 | A2A, OIDC verifier, `EgressPolicy` exist | `a2a.rs`, `oidc.rs`, `config.rs` | yes |
 
 ## Appendix B — the reviewer's documents (vendored, unmodified)

@@ -193,3 +193,30 @@ of the plan was produced for the reviewer with every divergence marked.
 ## Reusable lesson (consolidation)
 Six good plans appended one at a time are not one plan. The moment a section cites artefacts outside the repo, or
 justifies the same tension three ways, stop appending and write the document that owns the graph.
+
+## Rev 1.1 (2026-09-06) — the reviewer's response, and one correction of ours
+
+The reviewer accepted the unified roadmap, the contracts-plus-replay priority and the composition decisions, and
+accepted replacing their SQLite authority service with enforcement inside the store — with the qualification that
+the check and the commit must be *one* transaction (git ref transaction + pre-receive over both refs; `FsStore`'s
+per-instance mutex does not serialise processes). They also made D2 conditional on D4 (consensus establishment only
+after a safety argument + the replay gate; owner-authorized appointment as baseline), asked for the
+visibility-vs-durability contract to be stated per receipt (D8), for `persisted` to get a representational
+`NotConfigured` state (D24), for the OIDC verifier's crypto to be reused without its trust policy (D6), for the
+minimum replay bundle to be sufficient for exact reproduction with divergence detection (D14), for observer authority
+to be separated from historical attribution (posture 5), and for Phase B's gate to include peer durability across
+crash/restart. All adopted in `docs/plans/v3-contracts-axis.md` rev 1.1 (§11).
+
+**Correction (ours, found by the reviewer).** The 2026-09-05 addendum above and rev 1.0 §6.2 claimed the membership
+cooldown shortens *live* when a timing intent shortens the health-check interval. **False.** `start_membership_governor`
+computes both the cooldown `Duration` and the tick interval once from `self.config` (the immutable snapshot);
+`converge` compares elapsed monotonic time against that fixed value; the timing governor writes `ctx.hot`, which this
+governor never reads. What is true: an initial-config coupling worth removing (D20 revised: an explicit cooldown
+parameter with a declared bound), and — a smaller separate gap — this governor ignores live timing intents entirely,
+against the timing governor's "live re-timing" claim. The earlier addendum text is left as written; this section is
+the correction.
+
+## Reusable lesson (rev 1.1)
+"Derived from X" and "changes when X changes" are different claims; check whether the consumer *reads* X live before
+writing "coupling". And the reviewer's closing line is now posture rule 6: a named mechanism is not the composed
+guarantee.
