@@ -64,6 +64,9 @@ via wasm-host).
   `…-examples.md`. **0.6.1 (2026-09-06):** the router **reserves atomically with ranking** (`pick_and_reserve`; the pure
   `score_and_pick` rule shared with `candidates()`) — 0.6.0 ranked from a snapshot and reserved later, so
   simultaneous callers could herd anyway (CI flake 2026-09-06; log `.log/2026-09-05-v3-contracts-axis.md`).
+  **0.6.2 (2026-09-06):** the OpenAI façade **omits** the unknown prompt/completion split instead of reporting
+  `0` (`mycelium.usage.split_known: false`) — the honesty defect the resource-accounting proposal (plan rev 1.6)
+  named first.
   **0.6.0 (2026-09-04, the PAIR imports — plan addendum of that date):** ①
   gained **local in-flight reservations** (open calls per provider weighted into the rank,
   `reservation_weight`; node-local, never gossiped — lock-order row 36; the herd gate

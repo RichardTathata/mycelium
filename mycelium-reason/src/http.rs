@@ -27,8 +27,11 @@
 //! template-bound on the serving node and the request's values are not applied.
 //! `stream: true` is honoured as a one-chunk SSE stream (the mesh RPC is not streamed),
 //! so streaming clients work unchanged. `usage.total_tokens` is what the backend
-//! reported; the prompt/completion split is not known and is reported as `0`. An
-//! optional top-level `run_id` records the route to that run's trace, as on `/route`.
+//! reported; the prompt/completion split is **not known and not reported** — the
+//! `prompt_tokens` / `completion_tokens` keys are omitted rather than filled with a false
+//! `0` (0.6.2; a client that summed the split got `0 ≠ total` before), and
+//! `mycelium.usage.split_known: false` says so explicitly. An optional top-level `run_id`
+//! records the route to that run's trace, as on `/route`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -283,12 +286,25 @@ fn chat_completion_json(id: &str, created: u64, routed: &Routed) -> serde_json::
             "message": { "role": "assistant", "content": routed.output },
             "finish_reason": "stop",
         }],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": routed.tokens_used,
-        },
-        "mycelium": { "provider": routed.provider.to_string(), "attempt": routed.attempt },
+        "usage": usage_json(routed),
+        "mycelium": mycelium_ext(routed),
+    })
+}
+
+/// The `usage` block, stated honestly: the backend reports one total; the prompt/completion
+/// split is unknown, so those keys are **absent** (an absent field is "unknown"; a `0` is a
+/// false claim). The extension block beside it carries `usage.split_known: false`.
+fn usage_json(routed: &Routed) -> serde_json::Value {
+    json!({ "total_tokens": routed.tokens_used })
+}
+
+/// The `mycelium` extension block: which provider answered, on which attempt, and what
+/// the usage figures do and do not claim.
+fn mycelium_ext(routed: &Routed) -> serde_json::Value {
+    json!({
+        "provider": routed.provider.to_string(),
+        "attempt": routed.attempt,
+        "usage": { "split_known": false },
     })
 }
 
@@ -302,8 +318,8 @@ fn chat_completion_sse(id: &str, created: u64, routed: &Routed) -> String {
     let tail = json!({
         "id": id, "object": "chat.completion.chunk", "created": created, "model": routed.model_used,
         "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": routed.tokens_used },
-        "mycelium": { "provider": routed.provider.to_string(), "attempt": routed.attempt },
+        "usage": usage_json(routed),
+        "mycelium": mycelium_ext(routed),
     });
     format!("data: {head}\n\ndata: {tail}\n\ndata: [DONE]\n\n")
 }
@@ -428,5 +444,31 @@ mod tests {
         assert!(sse.contains("\"content\":\"hi\""));
         assert!(sse.contains("\"finish_reason\":\"stop\""));
         assert!(sse.ends_with("data: [DONE]\n\n"));
+    }
+
+    /// 0.6.2: an unknown prompt/completion split is *absent*, never a false `0` — in the
+    /// JSON body and in the SSE stop chunk alike — and the extension block says so.
+    #[test]
+    fn regression_unknown_usage_split_is_omitted_not_zero() {
+        let routed = Routed {
+            output: "hi".into(),
+            model_used: "echo".into(),
+            tokens_used: 3,
+            provider: mycelium::NodeId::new("127.0.0.1", 1).unwrap(),
+            attempt: 2,
+        };
+        let body = chat_completion_json("chatcmpl-x", 1, &routed);
+        assert_eq!(body["usage"]["total_tokens"], 3);
+        assert!(body["usage"].get("prompt_tokens").is_none(), "no fabricated prompt split");
+        assert!(body["usage"].get("completion_tokens").is_none(), "no fabricated completion split");
+        assert_eq!(body["mycelium"]["usage"]["split_known"], false);
+        assert_eq!(body["mycelium"]["attempt"], 2);
+
+        let sse = chat_completion_sse("chatcmpl-x", 1, &routed);
+        let tail = sse.split("data: ").nth(2).unwrap().trim();
+        let tail: serde_json::Value = serde_json::from_str(tail).unwrap();
+        assert_eq!(tail["usage"]["total_tokens"], 3);
+        assert!(tail["usage"].get("prompt_tokens").is_none());
+        assert_eq!(tail["mycelium"]["usage"]["split_known"], false);
     }
 }

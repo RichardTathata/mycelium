@@ -121,7 +121,8 @@ as `/route` routes it. Mapping, honestly: the last `user` message is the prompt 
 `history` (a template that wants them says `{{system}}`/`{{history}}`); `max_tokens` and
 `temperature` are bound by the serving template, not the request; `stream: true` is honoured
 as a one-chunk SSE stream (the mesh RPC is not streamed); `usage.total_tokens` is what the
-backend reported and the prompt/completion split is unknown (reported `0`).
+backend reported and the prompt/completion split is unknown — so `prompt_tokens` /
+`completion_tokens` are **absent**, not `0` (0.6.2), and `mycelium.usage.split_known` is `false`.
 
 ```python
 from openai import OpenAI
