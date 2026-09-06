@@ -36,6 +36,10 @@ and on the release PR before tagging**. Log `.log/2026-09-05-v2.4.3-release.md`.
   `mycelium-ts-v0.1.1`): every handle takes `token=` / `{ token }` (fallback `MYCELIUM_GATEWAY_TOKEN`),
   riding pooled + SSE clients; `consistent_set` / `cross_group_propose` return `CommitResult { persisted }`.
   `jest` now CI-gated. Logs `.log/2026-09-05-sdk-bearer-token.md`.
+- **Contracts-axis plan rev 1.1** (2026-09-06): the reviewer's response folded in — the decisive mandate invariant +
+  one-transaction spec (D1), D2 conditional on D4, D8 visibility-vs-durability, D24 `persisted` tri-state, D6
+  crypto-not-trust, D14 minimum bundle, posture rules 5–6, Phase B peer-durability gate. **Our correction:** the
+  "live" membership-cooldown coupling did not exist (fixed at start from the config snapshot). PDF rev 1.1 produced.
 - **The contracts axis consolidated into one plan of record** (2026-09-05): `docs/plans/v3-contracts-axis.md`
   (posture, dependency graph, phase gates, decision register D1–D23, corrections, next steps); the six external
   plans vendored under `docs/plans/external/`; ROADMAP § v3.0 restructured (two-axis naming note, index table).

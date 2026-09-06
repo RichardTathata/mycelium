@@ -3038,7 +3038,7 @@ mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consiste
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
 
-### The contracts axis (adopted plan 2026-09-05 — `docs/plans/v3-contracts-axis.md`)
+### The contracts axis (adopted plan 2026-09-05, rev 1.1 2026-09-06 — `docs/plans/v3-contracts-axis.md`)
 
 **The plan of record is [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md).** This section is its
 index. An external review of v2.4.1 (2026-09-05) found five defects — fixed and released the same day — and
@@ -3063,12 +3063,14 @@ gallery entry); roles evaporate and authority expires. The axis is the philosoph
 | 6 | **Deterministic replay** | production logic under controlled time/RNG/scheduling/storage; replay from a bundle | core seams + `mycelium-sim` | 5 | PR 1 next (with item 1) |
 | 2 | **Federated domains** | a domain = one admitted mesh; federation = exported services over an authenticated edge protocol; **no wire change** | companion `mycelium-federation` | 7 | after Phase A |
 | 3 | **Knowledge layer** | claim · observation · assessment · acceptance; reader-specific acceptance | companion `mycelium-knowledge` | 6 | after 1 + 6 |
-| 4 | **Adaptive stability** | one admission contract for every governor; budgets as allocated rights | agent interfaces + `mycelium-control` | 7 | cooldown fix now; rest after 6 |
+| 4 | **Adaptive stability** | one admission contract for every governor; budgets as allocated rights | agent interfaces + `mycelium-control` | 7 | explicit cooldown parameter now (*rev 1.1: the "live coupling" claim was wrong*); rest after 6 |
 | 5 | **Scoped mandates** | authority checked by the resource, never inferred from a role | wiki + consensus + companion | 7 | after 1 + 6 (replay scenario B) |
 
 **Order:** 1 + 6 together → 2 → 3, 4, 5 as companions. **The one architectural disagreement with the reviewer** (D1):
 no resource-authoritative *service process* for mandates — the fence goes inside the canonical store's own atomic
-boundary. **The `3.0.0` candidate** (D23): only a later authenticated, domain-bound SWIM/handshake; nothing in this axis
+boundary — *accepted by the reviewer in rev 1.1, with the qualification that the boundary must be one transaction
+(git ref transaction + pre-receive over both refs; `FsStore` strict mode out of scope), and the consensus-slot
+establishment (D2) made conditional on the replay gate.* **The `3.0.0` candidate** (D23): only a later authenticated, domain-bound SWIM/handshake; nothing in this axis
 changes the wire. **Subsumed packaging candidates** (table above): the *auction / bidding* companion needs item 1's
 destination-commit receipt; the *durable / partitioned event-log* refinement is item 1's receipt vocabulary on
 `KvHandle::append`; the *governed-memory read-set* candidate is item 3's provenance records.
