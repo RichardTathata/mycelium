@@ -3038,7 +3038,7 @@ mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consiste
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
 
-### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
+### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.4 adds the delivery surfaces; rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
 
 **The plan of record is [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md).** This section is its
 index. An external review of v2.4.1 (2026-09-05) found five defects — fixed and released the same day — and
@@ -3089,6 +3089,17 @@ infrastructure** owned here (the nightly scale runner; on-disk golden fixtures i
 ledger** (plan §6.6: `system_propose`, cosmetic `cluster_name`, the inferred `>=` ack, `persisted: bool`,
 node-as-caller dispatch) · the research track cross-linked (replay = reproducible experiments; the combined-feedback
 scenario = a Paper 1 case study).
+
+**Delivery surfaces (rev 1.4, plan §12):** the axis is not code alone. **Examples** — every ack-showing example
+refreshed to show its receipt, and one decisive demonstration per item at the coop/blackboard bar (the receipt
+ladder · replay-a-bundle · two-mesh federation viz · evidence-aware resolution in the coop world · the
+control-envelope viz · curator handover); **developer docs** — concepts with each ADR, a how-to chapter with each
+release gate, chapter 17 split into public discovery vs federated domains, wiki pages + the audit tools' own
+inventories; **operations docs** — runbook rows in the same PR as the knob, a new `federation.md`, replay-bundle
+capture with redaction; **presentations** — the core and customer decks re-aligned at the Phase A and C exits
+under `/publication-lint`, "shipped" only with a tag; **philosophy** — the contract as a property, posture rules 3
+and 6 as litmus tests; plus front-door refresh, a companion onboarding checklist, migration notes per deprecation,
+a Phase-C adversarial self-audit. **No phase exit while its §12 lines are open.**
 
 Status: **adopted as a plan; no code.** Assessment record and the day's verification:
 `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.

@@ -275,3 +275,13 @@ companion: reserve inside the ranking critical section, or make the test drive t
 rule shared by `candidates()` (observing) and the acting path, with a unit gate (`A B A B` alternation; exclusion
 for failover). The integration test's "deterministic against the mechanism" comment is now true and says since
 when. Reserve-before-act, done in the companion whose CI would otherwise flake on every v3 PR.
+
+## Rev 1.4 (2026-09-06) — the delivery surfaces
+The plan gained §12: examples (refresh every ack-showing example; one decisive demonstration per item), developer
+documentation (concept vocabulary with each ADR, how-to chapter with each release gate, wiki pages, the audit
+tools' own concept inventories), operations runbooks (same PR as the knob; `federation.md`; replay-bundle capture
+with redaction), the two decks (Phase A and C exits, `/publication-lint`), the philosophy revision (with item 1's
+ADR), and the rest (front door, companion onboarding checklist, migration notes per deprecation, a Phase-C
+adversarial self-audit + fuzz targets). Gated by existing mechanisms only; no phase exit while its §12 lines are
+open. Lesson for the wiki: an engineering plan that stops at code leaves *expressible ≠ supported* half-applied —
+the gallery, the guide and the decks are where a claim becomes supported for a reader.

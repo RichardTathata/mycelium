@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · **rev 1.3, 2026-09-06** records their four implementation requirements (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · **rev 1.4, 2026-09-06** adds §12, the delivery surfaces (examples, documentation, presentations) with their gates (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -116,6 +116,9 @@ ADR):
 | **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 | the adversarial release demos of 1 and 2 pass in CI |
 | **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 | evidence-aware resolution and curator handover both replay deterministically |
 | **E** | 3·PR7 · 4·PR6–7 · 5·PR7 · 6·PR7 | combined-feedback scenario green; shadow-mode rollout documented |
+
+*(rev 1.4)* Every phase exit also requires the **§12 alignment gate** for the items it ships: the gallery entry,
+the doc-coverage row with no missing cell, the runbook rows, and — at A and C — the re-linted decks.
 
 ---
 
@@ -526,10 +529,23 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 6. **Item 7 (gateway caller identity)** — small, standalone, closes a live security-design gap *(rev 1.2)*.
 7. **Item 8 (threat model rev 2)** — a document; gates items 2, 3, 5 *(rev 1.2)*.
 8. **Fix the nightly scale runner's image-build deadline** — nothing scale-related can be evidenced until it is green.
-9. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
+9. **Phase A's §12 lines** *(rev 1.4)*: the philosophy revision and the concepts-chapter vocabulary travel in item 1's
+   ADR PR; the receipt-ladder example is item 1 PR 3's gate; the core deck's federation and PAIR slides are re-linted
+   at the Phase A exit.
+10. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
+- **rev 1.4 (2026-09-06)** — **§12 Delivery surfaces**, from the maintainer's requirement that the roadmap include
+  compelling examples (refresh + new), developer and operations documentation re-alignment, and both presentations:
+  six lines (S1 examples — one decisive demonstration per item plus the refresh of every ack-showing example; S2 dev
+  docs — concepts with each ADR, how-to chapters with each release gate, wiki pages, the audit tools' own
+  inventories; S3 ops runbooks in the same PR as the knob; S4 the core and customer decks at Phase A and C exits
+  under `/publication-lint`; S5 the philosophy revision with item 1's ADR; S6 front door, companion onboarding
+  checklist, migration notes per deprecation, a Phase-C adversarial self-audit + fuzz targets, the analysis series,
+  a research candidate). Each gated by an existing mechanism; **no phase exit while its §12 lines are open** (§2).
+  No decision-register change — the reviewer's plans contain no documentation, example, or presentation lines;
+  §12 is ours.
 - **rev 1.3 (2026-09-06)** — the reviewer approved rev 1.2 as the strategic baseline with four implementation
   requirements, now recorded: **D26** atomic remote enforcement incl. ordinary writes (`--atomic`,
   `--force-with-lease` on the mandate ref, fail closed; local `verify` through commit); **one compatibility rule**
@@ -554,6 +570,136 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
   live cooldown coupling (§6.2, D20, §8). The reviewer's closing risk — *treating the existence of an appropriately named
   mechanism as evidence that the stronger composed guarantee follows* — is now posture rule 6.
 - **rev 1.0 (2026-09-05)** — consolidation of the six entries into one plan.
+
+## 12. Delivery surfaces — examples, documentation, presentations *(rev 1.4)*
+
+The reviewer's six plans are engineering plans; rev 1.0–1.3 kept that shape. That is a gap for a programme whose
+posture is *expressible ≠ supported*: a contract nobody can run, read about, or see demonstrated is a claim. This
+section names the **non-code deliverables** of the axis, ties each to the phase that produces the thing it
+describes, and gates each with a mechanism the repository already has — the three lint skills (`/wiki-lint`,
+`/doc-coverage`, `/publication-lint`) and the analysis series — rather than a new process. **Rule: no phase exit
+is declared while its §12 lines are open.** The §2 table's exit gates are engineering gates; §12 is the
+alignment gate that sits beside every one of them.
+
+| Line | What ships | When | Gate (existing mechanism) |
+|------|-----------|------|---------------------------|
+| **S1 Examples** — refresh + new | See §12.1 | each item's decisive demonstration lands **before** that item's release gate is called met | `examples/README.md` matrix row · CI-run · `__CONCEPTS__` + Ops Console link for browser examples ([UI-example contract](../wiki/dev/ui-example-contract.md)) |
+| **S2 Dev documentation** | See §12.2 | concept vocabulary with each item's PR 1 (the ADR); the how-to chapter with its release gate | `/doc-coverage` — a new matrix row per concept, no ✗ cell at the phase exit; `/wiki-lint` doc-vs-code clean |
+| **S3 Operations documentation** | See §12.3 | runbook rows in the **same PR** as the operator-facing change (the parity gate, §9, already says so for gateway changes — this extends it to every operator knob) | `/doc-coverage` Ops cells; the must-work rule (an instruction that silently no-ops is *Thin*) |
+| **S4 Presentations** — core + customer | See §12.4 | at **Phase A** exit (first shipped tranche) and **Phase C** exit (federation + effects demos); re-linted at every companion release | `/publication-lint` clean — every "shipped" claim cites a tag; roadmap items carry their phase status |
+| **S5 Philosophy** | See §12.5 | with item 1's ADR (Phase A) | `/publication-lint` (the philosophy is a lint target); the analysis series' dimension 1 |
+| **S6 The rest** | See §12.6 | as listed | as listed |
+
+### 12.1 Examples — the gallery is the proof
+
+*Refresh existing.* Every example that calls a verb whose ack changes meaning under item 1 shows the receipt it
+gets back — the zero-setup ladder (`hello_mesh`, `distributed_lock`), `three_node_demo`, the coop suite's
+consensus and mailbox demos, the LangGraph checkpointer ladder (chapter 15), and the Ops Console (an operator's
+first contact with `persisted` / `local_durability`). Refresh is not decoration: an example that keeps printing
+"ok" for a write the receipt says was *not* durable is an overclaim in code.
+
+*New, one per item — the decisive demonstration, at the coop/blackboard bar (README block per the examples doc
+template, constructive domain, CI-run):*
+
+| Item | Demonstration | Kind |
+|------|---------------|------|
+| 1 Contracts | the **receipt ladder**: the same write under `none` / `local` / `required-sync` / peer-persisted, then a peer crash — which receipts survive, which were only claims | CLI + Docker (crash) |
+| 6 Replay | **replay a bundle**: the WAL/snapshot race captured as a bundle, replayed to the failing witness, then the fix replayed green | CLI (`mycelium-sim`) |
+| 2 Domains | **two meshes, one exported service**: discovery without merging, a call across the edge, a partition, a revoked gateway — as a `*_viz` browser example so the boundary is *visible* | browser + Docker |
+| 3 Knowledge | in the coop world: "which pantry is really open" — claim, observation, assessment, and two readers with different acceptance policies resolving differently from the same evidence | CLI |
+| 4 Stability | the **control-envelope viz**: allocated rights and budgets under load, the `enforce-allocated` profile versus advisory, and the combined-feedback scenario | browser |
+| 5 Mandates | **curator handover** in the council substrate: appointment, an atomic-enforced write, expiry, revocation mid-write, attribution surviving the handover | CLI over `GitStore` |
+
+The Ops Console gains a panel per shipped concept (receipts, domains, mandates) — it is the operator's demo
+surface and the UI-example contract's consumer.
+
+### 12.2 Developer documentation
+
+- **Concepts first.** `docs/guide/00-concepts.md` gains the axis vocabulary with each item's ADR: receipt kinds and
+  `DeliveryUnknown` (1); the seams and what a bundle is (6); *domain* versus the NANDA discovery edge (2, D25);
+  claim/observation/assessment/acceptance (3); allocated rights and promise strength (4); mandate, term, epoch (5);
+  gateway caller identity (7). `building-on-mycelium.md` and the FAQ get the reserved prefixes and the one
+  compatibility rule the day they are reserved (§9).
+- **How-to chapters** with each item's release gate: a **contracts & receipts** chapter (the receipt ladder as its
+  worked example); a **replay & simulation** chapter; chapter 17 (federation) restructured into *public discovery*
+  (AgentFacts, unchanged) and **federated domains** (new — trust bundles, exported services, the edge protocol);
+  **knowledge**, **stability & control**, and **mandates** chapters for the companions; `error-handling.md` gains
+  the receipt outcomes; the cookbook gains one recipe per item.
+- **SDK docs are part of the parity gate** already; this adds the *narrative* side: the Python and TypeScript
+  READMEs and the LangGraph chapter show receipts, not just carry the field.
+- **The wiki** gets a page per new mechanism (contracts under architecture; replay under testing; domains and the
+  threat model under security; the four companions under companions) and `AGENTS.md` routing rules for them,
+  ingested with the PR that ships the mechanism — the §9 ingest rule, restated because it is where rev 1.0–1.3
+  stopped.
+- **`CLAUDE.md`** hot invariants gain the ack-semantics rule (what a receipt proves) and the seam rule (no direct
+  clock/RNG/filesystem access in production logic once item 6's kernel lands).
+- **The audit tools drift too.** `/doc-coverage`'s concept inventory, `/wiki-lint`'s cited-constants and namespace
+  sweeps, and `/mycelium-analysis`'s dimension prompts name the *current* concepts; each gains the axis' concepts
+  the day they ship (a hardcoded inventory is the same drift bug one level up — the wiki lint's own calibration
+  ledger says so).
+
+### 12.3 Operations documentation
+
+Runbook rows, in the PR that ships the knob: `deployment.md` (sync modes → the required-sync contract; persistence
+profiles and what each receipt costs); `production-readiness.md` (durability receipt and golden-fixture replay as
+checklist rows); `rbac.md` (the public surface as code; caller identity; `authorized_callers`; the `legacy` profile
+and its removal date); a **new `federation.md`** runbook (trust bundles, gateway rotation and revocation, partition
+behaviour, what the edge exports and never exports); `observability.md` + `metrics.md` (receipt counters, control
+envelopes, evidence freshness); `diagnostics.md` (capturing a **replay bundle from production**, with the redaction
+rules item 8 specifies); `audit.md` (mandate lifecycle events, attestations); `tuning.md` and `dynamic-scaling.md`
+(allocated rights, budgets); the **shared-responsibility matrix** gains rows for domains and mandates; the threat
+model rev 2 (item 8) lands under `docs/design/` and is linked from `crown-jewel.md` and the wiki security page.
+
+### 12.4 Presentations — core and customer
+
+- **Core deck** (`docs/publications/presentation.html`, engineer-facing): the architecture story gains the second
+  epoch — receipts as the honest ack, replay as the verification engine, *domains are not NANDA* — with every
+  claim labelled by phase status (**shipped** with a tag · **in CI** · **planned**). The deck's existing federation
+  slide and the PAIR-shaped slide are the two that change first.
+- **Customer deck** (`customer-pitch.html`, buyer-facing): the *Honest next* card is rewritten to name typed
+  durability receipts, deterministic replay, and federated domains as the next capabilities; the security list gains
+  caller identity and the threat model once they ship; "no third-party production deployment yet" stays until it is
+  false. The deck's discipline — demonstrated versus next, never roadmap sold as shipped — is the point of
+  `/publication-lint`, and the lint runs at each phase exit and each companion release, not on a calendar.
+- **Derived PDFs** are regenerated from source at the same points; the source is what is linted.
+
+### 12.5 Philosophy
+
+§1.4 claims this axis is the philosophy's own trajectory. The philosophy must say so itself, or §1.4 is our
+assertion about a document that does not make it. With item 1's ADR: the *contract* is added to the property
+list (an ack names what it proves); posture rules 3 (the three admissible shapes of prevention) and 6 (a named
+mechanism is not the composed guarantee) become litmus tests; Property 7's epistemic symmetry is extended to
+evidence (item 3: a reader decides acceptance, the substrate never decides truth). This is the WHY cell for the
+axis in the doc-coverage matrix; without it every new row is ~ at best.
+
+### 12.6 The rest — what else belongs on this list
+
+- **Front door refresh** at each phase exit: `README.md` (capability list, companion table), `docs/README.md`,
+  `docs/plans/README.md`, and the `CLAUDE.md` on-ramp's *Active work* paragraph — the pages a newcomer reads before
+  any chapter.
+- **A companion onboarding checklist**, since the axis adds up to five crates (effects, `mycelium-sim`, the
+  federation companion, `mycelium-knowledge`, `mycelium-control`, plus mandates over the wiki): a Cargo feature
+  line, a CI job, a Docker-suite membership where it makes a cross-node claim, a row in
+  `docs/operations/companions.md` and the wiki companions page, a gallery entry, an SDK verb where it has a gateway
+  route. The checklist is a wiki page; a companion missing a row is a lint finding.
+- **Migration notes per deprecation.** Every §6.6 ledger entry ships with a `CHANGELOG` migration note and a
+  guide paragraph the day it is deprecated, not the day it is removed — the ledger is a promise to adopters, and
+  the migration text is how the promise is kept.
+- **An adversarial self-audit at Phase C exit**, the v2.2.0 pattern (five passes, findings fixed before the
+  release), run against items 1, 2 and 7 together — because those three compose into the first *composed*
+  guarantee this plan makes (a durable, attributed, cross-domain effect), and posture rule 6 says composed
+  guarantees are established by argument *and* gate, never by naming. **Fuzz targets** for every new parser on a
+  trust edge (trust bundles, the edge protocol frames, replay bundle decoding) join the existing input-fuzz gate.
+- **The analysis series** (`docs/analysis/ratings.md`) keeps running; the axis does not get a dimension of its own.
+  What changes: the rotating deep-dives take the axis' items as they ship, and the falsification quota's probes
+  target composed guarantees first (rule 6).
+- **Research track:** already cross-linked (§9). Added here only as a *candidate*, not a commitment: the receipt
+  vocabulary and the replay harness together are the material for a third paper (typed receipts in a
+  coordinator-free substrate); decide after Phase B, when the peer-persisted protocol has data.
+- **What is deliberately *not* here:** a marketing site, a video, a certification programme, a training course.
+  The gallery, the guide, and two decks are the whole persuasion surface, by decision (the publications README).
+
+---
 
 ## Appendix A — verified anchors (2026-09-05)
 | Claim in a plan | Where verified | Holds? |
