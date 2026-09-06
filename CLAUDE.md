@@ -134,14 +134,16 @@ gate); a same-day critique found six gaps before council scale (format codec, fa
 branch contention, batch commits, read plane, batch gate) — hardening plan
 `docs/plans/council-substrate-hardening.md` (**Phase 6 complete M-side 2026-08-16**, incl. the
 measured ten-council contention run; remaining items are FTT-side); design record
-`docs/design/transparency-council-substrate.md`. Scale runs double as Paper 1.s case study. **mycelium-reason 0.6.0 (2026-09-04):** the NVIDIA-PAIR imports — router local reservations, the
-OpenAI-compatible façade `/gateway/reason/v1/*`, the `llm_meta` vocabulary + `ollama` collector;
-position: PAIR = GPU plane, Mycelium = agent plane, stackable (`docs/plans/mycelium-reason.md`
-addendum). Core fix on the way: merged `with_http_routes` routers now sit behind gateway auth with
-companion scope families. **The contracts axis (2026-09-05):** an external review's five defects fixed and
-released (v2.4.2 / v2.4.3, SDK 0.2.4 / 0.1.1); its six enhancement plans assessed, reconciled and adopted as
-**one plan** — `docs/plans/v3-contracts-axis.md` (posture · dependency graph · phase gates · 23-row decision
-register); externals vendored under `docs/plans/external/`. No code yet; next: item 1 PR 1 (contract ADR) + item
-6 PR 1 (nondeterminism inventory) + the membership-cooldown coupling fix. Delivery ledger:
+`docs/design/transparency-council-substrate.md`. Scale runs double as Paper 1.s case study. **mycelium-reason 0.6.x (2026-09-04 → 06):** 0.6.0 the NVIDIA-PAIR imports — router local reservations, the
+OpenAI-compatible façade `/gateway/reason/v1/*`, the `llm_meta` vocabulary + `ollama` collector (position: PAIR =
+GPU plane, Mycelium = agent plane, stackable — `docs/plans/mycelium-reason.md` addendum); 0.6.1 rank-and-reserve
+under one lock; 0.6.2 the façade omits the unknown token split instead of reporting `0`. **The contracts axis
+(2026-09-05 →):** an external review's five defects fixed and released (v2.4.2 / v2.4.3, SDK 0.2.4 / 0.1.1); its
+six enhancement plans reconciled into **one plan of record** — `docs/plans/v3-contracts-axis.md`, **rev 1.6**
+(posture · dependency graph · phases A–E with exit gates · decision register D1–D32 · §12 delivery surfaces:
+examples, dev/ops docs, decks, philosophy · §13 the composition hypothesis, *not* a v3 deliverable · §6.7 the RA
+resource-accounting slice); externals vendored under `docs/plans/external/`. Code so far: Phase 0 (durability) and
+RA0 (reason 0.6.2). Next: item 1 PR 1 (contract ADR, with `operation_id`/`attempt_id`) + item 6 PR 1
+(nondeterminism inventory) + item 7 (gateway caller identity) + the membership-cooldown explicit parameter. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

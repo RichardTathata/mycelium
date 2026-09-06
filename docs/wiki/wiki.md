@@ -58,7 +58,8 @@ upgrade. See [dev/history](dev/history.md) for the ledger.
 |---|---|
 | `src/lib.rs`, `mycelium-core/src/{framing,hlc}.rs`, `src/capability.rs` | Code canon (API, wire, HLC, capability model) |
 | `docs/README.md` | Map of the seven docs areas + root anchors |
-| `docs/plans/README.md` | Execution-record index (all engineering plans shipped as of 2026-06-21) |
+| `docs/plans/README.md` | Execution-record index (v1.x/v2.0 plans all shipped 2026-06-21) |
+| `docs/plans/v3-contracts-axis.md` | **The adopted v3.0 plan of record** (rev 1.6, 2026-09-06): posture, phases A–E, decision register D1–D32, §12 delivery surfaces, §6.7 the RA slice, §13 the composition hypothesis; assessment log `dev/.log/2026-09-05-v3-contracts-axis.md` |
 | `docs/publications/README.md` | Paper corpus index (read order, DOIs, dependency graph) |
 | `docs/analysis/ratings.md` | The M2 self-audit series + calibration ledger |
 | `docs/analysis/doc-coverage.md` | Documentation-coverage audit (WHAT/WHY/HOW × Dev/Ops matrix + remediation; a re-run diff target) |

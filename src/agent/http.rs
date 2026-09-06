@@ -4012,6 +4012,43 @@ mod tests {
     /// public set (`/health`, `/ready`, `/stats`, `/metrics`) and the nonce-capability
     /// `/bulk/{id}` stay open — never 401.
     #[tokio::test]
+    /// Wiki-lint regression (2026-09-06): a lock's slot is `lock/{name}` — two segments — and
+    /// the route is `/consensus/{slot}`, a one-segment pattern. So the literal
+    /// `GET /consensus/lock/{name}` the runbooks once gave **404s**, and only the
+    /// percent-encoded `GET /consensus/lock%2F{name}` reaches the handler. The runbooks
+    /// (`docs/operations/diagnostics.md`, `metrics.md`) now say the encoded form. If the route
+    /// ever becomes a wildcard, the first assertion flips — update the runbooks back then.
+    /// The route itself is `consensus`-gated (absent in the gateway-only build), hence the cfg.
+    #[cfg(feature = "consensus")]
+    async fn regression_lock_slot_reaches_consensus_slot_route_only_percent_encoded() {
+        use axum::http::header::AUTHORIZATION;
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let literal = client.get(format!("{base}/consensus/lock/x"))
+            .header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+        let encoded = client.get(format!("{base}/consensus/lock%2Fx"))
+            .header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
+        let (ls, es) = (literal.status(), encoded.status());
+        let lb = literal.text().await.unwrap_or_default();
+        let eb = encoded.text().await.unwrap_or_default();
+        agent.shutdown().await;
+        assert_eq!(ls, 404, "literal two-segment slot does not match `{{slot}}` (body: {lb})");
+        assert_eq!(es, 200, "percent-encoded slot reaches the handler (body: {eb})");
+        let v: serde_json::Value = serde_json::from_str(&eb).unwrap();
+        assert_eq!(v["slot"], "lock/x");
+    }
+
+    #[tokio::test]
     async fn regression_node_level_routes_require_bearer_when_token_set() {
         use axum::http::header::AUTHORIZATION;
 
