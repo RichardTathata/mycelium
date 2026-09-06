@@ -11,6 +11,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`mycelium-reason` 0.6.2 — the OpenAI-compatible façade no longer fabricates a token split.**
+  `/gateway/reason/v1/chat/completions` reported `prompt_tokens: 0, completion_tokens: 0` beside a real
+  `total_tokens` (a client summing the split got `0 ≠ total`). The mesh RPC returns one total and the split
+  is genuinely unknown, so the two keys are now **omitted** (an absent field is "unknown"; a `0` is a false
+  claim) and the extension block carries `mycelium.usage.split_known: false`, in the JSON body and the SSE
+  stop chunk alike. Companion-only; a 0.x shape change assessed on its merits (the false zero was worse than
+  the absent key). Gate: `regression_unknown_usage_split_is_omitted_not_zero`. Surfaced by the
+  resource-accounting proposal folded into the contracts-axis plan as rev 1.6.
+
 - **`mycelium-reason` 0.6.1 — the router reserves atomically with ranking.** 0.6.0's local reservations
   (the PAIR import) ranked from a *snapshot* of the in-flight map and reserved the chosen provider later, so
   truly simultaneous callers could all snapshot before any had reserved and herd onto one provider anyway —
