@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`GET /consensus/{*slot}` captures the path tail.** Every slot the substrate mints is hierarchical
+  (`lock/{name}`, `consistent/{key}`, `leader/{group}`), but the route was the one-segment `/consensus/{slot}`,
+  so the natural URL the runbooks gave (`/consensus/lock/{name}`) returned 404 and only the percent-encoded
+  slot reached the handler. The route is now a tail capture; both forms work and name the same slot. Additive
+  (no previously-working URL changes meaning); scope `consensus:read` unchanged; the `required_scope` key follows
+  the pattern. Gate: `regression_consensus_slot_route_accepts_hierarchical_slots`. This is the plan's *identifiers in paths* rule
+  (`docs/plans/v3-contracts-axis.md` §9, rev 1.7).
+
 ### Fixed
 
 - **`mycelium-reason` 0.6.2 — the OpenAI-compatible façade no longer fabricates a token split.**

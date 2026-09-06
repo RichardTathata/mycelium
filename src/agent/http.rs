@@ -10,7 +10,7 @@
 //!
 //! Behind the gateway bearer (and scope) boundary whenever a token model is configured — open only
 //! when none is, exactly like `/gateway/*` (since 2026-09-05; before, these answered with no token):
-//! - `GET  /consensus/{slot}`      — inspect committed value + ballot for a consensus slot (`consensus:read`)
+//! - `GET  /consensus/{*slot}`      — inspect committed value + ballot for a consensus slot (`consensus:read`)
 //! - `GET  /signals/{kind}`        — SSE stream of admitted signals (`mesh:read`)
 //! - `POST /mcp`                   — JSON-RPC 2.0 MCP protocol bridge (`mcp:invoke`)
 //!
@@ -174,7 +174,7 @@ pub(super) async fn run_http_server(
 
     // ── Language-bridge gateway routes (optionally auth-protected) ────────────
     // Nested under /gateway so the auth middleware applies to all of them; the node-level
-    // `/mcp`, `/signals/{kind}`, `/consensus/{slot}` get the same layer below, leaving only
+    // `/mcp`, `/signals/{kind}`, `/consensus/{*slot}` get the same layer below, leaving only
     // /health, /ready, /stats, /metrics and the nonce-capability /bulk/{id} public.
     // route_layer is applied once at the end so all routes (including
     // cfg-gated llm routes) are covered by a single middleware instance.
@@ -275,7 +275,7 @@ pub(super) async fn run_http_server(
     // token model is configured, like the gateway). Found by external review 2026-09-05: with a
     // token set, `POST /mcp` `tools/call` still invoked any tool in the cluster **with this node's
     // identity** (provider-side `authorized_callers` sees the node, not the HTTP caller — a
-    // confused deputy), `/signals/{kind}` streamed live mesh traffic and `/consensus/{slot}`
+    // confused deputy), `/signals/{kind}` streamed live mesh traffic and `/consensus/{*slot}`
     // disclosed committed values (lock holders) — while rbac.md and the wiki listed only
     // /health|/ready|/stats|/metrics as public. Scope entries live in `required_scope`
     // (`mcp:invoke`, `mesh:read`, `consensus:read`); the same layer instance the gateway uses.
@@ -283,7 +283,7 @@ pub(super) async fn run_http_server(
         .route("/signals/{kind}",       get(signal_sse_handler))
         .route("/mcp",                  post(mcp_handler));
     #[cfg(feature = "consensus")]
-    let gated = gated.route("/consensus/{slot}", get(consensus_slot_handler));
+    let gated = gated.route("/consensus/{*slot}", get(consensus_slot_handler));
     let gated = gated
         .route_layer(middleware::from_fn_with_state(Arc::clone(&state), gateway_auth));
     let app = app.merge(gated);
@@ -419,7 +419,7 @@ async fn shutdown_signal(mut rx: watch::Receiver<bool>) {
 ///    request must carry a valid `Authorization: Bearer <token>`. With neither
 ///    set the gateway is open (loopback-only deployments). `/health`, `/ready`,
 ///    `/stats`, `/metrics`, `/bulk/{id}` and the descriptor path stay public
-///    regardless; the node-level `/mcp`, `/signals/{kind}` and `/consensus/{slot}`
+///    regardless; the node-level `/mcp`, `/signals/{kind}` and `/consensus/{*slot}`
 ///    carry this same layer (2026-09-05).
 ///
 /// 2. **OAuth2 scope authorization** (`compliance` feature): the presented
@@ -586,7 +586,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         // these are merged, not nested under /gateway).
         "/mcp"              => "mcp:invoke",
         "/signals/{kind}"   => "mesh:read",
-        "/consensus/{slot}" => "consensus:read",
+        "/consensus/{*slot}" => "consensus:read",
         // Layer III consensus / consistency overlay
         "/gateway/overlay/consistent/set"      => "consensus:write",
         "/gateway/overlay/consistent/get"      => "consensus:read",
@@ -718,7 +718,7 @@ async fn bulk_staging_handler(
     }
 }
 
-/// `GET /consensus/{slot}` — inspect the committed value and current ballot for a slot.
+/// `GET /consensus/{*slot}` — inspect the committed value and current ballot for a slot.
 ///
 /// Returns `{"slot": "…", "committed": "<base64>" | null, "ballot": <u64>,
 /// "lease_ms": <u64> | null, "lease_expired": <bool>}`.
@@ -3946,7 +3946,7 @@ mod tests {
         // Node-level routes gated since 2026-09-05.
         assert_eq!(required_scope(&Method::POST, "/mcp"),              "mcp:invoke");
         assert_eq!(required_scope(&Method::GET,  "/signals/{kind}"),   "mesh:read");
-        assert_eq!(required_scope(&Method::GET,  "/consensus/{slot}"), "consensus:read");
+        assert_eq!(required_scope(&Method::GET,  "/consensus/{*slot}"), "consensus:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/reason/v1/chat/completions"), "llm:invoke");
         assert_eq!(required_scope(&Method::GET,  "/gateway/reason/trace/{run_id}"), "llm:read");
         assert_eq!(required_scope(&Method::PUT,  "/gateway/reason/blob"), "llm:write");
@@ -4006,21 +4006,21 @@ mod tests {
         assert_eq!(parse_hex32("abcd"), None);
     }
 
-    /// Review 2026-09-05 finding 4: `/mcp`, `/signals/{kind}` and `/consensus/{slot}` answered
+    /// Review 2026-09-05 finding 4: `/mcp`, `/signals/{kind}` and `/consensus/{*slot}` answered
     /// without a bearer when `gateway_auth_token` was set — `tools/call` invoked any cluster tool
     /// with this node's identity. They now sit behind the gateway's bearer boundary. The M16
     /// public set (`/health`, `/ready`, `/stats`, `/metrics`) and the nonce-capability
     /// `/bulk/{id}` stay open — never 401.
     #[tokio::test]
-    /// Wiki-lint regression (2026-09-06): a lock's slot is `lock/{name}` — two segments — and
-    /// the route is `/consensus/{slot}`, a one-segment pattern. So the literal
-    /// `GET /consensus/lock/{name}` the runbooks once gave **404s**, and only the
-    /// percent-encoded `GET /consensus/lock%2F{name}` reaches the handler. The runbooks
-    /// (`docs/operations/diagnostics.md`, `metrics.md`) now say the encoded form. If the route
-    /// ever becomes a wildcard, the first assertion flips — update the runbooks back then.
-    /// The route itself is `consensus`-gated (absent in the gateway-only build), hence the cfg.
+    /// Identifiers in paths (contracts-axis plan §9, 2026-09-06): every slot the substrate mints
+    /// is hierarchical (`lock/{name}`, `consistent/{key}`, `leader/{group}`), so the read route
+    /// captures the **path tail** (`/consensus/{*slot}`) and an operator can type the slot as a
+    /// receipt shows it. Before this the pattern was one-segment and the runbooks' literal URL
+    /// 404ed for two months (wiki-lint ledger 2026-09-06). Both the literal and the
+    /// percent-encoded form must reach the handler and name the same slot. `consensus`-gated
+    /// because the route is.
     #[cfg(feature = "consensus")]
-    async fn regression_lock_slot_reaches_consensus_slot_route_only_percent_encoded() {
+    async fn regression_consensus_slot_route_accepts_hierarchical_slots() {
         use axum::http::header::AUTHORIZATION;
         let gossip_port = alloc_port();
         let http_port   = alloc_port();
@@ -4042,10 +4042,12 @@ mod tests {
         let lb = literal.text().await.unwrap_or_default();
         let eb = encoded.text().await.unwrap_or_default();
         agent.shutdown().await;
-        assert_eq!(ls, 404, "literal two-segment slot does not match `{{slot}}` (body: {lb})");
-        assert_eq!(es, 200, "percent-encoded slot reaches the handler (body: {eb})");
-        let v: serde_json::Value = serde_json::from_str(&eb).unwrap();
-        assert_eq!(v["slot"], "lock/x");
+        assert_eq!(ls, 200, "literal hierarchical slot reaches the handler (body: {lb})");
+        assert_eq!(es, 200, "percent-encoded slot still reaches the handler (body: {eb})");
+        let lv: serde_json::Value = serde_json::from_str(&lb).unwrap();
+        let ev: serde_json::Value = serde_json::from_str(&eb).unwrap();
+        assert_eq!(lv["slot"], "lock/x");
+        assert_eq!(ev["slot"], "lock/x", "the extractor decodes the tail");
     }
 
     #[tokio::test]
