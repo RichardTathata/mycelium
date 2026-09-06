@@ -58,6 +58,17 @@ figures. Plan: `docs/plans/three_arm_workdist.md`; runners
 `docs/publications/paper2a/data/three_arm/` (one sweep stall-contaminated — see its
 README). Engineering-complete substrate; this is measurement + writing.
 
+## Pending: the composition hypothesis (research-track, after the contracts axis' items 3/4/5)
+
+Recorded 2026-09-06 in the plan of record, [`docs/plans/v3-contracts-axis.md` §13](../../plans/v3-contracts-axis.md):
+the three-arm harness extended to **four arms** (fixed workflow · orchestrator-led · axis with fixed policies · axis
+choosing among explicit arrangements) to test whether composing requirements, voluntary acceptance, scoped mandates,
+allocated resources and attributable outcomes lets local participants reorganise work with less manual coordination
+and no weakened safety boundary. Must report where the fixed/orchestrated arms win. Plus item 3's behavioural
+experiment (evidence-aware resolution vs ordinary resolution under misleading, correlated, stale and contradictory
+evidence; errors *and* opportunity costs). Not runnable until `mycelium-knowledge`, `mycelium-control` and the
+mandates work exist; the co-op supply-disruption demonstration is the acceptance artefact.
+
 ## Pending: the "Blood Money → Monetary Ecology" article revision (planned, not started)
 
 Three load-bearing improvements: (1) pull P and S apart as cause→effect (suppress

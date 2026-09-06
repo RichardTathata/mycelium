@@ -3038,7 +3038,7 @@ mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consiste
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
 
-### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.4 adds the delivery surfaces; rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
+### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.4 adds the delivery surfaces, rev 1.5 the composition hypothesis; rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
 
 **The plan of record is [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md).** This section is its
 index. An external review of v2.4.1 (2026-09-05) found five defects — fixed and released the same day — and
@@ -3100,6 +3100,17 @@ capture with redaction; **presentations** — the core and customer decks re-ali
 under `/publication-lint`, "shipped" only with a tag; **philosophy** — the contract as a property, posture rules 3
 and 6 as litmus tests; plus front-door refresh, a companion onboarding checklist, migration notes per deprecation,
 a Phase-C adversarial self-audit. **No phase exit while its §12 lines are open.**
+
+**Beyond the axis — the composition hypothesis (rev 1.5, plan §13; recorded here, *not a v3.0 deliverable*):** v3.0 delivers its prerequisites (items 3, 4, 5) and item 3's semantic gate; the experiment itself is the **opening question of the next epoch**, and its result decides whether there is a v4.0 body of work. a completed axis is
+a *distinctive composition* (discovery, belief, permission and commitment kept separate), not a new primitive, and
+correctness work is not novelty. A **commitment is a composition** of five existing records — requirement ·
+acceptance · mandate/allocation · receipt · assessment — never a subsystem or a planner (D28). Hypothesis: *composing
+requirements, voluntary acceptance, scoped mandates, allocated resources and attributable outcomes lets local
+participants reorganise work under changing conditions, with less manual coordination and without weakening declared
+safety boundaries.* Instrument: the three-arm harness extended to four arms (fixed workflow · orchestrator-led · axis
+with fixed policies · axis choosing among explicit arrangements), reporting where the fixed/orchestrated arms win;
+run only once items 3, 4, 5 exist. Item 3 gains a semantic gate (Phase D) and a behavioural experiment measuring
+errors *and* opportunity costs.
 
 Status: **adopted as a plan; no code.** Assessment record and the day's verification:
 `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.

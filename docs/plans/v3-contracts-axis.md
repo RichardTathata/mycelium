@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · **rev 1.4, 2026-09-06** adds §12, the delivery surfaces (examples, documentation, presentations) with their gates (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · **rev 1.5, 2026-09-06** adds item 3's two gates and §13, the composition hypothesis (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -114,7 +114,7 @@ ADR):
 | **A** | 1·PR1–3 (ADR, identities + receipts, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown parameter (4, standalone) · **7 gateway caller identity** · **8 threat model rev 2** · **V1 the nightly scale runner green** · **V2 on-disk golden fixtures in CI** | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails; **item 7's four negative cases + the `authorized_callers` gate pass in CI and the secure profile refuses legacy dispatch**; **item 8 published and cited by items 2/3/5's PR-1 ADRs**; **V1: three consecutive green nightlies (`resilience` + `entries`; `scale` classified)**; **V2: every released WAL/snapshot format replays in CI** |
 | **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) | `set_with_min_acks` acknowledges the *exact* payload only; **a peer that acknowledged persistence holds the record across its own crash/restart** (a crash-before-ack peer does not count); two meshes discover selected exports without merging |
 | **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 | the adversarial release demos of 1 and 2 pass in CI |
-| **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 | evidence-aware resolution and curator handover both replay deterministically |
+| **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 | evidence-aware resolution and curator handover both replay deterministically; **item 3's semantic gate: misleading evidence cannot erase a conflicting observation, refresh expired evidence, or confer authority (three replayed negative cases, rev 1.5)** |
 | **E** | 3·PR7 · 4·PR6–7 · 5·PR7 · 6·PR7 | combined-feedback scenario green; shadow-mode rollout documented |
 
 *(rev 1.4)* Every phase exit also requires the **§12 alignment gate** for the items it ships: the gallery entry,
@@ -284,6 +284,18 @@ is HLC adjacency.
 
 **Status wording.** PR 1's typed records are an *initial API release*, not completion of the knowledge contract; the
 contract is complete at PR 6 (the demonstration), and adapters (PR 7) extend it.
+
+**Two gates, not one *(rev 1.5)*.** The knowledge layer's most attractive claim — *substantive disagreement is
+preserved while useful coordination continues* — is also its least evidenced, so it gets a **semantic gate** and a
+**behavioural experiment**, and they are not confused with each other. *Semantic (a Phase D exit condition, in
+CI):* misleading evidence cannot silently erase a conflicting observation, cannot refresh expired evidence, and
+cannot confer authority — three negative cases, replayed. *Behavioural (research track, §13):* whether
+evidence-sensitive resolution improves outcomes under **misleading self-advertisements, correlated observers, stale
+successful histories and contradictory task-specific results**, compared with ordinary `resolve_for_caller` on the
+same resources; measured as **errors and opportunity costs** — bad selections, unnecessary refusals, completion
+quality, evaluation overhead — because a resolver that rejects everything looks safe while being useless. The
+second gate supports a *bounded* empirical claim; it can never establish that evidence-aware selection is always
+better, and the plan does not say it is.
 
 **⚠ Divergences.** Reserve `knowledge/` in the namespace table and both front-door lists at PR 1 · the trace adapter adds
 `derived_from` links rather than importing HLC order as causation · reuse `schemas/{schema_id}` as the schema *locator*
@@ -460,6 +472,7 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D24 | 1 | `persisted: bool` documented as "true = no promise broken" when unconfigured | A **new** `local_durability` representation beside the old field, `persisted` deprecated on 2.x, removal in the §6.6 ledger (rev 1.3: an enum-for-bool swap is not additive) | Documentation is inadequate for a contracts programme; Rust's compatibility rules define "additive" |
 | D25 | 2 | A second public well-known descriptor (`/.well-known/mycelium-domain`) and trust bundles | **NANDA stays the public discovery edge** (AgentFacts, self-certified, pull); federation is the authenticated export-and-invoke edge; the descriptor's public subset is an **AgentFacts profile** through the existing serializer; **no second well-known, no registry, no TRS**; "trust is the fetcher's decision" holds on both sides; assessments reach AgentFacts `certification` only through explicit projections | Two public descriptors and a trust index are how federation leaks into NANDA space |
 | D26 | 5 | "both refs in the same push" | **`git push --atomic` + `--force-with-lease=<mandate-ref>:<expected>` on every push, incl. ordinary content writes; fail closed on a non-atomic remote; local `verify` of the mandate ref inside every `update-ref` transaction** | An ordinary push is not atomic; a hook-time read is not a check through commit (the reviewer's requirement) |
+| D28 *(rev 1.5)* | beyond | A *commitment* subsystem as the central application abstraction; "the system constructs coordination arrangements" | A commitment is a **composition** of five existing records (requirement · acceptance · mandate/allocation · receipt · assessment) plus a correlation record; obligations arise only by authorized acceptance; no planner — **agreed with the reviewer after one exchange** (§13.2) | *Composition before primitives*; the planner is the ceremony the philosophy strips |
 | D27 | 7 | (a struct with principal + digest) | The context is **constructed only by the auth layer and attested by the node over the request digest**; four negative cases in CI; legacy node-as-caller only under `legacy`, never in the secure profile | Receiving a struct is not verifying a relationship |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
@@ -513,7 +526,7 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
   maintainer running `scripts/launchd/`; gate: three consecutive green `resilience` + `entries` nightlies with the
   `scale` row classified, a Phase A exit condition. V2 golden fixtures — owner: item 1's PR 1; gate: a CI job that
   replays a fixture from every released on-disk format, a Phase A exit condition.
-- **The research track is cross-linked *(rev 1.2)*:** the replay harness (6) is a reproducible-experiment engine and
+- **The research track is cross-linked *(rev 1.2; §13 rev 1.5)*:** the replay harness (6) is a reproducible-experiment engine and
   the combined-feedback scenario (4) is a case study for the three-arm work-distribution paper, the way the council
   substrate already doubles as Paper 1's case study — planned once, cited from `docs/wiki/domain/publications.md`.
 - **Deferred, by decision:** a policy DSL; automatic algorithm selection; distributed transactions; aggregated
@@ -536,6 +549,15 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
+- **rev 1.5 (2026-09-06)** — from the reviewer's post-axis assessment and our exchange on it: **item 3 gets two
+  gates** (a semantic gate in Phase D's exit — misleading evidence cannot erase a conflicting observation, refresh
+  expired evidence or confer authority; and a behavioural experiment on the research track measuring errors *and*
+  opportunity costs against ordinary resolution); **§13** records the agreed position — the axis' novelty is the
+  composition, not a primitive; correctness work is not novelty; the positioning sentence; the prior-art set incl.
+  the OSGi/Paremus lineage; a **commitment is a composition of five records, not a subsystem** (**D28**, the reviewer
+  withdrew the planner); the composition hypothesis with the four-arm instrument, run only when items 3, 4, 5 exist;
+  the co-op supply-disruption demonstration; replay's counterfactual limit. Scheduled inside phases A–E: only the
+  semantic gate.
 - **rev 1.4 (2026-09-06)** — **§12 Delivery surfaces**, from the maintainer's requirement that the roadmap include
   compelling examples (refresh + new), developer and operations documentation re-alignment, and both presentations:
   six lines (S1 examples — one decisive demonstration per item plus the refresh of every ack-showing example; S2 dev
@@ -656,6 +678,9 @@ model rev 2 (item 8) lands under `docs/design/` and is linked from `crown-jewel.
   epoch — receipts as the honest ack, replay as the verification engine, *domains are not NANDA* — with every
   claim labelled by phase status (**shipped** with a tag · **in CI** · **planned**). The deck's existing federation
   slide and the PAIR-shaped slide are the two that change first.
+- **Positioning sentence for both decks *(rev 1.5, §13.1)*:** *a distributed coordination substrate for autonomous agents,
+  combining local decision-making with evidence-aware capability selection, scoped authority and bounded federation;
+  its coordination contracts are tested through deterministic replay.* No "unique", "first", or new-category claim.
 - **Customer deck** (`customer-pitch.html`, buyer-facing): the *Honest next* card is rewritten to name typed
   durability receipts, deterministic replay, and federated domains as the next capabilities; the security list gains
   caller identity and the threat model once they ship; "no third-party production deployment yet" stays until it is
@@ -698,6 +723,97 @@ axis in the doc-coverage matrix; without it every new row is ~ at best.
   coordinator-free substrate); decide after Phase B, when the peer-persisted protocol has data.
 - **What is deliberately *not* here:** a marketing site, a video, a certification programme, a training course.
   The gallery, the guide, and two decks are the whole persuasion surface, by decision (the publications README).
+
+---
+
+## 13. Beyond the axis — the composition hypothesis *(rev 1.5; recorded now, run later)*
+
+**Not a v3.0 deliverable.** The axis delivers the hypothesis' prerequisites (items 3, 4, 5) and item 3's semantic
+gate; the experiment is the opening question of the *next* epoch, and its result decides whether there is one.
+
+On 2026-09-06 the reviewer assessed what a completed axis amounts to and what a further step would need. We
+agreed, after one exchange, on a position that this section records so it is not re-argued. **Nothing here is
+scheduled inside phases A–E.** It is the hypothesis the axis exists to make testable, and the reason items 3, 4
+and 5 have the gates they have.
+
+### 13.1 The assessment we accept
+
+A completed axis makes Mycelium a *distinctive coordination architecture*, with its novelty in the **composition**
+— discovery, belief, permission and commitment kept separate, so a participant can discover a service without
+trusting its competence, trust its competence without granting it authority, grant limited authority without
+admitting it into its domain, and get evidence from a call without that evidence becoming universally accepted
+knowledge. It does **not** introduce a new distributed-computing primitive and is not "the first system of its
+kind"; the ingredients (gossip, leases, fencing, durable logs, signatures, evidence records, deterministic
+simulation) are established, and the prior-art comparison starts there. **Correctness work is not novelty**: items
+1, 7 and the persistence fixes remove reasons to dismiss the thesis; they are never presented as differentiation.
+The positioning sentence we will use (§12.4): *a distributed coordination substrate for autonomous agents,
+combining local decision-making with evidence-aware capability selection, scoped authority and bounded
+federation; its coordination contracts are tested through deterministic replay.* "Unique", "first" and a
+new-category claim are reserved until a source-based prior-art comparison and comparative experiments support
+them. That comparison includes Linda, Zenoh, Automerge and FoundationDB **and** the project's documented governance
+lineage — OSGi and the Paremus fabric, argued in
+[management-as-intent](../wiki/domain/theory/management-as-intent.md) — compared from sources, not assumed
+equivalent.
+
+### 13.2 A commitment is a composition, not a subsystem
+
+The reviewer's first proposal made a *commitment* the central application abstraction and had "the system
+construct coordination arrangements". We objected that this is the deferred policy DSL plus a planner — the
+supervisory machinery the philosophy strips — and the reviewer withdrew both. The agreed definition:
+
+> A commitment links a **declared requirement**, an authorized participant's **acceptance**, the relevant
+> **mandate** and **resource allocation**, and the **receipts** and **assessments** that accumulate afterwards
+> establishing what happened.
+
+Five records, each keeping its own meaning: a requirement expresses desired work (`declare_requirement`, item 4's
+allocated rights); acceptance records someone undertaking it (a signed knowledge record, item 3); a mandate
+establishes permission (item 5); a receipt establishes an operation's outcome (item 1); an assessment decides
+whether the requirement was satisfied (item 3). A commitment has a lifecycle — at acceptance it references
+requirement, authority and acceptance criteria; receipts and assessments arrive later — and needs at most a small
+**correlation record** to link the five. No DSL, no new consensus, no service that assigns obligations. **Nobody
+assigns another participant's obligations**: obligations arise only through authorized acceptance; a participant
+may plan under a scoped mandate, and no planner is permanent. The arrangement of work is *observable through the
+records*, not constructed by a component. Posture rule 2 (composition before primitives) applies in full: a
+commitment subsystem needs a written argument that this composition cannot express it.
+
+**The risk that makes it worth testing:** the absence of a planner is not evidence of coordination. The complexity
+may simply have moved into participants. The experiment must show that local rules handle dependencies, prevent
+conflicting commitments where required, and recover when an obligation becomes infeasible.
+
+### 13.3 The hypothesis and its instrument
+
+> Composing requirements, voluntary acceptance, scoped mandates, allocated resources and attributable outcomes
+> allows local participants to reorganise work under changing conditions, with less manual coordination and
+> without weakening declared safety boundaries.
+
+- **Instrument:** the existing three-arm harness (`docs/plans/three_arm_workdist.md`), extended to four arms on
+  identical substrate, workload, models, tools and budgets: a well-engineered **fixed workflow** · an
+  **orchestrator-led** agent system · **the axis with fixed coordination policies** · **the axis choosing among a
+  small number of explicit arrangements**. Measured: completion quality, cost, recovery, human interventions,
+  authority violations, and performance on unfamiliar disruptions. The report **must expose the cases where the
+  fixed workflow or the orchestrator wins**; a result that never does is not credible.
+- **When:** record now; **run only when items 3, 4 and 5 are available** — Phase B alone does not supply the
+  prerequisites (mandates, evidence, control). Earliest honest slot: after Phase D.
+- **Demonstration:** self-contained, in the co-op world, at the gallery bar — three independently governed teams
+  (domains) handling a **supply disruption**: a human authorizes an outcome, budget and permitted interventions;
+  participants discover capabilities and accept bounded responsibilities; each team keeps its detailed evidence
+  local; a key participant disappears and one domain disconnects; the remaining participants revise the
+  arrangement within existing authority; conflicting assessments stay visible without stopping useful work;
+  completion is established by agreed evidence; a *qualified* lesson about which arrangement helped is retained.
+  Human owners can inspect, reject and interrupt at every step. Independent application evidence from a deployment
+  is welcome later; the repository's acceptance artefact is this demonstration.
+- **What replay can and cannot do here:** item 6 reproduces histories; it **cannot produce counterfactuals** — a
+  different action changes subsequent observations and external responses, and replaying the original responses
+  yields a convincing, invalid answer. Evaluating a proposed arrangement needs explicit environment models with
+  stated limits, scenario variation and sensitivity analysis, item 4's shadow mode, and bounded live experiments for
+  what simulation cannot establish. The output is *evidence for a decision with uncertainty attached*, never a
+  post-hoc explanation. This is why "automatic algorithm selection" stays deferred (§9).
+- **Not launched:** collective learning about arrangements (institutional memory with applicability conditions,
+  uncertainty, provenance and expiry) and mechanically-checkable composition properties across a domain edge
+  (authority exists · allocated rights cover the obligation · deadlines compatible · no obligation can be left
+  unresolved · completion evidence sufficient for the receiving domain) are the two directions after the
+  hypothesis holds. Both are compositions of items 2–5; neither is a new subsystem. One vertical slice, one
+  bounded experiment, then decide.
 
 ---
 
