@@ -678,9 +678,13 @@ model rev 2 (item 8) lands under `docs/design/` and is linked from `crown-jewel.
   epoch — receipts as the honest ack, replay as the verification engine, *domains are not NANDA* — with every
   claim labelled by phase status (**shipped** with a tag · **in CI** · **planned**). The deck's existing federation
   slide and the PAIR-shaped slide are the two that change first.
-- **Positioning sentence for both decks *(rev 1.5, §13.1)*:** *a distributed coordination substrate for autonomous agents,
-  combining local decision-making with evidence-aware capability selection, scoped authority and bounded federation;
-  its coordination contracts are tested through deterministic replay.* No "unique", "first", or new-category claim.
+- **Two positioning sentences, one per deck *(rev 1.5, §13.1; customer sentence added 2026-09-06)*.** Engineer-facing
+  (the core deck): *a distributed coordination substrate for autonomous agents, combining local decision-making with
+  evidence-aware capability selection, scoped authority and bounded federation; its coordination contracts are tested
+  through deterministic replay.* Buyer-facing (the customer pitch): *Mycelium enables independently governed agents to
+  coordinate through a shared medium, with explicit evidence, bounded authority and verifiable outcomes — while
+  preserving local autonomy and disagreement.* The first names mechanisms; the second names outcomes. Neither makes a
+  "unique", "first", or new-category claim, and neither is used until the tagged release it describes exists.
 - **Customer deck** (`customer-pitch.html`, buyer-facing): the *Honest next* card is rewritten to name typed
   durability receipts, deterministic replay, and federated domains as the next capabilities; the security list gains
   caller identity and the threat model once they ship; "no third-party production deployment yet" stays until it is
@@ -746,7 +750,7 @@ knowledge. It does **not** introduce a new distributed-computing primitive and i
 kind"; the ingredients (gossip, leases, fencing, durable logs, signatures, evidence records, deterministic
 simulation) are established, and the prior-art comparison starts there. **Correctness work is not novelty**: items
 1, 7 and the persistence fixes remove reasons to dismiss the thesis; they are never presented as differentiation.
-The positioning sentence we will use (§12.4): *a distributed coordination substrate for autonomous agents,
+The engineer-facing positioning sentence we will use (§12.4 carries the buyer-facing one beside it): *a distributed coordination substrate for autonomous agents,
 combining local decision-making with evidence-aware capability selection, scoped authority and bounded
 federation; its coordination contracts are tested through deterministic replay.* "Unique", "first" and a
 new-category claim are reserved until a source-based prior-art comparison and comparative experiments support
