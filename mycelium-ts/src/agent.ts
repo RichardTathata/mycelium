@@ -274,7 +274,9 @@ export class MyceliumAgent {
   }
 
   /**
-   * Writes `value` and waits for at least `minAcks` distinct peers to confirm.
+   * Writes `value` and waits for at least `minAcks` distinct peers to gossip an update for the key at or
+   * after this write's timestamp — propagation evidence, not receipt of this payload and not persistence
+   * (the exact-write receipt is the v3.0 contracts axis, item 1).
    * Returns the confirmed peer count on success; throws `TimeoutError` on timeout.
    */
   async setWithMinAcks(

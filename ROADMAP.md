@@ -3038,7 +3038,7 @@ mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consiste
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
 
-### The contracts axis (adopted plan 2026-09-05, rev 1.1 2026-09-06 — `docs/plans/v3-contracts-axis.md`)
+### The contracts axis (adopted plan 2026-09-05, rev 1.2 2026-09-06 — `docs/plans/v3-contracts-axis.md`)
 
 **The plan of record is [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md).** This section is its
 index. An external review of v2.4.1 (2026-09-05) found five defects — fixed and released the same day — and
@@ -3065,6 +3065,8 @@ gallery entry); roles evaporate and authority expires. The axis is the philosoph
 | 3 | **Knowledge layer** | claim · observation · assessment · acceptance; reader-specific acceptance | companion `mycelium-knowledge` | 6 | after 1 + 6 |
 | 4 | **Adaptive stability** | one admission contract for every governor; budgets as allocated rights | agent interfaces + `mycelium-control` | 7 | explicit cooldown parameter now (*rev 1.1: the "live coupling" claim was wrong*); rest after 6 |
 | 5 | **Scoped mandates** | authority checked by the resource, never inferred from a role | wiki + consensus + companion | 7 | after 1 + 6 (replay scenario B) |
+| 7 | **Gateway caller identity** *(rev 1.2)* | every gateway-originated call carries the client's identity to the provider — the `/mcp` confused-deputy class, closed everywhere | core gateway (additive) | — | Phase A, standalone |
+| 8 | **Threat model rev 2** *(rev 1.2)* | foreign principals · abusive authenticated clients · evidence confidentiality · a compromised former holder | `docs/threat-model.md` | — | Phase A; gates 2/3/5 |
 
 **Order:** 1 + 6 together → 2 → 3, 4, 5 as companions. **The one architectural disagreement with the reviewer** (D1):
 no resource-authoritative *service process* for mandates — the fence goes inside the canonical store's own atomic
@@ -3074,6 +3076,13 @@ establishment (D2) made conditional on the replay gate.* **The `3.0.0` candidate
 changes the wire. **Subsumed packaging candidates** (table above): the *auction / bidding* companion needs item 1's
 destination-commit receipt; the *durable / partitioned event-log* refinement is item 1's receipt vocabulary on
 `KvHandle::append`; the *governed-memory read-set* candidate is item 3's provenance records.
+
+**Cross-cutting (rev 1.2):** the **parity gate** (a gateway change ships with SDKs + operator docs in the same PR) ·
+the **public surface as code** (one routing-defined list, tested against `rbac.md`) · **verification
+infrastructure** owned here (the nightly scale runner; on-disk golden fixtures in CI) · the **`3.0.0` removal
+ledger** (plan §6.6: `system_propose`, cosmetic `cluster_name`, the inferred `>=` ack, `persisted: bool`,
+node-as-caller dispatch) · the research track cross-linked (replay = reproducible experiments; the combined-feedback
+scenario = a Paper 1 case study).
 
 Status: **adopted as a plan; no code.** Assessment record and the day's verification:
 `docs/wiki/dev/.log/2026-09-05-v3-contracts-axis.md`.

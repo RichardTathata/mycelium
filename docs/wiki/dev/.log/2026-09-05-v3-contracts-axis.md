@@ -220,3 +220,25 @@ the correction.
 "Derived from X" and "changes when X changes" are different claims; check whether the consumer *reads* X live before
 writing "coupling". And the reviewer's closing line is now posture rule 6: a named mechanism is not the composed
 guarantee.
+
+## Rev 1.2 (2026-09-06) — our own additions
+
+After rev 1.1, a 360 of the roadmap asked what was still missing. Added: **item 7, gateway caller identity inside
+a domain** — the `/mcp` confused deputy generalised: every gateway-originated call runs *as the node*, so
+`authorized_callers` never sees the client; a `GatewayCaller` context is the precursor to item 2's adapter, not its
+consequence. **Item 8, threat model rev 2** — one document for the foreign-principal / abusive-client / evidence-
+confidentiality / compromised-holder threats that items 2, 3, 5 each described in prose. A **`3.0.0` removal
+ledger** (`system_propose`, cosmetic `cluster_name`, the `>=` ack, `persisted: bool`, node-as-caller). Two
+cross-cutting rules — the **parity gate** (gateway change ⇒ SDKs + docs in the same PR; the SDKs lagged twice on
+09-05) and **public surface as code** (a routing-defined list tested against `rbac.md`). **Verification
+infrastructure** named: the nightly scale runner (image-build failures for days) and on-disk golden fixtures.
+The research track cross-linked.
+
+**Done now, not deferred:** `set_with_min_acks` was described as "durability counting" / "confirm receipt" in the
+rustdoc, both SDK READMEs and docstrings, and two guides. Reworded at all seven sites to what the tracker does:
+count any peer update for the key at or after the write's timestamp. The reviewer's rule — document actual
+semantics immediately — applied.
+
+## Reusable lesson (rev 1.2)
+An audit that finds the same lag twice (SDKs behind the gateway) has found a missing *rule*, not two bugs. Write
+the gate.

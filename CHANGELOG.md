@@ -11,6 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`set_with_min_acks` documented honestly** (rustdoc, both SDK READMEs and docstrings, guides 04 and
+  error-handling): an ack is any distinct peer's update for the key at or after the write's timestamp —
+  propagation (or supersession), **not** receipt of this payload and **not** persistence. The code is unchanged;
+  the exact-identity, persisted-by-peer receipt is the v3.0 contracts axis, item 1 (PR 4a/4b).
 - **Snapshot install is now crash-durable: the rename is fsynced at the directory before the WAL is
   truncated.** A file `sync_data` covers the snapshot's bytes, not the directory entry, so a power loss or
   kernel panic after the WAL truncation could leave the *old* `snapshot.bin` beside an *empty* fsynced
