@@ -292,3 +292,14 @@ and our exchange on their paradigm-shift proposal converged: a *commitment* is a
 records, not a subsystem, and there is no planner (D28 — the reviewer withdrew it). Recorded as plan §13 with the
 hypothesis, the four-arm instrument, the co-op demonstration, and replay's counterfactual limit; scheduled inside
 the phases only item 3's semantic gate (Phase D exit). Research-track pointer added to `domain/publications.md`.
+
+## Rev 1.6 (2026-09-06) — the RA slice and reason 0.6.2
+A third-party resource-accounting proposal (vendored `external/2026-09-06-ra-resource-accounting.md`) folded in as
+a cross-cutting slice over items 1, 4, 6, 7 — not item 9. Verified against HEAD: the OpenAI façade's
+`prompt_tokens: 0, completion_tokens: 0` beside a real total was a live honesty defect → `mycelium-reason` 0.6.2
+omits the unknown split (`mycelium.usage.split_known: false`; gate
+`regression_unknown_usage_split_is_omitted_not_zero`); the router has no logical-operation identity across retries
+→ item 1 PR 2; the guardrails budget is a count → Tier A. Trims: D29 minimal contract, money out of hard bounds;
+D30 RA1 after item 4's ADR; D31 stub consumer in CI; D32 responsibilities not roles. Lesson: a proposal that
+composes existing items is adopted as a slice with cross-references, never a new number — the plan's map must stay
+the one place dependencies are read.

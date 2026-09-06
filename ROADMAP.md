@@ -3038,7 +3038,7 @@ mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consiste
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
 
-### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.4 adds the delivery surfaces, rev 1.5 the composition hypothesis; rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
+### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.4 adds the delivery surfaces, rev 1.5 the composition hypothesis, rev 1.6 the RA slice; rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
 
 **The plan of record is [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md).** This section is its
 index. An external review of v2.4.1 (2026-09-05) found five defects — fixed and released the same day — and
@@ -3100,6 +3100,16 @@ capture with redaction; **presentations** — the core and customer decks re-ali
 under `/publication-lint`, "shipped" only with a tag; **philosophy** — the contract as a property, posture rules 3
 and 6 as litmus tests; plus front-door refresh, a companion onboarding checklist, migration notes per deprecation,
 a Phase-C adversarial self-audit. **No phase exit while its §12 lines are open.**
+
+**The RA slice — attributable resource accounting (rev 1.6, plan §6.7; a slice over items 1, 4, 6, 7 — not item
+9):** which attempt consumed what, for which logical operation, under whose verified authority, with what
+uncertainty. Three profiles (observe · enforce-local · enforce-allocated) in the guardrails tier vocabulary; **hard
+bounds only in native units with an enforceable maximum** — a price estimate is never a guarantee; reserve before
+dispatch, retain exposure on timeout, record overspend at its true value and fail closed; a durable outbox with
+authenticated pull; records outside gossip KV; a coverage event so "no usage" is never "no cost". Divergences D29–D32:
+the minimal contract with money out of the hard-bound vocabulary, RA1 after item 4's ADR, a stub consumer in CI,
+responsibilities not roles. RA0 shipped 2026-09-06 as `mycelium-reason` **0.6.2** (the OpenAI façade no longer
+fabricates a token split). Vendored proposal: `docs/plans/external/2026-09-06-ra-resource-accounting.md`.
 
 **Beyond the axis — the composition hypothesis (rev 1.5, plan §13; recorded here, *not a v3.0 deliverable*):** v3.0 delivers its prerequisites (items 3, 4, 5) and item 3's semantic gate; the experiment itself is the **opening question of the next epoch**, and its result decides whether there is a v4.0 body of work. a completed axis is
 a *distinctive composition* (discovery, belief, permission and commitment kept separate), not a new primitive, and
