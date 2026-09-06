@@ -4018,6 +4018,8 @@ mod tests {
     /// percent-encoded `GET /consensus/lock%2F{name}` reaches the handler. The runbooks
     /// (`docs/operations/diagnostics.md`, `metrics.md`) now say the encoded form. If the route
     /// ever becomes a wildcard, the first assertion flips — update the runbooks back then.
+    /// The route itself is `consensus`-gated (absent in the gateway-only build), hence the cfg.
+    #[cfg(feature = "consensus")]
     async fn regression_lock_slot_reaches_consensus_slot_route_only_percent_encoded() {
         use axum::http::header::AUTHORIZATION;
         let gossip_port = alloc_port();
