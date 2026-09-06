@@ -3101,7 +3101,7 @@ under `/publication-lint`, "shipped" only with a tag; **philosophy** — the con
 and 6 as litmus tests; plus front-door refresh, a companion onboarding checklist, migration notes per deprecation,
 a Phase-C adversarial self-audit. **No phase exit while its §12 lines are open.**
 
-**Beyond the axis — the composition hypothesis (rev 1.5, plan §13; recorded, not scheduled):** a completed axis is
+**Beyond the axis — the composition hypothesis (rev 1.5, plan §13; recorded here, *not a v3.0 deliverable*):** v3.0 delivers its prerequisites (items 3, 4, 5) and item 3's semantic gate; the experiment itself is the **opening question of the next epoch**, and its result decides whether there is a v4.0 body of work. a completed axis is
 a *distinctive composition* (discovery, belief, permission and commitment kept separate), not a new primitive, and
 correctness work is not novelty. A **commitment is a composition** of five existing records — requirement ·
 acceptance · mandate/allocation · receipt · assessment — never a subsystem or a planner (D28). Hypothesis: *composing

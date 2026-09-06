@@ -728,6 +728,9 @@ axis in the doc-coverage matrix; without it every new row is ~ at best.
 
 ## 13. Beyond the axis — the composition hypothesis *(rev 1.5; recorded now, run later)*
 
+**Not a v3.0 deliverable.** The axis delivers the hypothesis' prerequisites (items 3, 4, 5) and item 3's semantic
+gate; the experiment is the opening question of the *next* epoch, and its result decides whether there is one.
+
 On 2026-09-06 the reviewer assessed what a completed axis amounts to and what a further step would need. We
 agreed, after one exchange, on a position that this section records so it is not re-argued. **Nothing here is
 scheduled inside phases A–E.** It is the hypothesis the axis exists to make testable, and the reason items 3, 4
