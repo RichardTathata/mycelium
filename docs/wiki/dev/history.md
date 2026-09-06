@@ -36,6 +36,19 @@ and on the release PR before tagging**. Log `.log/2026-09-05-v2.4.3-release.md`.
   `mycelium-ts-v0.1.1`): every handle takes `token=` / `{ token }` (fallback `MYCELIUM_GATEWAY_TOKEN`),
   riding pooled + SSE clients; `consistent_set` / `cross_group_propose` return `CommitResult { persisted }`.
   `jest` now CI-gated. Logs `.log/2026-09-05-sdk-bearer-token.md`.
+- **`mycelium-reason` 0.6.2** (2026-09-06, tag `mycelium-reason-v0.6.2`, #198): the OpenAI façade omits the
+  unknown prompt/completion split instead of reporting `0` (`mycelium.usage.split_known: false`); RA0 of the plan.
+- **Contracts-axis plan rev 1.6** (2026-09-06, #197): the **RA slice** — attributable resource accounting composed
+  from items 1, 4, 6, 7 (§6.7; D29–D32: minimal contract with money out of the hard-bound vocabulary, RA1 after item
+  4's ADR, stub consumer in CI, responsibilities not roles); proposal vendored under `docs/plans/external/`.
+- **Contracts-axis plan rev 1.5** (2026-09-06, #195/#196): item 3's two gates (semantic + behavioural); §13 the
+  composition hypothesis — recorded, *not a v3.0 deliverable* (D28: a commitment is a composition of five records,
+  no planner); both decks' positioning sentences.
+- **Contracts-axis plan rev 1.4** (2026-09-06, #194): §12 delivery surfaces — examples (one decisive demonstration
+  per item + refresh), dev/ops documentation re-alignment, the two decks under `/publication-lint`, the philosophy
+  revision; no phase exit while its §12 lines are open.
+- **Directory fsync after the snapshot rename** (2026-09-05, #183) + write-site WAL-failure warns; analysis
+  **Run 61** (M2; floor 6/7/7 — WAL-error legibility, three probe gates, #185); doc-coverage **run 16**.
 - **`mycelium-reason` 0.6.1** (2026-09-06): the router's rank-then-reserve race fixed — rank and reserve under
   one lock per attempt, one pure selection rule with a unit gate; the 0.6.0 reservation damped staggered herds
   only. Reserve-before-act (contracts-axis item 4) applied where CI was flaking.

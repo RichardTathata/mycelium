@@ -58,7 +58,12 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   installable/ comp/ wiki/`) — the front-door reserved list had inherited the same gap
   because it was only ever diffed against this table, not against code.
 - **Endpoint/feature lists** (`docs/wiki/dev/operations.md`): spot-check against
-  `src/agent/http.rs` routes and `Cargo.toml` features.
+  `src/agent/http.rs` routes and `Cargo.toml` features. **And every URL a runbook or guide chapter tells an
+  operator to call** — `grep -rnoE '(GET|POST|DELETE|PUT) /[A-Za-z0-9_/{}%.:-]+' docs/operations docs/guide
+  docs/wiki` — exists as a literal in `http.rs` **and its segment shape matches**: a `{param}` pattern matches
+  one path segment, so a slash-bearing value (a lock's `lock/{name}` slot) reaches `/consensus/{slot}` only
+  percent-encoded. `diagnostics.md` + `metrics.md` gave the literal, 404ing form for two months (ledger
+  2026-09-06). When in doubt, probe it with a test — the router, not the doc, is canon.
 - **CI-gate list** (`docs/wiki/dev/testing/testing.md`): diff the documented gate block against the
   *actual* `run:` steps in `.github/workflows/*.yml`. A page that lists the *clippy* of a crate's
   tests can imply coverage CI doesn't provide — `mycelium-core`'s whole suite was clippy-compiled but
@@ -69,7 +74,8 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   design, so they drift like a wiki page and are higher-stakes (downstream integrators act on
   them). Verify: the reserved-KV-prefix list matches the `src/lib.rs` namespace-ownership
   table (top-level prefixes — grep `\| \`` rows, diff the sets); `WIRE_VERSION`; the eight
-  sub-handle names; the `Cargo.toml` feature flags. A mismatch = a finding (fix the doc). The
+  sub-handle names; the `Cargo.toml` feature flags; **the install snippet's `tag = "…"` pins are the newest tag
+  on each line** (`git tag -l 'v*' | sort -V | tail -1`; `git tag -l 'mycelium-<crate>-*'`). A mismatch = a finding (fix the doc). The
   *linking* front-doors (the FAQ's routing tables) need only the dead-link check in §3.
 
 Numbers the wiki deliberately does NOT pin (test counts, dep counts) are exempt — the

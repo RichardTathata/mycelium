@@ -160,7 +160,8 @@ The wiki has a genuinely different operational model: a **node-independent store
 
 ## mycelium-reason — routed inference, the OpenAI façade, fleet traces
 
-The Tier-3 reasoning companion (`mycelium-reason`, its own version line — 0.6.0 since 2026-09-04).
+The Tier-3 reasoning companion (`mycelium-reason`, its own version line — 0.6.2 since 2026-09-06: 0.6.0 the PAIR imports, 0.6.1 the atomic
+rank-and-reserve, 0.6.2 the OpenAI façade no longer fabricating a token split).
 Nothing to persist: routing state is capability pheromone + **node-local** in-flight reservations
 (never gossiped); traces ride the KV log (`log/reason/{run}`); payload blobs live in the blob tier
 (`BLOB_DIR`, content-addressed, fetched peer-to-peer on demand).
