@@ -285,3 +285,10 @@ ADR), and the rest (front door, companion onboarding checklist, migration notes 
 adversarial self-audit + fuzz targets). Gated by existing mechanisms only; no phase exit while its §12 lines are
 open. Lesson for the wiki: an engineering plan that stops at code leaves *expressible ≠ supported* half-applied —
 the gallery, the guide and the decks are where a claim becomes supported for a reader.
+
+## Rev 1.5 (2026-09-06) — item 3's two gates and the composition hypothesis
+The reviewer's post-axis assessment (novelty is the composition, not a primitive; correctness work is not novelty)
+and our exchange on their paradigm-shift proposal converged: a *commitment* is a composition of five existing
+records, not a subsystem, and there is no planner (D28 — the reviewer withdrew it). Recorded as plan §13 with the
+hypothesis, the four-arm instrument, the co-op demonstration, and replay's counterfactual limit; scheduled inside
+the phases only item 3's semantic gate (Phase D exit). Research-track pointer added to `domain/publications.md`.
