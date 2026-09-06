@@ -119,7 +119,9 @@ pub enum QuorumError {
 
 **Recoverability:** yes. The write succeeded locally and will propagate
 eventually. The `acks_received` field tells you how many peers did confirm;
-you can relax the durability requirement or retry when more peers rejoin.
+you can relax the propagation requirement or retry when more peers rejoin. (An ack means a peer gossiped an
+update for the key at or after this write's timestamp — propagation, not receipt of this payload, not
+persistence — see the v3.0 contracts axis, item 1, for the exact-write receipt.)
 
 ---
 

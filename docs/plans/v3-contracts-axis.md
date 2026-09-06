@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan · **rev 1.1, 2026-09-06** (rev 1.0 2026-09-05; §11 lists what changed after the reviewer's response) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · **rev 1.3, 2026-09-06** records their four implementation requirements (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -12,8 +12,9 @@ decided differently and why, how the six compose, and the order we will build in
 reviewer's text is marked **⚠ Divergence** and collected in [§7, the decision register](#7-decision-register).
 
 **"v3.0" is a roadmap epoch, not a version.** The released substrate is `mycelium` **2.4.3** (wire v12, PREV 11).
-Nothing in this plan changes the wire; a substrate `3.0.0` is triggered only by a breaking wire or public-API
-change, and §4.2 names the one candidate. Deliverables ship as companion crates on their own version lines and as
+Nothing in this plan changes the wire. **The one compatibility rule, used throughout (rev 1.3):** *ship compatible
+additions on 2.x; assess any incompatible public-API or protocol change on its merits* — §4.2 names the one
+*protocol* candidate; §9 states the rule for public types. Deliverables ship as companion crates on their own version lines and as
 additive core APIs on the 2.x line.
 
 ---
@@ -40,6 +41,8 @@ Six items, in the reviewer's numbering (kept so the external documents cross-ref
 | 3 | **Knowledge layer** | claim · observation · assessment · acceptance as attributable records; reader-specific acceptance | companion `mycelium-knowledge` | contract ADR + typed records |
 | 4 | **Adaptive stability** | a shared admission contract for every governor; strict budgets as allocated rights | agent-layer interfaces + `mycelium-control` | ADR + actuator inventory + fixture contract |
 | 5 | **Scoped mandates** | authority checked by the protected resource, never inferred from a role advertisement | wiki + consensus + companion | ADR + exhaustive wiki mutation-path inventory |
+| 7 | **Gateway caller identity** *(rev 1.2, near-term)* | every gateway-originated call carries the client's identity to the provider; the node never acts *as itself* on a client's behalf | core gateway (additive) | `GatewayCaller` context on rpc/scatter/propose/tool-call |
+| 8 | **Threat model rev 2** *(rev 1.2, gate)* | foreign principals, authenticated-but-abusive clients, evidence confidentiality, a compromised former holder | `docs/threat-model.md` | one revised document cited by items 2, 3, 5 |
 
 ### 1.3 Posture: the rules every item obeys
 These are the philosophy's litmus tests applied once, so the six entries do not each re-argue them.
@@ -95,6 +98,8 @@ what each item's demonstration must meet.
 | 3 Knowledge | 1 (receipts) · 6 (clock seam) | 5 (optional provenance refs) · 4 (optional observation provenance) |
 | 4 Stability | 6 (harness) · 1 (action-ID / unknown-outcome conventions) | — |
 | 5 Mandates | 1 (receipts) · 6 (scenario B) · 2 (cross-scope, later) | 3 (adoption decisions, later) |
+| 7 Gateway caller identity | — (standalone; Phase A) | 2 (the federated-caller adapter is this, across a boundary) · 5 (who invoked a mutation) |
+| 8 Threat model rev 2 | — (document; Phase A) | 2, 3, 5 (each PR 1 cites it) |
 
 **Order.** Items **1 and 6 first, together**: one states what must hold, the other attacks it. Then **2** as the
 structural investment. **3, 4, 5** follow as companions above the substrate, each once its dependencies' first
@@ -106,7 +111,7 @@ ADR):
 
 | Phase | Contents | Exit gate |
 |-------|----------|-----------|
-| **A** | 1·PR1–3 (ADR, identities + receipts, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown-coupling fix (4, standalone) | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails |
+| **A** | 1·PR1–3 (ADR, identities + receipts, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown parameter (4, standalone) · **7 gateway caller identity** · **8 threat model rev 2** · **V1 the nightly scale runner green** · **V2 on-disk golden fixtures in CI** | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails; **item 7's four negative cases + the `authorized_callers` gate pass in CI and the secure profile refuses legacy dispatch**; **item 8 published and cited by items 2/3/5's PR-1 ADRs**; **V1: three consecutive green nightlies (`resilience` + `entries`; `scale` classified)**; **V2: every released WAL/snapshot format replays in CI** |
 | **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) | `set_with_min_acks` acknowledges the *exact* payload only; **a peer that acknowledged persistence holds the record across its own crash/restart** (a crash-before-ack peer does not count); two meshes discover selected exports without merging |
 | **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 | the adversarial release demos of 1 and 2 pass in CI |
 | **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 | evidence-aware resolution and curator handover both replay deterministically |
@@ -143,9 +148,12 @@ PR7 gateway/SDK parity. PRs 2–3 are the first usable release.
   becomes visible · when the exact operation becomes durable · whether subscribers or effects may run before
   durability · what remains true after a synchronisation failure. Both orderings may have legitimate contracts;
   they may not silently share one meaning.
-- **`persisted` becomes a representational tri-state (item 1, PR 2).** Today it reads `true` when persistence is
-  unconfigured. Documentation is inadequate for a contracts programme: the Rust type gains a `NotConfigured` state
-  (the SDKs already model absence as `None`/`null`), additively.
+- **`persisted` becomes a representational tri-state (item 1, PR 2) — additively (rev 1.3).** Today it reads `true`
+  when persistence is unconfigured. Replacing the public `bool` field with an enum is **not** additive under Rust's
+  compatibility rules; the migration is a **new** field/result representation (`local_durability: LocalDurability
+  { OnDisk, Failed, NotConfigured }`) beside the old one, `persisted` kept and `#[deprecated]` on 2.x, gateway JSON
+  gaining the new key beside `"persisted"`, SDKs exposing the new state (they already model absence). Removal is a
+  §6.6 ledger entry.
 - **PR 4 split.** Reviewer: one "explicit peer persistence service" PR. We split 4a/4b. *Why:* 4a fixes a live overclaim
   on a shipped API in a few lines; 4b is a new protocol (negotiation, authenticated peers, failure-domain metadata,
   status retention) and the bulk of the plan. Pulling 4a forward is the honest priority.
@@ -194,9 +202,11 @@ tooling.
   are captured or reproducibly derived; boundary-event views and checkpoints follow when a real failure needs them.
   Exact replay **detects divergence** (each requested effect is checked against the recorded next effect) — it never
   merely consumes the same seed.
-- **4.2 — the `3.0.0` candidate.** Nothing here changes the wire. The only wire-touching work anywhere in this axis is a
-  *later* authenticated, domain-bound SWIM/handshake (item 2's deferred milestone); that, and nothing else, would
-  justify a substrate major.
+- **4.2 — the `3.0.0` candidates.** Nothing here changes the wire. The only *protocol* change anywhere in this axis is a
+  *later* authenticated, domain-bound SWIM/handshake (item 2's deferred milestone). A substrate major can also be
+  triggered by an incompatible *public-API* change; each such change is assessed on its merits under the one rule
+  (header), and none is planned — every public change in this axis is designed as a compatible addition with the
+  old surface deprecated (§6.6, D24).
 
 ---
 
@@ -237,6 +247,14 @@ mid-partition, reconnect, and prove from membership tables, consensus state and 
 - **Our own correction.** We had recorded domains as "the one item likely to touch the wire". Withdrawn: v1 federates over
   HTTPS at gateways (separate roots + SWIM off) and leaves the wire untouched.
 - **Process isolation is the example deployment's claim, not the library's.** The plan says so; we hold it in every doc.
+- **The NANDA boundary (rev 1.3, D25).** The AgentFacts companion already is Mycelium's NANDA edge: self-certified,
+  publicly fetchable, pulled by a quilt, deliberately un-gated, NANDA's field names isolated in one serializer.
+  Federation must not become a second discovery edge: the `DomainDescriptor`'s **public** subset is an AgentFacts
+  profile (no second well-known), trust bundles stay **bilateral operator configuration** (no registry, no TRS),
+  and item 3's assessments reach AgentFacts `certification` only through explicit export projections. NANDA =
+  what a domain says about itself, verifiable by any fetcher; federation = who may invoke what, between partners.
+  If NANDA later standardises attestations or cross-registry federation, we adapt the projection — edges are
+  adopted, not competed with.
 
 ---
 
@@ -334,9 +352,16 @@ Proposals are **evaporating KV** — a delivery hint. `LockService`'s fencing to
   per mechanism (the reviewer's qualification, accepted):** *(i) `GitStore`:* the mandate check and the content commit
   are **one git ref transaction** — `git update-ref --stdin` (`start` / `prepare` / `commit`) updating
   `refs/mycelium/mandate/{group}` and the content ref together, each with its expected old value, so two separately
-  successful CAS operations can never interleave; *(ii) the shared remote:* the **pre-receive hook** verifies the
-  signed epoch **and** the expected old values of both refs in the same push, rejecting the whole push on any
-  mismatch — a hook that only validates a signature before an update does not establish the guarantee; *(iii)
+  successful CAS operations can never interleave; *(ii) the shared remote (rev 1.3 — precise):* the curator pushes with **`git push --atomic`** so the remote updates
+  all requested refs or none, and asserts the mandate ref's current value with
+  **`--force-with-lease=refs/mycelium/mandate/{group}:<expected>`** on **every** push — including ordinary content
+  writes that leave the mandate unchanged — so the mandate check is part of the same remote ref transaction as the
+  content update, not an earlier hook-time read; the **pre-receive hook** additionally verifies the signed epoch and
+  rejects the whole atomic push on any mismatch. **Fail closed:** a remote that does not honour atomic pushes (the
+  client learns this from the push result) is not a supported strict-profile remote; the write is refused, never
+  downgraded to a non-atomic push. Locally, every content transaction carries `verify refs/mycelium/mandate/{group}
+  <expected>` in the same `update-ref --stdin` transaction, so the unchanged mandate is still checked *through
+  commit*, not before it; *(iii)
   `FsStore`:* its mutator `Mutex` is per store instance and does **not** serialise separate processes, so the strict
   profile on `FsStore` is **out of scope** unless an OS-level exclusive lock is added; legacy semantics are declared,
   not implied. The replay gate (scenario B) covers competing appointments, delayed holders, resource restart, expiry,
@@ -355,6 +380,48 @@ Proposals are **evaporating KV** — a delivery hint. `LockService`'s fencing to
   it under the replay harness (scenario B) before certifying or replacing.
 - **The decisive test is replay scenario B** — built once, there.
 - Reserve `mandate/` + `log/wiki/` at PR 1 · hold claims at "enforces configured eligibility rules".
+
+### 6.4 Item 7 — Gateway caller identity inside a domain *(rev 1.2)*
+**Why it is missing from the six.** The `/mcp` finding (fixed 2026-09-05) was a confused deputy: the gateway dispatched
+`tools/call` *as the node*. That class is not specific to MCP. Every gateway-originated RPC, scatter, proposal or
+tool call from a Python/TypeScript client runs under the node's identity, so provider-side `authorized_callers`
+sees the node and never the client. Item 2's `FederatedCaller` adapter solves this across a domain boundary;
+nothing solves it inside one. **Adopt (rev 1.3 — the contract):** a `GatewayCaller` context carried from the auth middleware to the provider on
+every gateway dispatch path, distinguishing **three things a provider can verify**: the *originating principal*
+(who the client is — the resolved bearer/scoped-token/OIDC principal, never a client-supplied string), the *gateway
+acting on its behalf* (this node's identity, bound in), and the *authority granted for this request* (the scopes
+the resolved credential actually holds, intersected with what the route needs). The context is **constructed only
+by the auth layer** and is attested to the provider by the node's identity over the request digest — a struct
+containing a principal name and a digest, supplied by anyone else, is not evidence. The node's own identity is used
+only for the node's own actions. **Secure profile rejects:** a client-supplied (forged) caller context · a missing
+context falling back to the node's identity · a gateway asserting more scope than the client's credential holds ·
+an older provider that cannot enforce the context (the call is refused, not silently run as the node). **Legacy
+node-as-caller dispatch** stays available only under an explicit `legacy` profile and is a §6.6 removal-ledger
+entry — compatibility never silently preserves impersonation in the secure profile. Small, standalone, Phase A;
+the precursor to item 2's adapter. **Gates:** a provider restricting `authorized_callers` rejects a gateway client
+outside the list although the node is listed; each of the four negative cases above is a CI test.
+
+### 6.5 Item 8 — Threat model rev 2 *(rev 1.2)*
+`docs/threat-model.md` models an admitted mesh with cooperative members (the crown-jewel work). Items 2, 3 and 5
+each state a threat model in prose — foreign principals and authenticated-but-abusive clients (2), evidence
+confidentiality and hash-as-credential (3), a compromised former holder and a forged epoch (5) — with no single
+document they cite. **Adopt:** one revision of `docs/threat-model.md` covering the three, written in Phase A and
+cited by each item's PR 1 ADR. Not code; a gate.
+
+### 6.6 The `3.0.0` removal ledger *(rev 1.2)*
+"Additive only on 2.x" is a slogan until the list of what a substrate major would remove exists. Seeded now,
+maintained in `ROADMAP.md`:
+
+| Candidate for removal at `3.0.0` | Since | Replacement |
+|---|---|---|
+| `system_propose` (`#[deprecated]` alias) | 2.1.0 | `cluster_propose` |
+| `cluster_name` as a cosmetic label with no isolation | — | item 2's `DomainId` (the label may stay as a display name) |
+| the inferred `>=` acknowledgement in `set_with_min_acks` | — | item 1 PR 4a's exact-identity ack (kept behind a legacy flag until then) |
+| `ConsensusResult::Committed { persisted: bool }` | 2.4.2 | the D24 tri-state |
+| `GatewayAgent`-as-caller dispatch (the node acting for gateway clients) | — | item 7's `GatewayCaller` |
+
+None of these *requires* `3.0.0`; each is additive-with-deprecation on 2.x. The ledger exists so the major, if
+D23's trigger ever fires, is a removal of announced things and nothing else.
 
 ---
 
@@ -386,8 +453,11 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D20 | 4 | Cooldown coupling listed as a design concern | **Rev 1.1:** an explicit cooldown parameter with a declared bound, decoupled from the health-check interval; decide whether the governor honours live timing intents | Small, standalone, gateable. *Rev 1.0 overstated this as a live runtime feedback defect — corrected, see §8* |
 | D21 | 4·6 | Combined tests as their own rigs | Every item's decisive demonstration is a **CI gallery entry** | *Expressible ≠ supported* |
 | D22 | all | Six separate seven-PR plans | **One plan, one dependency graph, one posture** (this document); the six kept vendored for attribution | The six overlap at receipts, clock, harness, namespaces — one order avoids six orderings |
-| D23 | 2 | ("4.0", "5.0" epochs) | Roadmap **epochs, not versions**; the only `3.0.0` candidate is a later authenticated domain-bound SWIM | Version numbers follow breaking changes, not ambitions |
-| D24 | 1 | `persisted: bool` documented as "true = no promise broken" when unconfigured | A **representational** `NotConfigured` state in the Rust type (PR 2), additive | Documentation is inadequate for a contracts programme (the reviewer's point, accepted) |
+| D23 | 2 | ("4.0", "5.0" epochs) | Roadmap **epochs, not versions**. **Rev 1.3, one rule:** ship compatible additions on 2.x; assess any incompatible public-API or protocol change on its merits — the one *protocol* candidate is a later authenticated domain-bound SWIM; public-type changes are designed additive (D24) | Version numbers follow breaking changes, not ambitions; and "additive" is Rust's definition, not ours |
+| D24 | 1 | `persisted: bool` documented as "true = no promise broken" when unconfigured | A **new** `local_durability` representation beside the old field, `persisted` deprecated on 2.x, removal in the §6.6 ledger (rev 1.3: an enum-for-bool swap is not additive) | Documentation is inadequate for a contracts programme; Rust's compatibility rules define "additive" |
+| D25 | 2 | A second public well-known descriptor (`/.well-known/mycelium-domain`) and trust bundles | **NANDA stays the public discovery edge** (AgentFacts, self-certified, pull); federation is the authenticated export-and-invoke edge; the descriptor's public subset is an **AgentFacts profile** through the existing serializer; **no second well-known, no registry, no TRS**; "trust is the fetcher's decision" holds on both sides; assessments reach AgentFacts `certification` only through explicit projections | Two public descriptors and a trust index are how federation leaks into NANDA space |
+| D26 | 5 | "both refs in the same push" | **`git push --atomic` + `--force-with-lease=<mandate-ref>:<expected>` on every push, incl. ordinary content writes; fail closed on a non-atomic remote; local `verify` of the mandate ref inside every `update-ref` transaction** | An ordinary push is not atomic; a hook-time read is not a check through commit (the reviewer's requirement) |
+| D27 | 7 | (a struct with principal + digest) | The context is **constructed only by the auth layer and attested by the node over the request digest**; four negative cases in CI; legacy node-as-caller only under `legacy`, never in the secure profile | Receiving a struct is not verifying a relationship |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
 lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disappearance; the asymmetric uncertainty rule;
@@ -410,11 +480,39 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 ## 9. Cross-cutting rules
 - **Namespaces reserved at each item's PR 1**, in `src/lib.rs` *and both* front-door lists: `knowledge/`, `mandate/`,
   `log/wiki/`; **explicitly none** for federation.
-- **Versioning.** Companions on their own lines; core additions on 2.x; a `3.0.0` only for D23's candidate.
+- **Versioning (rev 1.3, the one rule).** Ship compatible additions on 2.x — "compatible" by Rust's rules, so a public field or type never changes shape: a new representation is added beside the old, which is deprecated, and removal goes to the §6.6 ledger; assess any incompatible public-API or protocol change on its merits (the one protocol candidate is D23's). Companions on their own lines.
 - **Every gate is a test in CI** without a live node where possible (the day's pattern: stub servers, fetch recorders,
   in-process writers); Docker suites for the two-mesh and combined scenarios.
 - **Documentation ingest**: each PR updates the wiki page it touches and adds a dated `.log/` entry; the wiki lint's
   doc-vs-code sweep and the doc-coverage must-work rule apply to every instruction this plan adds.
+- **The parity gate *(rev 1.2)*:** no gateway change ships without the Python and TypeScript SDKs and the operator
+  docs in the **same PR**. The SDKs lagged core twice on 2026-09-05 (bearer support; the `persisted` field), both
+  found by audits, neither by a rule.
+- **The public surface as code *(rev 1.2, tightened 1.3)*:** one routing-defined list of public routes
+  (`pub fn public_routes()`) with a test that diffs it against `docs/operations/rbac.md` and the wiki security page
+  **and** an executable authentication test per route class (401 without a bearer on every non-public route; never
+  401 on the public set — `regression_node_level_routes_require_bearer_when_token_set` is the seed). Code and
+  documentation can agree on a wrong classification; only the executable test says what the router does.
+- **Secrets never become observability *(rev 1.3)*:** `GatewayCaller` carries a resolved principal and granted
+  scopes — **never the reusable credential itself**; replay bundles capture external inputs **redacted of bearer
+  credentials and keys**, with a protected-artefact class for anything that cannot be redacted and still reproduce;
+  audit and trace records carry verified claims and scoped attestations, not tokens. **Item 8 (threat model rev 2)
+  specifies** verified claims, scoped attestations, redaction rules and protected reproduction artefacts — the
+  identity and replay features both depend on it.
+- **Every implementation PR states, in its description *(rev 1.3, the reviewer's discipline)*:** the guarantee ·
+  its assumptions · the enforcing component · the failure behaviour · **the test that would detect its violation**.
+  A PR without the five is not ready for review.
+- **Verification infrastructure is a named line *(rev 1.2; owners + gates 1.3)*:** the nightly scale runner (100-node, resilience,
+  entry-volume) is owned here — it has failed in its Docker image build for days and Scalability has carried a
+  stale score for many runs; items 2 and 4 make scale claims that need it green. Plus **on-disk golden fixtures**
+  (WAL + snapshot files from each released format) replayed in CI, since item 1 will change the format and today
+  nothing tests that an old file still replays. **Owners and gates (rev 1.3):** V1 the nightly runner — owner: the
+  maintainer running `scripts/launchd/`; gate: three consecutive green `resilience` + `entries` nightlies with the
+  `scale` row classified, a Phase A exit condition. V2 golden fixtures — owner: item 1's PR 1; gate: a CI job that
+  replays a fixture from every released on-disk format, a Phase A exit condition.
+- **The research track is cross-linked *(rev 1.2)*:** the replay harness (6) is a reproducible-experiment engine and
+  the combined-feedback scenario (4) is a case study for the three-arm work-distribution paper, the way the council
+  substrate already doubles as Paper 1's case study — planned once, cited from `docs/wiki/domain/publications.md`.
 - **Deferred, by decision:** a policy DSL; automatic algorithm selection; distributed transactions; aggregated
   reputation; inferred observer independence; mandatory LLM judgment; consensus over truth; authenticated SWIM;
   transitive federation; dynamic quota transfer; delegation of mandates; replicated authority.
@@ -425,8 +523,29 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 3. **Item 4's cooldown fix** — standalone, this week.
 4. **Item 1, PR 4a** — the exact-identity ack; fixes the live `>=` overclaim.
 5. Item 2's ADR (D5–D7) in parallel, since it has no code dependency on 1 or 6 for its discovery release.
+6. **Item 7 (gateway caller identity)** — small, standalone, closes a live security-design gap *(rev 1.2)*.
+7. **Item 8 (threat model rev 2)** — a document; gates items 2, 3, 5 *(rev 1.2)*.
+8. **Fix the nightly scale runner's image-build deadline** — nothing scale-related can be evidenced until it is green.
+9. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
+   docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
+- **rev 1.3 (2026-09-06)** — the reviewer approved rev 1.2 as the strategic baseline with four implementation
+  requirements, now recorded: **D26** atomic remote enforcement incl. ordinary writes (`--atomic`,
+  `--force-with-lease` on the mandate ref, fail closed; local `verify` through commit); **one compatibility rule**
+  (header, §4.2, §9, D23) and **D24 made genuinely additive** (new representation + deprecation, not an enum-for-bool
+  swap); **Phase A's exit gate** now carries items 7 and 8 and the two verification lines (V1 nightly runner,
+  V2 golden fixtures) with owners and gates; the public-surface rule requires **executable** auth tests, not doc
+  agreement; a **secrets-never-become-observability** rule tying `GatewayCaller` and replay bundles to item 8;
+  **D27** — item 7's contract (originating principal · gateway acting · authority for this request; auth-layer
+  constructed, node-attested; four negative cases; legacy impersonation only under `legacy`); the **per-PR five-part
+  statement**. Also **D25** (NANDA boundary, from our own question). Scope otherwise stable; the next action is
+  unchanged: contracts ADR + replay foundation, with item 7 as immediate security work.
+- **rev 1.2 (2026-09-06)** — six additions from our own 360 review after rev 1.1: items **7** (gateway caller
+  identity inside a domain) and **8** (threat model rev 2) as near-term Phase-A work; the **`3.0.0` removal
+  ledger** (§6.6); the **parity gate** and **public-surface-as-code** rules; **verification infrastructure** named
+  (nightly runner, on-disk golden fixtures); the **research-track** cross-link. And the `set_with_min_acks`
+  wording corrected at seven sites (not a plan change — a live doc overclaim the plan had deferred to PR 1).
 - **rev 1.1 (2026-09-06)** — after the reviewer's response to rev 1.0. Adopted: the decisive mandate invariant and the
   per-mechanism transaction specification (§6.3, D1); D2 made conditional on D4; D8's application-visible
   visibility/durability contract; D24 (`persisted` tri-state); D6 crypto-not-trust; D14 minimum-bundle sufficiency +

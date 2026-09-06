@@ -220,3 +220,52 @@ the correction.
 "Derived from X" and "changes when X changes" are different claims; check whether the consumer *reads* X live before
 writing "coupling". And the reviewer's closing line is now posture rule 6: a named mechanism is not the composed
 guarantee.
+
+## Rev 1.2 (2026-09-06) — our own additions
+
+After rev 1.1, a 360 of the roadmap asked what was still missing. Added: **item 7, gateway caller identity inside
+a domain** — the `/mcp` confused deputy generalised: every gateway-originated call runs *as the node*, so
+`authorized_callers` never sees the client; a `GatewayCaller` context is the precursor to item 2's adapter, not its
+consequence. **Item 8, threat model rev 2** — one document for the foreign-principal / abusive-client / evidence-
+confidentiality / compromised-holder threats that items 2, 3, 5 each described in prose. A **`3.0.0` removal
+ledger** (`system_propose`, cosmetic `cluster_name`, the `>=` ack, `persisted: bool`, node-as-caller). Two
+cross-cutting rules — the **parity gate** (gateway change ⇒ SDKs + docs in the same PR; the SDKs lagged twice on
+09-05) and **public surface as code** (a routing-defined list tested against `rbac.md`). **Verification
+infrastructure** named: the nightly scale runner (image-build failures for days) and on-disk golden fixtures.
+The research track cross-linked.
+
+**Done now, not deferred:** `set_with_min_acks` was described as "durability counting" / "confirm receipt" in the
+rustdoc, both SDK READMEs and docstrings, and two guides. Reworded at all seven sites to what the tracker does:
+count any peer update for the key at or after the write's timestamp. The reviewer's rule — document actual
+semantics immediately — applied.
+
+## Reusable lesson (rev 1.2)
+An audit that finds the same lag twice (SDKs behind the gateway) has found a missing *rule*, not two bugs. Write
+the gate.
+
+## Rev 1.3 (2026-09-06) — the reviewer's approval, four requirements, and the NANDA line
+
+The reviewer approved rev 1.2 as the strategic baseline and asked for four things to be tracked as implementation
+requirements, all adopted: (1) **atomic remote enforcement** — "both refs in the same push" does not make a push
+atomic; `git push --atomic` + `--force-with-lease=<mandate-ref>:<expected>` on *every* push incl. ordinary content
+writes, fail closed on a non-atomic remote, and a local `verify` of the mandate ref inside every `update-ref`
+transaction so the unchanged mandate is checked *through commit* (D26); (2) **one compatibility rule** — "ship
+compatible additions on 2.x; assess any incompatible change on its merits" — replacing the two statements that only
+SWIM could trigger a major; and D24 corrected: an enum-for-bool swap is not additive, so `local_durability` is a
+new representation beside a deprecated `persisted`; (3) **phase gates** — Phase A's exit now carries items 7/8 and
+the verification lines (nightly runner, golden fixtures) with owners; public-surface agreement needs *executable*
+auth tests; (4) **secrets vs observability** — `GatewayCaller` carries a principal and scopes, never the credential;
+bundles are redacted; item 8 specifies the rules. Plus D27 — item 7's contract (three verifiable things; auth-layer
+constructed, node-attested; four negative cases; legacy impersonation only under `legacy`) — and the per-PR
+five-part statement (guarantee · assumptions · enforcing component · failure behaviour · violating test).
+
+**D25 — the NANDA boundary** (our own question, same day): AgentFacts is already the NANDA edge (self-certified,
+public, pulled). Federation's public descriptor subset is an AgentFacts profile; no second well-known; trust bundles
+stay bilateral; assessments reach `certification` only via explicit projections.
+
+**A finding from #192's CI, not from the docs:** `reservations_spread_concurrent_calls_across_equal_providers`
+(`mycelium-reason/tests/reason.rs:396`) failed twice on a runner — all four concurrent calls landed on one
+provider. The test says "deterministic against the mechanism, not timing", but the reservation is taken *after*
+ranking, not atomically with it, so on a loaded runner all four can resolve before any reservation registers. That
+is a flake with a cause — and it is item 4's *reserve-before-act* rule in miniature. Follow-up in the reason
+companion: reserve inside the ranking critical section, or make the test drive the interleaving.

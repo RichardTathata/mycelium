@@ -196,8 +196,10 @@ All writes are gossiped to peers with last-write-wins (HLC) semantics.
 
 #### `setWithMinAcks(key, value, minAcks, options?) → Promise<number>`
 
-Write `value` and wait for at least `minAcks` distinct peers to confirm.
-Returns the confirmed peer count; throws `TimeoutError` on timeout.
+Write `value` and wait until at least `minAcks` distinct peers have gossiped an update for the key at or
+after this write's timestamp — evidence of **propagation** (or supersession), not receipt of this payload and
+not persistence (the exact-write receipt is the v3.0 contracts axis, item 1). Returns the peer count; throws
+`TimeoutError` on timeout.
 
 ```typescript
 const n = await agent.setWithMinAcks("config/endpoint", Buffer.from("https://api.v2/"), 2);

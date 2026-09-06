@@ -17,16 +17,18 @@ use std::{sync::Arc, time::Duration};
 
 use super::kv_quorum::QuorumError;
 
-/// Quorum-durability write overlay for [`KvHandle`]. Import to call
+/// Propagation-acknowledgement write overlay for [`KvHandle`]. Import to call
 /// [`set_with_min_acks`](KvQuorumExt::set_with_min_acks).
 pub trait KvQuorumExt {
     /// Writes `value` under `key` and waits for at least `min_acks` distinct peers
     /// to confirm receipt before returning.
     ///
-    /// # Durability, not consistency
+    /// # What an ack is — propagation, not receipt, not durability
     ///
-    /// This method confirms that `min_acks` peers have **received** the write via
-    /// gossip. It does **not** provide linearisability, total-order, or any consensus
+    /// The tracker counts an ack when a distinct peer gossips **any** update for `key` at or after this write's HLC timestamp — evidence that the write *propagated* (or was already superseded by a newer one), **not** that the peer received this exact payload and **not** that it persisted anything. A newer competing write from a peer therefore satisfies the count for a
+    /// payload that peer never held. An exact-identity, persisted-by-peer receipt is the v3.0
+    /// contracts axis, item 1 (`docs/plans/v3-contracts-axis.md`, PR 4a/4b). It also does **not**
+    /// provide linearisability, total-order, or any consensus
     /// guarantee. Two concurrent callers writing different values to the same key will
     /// both succeed here; LWW resolves the winner silently. For a linearisable write
     /// use [`consistent_set`](crate::GossipAgent::consistent_set).
