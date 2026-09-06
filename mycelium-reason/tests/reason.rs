@@ -365,7 +365,9 @@ async fn trace_record_replay_round_trips() {
 /// rank was `(0.0, id)` for every caller — all four went to the lower id (the thundering
 /// herd). With reservations, each open call raises its provider's score by
 /// `reservation_weight`, so the second caller prefers the other node. Deterministic
-/// against the mechanism, not timing: the backend holds calls open for 400 ms, far longer
+/// against the mechanism since 0.6.1 (rank and reserve under one lock — in 0.6.0 four
+/// simultaneous callers could all snapshot the map before any reserved and herd onto one
+/// provider; seen on CI 2026-09-06): the backend holds calls open for 400 ms, far longer
 /// than the four dispatches take. Fails on the pre-fix router.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reservations_spread_concurrent_calls_across_equal_providers() {

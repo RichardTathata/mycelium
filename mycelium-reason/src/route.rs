@@ -16,6 +16,14 @@
 //! PAIR router documents its local reservations against). Node-local knowledge composed
 //! with the shared medium — never a global schedule: the reservation is neither gossiped
 //! nor written as a pheromone; the provider's own trail stays the fleet-wide signal.
+//! **The pick is atomic with the reservation (0.6.1).** Ranking and the reservation
+//! increment happen under the same lock (`pick_and_reserve`): 0.6.0 ranked from a
+//! *snapshot* of the map and reserved later, so N truly simultaneous callers could all
+//! snapshot before any had reserved and herd onto one provider regardless — the CI flake of
+//! 2026-09-06 (`reservations_spread_concurrent_calls_across_equal_providers`), and item 4's
+//! reserve-before-act rule in miniature. The reservation is a damping *weight*, not
+//! exclusion; what 0.6.1 guarantees is that every caller ranks against the reservations of
+//! every caller that picked before it.
 //!
 //! Convention (bound in `docs/plans/mycelium-reason.md`, 2026-07-08 addendum): **a model
 //! is a prompt skill** — capability `llm/{model-id}` via `register_prompt_skill`
@@ -326,6 +334,9 @@ pub struct InferenceRouter {
     inflight: Mutex<HashMap<String, u32>>,
 }
 
+/// One atomic pick: the chosen provider, the ranking it was chosen from, its reservation.
+type Pick<'r> = (NodeId, Vec<(NodeId, f32)>, Reservation<'r>);
+
 /// RAII reservation on one provider for the duration of one attempt.
 struct Reservation<'r> {
     router: &'r InferenceRouter,
@@ -356,6 +367,9 @@ impl InferenceRouter {
         map.get(&node.to_string()).copied().unwrap_or(0)
     }
 
+    /// Reserve `node` without ranking — kept for the reservation-accounting unit test; the
+    /// routing path reserves through [`pick_and_reserve`](Self::pick_and_reserve).
+    #[cfg(test)]
     fn reserve(&self, node: &NodeId) -> Reservation<'_> {
         let key = node.to_string();
         {
@@ -387,6 +401,37 @@ impl InferenceRouter {
     /// A brief window remains between a node's death and SWIM detecting it, bounded by one
     /// per-attempt timeout; that is inherent to the failure detector, not the router.
     pub fn candidates(&self, q: &ModelQuery) -> Vec<(NodeId, f32)> {
+        let eligible = self.eligible_with_fill(q);
+        let inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        score_and_pick(eligible, &inflight, self.cfg.reservation_weight, &[]).0
+    }
+
+    /// Rank **and reserve** under one lock: the chosen provider's in-flight count is
+    /// incremented before the lock is released, so a concurrent caller ranking a moment
+    /// later already sees this reservation. `exclude` skips providers this call has
+    /// already tried (failover). Returns the chosen node, the ranking it was chosen from
+    /// (for the trace), and the RAII reservation. `None` when nothing eligible remains.
+    fn pick_and_reserve(
+        &self,
+        q: &ModelQuery,
+        exclude: &[NodeId],
+    ) -> Option<Pick<'_>> {
+        let eligible = self.eligible_with_fill(q);
+        let (chosen, ranked, key) = {
+            let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+            let (ranked, chosen) = score_and_pick(eligible, &map, self.cfg.reservation_weight, exclude);
+            let chosen = chosen?;
+            let key = chosen.to_string();
+            *map.entry(key.clone()).or_insert(0) += 1;
+            (chosen, ranked, key)
+        };
+        metrics::gauge!("mycelium_reason_route_inflight").increment(1.0);
+        Some((chosen, ranked, Reservation { router: self, node: key }))
+    }
+
+    /// The eligible providers for `q` with their pheromone fill only (no reservation
+    /// weight, no lock): resolve, `llm-meta` constraints, SWIM liveness, opacity.
+    fn eligible_with_fill(&self, q: &ModelQuery) -> Vec<(NodeId, f32)> {
         let caps = self.agent.capabilities();
         let mut nodes: Vec<NodeId> =
             caps.resolve(&CapFilter::new("llm", q.model.as_str())).into_iter().map(|(n, _)| n).collect();
@@ -410,13 +455,9 @@ impl InferenceRouter {
 
         nodes.retain(|n| !caps.is_node_opaque(n, signal_kind::LLM_INVOKE, self.cfg.load_max_age));
 
-        // Pheromone fill per node (max fill_ratio over its fresh load entries) plus the
-        // local reservation — a snapshot of the in-flight map, taken once, lock released
-        // before ranking.
+        // Pheromone fill per node: max fill_ratio over its fresh load entries.
         let load = caps.peer_load(self.cfg.load_max_age);
-        let inflight: HashMap<String, u32> =
-            self.inflight.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let mut ranked: Vec<(NodeId, f32)> = nodes
+        nodes
             .into_iter()
             .map(|n| {
                 let ns = n.to_string();
@@ -425,12 +466,9 @@ impl InferenceRouter {
                     .filter(|(node, _, _)| node.as_ref() == ns)
                     .map(|(_, _, s)| s.fill_ratio)
                     .fold(0.0_f32, f32::max);
-                let reserved = inflight.get(&ns).copied().unwrap_or(0) as f32;
-                (n, fill + reserved * self.cfg.reservation_weight)
+                (n, fill)
             })
-            .collect();
-        rank(&mut ranked);
-        ranked
+            .collect()
     }
 
     /// Route one inference: walk [`candidates`](Self::candidates) up to
@@ -444,15 +482,6 @@ impl InferenceRouter {
         context: &HashMap<String, String>,
         trace: Option<&TraceRecorder>,
     ) -> Result<Routed, RouteError> {
-        let candidates = self.candidates(q);
-        let Some((chosen, _)) = candidates.first() else {
-            metrics::counter!("mycelium_reason_route_no_provider_total").increment(1);
-            return Err(RouteError::NoProvider);
-        };
-        if let Some(t) = trace {
-            t.route(&q.model, &candidates, chosen);
-        }
-
         // Same JSON the core's `llm.invoke` dispatch parses and `gw_llm_call` speaks
         // over the gateway (the structs are pub(crate) in core; the shape is wire-public).
         let request = serde_json::json!({
@@ -462,14 +491,30 @@ impl InferenceRouter {
         });
         let payload = Bytes::from(request.to_string().into_bytes());
 
-        // How many we will actually try — the last of these gets the full `call_timeout`,
-        // earlier ones the shorter `failover_timeout` (fail over fast, don't burn the
-        // inference budget on a candidate that may have just died).
-        let to_try = candidates.len().min(self.cfg.max_attempts);
+        // Each attempt picks-and-reserves atomically against the providers not yet tried.
+        // `to_try` (fixed from the first ranking) decides which attempt gets the full
+        // `call_timeout` — the last one — and which the shorter `failover_timeout` (fail
+        // over fast, don't burn the inference budget on a candidate that may have just died).
+        let mut tried: Vec<NodeId> = Vec::new();
         let mut failures: Vec<(NodeId, String)> = Vec::new();
-        for (attempt, (node, _fill)) in candidates.iter().take(self.cfg.max_attempts).enumerate() {
+        let mut to_try = 0usize;
+        for attempt in 0..self.cfg.max_attempts {
+            let Some((node, ranked, reservation)) = self.pick_and_reserve(q, &tried) else {
+                if attempt == 0 {
+                    metrics::counter!("mycelium_reason_route_no_provider_total").increment(1);
+                    return Err(RouteError::NoProvider);
+                }
+                break; // every eligible provider has been tried
+            };
+            let node = &node;
+            if attempt == 0 {
+                to_try = ranked.len().min(self.cfg.max_attempts);
+                if let Some(t) = trace {
+                    t.route(&q.model, &ranked, node);
+                }
+            }
             metrics::counter!("mycelium_reason_route_attempts_total").increment(1);
-            let per_attempt_timeout = if attempt + 1 == to_try {
+            let per_attempt_timeout = if attempt + 1 >= to_try {
                 self.cfg.call_timeout
             } else {
                 self.cfg.failover_timeout
@@ -478,7 +523,7 @@ impl InferenceRouter {
             let reply = {
                 // Reserved for exactly the attempt: the guard drops when the reply (or the
                 // timeout) comes back, whether or not we fail over.
-                let _reservation = self.reserve(node);
+                let _reservation = reservation;
                 self.agent
                     .service()
                     .rpc_call(node.clone(), signal_kind::LLM_INVOKE, payload.clone(), per_attempt_timeout)
@@ -516,6 +561,7 @@ impl InferenceRouter {
                 t.llm_call(node, false, 0, duration_ms, Some(&err));
             }
             failures.push((node.clone(), err));
+            tried.push(node.clone());
             // Failover: this attempt failed and at least one candidate remains to try.
             if attempt + 1 < to_try {
                 metrics::counter!("mycelium_reason_route_failovers_total").increment(1);
@@ -524,6 +570,27 @@ impl InferenceRouter {
         metrics::counter!("mycelium_reason_route_exhausted_total").increment(1);
         Err(RouteError::Exhausted(failures))
     }
+}
+
+/// Score `eligible` (pheromone fill) against the given in-flight map, rank, and choose the
+/// first provider not in `exclude`. Pure — the one selection rule `candidates()` (observing,
+/// on a snapshot) and `pick_and_reserve()` (acting, under the lock) both apply.
+fn score_and_pick(
+    eligible: Vec<(NodeId, f32)>,
+    inflight: &HashMap<String, u32>,
+    weight: f32,
+    exclude: &[NodeId],
+) -> (Vec<(NodeId, f32)>, Option<NodeId>) {
+    let mut ranked: Vec<(NodeId, f32)> = eligible
+        .into_iter()
+        .map(|(n, fill)| {
+            let reserved = inflight.get(&n.to_string()).copied().unwrap_or(0) as f32;
+            (n, fill + reserved * weight)
+        })
+        .collect();
+    rank(&mut ranked);
+    let chosen = ranked.iter().map(|(n, _)| n).find(|n| !exclude.contains(n)).cloned();
+    (ranked, chosen)
 }
 
 /// The candidate order: score ascending, then node-id string (deterministic ties).
@@ -578,6 +645,32 @@ mod tests {
         assert!(s.contains("all 2 attempted provider(s) failed"));
         assert!(s.contains("127.0.0.1:9000: timeout"));
         assert!(s.contains("127.0.0.1:9001: llm_error: boom"));
+    }
+
+    /// 0.6.1 regression gate, pure: four successive picks against two equal providers, each
+    /// pick applying its own reservation before the next — the order every atomic
+    /// `pick_and_reserve` sequence produces regardless of interleaving — alternate A B A B.
+    /// (0.6.0 ranked from a snapshot and reserved later, so simultaneous callers could all
+    /// pick A.) Also: `exclude` skips a tried provider even when it ranks first.
+    #[test]
+    fn score_and_pick_alternates_when_each_pick_reserves() {
+        let a = NodeId::new("127.0.0.1", 9000).unwrap();
+        let b = NodeId::new("127.0.0.1", 9001).unwrap();
+        let eligible = || vec![(a.clone(), 0.0_f32), (b.clone(), 0.0_f32)];
+        let mut inflight: HashMap<String, u32> = HashMap::new();
+        let mut picks = Vec::new();
+        for _ in 0..4 {
+            let (_, chosen) = score_and_pick(eligible(), &inflight, 0.1, &[]);
+            let chosen = chosen.unwrap();
+            *inflight.entry(chosen.to_string()).or_insert(0) += 1;
+            picks.push(chosen);
+        }
+        assert_eq!(picks, vec![a.clone(), b.clone(), a.clone(), b.clone()]);
+        // failover: a ranks first (tie on id) but is excluded → b
+        let (_, chosen) = score_and_pick(eligible(), &HashMap::new(), 0.1, std::slice::from_ref(&a));
+        assert_eq!(chosen, Some(b.clone()));
+        let (_, none) = score_and_pick(eligible(), &HashMap::new(), 0.1, &[a.clone(), b.clone()]);
+        assert_eq!(none, None, "nothing left to try");
     }
 
     /// The reservation guard: `reserve` counts up, dropping counts down (and clears the

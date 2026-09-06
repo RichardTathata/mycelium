@@ -61,7 +61,10 @@ via wasm-host).
   (`examples/langgraph/` rungs 0–6 incl. the echo-CI **deploy/reheal flagship** + a router-robustness
   fix it surfaced — live-SWIM filter + fast failover, #134), the repo's first Python CI job, and guide
   chapter 15 + an Ollama-manual real-model variant. Plans: `docs/plans/mycelium-reason.md` +
-  `…-examples.md`. **0.6.0 (2026-09-04, the PAIR imports — plan addendum of that date):** ①
+  `…-examples.md`. **0.6.1 (2026-09-06):** the router **reserves atomically with ranking** (`pick_and_reserve`; the pure
+  `score_and_pick` rule shared with `candidates()`) — 0.6.0 ranked from a snapshot and reserved later, so
+  simultaneous callers could herd anyway (CI flake 2026-09-06; log `.log/2026-09-05-v3-contracts-axis.md`).
+  **0.6.0 (2026-09-04, the PAIR imports — plan addendum of that date):** ①
   gained **local in-flight reservations** (open calls per provider weighted into the rank,
   `reservation_weight`; node-local, never gossiped — lock-order row 36; the herd gate
   `reservations_spread_concurrent_calls_across_equal_providers`), the **OpenAI-compatible

@@ -11,6 +11,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`mycelium-reason` 0.6.1 — the router reserves atomically with ranking.** 0.6.0's local reservations
+  (the PAIR import) ranked from a *snapshot* of the in-flight map and reserved the chosen provider later, so
+  truly simultaneous callers could all snapshot before any had reserved and herd onto one provider anyway —
+  the mechanism damped a staggered herd, not a simultaneous one (seen as a CI flake in
+  `reservations_spread_concurrent_calls_across_equal_providers`, 2026-09-06). `pick_and_reserve` now ranks
+  and increments under one lock, per attempt, with failover excluding tried providers; the selection rule is
+  one pure function (`score_and_pick`) shared by the observing `candidates()` and the acting path, with a
+  unit gate proving alternation. Item 4's reserve-before-act rule, applied early. Companion line only.
+
 - **`set_with_min_acks` documented honestly** (rustdoc, both SDK READMEs and docstrings, guides 04 and
   error-handling): an ack is any distinct peer's update for the key at or after the write's timestamp —
   propagation (or supersession), **not** receipt of this payload and **not** persistence. The code is unchanged;

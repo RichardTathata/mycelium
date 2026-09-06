@@ -269,3 +269,9 @@ provider. The test says "deterministic against the mechanism, not timing", but t
 ranking, not atomically with it, so on a loaded runner all four can resolve before any reservation registers. That
 is a flake with a cause — and it is item 4's *reserve-before-act* rule in miniature. Follow-up in the reason
 companion: reserve inside the ranking critical section, or make the test drive the interleaving.
+
+## Reason 0.6.1 (2026-09-06) — the reservation race fixed
+`pick_and_reserve` ranks and reserves under one lock per attempt; `score_and_pick` is the single pure selection
+rule shared by `candidates()` (observing) and the acting path, with a unit gate (`A B A B` alternation; exclusion
+for failover). The integration test's "deterministic against the mechanism" comment is now true and says since
+when. Reserve-before-act, done in the companion whose CI would otherwise flake on every v3 PR.
