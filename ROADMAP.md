@@ -3038,7 +3038,7 @@ mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consiste
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
 
-### The contracts axis (adopted plan 2026-09-05, rev 1.2 2026-09-06 — `docs/plans/v3-contracts-axis.md`)
+### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
 
 **The plan of record is [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md).** This section is its
 index. An external review of v2.4.1 (2026-09-05) found five defects — fixed and released the same day — and
@@ -3076,6 +3076,12 @@ establishment (D2) made conditional on the replay gate.* **The `3.0.0` candidate
 changes the wire. **Subsumed packaging candidates** (table above): the *auction / bidding* companion needs item 1's
 destination-commit receipt; the *durable / partitioned event-log* refinement is item 1's receipt vocabulary on
 `KvHandle::append`; the *governed-memory read-set* candidate is item 3's provenance records.
+
+**Rev 1.3 (2026-09-06):** the reviewer's four implementation requirements — atomic remote enforcement incl. ordinary
+writes (D26) · one compatibility rule with D24 made genuinely additive · items 7/8 and the verification lines in
+Phase A's exit gate with owners · secrets never become observability, item 8 as the specification · item 7's
+contract (D27) · the per-PR five-part statement — and D25, the NANDA boundary (federation is the authenticated
+export-and-invoke edge; AgentFacts stays the public discovery edge; no second well-known, no registry).
 
 **Cross-cutting (rev 1.2):** the **parity gate** (a gateway change ships with SDKs + operator docs in the same PR) ·
 the **public surface as code** (one routing-defined list, tested against `rbac.md`) · **verification
