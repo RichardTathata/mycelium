@@ -36,6 +36,9 @@ and on the release PR before tagging**. Log `.log/2026-09-05-v2.4.3-release.md`.
   `mycelium-ts-v0.1.1`): every handle takes `token=` / `{ token }` (fallback `MYCELIUM_GATEWAY_TOKEN`),
   riding pooled + SSE clients; `consistent_set` / `cross_group_propose` return `CommitResult { persisted }`.
   `jest` now CI-gated. Logs `.log/2026-09-05-sdk-bearer-token.md`.
+- **`mycelium-reason` 0.6.1** (2026-09-06): the router's rank-then-reserve race fixed — rank and reserve under
+  one lock per attempt, one pure selection rule with a unit gate; the 0.6.0 reservation damped staggered herds
+  only. Reserve-before-act (contracts-axis item 4) applied where CI was flaking.
 - **Contracts-axis plan rev 1.3** (2026-09-06): the reviewer approved rev 1.2 as the strategic baseline; their four
   implementation requirements recorded (D26 atomic remote enforcement, one compatibility rule + D24 additive, phase
   gates with owners, secrets vs observability), D27 item-7 contract, D25 the NANDA boundary, the per-PR five-part
