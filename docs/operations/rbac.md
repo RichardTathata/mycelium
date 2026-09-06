@@ -45,7 +45,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `kv:read` / `kv:write` | `GET /gateway/kv*` / `POST`,`DELETE /gateway/kv*`, `/kv/quorum` |
 | `cap:read` / `cap:write` | capability resolve, shard owner / advertise, drop |
 | `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox/rpc-serve, demand / signal emit, rpc call, scatter |
-| `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{slot}` inspection** / consistent set, lock, elect, log append, cross-group propose |
+| `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
 | `audit:read` / `transparency:read` | audit-trail query / revocation transparency log |
@@ -61,7 +61,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 > all. Before, they answered without a bearer even when the library's own routes demanded one.
 > A scoped-token deployment that used companion routes must now grant the family scopes above.
 
-> **Since 2026-09-05** the node-level `/mcp`, `/signals/{kind}` and `/consensus/{slot}` sit behind
+> **Since 2026-09-05** the node-level `/mcp`, `/signals/{kind}` and `/consensus/{*slot}` sit behind
 > the same bearer-then-scope boundary as `/gateway/*`. Before, they answered without a bearer even
 > with `gateway_auth_token` set — `POST /mcp` `tools/call` invoked any tool in the cluster **with
 > the node's own identity**. A scoped-token deployment must now grant `mcp:invoke` to MCP clients

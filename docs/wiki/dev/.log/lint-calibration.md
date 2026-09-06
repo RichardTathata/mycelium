@@ -187,8 +187,9 @@ Entry format:
   (`c9f9ab6`); the route is `/consensus/{slot}`, which matches **one** path segment, and a lock's slot is
   `lock/{name}` — the literal URL 404s and only `lock%2F{name}` reaches the handler. A must-work
   violation through every lint since, because the endpoint check diffed `dev/operations.md` only. Found by
-  this pass sweeping route mentions across `docs/operations/` and confirmed by a probe test (kept as
-  `regression_lock_slot_reaches_consensus_slot_route_only_percent_encoded`). Sharpening (folded into §1):
+  this pass sweeping route mentions across `docs/operations/` and confirmed by a probe test (kept, and flipped
+  the same day when the route became a path-tail capture — `regression_consensus_slot_route_accepts_hierarchical_slots`).
+  Sharpening (folded into §1):
   sweep every `GET|POST|DELETE /…` an operations runbook or guide chapter names against the literals in
   `src/agent/http.rs`, and check the **segment shape** — a `{param}` pattern never matches a slash-bearing
   value. Also added, no miss behind it: the front-door install snippet's `tag = "…"` pins are diffed against

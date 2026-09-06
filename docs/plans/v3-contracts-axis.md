@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · **rev 1.6, 2026-09-06** adds the RA slice (attributable resource accounting, §6.7, D29–D32) and records the `mycelium-reason` 0.6.2 honesty fix (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · **rev 1.7, 2026-09-06** adds the *identifiers in paths* rule (§9; `/consensus/{*slot}` shipped) (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -629,6 +629,14 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 - **The research track is cross-linked *(rev 1.2; §13 rev 1.5)*:** the replay harness (6) is a reproducible-experiment engine and
   the combined-feedback scenario (4) is a case study for the three-arm work-distribution paper, the way the council
   substrate already doubles as Paper 1's case study — planned once, cited from `docs/wiki/domain/publications.md`.
+- **Identifiers in paths *(rev 1.7)*:** the substrate's identifiers are hierarchical (consensus slots `lock/{name}`,
+  `consistent/{key}`, `leader/{group}`; soon knowledge streams `knowledge/head/{issuer}/{stream}` and mandate refs).
+  **A read route keyed by such an identifier captures the path tail** (`/consensus/{*slot}`, shipped 2026-09-06),
+  so an operator types the identifier exactly as a receipt or a runbook shows it, and the percent-encoded form keeps
+  working; **writes carry identifiers in the JSON body**, as `cross_group_propose` already does. Chosen over
+  "encode always" because hand-typed runbook URLs are where the alternative fails silently — the one-segment
+  `/consensus/{slot}` 404ed the runbooks' natural URL for two months (wiki-lint ledger 2026-09-06). Items 3 and 5
+  apply the rule to their read routes at PR 1; the scope table keys on the pattern, so the key changes with it.
 - **Deferred, by decision:** a policy DSL; automatic algorithm selection; distributed transactions; aggregated
   reputation; inferred observer independence; mandatory LLM judgment; consensus over truth; authenticated SWIM;
   transitive federation; dynamic quota transfer; delegation of mandates; replicated authority.
@@ -651,6 +659,9 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
+- **rev 1.7 (2026-09-06)** — **identifiers in paths** (§9): read routes keyed by a hierarchical identifier capture
+  the path tail; writes carry identifiers in the body. Shipped for `/consensus/{*slot}` the same day (the runbooks'
+  natural lock URL had 404ed since 2026-07-10; found by wiki-lint). Items 3 and 5 inherit the rule at PR 1.
 - **rev 1.6 (2026-09-06)** — the **RA slice** (§6.7) from a third-party resource-accounting proposal, vendored under
   `external/2026-09-06-ra-resource-accounting.md`: attributable resource accounting composed from items 1, 4, 6 and 7
   — three profiles in the guardrails tier vocabulary, hard bounds in native units only, reserve-before-dispatch with

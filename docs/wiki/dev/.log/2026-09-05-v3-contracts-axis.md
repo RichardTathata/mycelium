@@ -303,3 +303,10 @@ omits the unknown split (`mycelium.usage.split_known: false`; gate
 D30 RA1 after item 4's ADR; D31 stub consumer in CI; D32 responsibilities not roles. Lesson: a proposal that
 composes existing items is adopted as a slice with cross-references, never a new number — the plan's map must stay
 the one place dependencies are read.
+
+## Rev 1.7 (2026-09-06) — identifiers in paths
+From the lint finding (runbook lock URL 404ed against the one-segment `/consensus/{slot}`): the plan now states one
+convention — a read route keyed by a hierarchical identifier captures the path tail; writes carry identifiers in the
+JSON body. `/consensus/{*slot}` shipped the same day (both literal and percent-encoded forms name the same slot; gate
+`regression_consensus_slot_route_accepts_hierarchical_slots`); the runbooks are back to the natural URL. Items 3 and 5 apply
+it to their read routes at PR 1. Chosen over encode-always because hand-typed URLs are where that rule fails silently.
