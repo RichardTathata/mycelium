@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · **rev 1.5, 2026-09-06** adds item 3's two gates and §13, the composition hypothesis (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · **rev 1.6, 2026-09-06** adds the RA slice (attributable resource accounting, §6.7, D29–D32) and records the `mycelium-reason` 0.6.2 honesty fix (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -100,6 +100,7 @@ what each item's demonstration must meet.
 | 5 Mandates | 1 (receipts) · 6 (scenario B) · 2 (cross-scope, later) | 3 (adoption decisions, later) |
 | 7 Gateway caller identity | — (standalone; Phase A) | 2 (the federated-caller adapter is this, across a boundary) · 5 (who invoked a mutation) |
 | 8 Threat model rev 2 | — (document; Phase A) | 2, 3, 5 (each PR 1 cites it) |
+| **RA** Resource accounting *(slice, rev 1.6)* | 1 (receipts, identities) · 7 (caller context) · 4 (rights ledger — RA1 after 4·PR1) · 6 (seams) · 2 (federated variant only) | a read plane for cost evidence; item 4's first externally-priced dimension |
 
 **Order.** Items **1 and 6 first, together**: one states what must hold, the other attacks it. Then **2** as the
 structural investment. **3, 4, 5** follow as companions above the substrate, each once its dependencies' first
@@ -111,11 +112,11 @@ ADR):
 
 | Phase | Contents | Exit gate |
 |-------|----------|-----------|
-| **A** | 1·PR1–3 (ADR, identities + receipts, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown parameter (4, standalone) · **7 gateway caller identity** · **8 threat model rev 2** · **V1 the nightly scale runner green** · **V2 on-disk golden fixtures in CI** | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails; **item 7's four negative cases + the `authorized_callers` gate pass in CI and the secure profile refuses legacy dispatch**; **item 8 published and cited by items 2/3/5's PR-1 ADRs**; **V1: three consecutive green nightlies (`resilience` + `entries`; `scale` classified)**; **V2: every released WAL/snapshot format replays in CI** |
+| **A** | **RA0 (done: reason 0.6.2)** · 1·PR1–3 (ADR, identities + receipts incl. `operation_id`/`attempt_id`, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown parameter (4, standalone) · **7 gateway caller identity** · **8 threat model rev 2** · **V1 the nightly scale runner green** · **V2 on-disk golden fixtures in CI** | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails; **item 7's four negative cases + the `authorized_callers` gate pass in CI and the secure profile refuses legacy dispatch**; **item 8 published and cited by items 2/3/5's PR-1 ADRs**; **V1: three consecutive green nightlies (`resilience` + `entries`; `scale` classified)**; **V2: every released WAL/snapshot format replays in CI** |
 | **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) | `set_with_min_acks` acknowledges the *exact* payload only; **a peer that acknowledged persistence holds the record across its own crash/restart** (a crash-before-ack peer does not count); two meshes discover selected exports without merging |
-| **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 | the adversarial release demos of 1 and 2 pass in CI |
-| **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 | evidence-aware resolution and curator handover both replay deterministically; **item 3's semantic gate: misleading evidence cannot erase a conflicting observation, refresh expired evidence, or confer authority (three replayed negative cases, rev 1.5)** |
-| **E** | 3·PR7 · 4·PR6–7 · 5·PR7 · 6·PR7 | combined-feedback scenario green; shadow-mode rollout documented |
+| **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 · **RA1–RA3** (after 4·PR1) | the adversarial release demos of 1 and 2 pass in CI; **RA3: crash after ingest-before-ack replays safely, a retention gap is explicit** |
+| **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 · **RA4** | evidence-aware resolution and curator handover both replay deterministically; **item 3's semantic gate: misleading evidence cannot erase a conflicting observation, refresh expired evidence, or confer authority (three replayed negative cases, rev 1.5)** |
+| **E** | 3·PR7 · 4·PR6–7 · 5·PR7 · 6·PR7 · **RA5–RA6** | combined-feedback scenario green; shadow-mode rollout documented; **RA6: two budgeted domains keep working while the consumer is disconnected and reconcile without double counting** |
 
 *(rev 1.4)* Every phase exit also requires the **§12 alignment gate** for the items it ships: the gallery entry,
 the doc-coverage row with no missing cell, the runbook rows, and — at A and C — the re-linted decks.
@@ -440,6 +441,100 @@ D23's trigger ever fires, is a removal of announced things and nothing else.
 
 ---
 
+### 6.7 The RA slice — attributable resource accounting *(rev 1.6)*
+**Provenance.** A third-party proposal of 2026-09-06 (vendored:
+[`external/2026-09-06-ra-resource-accounting.md`](external/2026-09-06-ra-resource-accounting.md)) written for a
+FinOps consumer that wants to know *which attempt consumed what, for which operation, under whose authority, with
+what uncertainty*. It describes itself as one cross-cutting slice over items 1, 4, 6 and 7, not a new mechanism —
+we agree, and it is **a slice, never item 9**: it is cross-referenced from the §2 tables and §12, and nothing is
+renumbered.
+
+**Adopt.** Compose item 1's receipts and stable identities, item 7's caller context (`origin_principal` ·
+`acting_gateway` · `provider_principal`, all verified, never copied from the client), item 4's allocated-rights
+ledger, and item 6's seams. Three profiles — **observe** (export what is available; gaps visible; no blocking) ·
+**enforce-local** (a durable local authority admits against its envelope; a bound only over the dispatch paths it
+controls) · **enforce-allocated** (fixed, disjoint rights per authority; every covered call traverses enforcement;
+ownership survives restart) — each stated in the guardrails tier vocabulary, no new strength scale. **Hard bounds
+exist only in native units with an enforceable maximum**: attempts; capped tokens where the backend honours the
+cap; a documented provider-specific maximum charge. *A price estimate is not a monetary guarantee*, and an adapter
+that ignores an output limit, charges uncapped external tools, or cannot bound downstream retries **cannot offer
+the strict profile** (posture rule 6). The admission machine: reserve the resource vector atomically with the
+dispatch intent and the export-outbox record *before* dispatch; settle within the reservation on a definitive
+report and release the verified remainder; on timeout mark `outcome_unknown` and **retain the exposure** — a new
+attempt needs new rights, never recycled ones; a crash between recorded intent and the network send preserves
+uncertainty rather than reissuing. Per unit, `available + outstanding + settled = assigned`, every unit in exactly
+one bucket; rights are never reclaimed because discovery expired (item 4's rule); an actual cost above a claimed
+maximum is **recorded at its true value** and fails closed for new admissions in that profile — accounting never
+clips reality to the budget. **Missing is unknown, never zero**; cumulative and delta reports are distinguished;
+a correction supersedes, never adds; redelivery of an event adds no charge; the same id with different content is
+quarantined. Export is a durable outbox committed with the ledger, **authenticated pull** with opaque cursors,
+at-least-once with acknowledge-after-durable-ingest, explicit gap responses, a retention floor. **Detailed records
+stay outside gossip KV**; a consumer outage never stops already-authorized local work while ledger capacity
+remains; strict mode refuses new admissions it cannot account for durably. A **coverage** event names covered
+adapters, instrumentation version and known gaps, so "no usage" is never mistaken for "no cost". Cross-domain
+export uses item 2's permissions; denied evidence access is not evidence of zero spend. Business acceptance and
+invoice reconciliation are application concerns the records may *reference*.
+
+**Verified (2026-09-06, HEAD `8f2498d`).** The OpenAI façade reported `prompt_tokens: 0, completion_tokens: 0`
+beside a real total — **true, and fixed the same day as `mycelium-reason` 0.6.2** (the keys are now absent and
+`mycelium.usage.split_known: false` says so; gate `regression_unknown_usage_split_is_omitted_not_zero`). The
+router has failover depth and reports the answering attempt but **no logical operation identity survives a retry**
+— true; that is an item 1 concern (stable identities), assigned to 1·PR2. The guardrails `tool_budget` is a count
+— true; Tier A self-restraint, not a fleet ceiling. `TraceEvent::llm_call` carries a token count per attempt and
+no billing — true. Item 4 already owns *hard bounds = exclusive rights + durable accounting, persisted before
+acting, never reclaimed on disappearance*; RA is that ledger's **first resource dimension with an external cost**
+plus one enforcing adapter and a read plane.
+
+**⚠ Divergences (D29–D32).** The proposal's *Resource Accounting Contract 0.1* is a standard, not a slice: five event
+families, an envelope of ~25 fields, money arithmetic with rate cards and rounding stages, `invoice_reconciled`
+states, business tags mapped to organisational cells, and two external specification mappings. **We keep the
+identity envelope and the reservation · attempt · usage · coverage families (and `admission.rejected`, because a
+rejected work item is a visible outcome — item 4's rule), and take money out of the hard-bound vocabulary
+entirely:** native units only; an *estimate* is a claim in item 3's sense that an adapter may attach with its
+basis; a `provider_reported_charge` exists only when a provider reports one; rate cards, FOCUS, invoice states and
+business-tag mapping belong to the consumer. OpenTelemetry GenAI is a *derived*, version-pinned export an adapter
+may offer, never the ledger (D29). **RA1's fixtures do not precede item 4's ADR** — a contract written before the
+ledger's own vocabulary would define the ledger from the accounting side; RA1 follows or is co-authored with
+4·PR1, and the ledger's backend is 4·PR1's decision, not RA's. RA0 (the façade fix) and attempt identity go first
+because they need neither (D30). **The repository's acceptance artefact does not depend on the external consumer**:
+RA6's handoff runs against a **stub consumer in CI** (the fetch-recorder pattern); the consumer's conformance is
+its own evidence, and the co-op scenario below is ours (D31). **Five named maintainer roles → responsibilities,
+not people**; there is one maintainer, and the per-PR five-part statement (§9) already names the enforcing
+component (D32).
+
+**PRs and phases.** **RA0** *(done 2026-09-06)*: façade honesty, `mycelium-reason` 0.6.2; `operation_id` /
+`attempt_id` conventions land in **1·PR2** (identities + receipts). **RA1** ADR + the minimal contract + paired
+producer/consumer fixtures (retry, duplicate, null usage, corrected cumulative report, conflicting id) — after
+4·PR1. **RA2** attempt instrumentation in the reason router (every retry/failover its own attempt; failure with
+unknown usage stays unknown; no synthetic splits) + the one reference external-call adapter (item 1's effects
+companion) + additive SDK fields under the parity gate + item 7's negative identity tests covering accounting.
+**RA3** durable outbox + authenticated cursor export (crash after ingest-before-ack replays safely; a retention gap
+is explicit; an export outage preserves local evidence; no secrets in fixtures or bundles). **RA4** ledger
+integration: an enforceable native **attempt cap** plus one documented charge-capable adapter (concurrent branches
+cannot exceed allocated rights; failed attempts consume rights; an unsupported hard-money profile is *rejected*).
+**RA5** replay and reconciliation — streaming corrections, clock and restore-from-stale-backup cases, every
+transition checking the conservation identity. **RA6** the co-op gallery entry, SDK/operator parity, the
+stub-consumer handoff; its federated variant needs item 2. **Phases:** A — RA0 · C — RA1–RA3 (after 1·PR2–3, 7,
+4·PR1) · D — RA4 · E — RA5–RA6. Observe mode ships first with covered adapters listed; strict mode is opt-in behind
+configuration validation, supported provider limits, durable ownership and a recovery runbook; rollback disables
+new enforcement admissions and deletes nothing.
+
+**The decisive scenario** (constructive, at the gallery bar): two co-op domains prepare catalog entries for member
+requests; A holds seven attempt rights, B five, no transfers; each attempt reserves a conservative provider maximum
+independently of the count. One worker retries after a known failure; another times out with unknown charge; two
+branches race for A's last right; the ledger owner is killed after a reservation and restarted; the consumer is
+disconnected, then fed duplicated, out-of-order cumulative reports and a later correction. Required: at most twelve
+admitted attempts; never negative availability; unknown work never released; identical accounting on replay;
+redelivery adds no charge; a legitimate retry's cost stays separate; an estimate is never shown as an invoice; the
+consumer learns accepted *and* unsuccessful costs after catching up; **a deliberately disabled reservation guard
+must make the overspend test fail.** Also: stalled provider, partial cancellation, invalid origin scope, obsolete
+provider limits, outbox exhaustion, unsupported schema, failure-domain independence. Bounded dispatch does not
+claim eventual cancellation of all external activity.
+
+**Deferred, by decision:** invoice processing; exchange-rate policy; chargeback; business-acceptance scoring;
+automatic model or topology changes; dynamic rights reallocation; any claim of complete fleet cost without
+coverage evidence.
+
 ## 7. Decision register
 
 Every place this plan departs from the reviewer's six documents. "Kept" means we adopt their text; the rest are ours.
@@ -473,6 +568,10 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D25 | 2 | A second public well-known descriptor (`/.well-known/mycelium-domain`) and trust bundles | **NANDA stays the public discovery edge** (AgentFacts, self-certified, pull); federation is the authenticated export-and-invoke edge; the descriptor's public subset is an **AgentFacts profile** through the existing serializer; **no second well-known, no registry, no TRS**; "trust is the fetcher's decision" holds on both sides; assessments reach AgentFacts `certification` only through explicit projections | Two public descriptors and a trust index are how federation leaks into NANDA space |
 | D26 | 5 | "both refs in the same push" | **`git push --atomic` + `--force-with-lease=<mandate-ref>:<expected>` on every push, incl. ordinary content writes; fail closed on a non-atomic remote; local `verify` of the mandate ref inside every `update-ref` transaction** | An ordinary push is not atomic; a hook-time read is not a check through commit (the reviewer's requirement) |
 | D28 *(rev 1.5)* | beyond | A *commitment* subsystem as the central application abstraction; "the system constructs coordination arrangements" | A commitment is a **composition** of five existing records (requirement · acceptance · mandate/allocation · receipt · assessment) plus a correlation record; obligations arise only by authorized acceptance; no planner — **agreed with the reviewer after one exchange** (§13.2) | *Composition before primitives*; the planner is the ceremony the philosophy strips |
+| D29 *(rev 1.6)* | RA | *Resource Accounting Contract 0.1*: five families, ~25-field envelope, money arithmetic, rate cards, invoice states, business-tag mapping, OTel GenAI + FOCUS | The **minimal** contract: identity envelope + reservation/attempt/usage/coverage (+ `admission.rejected`); **money out of the hard-bound vocabulary** — native units only, an estimate is a claim with a basis, a reported charge only when a provider reports one; rate cards/FOCUS/invoices/tags → the consumer; OTel a derived, pinned export | *Composition before primitives*; a named number is not a guarantee (rule 6) |
+| D30 *(rev 1.6)* | RA | RA1 fixtures-first, in Phase A; "one transactional embedded backend chosen by its ADR" | RA1 **after or with 4·PR1**; the ledger's vocabulary and backend are item 4's decisions; RA0 + attempt identity go first | The ledger must not be defined from the accounting side |
+| D31 *(rev 1.6)* | RA | RA6 = the external consumer's end-to-end handoff | A **stub consumer in CI**; the co-op scenario is the acceptance artefact; external conformance is the consumer's evidence | The repository's gate cannot depend on a system it does not run |
+| D32 *(rev 1.6)* | RA | Five named maintainer roles | Responsibilities, not people; the per-PR five-part statement names the enforcing component | One maintainer |
 | D27 | 7 | (a struct with principal + digest) | The context is **constructed only by the auth layer and attested by the node over the request digest**; four negative cases in CI; legacy node-as-caller only under `legacy`, never in the secure profile | Receiving a struct is not verifying a relationship |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
@@ -495,7 +594,8 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 
 ## 9. Cross-cutting rules
 - **Namespaces reserved at each item's PR 1**, in `src/lib.rs` *and both* front-door lists: `knowledge/`, `mandate/`,
-  `log/wiki/`; **explicitly none** for federation.
+  `log/wiki/`; **explicitly none** for federation, **and none for RA** (records stay outside gossip KV; a discovery
+  pointer, if needed, is an existing scoped service capability — rev 1.6).
 - **Versioning (rev 1.3, the one rule).** Ship compatible additions on 2.x — "compatible" by Rust's rules, so a public field or type never changes shape: a new representation is added beside the old, which is deprecated, and removal goes to the §6.6 ledger; assess any incompatible public-API or protocol change on its merits (the one protocol candidate is D23's). Companions on their own lines.
 - **Every gate is a test in CI** without a live node where possible (the day's pattern: stub servers, fetch recorders,
   in-process writers); Docker suites for the two-mesh and combined scenarios.
@@ -542,13 +642,24 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 6. **Item 7 (gateway caller identity)** — small, standalone, closes a live security-design gap *(rev 1.2)*.
 7. **Item 8 (threat model rev 2)** — a document; gates items 2, 3, 5 *(rev 1.2)*.
 8. **Fix the nightly scale runner's image-build deadline** — nothing scale-related can be evidenced until it is green.
-9. **Phase A's §12 lines** *(rev 1.4)*: the philosophy revision and the concepts-chapter vocabulary travel in item 1's
+9. **RA0 done 2026-09-06** *(rev 1.6)*: `mycelium-reason` 0.6.2 omits the unknown token split. **`operation_id` /
+   `attempt_id` go into item 1's PR 2** with the other stable identities; RA1 waits for 4·PR1.
+10. **Phase A's §12 lines** *(rev 1.4)*: the philosophy revision and the concepts-chapter vocabulary travel in item 1's
    ADR PR; the receipt-ladder example is item 1 PR 3's gate; the core deck's federation and PAIR slides are re-linted
    at the Phase A exit.
-10. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
+11. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
+- **rev 1.6 (2026-09-06)** — the **RA slice** (§6.7) from a third-party resource-accounting proposal, vendored under
+  `external/2026-09-06-ra-resource-accounting.md`: attributable resource accounting composed from items 1, 4, 6 and 7
+  — three profiles in the guardrails tier vocabulary, hard bounds in native units only, reserve-before-dispatch with
+  retained exposure on timeout, the conservation identity, true-value overspend recording, a durable outbox with
+  authenticated pull, records outside gossip KV, a coverage event. Verified against HEAD `8f2498d`; the façade's
+  fabricated token split fixed the same day (**`mycelium-reason` 0.6.2**, RA0). Four divergences: **D29** the minimal
+  contract with money out of the hard-bound vocabulary, **D30** RA1 after item 4's ADR, **D31** a stub consumer in
+  CI, **D32** responsibilities not roles. Cross-referenced from §2 (map + phases A/C/D/E), §9 (no namespace), §10 and
+  §12.1; nothing renumbered.
 - **rev 1.5 (2026-09-06)** — from the reviewer's post-axis assessment and our exchange on it: **item 3 gets two
   gates** (a semantic gate in Phase D's exit — misleading evidence cannot erase a conflicting observation, refresh
   expired evidence or confer authority; and a behavioural experiment on the research track measuring errors *and*
@@ -631,6 +742,7 @@ template, constructive domain, CI-run):*
 | 3 Knowledge | in the coop world: "which pantry is really open" — claim, observation, assessment, and two readers with different acceptance policies resolving differently from the same evidence | CLI |
 | 4 Stability | the **control-envelope viz**: allocated rights and budgets under load, the `enforce-allocated` profile versus advisory, and the combined-feedback scenario | browser |
 | 5 Mandates | **curator handover** in the council substrate: appointment, an atomic-enforced write, expiry, revocation mid-write, attribution surviving the handover | CLI over `GitStore` |
+| RA *(rev 1.6)* | **two budgeted domains**: seven and five attempt rights, a retry, a timeout with unknown charge, a race for the last right, the ledger owner killed and restarted, the consumer disconnected then fed duplicated out-of-order reports — at most twelve attempts, never negative, unknown never released, identical accounting on replay, and the disabled-guard run *fails* | CLI + Docker |
 
 The Ops Console gains a panel per shipped concept (receipts, domains, mandates) — it is the operator's demo
 surface and the UI-example contract's consumer.
@@ -840,4 +952,5 @@ conflicting commitments where required, and recover when an obligation becomes i
 
 ## Appendix B — the reviewer's documents (vendored, unmodified)
 `docs/plans/external/2026-09-05-1-contracts.md` · `…-6-replay.md` · `…-2-domains.md` · `…-3-knowledge.md` ·
-`…-4-stability.md` · `…-5-mandates.md`. Each carries an attribution header; the body is verbatim.
+`…-4-stability.md` · `…-5-mandates.md` · **`2026-09-06-ra-resource-accounting.md`** (rev 1.6; its link to the consumer's
+companion plan is not vendored and dangles by design). Each carries an attribution header; the body is verbatim.
