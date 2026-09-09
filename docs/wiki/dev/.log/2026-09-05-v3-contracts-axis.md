@@ -310,3 +310,23 @@ convention — a read route keyed by a hierarchical identifier captures the path
 JSON body. `/consensus/{*slot}` shipped the same day (both literal and percent-encoded forms name the same slot; gate
 `regression_consensus_slot_route_accepts_hierarchical_slots`); the runbooks are back to the natural URL. Items 3 and 5 apply
 it to their read routes at PR 1. Chosen over encode-always because hand-typed URLs are where that rule fails silently.
+
+## Rev 1.8 (2026-09-09) — the second beyond-the-axis question
+A third-party "context paradigm" paper (reactive dependencies; `ctx.effect` inverses composing LIFO on unload)
+assessed against the code: the spatial half already ships (`watch_capabilities` / `declare_requirement` /
+`watch_requirement`, `CapFilter` schema filtering with input+output schemas, the per-component wasmtime store with
+confined KV and no ambient WASI, `InstallableCatalog` + `Provisioner` + content-addressed pull as a distributed
+component loader, `withdraw` → `Installed::uninstall` → tombstoned advertisement with the mid-flight regression).
+**The lesson worth keeping** (rewritten the same day, on the maintainer's correction — the first draft opposed
+evaporation to the inverse stack, which was a category error): **"undo" names three scopes.** (1) *Local teardown*
+on a live node — what the paper is actually about; a modest gap here, since guard types already do most of it and
+`Drop` is already LIFO for locals, so what a ledger adds is non-lexical ordering, teardown that must **await**
+(`Drop` cannot), and inspectability. (2) *Absence* — the node stopped refreshing; evaporation, needing nobody
+alive. (3) *An effect another participant has acted on* — **not undoable**, and the reason is **authority, not
+cost**: by Promise Theory (the philosophy's own fourth derivation) an agent promises only its own behaviour and the
+assessment lives with the observer, so a promise given and observed cannot be negated; an inverse into that state is
+an imposition. Compensation — a *new* promise — is the only permitted move, which is exactly what item 1 pairs with
+its receipts. Recorded as §13.4–13.5 with D33–D35 (three scopes, not a missing primitive · no new crate, it is item
+1's effects companion in-process · gate on item 1's ADR, not all of v3, with only the WASM-host replacement
+transaction eligible as a gallery entry). The KV caveat is a concurrency-rule restatement: an inverse computed read-then-restore
+is a stale read, so context state is contribution-keyed the way `facts/{node}/{field}` already is.

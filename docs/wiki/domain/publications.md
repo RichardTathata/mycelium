@@ -69,6 +69,19 @@ experiment (evidence-aware resolution vs ordinary resolution under misleading, c
 evidence; errors *and* opportunity costs). Not runnable until `mycelium-knowledge`, `mycelium-control` and the
 mandates work exist; the co-op supply-disruption demonstration is the acceptance artefact.
 
+## Pending: evaporative vs inverse-applied undo (research-track, needs no implementation)
+
+Recorded 2026-09-09 in [`docs/plans/v3-contracts-axis.md` §13.5](../../plans/v3-contracts-axis.md): **which
+spatiotemporal composability results survive when undo is *evaporative* rather than *inverse-applied*?** A
+third-party "context paradigm" paper reduces component unloading to a LIFO stack of runtime-owned inverses. Against
+that, "undo" names **three** scopes: local teardown on a live node, *absence* (evaporation, needing nobody alive),
+and an effect another participant has acted on — which is **not undoable at all**, because by Promise Theory a
+promise given and observed cannot be negated and the downstream state belongs to another autonomous agent. **The
+discriminator is observation, not failure.** Method: state the three scopes precisely, classify each of the paper's
+results by the widest scope its proof needs, and draw the line where teardown ends and compensation begins. No code required, and independent
+of the four-arm composition experiment above. **The paper is not in the repository — vendor the reference and cite
+it properly before writing.**
+
 ## Pending: the "Blood Money → Monetary Ecology" article revision (planned, not started)
 
 Three load-bearing improvements: (1) pull P and S apart as cause→effect (suppress
