@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · **rev 1.7, 2026-09-06** adds the *identifiers in paths* rule (§9; `/consensus/{*slot}` shipped) (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components over an evaporating substrate (§§13.4–13.5, D33–D35) (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -567,6 +567,9 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D24 | 1 | `persisted: bool` documented as "true = no promise broken" when unconfigured | A **new** `local_durability` representation beside the old field, `persisted` deprecated on 2.x, removal in the §6.6 ledger (rev 1.3: an enum-for-bool swap is not additive) | Documentation is inadequate for a contracts programme; Rust's compatibility rules define "additive" |
 | D25 | 2 | A second public well-known descriptor (`/.well-known/mycelium-domain`) and trust bundles | **NANDA stays the public discovery edge** (AgentFacts, self-certified, pull); federation is the authenticated export-and-invoke edge; the descriptor's public subset is an **AgentFacts profile** through the existing serializer; **no second well-known, no registry, no TRS**; "trust is the fetcher's decision" holds on both sides; assessments reach AgentFacts `certification` only through explicit projections | Two public descriptors and a trust index are how federation leaks into NANDA space |
 | D26 | 5 | "both refs in the same push" | **`git push --atomic` + `--force-with-lease=<mandate-ref>:<expected>` on every push, incl. ordinary content writes; fail closed on a non-atomic remote; local `verify` of the mandate ref inside every `update-ref` transaction** | An ordinary push is not atomic; a hook-time read is not a check through commit (the reviewer's requirement) |
+| D33 *(rev 1.8)* | beyond | A general `ctx.effect` inverse accumulator described as the primitive Mycelium *lacks* | **Evaporation is our undo** (soft state, gone at 3× the refresh interval) and is crash-safe where a LIFO inverse stack is not — different guarantees, opposite failure modes; any adoption names which one an effect gets, in the guardrails tier vocabulary | *Roles evaporate* (posture rule 5); a named mechanism is not the composed guarantee (rule 6) |
+| D34 *(rev 1.8)* | beyond | A new `mycelium-context` / `mycelium-component` companion crate | The local fiber runtime is the **in-process half of item 1's effects companion**; no new crate, one effect vocabulary | *Composition before primitives*; a second vocabulary before the contract ADR is D30's error |
+| D35 *(rev 1.8)* | beyond | "Unusually high leverage" — build it next | Gated on item 1's ADR (Phase A) + effects companion (Phase C), **not** on all of v3; only the WASM-host **replacement transaction** may ride inside the axis, and only as a §12 gallery demonstration | Sequencing, not merit: the ADR defines what an effect receipt means |
 | D28 *(rev 1.5)* | beyond | A *commitment* subsystem as the central application abstraction; "the system constructs coordination arrangements" | A commitment is a **composition** of five existing records (requirement · acceptance · mandate/allocation · receipt · assessment) plus a correlation record; obligations arise only by authorized acceptance; no planner — **agreed with the reviewer after one exchange** (§13.2) | *Composition before primitives*; the planner is the ceremony the philosophy strips |
 | D29 *(rev 1.6)* | RA | *Resource Accounting Contract 0.1*: five families, ~25-field envelope, money arithmetic, rate cards, invoice states, business-tag mapping, OTel GenAI + FOCUS | The **minimal** contract: identity envelope + reservation/attempt/usage/coverage (+ `admission.rejected`); **money out of the hard-bound vocabulary** — native units only, an estimate is a claim with a basis, a reported charge only when a provider reports one; rate cards/FOCUS/invoices/tags → the consumer; OTel a derived, pinned export | *Composition before primitives*; a named number is not a guarantee (rule 6) |
 | D30 *(rev 1.6)* | RA | RA1 fixtures-first, in Phase A; "one transactional embedded backend chosen by its ADR" | RA1 **after or with 4·PR1**; the ledger's vocabulary and backend are item 4's decisions; RA0 + attempt identity go first | The ledger must not be defined from the accounting side |
@@ -659,6 +662,18 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
+- **rev 1.8 (2026-09-09)** — §13 becomes **two recorded questions**. New **§13.4**: a third-party "context paradigm"
+  paper (reactive dependencies + `ctx.effect` inverses composing LIFO on unload) assessed against Mycelium — the
+  spatial half already ships (the three capability watchers, schema-filtered `CapFilter`, the confined WASM host,
+  catalogue + provisioner as a distributed loader, `withdraw` → `uninstall` → tombstoned advertisement), and three
+  divergences are recorded: **D33** evaporation *is* our undo and is crash-safe where an inverse stack is not,
+  **D34** no new crate — the local fiber runtime is the in-process half of item 1's effects companion, **D35** the
+  gate is item 1's ADR, not all of v3, with only the WASM-host replacement transaction eligible to ride inside the
+  axis as a §12 gallery entry. The gossip KV must not become the unified context (read-then-restore is a stale-read
+  hazard; contribution-keyed state, as `facts/{node}/{field}` already does). New **§13.5**: the research question —
+  *which composability results survive when undo is evaporative rather than inverse-applied* — answerable with no
+  code, recorded on the research track. The paper itself is not in the repository; vendor the reference before
+  pursuing it.
 - **rev 1.7 (2026-09-06)** — **identifiers in paths** (§9): read routes keyed by a hierarchical identifier capture
   the path tail; writes carry identifiers in the body. Shipped for `/consensus/{*slot}` the same day (the runbooks'
   natural lock URL had 404ed since 2026-07-10; found by wiki-lint). Items 3 and 5 inherit the rule at PR 1.
@@ -853,15 +868,22 @@ axis in the doc-coverage matrix; without it every new row is ~ at best.
 
 ---
 
-## 13. Beyond the axis — the composition hypothesis *(rev 1.5; recorded now, run later)*
+## 13. Beyond the axis — two recorded questions *(rev 1.5, 1.8; recorded now, run later)*
 
-**Not a v3.0 deliverable.** The axis delivers the hypothesis' prerequisites (items 3, 4, 5) and item 3's semantic
-gate; the experiment is the opening question of the *next* epoch, and its result decides whether there is one.
+**Neither is a v3.0 deliverable.** The axis delivers their prerequisites and their gates; the questions themselves
+open the *next* epoch, and their results decide whether there is one. **Nothing in this section is scheduled inside
+phases A–E**, with one named exception (§13.4's replacement transaction, and only as a §12 gallery entry). Both are
+recorded here rather than left to memory, because a five-phase programme with no calendar is exactly where an
+unwritten idea is lost — and because each was argued once already and should not be re-argued.
+
+- **Question one — the composition hypothesis** (rev 1.5, §§13.1–13.3): can local participants reorganise work
+  from the axis' own records, with less manual coordination and no weakened safety boundary?
+- **Question two — reversible components over an evaporating substrate** (rev 1.8, §§13.4–13.5): what does a
+  component-lifecycle *context* paradigm mean when undo is evaporative rather than inverse-applied?
 
 On 2026-09-06 the reviewer assessed what a completed axis amounts to and what a further step would need. We
-agreed, after one exchange, on a position that this section records so it is not re-argued. **Nothing here is
-scheduled inside phases A–E.** It is the hypothesis the axis exists to make testable, and the reason items 3, 4
-and 5 have the gates they have.
+agreed, after one exchange, on a position that §§13.1–13.3 record so it is not re-argued. It is the hypothesis the
+axis exists to make testable, and the reason items 3, 4 and 5 have the gates they have.
 
 ### 13.1 The assessment we accept
 
@@ -941,6 +963,79 @@ conflicting commitments where required, and recover when an obligation becomes i
   unresolved · completion evidence sufficient for the receiving domain) are the two directions after the
   hypothesis holds. Both are compositions of items 2–5; neither is a new subsystem. One vertical slice, one
   bounded experiment, then decide.
+
+### 13.4 Question two — reversible components over an evaporating substrate *(rev 1.8)*
+
+**Provenance.** On 2026-09-09 a third-party paper on a "context paradigm" for component systems (the *Cordis*
+calculus: spatial composability = components declare dependencies and activate/deactivate reactively as providers
+appear and vanish; temporal composability = every context mutation goes through `ctx.effect`, which returns an
+inverse the runtime owns, and a component's inverses run **LIFO** on unload) was assessed against Mycelium in
+session. The paper is **not in this repository** and no vendored copy exists; if this question is pursued, cite it
+properly and vendor the reference first.
+
+**The spatial half already exists, and was verified 2026-09-09.** `watch_capabilities`, `declare_requirement` and
+`watch_requirement` are the reactive coeffect surface; `CapFilter` filters providers on `schema_id` with input and
+output schemas on the advertisement — which the paper lists as an *open problem* for its own implementation; the
+WASM host runs components in a per-component wasmtime store with capability-scoped WIT imports, a confined KV
+subtree and no ambient WASI; and `InstallableCatalog` + `Provisioner` + the content-addressed artifact source are a
+distributed cousin of the paper's component loader (unmet demand → catalogue lookup → verified pull → instantiate →
+advertise). `withdraw` already removes the hosted entry, calls `Installed::uninstall`, and drops the registration so
+the advertisement is tombstoned, with a regression for the hard case (an install withdrawn in flight must not
+resurrect itself).
+
+**⚠ The correction that matters (D33): evaporation *is* our undo, and it is not a weaker `ctx.effect`.** Mycelium's
+advertisements are soft state — reasserted every refresh interval, gone at three times that when the refresher
+stops (the documented crash-detection mechanism); posture rule 5 states it as *roles evaporate*. A LIFO inverse
+accumulator runs **only if the runtime holding it survives to unload time**: a component whose node dies reverses
+nothing. Evaporation needs nobody alive. So the two are different guarantees with opposite failure modes, not one
+a subset of the other: inverses give *exact, ordered* undo when the unloader survives; evaporation gives
+*approximate, unordered* undo that holds when it does not. Any adoption states which of the two a given effect
+gets, in the guardrails tier vocabulary, and never claims both.
+
+**The gossip KV must not become the unified context.** An inverse computed as read-then-restore is a stale-read
+hazard by construction — the recurring race family the concurrency rules exist to prevent. Concretely: A sets
+`x = 1` remembering `x = 0`; B concurrently sets `x = 2`; A unloads and restores `x = 0`, destroying B's legitimate
+effect. The fix is **contribution-keyed** state, which is already the in-tree pattern (`facts/{node}/{field}`, the
+per-field AgentFacts CRDT): removal deletes the departing component's contribution rather than restoring a globally
+observed previous value. Where genuine exclusivity is required, the effect goes through the consensus/lock overlay
+**selectively** — the mesh does not become CP to gain reversibility.
+
+**⚠ Scope (D34): no new companion crate is proposed.** A local fiber runtime with an effect ledger is the
+**in-process half of item 1's effects companion** (PR 5), whose distributed half — evidence of effect, destination-side
+deduplication, compensation at an application-owned resource — is already planned. Building a second effect
+vocabulary before the contract ADR defines the first is exactly the sequencing error D30 corrected for RA1.
+
+**⚠ Sequencing (D35): the gate is item 1, not all of v3.** The blocker is the contract ADR (Phase A) plus the effects
+companion (Phase C), after which a local fiber runtime is buildable in one vocabulary. Waiting for Phase E adds
+delay and no safety. **One piece may ride inside the axis**, and only if it earns a §12 gallery slot rather than
+opening a workstream: the **replacement transaction** in the WASM host — mark the running version draining,
+instantiate the replacement privately, check its requirements, switch generation through a consensus slot (a
+hierarchical slot, §9's tail-capture rule), then reverse and uninstall the old one. Failure *before* the switch
+leaves the old version live, which is *detection, not prevention*, done correctly; the artifact being
+content-addressed makes reconstructing it free. The decisive test is a two-version replacement whose second version
+fails during activation, proving the first survives intact.
+
+**Not adopted:** making the gossip KV the Cordis context; a general-purpose inverse accumulator presented as a
+missing primitive; any claim that the paper's composability proofs transfer to an eventually consistent mesh
+without new theory (§13.5 is that theory's first question).
+
+### 13.5 The research question — answerable before any code *(rev 1.8)*
+
+> **Which of the paper's spatiotemporal composability results survive when undo is *evaporative* rather than
+> *inverse-applied*?**
+
+This is the part worth doing first, because it needs **no implementation**: state the two undo models precisely,
+then classify each of the paper's results by whether it depends on exact, ordered application of inverses by a
+surviving runtime. **The crash case is the discriminator** — a result that still holds when the unloading component
+never runs is a result an evaporating substrate keeps; one that does not is a result that needs the local fiber
+runtime, and therefore the boundary the two-nested-contexts shape draws (paper semantics locally, mesh semantics
+distributively).
+
+Mycelium is the natural place to ask it: the evaporation machinery ships, its behaviour is documented and gated,
+and the self-audit series has been probing it for sixty-plus runs. The output is a paper, not a crate — a stronger
+contribution than a reimplementation, and it establishes the theory the implementation would need anyway. Recorded
+on the research track (`docs/wiki/domain/publications.md`) beside §13.3's four-arm experiment; the two are
+independent and neither blocks the other.
 
 ---
 

@@ -310,3 +310,17 @@ convention — a read route keyed by a hierarchical identifier captures the path
 JSON body. `/consensus/{*slot}` shipped the same day (both literal and percent-encoded forms name the same slot; gate
 `regression_consensus_slot_route_accepts_hierarchical_slots`); the runbooks are back to the natural URL. Items 3 and 5 apply
 it to their read routes at PR 1. Chosen over encode-always because hand-typed URLs are where that rule fails silently.
+
+## Rev 1.8 (2026-09-09) — the second beyond-the-axis question
+A third-party "context paradigm" paper (reactive dependencies; `ctx.effect` inverses composing LIFO on unload)
+assessed against the code: the spatial half already ships (`watch_capabilities` / `declare_requirement` /
+`watch_requirement`, `CapFilter` schema filtering with input+output schemas, the per-component wasmtime store with
+confined KV and no ambient WASI, `InstallableCatalog` + `Provisioner` + content-addressed pull as a distributed
+component loader, `withdraw` → `Installed::uninstall` → tombstoned advertisement with the mid-flight regression).
+**The lesson worth keeping:** evaporation is *our* undo, and it is not a weaker inverse stack — a LIFO accumulator
+runs only if the runtime survives to unload time, while soft state expiring at 3× its refresh interval needs nobody
+alive. Opposite failure modes, so neither subsumes the other; posture rule 5 already said the substrate half.
+Recorded as §13.4–13.5 with D33–D35 (evaporation not a missing primitive · no new crate, it is item 1's effects
+companion in-process · gate on item 1's ADR, not all of v3, with only the WASM-host replacement transaction
+eligible as a gallery entry). The KV caveat is a concurrency-rule restatement: an inverse computed read-then-restore
+is a stale read, so context state is contribution-keyed the way `facts/{node}/{field}` already is.

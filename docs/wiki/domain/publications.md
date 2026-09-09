@@ -69,6 +69,19 @@ experiment (evidence-aware resolution vs ordinary resolution under misleading, c
 evidence; errors *and* opportunity costs). Not runnable until `mycelium-knowledge`, `mycelium-control` and the
 mandates work exist; the co-op supply-disruption demonstration is the acceptance artefact.
 
+## Pending: evaporative vs inverse-applied undo (research-track, needs no implementation)
+
+Recorded 2026-09-09 in [`docs/plans/v3-contracts-axis.md` §13.5](../../plans/v3-contracts-axis.md): **which
+spatiotemporal composability results survive when undo is *evaporative* rather than *inverse-applied*?** A
+third-party "context paradigm" paper reduces component unloading to a LIFO stack of runtime-owned inverses;
+Mycelium's advertisements instead evaporate at 3× their refresh interval when the refresher stops. The two have
+opposite failure modes — an inverse stack runs only if the runtime survives to unload time, evaporation needs
+nobody alive — so **the crash case is the discriminator**: a result that holds when the unloading component never
+runs is one an evaporating substrate keeps. Method: state both undo models precisely, classify each of the paper's
+results, and draw the boundary where the local fiber runtime becomes necessary. No code required, and independent
+of the four-arm composition experiment above. **The paper is not in the repository — vendor the reference and cite
+it properly before writing.**
+
 ## Pending: the "Blood Money → Monetary Ecology" article revision (planned, not started)
 
 Three load-bearing improvements: (1) pull P and S apart as cause→effect (suppress
