@@ -317,10 +317,16 @@ assessed against the code: the spatial half already ships (`watch_capabilities` 
 `watch_requirement`, `CapFilter` schema filtering with input+output schemas, the per-component wasmtime store with
 confined KV and no ambient WASI, `InstallableCatalog` + `Provisioner` + content-addressed pull as a distributed
 component loader, `withdraw` → `Installed::uninstall` → tombstoned advertisement with the mid-flight regression).
-**The lesson worth keeping:** evaporation is *our* undo, and it is not a weaker inverse stack — a LIFO accumulator
-runs only if the runtime survives to unload time, while soft state expiring at 3× its refresh interval needs nobody
-alive. Opposite failure modes, so neither subsumes the other; posture rule 5 already said the substrate half.
-Recorded as §13.4–13.5 with D33–D35 (evaporation not a missing primitive · no new crate, it is item 1's effects
-companion in-process · gate on item 1's ADR, not all of v3, with only the WASM-host replacement transaction
-eligible as a gallery entry). The KV caveat is a concurrency-rule restatement: an inverse computed read-then-restore
+**The lesson worth keeping** (rewritten the same day, on the maintainer's correction — the first draft opposed
+evaporation to the inverse stack, which was a category error): **"undo" names three scopes.** (1) *Local teardown*
+on a live node — what the paper is actually about; a modest gap here, since guard types already do most of it and
+`Drop` is already LIFO for locals, so what a ledger adds is non-lexical ordering, teardown that must **await**
+(`Drop` cannot), and inspectability. (2) *Absence* — the node stopped refreshing; evaporation, needing nobody
+alive. (3) *An effect another participant has acted on* — **not undoable**, and the reason is **authority, not
+cost**: by Promise Theory (the philosophy's own fourth derivation) an agent promises only its own behaviour and the
+assessment lives with the observer, so a promise given and observed cannot be negated; an inverse into that state is
+an imposition. Compensation — a *new* promise — is the only permitted move, which is exactly what item 1 pairs with
+its receipts. Recorded as §13.4–13.5 with D33–D35 (three scopes, not a missing primitive · no new crate, it is item
+1's effects companion in-process · gate on item 1's ADR, not all of v3, with only the WASM-host replacement
+transaction eligible as a gallery entry). The KV caveat is a concurrency-rule restatement: an inverse computed read-then-restore
 is a stale read, so context state is contribution-keyed the way `facts/{node}/{field}` already is.

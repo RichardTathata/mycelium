@@ -3111,13 +3111,16 @@ the minimal contract with money out of the hard-bound vocabulary, RA1 after item
 responsibilities not roles. RA0 shipped 2026-09-06 as `mycelium-reason` **0.6.2** (the OpenAI façade no longer
 fabricates a token split). Vendored proposal: `docs/plans/external/2026-09-06-ra-resource-accounting.md`.
 
-**Beyond the axis — reversible components over an evaporating substrate (rev 1.8, plan §§13.4–13.5; recorded,
+**Beyond the axis — reversible components and the three scopes of undo (rev 1.8, plan §§13.4–13.5; recorded,
 *not a v3.0 deliverable*):** a third-party "context paradigm" paper (components declare dependencies reactively;
 every context mutation returns an inverse, and a component's inverses run LIFO on unload) assessed against
 Mycelium 2026-09-09. The spatial half already ships — the three capability watchers, schema-filtered `CapFilter`,
-the confined WASM host, `InstallableCatalog` + `Provisioner` as a distributed component loader. **Evaporation is
-our undo** and is crash-safe where an inverse stack is not (D33): a LIFO accumulator runs only if the runtime
-survives; a lease needs nobody alive. No new crate (D34) — a local fiber runtime is the in-process half of item 1's
+the confined WASM host, `InstallableCatalog` + `Provisioner` as a distributed component loader. **"Undo" names three scopes (D33):** local teardown of a
+component on a live node (bounded; guard types already do most of it), *absence* (evaporation, which needs nobody
+alive), and an effect another participant has acted on — **not undoable**. The last is a Promise Theory result, the
+philosophy's own fourth derivation: an agent promises only its own behaviour and the assessment lives with the
+observer, so a promise given and observed cannot be negated; the downstream state was never yours to write, and
+compensation (a *new* promise) is the only permitted move. No new crate (D34) — a local fiber runtime is the in-process half of item 1's
 effects companion; gated on item 1's ADR rather than all of v3 (D35), with only the WASM-host **replacement
 transaction** eligible to ride inside the axis as a gallery demonstration. The gossip KV must not become the unified
 context: read-then-restore is a stale-read hazard, so state is contribution-keyed as `facts/{node}/{field}` already
