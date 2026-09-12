@@ -2933,7 +2933,7 @@ evolution needing field-level migration.
 ## v3.0 — two primaries (one shipped its first tranche) · packaging candidates · one adapter · the contracts axis (proposed)
 
 > **Naming note — "v3.0" is a roadmap _epoch_, not a version.** The released substrate is at
-> **`2.4.3`** (wire v12, additive-only); there is no `3.0.0` crate. "v3.0" labels a *body of work* the way
+> **`2.4.4`** (wire v12, additive-only); there is no `3.0.0` crate. "v3.0" labels a *body of work* the way
 > "v2.0 Milestones" named the prior epoch — and since 2026-09-05 it has **two axes**: the **companion / DX
 > axis** (shipped July 2026: `mycelium-guardrails` **`1.0.0`**, `mycelium-reason` **`0.6.0`**, the validated
 > pattern gallery) and the **contracts axis** (adopted plan, no code yet — [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md)).
