@@ -22,6 +22,18 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
+
+Durability PATCH on the 2.4 line: the snapshot rename is fsynced at the directory before the WAL is
+truncated (`237352a`; the contracts axis Phase-0 item), so a power loss after truncation can no longer
+leave the old `snapshot.bin` beside an empty `wal.bin`. Also shipped since v2.4.3: `/consensus/{*slot}`
+tail capture (additive, plan §9), `mycelium-reason` 0.6.1 / 0.6.2 (own line), `set_with_min_acks`
+documented honestly, the Python stub server backlog fix. Wire **v12** (PREV 11) unchanged; on-disk
+format unchanged; no public-API change. Cut at the NovusLens consumer's request: their durable canon
+rides the snapshot/WAL path and their manifest had carried "fsync-of-snapshot-rename still unreleased"
+since 2026-09-06. Release gate: CI green on the release PR before tagging. Log
+`.log/2026-09-12-v2.4.4-release.md`.
+
 ## v2.4.3 release — 2026-09-05 (tag `v2.4.3`)
 
 A **durability PATCH** cut the same day as v2.4.2 (wire **v12**/PREV 11 unchanged; on-disk format

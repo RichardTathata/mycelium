@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.4.4] — 2026-09-12
+
+Durability PATCH on the 2.4 line: the snapshot rename is fsynced at the directory before the WAL is truncated (the Phase-0 item of the v3.0 contracts axis). Wire **v12** (PREV 11) unchanged; on-disk format unchanged; no public-API change. Also: `/consensus/{*slot}` captures the path tail (additive); `mycelium-reason` 0.6.1 / 0.6.2 on its own line; `set_with_min_acks` documented honestly. Cut for the NovusLens consumer's re-pin (their durable canon rides the snapshot/WAL path).
+
 ### Changed
 
 - **`GET /consensus/{*slot}` captures the path tail.** Every slot the substrate mints is hierarchical
