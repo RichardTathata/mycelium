@@ -1,9 +1,11 @@
-> **Vendored external handover — NovusLens (Novus-i2), 2026-09-12. Body unmodified.**
-> Source of record: `Novus-i2/docs/contracts/mycelium_runtime_handover.md` at commit 2687a3c0. What it fixes for the AE slice
-> (plan rev 1.9 §6.8 / D36): the evidence contract the runtime side must produce, what comes back from a NovusLens policy
-> export, the two decisive demonstrations as NovusLens reads them, the four joint seams to settle in AE0/AE3, conventions, and
-> what NovusLens never does. Relative links in the body (`agent_evidence_v1.md`, fixtures, the reference exporter walkthrough)
-> point into the Novus-i2 repository and are expected to dangle here.
+> **Vendored external handover — NovusLens (Novus-i2), 2026-09-12 (re-vendored the same day at commit 144d7ae7). Body unmodified.**
+> Source of record: `Novus-i2/docs/contracts/mycelium_runtime_handover.md`. Change from the first vendoring: the Cedar
+> model reads the resource from `context.resource` (Cedar exposes no entity id as an attribute) and both artifacts are
+> engine-checked against the Cedar CLI and OPA in the consumer's test gate — not evaluated in any runtime, which is AE2's job.
+> What it fixes for the AE slice (plan rev 1.9 §6.8 / D36): the evidence contract the runtime side must produce, what comes
+> back from a NovusLens policy export, the two decisive demonstrations as NovusLens reads them, the four joint seams to settle
+> in AE0/AE3, conventions, and what NovusLens never does. Relative links in the body point into the Novus-i2 repository and
+> are expected to dangle here.
 > Do not edit below this line; changes to our plan go in `v3-contracts-axis.md`.
 
 ---
@@ -62,8 +64,11 @@ restriction; a source cannot widen its own enrolment. Keep your private key; Nov
 - **Policy export.** `GET /remits/export?format=cedar|rego` renders that declaration. The header says
   *generated, not deployed*, carries `digest = sha256:<hex of the policy body>` and lists the clauses
   the target cannot carry. Assumed Cedar model: `principal == Agent::"<subject>"`,
-  `action in [Action::"<operation>"…]`, `resource.id` (`==` or `like` for a trailing star),
-  `context.destination`; `forbid` for exclusions; validity dates are **not** in the Cedar artifact.
+  `action in [Action::"<operation>"…]`, `context.resource` and `context.destination` (`==`, or `like` for a
+  trailing star) — both supplied by the enforcement point; `forbid` for exclusions; validity dates are **not** in
+  the Cedar artifact. Both artifacts are engine-checked against the Cedar CLI and OPA in our test gate (the
+  renderer's clause set agrees with our comparator on every fully-observed input); they are not evaluated in
+  your runtime, which is AE2's job.
   Rego: `package novuslens.remit.<subject>`, `default allow := false`, `input.subject/operation/
   resource/destination`, validity by `time.now_ns()`. Neither is claimed lossless.
 - **What must come back for the page to say "deployment reported".** A `policy_deployment` whose
