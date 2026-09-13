@@ -3866,6 +3866,7 @@ async fn test_ws3_data_at_rest_cipher_encrypts_wal_and_round_trips() {
 /// **no persistence configured**, `Committed { persisted }` reads `true` — "nothing was promised" is
 /// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`
 /// beside it; this pin is what that PR changes, in the open.
+#[cfg(feature = "consensus")]
 #[tokio::test]
 async fn floor_committed_persisted_is_true_when_persistence_unconfigured() {
     use crate::{ConsensusConfig, ConsensusResult};
