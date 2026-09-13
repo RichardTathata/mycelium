@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -101,6 +101,8 @@ what each item's demonstration must meet.
 | 7 Gateway caller identity | — (standalone; Phase A) | 2 (the federated-caller adapter is this, across a boundary) · 5 (who invoked a mutation) |
 | 8 Threat model rev 2 | — (document; Phase A) | 2, 3, 5 (each PR 1 cites it) |
 | **RA** Resource accounting *(slice, rev 1.6)* | 1 (receipts, identities) · 7 (caller context) · 4 (rights ledger — RA1 after 4·PR1) · 6 (seams) · 2 (federated variant only) | a read plane for cost evidence; item 4's first externally-priced dimension |
+
+| **AE** Authorisation and evidence *(slice, rev 1.9)* | 1/5/7 (identity, receipts, resource fences) · 4 (allocated bounds) · 6/8 (replay/threat model) · 2 (cross-domain variant) | protected action contract and attributable execution/outcome evidence; §6.8 phase gates |
 
 **Order.** Items **1 and 6 first, together**: one states what must hold, the other attacks it. Then **2** as the
 structural investment. **3, 4, 5** follow as companions above the substrate, each once its dependencies' first
@@ -535,6 +537,157 @@ claim eventual cancellation of all external activity.
 automatic model or topology changes; dynamic rights reallocation; any claim of complete fleet cost without
 coverage evidence.
 
+### 6.8 The AE slice — runtime authorisation and evidence *(rev 1.9)*
+
+**Status: adopted V3 scope, not implemented or accepted.** Requested by the project owner on
+2026-09-12 following the NovusLens remit-authoring discussion. This composes items **1, 4, 5, 6,
+7 and 8**, with item **2** for cross-domain calls and item **3** for evidence interpretation.
+It is not a ninth primitive, a new policy language, or a central runtime control service.
+Existing §6.3 resource-atomic enforcement and §6.7 allocated-rights rules remain authoritative.
+
+**Objective.** A participating service can establish who is asking to do what, under which
+scoped authority, refuse an unauthorised effect at its own resource boundary, and publish
+attributable evidence of the request, decision, execution and independently observed outcome.
+Capability discovery is not permission. A signature authenticates its signer; separate admission
+and issuer-authority checks establish whether that signer may grant the claimed authority.
+
+**Minimal contract (ADR before API).**
+
+- An action envelope binds the logical operation and attempt identities from item 1, verified
+  actor and represented principal/delegation chain from item 7, operation, exact target resource,
+  security-relevant arguments or their canonical digest, mandate identity/epoch, policy revision,
+  validity and correlation context. Unverified caller-supplied identity never becomes authority.
+- A replaceable evaluator receives authenticated facts and versioned policy and returns
+  **permit, deny or indeterminate**, with the checked constraints, reason and policy revision.
+  The adapter also reports policy evaluation errors and unrecognised clauses. Indeterminate is
+  not permit. The secure profile refuses effects when required authority cannot be established.
+- The protected service enforces the decision and relevant epoch/constraints within its own
+  effect boundary. A remote decision is bound to actor, operation, resource, arguments and
+  validity; a reusable bearer or preflight check alone is insufficient. Address replay, argument
+  substitution and check/use races explicitly. For an external API without such a boundary,
+  state the weaker guarantee and use item 1's adapter contract; never label it hard prevention.
+- Records distinguish **requested, permitted/denied/indeterminate, execution attempted,
+  execution completed/failed/unknown, and outcome observed**. Acceptance remains a separate
+  attributable decision. A permit does not prove execution; timeout does not prove no effect;
+  an execution receipt does not prove the intended outcome. Reuse item 1's receipts and RA
+  identities/delivery conventions instead of creating a parallel ledger.
+- Evidence carries source identity, event/receipt time, policy and mandate revision, coverage,
+  correlation and correction/supersession references. Sensitive payloads stay outside gossip KV;
+  export only authorised references/records through durable delivery. Producer signatures never
+  manufacture observational independence. Export failure must not create an unrecorded effect:
+  each profile declares its durable audit-before-effect boundary or refuses where required.
+
+**Standards-based application profile, not a new universal ontology.** AE0 specifies the
+connections between established mechanisms and the existing Mycelium contracts. Pin the selected
+specification versions and supported subsets, with executable positive and negative fixtures:
+
+- **Identity:** integrate verified workload identities from SPIFFE or the customer's existing
+  identity system through item 7. Document trust-domain, subject and delegation bindings;
+  workload identity alone does not confer authority.
+- **Decision and enforcement:** use the separation described by XACML as an architectural
+  reference; it does not require an XACML engine or XML on Mycelium's wire. Ship the evaluator
+  interface, a deterministic reference and **one real Cedar or OPA adapter selected in AE0**.
+  Other engines remain replaceable integrations, not claimed shipped adapters.
+- **Remit interchange:** define an ODRL-aligned profile for permissions, prohibitions and
+  constraints, explicitly documenting completeness, precedence and unsupported semantics.
+  PROV may inform lineage. Alignment is not blanket standards conformance.
+- **Delegated requests:** use OAuth Rich Authorization Requests where the adopter's
+  authorisation infrastructure supports them; otherwise document the structured binding used.
+  OAuth support is an integration choice, not a mandatory central service or a substitute for
+  mandate establishment, identity verification or resource fencing.
+
+References: [SPIFFE](https://spiffe.io/docs/latest/spiffe-specs/),
+[XACML](https://www.oasis-open.org/tc-xacml/),
+[ODRL 2.2](https://www.w3.org/TR/odrl-model/),
+[OAuth RAR, RFC 9396](https://datatracker.ietf.org/doc/html/rfc9396),
+[PROV](https://www.w3.org/TR/prov-overview/).
+No lossless translation between ODRL, XACML, Cedar and Rego is promised. Unsupported clauses,
+changed defaults and conflict rules remain explicit; reject an enforcement export that would
+silently weaken the required boundary. MCP/A2A declarations are not business permission.
+
+**Reviewed business-to-action mappings.** A versioned catalogue binds business activities to
+native operations, resources, destinations and security-relevant arguments. Each mapping records
+its reviewer, revision, basis and coverage gaps. Ship one complete procurement mapping. Generic
+calls such as email cannot establish business purpose by name alone: use a structured protected
+operation, an authorised approval step, or declare the semantic gap. Ambiguous/unmapped behaviour
+remains unknown to the evidence consumer; a secure resource refuses actions whose required
+authority cannot be established. LLM suggestions retain attribution and uncertainty and cannot
+activate policy. Corrections export the mapping revision and supersession link so consumers can
+re-evaluate support without rewriting history. A reviewed mapping is not assumed infallible.
+
+**Declared, deployed and observed are separate.** Customer-facing authoring belongs to the
+adopting product. An approved declaration or generated policy is not proof of activation. The
+runtime exports a deployment report binding the declaration and mapping revisions, exact policy
+digest, target enforcement points, activation/effective times, issuer and route coverage. Action
+decisions bind the policy actually evaluated. Execution and outcome remain separate records.
+An authority-grant record alone does not prove that a whole remit was deployed: numerical grants
+may not express its operation/resource/destination sets. Missing, conflicting or stale deployment
+reports are explicit. A signed deployment report is attributable testimony about activation,
+not proof that every alternative route is controlled; tests and observations qualify coverage.
+NovusLens may export an artifact for customer deployment but never deploys it, operates an agent,
+or assumes the export was applied. No mandatory callback to NovusLens is introduced.
+
+**Local operation and failure policy.** No mandatory fleet-wide decision point. Resources may
+use locally verified policies within explicit validity/freshness bounds. Offline authority is
+permitted only where the declared profile allows it; immediate revocation during a partition
+cannot be promised by a disconnected evaluator. State which operations wait/refuse and which
+continue. Resources enforce epoch fencing against paused former holders; expiry of new-action
+permission, revocation, and invalidation of outstanding operations are separate transitions.
+Strict shared budgets use item 4's allocated spending rights and reserve before dispatch; local
+counters cannot establish a fleet bound. Unconditional forwarding within a domain is unchanged.
+Alternative effect routes must be covered or declared outside the enforcement guarantee.
+
+**Implementation and phase gates.** Responsibilities are assigned to components, not invented
+maintainer roles; each PR uses §9's five-part statement and SDK/operator parity gate.
+
+| Step | Dependency / phase | Deliverable and acceptance |
+|------|--------------------|----------------------------|
+| AE0 | Phase A; items 1/7/8 ADRs | contract, threat-model extension, strength profiles, reviewed action catalogue, pinned standards/profile matrix, adapter choice and negative fixtures; no new wire semantics |
+| AE1 | Phase C; usable items 1, 5 and 7 | authenticated action envelope, evaluator interface and reference evaluator; substitution, impersonation, missing facts and unsupported-policy cases refuse correctly |
+| AE2 | Phase D; item 5 resource fence, item 4 rights for budgeted actions, item 6 replay | real protected-service enforcement and selected policy adapter; check/use race, duplicate attempts, stale holder, timeout and partition behaviour replay deterministically |
+| AE3 | Phase D; item 1 receipts and RA delivery, item 3 interpretation where used | correlated declaration/deployment/decision/execution/outcome evidence and mapping/observation correction export; crash-before/after effect and acknowledgement retain honest states; consumer sees gaps rather than an invented all-clear |
+| AE4 | Phase E; AE1–3, item 2 for domain-crossing variant | CI gallery and operator/SDK examples; both scenarios below and a replacement evaluator pass the same contract fixtures |
+
+These AE exit requirements supplement §2: **Phase A requires AE0; Phase C AE1; Phase D AE2–3;
+Phase E AE4.** Neither API merge nor a simulated event generator closes a scenario gate.
+
+**Decisive demonstrations.** Use constructive co-operative settings and harmless controlled
+activity, in keeping with §12. The runtime consists of actual Mycelium participants invoking
+protected services, not merely pre-authored evidence replayed into a consumer.
+
+1. **Procurement authority.** Begin with an approved declaration, reviewed activity mapping,
+   customer-deployed policy and runtime activation report. A purchasing co-op agent attempts
+   an approval above its grant.
+   Show a valid permitted operation, a refused over-limit action with no business effect, and
+   a deliberately misconfigured test route whose recorded effect exposes the enforcement gap.
+   An authorised person intervenes through the resource's runtime mechanism. Show authorisation,
+   execution and outcome separately, then correct one observation and retain the original history.
+2. **Functional remit.** A maintenance co-op agent attempts a benign job or communication to an
+   owned test endpoint outside its recorded remit. Test explicit prohibitions, incomplete
+   allow-lists, missing destinations, shared identities and overlapping policies. Record one
+   partial intervention and an unobserved route; no broad containment claim follows from them.
+
+Both scenarios exercise expiry, revocation, disconnection, delayed execution, policy revision,
+retry, alternative-route coverage and a paused holder. Also test an export never deployed, a
+stale deployment report, an unsupported clause, an ambiguous business mapping and a mapping
+correction; none may yield a false enforcement or within-remit claim. The local CI gate uses a contract stub
+consumer (D31), so Mycelium acceptance does not depend on NovusLens availability.
+
+**Joint deployment acceptance, additionally required.** The adopter pack must provide deployable
+AWS and GCP configurations with Mycelium running the entities: **both scenarios on both clouds**.
+Include infrastructure, least-privilege setup, actual collectors, safe scenario drivers, cleanup,
+operational recovery and an exact-version evidence manifest. NovusLens demonstrates the declared
+boundary, responsible person, separate intervention/outcome records and correction propagation.
+Record these four runs as joint acceptance evidence, separate from Mycelium's local CI gate;
+fixtures, a stub consumer or one cloud do not complete that pack. No cloud/NovusLens conformance
+is claimed until the corresponding deployed run passes. This pack extends §12's delivery surfaces.
+
+**Boundary.** Mycelium supplies reusable runtime mechanisms; the customer establishes authority
+and its protected resources enforce effects. NovusLens records intent and assesses evidence;
+it does not issue containment. No new central planner, universal enforcement engine, automatic
+policy author, semantic intent detector, fleet-wide consensus requirement or propagation filter
+is introduced by this slice.
+
 ## 7. Decision register
 
 Every place this plan departs from the reviewer's six documents. "Kept" means we adopt their text; the rest are ours.
@@ -576,6 +729,7 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D31 *(rev 1.6)* | RA | RA6 = the external consumer's end-to-end handoff | A **stub consumer in CI**; the co-op scenario is the acceptance artefact; external conformance is the consumer's evidence | The repository's gate cannot depend on a system it does not run |
 | D32 *(rev 1.6)* | RA | Five named maintainer roles | Responsibilities, not people; the per-PR five-part statement names the enforcing component | One maintainer |
 | D27 | 7 | (a struct with principal + digest) | The context is **constructed only by the auth layer and attested by the node over the request digest**; four negative cases in CI; legacy node-as-caller only under `legacy`, never in the secure profile | Receiving a struct is not verifying a relationship |
+| D36 *(rev 1.9)* | AE | A universal policy engine or prompt guards as the authority boundary | A compositional action/evidence contract; replaceable evaluator, one real adapter, resource-enforced authority and honest receipts; §6.8 | Local autonomy remains; effects are checked by the resource, not by Layer I. Local CI is self-contained; AWS/GCP plus NovusLens runs are separately required joint delivery evidence |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
 lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disappearance; the asymmetric uncertainty rule;
@@ -662,6 +816,15 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
+
+- **rev 1.9, same-day refinement (2026-09-12):** standards/profile matrix, reviewed business
+  mappings, distinct deployment reports and negative acceptance cases added to AE; no new
+  universal policy language or NovusLens runtime responsibility.
+- **rev 1.9 (2026-09-12):** project-owner-requested runtime authorisation and evidence slice,
+  §6.8 / D36. Adds AE0–AE4 phase exits, a replaceable policy evaluator, protected-resource
+  enforcement, separate outcome evidence, two real runtime scenarios and the four-run AWS/GCP
+  joint acceptance pack. Adopted scope only; no implementation or acceptance asserted.
+
 - **rev 1.8 (2026-09-09)** — §13 becomes **two recorded questions**. New **§13.4**: a third-party "context paradigm"
   paper (reactive dependencies + `ctx.effect` inverses composing LIFO on unload) assessed against Mycelium — the
   spatial half already ships (the three capability watchers, schema-filtered `CapFilter`, the confined WASM host,

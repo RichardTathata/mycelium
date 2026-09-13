@@ -3101,6 +3101,27 @@ under `/publication-lint`, "shipped" only with a tag; **philosophy** — the con
 and 6 as litmus tests; plus front-door refresh, a companion onboarding checklist, migration notes per deprecation,
 a Phase-C adversarial self-audit. **No phase exit while its §12 lines are open.**
 
+**Runtime authorisation and evidence (rev 1.9, 2026-09-12; adopted scope, not implemented;
+plan §6.8 / D36).** A bounded slice over contracts, scoped mandates, caller identity, allocated
+rights, threat modelling and replay. Participating resources enforce authenticated action
+requests against versioned authority through a replaceable evaluator; a deterministic reference
+and one real Cedar/OPA adapter ship with conformance fixtures. Discovery never grants permission.
+Request, authorisation/denial, execution and outcome are separate attributable records; revocation,
+epoch fences, timeout uncertainty and partition policy are explicit. No new policy language,
+central coordinator or propagation filter. AE0–AE4 are required phase exits in the plan. The same-day
+standards refinement uses SPIFFE/customer identity, XACML's decision/enforcement separation,
+an ODRL-aligned remit profile and optional OAuth RAR integration. AE0 pins supported subsets;
+no universal translation is claimed. Reviewed business-to-action mappings and distinct policy
+deployment reports connect intent to effects. Unknown mappings, unsupported clauses and exports
+never deployed cannot become claims of enforcement. Mapping corrections preserve history.
+
+**Acceptance:** two actual Mycelium runtime demonstrations — a procurement approval exceeding
+its mandate, and benign maintenance activity outside its remit — including intervention,
+independent outcome evidence, correction and recovery. Local CI uses a stub evidence consumer;
+the additional joint delivery pack runs **both scenarios on AWS and GCP**, with NovusLens showing
+the complete evidence journey. These four live runs remain required; simulated records alone do
+not close them. Authoring in NovusLens stays separate from deployment/enforcement at the resource.
+
 **The RA slice — attributable resource accounting (rev 1.6, plan §6.7; a slice over items 1, 4, 6, 7 — not item
 9):** which attempt consumed what, for which logical operation, under whose verified authority, with what
 uncertainty. Three profiles (observe · enforce-local · enforce-allocated) in the guardrails tier vocabulary; **hard
