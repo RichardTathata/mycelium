@@ -47,6 +47,20 @@ the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key select
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
 identity.
 
+## Threat model revision 2 (v3 item 8, 2026-09-13)
+
+`docs/threat-model.md` §5 adds the four boundaries the contracts axis introduces — **D** a foreign principal across a
+domain edge (item 2: transports never joined, three trust relationships apart, bilateral bundles, no leader, SWIM off in
+the enforced profile), **E** an authenticated-but-abusive client (item 7 shipped: the attested `GatewayCaller`; AE0's
+`indeterminate ≠ permit`; the gateway is a route-level preflight), **F** evidence confidentiality and the
+hash-as-credential (item 3: opaque addresses, heads in KV and bodies in an authorised store, equivocation preserved,
+evidence never grants what authorisation denies), **G** a compromised former holder and a forged epoch (item 5: the
+decisive epoch invariant enforced inside the store's atomic boundary, `MandateSuperseded`, three lifecycle events
+apart) — plus the shared rule *authority is recomputed, never inherited*. §6 fixes what identity, evidence and replay
+artefacts may carry: verified claims and scoped attestations, never credentials; replay bundles redacted at the
+recording seam with a named protected-artefact class. Items 2, 3 and 5 cite it from their PR 1 ADRs (plan §6.5, done).
+Log: [`.log/2026-09-13-threat-model-rev2.md`](.log/2026-09-13-threat-model-rev2.md).
+
 ## WS2 — tamper-evident audit (`compliance`)
 
 Per-node hash-chained signed records at `sys/audit/{node}/{seq:016x}` (a global chain would
