@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **rev 1.11, 2026-09-13** restores the **coordination sense of "contract"** — the thesis in §1.2 and the **commitment companion** (contract net) in §6.9, D39 · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **rev 1.11, 2026-09-13** restores the **coordination sense of "contract"** — the thesis in §1.2 and the **commitment companion** (contract net) in §6.9, D39 · **rev 1.12, 2026-09-13** brings §12 (delivery surfaces) up to date with revs 1.9–1.11: AE, AE-T and CN examples, chapters, runbook rows; the decks lead with the wedge · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -938,6 +938,12 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 
 ## 11. Revision log
 
+- **rev 1.12 (2026-09-13):** §12 brought up to date with revs 1.9–1.11 — three gallery rows (AE-T at the gateway on
+  the public reference evaluator; AE scenario 1; the redistribution workload re-run as contract net beside its tuple-space
+  and blackboard versions), the boundary note (public entries demonstrate the seam; adapters, exporter and cloud pack are
+  private), concepts vocabulary for AE and CN, two guide chapters (authorising actions at the gateway; commitments), guide 16's
+  tier cross-reference, runbook rows (evaluator profile, evidence export, decision counters, `cn/`), an Ops Console panel, and
+  the decks leading with the wedge. Delivery surfaces only; no engineering change.
 - **rev 1.11 (2026-09-13):** the coordination sense of "contract" restored. §1.2 states the two senses and their
   relation (verification contracts serve coordination contracts); **§6.9** gives contract net its slot as the
   **commitment companion** (CN1–CN3, Phase C exit, may begin after 1·PR2) with the one-to-one mapping to §13.2's five
@@ -1068,8 +1074,15 @@ template, constructive domain, CI-run):*
 | 4 Stability | the **control-envelope viz**: allocated rights and budgets under load, the `enforce-allocated` profile versus advisory, and the combined-feedback scenario | browser |
 | 5 Mandates | **curator handover** in the council substrate: appointment, an atomic-enforced write, expiry, revocation mid-write, attribution surviving the handover | CLI over `GitStore` |
 | RA *(rev 1.6)* | **two budgeted domains**: seven and five attempt rights, a retry, a timeout with unknown charge, a race for the last right, the ledger owner killed and restarted, the consumer disconnected then fed duplicated out-of-order reports — at most twelve attempts, never negative, unknown never released, identical accounting on replay, and the disabled-guard run *fails* | CLI + Docker |
+| AE-T *(rev 1.12)* | **enforce a remit at the gateway**: a maintenance co-op agent calls tools through `POST /mcp`; a benign job outside its declared remit is refused at the gateway (`deny`, effect `none`) with the checked constraints and `policy.revision` printed; an explicit prohibition; an incomplete allow-list reads *authority not established*; the exported evidence batch names the gateway as the only observed enforcement point (`coverage.complete: false`) — **runs on the public reference evaluator**; the Cedar adapter and the NovusLens exporter are private and are shown only in the private gallery | CLI (public) · browser panel in the Ops Console |
+| AE *(rev 1.12)* | **procurement authority**: an approved declaration, a reviewed mapping, a deployed policy revision; a purchasing co-op agent's valid approval, its over-limit attempt refused with no business effect, a deliberately misconfigured route whose recorded effect exposes the enforcement gap, an authorised intervention, outcome observed separately, one observation corrected with history kept — scenario 1 of §6.8, at the gallery bar, against the stub consumer | CLI + Docker (public seam + reference) · the four AWS/GCP runs (private pack) |
+| CN *(rev 1.12)* | **the redistribution example re-run as contract net** (`mycelium-tuple-space`'s `redistribution` / `redistribution_viz` today): the same surplus-food workload where drivers *offer* against announced pickups, one award per pickup (the tuple-space lowest-candidate rule), the award a receipt, a report, an assessment — beside the tuple-space and blackboard versions so the three coordination models are compared on one workload; a double-award witness in CI | CLI + `*_viz` browser |
 
-The Ops Console gains a panel per shipped concept (receipts, domains, mandates) — it is the operator's demo
+**Boundary note *(rev 1.12)*.** Public gallery entries for AE-T and AE demonstrate the **seam** (the evaluator hook,
+the reference evaluator, the `AuditSink` export shape, the stub consumer); adapters, the signed NovusLens exporter and
+the cloud delivery pack are private and never a public claim. A public README block for these two says so in one line.
+
+The Ops Console gains a panel per shipped concept (receipts, domains, mandates, **gateway decisions** — rev 1.12) — it is the operator's demo
 surface and the UI-example contract's consumer.
 
 ### 12.2 Developer documentation
@@ -1077,13 +1090,20 @@ surface and the UI-example contract's consumer.
 - **Concepts first.** `docs/guide/00-concepts.md` gains the axis vocabulary with each item's ADR: receipt kinds and
   `DeliveryUnknown` (1); the seams and what a bundle is (6); *domain* versus the NANDA discovery edge (2, D25);
   claim/observation/assessment/acceptance (3); allocated rights and promise strength (4); mandate, term, epoch (5);
-  gateway caller identity (7). `building-on-mycelium.md` and the FAQ get the reserved prefixes and the one
+  gateway caller identity (7); **action envelope · evaluator · permit/deny/indeterminate · policy revision · coverage · the
+  deployment report** (AE, rev 1.12); **requirement · offer · award · report · assessment, and why an award is a receipt** (CN,
+  rev 1.12). `building-on-mycelium.md` and the FAQ get the reserved prefixes and the one
   compatibility rule the day they are reserved (§9).
 - **How-to chapters** with each item's release gate: a **contracts & receipts** chapter (the receipt ladder as its
   worked example); a **replay & simulation** chapter; chapter 17 (federation) restructured into *public discovery*
   (AgentFacts, unchanged) and **federated domains** (new — trust bundles, exported services, the edge protocol);
   **knowledge**, **stability & control**, and **mandates** chapters for the companions; `error-handling.md` gains
-  the receipt outcomes; the cookbook gains one recipe per item.
+  the receipt outcomes; the cookbook gains one recipe per item. *(rev 1.12)* Two more chapters: **authorising actions at the
+  gateway** (the AE-T how-to: declare a remit, load a policy revision, read a decision, export evidence, what the gateway
+  can and cannot promise — the wedge chapter, written so an adopter with an existing MCP fleet can follow it end to end), and
+  **commitments — contract net** beside chapter 14's tuple-space and blackboard material, completing the three coordination
+  models; chapter 14 gains the one-workload comparison. Guide 16 (guardrails) gains a section relating the evaluator's decision
+  to the three strength tiers, so the two vocabularies never fork.
 - **SDK docs are part of the parity gate** already; this adds the *narrative* side: the Python and TypeScript
   READMEs and the LangGraph chapter show receipts, not just carry the field.
 - **The wiki** gets a page per new mechanism (contracts under architecture; replay under testing; domains and the
@@ -1108,9 +1128,18 @@ envelopes, evidence freshness); `diagnostics.md` (capturing a **replay bundle fr
 rules item 8 specifies); `audit.md` (mandate lifecycle events, attestations); `tuning.md` and `dynamic-scaling.md`
 (allocated rights, budgets); the **shared-responsibility matrix** gains rows for domains and mandates; the threat
 model rev 2 (item 8) lands under `docs/design/` and is linked from `crown-jewel.md` and the wiki security page.
+*(rev 1.12)* `rbac.md` gains the **evaluator profile** rows (secure / legacy; what indeterminate does; refusal on evaluator error
+or unrecognised clause) and the `policy.revision` / deployment-report procedure; `audit.md` gains **evidence export** (the sink,
+batch identity, cursors, retention, what a gap looks like to the consumer); `observability.md` gains the decision counters
+(permit / deny / indeterminate / unmapped) with the cardinality rule; the namespace table and both front-door lists gain `cn/`
+at CN1. The private repository's runbooks (the Cedar adapter, the exporter's enrolment, the cloud pack) live there.
 
 ### 12.4 Presentations — core and customer
 
+- **The wedge leads both decks *(rev 1.12, §1.5)*.** The first capability slide after the architecture is *enforce your remits
+  where the agents actually act*: a gateway in front of the MCP tools and A2A endpoints an adopter already has, decisions
+  and evidence with honest coverage. Receipts, replay and domains follow it as what makes that trustworthy. Labelled
+  **planned** until AE-T's T-gate is met on a tag, then **in CI**, never "shipped" while the adapter is private-only.
 - **Core deck** (`docs/publications/presentation.html`, engineer-facing): the architecture story gains the second
   epoch — receipts as the honest ack, replay as the verification engine, *domains are not NANDA* — with every
   claim labelled by phase status (**shipped** with a tag · **in CI** · **planned**). The deck's existing federation
@@ -1122,8 +1151,9 @@ model rev 2 (item 8) lands under `docs/design/` and is linked from `crown-jewel.
   coordinate through a shared medium, with explicit evidence, bounded authority and verifiable outcomes — while
   preserving local autonomy and disagreement.* The first names mechanisms; the second names outcomes. Neither makes a
   "unique", "first", or new-category claim, and neither is used until the tagged release it describes exists.
-- **Customer deck** (`customer-pitch.html`, buyer-facing): the *Honest next* card is rewritten to name typed
-  durability receipts, deterministic replay, and federated domains as the next capabilities; the security list gains
+- **Customer deck** (`customer-pitch.html`, buyer-facing): the *Honest next* card is rewritten to name **gateway
+  authorisation with attributable evidence** first *(rev 1.12)*, then typed durability receipts, deterministic replay, and
+  federated domains as the next capabilities; the security list gains
   caller identity and the threat model once they ship; "no third-party production deployment yet" stays until it is
   false. The deck's discipline — demonstrated versus next, never roadmap sold as shipped — is the point of
   `/publication-lint`, and the lint runs at each phase exit and each companion release, not on a calendar.
