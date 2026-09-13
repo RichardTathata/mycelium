@@ -2967,7 +2967,7 @@ until a tested example exists — see [`pattern-coverage.md`](docs/wiki/domain/p
 
 | Candidate | Nature | Composes from (or: what it adds) | Trigger to build |
 |---|---|---|---|
-| **Auction / bidding companion** (`mycelium-auction`?) | *packaging* — Contract-Net | signal announce + `kv().append("bids/…")` + a consensus round **or** deterministic lowest-wins (as the tuple-space/wiki elections) | work-distribution needs price/priority clearing, not FCFS `claim`. |
+| **Commitment companion** (contract net; was "auction / bidding", renamed rev 1.11 — **scheduled**: plan §6.9, CN1–CN3, Phase C) | *packaging* — Contract-Net | signal announce + `kv().append("bids/…")` + a consensus round **or** deterministic lowest-wins (as the tuple-space/wiki elections) | work-distribution needs price/priority clearing, not FCFS `claim`. |
 | **Durable / partitioned event-log** | *refinement* — the event-sourced log is already **Native** (`KvHandle::append`/`scan_log`/`subscribe_log`/`compact_log`); this adds Kafka-style partitions + consumer-group committed offsets + retention | the existing `log/{stream}` overlay | a customer needs partitioned throughput + durable consumer offsets beyond replay + compaction. |
 | **DAG self-evolving network** | *packaging* — the dynamic wiring graph already rewires | `advertise_capability` + `declare_requirement` + `resolve_wiring` | evidence dynamic specialization beats flat capability groups. |
 | **Governed-memory read-set reconstruction** | *packaging* — governance is Native (access broker + authz); adds S-Bus-style read-set tracking | HLC read-stamps + wiki 3-way reconcile | the research matures **and** a governance-of-shared-memory customer need appears. |
@@ -3073,7 +3073,7 @@ no resource-authoritative *service process* for mandates — the fence goes insi
 boundary — *accepted by the reviewer in rev 1.1, with the qualification that the boundary must be one transaction
 (git ref transaction + pre-receive over both refs; `FsStore` strict mode out of scope), and the consensus-slot
 establishment (D2) made conditional on the replay gate.* **The `3.0.0` candidate** (D23): only a later authenticated, domain-bound SWIM/handshake; nothing in this axis
-changes the wire. **Subsumed packaging candidates** (table above): the *auction / bidding* companion needs item 1's
+changes the wire. **Subsumed packaging candidates** (table above): the *auction / bidding* companion (now the **commitment companion**, §6.9, scheduled after 1·PR2 — rev 1.11) needs item 1's
 destination-commit receipt; the *durable / partitioned event-log* refinement is item 1's receipt vocabulary on
 `KvHandle::append`; the *governed-memory read-set* candidate is item 3's provenance records.
 
@@ -3100,6 +3100,36 @@ capture with redaction; **presentations** — the core and customer decks re-ali
 under `/publication-lint`, "shipped" only with a tag; **philosophy** — the contract as a property, posture rules 3
 and 6 as litmus tests; plus front-door refresh, a companion onboarding checklist, migration notes per deprecation,
 a Phase-C adversarial self-audit. **No phase exit while its §12 lines are open.**
+
+**Runtime authorisation and evidence (rev 1.9, 2026-09-12; adopted scope, not implemented;
+plan §6.8 / D36).** A bounded slice over contracts, scoped mandates, caller identity, allocated
+rights, threat modelling and replay. Participating resources enforce authenticated action
+requests against versioned authority through a replaceable evaluator; a deterministic reference
+and one real Cedar/OPA adapter ship with conformance fixtures. Discovery never grants permission.
+Request, authorisation/denial, execution and outcome are separate attributable records; revocation,
+epoch fences, timeout uncertainty and partition policy are explicit. No new policy language,
+central coordinator or propagation filter. AE0–AE4 are required phase exits in the plan. The same-day
+standards refinement uses SPIFFE/customer identity, XACML's decision/enforcement separation,
+an ODRL-aligned remit profile and optional OAuth RAR integration. AE0 pins supported subsets;
+no universal translation is claimed. Reviewed business-to-action mappings and distinct policy
+deployment reports connect intent to effects. Unknown mappings, unsupported clauses and exports
+never deployed cannot become claims of enforcement. Mapping corrections preserve history.
+
+**Acceptance:** two actual Mycelium runtime demonstrations — a procurement approval exceeding
+its mandate, and benign maintenance activity outside its remit — including intervention,
+independent outcome evidence, correction and recovery. Local CI uses a stub evidence consumer;
+the additional joint delivery pack runs **both scenarios on AWS and GCP**, with NovusLens showing
+the complete evidence journey. These four live runs remain required; simulated records alone do
+not close them. Authoring in NovusLens stays separate from deployment/enforcement at the resource.
+
+**AE-T, the thin slice (rev 1.10, 2026-09-13; plan §6.8 / D37–D38).** The NovusLens loop pulled forward to a
+Phase B exit: item 7's caller identity on the `tools/call` and `/a2a` paths, an evaluator interface with one
+in-process Cedar adapter at the gateway, a signed `AuditSink` exporter to the handover envelope, one reviewed
+mapping subset, and scenario 2 end-to-end locally against the stub consumer. Its guarantee is a route-level
+preflight, stated as such (`coverage.complete: false` names the unobserved routes); resource fencing, grants and
+intervention stay at AE2. **The wedge is the gateway, not the fleet:** enterprises put a gateway in front of the
+MCP tools and A2A endpoints their agents already call, and Mycelium already fronts both. "Enforce your remits
+where the agents actually act" is the entry sentence; the fleet story follows.
 
 **The RA slice — attributable resource accounting (rev 1.6, plan §6.7; a slice over items 1, 4, 6, 7 — not item
 9):** which attempt consumed what, for which logical operation, under whose verified authority, with what

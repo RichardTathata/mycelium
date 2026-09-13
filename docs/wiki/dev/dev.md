@@ -34,3 +34,20 @@ pages here cite `src/` / `mycelium-core/src/` rather than paraphrasing it.
   gateway+metrics features, Ops Console linking, opt-in audit, and the "what you're seeing" concepts box.
 - **[history.md](history.md)** — the delivery ledger: v1.x + v2.0 workstreams, PR ranges,
   what was declined-with-evidence.
+
+## Planned V3 runtime authorisation and evidence
+
+The project owner adopted the AE slice on 2026-09-12, **plan rev 1.9, not implemented**.
+See [the plan of record §6.8](../../plans/v3-contracts-axis.md#68-the-ae-slice--runtime-authorisation-and-evidence-rev-19)
+and [ROADMAP](../../../ROADMAP.md). It composes receipts, caller identity, resource fences,
+allocated rights and replay; policy evaluation is replaceable and no new central control service
+is introduced. Local CI uses a stub consumer; the separately required joint pack runs both
+scenarios on AWS/GCP with Mycelium participants and NovusLens evidence views.
+**Rev 1.10 (2026-09-13)** pulls a thin slice (**AE-T**) forward to Phase B: caller identity on the
+`tools/call` / `/a2a` paths, an evaluator + one in-process Cedar adapter at the gateway, a signed
+`AuditSink` exporter, scenario 2 locally. Guarantee stated as a route-level preflight. *The wedge is
+the gateway, not the fleet* — plan §1.5.
+History: [.log/2026-09-12-runtime-authorisation-evidence.md](.log/2026-09-12-runtime-authorisation-evidence.md)
+· [.log/2026-09-13-ae-thin-slice.md](.log/2026-09-13-ae-thin-slice.md)
+· [.log/2026-09-13-commitment-companion.md](.log/2026-09-13-commitment-companion.md) (rev 1.11: contract net
+restored as the **commitment companion**, plan §6.9; the two senses of "contract", §1.2).
