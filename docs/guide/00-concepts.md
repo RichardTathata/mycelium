@@ -239,6 +239,8 @@ coordinator-free system can offer. → [`consensus`](../../examples/coop/src/bin
 | MCP tool | standard | LLM-tool bridge at `tools/{name}/{node}` | `mcp_toolgrowth` |
 | A2A AgentCard | standard | agent discovery for external frameworks (`/.well-known/agent.json`) | `a2a_langchain` |
 | AgentFacts | standard | self-certified cross-domain federation (`/.well-known/agent-facts.json`) | `federation_facts` |
+| Seam | native | a replaceable adapter behind which production decision logic runs unchanged — wall clock, monotonic clock, named RNG streams, timers, scheduling, channels, storage, external inputs (replay, item 6) | `design/replay-nondeterminism-inventory.md` |
+| Bundle | native | what a failing run leaves behind and a reviewer replays exactly: build identity, config, initial disk state, redacted inputs, the ordered choices trace, the witness; exact replay detects divergence, never merely re-seeds | `design/replay-nondeterminism-inventory.md` |
 
 **Next:** [01 · Gossip KV](01-gossip-kv.md). For the full design argument behind
 this vocabulary, see [philosophy.md](../philosophy.md).

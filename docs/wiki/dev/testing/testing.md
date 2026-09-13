@@ -161,6 +161,18 @@ guard's lifetime (added Run 28 after exactly this race).
 Use `crate::test_util::alloc_port` (process-unique, bind-verified, confined below the OS
 ephemeral floor — PR #110 retired the parallel-suite flake family). Never hardcode.
 
+## The nondeterminism inventory and the coverage map (replay, item 6 PR 1)
+
+[`docs/design/replay-nondeterminism-inventory.md`](../../../design/replay-nondeterminism-inventory.md) names every
+production site that depends on something the process did not decide — 22 wall-clock, 71 monotonic-clock, 27
+RNG, 46 timer, 15 filesystem sites, every `select!`, the one unseeded shared hasher (`framing.rs` `shard_hasher`),
+and the papaya CAS retries — and assigns each an owner: the `mycelium-sim` kernel's seams (two clocks, five named
+RNG streams, timers, scheduler, channel fullness, storage with volatile/durable/directory distinctions), **Loom** for
+CAS interleavings (D13), fuzz for decoders, Docker suites for real timing. It also lists the sleeps whose duration is
+a correctness assumption (the 1 s convergence wait after a lock commit first among them), fixes the choices-trace
+and bundle shape (D14: exact reproduction with divergence detection from PR 2), and moves the static forbidden-call
+check to PR 3 (D12). A new nondeterminism site on a covered path is admitted only by editing that inventory.
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy

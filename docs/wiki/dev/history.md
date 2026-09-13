@@ -22,6 +22,14 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 6 PR 1: the nondeterminism inventory — 2026-09-13 (unreleased)
+
+`docs/design/replay-nondeterminism-inventory.md`: the measured inventory by kind and module (production paths on
+`main`), the coverage map (kernel seams · Loom for CAS retries · fuzz · Docker suites), the sleeps whose duration is
+a correctness assumption, the choices-trace and bundle schema (D14), the static check moved to PR 3 (D12), D13's
+additions (CAS retries to Loom, hash iteration order, lease-expiry clock reads). Concepts: *seam*, *bundle*.
+Wiki: [testing](testing/testing.md), [`.log/2026-09-13-item6-pr1-nondeterminism-inventory.md`](.log/2026-09-13-item6-pr1-nondeterminism-inventory.md).
+
 ## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
 
 Durability PATCH on the 2.4 line: the snapshot rename is fsynced at the directory before the WAL is
