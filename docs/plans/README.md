@@ -25,7 +25,8 @@ record, not duplicates of those.
 > external review's six plans, which are vendored unmodified under [`external/`](external/). Code so far
 > (2026-09-13): item 7 gateway caller identity (PR #208) and item 1 PR 1 — the
 > [contracts-and-receipts ADR](../design/contracts-receipts.md), the regression floor and the golden
-> on-disk fixtures (`tests/fixtures/persistence/`).
+> on-disk fixtures (`tests/fixtures/persistence/`); and the AE0
+> [action-envelope ADR](../design/action-envelope-ae0.md) beside it.
 >
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).

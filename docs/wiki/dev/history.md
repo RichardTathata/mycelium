@@ -22,6 +22,18 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — AE0: the action-envelope ADR — 2026-09-13 (unreleased)
+
+Queue §10.12.3, beside item 1's ADR. `docs/design/action-envelope-ae0.md`: the three questions a protected action
+answers; the envelope assembled only by the enforcement point from verified facts (no second identity scheme —
+item 1's identities, item 7's actor); the evaluator contract (three verdicts, indeterminate never permit,
+deterministic, replaceable; Cedar in-process adopted as the one adapter, D37); authority facts with their issuers;
+five evidence records through the `AuditSink`; the consumer's catalogue identity, generic tools, the deployment
+report and coverage as a field; three strength profiles in the guardrails tier vocabulary; the pinned standards
+matrix (SPIFFE · XACML-as-architecture · Cedar · ODRL profile · OAuth RAR · PROV); eleven negative fixtures. No
+code; the seam lands on item 7. Wiki: [dev](dev.md) §Planned AE,
+[`.log/2026-09-13-ae0-action-envelope-adr.md`](.log/2026-09-13-ae0-action-envelope-adr.md).
+
 ## v3 contracts axis — item 1 PR 1: the contracts-and-receipts ADR — 2026-09-13 (unreleased)
 
 The plan's "this unblocks everything" item (§10.1). `docs/design/contracts-receipts.md`: the site-by-site
