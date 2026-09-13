@@ -118,6 +118,12 @@ the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
   a durability claim (`Err` when the writer is gone; `append_sync` fsyncs in every `SyncMode`).
   The snapshot merges the WAL tail before truncating; replay is LWW, not a watermark —
   [runtime-invariants](docs/wiki/dev/architecture/runtime-invariants.md) §Persistence.
+- **An ack is a receipt that names its rung and nothing above it** — local application · local sync
+  · replica sync · destination commit; a timeout is `DeliveryUnknown`, never a negative; same
+  `operation_id` + different content is a `Conflict`. Today's `bool`s and `persisted` are pinned by the
+  regression floor (`floor_*` tests + the golden on-disk fixtures under `tests/fixtures/persistence/`,
+  replayed in CI); a PR changes an ack's meaning by changing a pin, in the open —
+  [contracts-receipts ADR](docs/design/contracts-receipts.md).
 - Ports via `test_util::alloc_port`; env-var tests hold `config::tests::env_test_lock()`.
 
 ## Active work

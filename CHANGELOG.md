@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Contracts axis item 1 PR 1 — the contracts-and-receipts ADR, the regression floor, golden on-disk
+  fixtures** (`docs/design/contracts-receipts.md`; plan `docs/plans/v3-contracts-axis.md` §3, D8/D11/D24).
+  The record states what an acknowledgement proves today at every site (`kv().set` = queued for gossip;
+  `set_with_min_acks` = propagation with a `>=` overclaim; `Committed { persisted }` = fsynced *or*
+  never promised) and fixes the contract the next PRs implement: four receipts kept separate — local
+  application · local sync · replica sync · destination commit — each with its own visibility /
+  durability / pre-durability-effects / post-failure truth; caller-minted `operation_id` + `attempt_id`
+  (the identities the AE0 envelope binds); `Conflict` on same-id-different-content; `DeliveryUnknown` on
+  timeout; apply→persist kept as the invariant with persist-first admissible only under the WAL-tail
+  merge; the reconciliation with `exactly-once-effect.md`'s declined extraction. **No public type
+  changes.** Code: the regression floor — `floor_observe_counts_any_update_at_or_after_write_ts`
+  (`src/agent/kv_quorum.rs`) and `floor_committed_persisted_is_true_when_persistence_unconfigured`
+  (`src/lib_tests.rs`) pin today's semantics so PR 2 / PR 4a change them in the open — and the **V2
+  golden fixtures**: `tests/fixtures/persistence/fixint-v1/` (real `wal.bin` + `snapshot.bin` from the
+  format unchanged since v1.0.0) replayed in CI by `golden_fixture_replays_every_released_on_disk_format`
+  (`mycelium-core`); a future format adds a directory, never edits one. Docs: concepts vocabulary
+  (receipt, `operation_id`/`attempt_id`, `DeliveryUnknown`), the philosophy's **Property 8** and litmus
+  tests 4–5, the one compatibility rule in `building-on-mycelium.md`, the CLAUDE.md ack invariant.
+
 ---
 
 ## [2.4.4] — 2026-09-12

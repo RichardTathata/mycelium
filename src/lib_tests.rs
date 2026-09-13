@@ -3862,6 +3862,27 @@ async fn test_ws3_data_at_rest_cipher_encrypts_wal_and_round_trips() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8): with
+/// **no persistence configured**, `Committed { persisted }` reads `true` — "nothing was promised" is
+/// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`
+/// beside it; this pin is what that PR changes, in the open.
+#[tokio::test]
+async fn floor_committed_persisted_is_true_when_persistence_unconfigured() {
+    use crate::{ConsensusConfig, ConsensusResult};
+    let port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    assert!(cfg.persistence.is_none(), "precondition: no persistence");
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let solo = ConsensusConfig { quorum_size: 1, ..ConsensusConfig::default() };
+    let r = a.consensus().cluster_propose("floor/unconfigured", Bytes::from_static(b"v"), solo).await;
+    assert!(matches!(r, ConsensusResult::Committed { persisted: true, .. }),
+        "today: unconfigured persistence reports persisted: true (nothing promised); got {r:?}");
+    a.shutdown().await;
+}
+
 /// Review 2026-09-05 finding 3: consensus discarded the committed-slot WAL result and reported
 /// `Committed` regardless. With persistence on, the commit must report `persisted: true`, the
 /// forced-fsync append must actually land (`append_sync` in *Async* mode — the mode that used to

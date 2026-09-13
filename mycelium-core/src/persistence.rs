@@ -989,6 +989,109 @@ mod durability_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── V2: golden on-disk fixtures (contracts axis item 1 PR 1; `docs/design/contracts-receipts.md` §9)
+
+    /// Root of the committed fixtures: one directory per released on-disk format, each holding
+    /// `wal.bin`, `snapshot.bin` and `expected.json` (`{"live": {key: utf8}, "tombstoned": [key]}`).
+    fn golden_fixture_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/persistence")
+    }
+
+    /// The fixture's content, chosen to exercise what the durability invariants protect: a key in
+    /// both snapshot and WAL where LWW decides (`both/newer-in-wal`, `both/newer-in-snapshot`), a
+    /// WAL-only key whose HLC is *older* than the snapshot watermark (invariant 2:
+    /// `wal-only/older-than-watermark` must still replay), a snapshot-only key, and a tombstone.
+    fn golden_expected() -> (Vec<(&'static str, &'static [u8])>, Vec<&'static str>) {
+        (
+            vec![
+                ("snap-only/a", b"snapshot value"),
+                ("both/newer-in-wal", b"wal wins"),
+                ("both/newer-in-snapshot", b"snapshot wins"),
+                ("wal-only/older-than-watermark", b"delayed remote update"),
+                ("wal-only/newer", b"appended after snapshot"),
+            ],
+            vec!["tomb/deleted-in-wal"],
+        )
+    }
+
+    /// Regenerate `tests/fixtures/persistence/fixint-v1` with the *current* writer. Run by hand
+    /// (`cargo test -p mycelium-core regenerate_golden_fixture_fixint_v1 -- --ignored`) only when
+    /// the format that directory names is the one this code writes; a format change adds a new
+    /// directory instead. Never in CI.
+    #[tokio::test]
+    #[ignore]
+    async fn regenerate_golden_fixture_fixint_v1() {
+        let dir = golden_fixture_root().join("fixint-v1");
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["wal.bin", "snapshot.bin", "snapshot.tmp"] { let _ = std::fs::remove_file(dir.join(f)); }
+        let node  = NodeId::new("127.0.0.1", 7).unwrap();
+        let hlc   = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        // Deterministic HLC timestamps (packed physical-ms << 16 | logical) so the files are stable.
+        let ts = |ms: u64| ms << 16;
+        let put = |key: &str, val: &'static [u8], t: u64, tomb: bool| {
+            let e = entry(key, val, t, tomb);
+            apply_and_notify(&state, &GossipUpdate {
+                nonce: crate::framing::ANTI_ENTROPY_NONCE, sender: 0, ttl: 1,
+                is_tombstone: e.is_tombstone, timestamp: e.timestamp, key: e.key.clone(), value: e.value.clone(),
+            });
+            e
+        };
+        let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+        // Records that end up in the snapshot (applied to the store before it is taken).
+        let e1 = put("snap-only/a",            b"snapshot value",   ts(1_000), false);
+        let e2 = put("both/newer-in-wal",      b"old value",        ts(1_000), false);
+        let e3 = put("both/newer-in-snapshot", b"snapshot wins",    ts(3_000), false);
+        let e4 = put("tomb/deleted-in-wal",    b"to be deleted",    ts(1_000), false);
+        for e in [&e1, &e2, &e3, &e4] { wal_append(&mut file, e, true, None).await.unwrap(); }
+        do_snapshot(&dir, &state, &node, &hlc, 1, &mut file, None).await.unwrap();
+        assert_eq!(std::fs::metadata(dir.join("wal.bin")).unwrap().len(), 0, "snapshot truncated the WAL");
+        // The WAL tail after the snapshot: LWW both ways, an older-than-watermark record, a tombstone.
+        for e in [
+            entry("both/newer-in-wal",             b"wal wins",                ts(2_000), false),
+            entry("both/newer-in-snapshot",        b"stale",                   ts(2_000), false),
+            entry("wal-only/older-than-watermark", b"delayed remote update",   ts(500),   false),
+            entry("wal-only/newer",                b"appended after snapshot", ts(4_000), false),
+            entry("tomb/deleted-in-wal",           b"",                        ts(2_000), true),
+        ] { wal_append(&mut file, &e, true, None).await.unwrap(); }
+        drop(file);
+        let (live, tombs) = golden_expected();
+        let mut json = String::from("{\n  \"format\": \"fixint-v1\",\n  \"since\": \"v1.0.0\",\n  \"live\": {\n");
+        for (i, (k, v)) in live.iter().enumerate() {
+            json.push_str(&format!("    \"{k}\": \"{}\"{}\n", std::str::from_utf8(v).unwrap(), if i + 1 < live.len() { "," } else { "" }));
+        }
+        json.push_str("  },\n  \"tombstoned\": [");
+        json.push_str(&tombs.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", "));
+        json.push_str("]\n}\n");
+        std::fs::write(dir.join("expected.json"), json).unwrap();
+    }
+
+    /// V2 gate: every committed fixture directory replays through the production `replay` + LWW
+    /// apply path and matches its `expected.json`. A format change that breaks an old file fails
+    /// here; a new format adds a directory rather than editing one.
+    #[tokio::test]
+    async fn golden_fixture_replays_every_released_on_disk_format() {
+        let root = golden_fixture_root();
+        let mut dirs: Vec<_> = std::fs::read_dir(&root)
+            .unwrap_or_else(|e| panic!("fixture root {} missing: {e}", root.display()))
+            .filter_map(|d| d.ok()).map(|d| d.path()).filter(|p| p.is_dir()).collect();
+        dirs.sort();
+        assert!(!dirs.is_empty(), "no fixture directories under {}", root.display());
+        for dir in dirs {
+            let expected: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.join("expected.json")).unwrap()).unwrap();
+            let restored = replay_into_fresh_store(&dir).await;
+            for (k, v) in expected["live"].as_object().unwrap() {
+                assert_eq!(live_value(&restored, k).as_deref(), Some(v.as_str().unwrap().as_bytes()),
+                    "{}: key {k} did not replay to its expected value", dir.display());
+            }
+            for k in expected["tombstoned"].as_array().unwrap() {
+                let k = k.as_str().unwrap();
+                assert!(live_value(&restored, k).is_none(), "{}: {k} should replay as tombstoned", dir.display());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn replay_without_watermark_still_lets_snapshot_win_same_key() {
         // Dropping the filter must not let an older WAL record clobber the snapshot's

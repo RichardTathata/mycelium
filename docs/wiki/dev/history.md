@@ -22,6 +22,19 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 1 PR 1: the contracts-and-receipts ADR — 2026-09-13 (unreleased)
+
+The plan's "this unblocks everything" item (§10.1). `docs/design/contracts-receipts.md`: the site-by-site
+inventory of what an ack proves today; four receipts kept separate with independent visibility /
+durability / effects / post-failure truth (D8 rev 1.1); `operation_id` + `attempt_id` (the identities AE0
+binds); `Conflict`; `DeliveryUnknown`; apply→persist kept, persist-first only under the WAL-tail merge;
+the reconciliation with `exactly-once-effect.md` (D11); the mapping of `emit_reliable` / mailbox / tuple
+lease / min-acks into the vocabulary. Code: the regression floor (`floor_*` pins) and the V2 golden
+on-disk fixtures (`tests/fixtures/persistence/fixint-v1`, replayed in CI). Docs: concepts vocabulary,
+philosophy Property 8 + litmus tests 4–5, the compatibility rule, the CLAUDE.md ack invariant. Wiki:
+[runtime-invariants](architecture/runtime-invariants.md) §Persistence, [testing](testing/testing.md),
+[`.log/2026-09-13-item1-pr1-contract-adr.md`](.log/2026-09-13-item1-pr1-contract-adr.md).
+
 ## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
 
 Durability PATCH on the 2.4 line: the snapshot rename is fsynced at the directory before the WAL is
