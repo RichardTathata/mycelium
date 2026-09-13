@@ -279,11 +279,19 @@ impl GossipAgent {
         {
             let ctx = Arc::clone(&self.task_ctx);
             let key: Arc<str> = Arc::from(super::gateway_caller::marker_key(&self.node_id).as_str());
+            let mut srx = self.shutdown_tx.subscribe();
             self.spawn_task(async move {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                while ctx.peers.pin().is_empty() && std::time::Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                // The task set is drained at shutdown: a node that stops before any peer connects
+                // must not hold shutdown for the grace period (tuple-space
+                // `shutdown_with_parked_take_waiter_is_prompt` caught exactly that).
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                while ctx.peers.pin().is_empty() && tokio::time::Instant::now() < deadline {
+                    tokio::select! {
+                        _ = srx.wait_for(|v| *v) => return,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    }
                 }
+                if *srx.borrow() { return; }
                 let _ = kv_set(&ctx, key,
                                Bytes::from_static(&[super::gateway_caller::CALLER_CONTEXT_VERSION + b'0']));
             });
