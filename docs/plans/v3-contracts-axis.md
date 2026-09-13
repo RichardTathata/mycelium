@@ -248,8 +248,8 @@ federation-aware adapter; ≥ 2 replaceable gateways with no federation leader; 
 authority lasts only to its expiry, reconnect refreshes before new work and never merges. `cluster_name` stays a label.
 
 **Verified.** SWIM control datagrams are **unauthenticated UDP** (`swim.rs` signs nothing) — "disable SWIM in the enforced
-v1 profile" is grounded. Intra-domain admission is a per-node CA `RootCertStore`. `federation_facts.rs` + guide 17 are
-the starting point. `FACTS_PREFIX` is the full board the plan says not to export by default.
+v1 profile" is grounded. Intra-domain admission is a per-node CA `RootCertStore`. The `mycelium-agentfacts` crate + guide 17 are
+the starting point *(anchor corrected 2026-09-13: there is no `federation_facts.rs`)*. `FACTS_PREFIX` is the full board the plan says not to export by default.
 
 **Sequence.** PR1 domain ADR + enforced profile + two-mesh harness · PR2 identity, trust bundles, typed policy, vectors ·
 PR3 filtered catalogs + remote resolver · PR4 authenticated unary calls + provider adapter · PR5 two-gateway operation,

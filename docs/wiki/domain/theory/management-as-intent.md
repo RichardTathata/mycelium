@@ -23,8 +23,9 @@ policy — ClusterTuner recommendations); (2) desired-state + veto (evaporating 
 local reconciler — the tuning/membership governors; **most "management" lands here**);
 (3) hard cluster-wide invariant → Layer III consensus, only for genuinely inviolable bounds.
 
-**Abstraction seam (agreed 2026-06-18):** share the reconcile/transport plumbing (generic
-`IntentReconciler<T>` — `src/agent/intent.rs`), keep policy/decision bespoke per behaviour;
+**Abstraction seam (agreed 2026-06-18):** share the reconcile/transport plumbing (`src/agent/intent.rs`:
+the `FleetIntent` trait + `publish_intent` / `read_fresh_intent` / `reconcile_intent` / `spawn_intent_reconciler` —
+the design called this `IntentReconciler<T>`; no type of that name exists), keep policy/decision bespoke per behaviour;
 no heavy `IntentGovernor<T>` trait unless the Rule of Three demands it (membership's
 collective self-election shares nothing with the tuner's scalar gate).
 
