@@ -29,8 +29,24 @@ use super::emit_signal;
 pub struct RpcRequest(pub(crate) Signal);
 
 impl RpcRequest {
-    /// Application payload with the 8-byte nonce prefix stripped.
-    pub fn payload(&self) -> Bytes   { self.0.payload.slice(8..) }
+    /// Application payload with the 8-byte nonce prefix stripped — and, when a gateway
+    /// dispatched this call for a client, the caller-context envelope stripped too (item 7:
+    /// [`gateway_caller`](super::gateway_caller)). A provider loop always sees exactly the
+    /// application bytes; the context is read via
+    /// [`GossipAgent::request_principal`](crate::GossipAgent::request_principal).
+    pub fn payload(&self) -> Bytes {
+        let after_nonce = self.0.payload.slice(8.min(self.0.payload.len())..);
+        super::gateway_caller::split_frame(&after_nonce).1
+    }
+    /// The raw caller-context envelope, if the payload carries one (crate-private: read it
+    /// only through [`gateway_caller::verify`](super::gateway_caller::verify)).
+    pub(crate) fn caller_envelope(&self) -> Option<Bytes> {
+        let after_nonce = self.0.payload.slice(8.min(self.0.payload.len())..);
+        super::gateway_caller::split_frame(&after_nonce).0
+    }
+    /// `true` when a gateway caller context rides on this request (verified or not — use
+    /// [`GossipAgent::gateway_caller`](crate::GossipAgent::gateway_caller) to verify it).
+    pub fn has_caller_context(&self) -> bool { self.caller_envelope().is_some() }
     /// NodeId of the node that sent the request.
     pub fn sender(&self)  -> &NodeId { &self.0.sender }
     /// Signal kind (e.g. `"mcp.invoke"`).

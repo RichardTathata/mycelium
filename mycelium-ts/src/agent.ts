@@ -330,13 +330,16 @@ export class MyceliumAgent {
     yield* sseStream<RpcRequest>({ url, headers: this.auth }, (data) => {
       const raw = JSON.parse(data) as {
         kind: string; nonce_hex: string; sender: string; payload_b64: string;
+        caller?: { principal: string; via: string; scopes: string[]; attested: boolean };
       };
-      return {
+      const req: RpcRequest = {
         kind: raw.kind,
         nonceHex: raw.nonce_hex,
         sender: raw.sender,
         payload: fromb64(raw.payload_b64),
       };
+      if (raw.caller) req.caller = raw.caller;
+      return req;
     });
   }
 

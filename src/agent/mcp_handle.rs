@@ -78,6 +78,26 @@ impl McpHandle {
         F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
     {
+        self.register_mcp_tool_with_principal(name, schema, move |_who, args| handler(args))
+    }
+
+    /// [`register_mcp_tool`](Self::register_mcp_tool), with the handler also told **who is
+    /// calling** (v3 item 7): the gateway client behind a verified
+    /// [`GatewayCaller`](crate::GatewayCaller) context (`RequestPrincipal::Client`) or, for a
+    /// direct in-mesh `rpc_call`, the sending node (`RequestPrincipal::Node`). A context that
+    /// fails verification never reaches the handler — the task answers a JSON-RPC error
+    /// (`-32022`) instead. Use this to enforce an allowlist inside a tool, or to attribute its
+    /// effects to the client rather than to the gateway node.
+    pub fn register_mcp_tool_with_principal<F, Fut>(
+        &self,
+        name:    impl Into<Arc<str>>,
+        schema:  serde_json::Value,
+        handler: F,
+    ) -> McpToolHandle
+    where
+        F: Fn(crate::RequestPrincipal, serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    {
         let name: Arc<str>   = name.into();
         let kv_key: Arc<str> = Arc::from(
             format!("tools/{}/{}", name, self.ctx.node_id).as_str(),

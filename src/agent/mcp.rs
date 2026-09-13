@@ -12,6 +12,7 @@
 use crate::framing::{dispatch_gossip_send, make_gossip_update, ForwardHint, WireMessage};
 use crate::signal::Signal;
 use super::rpc::{RpcRequest, rpc_respond_ctx};
+use super::gateway_caller::{self, RequestPrincipal};
 use crate::store::apply_and_notify;
 use bytes::Bytes;
 use serde_json::json;
@@ -79,7 +80,7 @@ pub(super) async fn run_mcp_tool_task<F, Fut>(
     handler:         F,
 )
 where
-    F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
+    F: Fn(RequestPrincipal, serde_json::Value) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
 {
     loop {
@@ -106,8 +107,25 @@ where
             continue;
         }
 
+        // Item 7: who is calling — the gateway client behind a verified context, or the sending
+        // node itself. A context that fails verification is refused with an error reply; the
+        // handler never runs as if the node had called.
+        let principal = match gateway_caller::request_principal(&ctx, &req) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(tool = %tool_name, sender = %req.sender(), "mcp.invoke: caller context refused: {e}");
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": rpc_req["id"],
+                    "error": {"code": -32022, "message": format!("caller context refused: {e}")},
+                });
+                rpc_respond_ctx(&ctx, &req, Bytes::from(response.to_string().into_bytes()));
+                continue;
+            }
+        };
+
         let args   = rpc_req["params"]["arguments"].clone();
-        let result = handler(args).await;
+        let result = handler(principal, args).await;
 
         let response = match result {
             Ok(val) => json!({

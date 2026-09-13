@@ -35,12 +35,36 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    layer with scopes `mcp:invoke` / `mesh:read` / `consensus:read`. `GET /bulk/{id}` stays
    public **by design** — a capability URL (64-bit random per-call nonce, fetched peer-to-peer
    with no shared bearer). The public surface is exactly: `/health|/ready|/stats|/metrics`,
-   `/bulk/{id}`, the A2A descriptor. Gates:
+   `/bulk/{id}`, the A2A descriptor and `POST /a2a` (an optional bearer on it is resolved to the
+   caller principal, an unrecognised one is 401 — item 5 below). Gates:
    `regression_node_level_routes_require_bearer_when_token_set`,
    `node_level_routes_honour_scoped_tokens` (`src/agent/http.rs`).
 4. **`sys/` namespace tripwire (core, feature-free):** inbound writes naming *self* under
-   `sys/identity|load|role|tuple/{node}` → `warn!` + `sys_namespace_violations`. Detection
-   only — never make it a write guard.
+   `sys/identity|load|role|tuple|caller-context/{node}` → `warn!` + `sys_namespace_violations`.
+   Detection only — never make it a write guard.
+5. **Gateway caller identity (v3 item 7, 2026-09-13; `src/agent/gateway_caller.rs`):** the
+   confused deputy the 2026-09-05 fix left open — every gateway dispatch (`tools/call`, `/a2a`,
+   `rpc/call`, `scatter`, `emit_reliable`, `llm/*`) ran as the **node**, so layer 2's
+   `authorized_callers` saw the gateway and never the client. Now the auth layer constructs a
+   `GatewayCaller` (principal `oidc:{sub}` / `token:#{i}` / `token:legacy` / `anonymous` · `via`
+   = this node · `scopes` = credential ∩ route, never `*`) and the node attests it (Ed25519 over
+   `principal ‖ via ‖ scopes ‖ issued_at ‖ sha256(payload)` under `tls`); it rides inside the
+   RPC payload after the nonce (**wire v12 unchanged**), `RpcRequest::payload()` strips it, and
+   the provider verifies `via == sender` + the signer against the keys it knows for `via`.
+   Providers authorise with **`request_authorized`** (a client by *principal* — listing the
+   gateway node admits nothing; a node by id/roles as before); guardrails `check_caller` /
+   `guarded_rpc_serve` and SkillRunner use it, and denial seals name the principal + `via`.
+   **Secure profile** (`gateway_caller_profile`, default) refuses rather than impersonates:
+   forged context (ignored at the gateway / `CallerError` at the provider), missing context
+   (`-32020`), over-scoped assertion (intersection by construction), and a provider without
+   the `sys/caller-context/{node}` marker (`-32021` / HTTP 412, naming it); `legacy` =
+   node-as-caller for a rolling-upgrade window, `warn!` at start, plan §6.6 removal-ledger entry.
+   Gates: `gateway_caller_tests` (`src/agent/http.rs` — the four negative cases, the
+   `authorized_callers` gate under `tls`+`compliance` with a mesh forgery, `/a2a` principal
+   resolution) + `agent::gateway_caller::tests` (framing, sign/verify, tamper, unknown signer).
+   Strength: *HardPrevention* at a `tls` provider; *SelfImposedPrevention* on an unauthenticated
+   mesh (`CallerAttestation::UnauthenticatedMesh`). Runbook: `docs/operations/rbac.md` §7; log
+   [`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).
 
 **WS4 OIDC SSO** (`src/agent/oidc.rs`): JWT validated against IdP JWKS, groups→scopes into
 the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key selection);

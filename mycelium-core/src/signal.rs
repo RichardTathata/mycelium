@@ -892,6 +892,14 @@ pub mod kv_ns {
     /// Deliberately not a `sys/identity/` sub-prefix so an `IDENTITY` prefix scan never sees it.
     pub const IDENTITY_PROOF: &str = "sys/identity-proof/";
 
+    /// Gateway caller-context marker (v3 item 7). Key: `sys/caller-context/{node}`, value: the
+    /// envelope version this node enforces (`b"1"`). Written once at start by every node that
+    /// strips and verifies the `GatewayCaller` envelope on its RPC receive path; a gateway in the
+    /// secure profile dispatches to a provider **only** if the marker is present — a node without
+    /// it is a pre-item-7 provider that would run the call as the gateway node, and the call is
+    /// refused instead. Self-owned (`sys/` tripwire), never written for another node.
+    pub const CALLER_CONTEXT: &str = "sys/caller-context/";
+
     /// Persistent quorum evidence namespace (library-internal — do not write from application code).
     ///
     /// Key: `sys/quorum/{kind}/{sender_node_id}`. Value: 8-byte little-endian Unix millisecond

@@ -76,6 +76,8 @@ use crate::LogEntry;
 use super::overlay_consistent::LockGuard;
 
 use super::TaskCtx;
+use super::gateway_caller::{self, GatewayDispatchError, ResolvedPrincipal};
+use axum::Extension;
 
 /// Shared state passed to every HTTP handler.
 struct HttpCtx {
@@ -446,8 +448,26 @@ async fn gateway_auth(
     #[cfg(not(feature = "compliance"))]
     let have_oidc = false;
 
-    // Open gateway: no token model and no OIDC configured.
+    // The scope this route requires (compliance) — also the authority a caller context is
+    // granted for the request (item 7: never more than the credential holds, never more than
+    // the route needs).
+    #[cfg(feature = "compliance")]
+    let required_scope_for_route: &'static str = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| required_scope(request.method(), m.as_str()))
+        .unwrap_or("admin");
+    #[cfg(feature = "compliance")]
+    let required: Option<&'static str> = Some(required_scope_for_route);
+    #[cfg(not(feature = "compliance"))]
+    let required: Option<&'static str> = None;
+
+    // Open gateway: no token model and no OIDC configured. The caller context still exists —
+    // principal `anonymous`, granted what the route needs (compliance) or everything (no scope
+    // model exists to intersect with) — so a provider can tell a gateway client from the node.
     if legacy.is_none() && !have_scoped && !have_oidc {
+        let mut request = request;
+        request.extensions_mut().insert(ResolvedPrincipal::anonymous(open_gateway_scopes(required)));
         return next.run(request).await;
     }
 
@@ -463,23 +483,7 @@ async fn gateway_auth(
         ).into_response();
     };
 
-    // Resolve scopes: try OIDC first (a JWT bearer from the IdP → groups → scopes),
-    // then fall back to the static token table. A JWT that fails OIDC validation
-    // won't match a static token either, so it correctly ends in 401.
-    #[cfg(feature = "compliance")]
-    let resolved: Option<Vec<String>> = {
-        let mut s = None;
-        if let Some(verifier) = &ctx.oidc
-            && let Some(principal) = verifier.verify(presented).await
-        {
-            s = Some(principal.scopes);
-        }
-        s.or_else(|| resolve_token_scopes(cfg, presented))
-    };
-    #[cfg(not(feature = "compliance"))]
-    let resolved: Option<Vec<String>> = resolve_token_scopes(cfg, presented);
-
-    let Some(scopes) = resolved else {
+    let Some((principal, scopes)) = resolve_bearer(&ctx, presented).await else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "authentication required"})),
@@ -487,23 +491,73 @@ async fn gateway_auth(
     };
 
     #[cfg(feature = "compliance")]
-    {
-        let required = request
-            .extensions()
-            .get::<MatchedPath>()
-            .map(|m| required_scope(request.method(), m.as_str()))
-            .unwrap_or("admin");
-        if !scope_admits(&scopes, required) {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "insufficient scope", "required_scope": required})),
-            ).into_response();
-        }
+    if !scope_admits(&scopes, required_scope_for_route) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "insufficient scope", "required_scope": required_scope_for_route})),
+        ).into_response();
     }
-    // Without compliance the token is authenticated but not scope-gated.
-    #[cfg(not(feature = "compliance"))]
-    let _ = &scopes;
 
+    // Item 7: the resolved principal and the authority granted for this request travel to the
+    // dispatch site as a request extension. Constructed here and nowhere else.
+    let granted = match required {
+        Some(_) => gateway_caller::granted_scopes(&scopes, required),
+        // Without compliance the token is authenticated but not scope-gated: what it holds.
+        None => scopes,
+    };
+    let mut request = request;
+    request.extensions_mut().insert(ResolvedPrincipal { principal, scopes: granted });
+
+    next.run(request).await
+}
+
+/// The authority an open gateway grants a request: the route's scope under `compliance`
+/// (there is a scope model, and this is what the request needed); everything otherwise (no
+/// scope model exists — the deployment has decided everyone on the port is trusted).
+fn open_gateway_scopes(required: Option<&'static str>) -> Vec<String> {
+    match required {
+        Some(r) => vec![r.to_string()],
+        None => vec!["*".to_string()],
+    }
+}
+
+/// Resolve a presented bearer to `(principal, scopes)`: OIDC first (a JWT from the IdP →
+/// `oidc:{subject}` + groups→scopes), then the static token table. A JWT that fails OIDC
+/// validation won't match a static token either, so it correctly ends in `None` (→ 401).
+async fn resolve_bearer(ctx: &HttpCtx, presented: &str) -> Option<(String, Vec<String>)> {
+    #[cfg(feature = "compliance")]
+    if let Some(verifier) = &ctx.oidc
+        && let Some(principal) = verifier.verify(presented).await
+    {
+        return Some((format!("oidc:{}", principal.subject), principal.scopes));
+    }
+    resolve_token(&ctx.agent_ctx.config, presented)
+}
+
+/// Optional authentication for `POST /a2a` (item 7). The route is public by design (an A2A
+/// peer needs no Mycelium credential), but the caller context must still be *constructed by
+/// this layer*: a valid bearer resolves to its principal; no bearer is `anonymous`; a presented
+/// but unrecognised bearer is refused (never silently downgraded to anonymous). No scope is
+/// required, so none is granted.
+async fn a2a_optional_auth(ctx: Arc<HttpCtx>, mut request: Request, next: Next) -> Response {
+    let presented = request.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let resolved = match presented {
+        None => ResolvedPrincipal::anonymous(Vec::new()),
+        Some(token) => match resolve_bearer(&ctx, &token).await {
+            Some((principal, _held)) => ResolvedPrincipal { principal, scopes: Vec::new() },
+            None => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "authentication required"})),
+                ).into_response();
+            }
+        },
+    };
+    request.extensions_mut().insert(resolved);
     next.run(request).await
 }
 
@@ -518,27 +572,30 @@ async fn gateway_auth_if_gateway_path(
 ) -> Response {
     if request.uri().path().starts_with("/gateway/") {
         gateway_auth(State(ctx), request, next).await
+    } else if request.uri().path() == "/a2a" {
+        a2a_optional_auth(ctx, request, next).await
     } else {
         next.run(request).await
     }
 }
 
-/// Map a presented bearer token to its scope grant, or `None` if unrecognised.
+/// Map a presented bearer token to `(principal, scopes)`, or `None` if unrecognised.
 ///
-/// The legacy `gateway_auth_token` is the superuser case: it grants `["*"]`, so
-/// deployments that only set it behave exactly as before. Scoped tokens are only
-/// consulted under the `compliance` feature.
-fn resolve_token_scopes(cfg: &crate::config::GossipConfig, presented: &str) -> Option<Vec<String>> {
+/// The legacy `gateway_auth_token` is the superuser case: principal `token:legacy`, scopes
+/// `["*"]`, so deployments that only set it behave exactly as before. Scoped tokens are only
+/// consulted under the `compliance` feature; their principal is `token:#{index}` — the entry's
+/// position in `gateway_scoped_tokens` (stable per configuration, and never the secret).
+fn resolve_token(cfg: &crate::config::GossipConfig, presented: &str) -> Option<(String, Vec<String>)> {
     if let Some(legacy) = cfg.gateway_auth_token.as_deref()
         && presented == legacy
     {
-        return Some(vec!["*".to_string()]);
+        return Some((gateway_caller::PRINCIPAL_LEGACY_TOKEN.to_string(), vec!["*".to_string()]));
     }
     #[cfg(feature = "compliance")]
     {
-        for t in &cfg.gateway_scoped_tokens {
+        for (i, t) in cfg.gateway_scoped_tokens.iter().enumerate() {
             if t.token == presented {
-                return Some(t.scopes.clone());
+                return Some((format!("token:#{i}"), t.scopes.clone()));
             }
         }
     }
@@ -1245,8 +1302,10 @@ async fn signal_sse_handler(
 /// - `tools/call`   — locates a provider and proxies the call via `rpc_call_ctx`.
 async fn mcp_handler(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let caller = caller.map(|Extension(c)| c);
     let req: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v)  => v,
         Err(_) => {
@@ -1337,8 +1396,11 @@ async fn mcp_handler(
                 "params": {"name": name, "arguments": arguments},
             });
 
-            match super::rpc::rpc_call_ctx(
+            // Item 7: the call carries the auth layer's caller context (never anything the
+            // client put in `params`), or is refused — it is never dispatched as the node.
+            match gateway_caller::gateway_rpc_call(
                 &ctx.agent_ctx,
+                caller.as_ref(),
                 provider_node_id,
                 std::sync::Arc::from(crate::signal::signal_kind::MCP_INVOKE),
                 Bytes::from(tool_req.to_string().into_bytes()),
@@ -1352,9 +1414,14 @@ async fn mcp_handler(
                         }));
                     Json(resp).into_response()
                 }
-                Err(super::rpc::RpcError::Timeout) => Json(json!({
+                Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => Json(json!({
                     "jsonrpc": "2.0", "id": id,
                     "error": {"code": -32000, "message": "tool invocation timed out"},
+                })).into_response(),
+                Err(e) => Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": {"code": e.json_rpc_code(), "message": e.to_string(),
+                              "data": {"reason": e.reason()}},
                 })).into_response(),
             }
         }
@@ -1705,9 +1772,11 @@ async fn gw_demand(
 /// Returns `{ "ok": true, "result_b64": "…" }` or `{ "ok": false, "error": "timeout" }`.
 async fn gw_rpc_call(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    let caller = caller.map(|Extension(c)| c);
 
     let target_str = match body["target"].as_str() {
         Some(s) => s.to_string(),
@@ -1735,15 +1804,28 @@ async fn gw_rpc_call(
     let timeout_secs = body["timeout_secs"].as_u64().unwrap_or(30);
     let timeout      = Duration::from_secs(timeout_secs.clamp(1, 300));
 
-    match super::rpc::rpc_call_ctx(&ctx.agent_ctx, target, method, payload, timeout).await {
+    match gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, method, payload, timeout).await {
         Ok(result) => {
             let result_b64 = base64::engine::general_purpose::STANDARD.encode(&result);
             Json(json!({ "ok": true, "result_b64": result_b64 })).into_response()
         }
-        Err(super::rpc::RpcError::Timeout) => {
+        Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => {
             (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": "timeout" }))).into_response()
         }
+        Err(e) => dispatch_refused(e),
     }
+}
+
+/// HTTP shape of a refused gateway dispatch (item 7): `412 Precondition Failed` — the
+/// precondition being a provider that enforces the caller context, or a context to send.
+fn dispatch_refused(e: GatewayDispatchError) -> Response {
+    let provider = match &e {
+        GatewayDispatchError::ProviderWithoutContext(n) => Some(n.to_string()),
+        _ => None,
+    };
+    (StatusCode::PRECONDITION_FAILED,
+     Json(json!({ "ok": false, "error": e.reason(), "detail": e.to_string(), "provider": provider })))
+        .into_response()
 }
 
 // ── KV gateway handlers ───────────────────────────────────────────────────────
@@ -1941,19 +2023,38 @@ async fn gw_rpc_serve(
         256,
     );
 
-    let stream = ReceiverStream::new(rx).filter_map(|sig: crate::signal::Signal| {
+    let agent_ctx = Arc::clone(&ctx.agent_ctx);
+    let stream = ReceiverStream::new(rx).filter_map(move |sig: crate::signal::Signal| {
         use base64::Engine as _;
         if sig.payload.len() < 8 { return None; }
-        let nonce = u64::from_le_bytes(sig.payload[..8].try_into().expect("infallible: payload.len() >= 8 checked above"));
-        let app_payload = sig.payload.slice(8..);
-        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&app_payload);
-        let data = json!({
-            "nonce_hex":   format!("{:016x}", nonce),
-            "sender":      sig.sender.to_string(),
+        let req = super::rpc::RpcRequest::from(sig);
+        // Item 7: a gateway-dispatched request carries a caller context. Verified, it is
+        // handed to the served handler as `caller`; refused, the request is dropped here (the
+        // served handler never sees a forged principal, and the caller times out).
+        let caller = match gateway_caller::verify(&agent_ctx, &req) {
+            Ok(Some(c)) => Some(json!({
+                "principal": c.principal,
+                "via":       c.via.to_string(),
+                "scopes":    c.scopes,
+                "attested":  matches!(c.attestation, super::gateway_caller::CallerAttestation::Signed { .. }),
+            })),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(kind = %req.kind(), sender = %req.sender(), "rpc/serve: caller context refused: {e}");
+                return None;
+            }
+        };
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(req.payload());
+        let mut data = json!({
+            "nonce_hex":   format!("{:016x}", req.nonce()),
+            "sender":      req.sender().to_string(),
             "payload_b64": payload_b64,
         });
+        if let Some(c) = caller {
+            data["caller"] = c;
+        }
         Some(Ok(Event::default()
-            .event(sig.kind.as_ref())
+            .event(req.kind().as_ref())
             .data(data.to_string())))
     });
 
@@ -2023,9 +2124,11 @@ async fn gw_rpc_respond(
 /// `min_ok` replies arrive, or `{"ok": false, "error": "…", "replies": […]}` on timeout.
 async fn gw_scatter(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    let caller = caller.map(|Extension(c)| c);
 
     let targets: Vec<crate::node_id::NodeId> = match body["targets"].as_array() {
         Some(arr) => arr.iter()
@@ -2049,36 +2152,46 @@ async fn gw_scatter(
     let timeout      = Duration::from_secs(timeout_secs);
     let min_ok       = body["min_ok"].as_u64().unwrap_or(1) as usize;
 
-    let mut js: tokio::task::JoinSet<(crate::node_id::NodeId, Result<Bytes, super::rpc::RpcError>)>
+    let mut js: tokio::task::JoinSet<(crate::node_id::NodeId, Result<Bytes, GatewayDispatchError>)>
         = tokio::task::JoinSet::new();
     for target in targets {
         let c = Arc::clone(&ctx.agent_ctx);
         let k = Arc::clone(&method);
         let p = payload.clone();
         let t = target.clone();
+        let who = caller.clone();
         js.spawn(async move {
-            let res = super::rpc::rpc_call_ctx(&c, t.clone(), k, p, timeout).await;
+            let res = gateway_caller::gateway_rpc_call(&c, who.as_ref(), t.clone(), k, p, timeout).await;
             (t, res)
         });
     }
 
     let mut replies: Vec<serde_json::Value> = Vec::new();
+    // Item 7: a target refused before dispatch (no caller-context marker) is reported per
+    // target, not folded into "insufficient replies".
+    let mut refused: Vec<serde_json::Value> = Vec::new();
     while let Some(res) = js.join_next().await {
-        if let Ok((nid, Ok(bytes))) = res {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            replies.push(json!({ "sender": nid.to_string(), "result_b64": b64 }));
-            if replies.len() >= min_ok {
-                js.abort_all();
-                break;
+        match res {
+            Ok((nid, Ok(bytes))) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                replies.push(json!({ "sender": nid.to_string(), "result_b64": b64 }));
+                if replies.len() >= min_ok {
+                    js.abort_all();
+                    break;
+                }
             }
+            Ok((nid, Err(e))) if !matches!(e, GatewayDispatchError::Rpc(_)) => {
+                refused.push(json!({ "target": nid.to_string(), "error": e.reason(), "detail": e.to_string() }));
+            }
+            _ => {}
         }
     }
 
     if replies.len() >= min_ok {
-        Json(json!({ "ok": true, "replies": replies })).into_response()
+        Json(json!({ "ok": true, "replies": replies, "refused": refused })).into_response()
     } else {
         (StatusCode::GATEWAY_TIMEOUT,
-         Json(json!({ "ok": false, "error": "insufficient replies", "replies": replies })))
+         Json(json!({ "ok": false, "error": "insufficient replies", "replies": replies, "refused": refused })))
             .into_response()
     }
 }
@@ -2796,9 +2909,11 @@ struct EmitReliableBody {
 /// Returns `{"ack": "acknowledged" | "timeout"}`.
 async fn gw_overlay_emit_reliable(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     Json(body):  Json<EmitReliableBody>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    let caller = caller.map(|Extension(c)| c);
     let target: crate::node_id::NodeId = match body.target.parse() {
         Ok(n)  => n,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid target node id"}))).into_response(),
@@ -2814,9 +2929,10 @@ async fn gw_overlay_emit_reliable(
     let timeout = Duration::from_secs(body.timeout_secs.unwrap_or(5).clamp(1, 300));
     let kind: Arc<str> = Arc::from(body.kind.as_str());
 
-    match super::rpc::rpc_call_ctx(&ctx.agent_ctx, target, kind, payload, timeout).await {
-        Ok(_)                              => Json(json!({ "ack": "acknowledged" })).into_response(),
-        Err(super::rpc::RpcError::Timeout) => Json(json!({ "ack": "timeout" })).into_response(),
+    match gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, kind, payload, timeout).await {
+        Ok(_)                                                    => Json(json!({ "ack": "acknowledged" })).into_response(),
+        Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => Json(json!({ "ack": "timeout" })).into_response(),
+        Err(e)                                                   => dispatch_refused(e),
     }
 }
 
@@ -3028,9 +3144,11 @@ fn default_timeout_ms() -> u64 { 30_000 }
 #[cfg(feature = "llm")]
 async fn gw_llm_call(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     axum::Json(body): axum::Json<LlmCallBody>,
 ) -> impl IntoResponse {
     use crate::capability::CapFilter;
+    let caller = caller.map(|Extension(c)| c);
     use crate::signal::signal_kind;
 
     let timeout = std::time::Duration::from_millis(body.timeout_ms);
@@ -3057,8 +3175,9 @@ async fn gw_llm_call(
     });
     let payload = Bytes::from(req.to_string().into_bytes());
 
-    match super::rpc::rpc_call_ctx(
+    match gateway_caller::gateway_rpc_call(
         &ctx.agent_ctx,
+        caller.as_ref(),
         target,
         Arc::from(signal_kind::LLM_INVOKE),
         payload,
@@ -3076,10 +3195,11 @@ async fn gw_llm_call(
                 "provider": provider_str,
             })).into_response()
         }
-        Err(super::rpc::RpcError::Timeout) =>
+        Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) =>
             (StatusCode::GATEWAY_TIMEOUT,
                 axum::Json(serde_json::json!({"error":"timeout","detail":""})))
                 .into_response(),
+        Err(e) => dispatch_refused(e),
     }
 }
 
@@ -3096,9 +3216,11 @@ struct LlmStreamBody {
 #[cfg(feature = "llm")]
 async fn gw_llm_stream(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     axum::Json(body): axum::Json<LlmStreamBody>,
 ) -> impl IntoResponse {
     use axum::response::sse::Event;
+    let caller = caller.map(|Extension(c)| c);
     use crate::capability::CapFilter;
     use crate::signal::signal_kind;
     use futures_util::stream;
@@ -3124,8 +3246,9 @@ async fn gw_llm_stream(
                 "context": body.context,
             });
             let payload = Bytes::from(req.to_string().into_bytes());
-            match super::rpc::rpc_call_ctx(
+            match gateway_caller::gateway_rpc_call(
                 &ctx.agent_ctx,
+                caller.as_ref(),
                 target,
                 Arc::from(signal_kind::LLM_INVOKE),
                 payload,
@@ -3138,8 +3261,12 @@ async fn gw_llm_stream(
                     let data = serde_json::json!({"type":"done","output":output}).to_string();
                     Event::default().data(data)
                 }
-                Err(_) => {
+                Err(GatewayDispatchError::Rpc(_)) => {
                     let data = serde_json::json!({"type":"error","error":"timeout"}).to_string();
+                    Event::default().data(data)
+                }
+                Err(e) => {
+                    let data = serde_json::json!({"type":"error","error":e.reason(),"detail":e.to_string()}).to_string();
                     Event::default().data(data)
                 }
             }
@@ -3976,19 +4103,20 @@ mod tests {
     #[cfg(feature = "compliance")]
     #[test]
     fn resolve_token_scopes_legacy_is_wildcard() {
-        use super::resolve_token_scopes;
+        use super::resolve_token;
         let mut cfg = GossipConfig::default();
         cfg.gateway_auth_token = Some("legacy-tok".to_string());
         cfg.gateway_scoped_tokens = vec![crate::GatewayToken {
             token:  "ro-tok".to_string(),
             scopes: vec!["kv:read".to_string()],
         }];
-        // Legacy token → superuser wildcard (unchanged upgrade path).
-        assert_eq!(resolve_token_scopes(&cfg, "legacy-tok"), Some(vec!["*".to_string()]));
-        // Scoped token → its grant.
-        assert_eq!(resolve_token_scopes(&cfg, "ro-tok"), Some(vec!["kv:read".to_string()]));
+        // Legacy token → superuser wildcard (unchanged upgrade path), principal `token:legacy`.
+        assert_eq!(resolve_token(&cfg, "legacy-tok"),
+                   Some((crate::PRINCIPAL_LEGACY_TOKEN.to_string(), vec!["*".to_string()])));
+        // Scoped token → its grant, principal by position (never the secret).
+        assert_eq!(resolve_token(&cfg, "ro-tok"), Some(("token:#0".to_string(), vec!["kv:read".to_string()])));
         // Unknown token → None (unauthenticated).
-        assert_eq!(resolve_token_scopes(&cfg, "nope"), None);
+        assert_eq!(resolve_token(&cfg, "nope"), None);
     }
 
     #[cfg(feature = "compliance")]
@@ -4815,5 +4943,409 @@ mod tests {
 
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+}
+
+/// Item 7 gates (`docs/plans/v3-contracts-axis.md` §6.4, D27): the four negative cases the
+/// secure profile must refuse, the `authorized_callers` gate, and the `/a2a` principal.
+#[cfg(test)]
+mod gateway_caller_tests {
+    use crate::{GossipAgent, GossipConfig, NodeId, RequestPrincipal};
+    use std::{sync::{Arc, Mutex}, time::Duration};
+
+    fn alloc_port() -> u16 { crate::test_util::alloc_port() }
+
+    async fn poll_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if cond() { return true; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        cond()
+    }
+
+    fn node(http_port: Option<u16>, boot: Vec<NodeId>, tweak: impl FnOnce(&mut GossipConfig)) -> Arc<GossipAgent> {
+        let gossip_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = http_port;
+        cfg.bootstrap_peers = boot;
+        cfg.reconnect_backoff_secs = 1;
+        tweak(&mut cfg);
+        Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg))
+    }
+
+    /// A tool that records who called it, registered through the principal-aware API.
+    fn observing_tool(agent: &GossipAgent) -> (crate::McpToolHandle, Arc<Mutex<Option<RequestPrincipal>>>) {
+        let seen: Arc<Mutex<Option<RequestPrincipal>>> = Arc::new(Mutex::new(None));
+        let seen2 = Arc::clone(&seen);
+        let handle = agent.mcp().register_mcp_tool_with_principal(
+            "whoami",
+            serde_json::json!({"type": "object", "properties": {}}),
+            move |who, _args| {
+                let seen = Arc::clone(&seen2);
+                async move {
+                    let name = who.name();
+                    *seen.lock().unwrap() = Some(who);
+                    Ok(serde_json::json!(name))
+                }
+            },
+        );
+        (handle, seen)
+    }
+
+    async fn tools_call(http_port: u16, bearer: Option<&str>, params: serde_json::Value) -> serde_json::Value {
+        let mut req = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{http_port}/mcp"))
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}));
+        if let Some(b) = bearer {
+            req = req.header(axum::http::header::AUTHORIZATION, format!("Bearer {b}"));
+        }
+        let resp = req.send().await.expect("tools/call request");
+        assert_eq!(resp.status(), 200, "tools/call is answered as JSON-RPC");
+        resp.json().await.unwrap()
+    }
+
+    /// Negative case 1 — a **client-supplied (forged) caller context is not evidence**: whatever
+    /// the client puts in `params` (`_meta`, a `caller` block), the provider sees the principal
+    /// the auth layer resolved. On an open gateway that is `anonymous` — and it is a *client*
+    /// principal, never the node (negative case 2: no fallback to the node's identity).
+    #[tokio::test]
+    async fn forged_client_context_is_ignored_and_the_node_is_never_the_principal() {
+        let http_port = alloc_port();
+        let agent = node(Some(http_port), vec![], |_| {});
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (_tool, seen) = observing_tool(&agent);
+
+        let body = tools_call(http_port, None, serde_json::json!({
+            "name": "whoami",
+            "arguments": {},
+            "_meta": {"mycelium_caller": {"principal": "oidc:admin", "scopes": ["*"]}},
+            "caller": {"principal": "oidc:admin"},
+        })).await;
+        assert!(body.get("error").is_none(), "unexpected error: {body}");
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(crate::PRINCIPAL_ANONYMOUS), "the resolved principal, not the forged one: {text}");
+
+        let who = seen.lock().unwrap().clone().expect("the tool ran");
+        match who {
+            RequestPrincipal::Client(c) => {
+                assert_eq!(c.principal, crate::PRINCIPAL_ANONYMOUS);
+                assert_eq!(&c.via, agent.node_id(), "the gateway node is bound in as `via`");
+                #[cfg(feature = "compliance")]
+                assert_eq!(c.scopes, vec!["mcp:invoke".to_string()], "open gateway grants what the route needs");
+                #[cfg(not(feature = "compliance"))]
+                assert_eq!(c.scopes, vec!["*".to_string()], "no scope model to intersect with");
+            }
+            RequestPrincipal::Node(n) => panic!("a gateway call must never be attributed to the node ({n})"),
+        }
+
+        // The node's own action (a direct in-mesh rpc_call) is still the node.
+        let reply = agent.service().rpc_call(
+            agent.node_id().clone(), crate::signal::signal_kind::MCP_INVOKE,
+            serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"whoami","arguments":{}}})
+                .to_string().into_bytes(),
+            Duration::from_secs(5),
+        ).await.expect("direct call");
+        let v: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains(&agent.node_id().to_string()));
+        assert!(matches!(seen.lock().unwrap().clone(), Some(RequestPrincipal::Node(_))));
+
+        agent.shutdown().await;
+    }
+
+    /// The legacy bearer resolves to `token:legacy`; the principal is never the credential.
+    #[tokio::test]
+    async fn bearer_resolves_to_a_principal_never_the_credential() {
+        let http_port = alloc_port();
+        let agent = node(Some(http_port), vec![], |c| c.gateway_auth_token = Some("s3cret".into()));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (_tool, seen) = observing_tool(&agent);
+
+        let body = tools_call(http_port, Some("s3cret"), serde_json::json!({"name": "whoami", "arguments": {}})).await;
+        assert!(body.get("error").is_none(), "unexpected error: {body}");
+        let who = seen.lock().unwrap().clone().expect("the tool ran");
+        let RequestPrincipal::Client(c) = who else { panic!("client principal expected") };
+        assert_eq!(c.principal, crate::PRINCIPAL_LEGACY_TOKEN);
+        assert!(!c.principal.contains("s3cret"));
+        agent.shutdown().await;
+    }
+
+    /// Negative case 3 — **the gateway never asserts more scope than the credential holds**: a
+    /// scoped token holding `mcp:invoke` + `kv:read` yields exactly `["mcp:invoke"]` on
+    /// `tools/call` (the intersection with the route), and a `*` token yields `["mcp:invoke"]`,
+    /// never `*`.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn granted_scopes_are_the_intersection_never_the_wildcard() {
+        let http_port = alloc_port();
+        let agent = node(Some(http_port), vec![], |c| {
+            c.gateway_scoped_tokens = vec![
+                crate::GatewayToken { token: "narrow".into(), scopes: vec!["mcp:invoke".into(), "kv:read".into()] },
+                crate::GatewayToken { token: "root".into(),   scopes: vec!["*".into()] },
+                crate::GatewayToken { token: "kvonly".into(), scopes: vec!["kv:read".into()] },
+            ];
+        });
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (_tool, seen) = observing_tool(&agent);
+
+        let body = tools_call(http_port, Some("narrow"), serde_json::json!({"name": "whoami", "arguments": {}})).await;
+        assert!(body.get("error").is_none(), "unexpected error: {body}");
+        let RequestPrincipal::Client(c) = seen.lock().unwrap().clone().unwrap() else { panic!() };
+        assert_eq!(c.principal, "token:#0");
+        assert_eq!(c.scopes, vec!["mcp:invoke".to_string()], "kv:read is held but not granted here");
+
+        let body = tools_call(http_port, Some("root"), serde_json::json!({"name": "whoami", "arguments": {}})).await;
+        assert!(body.get("error").is_none(), "unexpected error: {body}");
+        let RequestPrincipal::Client(c) = seen.lock().unwrap().clone().unwrap() else { panic!() };
+        assert_eq!(c.principal, "token:#1");
+        assert_eq!(c.scopes, vec!["mcp:invoke".to_string()], "`*` is never carried as an authority");
+
+        // A token without the route's scope is refused at the gate (403) — no dispatch at all.
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{http_port}/mcp"))
+            .header(axum::http::header::AUTHORIZATION, "Bearer kvonly")
+            .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whoami","arguments":{}}}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 403);
+        agent.shutdown().await;
+    }
+
+    /// Negative case 4 — **an older provider that cannot enforce the context is refused, not
+    /// silently run as the node**: with the provider's `sys/caller-context/` marker absent, the
+    /// secure gateway answers `-32021`; the explicit `legacy` profile dispatches as before.
+    #[tokio::test]
+    async fn secure_profile_refuses_a_provider_without_the_marker_and_legacy_does_not() {
+        let provider = node(None, vec![], |_| {});
+        provider.start().await.unwrap();
+        let boot = vec![provider.node_id().clone()];
+        let secure_port = alloc_port();
+        let legacy_port = alloc_port();
+        let secure = node(Some(secure_port), boot.clone(), |_| {});
+        let legacy = node(Some(legacy_port), boot, |c| c.gateway_caller_profile = crate::GatewayCallerProfile::Legacy);
+        secure.start().await.unwrap();
+        legacy.start().await.unwrap();
+        let (_tool, seen) = observing_tool(&provider);
+
+        // Structural readiness: both gateways see the provider's tool and its marker.
+        let marker = format!("sys/caller-context/{}", provider.node_id());
+        let tool_key = format!("tools/whoami/{}", provider.node_id());
+        assert!(poll_until(|| [&secure, &legacy].iter().all(|g|
+            g.kv().get(&tool_key).is_some() && g.kv().get(&marker).is_some()
+        ), Duration::from_secs(15)).await, "gateways learn the provider's tool and marker");
+
+        // Both profiles reach the provider while the marker is present.
+        let body = tools_call(secure_port, None, serde_json::json!({"name": "whoami", "arguments": {}})).await;
+        assert!(body.get("error").is_none(), "secure dispatch with marker: {body}");
+        assert!(matches!(seen.lock().unwrap().clone(), Some(RequestPrincipal::Client(_))));
+
+        // Simulate a pre-item-7 provider: tombstone its marker (LWW, later HLC wins everywhere).
+        assert!(secure.kv().delete(marker.clone()));
+        assert!(poll_until(|| secure.kv().get(&marker).is_none() && legacy.kv().get(&marker).is_none(),
+                           Duration::from_secs(10)).await, "the tombstone reaches both gateways");
+
+        let body = tools_call(secure_port, None, serde_json::json!({"name": "whoami", "arguments": {}})).await;
+        assert_eq!(body["error"]["code"], -32021, "secure profile refuses: {body}");
+        assert_eq!(body["error"]["data"]["reason"], "provider_without_caller_context");
+        assert!(body["error"]["message"].as_str().unwrap().contains(&provider.node_id().to_string()),
+                "the refusal names the provider");
+
+        // The explicit legacy profile still dispatches — as the node, which is what the
+        // provider (here: one that would strip nothing) then sees.
+        *seen.lock().unwrap() = None;
+        let body = tools_call(legacy_port, None, serde_json::json!({"name": "whoami", "arguments": {}})).await;
+        assert!(body.get("error").is_none(), "legacy dispatch: {body}");
+        assert_eq!(seen.lock().unwrap().clone(), Some(RequestPrincipal::Node(legacy.node_id().clone())),
+                   "legacy = node-as-caller, exactly the pre-item-7 behaviour");
+
+        secure.shutdown().await;
+        legacy.shutdown().await;
+        provider.shutdown().await;
+    }
+
+    /// The `authorized_callers` gate (§6.4): a provider restricting the allowlist to the gateway
+    /// **node** rejects a gateway **client**, although the node is listed — and admits the node's
+    /// own direct call. Listing the client's principal admits it. A forged envelope from another
+    /// node is refused as a caller-context error, never as the node. Under `tls` + `compliance`
+    /// the context is Ed25519-attested by the gateway and verified against its identity key.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn authorized_callers_judges_the_client_not_the_gateway_node() {
+        use crate::signal::SignalScope;
+        use bytes::{BufMut, BytesMut};
+
+        let cert_dir = std::env::temp_dir().join(format!("gwcaller-gate-{}", alloc_port()));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let tls = |c: &mut GossipConfig| {
+            c.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        };
+        let http_port = alloc_port();
+        let gateway = node(Some(http_port), vec![], |c| { tls(c); c.gateway_auth_token = Some("tok".into()); });
+        gateway.start().await.unwrap();
+        let boot = vec![gateway.node_id().clone()];
+        let provider = node(None, boot.clone(), tls);
+        let rogue = node(None, boot, tls);
+        provider.start().await.unwrap();
+        rogue.start().await.unwrap();
+
+        // Structural readiness: the mesh forms and the provider knows the gateway's identity key
+        // (harvested from its cert on connect — what the attestation verifies against).
+        let gid = gateway.node_id().clone();
+        assert!(poll_until(|| provider.peers().len() >= 2 && rogue.peers().len() >= 2
+                    && provider.task_ctx.peer_keys.pin().get(&gid).is_some_and(|k| !k.is_empty()),
+                Duration::from_secs(30)).await, "mesh forms and the provider anchors the gateway's key");
+
+        // The provider serves `guarded.echo` with a switchable allowlist, judged by
+        // `request_authorized` (the caller-context-aware gate). The reply names the outcome.
+        let allow: Arc<Mutex<Vec<Arc<str>>>> = Arc::new(Mutex::new(vec![Arc::from(gid.to_string().as_str())]));
+        let attested: Arc<Mutex<Option<crate::CallerAttestation>>> = Arc::new(Mutex::new(None));
+        {
+            let p = Arc::clone(&provider);
+            let allow = Arc::clone(&allow);
+            let attested = Arc::clone(&attested);
+            let mut rx = provider.service().rpc_rx("guarded.echo");
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    let list = allow.lock().unwrap().clone();
+                    let reply = match p.request_authorized(&req, &list) {
+                        Ok(true) => {
+                            if let Ok(RequestPrincipal::Client(c)) = p.request_principal(&req) {
+                                *attested.lock().unwrap() = Some(c.attestation);
+                            }
+                            format!("ok:{}", p.request_principal(&req).unwrap().name())
+                        }
+                        Ok(false) => "denied:authorized_callers".to_string(),
+                        Err(e) => format!("denied:caller_context:{e}"),
+                    };
+                    p.service().rpc_respond(&req, reply.into_bytes());
+                }
+            });
+        }
+
+        let client = reqwest::Client::new();
+        let call = |payload: &str| {
+            let client = client.clone();
+            let body = serde_json::json!({"target": provider.node_id().to_string(), "method": "guarded.echo",
+                                          "payload_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload),
+                                          "timeout_secs": 10});
+            async move {
+                let r = client.post(format!("http://127.0.0.1:{http_port}/gateway/rpc/call"))
+                    .header(axum::http::header::AUTHORIZATION, "Bearer tok")
+                    .json(&body).send().await.unwrap();
+                let status = r.status();
+                let v: serde_json::Value = r.json().await.unwrap();
+                let text = v["result_b64"].as_str().map(|b| {
+                    String::from_utf8(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).unwrap()).unwrap()
+                });
+                (status, text, v)
+            }
+        };
+
+        // 1. Node listed, client not: the gateway client is rejected …
+        let (status, text, v) = call("hi").await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(text.as_deref(), Some("denied:authorized_callers"), "the node being listed admits no client");
+        // … while the node's own direct call is admitted.
+        let reply = gateway.service().rpc_call(provider.node_id().clone(), "guarded.echo", b"hi".to_vec(), Duration::from_secs(10))
+            .await.expect("direct reply");
+        assert_eq!(String::from_utf8(reply.to_vec()).unwrap(), format!("ok:{gid}"));
+
+        // 2. The client's principal listed: admitted, and the context was signature-attested.
+        *allow.lock().unwrap() = vec![Arc::from(crate::PRINCIPAL_LEGACY_TOKEN)];
+        let (_, text, v) = call("hi").await;
+        assert_eq!(text.as_deref(), Some(&*format!("ok:{}", crate::PRINCIPAL_LEGACY_TOKEN)), "{v}");
+        assert!(matches!(*attested.lock().unwrap(), Some(crate::CallerAttestation::Signed { .. })),
+                "under tls the provider verified the gateway's signature");
+
+        // 3. A forged envelope from another node (unsigned, claiming the token principal):
+        // refused as a caller-context error — never judged as the sending node.
+        let forged_env = serde_json::json!({"v": 1, "p": crate::PRINCIPAL_LEGACY_TOKEN, "via": rogue.node_id().to_string(), "s": [], "t": 0}).to_string();
+        let mut framed = BytesMut::new();
+        framed.put_slice(&[0x00, b'G', b'W', b'C', crate::CALLER_CONTEXT_VERSION]);
+        framed.put_u16(forged_env.len() as u16);
+        framed.put_slice(forged_env.as_bytes());
+        framed.put_slice(b"hi");
+        let reply = rogue.service().rpc_call(provider.node_id().clone(), "guarded.echo", framed.freeze(), Duration::from_secs(10))
+            .await.expect("forged call still gets a reply");
+        let reply = String::from_utf8(reply.to_vec()).unwrap();
+        assert!(reply.starts_with("denied:caller_context:"), "forgery is refused as such: {reply}");
+        // Even with an open allowlist a forged context is refused.
+        *allow.lock().unwrap() = vec![];
+        let reply = rogue.service().rpc_call(provider.node_id().clone(), "guarded.echo",
+            { let mut b = BytesMut::new(); b.put_slice(&[0x00, b'G', b'W', b'C', crate::CALLER_CONTEXT_VERSION]);
+              b.put_u16(forged_env.len() as u16); b.put_slice(forged_env.as_bytes()); b.put_slice(b"hi"); b.freeze() },
+            Duration::from_secs(10)).await.expect("reply");
+        assert!(String::from_utf8(reply.to_vec()).unwrap().starts_with("denied:caller_context:"));
+        let _ = SignalScope::Cluster; // keep the import honest under cfg combinations
+
+        rogue.shutdown().await;
+        provider.shutdown().await;
+        gateway.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// `/a2a` (public by design) still resolves a principal: no bearer ⇒ `anonymous`; a valid
+    /// bearer ⇒ its principal; an unrecognised bearer ⇒ 401 (never downgraded to anonymous).
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn a2a_resolves_the_caller_principal() {
+        let http_port = alloc_port();
+        let agent = {
+            let gossip_port = alloc_port();
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = gossip_port;
+            cfg.http_port = Some(http_port);
+            cfg.gateway_auth_token = Some("tok".into());
+            let a = GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a();
+            Arc::new(a)
+        };
+        agent.start().await.unwrap();
+        let _reg = agent.capabilities().advertise_capability(
+            crate::capability::Capability::new("demo", "whoami"), Duration::from_secs(5));
+        {
+            let a = Arc::clone(&agent);
+            let mut rx = agent.service().rpc_rx("skill.invoke");
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    let reply = match a.request_principal(&req) {
+                        Ok(p) => p.name(),
+                        Err(e) => format!("refused:{e}"),
+                    };
+                    a.service().rpc_respond(&req, reply.into_bytes());
+                }
+            });
+        }
+        let cap_key = format!("cap/{}/demo/whoami", agent.node_id());
+        assert!(poll_until(|| agent.kv().get(&cap_key).is_some(), Duration::from_secs(5)).await);
+
+        let client = reqwest::Client::new();
+        let send = |bearer: Option<&str>| {
+            let client = client.clone();
+            let bearer = bearer.map(str::to_owned);
+            async move {
+                let mut req = client.post(format!("http://127.0.0.1:{http_port}/a2a")).json(&serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
+                    "params": {"skillId": "demo/whoami", "message": {"role": "user", "parts": [{"type": "text", "text": "?"}]}},
+                }));
+                if let Some(b) = bearer { req = req.header(axum::http::header::AUTHORIZATION, format!("Bearer {b}")); }
+                let r = req.send().await.unwrap();
+                let status = r.status();
+                let v: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
+                (status, v)
+            }
+        };
+        let (status, v) = send(None).await;
+        assert_eq!(status, 200);
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::PRINCIPAL_ANONYMOUS, "{v}");
+        let (status, v) = send(Some("tok")).await;
+        assert_eq!(status, 200);
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::PRINCIPAL_LEGACY_TOKEN, "{v}");
+        let (status, _) = send(Some("wrong")).await;
+        assert_eq!(status, 401, "a presented but unrecognised bearer is refused, not anonymised");
+
+        agent.shutdown().await;
     }
 }

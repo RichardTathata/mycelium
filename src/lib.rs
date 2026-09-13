@@ -112,6 +112,7 @@
 //! | `agent/{node}/provision/{item}/error` | Last provisioning failure — written by the **application** provisioning handler, not the substrate |
 //! | `sys/identity/{node}`              | mTLS — 32-byte Ed25519 verifying key history (current‖retained); written at startup by TLS-enabled nodes |
 //! | `sys/identity-proof/{node}`        | identity-auth Phase 2 — `signer_key(32)‖sig(64)` authenticating the identity entry; peers accept a key only if the proof chains to a trusted key (`tls`) |
+//! | `sys/caller-context/{node}`        | v3 item 7 — the node strips + verifies the `GatewayCaller` envelope on its RPC receive path (value `b"1"`, the envelope version); a secure-profile gateway dispatches only to nodes carrying it. Written at start by every node; self-owned (`sys/` tripwire) |
 //! | `cap/{node}/llm/inference`         | LLM backend capability (model, context, backend, endpoint attrs) |
 //! | `cap/{node}/llm/installable`       | LLM models that can be pulled (model, size_gb, est_mins attrs) |
 //! | `cap/{node}/llm/loading`           | LLM model pull in progress; the shipped provisioner writes a `pct` (0–100) attr (the `llm_agent` example's *simulated* pull uses `progress`) |
@@ -224,6 +225,8 @@ pub use agent::{
     BulkError, BulkServeHandle,
     GossipAgent, MailboxHandle, McpError, McpToolHandle, McpHandle,
     MeshEvent, RpcError, RpcRequest, RpcRequestRx, ScatterError, ScatterResult, SystemStats,
+    CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
+    CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS, PRINCIPAL_LEGACY_TOKEN,
     AckResult, CapabilitiesHandle, LogEntry,
     KvHandle, KvQuorumExt, MeshHandle, QuorumError, ServiceHandle, ShardError,
     SchemaError, SchemaHandle, SchemaPublishResult,
@@ -282,7 +285,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{EgressPolicy, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{EgressPolicy, GatewayCallerProfile, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]

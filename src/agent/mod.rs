@@ -36,6 +36,7 @@ mod lock_service;
 mod overlay_consistent;
 mod overlay_reliable;
 mod rpc;
+pub(crate) mod gateway_caller;
 #[cfg(feature = "gateway")]
 mod http;
 mod mcp;
@@ -107,6 +108,10 @@ pub(crate) use opacity::is_self_opaque;
 pub use mcp::McpClientHandle;
 pub use mcp::{McpError, McpToolHandle};
 pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
+pub use gateway_caller::{
+    CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
+    CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS, PRINCIPAL_LEGACY_TOKEN,
+};
 pub use state_machine::{AgentPolicy, ExecutionState, AgentStateMachine, PolicyViolation};
 pub use scatter::{ScatterError, ScatterResult};
 pub use bulk::{BulkError, BulkServeHandle};

@@ -22,6 +22,22 @@ export interface RpcRequest {
   nonceHex: string;
   sender: string;
   payload: Buffer;
+  /**
+   * Present when a *gateway* dispatched the call for one of its HTTP/SDK clients (core v3
+   * item 7): the client's resolved principal (`oidc:…` / `token:#i` / `token:legacy` /
+   * `anonymous`), the gateway node (`via`), the scopes granted for the request, and whether
+   * the node verified the gateway's signature. Absent for a direct in-mesh call, where
+   * `sender` *is* the principal. A request whose context failed verification is never delivered.
+   */
+  caller?: GatewayCaller;
+}
+
+/** The verified caller context behind a gateway-dispatched RPC (core v3 item 7). */
+export interface GatewayCaller {
+  principal: string;
+  via: string;
+  scopes: string[];
+  attested: boolean;
 }
 
 /** A mailbox event delivered to this node. */

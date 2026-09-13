@@ -116,6 +116,42 @@ pub struct GatewayTlsConfig {
     pub key_pem_path: Option<PathBuf>,
 }
 
+/// How the HTTP gateway identifies the **originating client** to the provider it dispatches
+/// to (v3 contracts axis, item 7 — `docs/plans/v3-contracts-axis.md` §6.4, D27).
+///
+/// Every gateway-originated RPC (`POST /mcp` `tools/call`, `POST /a2a`, `/gateway/rpc/call`,
+/// `/gateway/scatter`, `/gateway/overlay/emit_reliable`, `/gateway/llm/*`) used to run under
+/// the **node's** identity, so a provider's `authorized_callers` saw the gateway node and never
+/// the client — a confused deputy. Under the secure profile the auth layer constructs a
+/// `GatewayCaller` (resolved principal · this node as the gateway · the scopes granted for the
+/// request) and the node attests it over the request digest; the provider verifies it and
+/// authorises the *client*, never the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayCallerProfile {
+    /// **Default.** Every gateway dispatch carries a caller context. The gateway refuses
+    /// (rather than silently running as the node) when it cannot: a provider that does not
+    /// enforce the context (no `sys/caller-context/{provider}` marker — a pre-2.5 node) is
+    /// answered with an explicit error naming the provider.
+    #[default]
+    Secure,
+    /// Node-as-caller dispatch, exactly as before item 7. **Only for a rolling upgrade window**
+    /// (gateways upgraded before their providers); logged at `warn!` on start. A §6.6 removal-ledger
+    /// entry: it never silently preserves impersonation in the secure profile.
+    Legacy,
+}
+
+impl std::str::FromStr for GatewayCallerProfile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "secure" => Ok(Self::Secure),
+            "legacy" => Ok(Self::Legacy),
+            other => Err(format!("unknown gateway caller profile '{other}' (expected 'secure' or 'legacy')")),
+        }
+    }
+}
+
 /// A gateway bearer token paired with its OAuth2-style scope grants.
 ///
 /// Scopes follow the `resource:verb` convention (`kv:read`, `kv:write`,
@@ -805,6 +841,14 @@ pub struct GossipConfig {
     #[serde(default)]
     pub require_identity_proofs: bool,
 
+    /// Gateway caller identity profile (item 7). `Secure` (default): every gateway-originated
+    /// dispatch carries an auth-layer-constructed, node-attested `GatewayCaller`, and a provider
+    /// that cannot enforce it is refused explicitly. `Legacy`: the pre-item-7 node-as-caller
+    /// dispatch, for a rolling-upgrade window only. Set via `GOSSIP_GATEWAY_CALLER_PROFILE`
+    /// (`secure` | `legacy`). See `docs/operations/rbac.md` §7.
+    #[serde(default)]
+    pub gateway_caller_profile: GatewayCallerProfile,
+
     /// Outbound egress allow-policy (WS3). Default: empty = allow all. Set
     /// `allow_hosts` to constrain which external hosts the substrate may reach
     /// (enforced at the MCP client bridge). A node-local posture, not a coordinator.
@@ -896,6 +940,7 @@ impl Default for GossipConfig {
             gateway_auth_token:            None,
             gateway_scoped_tokens:         Vec::new(),
             require_identity_proofs:       false,
+            gateway_caller_profile:        GatewayCallerProfile::Secure,
             egress:                        EgressPolicy::default(),
             #[cfg(feature = "compliance")]
             oidc:                          None,
@@ -1396,6 +1441,12 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_REQUIRE_IDENTITY_PROOFS") {
             self.require_identity_proofs = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_CALLER_PROFILE") {
+            self.gateway_caller_profile = v.parse().map_err(|reason| GossipError::InvalidField {
+                field:  "gateway_caller_profile",
+                reason,
+            })?;
         }
         if let Ok(v) = env::var("GOSSIP_LOCALITY_PATH") {
             self.locality_path = v
