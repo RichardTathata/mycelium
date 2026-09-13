@@ -29,8 +29,6 @@ use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn, scan_pre
 pub const MEMBERSHIP_PREFIX: &str = "sys/govern/membership/";
 /// Evaporation window for a membership intent (refresh within this or it self-heals away).
 pub const MEMBERSHIP_INTENT_TTL_MS: u64 = 5 * 60 * 1000;
-/// Post-action cooldown, in convergence ticks, to damp boundary flap.
-const COOLDOWN_TICKS: u32 = 3;
 
 /// Elastic-sizing intent for one group: keep the live member count within `[min, max]`, minus any
 /// explicitly drained nodes. `max = None` is unbounded. Rides the Track-1 transport.
@@ -213,7 +211,10 @@ impl GossipAgent {
         let kv = KvHandle::from_core(Arc::clone(&self.task_ctx.core));
         let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
         let interval_secs = self.config.health_check_interval_secs.max(1);
-        let cooldown = Duration::from_secs(interval_secs * COOLDOWN_TICKS as u64);
+        // WP5: an explicit, bounded parameter (`membership_cooldown_secs`), falling back to the
+        // historical 3 × health-check interval. Read once here: live timing intents do not alter it.
+        let cooldown = self.config.membership_cooldown();
+        debug_assert!(cooldown >= Duration::from_secs(1));
         self.task_ctx.spawn_task(async move {
             let mut rx = kv.subscribe_prefix(MEMBERSHIP_PREFIX);
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -236,6 +237,24 @@ impl GossipAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WP5 pin: the cooldown is an explicit config parameter. Unset ⇒ the historical
+    /// `DEFAULT_MEMBERSHIP_COOLDOWN_TICKS × health_check_interval_secs`; set ⇒ exactly that, never below 1 s.
+    #[test]
+    fn cooldown_is_an_explicit_bounded_parameter() {
+        let mut cfg = crate::GossipConfig::default();
+        cfg.health_check_interval_secs = 10;
+        assert_eq!(cfg.membership_cooldown(),
+            Duration::from_secs(10 * crate::config::DEFAULT_MEMBERSHIP_COOLDOWN_TICKS),
+            "unset: the documented default is 3 × the health-check interval");
+        cfg.membership_cooldown_secs = Some(7);
+        assert_eq!(cfg.membership_cooldown(), Duration::from_secs(7), "set: exactly the parameter");
+        cfg.membership_cooldown_secs = Some(0);
+        assert_eq!(cfg.membership_cooldown(), Duration::from_secs(1), "bounded below at 1 s");
+        cfg.health_check_interval_secs = 1;
+        cfg.membership_cooldown_secs = Some(3600);
+        assert_eq!(cfg.membership_cooldown(), Duration::from_secs(3600), "independent of the ping cadence");
+    }
 
     #[test]
     fn join_probability_zero_when_at_or_above_min() {

@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Membership-governor cooldown is an explicit, bounded parameter; view staleness says when it is unknown**
+  (v3 contracts axis item 4's standalone honesty fix, plan §10.12.5 / private WP5). `GossipConfig::membership_cooldown_secs:
+  Option<u64>` (env `GOSSIP_MEMBERSHIP_COOLDOWN_SECS`): unset keeps the historical 3 × `health_check_interval_secs`,
+  set bounds oscillation independently of the ping cadence, never below 1 s; read once at governor start — live
+  timing intents do not alter it (decided in this change; a restart applies a new value and the doc says so).
+  `ViewConfidence` gains **`staleness_known: bool`** (also on `/stats` and `GET /gateway/fleet`): `false` when no
+  peer was heard inside the window, so `max_staleness_ms: 0` is read as *unknown*, not *perfectly fresh* — an
+  isolated node no longer reports the healthiest view in the fleet. Gates: `cooldown_is_an_explicit_bounded_parameter`,
+  `view_confidence_staleness_is_unknown_with_no_peers_heard`. Additive: a new field beside the old, no shape change.
+
 ---
 
 ## [2.4.4] — 2026-09-12

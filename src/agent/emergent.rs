@@ -56,8 +56,14 @@ pub struct ViewConfidence {
     pub peers_known:      usize,
     /// Peers this node has heard from within [`HEARD_WINDOW`] (the "am I hearing the fleet" signal).
     pub peers_heard:      usize,
-    /// Age (ms) of the stalest *heard* peer's last contact — a view-staleness proxy.
+    /// Age (ms) of the stalest *heard* peer's last contact — a view-staleness proxy. **Read it only
+    /// when [`staleness_known`](Self::staleness_known) is `true`**: with no peer heard inside the
+    /// window there is no observation, and the `0` here is a placeholder, not "perfectly fresh".
     pub max_staleness_ms: u64,
+    /// `false` when this node has heard from **no** peer inside the window (`peers_heard == 0`):
+    /// staleness is *unknown*, not zero. A consumer that reads `max_staleness_ms` without this flag
+    /// would mistake an isolated node for a perfectly fresh one (WP5, the governor-honesty fix).
+    pub staleness_known: bool,
     /// Is the observer itself opaque/shedding (its own inputs may be degraded)?
     pub self_degraded:    bool,
 }
@@ -380,6 +386,7 @@ pub fn compute_view_confidence(ctx: &TaskCtx) -> ViewConfidence {
         peers_known,
         peers_heard,
         max_staleness_ms,
+        staleness_known: peers_heard > 0,
         self_degraded: super::opacity::is_self_opaque(&ctx.kv_state, &ctx.node_id),
     }
 }
@@ -1506,13 +1513,32 @@ mod tests {
 
     // ── Phase 4: fleet diagnosis (the "why is the fleet in this state" rule engine) ────────────
 
+    /// WP5 pin: with no peer heard inside the window, staleness is *unknown* — `staleness_known`
+    /// is `false` and `max_staleness_ms` is a placeholder, so an isolated node never reads as the
+    /// freshest observer in the fleet.
+    #[test]
+    fn view_confidence_staleness_is_unknown_with_no_peers_heard() {
+        let agent = crate::GossipAgent::new(
+            crate::NodeId::new("127.0.0.1", 1).unwrap(),
+            crate::GossipConfig::default(),
+        );
+        let vc = compute_view_confidence(&agent.task_ctx);
+        assert_eq!(vc.peers_heard, 0);
+        assert!(!vc.staleness_known, "no observation ⇒ unknown, not fresh");
+        // One peer heard just now ⇒ known, and the placeholder becomes a real (small) age.
+        agent.task_ctx.peers.pin().insert(crate::NodeId::new("127.0.0.1", 2).unwrap(), std::time::Instant::now());
+        let vc = compute_view_confidence(&agent.task_ctx);
+        assert_eq!(vc.peers_heard, 1);
+        assert!(vc.staleness_known);
+    }
+
     /// A healthy-fleet snapshot with a full, current view. Tests mutate one axis at a time.
     fn nominal_snapshot() -> FleetSnapshot {
         FleetSnapshot {
             observer: "n1".into(),
             view_confidence: ViewConfidence {
                 observer: "n1".into(), peers_known: 3, peers_heard: 3,
-                max_staleness_ms: 0, self_degraded: false,
+                max_staleness_ms: 0, staleness_known: true, self_degraded: false,
             },
             governed_groups: vec![],
             capability_coverage_gaps: vec![],

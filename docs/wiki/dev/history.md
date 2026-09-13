@@ -22,6 +22,13 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — WP5: cooldown parameter + `staleness_known` — 2026-09-13 (unreleased)
+
+Item 4's standalone honesty fix (plan §10.12.5). `membership_cooldown_secs` replaces the unexported
+`3 × health_check_interval` constant (default preserved; env override; ≥ 1 s; read at start — live timing intents
+do not alter it, decided here); `ViewConfidence::staleness_known` so an isolated node's `max_staleness_ms: 0`
+reads as unknown. Two pins. [`.log/2026-09-13-wp5-cooldown-parameter.md`](.log/2026-09-13-wp5-cooldown-parameter.md).
+
 ## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
 
 Durability PATCH on the 2.4 line: the snapshot rename is fsynced at the directory before the WAL is
