@@ -43,4 +43,9 @@ and [ROADMAP](../../../ROADMAP.md). It composes receipts, caller identity, resou
 allocated rights and replay; policy evaluation is replaceable and no new central control service
 is introduced. Local CI uses a stub consumer; the separately required joint pack runs both
 scenarios on AWS/GCP with Mycelium participants and NovusLens evidence views.
-History: [.log/2026-09-12-runtime-authorisation-evidence.md](.log/2026-09-12-runtime-authorisation-evidence.md).
+**Rev 1.10 (2026-09-13)** pulls a thin slice (**AE-T**) forward to Phase B: caller identity on the
+`tools/call` / `/a2a` paths, an evaluator + one in-process Cedar adapter at the gateway, a signed
+`AuditSink` exporter, scenario 2 locally. Guarantee stated as a route-level preflight. *The wedge is
+the gateway, not the fleet* — plan §1.5.
+History: [.log/2026-09-12-runtime-authorisation-evidence.md](.log/2026-09-12-runtime-authorisation-evidence.md)
+· [.log/2026-09-13-ae-thin-slice.md](.log/2026-09-13-ae-thin-slice.md).

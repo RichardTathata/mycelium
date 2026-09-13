@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -86,6 +86,12 @@ gallery), shipped July 2026. This adds a second, and moves the epoch's centre of
 to *contracts and verification*. That is a deliberate response to §1.1. The gallery discipline is unchanged and is
 what each item's demonstration must meet.
 
+**The wedge is the gateway, not the fleet *(rev 1.10)*.** Enterprises will not rewrite their agents onto
+Mycelium to trial governance. They will put a gateway in front of the MCP tools and A2A endpoints their agents
+already call, and Mycelium already fronts both. **"Enforce your remits where the agents actually act"** is the
+entry sentence; the full fleet story (allocated rights, resource fences, federation) comes after, from the same
+components. AE-T (§6.8) is this sentence made runnable, and §12's decks lead with it.
+
 ---
 
 ## 2. The map: dependencies and order
@@ -115,7 +121,7 @@ ADR):
 | Phase | Contents | Exit gate |
 |-------|----------|-----------|
 | **A** | **RA0 (done: reason 0.6.2)** · 1·PR1–3 (ADR, identities + receipts incl. `operation_id`/`attempt_id`, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown parameter (4, standalone) · **7 gateway caller identity** · **8 threat model rev 2** · **V1 the nightly scale runner green** · **V2 on-disk golden fixtures in CI** | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails; **item 7's four negative cases + the `authorized_callers` gate pass in CI and the secure profile refuses legacy dispatch**; **item 8 published and cited by items 2/3/5's PR-1 ADRs**; **V1: three consecutive green nightlies (`resilience` + `entries`; `scale` classified)**; **V2: every released WAL/snapshot format replays in CI** |
-| **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) | `set_with_min_acks` acknowledges the *exact* payload only; **a peer that acknowledged persistence holds the record across its own crash/restart** (a crash-before-ack peer does not count); two meshes discover selected exports without merging |
+| **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) · **AE-T T1–T4 (the thin slice, rev 1.10)** | `set_with_min_acks` acknowledges the *exact* payload only; **a peer that acknowledged persistence holds the record across its own crash/restart** (a crash-before-ack peer does not count); two meshes discover selected exports without merging; **AE-T: scenario 2 runs end-to-end locally against the stub consumer with the gateway as the sole, declared enforcement point** |
 | **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 · **RA1–RA3** (after 4·PR1) | the adversarial release demos of 1 and 2 pass in CI; **RA3: crash after ingest-before-ack replays safely, a retention gap is explicit** |
 | **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 · **RA4** | evidence-aware resolution and curator handover both replay deterministically; **item 3's semantic gate: misleading evidence cannot erase a conflicting observation, refresh expired evidence, or confer authority (three replayed negative cases, rev 1.5)** |
 | **E** | 3·PR7 · 4·PR6–7 · 5·PR7 · 6·PR7 · **RA5–RA6** | combined-feedback scenario green; shadow-mode rollout documented; **RA6: two budgeted domains keep working while the consumer is disconnected and reconcile without double counting** |
@@ -649,7 +655,49 @@ maintainer roles; each PR uses §9's five-part statement and SDK/operator parity
 | AE4 | Phase E; AE1–3, item 2 for domain-crossing variant | CI gallery and operator/SDK examples; both scenarios below and a replacement evaluator pass the same contract fixtures |
 
 These AE exit requirements supplement §2: **Phase A requires AE0; Phase C AE1; Phase D AE2–3;
-Phase E AE4.** Neither API merge nor a simulated event generator closes a scenario gate.
+Phase E AE4; Phase B additionally requires AE-T (rev 1.10).** Neither API merge nor a simulated event generator closes a scenario gate.
+
+#### AE-T — the thin vertical slice *(rev 1.10, 2026-09-13)*
+
+**Why it exists.** AE1–AE4 sit at Phases C–E, behind items 1, 5 and 7. The NovusLens loop —
+declared remit → exported policy → enforced action → signed evidence → assessed page — is the
+commercially decisive demonstration of this axis, and under rev 1.9 it is the furthest thing from
+runnable. AE-T cuts one honest vertical through the loop as soon as item 7 lands, at the **gateway**
+as the sole enforcement point, and says so. It does not pre-empt AE1–AE4; it is a strict subset of
+them with its guarantee stated at the strength it actually has (posture rule 6).
+
+**Where it sits in the code (verified 2026-09-13).** The gateway already fronts every route a
+foreign agent uses to act: `POST /mcp` `tools/call` is dispatched at `src/agent/http.rs:1307`
+through `rpc_call_ctx` (`src/agent/rpc.rs:131`), behind `gateway_auth` (`src/agent/http.rs:431`)
+and the `mcp:invoke` scope (`required_scope`, `src/agent/http.rs:587`); `POST /a2a` is
+`src/agent/a2a.rs:462`. The tamper-evident audit chain (`src/agent/audit.rs`: `AuditRecord`
+with `principal` · `action` · `target` · `outcome`, `AuditSink::export` per sealed record at
+`audit.rs:260`, keys under `sys/audit/`) is the evidence source the handover's unsigned
+`mycelium-audit` connector already reads. Item 7's `GatewayCaller` is the missing fact: today the
+dispatch runs as the node.
+
+| Step | Depends on | Deliverable | Gate |
+|------|-----------|-------------|------|
+| **T1** caller reaches the dispatch | item 7 (Phase A) | `GatewayCaller` present on the `tools/call` and `/a2a` paths; the originating principal is the `subject` of every record below | item 7's four negative cases (already Phase A) |
+| **T2** evaluator at the gateway | T1 · AE0 contract | the `ActionEvaluator` interface (permit · deny · indeterminate, with checked constraints, reason and `policy.revision`), a deterministic reference evaluator, and **one in-process Cedar adapter** (D37) evaluated between `gateway_auth` and `rpc_call_ctx` for MCP tool calls; policy loaded from a versioned local artifact whose `sha256` is `policy.revision`; secure profile refuses on indeterminate, on evaluator error and on an unrecognised clause | substitution, impersonation, missing-facts and unsupported-clause fixtures refuse; an export whose header lists uncarried clauses is refused unless the operator accepts the listed loss explicitly |
+| **T3** signed exporter | T2 · the handover §1 envelope | an `AuditSink` implementation that batches sealed records into NovusLens `activity_observation` and `policy_deployment` envelopes (Ed25519 over canonical JSON, ≤ 1000 records / ≤ 2 MiB, cursors advancing, same `batch_id` ⇒ byte-identical body); `mapping.status: unmapped` for any tool outside the catalogue; `coverage.complete: false` naming the gateway route as the only observed enforcement point | every batch passes the consumer's conformance checker in local CI (the D31 stub); a retry with a changed body is refused |
+| **T4** one reviewed mapping | T3 · handover seam 1 | the procurement catalogue subset needed by scenario 2, carrying NovusLens's `activity_catalogues` identity and revision — no second identity | a mapping correction exports the supersession link; the original is retained |
+| **T-gate** | T1–T4 | **scenario 2 (functional remit) end-to-end locally**: a maintenance co-op agent's benign job outside its remit is refused at the gateway (`deny`, effect `none`); an explicit prohibition; an incomplete allow-list reads as *authority not established*; a shared identity reports without `execution_identity`; the unobserved route stays unobserved | the stub consumer renders the page with no false within-remit or enforcement claim; recorded as the **Phase B** AE exit |
+
+**What AE-T is not — stated in every artefact it ships.** It is *not* resource-side enforcement:
+a gateway decision is a preflight at one route, and a process that reaches a tool or an endpoint
+without traversing the gateway is outside its guarantee. That is exactly the weaker contract
+posture rule 6 and the handover's *coverage* field exist to express, and AE-T's deployment
+report names it. Resource fencing (AE2), grants, budgets and intervention (scenario 1, needing
+items 4 and 5) and the domain-crossing variant (item 2) are unchanged in phase. AE-T introduces
+no wire change, no daemon, no callback to NovusLens, and no KV prefix (records leave through the
+sink, never through gossip — §6.7's rule).
+
+**Why the gateway first, commercially.** An adopter will not rewrite an agent fleet onto
+Mycelium to trial governance; it will put one gateway in front of the MCP tools and A2A
+endpoints its agents already call. Both edges are the gateway's today. "Enforce the declared
+remit where the agents act, and export evidence that admits what it did not see" is the entry
+sentence; the fleet story follows from the same components.
 
 **Decisive demonstrations.** Use constructive co-operative settings and harmless controlled
 activity, in keeping with §12. The runtime consists of actual Mycelium participants invoking
@@ -730,6 +778,8 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D32 *(rev 1.6)* | RA | Five named maintainer roles | Responsibilities, not people; the per-PR five-part statement names the enforcing component | One maintainer |
 | D27 | 7 | (a struct with principal + digest) | The context is **constructed only by the auth layer and attested by the node over the request digest**; four negative cases in CI; legacy node-as-caller only under `legacy`, never in the secure profile | Receiving a struct is not verifying a relationship |
 | D36 *(rev 1.9)* | AE | A universal policy engine or prompt guards as the authority boundary | A compositional action/evidence contract; replaceable evaluator, one real adapter, resource-enforced authority and honest receipts; §6.8 | Local autonomy remains; effects are checked by the resource, not by Layer I. Local CI is self-contained; AWS/GCP plus NovusLens runs are separately required joint delivery evidence |
+| D37 *(rev 1.10, provisional until the AE0 ADR)* | AE | OPA/Rego as the one real adapter | **Cedar**, in-process via the `cedar-policy` crate: deterministic, no sidecar or daemon (philosophy § Not a platform), and the NovusLens export is already engine-checked for it. Rego stays a replaceable integration (the wasm host could run OPA-compiled policies later; not claimed). | The one adapter must not arrive as a process |
+| D38 *(rev 1.10)* | AE | AE-T waits for Phases C–E | A thin slice at the gateway, Phase B, with its guarantee stated as a route-level preflight and `coverage.complete: false` naming the unobserved routes; AE1–AE4 unchanged | Posture rule 6: the composed guarantee is claimed only where the resource enforces |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
 lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disappearance; the asymmetric uncertainty rule;
@@ -812,11 +862,24 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 10. **Phase A's §12 lines** *(rev 1.4)*: the philosophy revision and the concepts-chapter vocabulary travel in item 1's
    ADR PR; the receipt-ladder example is item 1 PR 3's gate; the core deck's federation and PAIR slides are re-linted
    at the Phase A exit.
+12. **Rev 1.10 re-sequence (2026-09-13) — the queue as it now runs, in order:**
+    1. **Item 7** first, not sixth: `GatewayCaller` on `tools/call` and `/a2a`, four negative cases, secure profile refuses legacy dispatch. Small, standalone, and the precondition of everything commercially visible.
+    2. **Item 1 PR 1** in parallel (the contract ADR carries AE0's action-envelope identities — `operation_id` / `attempt_id` — so AE-T never mints a second identity scheme).
+    3. **AE0** as a one-page ADR beside item 1's: the envelope, the evaluator interface, D37's adapter choice, the catalogue identity (handover seam 1) and the negative fixtures. No code.
+    4. **AE-T T2–T4** directly after item 7 lands: evaluator + Cedar adapter at the gateway, the signed `AuditSink` exporter, the procurement mapping subset; the T-gate closes Phase B's AE line.
+    5. **The cooldown parameter** (item 4, `membership_governor.rs:216`) and **item 8** travel alongside; neither blocks AE-T.
+    6. Item 6 PR 1 and item 1 PR 4a keep their places; nothing else in this list moves.
 11. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
 
+- **rev 1.10 (2026-09-13):** **AE-T**, the thin vertical slice — item 7 moved to the front of §10's queue;
+  an `ActionEvaluator` + one in-process Cedar adapter at the gateway (D37, provisional), a signed `AuditSink`
+  exporter to the handover's envelope, one reviewed mapping subset, scenario 2 end-to-end locally as a new
+  **Phase B** exit (D38). Code anchors verified. Guarantee stated as a route-level preflight; AE1–AE4 and the
+  four-run joint pack unchanged. Motivation recorded: the NovusLens loop is the axis's decisive commercial
+  demonstration and was its furthest-from-runnable item.
 - **rev 1.9, same-day refinement (2026-09-12):** standards/profile matrix, reviewed business
   mappings, distinct deployment reports and negative acceptance cases added to AE; no new
   universal policy language or NovusLens runtime responsibility.

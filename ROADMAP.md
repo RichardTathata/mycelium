@@ -3122,6 +3122,15 @@ the additional joint delivery pack runs **both scenarios on AWS and GCP**, with 
 the complete evidence journey. These four live runs remain required; simulated records alone do
 not close them. Authoring in NovusLens stays separate from deployment/enforcement at the resource.
 
+**AE-T, the thin slice (rev 1.10, 2026-09-13; plan §6.8 / D37–D38).** The NovusLens loop pulled forward to a
+Phase B exit: item 7's caller identity on the `tools/call` and `/a2a` paths, an evaluator interface with one
+in-process Cedar adapter at the gateway, a signed `AuditSink` exporter to the handover envelope, one reviewed
+mapping subset, and scenario 2 end-to-end locally against the stub consumer. Its guarantee is a route-level
+preflight, stated as such (`coverage.complete: false` names the unobserved routes); resource fencing, grants and
+intervention stay at AE2. **The wedge is the gateway, not the fleet:** enterprises put a gateway in front of the
+MCP tools and A2A endpoints their agents already call, and Mycelium already fronts both. "Enforce your remits
+where the agents actually act" is the entry sentence; the fleet story follows.
+
 **The RA slice — attributable resource accounting (rev 1.6, plan §6.7; a slice over items 1, 4, 6, 7 — not item
 9):** which attempt consumed what, for which logical operation, under whose verified authority, with what
 uncertainty. Three profiles (observe · enforce-local · enforce-allocated) in the guardrails tier vocabulary; **hard
