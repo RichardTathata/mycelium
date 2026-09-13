@@ -139,7 +139,7 @@ OpenAI-compatible façade `/gateway/reason/v1/*`, the `llm_meta` vocabulary + `o
 GPU plane, Mycelium = agent plane, stackable — `docs/plans/mycelium-reason.md` addendum); 0.6.1 rank-and-reserve
 under one lock; 0.6.2 the façade omits the unknown token split instead of reporting `0`. **The contracts axis
 (2026-09-05 →):** an external review's five defects fixed and released (v2.4.2 / v2.4.3, SDK 0.2.4 / 0.1.1); its
-six enhancement plans reconciled into **one plan of record** — `docs/plans/v3-contracts-axis.md`, **rev 1.11**
+six enhancement plans reconciled into **one plan of record** — `docs/plans/v3-contracts-axis.md`, **rev 1.12**
 (posture · dependency graph · phases A–E with exit gates · decision register D1–D39 · §12 delivery surfaces:
 examples, dev/ops docs, decks, philosophy · §13 the composition hypothesis, *not* a v3 deliverable · §6.7 the RA
 resource-accounting slice); externals vendored under `docs/plans/external/`. Code so far: Phase 0 (durability) and
