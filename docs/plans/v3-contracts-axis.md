@@ -1,6 +1,6 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **rev 1.11, 2026-09-13** restores the **coordination sense of "contract"** — the thesis in §1.2 and the **commitment companion** (contract net) in §6.9, D39 · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -43,6 +43,18 @@ Six items, in the reviewer's numbering (kept so the external documents cross-ref
 | 5 | **Scoped mandates** | authority checked by the protected resource, never inferred from a role advertisement | wiki + consensus + companion | ADR + exhaustive wiki mutation-path inventory |
 | 7 | **Gateway caller identity** *(rev 1.2, near-term)* | every gateway-originated call carries the client's identity to the provider; the node never acts *as itself* on a client's behalf | core gateway (additive) | `GatewayCaller` context on rpc/scatter/propose/tool-call |
 | 8 | **Threat model rev 2** *(rev 1.2, gate)* | foreign principals, authenticated-but-abusive clients, evidence confidentiality, a compromised former holder | `docs/threat-model.md` | one revised document cited by items 2, 3, 5 |
+
+**Two senses of "contract", and which one this axis serves *(rev 1.11)*.** The v3.0 epoch began with
+*programming by contract rather than by specification*: an application is not a workflow someone writes, it is
+what emerges when participants coordinate through a shared medium under contracts — the tuple space (Linda),
+the blackboard, and the **contract net** (announce a requirement · receive offers · award to one acceptor ·
+receive a report). Two of the three shipped in v2 as companions; the third never got a slot. The items above use
+"contract" in a second sense — what an acknowledgement, an identity or a mandate *proves* — and that sense
+captured the axis's name. The relation between them is the point of the whole programme: **the verification
+contracts exist to make the coordination contracts trustworthy.** A contract-net award is only a programming
+model if the award is a receipt (item 1), the acceptor's authority is checked where the work happens (items 5,
+7), and the arrangement can be replayed (item 6). §6.9 gives the third coordination model its slot; §13.2 is the
+same idea stated as a hypothesis.
 
 ### 1.3 Posture: the rules every item obeys
 These are the philosophy's litmus tests applied once, so the six entries do not each re-argue them.
@@ -108,6 +120,7 @@ components. AE-T (§6.8) is this sentence made runnable, and §12's decks lead w
 | 8 Threat model rev 2 | — (document; Phase A) | 2, 3, 5 (each PR 1 cites it) |
 | **RA** Resource accounting *(slice, rev 1.6)* | 1 (receipts, identities) · 7 (caller context) · 4 (rights ledger — RA1 after 4·PR1) · 6 (seams) · 2 (federated variant only) | a read plane for cost evidence; item 4's first externally-priced dimension |
 
+| **CN** Commitment companion — contract net *(rev 1.11)* | 1·PR2 (receipts, `operation_id`) · existing signal / `append` / lowest-wins election · 5 (mandate check at award, when available) · 3 (signed acceptance, when available; a plain signed KV record before that) | the executable form of §13.2; the third coordination model beside tuple space and blackboard; the gallery entry §13.3's four-arm harness runs on |
 | **AE** Authorisation and evidence *(slice, rev 1.9)* | 1/5/7 (identity, receipts, resource fences) · 4 (allocated bounds) · 6/8 (replay/threat model) · 2 (cross-domain variant) | protected action contract and attributable execution/outcome evidence; §6.8 phase gates |
 
 **Order.** Items **1 and 6 first, together**: one states what must hold, the other attacks it. Then **2** as the
@@ -122,7 +135,7 @@ ADR):
 |-------|----------|-----------|
 | **A** | **RA0 (done: reason 0.6.2)** · 1·PR1–3 (ADR, identities + receipts incl. `operation_id`/`attempt_id`, required local sync) · 6·PR1–4 (inventory, kernel, persistence adapters, WAL/snapshot scenario) · the cooldown parameter (4, standalone) · **7 gateway caller identity** · **8 threat model rev 2** · **V1 the nightly scale runner green** · **V2 on-disk golden fixtures in CI** | typed local durability usable from Rust; the WAL/snapshot race replays from a bundle and its merge-removed witness fails; **item 7's four negative cases + the `authorized_callers` gate pass in CI and the secure profile refuses legacy dispatch**; **item 8 published and cited by items 2/3/5's PR-1 ADRs**; **V1: three consecutive green nightlies (`resilience` + `entries`; `scale` classified)**; **V2: every released WAL/snapshot format replays in CI** |
 | **B** | 1·PR4a (exact-identity ack on the existing quorum path) · 1·PR4b (persisted-by-peer protocol) · 2·PR1–3 (domain profile, trust bundles, filtered catalogs) · **AE-T T1–T4 (the thin slice, rev 1.10)** | `set_with_min_acks` acknowledges the *exact* payload only; **a peer that acknowledged persistence holds the record across its own crash/restart** (a crash-before-ack peer does not count); two meshes discover selected exports without merging; **AE-T: scenario 2 runs end-to-end locally against the stub consumer with the gateway as the sole, declared enforcement point** |
-| **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 · **RA1–RA3** (after 4·PR1) | the adversarial release demos of 1 and 2 pass in CI; **RA3: crash after ingest-before-ack replays safely, a retention gap is explicit** |
+| **C** | 1·PR5–7 (effects companion, tuple-space consumer, SDK parity) · 2·PR4–7 (calls, gateways, partition, example) · 3·PR1–3 · 5·PR1–2 · **RA1–RA3** (after 4·PR1) · **CN1–CN3 (the commitment companion, rev 1.11; may begin after 1·PR2)** | the adversarial release demos of 1 and 2 pass in CI; **RA3: crash after ingest-before-ack replays safely, a retention gap is explicit**; **CN-gate: the redistribution demo re-run under contract net — announce, offers, one award, one receipt, one assessment — with the award replayed and a double-award witness that fails** |
 | **D** | 3·PR4–6 · 5·PR3–6 (on replay scenario B) · 4·PR1–5 · 6·PR5–6 · **RA4** | evidence-aware resolution and curator handover both replay deterministically; **item 3's semantic gate: misleading evidence cannot erase a conflicting observation, refresh expired evidence, or confer authority (three replayed negative cases, rev 1.5)** |
 | **E** | 3·PR7 · 4·PR6–7 · 5·PR7 · 6·PR7 · **RA5–RA6** | combined-feedback scenario green; shadow-mode rollout documented; **RA6: two budgeted domains keep working while the consumer is disconnected and reconcile without double counting** |
 
@@ -736,6 +749,55 @@ it does not issue containment. No new central planner, universal enforcement eng
 policy author, semantic intent detector, fleet-wide consensus requirement or propagation filter
 is introduced by this slice.
 
+### 6.9 The commitment companion — contract net *(rev 1.11, 2026-09-13)*
+
+**Provenance.** The v3.0 packaging-candidate table (ROADMAP) listed an *auction / bidding companion*
+(`mycelium-auction`?) as the contract-net packaging; rev 1.0 marked it *subsumed* because the award
+needs item 1's receipt. Subsumed became unscheduled. This section restores it under its proper name —
+it is the third of the three coordination models the epoch was named for (§1.2), and the executable
+form of §13.2's five records. "Auction" framed it as pricing; the model is *commitment*: declare, offer,
+accept, fulfil, assess.
+
+**What it composes (verified 2026-09-13; nothing new in core).** Announce = a signal
+(`emit_reliable`, `src/agent/service_handle.rs:180`) or a `declare_requirement` filter
+(`src/agent/capability_handle.rs:235`) · offers = `kv().append("cn/{requirement}/offers", …)`
+(`mycelium-core/src/kv_handle.rs:247`, read back with `subscribe_log`) · award = the deterministic
+lowest-candidate-wins rule the tuple-space primary election already runs
+(`mycelium-tuple-space/src/lib.rs:728`), **or** a `group_propose` round where the award must be
+linearizable · fulfilment = item 1's receipt against the award's `operation_id` · assessment = a
+signed record (item 3's `assessment` when it exists; a signed KV record under the companion's prefix
+before that). The overlay scenario `s11_task_auction.py` is the existing exact-once precedent. The
+mapping to §13.2 is one-to-one:
+
+| Contract net | §13.2 record | Mechanism |
+|---|---|---|
+| announce | declared requirement | signal / `declare_requirement`; `cn/{req}` head with terms, deadline, acceptance criteria |
+| offer | (an offer is not yet an obligation) | `append` to the requirement's offers stream; evaporates with the requirement |
+| award | acceptance under a mandate and an allocation | deterministic rule or consensus; **the award is a receipt-bearing operation**, never a KV write alone; checked against the acceptor's mandate epoch (item 5) where a mandate exists |
+| report | receipt | item 1 — outcome, uncertainty, never "nothing happened" |
+| evaluation | assessment | signed; the requirement's declarer is not the only permitted assessor |
+
+**Rules.** No component assigns another participant's obligation (§13.2): an award only records an
+*offer* the participant made. A requirement with no offers is a visible state, not a retry loop. An
+awarded participant that vanishes leaves an award with no receipt — reported as such; re-announcement
+is the declarer's decision under its own policy, never automatic reassignment by the companion. One
+award per requirement per epoch: a double award is the companion's defining failure and gets a replay
+witness. Detailed offers and reports stay in the companion's streams under one prefix (`cn/`, added
+to the namespace-ownership table); the gossip KV carries heads and terms only.
+
+| Step | Depends on | Deliverable | Gate |
+|---|---|---|---|
+| **CN1** | 1·PR2 | `mycelium-commitment` companion on the public API: announce · offer · award (deterministic rule) · report · assess; `cn/` prefix registered | the redistribution example re-run as contract net, in CI; the award is a receipt |
+| **CN2** | CN1 · 6·PR2 kernel | the award replays; a double-award witness (award rule removed) fails under replay | witness fails, real rule passes |
+| **CN3** | CN1 · 5·PR1 where present | award checked against the acceptor's mandate epoch; a stale holder's award is `MandateSuperseded` | one negative case in CI; skipped, not faked, where item 5 is absent |
+| **CN-gate** | CN1–CN3 | Phase C exit; the gallery entry §13.3's four-arm harness runs on | §12 alignment gate as for every companion |
+
+**Why now and not after Phase D.** §13.3 waits for items 3, 4 and 5 to run the *experiment*; the
+*mechanism* needs only receipts, and every other ingredient shipped in v2. Building it early gives the
+experiment its instrument, gives AE-T's scenario 2 its natural shape (the maintenance agent's job is an
+award checked against a remit), and makes the epoch's thesis visible in the gallery beside its two
+sibling models.
+
 ## 7. Decision register
 
 Every place this plan departs from the reviewer's six documents. "Kept" means we adopt their text; the rest are ours.
@@ -780,6 +842,7 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D36 *(rev 1.9)* | AE | A universal policy engine or prompt guards as the authority boundary | A compositional action/evidence contract; replaceable evaluator, one real adapter, resource-enforced authority and honest receipts; §6.8 | Local autonomy remains; effects are checked by the resource, not by Layer I. Local CI is self-contained; AWS/GCP plus NovusLens runs are separately required joint delivery evidence |
 | D37 *(rev 1.10, provisional until the AE0 ADR)* | AE | OPA/Rego as the one real adapter | **Cedar**, in-process via the `cedar-policy` crate: deterministic, no sidecar or daemon (philosophy § Not a platform), and the NovusLens export is already engine-checked for it. Rego stays a replaceable integration (the wasm host could run OPA-compiled policies later; not claimed). | The one adapter must not arrive as a process |
 | D38 *(rev 1.10)* | AE | AE-T waits for Phases C–E | A thin slice at the gateway, Phase B, with its guarantee stated as a route-level preflight and `coverage.complete: false` naming the unobserved routes; AE1–AE4 unchanged | Posture rule 6: the composed guarantee is claimed only where the resource enforces |
+| D39 *(rev 1.11)* | CN | Leave contract net as an unscheduled "auction" packaging candidate subsumed by item 1 | The **commitment companion** (§6.9): scheduled after 1·PR2, Phase C exit, named for the model not the price; the executable form of §13.2 and the third coordination model of the epoch | Verification contracts exist to make coordination contracts trustworthy (§1.2); an award that is not a receipt is a KV write with a hopeful name |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
 lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disappearance; the asymmetric uncertainty rule;
@@ -869,11 +932,16 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
     4. **AE-T T2–T4** directly after item 7 lands: evaluator + Cedar adapter at the gateway, the signed `AuditSink` exporter, the procurement mapping subset; the T-gate closes Phase B's AE line.
     5. **The cooldown parameter** (item 4, `membership_governor.rs:216`) and **item 8** travel alongside; neither blocks AE-T.
     6. Item 6 PR 1 and item 1 PR 4a keep their places; nothing else in this list moves.
+13. **Rev 1.11 (2026-09-13):** the **commitment companion** (§6.9, contract net) enters the queue directly after item 1 PR 2, as CN1; it is the first gallery entry to show the epoch's thesis (§1.2) executable.
 11. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 
 ## 11. Revision log
 
+- **rev 1.11 (2026-09-13):** the coordination sense of "contract" restored. §1.2 states the two senses and their
+  relation (verification contracts serve coordination contracts); **§6.9** gives contract net its slot as the
+  **commitment companion** (CN1–CN3, Phase C exit, may begin after 1·PR2) with the one-to-one mapping to §13.2's five
+  records and verified anchors; D39. §13.2 now points at §6.9 as its executable form. No phase moves.
 - **rev 1.10 (2026-09-13):** **AE-T**, the thin vertical slice — item 7 moved to the front of §10's queue;
   an `ActionEvaluator` + one in-process Cedar adapter at the gateway (D37, provisional), a signed `AuditSink`
   exporter to the handover's envelope, one reviewed mapping subset, scenario 2 end-to-end locally as a new
@@ -1155,7 +1223,9 @@ requirement, authority and acceptance criteria; receipts and assessments arrive 
 assigns another participant's obligations**: obligations arise only through authorized acceptance; a participant
 may plan under a scoped mandate, and no planner is permanent. The arrangement of work is *observable through the
 records*, not constructed by a component. Posture rule 2 (composition before primitives) applies in full: a
-commitment subsystem needs a written argument that this composition cannot express it.
+commitment subsystem needs a written argument that this composition cannot express it. *(rev 1.11)* **§6.9 is this
+composition built**: the contract-net companion's announce · offer · award · report · evaluation are the five records
+with a mechanism each, and no planner.
 
 **The risk that makes it worth testing:** the absence of a planner is not evidence of coordination. The complexity
 may simply have moved into participants. The experiment must show that local rules handle dependencies, prevent

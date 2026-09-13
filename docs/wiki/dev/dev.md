@@ -48,4 +48,6 @@ scenarios on AWS/GCP with Mycelium participants and NovusLens evidence views.
 `AuditSink` exporter, scenario 2 locally. Guarantee stated as a route-level preflight. *The wedge is
 the gateway, not the fleet* — plan §1.5.
 History: [.log/2026-09-12-runtime-authorisation-evidence.md](.log/2026-09-12-runtime-authorisation-evidence.md)
-· [.log/2026-09-13-ae-thin-slice.md](.log/2026-09-13-ae-thin-slice.md).
+· [.log/2026-09-13-ae-thin-slice.md](.log/2026-09-13-ae-thin-slice.md)
+· [.log/2026-09-13-commitment-companion.md](.log/2026-09-13-commitment-companion.md) (rev 1.11: contract net
+restored as the **commitment companion**, plan §6.9; the two senses of "contract", §1.2).

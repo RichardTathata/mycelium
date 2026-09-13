@@ -2967,7 +2967,7 @@ until a tested example exists — see [`pattern-coverage.md`](docs/wiki/domain/p
 
 | Candidate | Nature | Composes from (or: what it adds) | Trigger to build |
 |---|---|---|---|
-| **Auction / bidding companion** (`mycelium-auction`?) | *packaging* — Contract-Net | signal announce + `kv().append("bids/…")` + a consensus round **or** deterministic lowest-wins (as the tuple-space/wiki elections) | work-distribution needs price/priority clearing, not FCFS `claim`. |
+| **Commitment companion** (contract net; was "auction / bidding", renamed rev 1.11 — **scheduled**: plan §6.9, CN1–CN3, Phase C) | *packaging* — Contract-Net | signal announce + `kv().append("bids/…")` + a consensus round **or** deterministic lowest-wins (as the tuple-space/wiki elections) | work-distribution needs price/priority clearing, not FCFS `claim`. |
 | **Durable / partitioned event-log** | *refinement* — the event-sourced log is already **Native** (`KvHandle::append`/`scan_log`/`subscribe_log`/`compact_log`); this adds Kafka-style partitions + consumer-group committed offsets + retention | the existing `log/{stream}` overlay | a customer needs partitioned throughput + durable consumer offsets beyond replay + compaction. |
 | **DAG self-evolving network** | *packaging* — the dynamic wiring graph already rewires | `advertise_capability` + `declare_requirement` + `resolve_wiring` | evidence dynamic specialization beats flat capability groups. |
 | **Governed-memory read-set reconstruction** | *packaging* — governance is Native (access broker + authz); adds S-Bus-style read-set tracking | HLC read-stamps + wiki 3-way reconcile | the research matures **and** a governance-of-shared-memory customer need appears. |
@@ -3073,7 +3073,7 @@ no resource-authoritative *service process* for mandates — the fence goes insi
 boundary — *accepted by the reviewer in rev 1.1, with the qualification that the boundary must be one transaction
 (git ref transaction + pre-receive over both refs; `FsStore` strict mode out of scope), and the consensus-slot
 establishment (D2) made conditional on the replay gate.* **The `3.0.0` candidate** (D23): only a later authenticated, domain-bound SWIM/handshake; nothing in this axis
-changes the wire. **Subsumed packaging candidates** (table above): the *auction / bidding* companion needs item 1's
+changes the wire. **Subsumed packaging candidates** (table above): the *auction / bidding* companion (now the **commitment companion**, §6.9, scheduled after 1·PR2 — rev 1.11) needs item 1's
 destination-commit receipt; the *durable / partitioned event-log* refinement is item 1's receipt vocabulary on
 `KvHandle::append`; the *governed-memory read-set* candidate is item 3's provenance records.
 

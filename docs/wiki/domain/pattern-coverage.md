@@ -62,7 +62,7 @@ capability, not proof.
 These need **no new substrate capability** — only ergonomic packaging, exactly as blackboard/tuple-space
 packaged Linda. Tracked as packaging companions in [`ROADMAP.md`](../../../ROADMAP.md) → *v3.0 Candidates*:
 
-- **Auction / bidding (Contract-Net)** — announce = signal · bids = `kv().append("bids/{auction}")` ·
+- **Contract-Net — the commitment companion** (scheduled 2026-09-13: [plan §6.9](../../plans/v3-contracts-axis.md), CN1–CN3, after item 1 PR 2; "auction / bidding" until rev 1.11) — announce = signal · bids = `kv().append("bids/{auction}")` ·
   clear = a consensus round (linearizable award) **or** the deterministic lowest-wins rule the
   tuple-space/wiki elections already run.
 - **DAG self-evolving agent network** (AgentNet-style) — the dynamic wiring graph (above) *is* this;
