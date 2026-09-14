@@ -43,6 +43,12 @@ and [ROADMAP](../../../ROADMAP.md). It composes receipts, caller identity, resou
 allocated rights and replay; policy evaluation is replaceable and no new central control service
 is introduced. Local CI uses a stub consumer; the separately required joint pack runs both
 scenarios on AWS/GCP with Mycelium participants and NovusLens evidence views.
+**AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md): the envelope
+(item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
+`policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;
+Cedar in-process as the one adapter, D37 adopted), five evidence records through the `AuditSink`, the consumer's
+catalogue identity (no second identity), three strength profiles, the pinned standards matrix, and eleven negative
+fixtures the seam and every evaluator must pass. Next: the evaluator seam on item 7, then AE-T T2–T4 privately.
 **Rev 1.10 (2026-09-13)** pulls a thin slice (**AE-T**) forward to Phase B: caller identity on the
 `tools/call` / `/a2a` paths, an evaluator + one in-process Cedar adapter at the gateway, a signed
 `AuditSink` exporter, scenario 2 locally. Guarantee stated as a route-level preflight. *The wedge is

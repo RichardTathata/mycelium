@@ -257,6 +257,9 @@ coordinator-free system can offer. → [`consensus`](../../examples/coop/src/bin
 | `operation_id` / `attempt_id` | native | caller-minted identity of an operation (stable across retries) and of each attempt; the key of every receipt | `design/contracts-receipts.md` |
 | `DeliveryUnknown` | native | a timeout's honest answer: the rungs established so far, then *unknown* — never a negative | `design/contracts-receipts.md` |
 | Gateway caller | native | the client principal a provider sees behind a gateway call (`GatewayCaller`, item 7) | `docs/operations/rbac.md` §7 |
+| Action envelope | native | who is asking to do what, to which resource, with which arguments — assembled only by the enforcement point from verified facts (AE0) | `design/action-envelope-ae0.md` |
+| Evaluator · permit / deny / indeterminate | native | a replaceable, deterministic decision over an envelope + authority facts; indeterminate is never permit; the secure profile refuses on it | `design/action-envelope-ae0.md` |
+| Policy revision · coverage · deployment report | native | the digest of the policy actually evaluated; the routes an enforcement point does not see (`coverage.complete: false`); attributable testimony about activation, never proof of coverage | `design/action-envelope-ae0.md` |
 | Seam | native | a replaceable adapter behind which production decision logic runs unchanged — wall clock, monotonic clock, named RNG streams, timers, scheduling, channels, storage, external inputs (replay, item 6) | `design/replay-nondeterminism-inventory.md` |
 | Bundle | native | what a failing run leaves behind and a reviewer replays exactly: build identity, config, initial disk state, redacted inputs, the ordered choices trace, the witness; exact replay detects divergence, never merely re-seeds | `design/replay-nondeterminism-inventory.md` |
 

@@ -32,6 +32,18 @@ SkillRunner switched). `gateway_caller_profile` secure/legacy; `sys/caller-conte
 negative cases + the `authorized_callers` gate + `/a2a` in CI. SDK parity: `RpcRequest.caller` on
 `rpc_serve` / `rpcServe`, READMEs; `docs/operations/rbac.md` §7. Wiki: [security](security.md) §WS1.5,
 [`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).
+## v3 contracts axis — AE0: the action-envelope ADR — 2026-09-13 (unreleased)
+
+Queue §10.12.3, beside item 1's ADR. `docs/design/action-envelope-ae0.md`: the three questions a protected action
+answers; the envelope assembled only by the enforcement point from verified facts (no second identity scheme —
+item 1's identities, item 7's actor); the evaluator contract (three verdicts, indeterminate never permit,
+deterministic, replaceable; Cedar in-process adopted as the one adapter, D37); authority facts with their issuers;
+five evidence records through the `AuditSink`; the consumer's catalogue identity, generic tools, the deployment
+report and coverage as a field; three strength profiles in the guardrails tier vocabulary; the pinned standards
+matrix (SPIFFE · XACML-as-architecture · Cedar · ODRL profile · OAuth RAR · PROV); eleven negative fixtures. No
+code; the seam lands on item 7. Wiki: [dev](dev.md) §Planned AE,
+[`.log/2026-09-13-ae0-action-envelope-adr.md`](.log/2026-09-13-ae0-action-envelope-adr.md).
+
 ## v3 contracts axis — item 1 PR 1: the contracts-and-receipts ADR — 2026-09-13 (unreleased)
 
 The plan's "this unblocks everything" item (§10.1). `docs/design/contracts-receipts.md`: the site-by-site
@@ -44,6 +56,12 @@ on-disk fixtures (`tests/fixtures/persistence/fixint-v1`, replayed in CI). Docs:
 philosophy Property 8 + litmus tests 4–5, the compatibility rule, the CLAUDE.md ack invariant. Wiki:
 [runtime-invariants](architecture/runtime-invariants.md) §Persistence, [testing](testing/testing.md),
 [`.log/2026-09-13-item1-pr1-contract-adr.md`](.log/2026-09-13-item1-pr1-contract-adr.md).
+## v3 contracts axis — item 8: threat model revision 2 — 2026-09-13 (unreleased)
+
+`docs/threat-model.md` §5 Boundaries D–G (domain edge · authenticated-but-abusive client · evidence confidentiality /
+hash-as-credential · compromised former holder / forged epoch) and §6 (verified claims · scoped attestations · redaction
+· protected reproduction artefacts). A document, a Phase A gate: items 2, 3, 5 cite it from their PR 1 ADRs. Plan §6.5
+marked done. Wiki: [security](security.md), [`.log/2026-09-13-threat-model-rev2.md`](.log/2026-09-13-threat-model-rev2.md).
 ## v3 contracts axis — item 6 PR 1: the nondeterminism inventory — 2026-09-13 (unreleased)
 
 `docs/design/replay-nondeterminism-inventory.md`: the measured inventory by kind and module (production paths on
