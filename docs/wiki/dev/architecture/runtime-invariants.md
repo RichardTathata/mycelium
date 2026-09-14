@@ -244,6 +244,17 @@ would repair it from peers eventually; a single node or a cold cluster restart l
 record is now replayed through `apply_fn` = `apply_and_notify`, whose LWW lets the snapshot's newer
 entry win on its own. `KvSnapshot::snapshot_hlc` stays on disk, informational only.
 
+**The contract above the invariants (contracts axis item 1, ADR 2026-09-13).** What each public
+acknowledgement proves — and does not — is inventoried site by site in
+[`docs/design/contracts-receipts.md`](../../../design/contracts-receipts.md) §1, with the four receipts
+(local application · local sync · replica sync · destination commit) it commits PRs 2–4 to return. The
+**regression floor** pins today's meanings (`floor_observe_counts_any_update_at_or_after_write_ts`,
+`floor_committed_persisted_is_true_when_persistence_unconfigured`, plus the durability tests named
+here); the **golden on-disk fixtures** (`tests/fixtures/persistence/<format>/`, replayed by
+`golden_fixture_replays_every_released_on_disk_format`) pin that every released `wal.bin` /
+`snapshot.bin` still replays — one family, `fixint-v1`, since v1.0.0. Persist-first on the strong path
+(PR 3) is admissible **only** because invariant 2 holds; the two regression tests above are its pin.
+
 **An ack is a durability claim — at the `WalHandle` level.** `append` (Flush), `append_sync`,
 `trigger_snapshot` return `BrokenPipe` when the writer task is gone — never `Ok` by default. The
 *public* `set_async`/`delete_async` do **not** propagate it: their `bool` is the gossip-queue result and

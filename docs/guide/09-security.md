@@ -175,14 +175,22 @@ the entry simply reads back as `None`.
 
 ```rust
 // inside a provider's rpc_rx serve loop
-if !agent.caller_authorized(req.sender(), &authorized_callers) {
-    // deny — req.sender() is signature-verified at the connection layer under tls
+match agent.request_authorized(&req, &authorized_callers) {
+    Ok(true)  => { /* serve */ }
+    Ok(false) => { /* deny — the principal is not listed */ }
+    Err(e)    => { /* deny — a forged or unsigned gateway caller context; never fall back to the node */ }
 }
 ```
 
-Empty allowlist = open; otherwise the verified sender is admitted if it is listed
-by NodeId or holds a listed role. SkillRunner wires this in automatically from
-the `[policy] authorized_callers` field of a `.skill.toml`.
+Empty allowlist = open. A direct in-mesh call is admitted if the (signature-verified)
+sender is listed by NodeId or holds a listed role. A call a **gateway** dispatched for an
+HTTP/SDK client carries a node-attested `GatewayCaller` (v3 item 7) and is judged by the
+*client's principal* — `oidc:{subject}`, `token:#{i}`, `token:legacy`, `anonymous` — so
+listing the gateway node admits none of its clients (that was the confused deputy the
+`/mcp` finding exposed). `caller_authorized(req.sender(), …)` still exists for direct calls;
+`request_authorized` is the one to use anywhere a gateway can reach. SkillRunner wires
+this in automatically from the `[policy] authorized_callers` field of a `.skill.toml`;
+`docs/operations/rbac.md` §7 has the profile and the rolling-upgrade rule.
 
 **3. OAuth2 scope gateway ACLs.** Map bearer tokens to `resource:verb` scopes;
 each `/gateway/**` route requires one (deny-by-default → `admin`):

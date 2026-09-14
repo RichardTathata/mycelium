@@ -140,6 +140,11 @@ Any significant proposed addition must be able to answer these three questions c
 3. **Protocol or substrate property?** Does this require explicit protocol machinery — a manager, a lifecycle, a renewal RPC, an explicit deregistration — that could instead be expressed as a substrate property? If yes, find the evaporation equivalent.
    *Fail: requires a manager, coordinator, or lifecycle RPC*
 
+4. **Which of the three admissible shapes of prevention is this?** The hot invariant is *detection, not prevention*; Layer I is never taught a higher-layer law. Prevention is admissible in exactly three shapes: (i) **requested by the caller as a contract** (a required-sync write that refuses when persistence is off), (ii) **enforced at the resource the caller already trusts** (a mandate checked inside the store's own atomic boundary; an allowlist checked where the provider serves), or (iii) **an opt-in profile with a declared promise strength**. A proposal must name its shape and state its strength in the guardrails tier vocabulary.
+   *Fail: prevents at Layer I, or prevents without naming its shape and strength*
+5. **Is the named mechanism the composed guarantee?** Consensus, a lease, a CAS, a signature — each proves what it proves and no more. A composed guarantee ("exactly-once", "the lock is exclusive", "the write is durable on three replicas") exists only with an explicit safety argument *and* a replay or CI gate that would fail if it did not hold. A mechanism with the right name is not the guarantee.
+   *Fail: claims a composed guarantee from the presence of an appropriately named primitive*
+
 > **The informal check:** "Would Holland approve?" It compresses the whole framework into one question: does this emerge from simple rules interacting, or does it require a manager, a coordinator, or a lifecycle protocol? The latter almost always signals a layer violation or a misidentified primitive.
 
 ## Emergent Levels and Symmetry Breaking
@@ -365,6 +370,12 @@ In Mycelium terms, this is **Property 7 — Epistemic Symmetry**: the meta-knowl
 > **The complete failure-mode picture.** Failure Mode I: coordinator-based design from the start — epistemic collapse (Coordinator Trap). Failure Mode II: correct substrate, Property 5 absent — external capture (Olson dynamics). Failure Mode III: correct substrate, Property 6 absent — internal capture (incumbency accumulation). Failure Mode IV: correct substrate, Property 7 absent — structural class entrenchment (data locality and meta-game advantage survive rotation). Each requires a distinct structural remedy; none of the four can substitute for another.
 
 The political analogy is not decorative. Subsidiarity, polycentric governance, the Ostrom design principles, and the mandate TTL are the result of decades of empirical study of what makes distributed coordination sustainable at scale. They converge with Holland, Hayek, and Burgess because they are studying the same underlying problem in a different domain. The correct answer is the same: local self-determination wherever possible; emergent consensus structures where scale requires them; the higher layer as servant, not master; and the servant's mandate explicitly limited in time.
+
+### Property 8 — the contract: an ack names what it proves
+
+Properties 1–7 describe how state and authority move through the substrate. They say nothing about what a participant may *believe* when the substrate answers. Yet every layer answers — `true`, `Ok`, `Acknowledged`, `Committed` — and a system whose answers mean different things at different sites, or mean less than they read, breeds the same asymmetry Property 7 guards against: the participant who knows what an ack really proves holds an advantage over the one who took it at face value, and the difference is invisible until a failure makes it visible. A coordinator-free substrate cannot afford that, because there is no coordinator to ask.
+
+**Property 8 — the contract.** An acknowledgement is a **receipt**: it names exactly which rung was established — *applied locally*, *this exact operation on this node's disk*, *persisted by these named peers*, *committed by that destination together with its dedup result* — and never implies a rung above. Same identity with different content is a conflict, not a silent overwrite. A timeout returns the rungs that were established and an explicit *unknown* for the rest; the substrate never answers "nothing happened", because it cannot know that. Receipts are evidence, not verdicts: the reader decides what to accept (Property 7's epistemic symmetry, extended from state to *evidence* — the substrate never decides truth; the knowledge layer of the contracts axis makes that a rule for claims and assessments too). The design record is [`docs/design/contracts-receipts.md`](design/contracts-receipts.md); the v3 contracts axis is this property's implementation, and litmus tests 4 and 5 are its guards.
 
 ## Further Reading
 

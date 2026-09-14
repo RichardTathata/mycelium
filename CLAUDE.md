@@ -118,6 +118,12 @@ the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
   a durability claim (`Err` when the writer is gone; `append_sync` fsyncs in every `SyncMode`).
   The snapshot merges the WAL tail before truncating; replay is LWW, not a watermark —
   [runtime-invariants](docs/wiki/dev/architecture/runtime-invariants.md) §Persistence.
+- **An ack is a receipt that names its rung and nothing above it** — local application · local sync
+  · replica sync · destination commit; a timeout is `DeliveryUnknown`, never a negative; same
+  `operation_id` + different content is a `Conflict`. Today's `bool`s and `persisted` are pinned by the
+  regression floor (`floor_*` tests + the golden on-disk fixtures under `tests/fixtures/persistence/`,
+  replayed in CI); a PR changes an ack's meaning by changing a pin, in the open —
+  [contracts-receipts ADR](docs/design/contracts-receipts.md).
 - Ports via `test_util::alloc_port`; env-var tests hold `config::tests::env_test_lock()`.
 
 ## Active work
@@ -147,6 +153,8 @@ RA0 (reason 0.6.2). **Rev 1.10 (2026-09-13) re-sequenced the queue — item 7 fi
 at the gateway, signed `AuditSink` exporter, scenario 2 locally; a Phase B exit; *the wedge is the gateway, not the fleet*, §1.5);
 item 1 PR 1 (contract ADR, with `operation_id`/`attempt_id`) + the AE0 ADR in parallel; the **commitment companion**
 (contract net, §6.9, rev 1.11) directly after item 1 PR 2; item 6 PR 1
-(nondeterminism inventory) + the membership-cooldown explicit parameter alongside. Delivery ledger:
+(nondeterminism inventory) + the membership-cooldown explicit parameter alongside. **Item 7 landed
+2026-09-13** (`src/agent/gateway_caller.rs`: `GatewayCaller` on every gateway dispatch, `request_authorized`,
+`gateway_caller_profile`, `sys/caller-context/` marker, four negative cases + gate in CI; `rbac.md` §7). Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

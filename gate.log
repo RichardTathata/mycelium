@@ -1,0 +1,14 @@
+=== tuple-space failover
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 2.02s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+=== item7 gates
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 456 filtered out; finished in 5.03s
+=== lock race
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 404 filtered out; finished in 1.08s
+=== clippy
+=== DONE

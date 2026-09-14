@@ -49,7 +49,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 from httpx_sse import aconnect_sse
@@ -137,12 +137,21 @@ class RpcRequest:
     """An incoming RPC request received via :meth:`MyceliumAgent.rpc_serve`.
 
     Pass this to :meth:`MyceliumAgent.rpc_respond` to complete the round-trip.
+
+    ``caller`` is present when a *gateway* dispatched the call for one of its HTTP/SDK
+    clients (core v3 item 7): ``{"principal", "via", "scopes", "attested"}`` — the
+    client's resolved principal (``oidc:…`` / ``token:#i`` / ``token:legacy`` /
+    ``anonymous``), the gateway node, the scopes granted for the request, and whether
+    the node verified the gateway's signature. ``None`` for a direct in-mesh call, where
+    ``sender`` *is* the principal. A request whose context failed verification is never
+    delivered.
     """
 
     kind:        str
     nonce_hex:   str
     sender:      str
     payload:     bytes
+    caller:      Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -626,6 +635,7 @@ class MyceliumAgent:
                         nonce_hex = data.get("nonce_hex", ""),
                         sender    = data.get("sender", ""),
                         payload   = payload,
+                        caller    = data.get("caller"),
                     )
 
     def rpc_respond(self, request: "RpcRequest", result: bytes = b"") -> None:

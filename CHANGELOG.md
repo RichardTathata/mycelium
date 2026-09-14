@@ -11,6 +11,74 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Gateway caller identity (v3 contracts axis item 7, `docs/plans/v3-contracts-axis.md` §6.4 / D27).**
+  Every gateway-originated dispatch — `POST /mcp` `tools/call`, `POST /a2a`, `/gateway/rpc/call`,
+  `/gateway/scatter`, `/gateway/overlay/emit_reliable`, `/gateway/llm/{call,stream}` — used to run under
+  the **node's** identity, so a provider's `authorized_callers` saw the gateway node and never the client
+  (a confused deputy; the 2026-09-05 `/mcp` fix put the route behind auth but did not tell the provider who
+  called). Now the auth layer constructs a `GatewayCaller` on every dispatch — the **originating principal**
+  (`oidc:{subject}` · `token:#{index}` · `token:legacy` · `anonymous`, never the credential), the **gateway
+  node** acting on its behalf (`via`, checked against the frame's signature-verified sender), and the
+  **authority granted for the request** (the credential's scopes ∩ the route's scope, never `*`) — and the
+  node **attests it** (Ed25519 over `principal ‖ via ‖ scopes ‖ issued_at ‖ sha256(payload)` under `tls`).
+  It rides inside the RPC payload after the nonce; **wire v12 unchanged**. `RpcRequest::payload()` strips
+  it, so existing provider loops see exactly the application bytes; providers read it via
+  `GossipAgent::request_principal` / `gateway_caller`, and (`compliance`) authorise with the new
+  **`request_authorized`** — a gateway client is judged by its *principal* (listing the gateway node admits
+  nothing), a direct node call by node id / roles as before. `mycelium-guardrails` `check_caller` /
+  `guarded_rpc_serve` and SkillRunner use it; denial seals now name the client principal and the `via` node.
+  New: `McpHandle::register_mcp_tool_with_principal`; `/gateway/rpc/serve/{kind}` events carry an optional
+  `caller` object (`principal`, `via`, `scopes`, `attested`); `/a2a` resolves an *optional* bearer (valid ⇒
+  its principal, none ⇒ `anonymous`, unrecognised ⇒ 401 — never downgraded); `sys/caller-context/{node}`
+  marker (`b"1"`) written at start by every node. **Config:** `gateway_caller_profile` (`secure` default ·
+  `legacy`; env `GOSSIP_GATEWAY_CALLER_PROFILE`). **Secure profile refuses** — never silently runs as the
+  node — a provider without the marker (JSON-RPC `-32021` / HTTP `412` `provider_without_caller_context`,
+  naming the provider), a dispatch site without a context (`-32020`), and, at the provider, a forged /
+  unsigned / mis-attributed context (`CallerError`; MCP `-32022`). The `legacy` profile is node-as-caller
+  for a rolling-upgrade window (gateways upgraded before providers), logged at `warn!`, and a §6.6
+  removal-ledger entry. Gates: `gateway_caller_tests` in `src/agent/http.rs` (the four negative cases + the
+  `authorized_callers` gate under `tls`+`compliance`, `/a2a`) and `agent::gateway_caller::tests`.
+  Metric: `mycelium_gateway_caller_refusals_total{reason}`. Operator page: `docs/operations/rbac.md` §7.
+  **Behaviour note:** a deployment that listed the *gateway node* in a provider's `authorized_callers` to
+  admit HTTP clients must now list the clients' principals (that node-listing was the impersonation).
+  **Hardened after an external review of the first cut (2026-09-13/14), four findings, all closed with
+  regression tests:** (1) a raw `/gateway/signal/emit` of RPC-shaped bytes reached a provider *as the node*
+  — a secure-profile gateway node now publishes marker `"2"` and wraps its own `rpc_call`s in a signed
+  `node:{self}` envelope, so a bare frame from it is `CallerError::Missing`, never its action
+  (`raw_gateway_signal_cannot_pass_as_the_node`); (2) `token:#0` named the same identity on every gateway —
+  principals are now **issuer-qualified** (`token:{issuer}/{name|#i|legacy}`, `oidc:{idp}/{subject}`;
+  `gateway_identity_issuer`, default the node id; new `gateway_named_tokens` for stable names)
+  (`token_identities_are_qualified_by_the_issuing_gateway`); (3) the built-in LLM provider stripped an
+  envelope without verifying it — **`ServiceHandle::rpc_rx` now verifies at the receive boundary** and
+  answers refusals itself, covering every companion loop, and the LLM / MCP / explain receivers verify
+  directly (`llm_provider_refuses_an_unverified_context`); (4) malformed or oversized frames read as
+  "no envelope" and were admitted as the node — framing is a three-way `Frame::{Unframed, Framed,
+  Malformed}`, malformed refuses, and the producer refuses an over-bound envelope (`-32023` / HTTP 413)
+  instead of truncating (`malformed_frames_are_refused_never_treated_as_the_node`,
+  `producer_refuses_an_oversized_envelope`).
+- **Contracts axis item 1 PR 1 — the contracts-and-receipts ADR, the regression floor, golden on-disk
+  fixtures** (`docs/design/contracts-receipts.md`; plan `docs/plans/v3-contracts-axis.md` §3, D8/D11/D24).
+  The record states what an acknowledgement proves today at every site (`kv().set` = queued for gossip;
+  `set_with_min_acks` = propagation with a `>=` overclaim; `Committed { persisted }` = fsynced *or*
+  never promised) and fixes the contract the next PRs implement: four receipts kept separate — local
+  application · local sync · replica sync · destination commit — each with its own visibility /
+  durability / pre-durability-effects / post-failure truth; caller-minted `operation_id` + `attempt_id`
+  (the identities the AE0 envelope binds); `Conflict` on same-id-different-content; `DeliveryUnknown` on
+  timeout; apply→persist kept as the invariant with persist-first admissible only under the WAL-tail
+  merge; the reconciliation with `exactly-once-effect.md`'s declined extraction. **No public type
+  changes.** Code: the regression floor — `floor_observe_counts_any_update_at_or_after_write_ts`
+  (`src/agent/kv_quorum.rs`) and `floor_committed_persisted_is_true_when_persistence_unconfigured`
+  (`src/lib_tests.rs`) pin today's semantics so PR 2 / PR 4a change them in the open — and the **V2
+  golden fixtures**: `tests/fixtures/persistence/fixint-v1/` (real `wal.bin` + `snapshot.bin` from the
+  format unchanged since v1.0.0) replayed in CI by `golden_fixture_replays_every_released_on_disk_format`
+  (`mycelium-core`); a future format adds a directory, never edits one. Docs: concepts vocabulary
+  (receipt, `operation_id`/`attempt_id`, `DeliveryUnknown`), the philosophy's **Property 8** and litmus
+  tests 4–5, the one compatibility rule in `building-on-mycelium.md`, the CLAUDE.md ack invariant.
+  **Review corrections (2026-09-14):** `Failed` means *durability not established*, never *absent* (the WAL
+  record is written before it is synced) — the `Committed { persisted: false }` rustdoc that said "not in this
+  node's WAL" is corrected; tuple-space `complete` is the pipeline's receipt, never a destination commit; and
+  PR 2 delivers `local_durability` through a new receipt-returning propose API rather than a new field on
+  `ConsensusResult::Committed`, which would break exhaustive destructures under Rust's rules.
 - **Replay item 6 PR 1 — the nondeterminism inventory, coverage map and trace schema**
   (`docs/design/replay-nondeterminism-inventory.md`; plan §4, D12–D14). Every production site whose behaviour
   depends on something the process did not decide, counted on `main` and assigned an owner: the `mycelium-sim`

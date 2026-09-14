@@ -105,6 +105,17 @@ regenerate `GOLDENS`, freeze the *outgoing* version's bytes as `V{N}_*` fixtures
 `decode_wire_v{N}`, and extend the gate so new code still decodes vN frames. A live two-binary
 mixed-version *cluster* test remains a documented (unbuilt) nightly-tier follow-up.
 
+## Golden on-disk fixtures replay in CI (V2, contracts axis)
+
+`tests/fixtures/persistence/<format>/{wal.bin,snapshot.bin,expected.json}` are real files written by
+the persistence writer of a released format; `golden_fixture_replays_every_released_on_disk_format`
+(`mycelium-core/src/persistence.rs`, `durability_tests`) walks every directory, replays it through the
+production `replay` + LWW apply path and checks `expected.json`. **A format change adds a directory;
+it never edits one** — every released file must keep replaying. Regenerate a family only with its own
+writer, by hand: `cargo test -p mycelium-core regenerate_golden_fixture_fixint_v1 -- --ignored`. The
+fixture deliberately holds a WAL-only record *older* than the snapshot watermark (durability
+invariant 2) and a tombstone. Record: `docs/design/contracts-receipts.md` §9.
+
 ## Coop demos: wasm is opt-in (fast non-wasm builds)
 
 `examples/coop` gates `mycelium-wasm-host` (→ wasmtime/cranelift) behind a `wasm` feature. Four

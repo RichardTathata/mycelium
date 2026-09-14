@@ -22,6 +22,28 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 7 gateway caller identity — 2026-09-13 (unreleased, main)
+
+The first code item of the v3 queue (plan rev 1.10 §10.12.1; private WP1). `GatewayCaller` on every
+gateway dispatch path (`tools/call`, `/a2a`, `rpc/call`, `scatter`, `emit_reliable`, `llm/*`): auth-layer
+constructed, node-attested over the request digest, carried inside the RPC payload (wire v12 unchanged),
+verified at the provider, authorised by *client principal* via `request_authorized` (guardrails +
+SkillRunner switched). `gateway_caller_profile` secure/legacy; `sys/caller-context/{node}` marker; the four
+negative cases + the `authorized_callers` gate + `/a2a` in CI. SDK parity: `RpcRequest.caller` on
+`rpc_serve` / `rpcServe`, READMEs; `docs/operations/rbac.md` §7. Wiki: [security](security.md) §WS1.5,
+[`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).
+## v3 contracts axis — item 1 PR 1: the contracts-and-receipts ADR — 2026-09-13 (unreleased)
+
+The plan's "this unblocks everything" item (§10.1). `docs/design/contracts-receipts.md`: the site-by-site
+inventory of what an ack proves today; four receipts kept separate with independent visibility /
+durability / effects / post-failure truth (D8 rev 1.1); `operation_id` + `attempt_id` (the identities AE0
+binds); `Conflict`; `DeliveryUnknown`; apply→persist kept, persist-first only under the WAL-tail merge;
+the reconciliation with `exactly-once-effect.md` (D11); the mapping of `emit_reliable` / mailbox / tuple
+lease / min-acks into the vocabulary. Code: the regression floor (`floor_*` pins) and the V2 golden
+on-disk fixtures (`tests/fixtures/persistence/fixint-v1`, replayed in CI). Docs: concepts vocabulary,
+philosophy Property 8 + litmus tests 4–5, the compatibility rule, the CLAUDE.md ack invariant. Wiki:
+[runtime-invariants](architecture/runtime-invariants.md) §Persistence, [testing](testing/testing.md),
+[`.log/2026-09-13-item1-pr1-contract-adr.md`](.log/2026-09-13-item1-pr1-contract-adr.md).
 ## v3 contracts axis — item 6 PR 1: the nondeterminism inventory — 2026-09-13 (unreleased)
 
 `docs/design/replay-nondeterminism-inventory.md`: the measured inventory by kind and module (production paths on
