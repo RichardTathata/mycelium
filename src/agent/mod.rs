@@ -110,7 +110,8 @@ pub use mcp::{McpError, McpToolHandle};
 pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
-    CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS, PRINCIPAL_LEGACY_TOKEN,
+    CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,
+    legacy_token_principal, named_token_principal, node_principal, oidc_principal, positional_token_principal,
 };
 pub use state_machine::{AgentPolicy, ExecutionState, AgentStateMachine, PolicyViolation};
 pub use scatter::{ScatterError, ScatterResult};

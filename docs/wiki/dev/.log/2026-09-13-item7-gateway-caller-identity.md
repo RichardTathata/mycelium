@@ -60,5 +60,24 @@ never-connected bootstrap peers from data fan-out). Also observed: the same test
 between ~1 s and ~60 s on an unchanged `main` depending on which node's bootstrap connect fails
 first — a timing signature worth a structural gate, not a widened timeout.
 
+**External review before merge (2026-09-13/14) — four P1 findings, all real, all closed.** (1) *Raw
+emission bypass:* `/gateway/signal/emit` sends arbitrary bytes as the node and an RPC request is just a
+nonce-prefixed signal, so a client reached any `rpc_rx` provider *as the gateway node*. Closed by making a
+secure-profile gateway node **promise an envelope on every RPC it originates** (marker value `"2"`; its own
+`rpc_call`s wrap a signed `node:{self}` envelope mapped back to `Node`), so a bare RPC-shaped frame from it is
+`CallerError::Missing`. Plain-signal semantics untouched: the raw routes still emit exactly the given bytes;
+the enforceable distinction lives at the RPC receive path. Residual: a plain (non-RPC) signal handler
+acting on a gateway emission still attributes it to the sender node — plain signals carry no principal, by
+design. (2) *Positional identities:* `token:#0` on two gateways was one string. Closed by qualifying every
+principal with its issuing authority (`gateway_identity_issuer`, default the node id; `oidc:{idp}/{sub}`)
+and adding `gateway_named_tokens` (a new struct beside the old — `GatewayToken` cannot grow a field under
+the compatibility rule). (3) *LLM provider stripped without verifying:* closed twice — `rpc_rx` now
+verifies at the receive boundary and answers refusals itself (every companion loop covered without a code
+change), and the raw-registration receivers (LLM, MCP, explain) verify directly. (4) *Malformed frames
+failed open:* `split_frame` returned "no envelope" for a truncated or over-8 KiB frame, which read as a node
+call. Closed with a three-way `Frame`, refusal on `Malformed`, an empty payload for structurally broken
+frames, and a producer bound (`-32023` / HTTP 413) instead of truncation. The reviewer's four probes were
+converted into refusal tests; 18 gates now.
+
 **Behaviour note for adopters.** An allowlist that named the gateway node to admit HTTP clients
 must now name the clients' principals (that node-listing *was* the impersonation).

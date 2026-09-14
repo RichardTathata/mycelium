@@ -35,18 +35,26 @@ impl RpcRequest {
     /// application bytes; the context is read via
     /// [`GossipAgent::request_principal`](crate::GossipAgent::request_principal).
     pub fn payload(&self) -> Bytes {
-        let after_nonce = self.0.payload.slice(8.min(self.0.payload.len())..);
-        super::gateway_caller::split_frame(&after_nonce).1
+        match self.frame() {
+            super::gateway_caller::Frame::Unframed(app) => app,
+            super::gateway_caller::Frame::Framed { app, .. } => app,
+            // A recognised but malformed frame has no defined application payload: never hand a
+            // handler the raw bytes as if they were one (review finding 4). Verification refuses
+            // the request before any handler behind `rpc_rx` sees it.
+            super::gateway_caller::Frame::Malformed(_) => Bytes::new(),
+        }
     }
-    /// The raw caller-context envelope, if the payload carries one (crate-private: read it
-    /// only through [`gateway_caller::verify`](super::gateway_caller::verify)).
-    pub(crate) fn caller_envelope(&self) -> Option<Bytes> {
+    /// The classified frame after the nonce (crate-private: verification reads it through
+    /// [`gateway_caller::verify`](super::gateway_caller::verify)).
+    pub(crate) fn frame(&self) -> super::gateway_caller::Frame {
         let after_nonce = self.0.payload.slice(8.min(self.0.payload.len())..);
-        super::gateway_caller::split_frame(&after_nonce).0
+        super::gateway_caller::split_frame(&after_nonce)
     }
-    /// `true` when a gateway caller context rides on this request (verified or not — use
+    /// `true` when a caller-context frame rides on this request (well-formed or not — use
     /// [`GossipAgent::gateway_caller`](crate::GossipAgent::gateway_caller) to verify it).
-    pub fn has_caller_context(&self) -> bool { self.caller_envelope().is_some() }
+    pub fn has_caller_context(&self) -> bool {
+        !matches!(self.frame(), super::gateway_caller::Frame::Unframed(_))
+    }
     /// NodeId of the node that sent the request.
     pub fn sender(&self)  -> &NodeId { &self.0.sender }
     /// Signal kind (e.g. `"mcp.invoke"`).
@@ -66,14 +74,33 @@ impl From<Signal> for RpcRequest {
 
 /// A signal receiver that yields [`RpcRequest`] values.
 ///
-/// Returned by [`ServiceHandle::rpc_rx`]. Thin wrapper around
-/// `mpsc::Receiver<Signal>` that applies `RpcRequest::from` on each message.
-pub struct RpcRequestRx(pub(crate) mpsc::Receiver<Signal>);
+/// Returned by [`ServiceHandle::rpc_rx`]. Wraps `mpsc::Receiver<Signal>` and **verifies the
+/// caller context at the receive boundary** (item 7, review finding 3): a request whose context
+/// is forged, unsigned on an authenticated mesh, malformed, mis-attributed, or missing from a
+/// node that promises one is answered with an error reply and never yielded — so every serve
+/// loop, in this crate or a companion, gets the refusal without calling anything. Authorising
+/// the *verified* principal against an allowlist stays the loop's job
+/// (`request_authorized`).
+pub struct RpcRequestRx {
+    pub(crate) rx:  mpsc::Receiver<Signal>,
+    pub(crate) ctx: Arc<TaskCtx>,
+}
 
 impl RpcRequestRx {
-    /// Receives the next RPC request. Returns `None` when the agent shuts down.
+    /// Receives the next **verified** RPC request. Returns `None` when the agent shuts down.
     pub async fn recv(&mut self) -> Option<RpcRequest> {
-        self.0.recv().await.map(RpcRequest)
+        loop {
+            let req = RpcRequest(self.rx.recv().await?);
+            match super::gateway_caller::verify(&self.ctx, &req) {
+                Ok(_) => return Some(req),
+                Err(e) => {
+                    tracing::warn!(kind = %req.kind(), sender = %req.sender(),
+                        "rpc_rx: caller context refused, answering with an error: {e}");
+                    let err = format!("{{\"error\":\"caller context refused: {e}\"}}");
+                    rpc_respond_ctx(&self.ctx, &req, Bytes::from(err.into_bytes()));
+                }
+            }
+        }
     }
 }
 
@@ -140,11 +167,31 @@ pub(crate) fn rpc_respond_ctx(ctx: &TaskCtx, request: &RpcRequest, result: impl 
     );
 }
 
-/// Core `rpc_call` logic operating on [`TaskCtx`] directly.
+/// Core `rpc_call` logic operating on [`TaskCtx`] directly — **the node's own action**.
 ///
-/// Exposed as `pub(crate)` so HTTP handlers that hold only `Arc<TaskCtx>` (not a
-/// full `GossipAgent`) can issue RPC calls. [`ServiceHandle::rpc_call`] delegates here.
+/// On a node that promises envelopes (a gateway in the secure profile,
+/// [`gateway_caller::promises_envelopes`](super::gateway_caller::promises_envelopes)) the payload
+/// is wrapped in the node's signed *self* envelope first, so a provider can tell this call from a
+/// raw gateway emission shaped like one (review finding 1). [`ServiceHandle::rpc_call`] delegates
+/// here; gateway dispatch on a client's behalf uses [`rpc_call_framed`] with the client's envelope.
 pub(crate) async fn rpc_call_ctx(
+    ctx:     &TaskCtx,
+    target:  NodeId,
+    kind:    Arc<str>,
+    payload: Bytes,
+    timeout: Duration,
+) -> Result<Bytes, RpcError> {
+    let payload = if super::gateway_caller::promises_envelopes(&ctx.config) {
+        super::gateway_caller::frame_self(ctx, payload)
+    } else {
+        payload
+    };
+    rpc_call_framed(ctx, target, kind, payload, timeout).await
+}
+
+/// `rpc_call` over an already-framed payload (a client envelope from the gateway, or a self
+/// envelope from [`rpc_call_ctx`]); prepends only the correlation nonce.
+pub(crate) async fn rpc_call_framed(
     ctx:     &TaskCtx,
     target:  NodeId,
     kind:    Arc<str>,

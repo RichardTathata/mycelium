@@ -171,6 +171,22 @@ pub struct GatewayToken {
     pub scopes: Vec<String>,
 }
 
+/// A **named** gateway bearer token (v3 item 7, review finding 2): its principal is
+/// `token:{issuer}/{name}` — stable across list reordering and qualified by the issuing gateway
+/// (`GossipConfig::gateway_identity_issuer`, default this node's id), so two gateways' first tokens
+/// are never the same identity unless the operator gives them the same issuer on purpose.
+/// Resolved before [`GatewayToken`] entries, whose principal stays positional (`token:{issuer}/#{i}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayNamedToken {
+    /// Stable identity of this credential within the issuer's namespace (never the secret).
+    pub name: String,
+    /// The bearer token presented as `Authorization: Bearer <token>`.
+    pub token: String,
+    /// Scopes granted to this token. `["*"]` is full access.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
 /// Outbound egress allow-policy (WS3 crown-jewel — blast-radius containment).
 ///
 /// A node-local allowlist of hosts the substrate may reach *outbound*. It is a
@@ -830,6 +846,21 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_scoped_tokens: Vec<GatewayToken>,
 
+    /// Named scoped gateway tokens (`compliance`): like [`gateway_scoped_tokens`](Self::gateway_scoped_tokens)
+    /// but each carries a stable `name`, so its caller principal is `token:{issuer}/{name}` rather than a
+    /// list position. Prefer these; positional tokens are kept for compatibility.
+    #[serde(default)]
+    pub gateway_named_tokens: Vec<GatewayNamedToken>,
+
+    /// The issuing authority that qualifies every gateway-local caller principal (item 7):
+    /// `token:{issuer}/…` for bearer tokens, and the `via` a provider sees. `None` (default) = this
+    /// node's id, so two gateways never mint the same identity by accident. Set the **same** value on
+    /// gateways that deliberately share one identity namespace (a load-balanced pair with identical
+    /// token tables). OIDC principals are qualified by the IdP issuer instead. Env:
+    /// `GOSSIP_GATEWAY_IDENTITY_ISSUER`.
+    #[serde(default)]
+    pub gateway_identity_issuer: Option<String>,
+
     /// **Require signed identity proofs** (identity-auth Phase 3). When `true`, a `sys/identity/{V}`
     /// entry **without** a valid `sys/identity-proof/{V}` is **rejected** (not merged into
     /// `peer_keys`) — closing the last poisoning residual (an unsigned entry mimicking a pre-Phase-2
@@ -939,6 +970,8 @@ impl Default for GossipConfig {
             emergent_detectors_enabled:    false,
             gateway_auth_token:            None,
             gateway_scoped_tokens:         Vec::new(),
+            gateway_named_tokens:          Vec::new(),
+            gateway_identity_issuer:       None,
             require_identity_proofs:       false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
             egress:                        EgressPolicy::default(),
@@ -1441,6 +1474,9 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_REQUIRE_IDENTITY_PROOFS") {
             self.require_identity_proofs = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_IDENTITY_ISSUER") {
+            self.gateway_identity_issuer = Some(v);
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_CALLER_PROFILE") {
             self.gateway_caller_profile = v.parse().map_err(|reason| GossipError::InvalidField {

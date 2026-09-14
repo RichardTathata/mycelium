@@ -41,6 +41,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Metric: `mycelium_gateway_caller_refusals_total{reason}`. Operator page: `docs/operations/rbac.md` §7.
   **Behaviour note:** a deployment that listed the *gateway node* in a provider's `authorized_callers` to
   admit HTTP clients must now list the clients' principals (that node-listing was the impersonation).
+  **Hardened after an external review of the first cut (2026-09-13/14), four findings, all closed with
+  regression tests:** (1) a raw `/gateway/signal/emit` of RPC-shaped bytes reached a provider *as the node*
+  — a secure-profile gateway node now publishes marker `"2"` and wraps its own `rpc_call`s in a signed
+  `node:{self}` envelope, so a bare frame from it is `CallerError::Missing`, never its action
+  (`raw_gateway_signal_cannot_pass_as_the_node`); (2) `token:#0` named the same identity on every gateway —
+  principals are now **issuer-qualified** (`token:{issuer}/{name|#i|legacy}`, `oidc:{idp}/{subject}`;
+  `gateway_identity_issuer`, default the node id; new `gateway_named_tokens` for stable names)
+  (`token_identities_are_qualified_by_the_issuing_gateway`); (3) the built-in LLM provider stripped an
+  envelope without verifying it — **`ServiceHandle::rpc_rx` now verifies at the receive boundary** and
+  answers refusals itself, covering every companion loop, and the LLM / MCP / explain receivers verify
+  directly (`llm_provider_refuses_an_unverified_context`); (4) malformed or oversized frames read as
+  "no envelope" and were admitted as the node — framing is a three-way `Frame::{Unframed, Framed,
+  Malformed}`, malformed refuses, and the producer refuses an over-bound envelope (`-32023` / HTTP 413)
+  instead of truncating (`malformed_frames_are_refused_never_treated_as_the_node`,
+  `producer_refuses_an_oversized_envelope`).
 
 ---
 

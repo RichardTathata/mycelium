@@ -529,9 +529,16 @@ async fn resolve_bearer(ctx: &HttpCtx, presented: &str) -> Option<(String, Vec<S
     if let Some(verifier) = &ctx.oidc
         && let Some(principal) = verifier.verify(presented).await
     {
-        return Some((format!("oidc:{}", principal.subject), principal.scopes));
+        return Some((gateway_caller::oidc_principal(verifier.issuer(), &principal.subject), principal.scopes));
     }
-    resolve_token(&ctx.agent_ctx.config, presented)
+    resolve_token(&ctx.agent_ctx.config, &gateway_identity_issuer(&ctx.agent_ctx), presented)
+}
+
+/// The issuer that qualifies this gateway's local principals: `gateway_identity_issuer`, or this
+/// node's id (item 7, review finding 2 — a token's list position is a gateway-local name, never a
+/// domain-wide identity).
+fn gateway_identity_issuer(ctx: &TaskCtx) -> String {
+    ctx.config.gateway_identity_issuer.clone().unwrap_or_else(|| ctx.node_id.to_string())
 }
 
 /// Optional authentication for `POST /a2a` (item 7). The route is public by design (an A2A
@@ -581,24 +588,32 @@ async fn gateway_auth_if_gateway_path(
 
 /// Map a presented bearer token to `(principal, scopes)`, or `None` if unrecognised.
 ///
-/// The legacy `gateway_auth_token` is the superuser case: principal `token:legacy`, scopes
-/// `["*"]`, so deployments that only set it behave exactly as before. Scoped tokens are only
-/// consulted under the `compliance` feature; their principal is `token:#{index}` — the entry's
-/// position in `gateway_scoped_tokens` (stable per configuration, and never the secret).
-fn resolve_token(cfg: &crate::config::GossipConfig, presented: &str) -> Option<(String, Vec<String>)> {
+/// Every gateway-local principal is qualified by `issuer` (this gateway's identity issuer): the
+/// legacy `gateway_auth_token` is `token:{issuer}/legacy` with scopes `["*"]` (deployments that
+/// only set it behave exactly as before); a named token (`gateway_named_tokens`, `compliance`) is
+/// `token:{issuer}/{name}`; a positional token (`gateway_scoped_tokens`) is `token:{issuer}/#{i}` —
+/// the list position, which reordering moves, so prefer named tokens. Never the secret.
+fn resolve_token(cfg: &crate::config::GossipConfig, issuer: &str, presented: &str) -> Option<(String, Vec<String>)> {
     if let Some(legacy) = cfg.gateway_auth_token.as_deref()
         && presented == legacy
     {
-        return Some((gateway_caller::PRINCIPAL_LEGACY_TOKEN.to_string(), vec!["*".to_string()]));
+        return Some((gateway_caller::legacy_token_principal(issuer), vec!["*".to_string()]));
     }
     #[cfg(feature = "compliance")]
     {
+        for t in &cfg.gateway_named_tokens {
+            if t.token == presented {
+                return Some((gateway_caller::named_token_principal(issuer, &t.name), t.scopes.clone()));
+            }
+        }
         for (i, t) in cfg.gateway_scoped_tokens.iter().enumerate() {
             if t.token == presented {
-                return Some((format!("token:#{i}"), t.scopes.clone()));
+                return Some((gateway_caller::positional_token_principal(issuer, i), t.scopes.clone()));
             }
         }
     }
+    #[cfg(not(feature = "compliance"))]
+    let _ = issuer;
     None
 }
 
@@ -1823,8 +1838,11 @@ fn dispatch_refused(e: GatewayDispatchError) -> Response {
         GatewayDispatchError::ProviderWithoutContext(n) => Some(n.to_string()),
         _ => None,
     };
-    (StatusCode::PRECONDITION_FAILED,
-     Json(json!({ "ok": false, "error": e.reason(), "detail": e.to_string(), "provider": provider })))
+    let status = match e {
+        GatewayDispatchError::ContextTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => StatusCode::PRECONDITION_FAILED,
+    };
+    (status, Json(json!({ "ok": false, "error": e.reason(), "detail": e.to_string(), "provider": provider })))
         .into_response()
 }
 
@@ -4110,13 +4128,18 @@ mod tests {
             token:  "ro-tok".to_string(),
             scopes: vec!["kv:read".to_string()],
         }];
-        // Legacy token → superuser wildcard (unchanged upgrade path), principal `token:legacy`.
-        assert_eq!(resolve_token(&cfg, "legacy-tok"),
-                   Some((crate::PRINCIPAL_LEGACY_TOKEN.to_string(), vec!["*".to_string()])));
-        // Scoped token → its grant, principal by position (never the secret).
-        assert_eq!(resolve_token(&cfg, "ro-tok"), Some(("token:#0".to_string(), vec!["kv:read".to_string()])));
+        cfg.gateway_named_tokens = vec![crate::GatewayNamedToken {
+            name: "ci-bot".to_string(), token: "named-tok".to_string(), scopes: vec!["kv:write".to_string()],
+        }];
+        // Legacy token → superuser wildcard (unchanged upgrade path), principal qualified by the issuer.
+        assert_eq!(resolve_token(&cfg, "gw-1", "legacy-tok"),
+                   Some(("token:gw-1/legacy".to_string(), vec!["*".to_string()])));
+        // Named token → its grant, principal by name (never the secret, stable under reordering).
+        assert_eq!(resolve_token(&cfg, "gw-1", "named-tok"), Some(("token:gw-1/ci-bot".to_string(), vec!["kv:write".to_string()])));
+        // Positional token → its grant, principal by position.
+        assert_eq!(resolve_token(&cfg, "gw-1", "ro-tok"), Some(("token:gw-1/#0".to_string(), vec!["kv:read".to_string()])));
         // Unknown token → None (unauthenticated).
-        assert_eq!(resolve_token(&cfg, "nope"), None);
+        assert_eq!(resolve_token(&cfg, "gw-1", "nope"), None);
     }
 
     #[cfg(feature = "compliance")]
@@ -5068,7 +5091,8 @@ mod gateway_caller_tests {
         assert!(body.get("error").is_none(), "unexpected error: {body}");
         let who = seen.lock().unwrap().clone().expect("the tool ran");
         let RequestPrincipal::Client(c) = who else { panic!("client principal expected") };
-        assert_eq!(c.principal, crate::PRINCIPAL_LEGACY_TOKEN);
+        assert_eq!(c.principal, crate::legacy_token_principal(&agent.node_id().to_string()),
+            "qualified by the gateway's identity issuer (its node id by default)");
         assert!(!c.principal.contains("s3cret"));
         agent.shutdown().await;
     }
@@ -5095,13 +5119,13 @@ mod gateway_caller_tests {
         let body = tools_call(http_port, Some("narrow"), serde_json::json!({"name": "whoami", "arguments": {}})).await;
         assert!(body.get("error").is_none(), "unexpected error: {body}");
         let RequestPrincipal::Client(c) = seen.lock().unwrap().clone().unwrap() else { panic!() };
-        assert_eq!(c.principal, "token:#0");
+        assert_eq!(c.principal, format!("token:{}/#0", agent.node_id()));
         assert_eq!(c.scopes, vec!["mcp:invoke".to_string()], "kv:read is held but not granted here");
 
         let body = tools_call(http_port, Some("root"), serde_json::json!({"name": "whoami", "arguments": {}})).await;
         assert!(body.get("error").is_none(), "unexpected error: {body}");
         let RequestPrincipal::Client(c) = seen.lock().unwrap().clone().unwrap() else { panic!() };
-        assert_eq!(c.principal, "token:#1");
+        assert_eq!(c.principal, format!("token:{}/#1", agent.node_id()));
         assert_eq!(c.scopes, vec!["mcp:invoke".to_string()], "`*` is never carried as an authority");
 
         // A token without the route's scope is refused at the gate (403) — no dispatch at all.
@@ -5254,15 +5278,16 @@ mod gateway_caller_tests {
         assert_eq!(String::from_utf8(reply.to_vec()).unwrap(), format!("ok:{gid}"));
 
         // 2. The client's principal listed: admitted, and the context was signature-attested.
-        *allow.lock().unwrap() = vec![Arc::from(crate::PRINCIPAL_LEGACY_TOKEN)];
+        let legacy = crate::legacy_token_principal(&gid.to_string());
+        *allow.lock().unwrap() = vec![Arc::from(legacy.as_str())];
         let (_, text, v) = call("hi").await;
-        assert_eq!(text.as_deref(), Some(&*format!("ok:{}", crate::PRINCIPAL_LEGACY_TOKEN)), "{v}");
+        assert_eq!(text.as_deref(), Some(&*format!("ok:{legacy}")), "{v}");
         assert!(matches!(*attested.lock().unwrap(), Some(crate::CallerAttestation::Signed { .. })),
                 "under tls the provider verified the gateway's signature");
 
         // 3. A forged envelope from another node (unsigned, claiming the token principal):
         // refused as a caller-context error — never judged as the sending node.
-        let forged_env = serde_json::json!({"v": 1, "p": crate::PRINCIPAL_LEGACY_TOKEN, "via": rogue.node_id().to_string(), "s": [], "t": 0}).to_string();
+        let forged_env = serde_json::json!({"v": 1, "p": legacy, "via": rogue.node_id().to_string(), "s": [], "t": 0}).to_string();
         let mut framed = BytesMut::new();
         framed.put_slice(&[0x00, b'G', b'W', b'C', crate::CALLER_CONTEXT_VERSION]);
         framed.put_u16(forged_env.len() as u16);
@@ -5271,14 +5296,16 @@ mod gateway_caller_tests {
         let reply = rogue.service().rpc_call(provider.node_id().clone(), "guarded.echo", framed.freeze(), Duration::from_secs(10))
             .await.expect("forged call still gets a reply");
         let reply = String::from_utf8(reply.to_vec()).unwrap();
-        assert!(reply.starts_with("denied:caller_context:"), "forgery is refused as such: {reply}");
+        // Refused at the `rpc_rx` boundary itself (review finding 3): the provider loop never
+        // sees the request; the boundary answers with the refusal.
+        assert!(reply.contains("caller context refused"), "forgery is refused as such: {reply}");
         // Even with an open allowlist a forged context is refused.
         *allow.lock().unwrap() = vec![];
         let reply = rogue.service().rpc_call(provider.node_id().clone(), "guarded.echo",
             { let mut b = BytesMut::new(); b.put_slice(&[0x00, b'G', b'W', b'C', crate::CALLER_CONTEXT_VERSION]);
               b.put_u16(forged_env.len() as u16); b.put_slice(forged_env.as_bytes()); b.put_slice(b"hi"); b.freeze() },
             Duration::from_secs(10)).await.expect("reply");
-        assert!(String::from_utf8(reply.to_vec()).unwrap().starts_with("denied:caller_context:"));
+        assert!(String::from_utf8(reply.to_vec()).unwrap().contains("caller context refused"));
         let _ = SignalScope::Cluster; // keep the import honest under cfg combinations
 
         rogue.shutdown().await;
@@ -5342,10 +5369,112 @@ mod gateway_caller_tests {
         assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::PRINCIPAL_ANONYMOUS, "{v}");
         let (status, v) = send(Some("tok")).await;
         assert_eq!(status, 200);
-        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::PRINCIPAL_LEGACY_TOKEN, "{v}");
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::legacy_token_principal(&agent.node_id().to_string()), "{v}");
         let (status, _) = send(Some("wrong")).await;
         assert_eq!(status, 401, "a presented but unrecognised bearer is refused, not anonymised");
 
         agent.shutdown().await;
+    }
+
+    /// Review finding 1, closed: a raw `/gateway/signal/emit` of RPC-shaped bytes reaches an
+    /// `rpc_rx` provider **refused** — the gateway node promises an envelope on every RPC it
+    /// originates, so the bare frame is `Missing`, never the node's own action; the gateway's
+    /// genuine dispatch on the same route is judged by the client's principal.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn raw_gateway_signal_cannot_pass_as_the_node() {
+        use base64::Engine as _;
+        let http_port = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("gwraw-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let a = node(Some(http_port), vec![], |c| {
+            c.gateway_auth_token = Some("review-token".into());
+            c.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        });
+        a.start().await.unwrap();
+        // Observe the raw signal below the verifying `rpc_rx` boundary too.
+        let mut raw_rx = a.task_ctx.signal_handlers.register(Arc::from("review.guarded"));
+        let mut rx = a.service().rpc_rx("review.guarded");
+        let target = a.node_id().clone();
+        let node_allow: Vec<Arc<str>> = vec![Arc::from(target.to_string().as_str())];
+        let client = reqwest::Client::new();
+
+        // The genuine gateway dispatch: the client is not the node.
+        let safe = client.post(format!("http://127.0.0.1:{http_port}/gateway/rpc/call"))
+            .bearer_auth("review-token")
+            .json(&serde_json::json!({"target": target.to_string(), "method": "review.guarded", "payload_b64": "eA==", "timeout_secs": 2}));
+        let call = tokio::spawn(async move { safe.send().await });
+        let req = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(a.request_principal(&req).unwrap(), RequestPrincipal::Client(_)));
+        assert!(!a.request_authorized(&req, &node_allow).unwrap(), "listing the node admits no client");
+        a.service().rpc_respond(&req, bytes::Bytes::new());
+        let _ = call.await;
+        let _ = raw_rx.recv().await; // drain the genuine one
+
+        // The bypass: RPC-shaped bytes through the raw signal route.
+        let mut raw = 1234u64.to_le_bytes().to_vec(); raw.extend_from_slice(b"x");
+        let resp = client.post(format!("http://127.0.0.1:{http_port}/gateway/signal/emit"))
+            .bearer_auth("review-token")
+            .json(&serde_json::json!({"kind": "review.guarded", "scope": format!("node:{target}"),
+                                      "payload_b64": base64::engine::general_purpose::STANDARD.encode(raw)}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200, "emitting a plain signal is still allowed");
+        // Below the boundary the frame arrives — and is judged Missing, never Node.
+        let sig = tokio::time::timeout(Duration::from_secs(3), raw_rx.recv()).await.unwrap().unwrap();
+        let req = crate::RpcRequest::from(sig);
+        assert_eq!(a.gateway_caller(&req), Err(crate::CallerError::Missing));
+        assert!(a.request_authorized(&req, &node_allow).is_err(), "never admitted as the node");
+        // The verifying `rpc_rx` never yields it.
+        assert!(tokio::time::timeout(Duration::from_millis(500), rx.recv()).await.is_err(),
+            "rpc_rx refuses the raw frame instead of yielding it");
+        // And the node's own direct call still works, as its own action.
+        let caller = Arc::clone(&a);
+        let t2 = target.clone();
+        let own = tokio::spawn(async move {
+            caller.service().rpc_call(t2, "review.guarded", b"x".to_vec(), Duration::from_secs(2)).await
+        });
+        let req = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(a.request_principal(&req).unwrap(), RequestPrincipal::Node(target.clone()));
+        assert!(a.request_authorized(&req, &node_allow).unwrap(), "the node's own call is admitted by its id");
+        a.service().rpc_respond(&req, bytes::Bytes::new());
+        let _ = own.await;
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// Review finding 2, closed at the HTTP level: the same bearer position on two gateways
+    /// resolves to two principals; a named token under an explicit shared issuer resolves to one.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn token_identities_are_qualified_by_the_issuing_gateway() {
+        let provider = node(None, vec![], |_| {});
+        provider.start().await.unwrap();
+        let boot = vec![provider.node_id().clone()];
+        let p1 = alloc_port(); let p2 = alloc_port();
+        let tokens = |c: &mut GossipConfig| {
+            c.gateway_scoped_tokens = vec![crate::GatewayToken { token: "pos".into(), scopes: vec!["*".into()] }];
+            c.gateway_named_tokens = vec![crate::GatewayNamedToken { name: "ci-bot".into(), token: "named".into(), scopes: vec!["*".into()] }];
+        };
+        let g1 = node(Some(p1), boot.clone(), |c| { tokens(c); });
+        let g2 = node(Some(p2), boot, |c| { tokens(c); c.gateway_identity_issuer = Some("fleet-gw".into()); });
+        g1.start().await.unwrap(); g2.start().await.unwrap();
+        let (_tool, seen) = observing_tool(&provider);
+        let tool_key = format!("tools/whoami/{}", provider.node_id());
+        let marker = format!("sys/caller-context/{}", provider.node_id());
+        assert!(poll_until(|| [&g1, &g2].iter().all(|g| g.kv().get(&tool_key).is_some() && g.kv().get(&marker).is_some()), Duration::from_secs(15)).await);
+        let who = |port: u16, bearer: &'static str, seen: Arc<Mutex<Option<RequestPrincipal>>>| async move {
+            let body = tools_call(port, Some(bearer), serde_json::json!({"name": "whoami", "arguments": {}})).await;
+            assert!(body.get("error").is_none(), "{body}");
+            let RequestPrincipal::Client(c) = seen.lock().unwrap().clone().unwrap() else { panic!() };
+            c.principal
+        };
+        let a = who(p1, "pos", Arc::clone(&seen)).await;
+        let b = who(p2, "pos", Arc::clone(&seen)).await;
+        assert_eq!(a, format!("token:{}/#0", g1.node_id()));
+        assert_eq!(b, "token:fleet-gw/#0");
+        assert_ne!(a, b, "the same list position on two gateways is two identities");
+        let n1 = who(p1, "named", Arc::clone(&seen)).await;
+        assert_eq!(n1, format!("token:{}/ci-bot", g1.node_id()));
+        g1.shutdown().await; g2.shutdown().await; provider.shutdown().await;
     }
 }

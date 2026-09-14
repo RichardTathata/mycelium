@@ -226,7 +226,8 @@ pub use agent::{
     GossipAgent, MailboxHandle, McpError, McpToolHandle, McpHandle,
     MeshEvent, RpcError, RpcRequest, RpcRequestRx, ScatterError, ScatterResult, SystemStats,
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
-    CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS, PRINCIPAL_LEGACY_TOKEN,
+    CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,
+    legacy_token_principal, named_token_principal, node_principal, oidc_principal, positional_token_principal,
     AckResult, CapabilitiesHandle, LogEntry,
     KvHandle, KvQuorumExt, MeshHandle, QuorumError, ServiceHandle, ShardError,
     SchemaError, SchemaHandle, SchemaPublishResult,
@@ -285,7 +286,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{EgressPolicy, GatewayCallerProfile, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{EgressPolicy, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]

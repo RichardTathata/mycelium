@@ -167,7 +167,7 @@ the node attests it:
 
 | Field | Meaning | Source |
 |---|---|---|
-| `principal` | the originating client | `oidc:{subject}` (OIDC bearer) · `token:#{i}` (the i-th `gateway_scoped_tokens` entry — by position, never the secret) · `token:legacy` (`gateway_auth_token`) · `anonymous` (open gateway, or `/a2a` without a bearer) |
+| `principal` | the originating client, **qualified by its issuing authority** | `oidc:{idp issuer}/{subject}` (OIDC bearer) · `token:{issuer}/{name}` (a `gateway_named_tokens` entry — prefer these) · `token:{issuer}/#{i}` (the i-th `gateway_scoped_tokens` entry — by position, so reordering moves the identity) · `token:{issuer}/legacy` (`gateway_auth_token`) · `anonymous` (open gateway, or `/a2a` without a bearer — carries no issuer). `{issuer}` is `gateway_identity_issuer`, or this gateway's node id: two gateways never mint the same identity unless the operator gives them the same issuer on purpose |
 | `via` | the gateway node acting for it | this node; the provider checks it equals the frame's signature-verified sender |
 | `scopes` | the authority granted for *this* request | the credential's scopes ∩ the route's required scope — a `*` token yields exactly the route's scope, never `*`; empty on `/a2a` (no scope required) |
 | `attestation` | how it was verified | `Signed { signer }` — Ed25519 by the gateway's identity key over `principal ‖ via ‖ scopes ‖ issued_at ‖ sha256(payload)`, verified against the keys the provider knows for `via` (`sys/identity`, anchors, minus revocations) — under `tls`; `UnauthenticatedMesh` on a mesh without a `tls` identity (then the context is exactly as strong as the frame's sender: honoured, promise-strength) |
@@ -193,8 +193,26 @@ match agent.request_authorized(&req, &authorized_callers) {
 (`{principal, via, scopes, attested}`).
 
 **Allowlists.** `authorized_callers` entries name node ids or roles (direct calls) **and principals**
-(gateway clients): `["oidc:alice", "token:#0", "orchestrator"]`. To admit unauthenticated gateway
-clients on an open gateway, list `anonymous` explicitly. An empty list stays open.
+(gateway clients): `["oidc:https://idp.example/alice", "token:gw-a/ci-bot", "orchestrator"]`. To admit
+unauthenticated gateway clients on an open gateway, list `anonymous` explicitly (it admits every
+gateway's anonymous clients). An empty list stays open.
+
+**The receive boundary verifies for you.** `ServiceHandle::rpc_rx` verifies every request's caller
+context before yielding it: a forged, unsigned-on-a-`tls`-mesh, malformed, mis-attributed or *missing*
+context is answered with `{"error":"caller context refused: …"}` and never reaches the loop — in this
+crate and in every companion. The built-in MCP tool task, the LLM prompt skills and the explain
+responder verify the same way. What stays the loop's job is authorising the **verified** principal
+(`request_authorized`).
+
+**A gateway node's own RPCs carry a self envelope.** A node that runs a gateway in the secure profile
+publishes `sys/caller-context/{self} = "2"` ("every RPC I originate carries an envelope") and wraps
+its own `rpc_call`s in a signed `node:{self}` envelope, which providers map back to the node. So a
+**raw emission** through `/gateway/signal/emit`, `/gateway/shard/emit` or `/gateway/mailbox/deliver`
+that happens to be RPC-shaped arrives with **no** envelope from a node that promised one — refused as
+`CallerError::Missing`, never admitted as the node (an external review found that bypass before this
+shipped). Plain signal consumers are unaffected: those routes emit exactly the bytes given. A node
+without a gateway publishes `"1"` ("I verify on receive") and its bare RPCs are its own actions, as
+before.
 
 **The secure profile refuses rather than impersonates** (`gateway_caller_profile = secure`, the
 default; env `GOSSIP_GATEWAY_CALLER_PROFILE`). Four cases are CI-gated
@@ -206,6 +224,8 @@ default; env `GOSSIP_GATEWAY_CALLER_PROFILE`). Four cases are CI-gated
 | a missing context falling back to the node | the dispatch site | `-32020` / HTTP `412` `caller_context_missing` — never dispatched as the node |
 | a gateway asserting more scope than the credential holds | the auth layer | `scopes` is the intersection; `*` is never carried |
 | an older provider that cannot enforce the context | the gateway, before dispatch: no `sys/caller-context/{provider}` marker | `-32021` / HTTP `412` `provider_without_caller_context`, naming the provider; `/gateway/scatter` lists such targets under `refused` |
+| a malformed or oversized frame (truncated header, length over 8 KiB, unsupported version, bad envelope) | the provider's receive boundary | `CallerError::Malformed` — refused, never read as an unframed node call; the producer refuses a principal or scope set that would not fit (`-32023` / HTTP `413` `caller_context_too_large`) rather than truncating |
+| RPC-shaped bytes through a raw emission route | the provider's receive boundary | `CallerError::Missing` — the gateway node promised an envelope on every RPC; a bare frame from it is not its action |
 
 Every node running this release writes `sys/caller-context/{self} = b"1"` at start (self-owned under the
 `sys/` tripwire, §5). The marker is what a secure gateway checks; a node without it is a pre-item-7

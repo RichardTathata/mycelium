@@ -30,7 +30,18 @@
 //! unchanged: `[0x00 'G' 'W' 'C' 0x01] ‖ u16be len ‖ envelope JSON ‖ application payload`.
 //! [`RpcRequest::payload`](super::rpc::RpcRequest::payload) strips it, so every existing
 //! provider loop on a node running this code sees exactly the application bytes; the context is
-//! read through [`GossipAgent::gateway_caller`] / [`GossipAgent::request_principal`].
+//! read through [`GossipAgent::gateway_caller`] / [`GossipAgent::request_principal`], and
+//! **verified at the receive boundary** by `ServiceHandle::rpc_rx`, which answers a refusal itself
+//! and never yields a request whose context failed (so every companion loop is covered).
+//!
+//! **A gateway node's own RPCs carry a self envelope.** A node that runs a gateway in the secure
+//! profile publishes marker [`MARKER_PROMISES_ENVELOPES`] and wraps its own `rpc_call`s in a signed
+//! `node:{self}` envelope ([`frame_self`]); providers map it back to [`RequestPrincipal::Node`]. That
+//! is what makes RPC-shaped bytes sent through a *raw* emission route (`/gateway/signal/emit`)
+//! distinguishable from the node's action: they arrive bare from a node that promised an envelope
+//! — [`CallerError::Missing`]. Principals are qualified by their issuing authority
+//! ([`legacy_token_principal`], [`named_token_principal`], [`positional_token_principal`],
+//! [`oidc_principal`]) so two gateways never mint one identity by accident.
 //!
 //! **The older-provider case.** A node that does not strip the envelope would hand the framed
 //! bytes to its handler as if they were the application payload. Every node that enforces the
@@ -56,9 +67,7 @@
 //! `authorized_callers` gate.
 
 use crate::node_id::NodeId;
-use bytes::Bytes;
-#[cfg(any(feature = "gateway", test))]
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "gateway", feature = "compliance", test))]
 use std::sync::Arc;
@@ -70,17 +79,42 @@ use super::rpc::RpcError;
 use super::rpc::RpcRequest;
 use super::TaskCtx;
 
-/// Envelope version carried in the frame magic and in `sys/caller-context/{node}`.
+/// Envelope version carried in the frame magic.
 pub const CALLER_CONTEXT_VERSION: u8 = 1;
 /// The principal an open gateway (no token model configured, or `/a2a` without a bearer)
-/// resolves to. Listing it in `authorized_callers` admits unauthenticated gateway clients.
+/// resolves to. Listing it in `authorized_callers` admits unauthenticated gateway clients — of
+/// **every** gateway; anonymity carries no issuer.
 pub const PRINCIPAL_ANONYMOUS: &str = "anonymous";
-/// Principal of the legacy single `gateway_auth_token`.
-pub const PRINCIPAL_LEGACY_TOKEN: &str = "token:legacy";
+
+/// `sys/caller-context/{node}` value: this node strips and **verifies** the envelope on its RPC
+/// receive path.
+pub const MARKER_VERIFIES: &[u8] = b"1";
+/// `sys/caller-context/{node}` value: as [`MARKER_VERIFIES`], **and** every RPC this node originates
+/// carries an envelope — a client's, or its own signed *self* envelope. A bare RPC-shaped frame from
+/// such a node is therefore never the node's own action (review finding 1: a raw `/gateway/signal/emit`
+/// of nonce-prefixed bytes used to reach a provider as the gateway node). Written by nodes that run a
+/// gateway in the secure profile.
+pub const MARKER_PROMISES_ENVELOPES: &[u8] = b"2";
 
 /// Frame magic after the RPC nonce: a leading NUL (no JSON or text payload starts with one),
-/// then `GWC`, then the version.
+/// then `GWC`; the fifth byte is the version.
+const FRAME_MAGIC_PREFIX: [u8; 4] = [0x00, b'G', b'W', b'C'];
 const FRAME_MAGIC: [u8; 5] = [0x00, b'G', b'W', b'C', CALLER_CONTEXT_VERSION];
+
+/// The principal of a bearer that matched the legacy `gateway_auth_token`, qualified by the
+/// gateway's identity issuer: `token:{issuer}/legacy`.
+pub fn legacy_token_principal(issuer: &str) -> String { format!("token:{issuer}/legacy") }
+/// The principal of the `i`-th `gateway_scoped_tokens` entry: `token:{issuer}/#{i}` — positional,
+/// so reordering the list moves the identity; prefer named tokens.
+pub fn positional_token_principal(issuer: &str, index: usize) -> String { format!("token:{issuer}/#{index}") }
+/// The principal of a `gateway_named_tokens` entry: `token:{issuer}/{name}`.
+pub fn named_token_principal(issuer: &str, name: &str) -> String { format!("token:{issuer}/{name}") }
+/// The principal of a validated OIDC bearer: `oidc:{idp issuer}/{subject}` — two IdPs' subjects
+/// never collide.
+pub fn oidc_principal(issuer: &str, subject: &str) -> String { format!("oidc:{issuer}/{subject}") }
+/// The principal a node's **own** RPC carries in its self envelope: `node:{node id}`. A provider
+/// maps it back to [`RequestPrincipal::Node`].
+pub fn node_principal(node: &NodeId) -> String { format!("node:{node}") }
 /// Domain separator for the signed message.
 #[cfg(feature = "tls")]
 const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";
@@ -149,6 +183,10 @@ pub enum CallerError {
     UnknownSigner,
     /// The signature does not verify over the request digest.
     BadSignature,
+    /// No envelope, from a sender whose `sys/caller-context` marker promises one on every RPC it
+    /// originates (a secure-profile gateway node): a raw emission shaped like an RPC, never the
+    /// node's own action.
+    Missing,
 }
 
 impl std::fmt::Display for CallerError {
@@ -161,6 +199,9 @@ impl std::fmt::Display for CallerError {
             CallerError::Unsigned => f.write_str("caller context is unsigned on an authenticated mesh"),
             CallerError::UnknownSigner => f.write_str("caller context signer is not a trusted key for the gateway"),
             CallerError::BadSignature => f.write_str("caller context signature does not verify"),
+            CallerError::Missing => f.write_str(
+                "caller context missing from a node that promises one on every RPC (a raw gateway emission is not the node's action)",
+            ),
         }
     }
 }
@@ -236,6 +277,27 @@ pub(crate) fn provider_enforces_context(ctx: &TaskCtx, node: &NodeId) -> bool {
     mycelium_core::ops::kv_get(ctx, &marker_key(node)).is_some()
 }
 
+/// Is this node one whose every originated RPC carries an envelope — a gateway in the secure
+/// profile? Decides the marker value it publishes and whether `rpc_call` wraps a self envelope.
+pub(crate) fn promises_envelopes(config: &crate::config::GossipConfig) -> bool {
+    config.http_port.is_some() && config.gateway_caller_profile == crate::config::GatewayCallerProfile::Secure
+}
+
+/// The `sys/caller-context/{self}` value this node publishes.
+pub(crate) fn marker_value(config: &crate::config::GossipConfig) -> &'static [u8] {
+    if promises_envelopes(config) { MARKER_PROMISES_ENVELOPES } else { MARKER_VERIFIES }
+}
+
+/// Did `sender` promise an envelope on every RPC it originates (its marker is
+/// [`MARKER_PROMISES_ENVELOPES`])? For self, the local config answers.
+fn sender_promises_envelopes(ctx: &TaskCtx, sender: &NodeId) -> bool {
+    if *sender == ctx.node_id {
+        return promises_envelopes(&ctx.config);
+    }
+    mycelium_core::ops::kv_get(ctx, &marker_key(sender))
+        .is_some_and(|v| v.as_ref() == MARKER_PROMISES_ENVELOPES)
+}
+
 /// Why a gateway dispatch was refused before (or while) reaching the provider.
 #[cfg(any(feature = "gateway", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +310,9 @@ pub(crate) enum GatewayDispatchError {
     /// Secure profile, and the target has no `sys/caller-context/{node}` marker: it would run
     /// the call as this node. Refused; the message names the provider.
     ProviderWithoutContext(NodeId),
+    /// The resolved principal or scopes do not fit the envelope bound a receiver accepts
+    /// (`MAX_ENVELOPE_BYTES`); refused before dispatch rather than truncated (review finding 4).
+    ContextTooLarge,
 }
 
 #[cfg(any(feature = "gateway", test))]
@@ -258,6 +323,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::Rpc(_) => -32000,
             GatewayDispatchError::MissingContext => -32020,
             GatewayDispatchError::ProviderWithoutContext(_) => -32021,
+            GatewayDispatchError::ContextTooLarge => -32023,
         }
     }
 
@@ -267,6 +333,7 @@ impl GatewayDispatchError {
             GatewayDispatchError::Rpc(_) => "timeout",
             GatewayDispatchError::MissingContext => "caller_context_missing",
             GatewayDispatchError::ProviderWithoutContext(_) => "provider_without_caller_context",
+            GatewayDispatchError::ContextTooLarge => "caller_context_too_large",
         }
     }
 }
@@ -283,6 +350,9 @@ impl std::fmt::Display for GatewayDispatchError {
                 f,
                 "provider {n} does not enforce the gateway caller context (no sys/caller-context marker): \
                  upgrade it, or set gateway_caller_profile = legacy for the rolling-upgrade window"
+            ),
+            GatewayDispatchError::ContextTooLarge => f.write_str(
+                "gateway caller context exceeds the envelope bound (principal or scopes too long)",
             ),
         }
     }
@@ -303,7 +373,9 @@ pub(crate) async fn gateway_rpc_call(
 ) -> Result<Bytes, GatewayDispatchError> {
     use crate::config::GatewayCallerProfile;
     match ctx.config.gateway_caller_profile {
-        GatewayCallerProfile::Legacy => super::rpc::rpc_call_ctx(ctx, target, kind, payload, timeout)
+        // Legacy: a bare frame — the node's own action, as before item 7. `rpc_call_framed` (not
+        // `rpc_call_ctx`) so no self envelope is attached either: legacy is legacy.
+        GatewayCallerProfile::Legacy => super::rpc::rpc_call_framed(ctx, target, kind, payload, timeout)
             .await
             .map_err(GatewayDispatchError::Rpc),
         GatewayCallerProfile::Secure => {
@@ -315,8 +387,11 @@ pub(crate) async fn gateway_rpc_call(
                 refused("provider_without_caller_context");
                 return Err(GatewayDispatchError::ProviderWithoutContext(target));
             }
-            let framed = frame_with_context(ctx, caller, payload);
-            super::rpc::rpc_call_ctx(ctx, target, kind, framed, timeout)
+            let Some(framed) = frame_with_context(ctx, &caller.principal, &caller.scopes, payload) else {
+                refused("caller_context_too_large");
+                return Err(GatewayDispatchError::ContextTooLarge);
+            };
+            super::rpc::rpc_call_framed(ctx, target, kind, framed, timeout)
                 .await
                 .map_err(GatewayDispatchError::Rpc)
         }
@@ -353,33 +428,45 @@ struct Envelope {
 
 /// Build the framed payload: magic ‖ len ‖ envelope ‖ application payload. Signs under a `tls`
 /// identity; otherwise the envelope is unsigned (see [`CallerAttestation::UnauthenticatedMesh`]).
-#[cfg(any(feature = "gateway", test))]
-pub(crate) fn frame_with_context(ctx: &TaskCtx, caller: &ResolvedPrincipal, app: Bytes) -> Bytes {
+/// `None` when the envelope would exceed the bound a receiver accepts (`MAX_ENVELOPE_BYTES`) —
+/// the producer never truncates (review finding 4).
+pub(crate) fn frame_with_context(ctx: &TaskCtx, principal: &str, scopes: &[String], app: Bytes) -> Option<Bytes> {
     let issued_at_ms = crate::hlc::physical_ms(ctx.hlc.current());
     let via = ctx.node_id.to_string();
-    let (k, sig) = attest(ctx, &caller.principal, &via, &caller.scopes, issued_at_ms, &app);
+    let (k, sig) = attest(ctx, principal, &via, scopes, issued_at_ms, &app);
     let env = Envelope {
         v: CALLER_CONTEXT_VERSION,
-        p: caller.principal.clone(),
+        p: principal.to_string(),
         via,
-        s: caller.scopes.clone(),
+        s: scopes.to_vec(),
         t: issued_at_ms,
         k,
         sig,
     };
-    let env_bytes = serde_json::to_vec(&env).unwrap_or_default();
-    let len = u16::try_from(env_bytes.len()).unwrap_or(u16::MAX);
+    let env_bytes = serde_json::to_vec(&env).ok()?;
+    if env_bytes.len() > MAX_ENVELOPE_BYTES {
+        return None;
+    }
+    let len = u16::try_from(env_bytes.len()).ok()?;
     let mut buf = BytesMut::with_capacity(FRAME_MAGIC.len() + 2 + env_bytes.len() + app.len());
     buf.put_slice(&FRAME_MAGIC);
     buf.put_u16(len);
-    buf.put_slice(&env_bytes[..len as usize]);
+    buf.put_slice(&env_bytes);
     buf.put(app);
     buf.freeze()
+    .into()
+}
+
+/// The **self envelope** a secure-profile gateway node wraps around its own RPCs
+/// (`principal = node:{self}`, no scopes): what makes a bare RPC-shaped frame from that node
+/// distinguishable from its own action. Falls back to the bare payload only if the envelope
+/// cannot be built (it cannot exceed the bound: a node id is short).
+pub(crate) fn frame_self(ctx: &TaskCtx, app: Bytes) -> Bytes {
+    frame_with_context(ctx, &node_principal(&ctx.node_id), &[], app.clone()).unwrap_or(app)
 }
 
 /// The `(signer, signature)` pair for an envelope: Ed25519 by this node's identity key under a
 /// `tls` identity, `(None, None)` otherwise (an unauthenticated mesh has nothing to sign with).
-#[cfg(any(feature = "gateway", test))]
 #[cfg(feature = "tls")]
 fn attest(
     ctx: &TaskCtx,
@@ -401,7 +488,6 @@ fn attest(
     )
 }
 
-#[cfg(any(feature = "gateway", test))]
 #[cfg(not(feature = "tls"))]
 fn attest(
     _ctx: &TaskCtx,
@@ -414,19 +500,41 @@ fn attest(
     (None, None)
 }
 
-/// Split a nonce-stripped RPC payload into `(envelope, application payload)`. A payload that
-/// does not start with the frame magic, or whose declared length does not fit, is returned
-/// whole as the application payload with no envelope.
-pub(crate) fn split_frame(after_nonce: &Bytes) -> (Option<Bytes>, Bytes) {
+/// A nonce-stripped RPC payload, classified. Three outcomes, never two (review finding 4): a
+/// recognised frame that is malformed is **not** an unframed payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// No frame magic: the whole payload is the application payload.
+    Unframed(Bytes),
+    /// A well-formed frame: the envelope bytes and the application payload after it.
+    Framed { envelope: Bytes, app: Bytes },
+    /// The frame magic prefix is present but the frame cannot be used: an unsupported version, a
+    /// truncated header, a declared length beyond the bound or beyond the payload. The
+    /// application payload is undefined; the request must be refused.
+    Malformed(&'static str),
+}
+
+/// Classify a nonce-stripped RPC payload (see [`Frame`]).
+pub(crate) fn split_frame(after_nonce: &Bytes) -> Frame {
+    let prefix = FRAME_MAGIC_PREFIX.len();
+    if after_nonce.len() < prefix || after_nonce[..prefix] != FRAME_MAGIC_PREFIX {
+        return Frame::Unframed(after_nonce.clone());
+    }
     let hdr = FRAME_MAGIC.len() + 2;
-    if after_nonce.len() < hdr || after_nonce[..FRAME_MAGIC.len()] != FRAME_MAGIC {
-        return (None, after_nonce.clone());
+    if after_nonce.len() < hdr {
+        return Frame::Malformed("truncated frame header");
     }
-    let len = u16::from_be_bytes([after_nonce[FRAME_MAGIC.len()], after_nonce[FRAME_MAGIC.len() + 1]]) as usize;
-    if len > MAX_ENVELOPE_BYTES || after_nonce.len() < hdr + len {
-        return (None, after_nonce.clone());
+    if after_nonce[prefix] != CALLER_CONTEXT_VERSION {
+        return Frame::Malformed("unsupported caller-context frame version");
     }
-    (Some(after_nonce.slice(hdr..hdr + len)), after_nonce.slice(hdr + len..))
+    let len = u16::from_be_bytes([after_nonce[hdr - 2], after_nonce[hdr - 1]]) as usize;
+    if len > MAX_ENVELOPE_BYTES {
+        return Frame::Malformed("envelope length exceeds the bound");
+    }
+    if after_nonce.len() < hdr + len {
+        return Frame::Malformed("envelope truncated");
+    }
+    Frame::Framed { envelope: after_nonce.slice(hdr..hdr + len), app: after_nonce.slice(hdr + len..) }
 }
 
 #[cfg(feature = "tls")]
@@ -483,8 +591,15 @@ fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
 /// `Ok(None)`: no context — the sender acts for itself. `Ok(Some(_))`: a verified context.
 /// `Err(_)`: a context was present and must be **refused**; never treat the call as the node's.
 pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
-    let Some(env_bytes) = req.caller_envelope() else {
-        return Ok(None);
+    let env_bytes = match req.frame() {
+        Frame::Unframed(_) => {
+            if sender_promises_envelopes(ctx, req.sender()) {
+                return Err(CallerError::Missing);
+            }
+            return Ok(None);
+        }
+        Frame::Malformed(why) => return Err(CallerError::Malformed(why.to_string())),
+        Frame::Framed { envelope, .. } => envelope,
     };
     let env: Envelope =
         serde_json::from_slice(&env_bytes).map_err(|e| CallerError::Malformed(e.to_string()))?;
@@ -544,6 +659,8 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
 /// Resolve the principal `req` should be authorised as. `Err` means refuse.
 pub(crate) fn request_principal(ctx: &TaskCtx, req: &RpcRequest) -> Result<RequestPrincipal, CallerError> {
     Ok(match verify(ctx, req)? {
+        // A verified self envelope (`node:{via}`, via == sender) is the sending node's own action.
+        Some(c) if c.principal == node_principal(&c.via) => RequestPrincipal::Node(c.via),
         Some(c) => RequestPrincipal::Client(c),
         None => RequestPrincipal::Node(req.sender().clone()),
     })
@@ -625,50 +742,99 @@ mod tests {
         })
     }
 
+    fn raw_frame(env: &[u8], app: &[u8]) -> Bytes {
+        let mut f = FRAME_MAGIC.to_vec();
+        f.extend_from_slice(&(env.len() as u16).to_be_bytes());
+        f.extend_from_slice(env);
+        f.extend_from_slice(app);
+        Bytes::from(f)
+    }
+
     #[test]
     fn granted_scopes_never_exceed_the_credential() {
-        // `*` grants exactly the required scope, never `*`.
         assert_eq!(granted_scopes(&["*".into()], Some("mcp:invoke")), vec!["mcp:invoke".to_string()]);
-        // A held scope is granted only when required.
         assert_eq!(
             granted_scopes(&["kv:read".into(), "mcp:invoke".into()], Some("mcp:invoke")),
             vec!["mcp:invoke".to_string()]
         );
-        // Not held → nothing (the route would have been refused upstream anyway).
         assert!(granted_scopes(&["kv:read".into()], Some("mcp:invoke")).is_empty());
-        // No requirement → nothing granted, whatever is held.
         assert!(granted_scopes(&["*".into()], None).is_empty());
     }
 
+    /// Review finding 4: three outcomes, never two. A recognised frame that is malformed is
+    /// `Malformed`, not "unframed and therefore the node".
     #[test]
-    fn split_frame_leaves_plain_payloads_alone() {
+    fn split_frame_distinguishes_unframed_framed_and_malformed() {
         let plain = Bytes::from_static(b"{\"jsonrpc\":\"2.0\"}");
-        let (env, app) = split_frame(&plain);
-        assert!(env.is_none());
-        assert_eq!(app, plain);
-        // Magic with an impossible length is not an envelope either.
-        let mut bogus = FRAME_MAGIC.to_vec();
-        bogus.extend_from_slice(&[0xff, 0xff, b'x']);
-        let bogus = Bytes::from(bogus);
-        let (env, app) = split_frame(&bogus);
-        assert!(env.is_none());
-        assert_eq!(app, bogus);
-        let (env, app) = split_frame(&Bytes::new());
-        assert!(env.is_none());
-        assert!(app.is_empty());
+        assert_eq!(split_frame(&plain), Frame::Unframed(plain.clone()));
+        assert_eq!(split_frame(&Bytes::new()), Frame::Unframed(Bytes::new()));
+        // A well-formed frame.
+        let good = raw_frame(b"{}", b"app");
+        assert!(matches!(split_frame(&good), Frame::Framed { app, .. } if app == Bytes::from_static(b"app")));
+        // Truncated header: magic present, no length.
+        let mut t = FRAME_MAGIC.to_vec(); t.push(0x00);
+        assert!(matches!(split_frame(&Bytes::from(t)), Frame::Malformed(_)));
+        // Declared length beyond the bound.
+        let mut big = FRAME_MAGIC.to_vec(); big.extend_from_slice(&[0xff, 0xff]); big.extend_from_slice(b"x");
+        assert!(matches!(split_frame(&Bytes::from(big)), Frame::Malformed(_)));
+        // Declared length beyond the payload (envelope truncated).
+        let mut short = FRAME_MAGIC.to_vec(); short.extend_from_slice(&50u16.to_be_bytes()); short.extend_from_slice(b"{}");
+        assert!(matches!(split_frame(&Bytes::from(short)), Frame::Malformed(_)));
+        // Unsupported version.
+        let mut v2 = FRAME_MAGIC_PREFIX.to_vec(); v2.push(2); v2.extend_from_slice(&2u16.to_be_bytes()); v2.extend_from_slice(b"{}x");
+        assert!(matches!(split_frame(&Bytes::from(v2)), Frame::Malformed(_)));
+    }
+
+    /// Review finding 4 (the parser downgrade): every malformed shape is refused by `verify`
+    /// and yields an **empty** application payload — never admitted as the node's own call.
+    #[tokio::test]
+    async fn malformed_frames_are_refused_never_treated_as_the_node() {
+        let a = agent(false);
+        let node_allow: Vec<Arc<str>> = vec![Arc::from(a.node_id().to_string().as_str())];
+        let cases: Vec<(&str, Bytes)> = vec![
+            ("truncated header", { let mut t = FRAME_MAGIC.to_vec(); t.push(0); Bytes::from(t) }),
+            ("oversized length", { let mut b = FRAME_MAGIC.to_vec(); b.extend_from_slice(&[0xff, 0xff]); b.extend_from_slice(b"x"); Bytes::from(b) }),
+            ("truncated envelope", { let mut b = FRAME_MAGIC.to_vec(); b.extend_from_slice(&50u16.to_be_bytes()); b.extend_from_slice(b"{}"); Bytes::from(b) }),
+            ("unsupported version", { let mut b = FRAME_MAGIC_PREFIX.to_vec(); b.push(9); b.extend_from_slice(&2u16.to_be_bytes()); b.extend_from_slice(b"{}"); Bytes::from(b) }),
+            ("malformed json", raw_frame(b"not json", b"payload")),
+        ];
+        for (name, framed) in cases {
+            let req = request_from(a.node_id(), "k", framed);
+            assert!(matches!(verify(&a.task_ctx, &req), Err(CallerError::Malformed(_))), "{name}: must be Malformed");
+            if name != "malformed json" {
+                // A frame that fails structurally has no defined application payload; a
+                // well-formed frame whose envelope is bad JSON does (and is still refused).
+                assert!(req.payload().is_empty(), "{name}: no application payload is defined");
+            }
+            assert!(request_principal(&a.task_ctx, &req).is_err(), "{name}: never a principal");
+            #[cfg(feature = "compliance")]
+            assert!(a.request_authorized(&req, &node_allow).is_err(), "{name}: never admitted as the node");
+            #[cfg(not(feature = "compliance"))]
+            let _ = &node_allow;
+        }
+    }
+
+    /// Review finding 4 (the producer side): an envelope over the bound is refused before
+    /// dispatch, never truncated into something a receiver would misread.
+    #[tokio::test]
+    async fn producer_refuses_an_oversized_envelope() {
+        let a = agent(false);
+        let long = format!("oidc:{}", "a".repeat(9_000));
+        assert!(frame_with_context(&a.task_ctx, &long, &[], Bytes::from_static(b"x")).is_none(),
+            "a 9 KB principal does not fit the 8 KiB envelope bound");
+        assert!(frame_with_context(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], Bytes::from_static(b"x")).is_some());
     }
 
     #[tokio::test]
     async fn context_round_trips_and_payload_is_stripped() {
         let a = agent(false);
-        let draft = ResolvedPrincipal { principal: "token:#0".into(), scopes: vec!["mcp:invoke".into()] };
         let app = Bytes::from_static(b"hello");
-        let framed = frame_with_context(&a.task_ctx, &draft, app.clone());
+        let framed = frame_with_context(&a.task_ctx, "token:gw/#0", &["mcp:invoke".into()], app.clone()).unwrap();
         let req = request_from(a.node_id(), "k", framed);
         assert_eq!(req.payload(), app, "the provider sees exactly the application bytes");
         assert!(req.has_caller_context());
         let c = verify(&a.task_ctx, &req).unwrap().expect("a context");
-        assert_eq!(c.principal, "token:#0");
+        assert_eq!(c.principal, "token:gw/#0");
         assert_eq!(c.scopes, vec!["mcp:invoke".to_string()]);
         assert_eq!(&c.via, a.node_id());
         assert_eq!(c.attestation, CallerAttestation::UnauthenticatedMesh, "no tls identity ⇒ unsigned");
@@ -676,50 +842,81 @@ mod tests {
             RequestPrincipal::Client(c2) => assert_eq!(c2, c),
             other => panic!("expected a client principal, got {other:?}"),
         }
-        // No envelope ⇒ the node itself.
+        // No envelope from a node that promises none ⇒ the node itself.
         let bare = request_from(a.node_id(), "k", app.clone());
         assert!(!bare.has_caller_context());
         assert_eq!(request_principal(&a.task_ctx, &bare).unwrap(), RequestPrincipal::Node(a.node_id().clone()));
     }
 
+    /// Review finding 1: a node that promises envelopes (a secure-profile gateway) is judged
+    /// only by them — its own RPCs carry a self envelope that maps back to `Node`; a bare
+    /// RPC-shaped frame from it (what a raw `/gateway/signal/emit` produces) is `Missing`, never
+    /// the node's own action.
+    #[tokio::test]
+    async fn a_promising_node_is_never_the_bare_sender() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(crate::test_util::alloc_port()); // a gateway node, secure by default
+        let g = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        assert!(promises_envelopes(&g.task_ctx.config));
+        assert_eq!(marker_value(&g.task_ctx.config), MARKER_PROMISES_ENVELOPES);
+
+        // Its own action: the self envelope ⇒ Node.
+        let own = frame_self(&g.task_ctx, Bytes::from_static(b"payload"));
+        let req = request_from(g.node_id(), "k", own);
+        assert_eq!(req.payload(), Bytes::from_static(b"payload"));
+        assert_eq!(request_principal(&g.task_ctx, &req).unwrap(), RequestPrincipal::Node(g.node_id().clone()));
+
+        // A bare frame from it (a raw emission): refused as Missing.
+        let mut raw = Vec::new(); raw.extend_from_slice(b"x");
+        let req = request_from(g.node_id(), "k", Bytes::from(raw));
+        assert_eq!(verify(&g.task_ctx, &req), Err(CallerError::Missing));
+        assert!(request_principal(&g.task_ctx, &req).is_err());
+
+        // A non-gateway node promises nothing: bare is its own action.
+        let n = agent(false);
+        assert!(!promises_envelopes(&n.task_ctx.config));
+        assert_eq!(marker_value(&n.task_ctx.config), MARKER_VERIFIES);
+    }
+
     #[tokio::test]
     async fn via_must_be_the_frame_sender() {
         let a = agent(false);
-        let draft = ResolvedPrincipal::anonymous(vec![]);
-        let framed = frame_with_context(&a.task_ctx, &draft, Bytes::from_static(b"x"));
-        // Replayed by a different node: the envelope still names `a` as via.
+        let framed = frame_with_context(&a.task_ctx, PRINCIPAL_ANONYMOUS, &[], Bytes::from_static(b"x")).unwrap();
         let other = NodeId::new("127.0.0.1", 1).unwrap();
         let req = request_from(&other, "k", framed);
         assert!(matches!(verify(&a.task_ctx, &req), Err(CallerError::ViaMismatch { .. })));
     }
 
-    #[tokio::test]
-    async fn malformed_envelope_is_refused_not_ignored() {
-        let a = agent(false);
-        let mut framed = FRAME_MAGIC.to_vec();
-        let junk = b"not json";
-        framed.extend_from_slice(&(junk.len() as u16).to_be_bytes());
-        framed.extend_from_slice(junk);
-        framed.extend_from_slice(b"payload");
-        let req = request_from(a.node_id(), "k", Bytes::from(framed));
-        assert_eq!(req.payload(), Bytes::from_static(b"payload"));
-        assert!(matches!(verify(&a.task_ctx, &req), Err(CallerError::Malformed(_))));
-    }
-
+    /// Review finding 2: gateway-local names are qualified by the issuing gateway, so two
+    /// gateways' first tokens are distinct identities, and only an explicit shared issuer makes
+    /// them one. OIDC subjects are qualified by the IdP issuer.
     #[test]
-    fn client_admission_is_by_principal_never_by_gateway_node() {
-        let via = NodeId::new("127.0.0.1", 9).unwrap();
-        let c = GatewayCaller {
-            principal: "oidc:alice".into(),
-            via: via.clone(),
-            scopes: vec![],
-            issued_at_ms: 0,
+    fn principals_are_qualified_by_their_issuer() {
+        let g1 = NodeId::new("127.0.0.1", 9001).unwrap();
+        let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
+        let mk = |via: &NodeId, p: String| GatewayCaller {
+            principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
             attestation: CallerAttestation::UnauthenticatedMesh,
         };
-        assert!(client_admitted(&[], &c), "empty allowlist is open");
-        assert!(client_admitted(&["oidc:alice".into()], &c));
-        assert!(!client_admitted(&[via.to_string().into()], &c), "listing the gateway node admits nothing");
-        assert!(!client_admitted(&["oidc:bob".into()], &c));
+        let a = mk(&g1, positional_token_principal(&g1.to_string(), 0));
+        let b = mk(&g2, positional_token_principal(&g2.to_string(), 0));
+        assert_ne!(a.principal, b.principal, "the same list position on two gateways is two identities");
+        let allow_a: Vec<Arc<str>> = vec![Arc::from(a.principal.as_str())];
+        assert!(client_admitted(&allow_a, &a));
+        assert!(!client_admitted(&allow_a, &b), "gateway 2's first token is not gateway 1's");
+        // A deliberately shared issuer is one namespace — explicit configuration, not inference.
+        let s1 = mk(&g1, named_token_principal("fleet-gw", "ci-bot"));
+        let s2 = mk(&g2, named_token_principal("fleet-gw", "ci-bot"));
+        assert_eq!(s1.principal, s2.principal);
+        // Named tokens survive reordering; positional ones do not — by construction of the name.
+        assert_eq!(named_token_principal("gw", "ci-bot"), "token:gw/ci-bot");
+        assert_eq!(legacy_token_principal("gw"), "token:gw/legacy");
+        assert_ne!(oidc_principal("https://idp-a", "alice"), oidc_principal("https://idp-b", "alice"));
+        // Listing the gateway node admits nothing (unchanged).
+        assert!(!client_admitted(&[Arc::from(g1.to_string().as_str())], &a));
+        assert!(client_admitted(&[], &a), "empty allowlist is open");
     }
 
     #[cfg(feature = "tls")]
@@ -727,52 +924,66 @@ mod tests {
     async fn tls_signed_context_verifies_and_forgeries_fail() {
         let a = agent(true);
         a.start().await.unwrap();
-        let draft = ResolvedPrincipal { principal: "oidc:alice".into(), scopes: vec!["mesh:write".into()] };
         let app = Bytes::from_static(b"payload");
-        let framed = frame_with_context(&a.task_ctx, &draft, app.clone());
+        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone()).unwrap();
         let req = request_from(a.node_id(), "k", framed.clone());
         let c = verify(&a.task_ctx, &req).unwrap().expect("context");
         let own = a.task_ctx.tls.get().unwrap().verifying_key_bytes();
         assert_eq!(c.attestation, CallerAttestation::Signed { signer: own });
 
         // Tampered payload: the digest no longer matches.
-        let (env, _) = split_frame(&framed);
-        let mut tampered = FRAME_MAGIC.to_vec();
-        let env = env.unwrap();
-        tampered.extend_from_slice(&(env.len() as u16).to_be_bytes());
-        tampered.extend_from_slice(&env);
-        tampered.extend_from_slice(b"PAYLOAD");
-        let req = request_from(a.node_id(), "k", Bytes::from(tampered));
+        let Frame::Framed { envelope, .. } = split_frame(&framed) else { panic!() };
+        let req = request_from(a.node_id(), "k", raw_frame(&envelope, b"PAYLOAD"));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::BadSignature));
 
         // Unsigned envelope on an authenticated node: refused.
         let unsigned = serde_json::to_vec(&Envelope {
-            v: 1, p: "oidc:mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
+            v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
         }).unwrap();
-        let mut f = FRAME_MAGIC.to_vec();
-        f.extend_from_slice(&(unsigned.len() as u16).to_be_bytes());
-        f.extend_from_slice(&unsigned);
-        let req = request_from(a.node_id(), "k", Bytes::from(f));
+        let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
 
         // Signed by a key nobody trusts for `via`: refused.
         {
             use base64::Engine as _;
             let rogue = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
-            let msg = signed_message("oidc:mallory", &a.node_id().to_string(), &[], 0, &digest(b"payload"));
+            let msg = signed_message("oidc:idp/mallory", &a.node_id().to_string(), &[], 0, &digest(b"payload"));
             let sig = crate::tls::sign_bytes(&rogue, &msg);
             let forged = serde_json::to_vec(&Envelope {
-                v: 1, p: "oidc:mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0,
+                v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0,
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
             }).unwrap();
-            let mut f = FRAME_MAGIC.to_vec();
-            f.extend_from_slice(&(forged.len() as u16).to_be_bytes());
-            f.extend_from_slice(&forged);
-            f.extend_from_slice(b"payload");
-            let req = request_from(a.node_id(), "k", Bytes::from(f));
+            let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
         }
+        a.shutdown().await;
+    }
+
+    /// Review finding 3: the built-in LLM provider refuses an unsigned context on a `tls` node
+    /// instead of stripping it and executing.
+    #[cfg(all(feature = "tls", feature = "llm"))]
+    #[tokio::test]
+    async fn llm_provider_refuses_an_unverified_context() {
+        let a = agent(true);
+        a.start().await.unwrap();
+        let handle = a.llm().register_prompt_skill("review", "echo", crate::PromptTemplate {
+            system: "".into(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default(),
+        }, Arc::new(crate::EchoBackend)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let env = serde_json::to_vec(&Envelope {
+            v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
+        }).unwrap();
+        let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
+        let req = request_from(a.node_id(), "llm.invoke", bytes.clone());
+        assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
+        // The real dispatch: `rpc_call_framed` sends the forged bytes as-is (the node's own
+        // `rpc_call` would wrap a self envelope around them, which is the point).
+        let reply = super::super::rpc::rpc_call_framed(&a.task_ctx, a.node_id().clone(), Arc::from("llm.invoke"), bytes, std::time::Duration::from_secs(3)).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(v["error"], "caller_context_refused", "{v}");
+        assert!(v.get("output").is_none(), "the backend must not run");
+        drop(handle);
         a.shutdown().await;
     }
 }

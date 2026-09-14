@@ -62,7 +62,13 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    Gates: `gateway_caller_tests` (`src/agent/http.rs` — the four negative cases, the
    `authorized_callers` gate under `tls`+`compliance` with a mesh forgery, `/a2a` principal
    resolution) + `agent::gateway_caller::tests` (framing, sign/verify, tamper, unknown signer).
-   Strength: *HardPrevention* at a `tls` provider; *SelfImposedPrevention* on an unauthenticated
+   **Review-hardened before merge (2026-09-14, four findings):** a secure-profile gateway node
+   publishes marker `"2"` and wraps its own RPCs in a signed `node:{self}` envelope, so a raw
+   `/gateway/signal/emit` of RPC-shaped bytes is `Missing`, never the node; principals are
+   issuer-qualified (`token:{issuer}/…`, `oidc:{idp}/{sub}`; `gateway_identity_issuer`,
+   `gateway_named_tokens`); `rpc_rx` verifies at the receive boundary for every loop in every crate,
+   and the LLM / MCP / explain receivers verify directly; framing is three-way and malformed refuses,
+   with a producer bound. Strength: *HardPrevention* at a `tls` provider; *SelfImposedPrevention* on an unauthenticated
    mesh (`CallerAttestation::UnauthenticatedMesh`). Runbook: `docs/operations/rbac.md` §7; log
    [`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).
 

@@ -293,7 +293,7 @@ impl GossipAgent {
                 }
                 if *srx.borrow() { return; }
                 let _ = kv_set(&ctx, key,
-                               Bytes::from_static(&[super::gateway_caller::CALLER_CONTEXT_VERSION + b'0']));
+                               Bytes::from_static(super::gateway_caller::marker_value(&ctx.config)));
             });
             if self.config.gateway_caller_profile == crate::config::GatewayCallerProfile::Legacy {
                 warn!(

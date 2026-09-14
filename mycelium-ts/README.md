@@ -78,8 +78,11 @@ The header rides every request including the SSE streams (`onSignal`, `rpcServe`
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway
 (`rpcCall`, `scatter`, `llm*`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a
 node-attested caller context: the provider's `authorized_callers` judges *this client's principal*
-(`token:legacy` for `gateway_auth_token`, `token:#i` for the i-th scoped token, `oidc:<sub>` for a
-JWT, `anonymous` with no token) — never the gateway node. On the serving side, `rpcServe` requests
+(`token:<issuer>/legacy` for `gateway_auth_token`, `token:<issuer>/<name>` for a named token,
+`token:<issuer>/#i` for the i-th positional scoped token, `oidc:<idp issuer>/<sub>` for a JWT,
+`anonymous` with no token; `<issuer>` is the gateway's `gateway_identity_issuer` or its node id) — never
+the gateway node. Raw emissions (`emit`, shard emit, mailbox deliver) carry no principal and cannot reach
+an RPC provider as the node. On the serving side, `rpcServe` requests
 carry it as `RpcRequest.caller` (`{ principal, via, scopes, attested }`; absent for a direct
 in-mesh call). Two new gateway refusals, both meaning "the node will not impersonate": HTTP `412` /
 JSON-RPC `-32021` `provider_without_caller_context` (the target node predates item 7 — upgrade it,
