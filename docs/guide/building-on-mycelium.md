@@ -140,6 +140,12 @@ inherits the contract without reading everything:
   prefixes: grp/ sys/ consensus/ cap/ req/ cap-group/ gcap/ mailbox/ schemas/ tools/
   agent/ svc/ log/ clog/ lock/ prompts/ skills/ installable/ comp/ tuple/ wiki/ ckpt/ ckptw/
   facts/ manifest/ audit/ (authoritative table: mycelium `src/lib.rs` → KV namespace ownership).
+- **One compatibility rule, Rust's definition.** The substrate ships compatible additions on the
+  2.x line: a public field or type never changes shape. When a verb's answer gains meaning (the
+  contracts axis: a typed receipt beside today's `bool` / `persisted`), the new representation is
+  added *beside* the old, the old is `#[deprecated]`, and removal waits for the `3.0.0` ledger
+  (`docs/plans/v3-contracts-axis.md` §6.6). Read the deprecation, adopt the new field, keep
+  compiling. The contract itself: `docs/design/contracts-receipts.md`.
 - Always `shutdown()` the agent + any companion handle (background loops won't stop on
   drop). KV writes are size-gated (chunk large values). Consistency is opt-in — default
   to eventually-consistent kv(); use consensus() only where linearisability is required.

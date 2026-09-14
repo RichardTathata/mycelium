@@ -192,10 +192,13 @@ pub enum ConsensusResult {
         /// `true` when the committed slot (and its lease, if any) reached stable
         /// storage on this node — the forced-`fdatasync` WAL append succeeded, or
         /// persistence is not configured (nothing was promised). `false` means the
-        /// value **is committed cluster-wide and applied locally**, but this node's
-        /// WAL does not hold it (writer stopped, disk error): after a restart it
-        /// recovers only via anti-entropy from peers. Logged at `error` with the
-        /// slot; a caller that requires local durability must check this flag.
+        /// value **is committed cluster-wide and applied locally**, but its local
+        /// durability was **not established** (writer stopped, write or sync error):
+        /// the WAL record is written before it is synced, so the bytes may or may not
+        /// be on disk — a restart may restore it by local replay or via anti-entropy
+        /// from peers, and nothing is promised. Never read `false` as "absent from the
+        /// WAL". Logged at `error` with the slot; a caller that requires local
+        /// durability must check this flag (`docs/design/contracts-receipts.md` §1).
         persisted: bool,
     },
     /// All ballot attempts timed out without reaching quorum.
