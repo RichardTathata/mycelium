@@ -25,6 +25,19 @@ holding an older-than-watermark WAL record and a tombstone. Docs: concepts vocab
 Property 8 + litmus tests 4–5 (§12.5 delivered with this ADR), `building-on-mycelium.md`'s one
 compatibility rule, CLAUDE.md's ack invariant.
 
+**External review before merge (2026-09-14), three P2 corrections, all taken.** (1) `Failed` is *durability not
+established*, never *absent*: `wal_append` writes before `sync_data`, so a failed sync may leave the bytes on
+disk and a later replay may restore them — the ADR's local-sync row and §1 now say so, and the
+`Committed { persisted: false }` rustdoc that claimed "not in this node's WAL" is corrected in the same PR.
+(2) Tuple-space `complete` is the *pipeline's* receipt (acknowledged + next stage queued, atomically at the
+primary); it neither performs nor verifies the consumer's business transaction, so it never stands in for a
+destination-commit receipt — the two are separate records linked by `operation_id`. (3) Adding
+`local_durability` beside `persisted` inside `ConsensusResult::Committed` is **breaking** under Rust's rules
+(non-`non_exhaustive` variant fields; v2.4.2's `persisted` addition already forced `..`): D24's "new
+representation beside the old" is read as a **new receipt-returning API** (`*_propose_receipt`, a
+`#[non_exhaustive]` `CommitReceipt`), the variant unchanged on 2.x, the field addition scheduled with the
+`3.0.0` ledger.
+
 **Kept deliberately.** The floor pins the *overclaim* on purpose: PR 4a must flip
 `floor_observe_counts_any_update_at_or_after_write_ts`'s last assertion, and PR 2 must extend
 `floor_committed_persisted_is_true_when_persistence_unconfigured` with `NotConfigured` — meaning changes

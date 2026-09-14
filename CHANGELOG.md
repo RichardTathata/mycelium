@@ -29,6 +29,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`mycelium-core`); a future format adds a directory, never edits one. Docs: concepts vocabulary
   (receipt, `operation_id`/`attempt_id`, `DeliveryUnknown`), the philosophy's **Property 8** and litmus
   tests 4–5, the one compatibility rule in `building-on-mycelium.md`, the CLAUDE.md ack invariant.
+  **Review corrections (2026-09-14):** `Failed` means *durability not established*, never *absent* (the WAL
+  record is written before it is synced) — the `Committed { persisted: false }` rustdoc that said "not in this
+  node's WAL" is corrected; tuple-space `complete` is the pipeline's receipt, never a destination commit; and
+  PR 2 delivers `local_durability` through a new receipt-returning propose API rather than a new field on
+  `ConsensusResult::Committed`, which would break exhaustive destructures under Rust's rules.
 
 ---
 
