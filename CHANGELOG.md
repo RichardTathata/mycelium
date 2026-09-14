@@ -137,6 +137,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   included). It is recorded honestly here rather than called additive, and the `3.0.0` ledger now carries
   the entry that ends the series: mark `GossipConfig` and the other operator-constructed config structs
   `#[non_exhaustive]`, after which field additions are genuinely additive.
+- **Replay item 6 PR 1 — the nondeterminism inventory, coverage map and trace schema**
+  (`docs/design/replay-nondeterminism-inventory.md`; plan §4, D12–D14). Every production site whose behaviour
+  depends on something the process did not decide, counted on `main` and assigned an owner: the `mycelium-sim`
+  kernel's seams — wall and monotonic clocks kept separate (the HLC's single `wall_now_ms` and consensus's
+  `causal_now_ms` lease reads both injected, D13), five named RNG streams (`nonce`, `shed`, `jitter`, `select`,
+  `govern`), timers, `select!` readiness, channel fullness as a schedulable fault, storage with the
+  volatile/durable/directory/process-kill/power-loss distinctions, recorded and redacted external inputs; papaya
+  CAS retries owned by Loom, decoders by fuzz, real timing by the Docker suites; the one unseeded shared hasher
+  (`framing.rs` `shard_hasher`) and the order-sensitive `AHashMap` consumers named. The sleeps whose duration is a
+  correctness assumption are listed with their witnesses (the 1 s convergence wait after a lock commit first). The
+  choices trace (`seq · node · kind · stream/seam · value`) and the minimum failure bundle sufficient for **exact
+  reproduction with divergence detection** are fixed for PR 2; the static forbidden-call check lands with the
+  adapters in PR 3. No code.
 
 ---
 

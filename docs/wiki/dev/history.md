@@ -70,6 +70,13 @@ do not alter it, decided here); `ViewConfidence::staleness_known()` — a derive
 (review, 2026-09-14: the struct is publicly constructible and not `#[non_exhaustive]`) — so an isolated node's
 `max_staleness_ms: 0` reads as unknown. Two pins; a §6.6 ledger entry schedules `#[non_exhaustive]` for the
 operator-constructed config structs, the break that every config-field addition has been making quietly. [`.log/2026-09-13-wp5-cooldown-parameter.md`](.log/2026-09-13-wp5-cooldown-parameter.md).
+## v3 contracts axis — item 6 PR 1: the nondeterminism inventory — 2026-09-13 (unreleased)
+
+`docs/design/replay-nondeterminism-inventory.md`: the measured inventory by kind and module (production paths on
+`main`), the coverage map (kernel seams · Loom for CAS retries · fuzz · Docker suites), the sleeps whose duration is
+a correctness assumption, the choices-trace and bundle schema (D14), the static check moved to PR 3 (D12), D13's
+additions (CAS retries to Loom, hash iteration order, lease-expiry clock reads). Concepts: *seam*, *bundle*.
+Wiki: [testing](testing/testing.md), [`.log/2026-09-13-item6-pr1-nondeterminism-inventory.md`](.log/2026-09-13-item6-pr1-nondeterminism-inventory.md).
 
 ## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
 

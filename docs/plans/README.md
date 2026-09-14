@@ -23,10 +23,9 @@ record, not duplicates of those.
 > six items (typed contracts · deterministic replay · federated domains · knowledge layer · adaptive stability ·
 > scoped mandates), one dependency graph, phase gates, and a decision register of every departure from the
 > external review's six plans, which are vendored unmodified under [`external/`](external/). Code so far
-> (2026-09-13): item 7 gateway caller identity (PR #208) and item 1 PR 1 — the
-> [contracts-and-receipts ADR](../design/contracts-receipts.md), the regression floor and the golden
-> on-disk fixtures (`tests/fixtures/persistence/`); and the AE0
-> [action-envelope ADR](../design/action-envelope-ae0.md) beside it.
+> (2026-09-13): item 7 gateway caller identity (PR #208); item 1 PR 1 (#209) and the AE0 ADR (#210); item 8's threat
+> model revision (#211); WP5's cooldown parameter; and item 6 PR 1 — the
+> [nondeterminism inventory](../design/replay-nondeterminism-inventory.md).
 >
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).
