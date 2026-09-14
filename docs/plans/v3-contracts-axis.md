@@ -459,6 +459,7 @@ maintained in `ROADMAP.md`:
 | the inferred `>=` acknowledgement in `set_with_min_acks` | — | item 1 PR 4a's exact-identity ack (kept behind a legacy flag until then) |
 | `ConsensusResult::Committed { persisted: bool }` | 2.4.2 | the D24 tri-state |
 | `GatewayAgent`-as-caller dispatch (the node acting for gateway clients) | — | item 7's `GatewayCaller` |
+| `GossipConfig` (and the operator-constructed config structs beside it) **not** being `#[non_exhaustive]` | — | mark them `#[non_exhaustive]` at `3.0.0`: every release adds config fields, and each such addition silently breaks an exhaustive struct literal today (found by an external review of WP5, 2026-09-14). One announced break ends a series of unannounced ones; the documented `Default` + assignment pattern is unaffected either way |
 
 None of these *requires* `3.0.0`; each is additive-with-deprecation on 2.x. The ledger exists so the major, if
 D23's trigger ever fires, is a removal of announced things and nothing else.
