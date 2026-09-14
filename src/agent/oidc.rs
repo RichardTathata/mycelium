@@ -143,6 +143,12 @@ impl OidcVerifier {
         Self { cfg, http: reqwest::Client::new(), cache: tokio::sync::RwLock::new(None) }
     }
 
+    /// The IdP issuer every accepted JWT was validated against — the authority that qualifies an
+    /// OIDC caller principal (`oidc:{issuer}/{subject}`, item 7 review finding 2).
+    pub(crate) fn issuer(&self) -> &str {
+        &self.cfg.issuer
+    }
+
     /// Validate `token`; `Some` only if signature, issuer, audience, and expiry
     /// all check out against the (possibly just-refreshed) JWKS.
     pub(crate) async fn verify(&self, token: &str) -> Option<VerifiedOidcPrincipal> {

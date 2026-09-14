@@ -68,7 +68,7 @@ impl ServiceHandle {
 
     /// Returns a typed receiver for incoming RPC requests of `kind`.
     pub fn rpc_rx(&self, kind: impl Into<Arc<str>>) -> RpcRequestRx {
-        RpcRequestRx(self.ctx.signal_handlers.register(kind.into()))
+        RpcRequestRx { rx: self.ctx.signal_handlers.register(kind.into()), ctx: Arc::clone(&self.ctx) }
     }
 
     // ── Bulk ─────────────────────────────────────────────────────────────────

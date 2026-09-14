@@ -33,6 +33,8 @@ use std::{
 use tracing::warn;
 
 use crate::agent::TaskCtx;
+use super::gateway_caller::{self, GatewayDispatchError, ResolvedPrincipal};
+use axum::Extension;
 use crate::capability::CapFilter;
 use crate::store::scan_kv_prefix;
 use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn};
@@ -286,6 +288,7 @@ async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse 
 
 async fn handle_tasks_send(
     state:  &A2aState,
+    caller: Option<&ResolvedPrincipal>,
     id:     Option<Value>,
     params: &Value,
 ) -> Value {
@@ -309,8 +312,10 @@ async fn handle_tasks_send(
     // a 30 s cap made every such composition fail with -32603 while the
     // pipeline was still working. Clients enforce their own HTTP timeouts.
     let timeout = Duration::from_secs(120);
-    match super::rpc::rpc_call_ctx(
-        &state.task_ctx, target,
+    // Item 7: the skill provider is told who called (the resolved bearer principal, or
+    // `anonymous`), never just "the gateway node".
+    match gateway_caller::gateway_rpc_call(
+        &state.task_ctx, caller, target,
         "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout,
     ).await {
         Ok(reply) => {
@@ -318,9 +323,13 @@ async fn handle_tasks_send(
             state.tasks.pin().insert(task_id, A2aTask { task: task.clone(), created_at: Instant::now() });
             jsonrpc_ok(id, serde_json::to_value(&task).unwrap_or(Value::Null))
         }
-        Err(e) => {
+        Err(GatewayDispatchError::Rpc(e)) => {
             warn!("A2A tasks/send rpc_call failed for skill {}: {:?}", skill_id, e);
             jsonrpc_error(id, -32603, "rpc call failed")
+        }
+        Err(e) => {
+            warn!("A2A tasks/send refused for skill {}: {e}", skill_id);
+            jsonrpc_error(id, e.json_rpc_code(), &e.to_string())
         }
     }
 }
@@ -356,6 +365,7 @@ fn handle_tasks_cancel(state: &A2aState, id: Option<Value>, params: &Value) -> V
 /// so the router can dispatch to it after the JSON body is parsed.
 pub(crate) async fn tasks_send_subscribe(
     state:    A2aState,
+    caller:   Option<ResolvedPrincipal>,
     id:       Option<Value>,
     task_id:  String,
     skill_id: String,
@@ -391,8 +401,8 @@ pub(crate) async fn tasks_send_subscribe(
         });
 
         let timeout = Duration::from_secs(30);
-        match super::rpc::rpc_call_ctx(
-            &state2.task_ctx, target,
+        match gateway_caller::gateway_rpc_call(
+            &state2.task_ctx, caller.as_ref(), target,
             "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout,
         ).await {
             Ok(reply) => {
@@ -402,11 +412,18 @@ pub(crate) async fn tasks_send_subscribe(
                     .event("task_status_update")
                     .data(serde_json::to_string(&task).unwrap_or_default()))).await;
             }
-            Err(e) => {
+            Err(GatewayDispatchError::Rpc(e)) => {
                 warn!("A2A sendSubscribe rpc_call failed for skill {}: {:?}", skill_id, e);
                 let _ = tx.send(Ok(Event::default()
                     .event("task_status_update")
                     .data(json!({ "id": &task_id2, "status": { "state": "failed" } }).to_string()))).await;
+            }
+            Err(e) => {
+                warn!("A2A sendSubscribe refused for skill {}: {e}", skill_id);
+                let _ = tx.send(Ok(Event::default()
+                    .event("task_status_update")
+                    .data(json!({ "id": &task_id2, "status": { "state": "failed" },
+                                  "error": e.reason(), "detail": e.to_string() }).to_string()))).await;
             }
         }
         drop(id2); // suppress unused warning
@@ -420,8 +437,13 @@ pub(crate) async fn tasks_send_subscribe(
 
 pub(crate) async fn a2a_jsonrpc_full(
     State(state): State<A2aState>,
+    caller:       Option<Extension<ResolvedPrincipal>>,
     Json(body):   Json<Value>,
 ) -> axum::response::Response {
+    // Item 7: inserted by the gateway's `/a2a` optional-auth layer (a bearer's principal, or
+    // `anonymous`); a handler reached without it (a bare router in a unit test) dispatches with
+    // no context and is refused by the secure profile.
+    let caller = caller.map(|Extension(c)| c);
     let id     = body.get("id").cloned();
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let params = body.get("params").cloned().unwrap_or(Value::Null);
@@ -437,11 +459,11 @@ pub(crate) async fn a2a_jsonrpc_full(
             .unwrap_or("")
             .to_string();
         let text     = text_from_message(params.get("message").unwrap_or(&Value::Null));
-        return tasks_send_subscribe(state, id, task_id, skill_id, text).await.into_response();
+        return tasks_send_subscribe(state, caller, id, task_id, skill_id, text).await.into_response();
     }
 
     let result: Value = match method.as_str() {
-        "tasks/send"   => handle_tasks_send(&state, id.clone(), &params).await,
+        "tasks/send"   => handle_tasks_send(&state, caller.as_ref(), id.clone(), &params).await,
         "tasks/get"    => handle_tasks_get(&state, id.clone(), &params),
         "tasks/cancel" => handle_tasks_cancel(&state, id.clone(), &params),
         _              => jsonrpc_error(id, -32601, "method not found"),

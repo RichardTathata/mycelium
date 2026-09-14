@@ -33,7 +33,7 @@ gateway = ["dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:futures-util",
 fuzz-internals = []
 # Enables mTLS on the gossip TCP port, keypair-backed node identity, and
 # consensus payload signing. Adds tokio-rustls, rcgen, and ed25519-dalek.
-tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap"]
+tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:sha2"]
 # Enables OTEL span export from SkillRunner (opentelemetry-otlp gRPC).
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 # Exposes a Prometheus /metrics endpoint on the gateway HTTP port.

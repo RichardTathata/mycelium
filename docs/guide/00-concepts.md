@@ -89,6 +89,20 @@ TOML manifest). *MCP tool* = the standards-based bridge for LLM tool-use, in the
 separate `tools/` namespace. The first two are native Capabilities; the third is
 an edge standard.
 
+**Ack vs. receipt (v3 contracts axis, item 1).** Today's `bool` / `Ok` acknowledgements each
+prove something different — `kv().set` proves *queued for gossip*, `set_with_min_acks` proves
+*propagation* (any newer update counts), `Committed { persisted }` folds *fsynced* and *never
+promised* into one `true`. A **receipt** names its rung on the ladder and nothing above it:
+**local application** (`Applied` / `Superseded`) · **local sync** (this exact operation crossed
+this node's persistence barrier: `OnDisk` / `Failed` / `NotConfigured`) · **replica sync** (named
+peers persisted this exact operation) · **destination commit** (an external destination
+committed the business change and its dedup result in one transaction). Every operation carries
+a caller-minted **`operation_id`** (stable across retries and worker replacement) and an
+**`attempt_id`**; same id + different content is a `Conflict`; a timeout returns the rungs that
+were established plus **`DeliveryUnknown`** — never "nothing happened". The contract:
+[`design/contracts-receipts.md`](../design/contracts-receipts.md); the receipt types land with
+the plan's item 1 PRs 2–4.
+
 **Signal vs. KV entry.** A **Signal** (Layer II) is an *ephemeral* scoped event
 — miss it and it's gone. A **KV entry** (Layer I) is *durable* state that
 gossips and heals via anti-entropy. Use a Signal to *notify*; use KV to *record*.
@@ -239,6 +253,10 @@ coordinator-free system can offer. → [`consensus`](../../examples/coop/src/bin
 | MCP tool | standard | LLM-tool bridge at `tools/{name}/{node}` | `mcp_toolgrowth` |
 | A2A AgentCard | standard | agent discovery for external frameworks (`/.well-known/agent.json`) | `a2a_langchain` |
 | AgentFacts | standard | self-certified cross-domain federation (`/.well-known/agent-facts.json`) | `federation_facts` |
+| Receipt | native | what an ack proves, by rung: local application · local sync · replica sync · destination commit (contracts axis item 1) | `design/contracts-receipts.md` |
+| `operation_id` / `attempt_id` | native | caller-minted identity of an operation (stable across retries) and of each attempt; the key of every receipt | `design/contracts-receipts.md` |
+| `DeliveryUnknown` | native | a timeout's honest answer: the rungs established so far, then *unknown* — never a negative | `design/contracts-receipts.md` |
+| Gateway caller | native | the client principal a provider sees behind a gateway call (`GatewayCaller`, item 7) | `docs/operations/rbac.md` §7 |
 
 **Next:** [01 · Gossip KV](01-gossip-kv.md). For the full design argument behind
 this vocabulary, see [philosophy.md](../philosophy.md).
