@@ -43,6 +43,12 @@ and [ROADMAP](../../../ROADMAP.md). It composes receipts, caller identity, resou
 allocated rights and replay; policy evaluation is replaceable and no new central control service
 is introduced. Local CI uses a stub consumer; the separately required joint pack runs both
 scenarios on AWS/GCP with Mycelium participants and NovusLens evidence views.
+**The evaluator seam shipped 2026-09-14** (`src/agent/action_evaluator.rs`, `gateway` + `tls`): the
+`ActionEvaluator` contract, the `ActionEnvelope` assembled from verified facts, the deterministic
+`ReferenceEvaluator`, and the hook at the MCP `tools/call` dispatch — inert until
+`with_action_evaluator` attaches one. The AE0 §9 negative fixtures are its unit gates; two live-gateway
+tests prove the wiring refuses before a tool runs. A **route-level preflight**, never enforcement at the
+effect. Next on this line: `/a2a`, the evidence journal, the deployment report.
 **AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md): the envelope
 (item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
 `policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;

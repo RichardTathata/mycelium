@@ -227,11 +227,15 @@ deployment report, an ambiguous mapping or an absence of records.
 
 ## 11. What lands next
 
-- **The seam** (public, on item 7): `ActionEvaluator` + `ActionEnvelope` + `Decision` types, the hook between
-  `gateway_auth` and the MCP `tools/call` dispatch (then `/a2a`), the reference evaluator, the fixtures of §9 as
-  tests, `Indeterminate ⇒ refuse` in the secure profile; **the node-local evidence journal** with its
-  `append -> LocalSync` receipt, the safe reference record into the audit chain, and the three failure tests
-  (saturation, persistence failure, lost acknowledgement). Five-part statement and SDK/operator parity in that PR.
+- **The seam** — ✅ *shipped 2026-09-14* (`src/agent/action_evaluator.rs`): `ActionEvaluator` +
+  `ActionEnvelope` + `Decision`, the hook between `gateway_auth` and the MCP `tools/call` dispatch, the
+  deterministic `ReferenceEvaluator`, the §9 fixtures as tests, `Indeterminate ⇒ refuse`, and two
+  live-gateway tests. Inert until an evaluator is attached. **Still to come on this line:** `/a2a` and the
+  remaining gateway dispatch paths; **the node-local evidence journal** with its `append -> LocalSync`
+  receipt, the safe reference record into the audit chain, and the three failure tests (saturation,
+  persistence failure, lost acknowledgement); the deployment report that gives the enforcement point an
+  expected `policy.revision` (until then the seam's stale-policy check has no second opinion to compare
+  against and does not fire).
 - **AE-T T2–T4** (private companion, on the seam): the Cedar adapter, the signed `AuditSink` exporter into the
   consumer's envelopes (Ed25519 over canonical JSON, ≤ 1000 records / ≤ 2 MiB, cursors, same `batch_id` ⇒
   byte-identical body), the procurement mapping subset; T-gate = scenario 2 locally.

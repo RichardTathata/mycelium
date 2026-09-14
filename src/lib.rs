@@ -233,6 +233,12 @@ pub use agent::{
     SchemaError, SchemaHandle, SchemaPublishResult,
 };
 // Layer III consensus + the consistency overlay built on it (v2 M2 feature gate).
+// The AE evaluator seam (runtime authorisation at the gateway) — present where it is enforced.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub use agent::{
+    ActionEnvelope, ActionEvaluator, ActionMapping, Decision, MappingStatus, PreflightRefusal,
+    ReferenceEvaluator, Rule, Verdict,
+};
 #[cfg(feature = "consensus")]
 pub use agent::{ConsensusHandle, ConsistencyError, LockGuard, LockService};
 // WS-C M9: self-managing-metabolism config tuner + governance.

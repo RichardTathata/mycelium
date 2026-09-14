@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **AE evaluator seam at the gateway** (`src/agent/action_evaluator.rs`; the code half of AE0,
+  `docs/design/action-envelope-ae0.md`; plan §6.8 / D36–D38, queue §10.12.4). One hook between the
+  gateway's auth layer and its dispatch: before a gateway-originated `tools/call` reaches a provider,
+  an attached `ActionEvaluator` sees an `ActionEnvelope` — the verified actor (item 7), the granted
+  scopes, the operation, the exact resource, a `sha256` argument digest, the reviewed catalogue
+  mapping, validity — and answers `Permit` · `Deny` · `Indeterminate`. **Inert unless an evaluator is
+  attached** (`GossipAgent::with_action_evaluator`), so every existing deployment is unchanged.
+  Ships `ReferenceEvaluator`, a deterministic reference implementation (prohibitions win, then
+  allowances; anything uncovered is *authority not established*, never a denial). The seam enforces
+  what an adapter might get wrong: a permit carrying evaluation errors, a permit over an unmapped or
+  ambiguous operation, a decision from an unexpected policy revision, an expired envelope, and a
+  panicking evaluator all refuse. Refusals answer `-32030` (`action_denied`) or `-32031`
+  (`authority_not_established`) with the policy revision and what was checked; metric
+  `mycelium_ae_preflight_refusals_total{reason}`. **Strength: a route-level preflight**
+  (`SelfImposedPrevention` for the routes this gateway fronts) — never enforcement at the effect,
+  which only AE2's resource fence earns; anything reaching a provider without traversing this gateway
+  is outside the guarantee and the evidence must say so. Gates: the AE0 §9 negative fixtures as unit
+  tests, plus two live-gateway tests (a prohibited and an uncovered tool are refused before the tool
+  runs; an unattached seam changes nothing). No wire change, no KV prefix; `gateway` + `tls`.
+
 ### Security
 
 - **rustls 0.23.40 → 0.23.45, rustls-webpki 0.103.13 → 0.103.15 — RUSTSEC-2026-0285**
