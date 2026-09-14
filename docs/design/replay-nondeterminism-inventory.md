@@ -47,7 +47,8 @@ the canon.
 |---|---|---|
 | `mycelium-core/src/hlc.rs` `wall_now_ms` (**the one HLC read**, line 130) | every HLC tick, so every write's LWW rank | **wall-clock seam** — the clean seam the plan verified; the kernel's wall clock feeds `Hlc` |
 | `src/consensus.rs:337` `wall_now_ms` → `causal_now_ms` (= `max(wall, hlc physical)`) — used at 14 call sites: 3 in `consensus.rs`, 3 in `consensus_handle.rs`, 4 in `http.rs`, 1 in `overlay_consistent.rs` | **lease expiry**: whether a committed slot is live, whether a lock is held (D13: clock injection must reach these reads, not only the HLC) | wall-clock seam, via `causal_now_ms` taking the injected clock |
-| `src/agent/opacity.rs:108,130,149,359` · `capability_ops.rs:178,408` · `lifecycle.rs:464` · `tasks.rs:968` · `wiring.rs` · `consensus_handle.rs:187,250` · `mesh_handle.rs:253,316` · `kv_handle.rs:227,345` · `signal.rs:468` · `prompt.rs` · `oidc.rs` | freshness of soft state (`is_fresh`, opacity, requirement expiry, intent TTLs), evidence timestamps, JWT `exp` | wall-clock seam (one `now_ms()` on the kernel clock); `oidc` stays wall (external tokens) and is a recorded external input |
+| `src/agent/opacity.rs:108,130,149,359` · `capability_ops.rs:178,408` · `lifecycle.rs:464` · `tasks.rs:968` · `wiring.rs` · `consensus_handle.rs:187,250` · `mesh_handle.rs:253,316` · `kv_handle.rs:227,345` · `signal.rs:468` · `prompt.rs` | freshness of soft state (`is_fresh`, opacity, requirement expiry, intent TTLs), evidence timestamps | wall-clock seam (one `now_ms()` on the kernel clock) |
+| **OIDC verification** — `oidc.rs:128,174,187` (the JWKS cache's `CachedKeys { at: Instant }` and `at.elapsed() < JWKS_TTL`) and, **inside `jsonwebtoken`**, the wall-clock read behind `validation.validate_exp = true` (`oidc.rs:96`) | whether a token is accepted now, and whether the JWKS is refetched | **the verified result is the recorded input, not the token.** Recording the JWT and the JWKS response does *not* make authentication replayable: the same bytes replayed later fail an expiry check that reads the real wall clock inside a dependency we do not own, and the cache's monotonic TTL decides refetching independently. The kernel records `input oidc/verify → principal=…` (or the refusal) and **authentication internals are declared outside its coverage**; the JWKS cache's `Instant` read is ours and joins the monotonic seam if replaying refresh behaviour is ever wanted. Corrected 2026-09-14 after review — the first draft listed this module under the wall clock and called the token a sufficient input |
 | `mycelium-core/src/writer.rs:57,78,124,131,177` (idle timeout, reconnect backoff) · `connection.rs:131,168,240,373,464` (rate window, state-request cadence) · `swim.rs:160,222,232,237,473` · `swim_membership.rs` · `signal.rs:375–1014` (dedup windows, suppression, quorum-evidence trim, pending ordering) · `tasks.rs:780,867` · `mesh_handle.rs:136,165,271` · `rpc.rs:146,148` · `a2a.rs:124,318,400` · `http.rs:2718,2726` · `membership_governor.rs:186,191` (the **cooldown**, WP5) · `capability_handle.rs` | every interval-based decision: is this peer alive, is this signal a duplicate, has the backoff elapsed, has the cooldown elapsed | **monotonic-clock seam** — separate from the wall clock (the plan's rule: "monotonic and wall clocks separately"); `Instant` values become kernel ticks |
 
 ### 2.2 Randomness
@@ -149,30 +150,59 @@ bundle/
 **`choices.trace` — one line per kernel decision, in order:**
 
 ```text
-seq  node  kind      stream/seam   value                       # meaning
-1    n1    rng       nonce         0x9f3a…                     # a draw from a named stream
-2    n1    wall      -             1789322039042               # the wall clock the HLC read
-3    n2    mono      -             +12ms                       # a monotonic advance
-4    -     sched     select        conn/n1→n2#3 branch=recv    # which select! branch became ready
-5    -     chan      gossip/shard2 full                        # a channel-fullness fault
-6    n1    timer     ballot-jitter fire                        # a deadline firing
-7    n1    fs        wal.bin       append len=214 sync=true    # a storage effect and its durability
-8    n1    fs        snapshot.bin  rename durable_dir=false    # a storage fault (power loss before fsync_dir)
-9    n2    input     oidc/jwks     #7                          # an external input consumed
+seq  node  kind   stream/seam    request                                              result
+1    n1    rng    nonce          draw(u64)                                            0x9f3a…
+2    n1    wall   -              now_ms()                                             1789322039042
+3    n2    mono   -              now()                                                +12ms
+4    -     sched  select         conn/n1→n2#3 ready?                                  branch=recv
+5    -     chan   gossip/shard2  try_send(len=88)                                     Err(Full)
+6    n1    timer  ballot-jitter  deadline(+37ms)                                      fire
+7    n1    fs     wal.bin        append d=sha256:4f1c… len=214 sync=true off=8192     Ok(214)
+8    n1    fs     wal.bin        append d=sha256:9ab0… len=214 sync=true off=8410     Err(EIO) wrote=96
+9    n1    fs     snapshot.bin   rename from=snapshot.tmp fsync_dir=false             Ok
+10   n2    input  oidc/verify    token d=sha256:c31e…                                 principal=oidc:idp/alice
 ```
 
-Rules: every entry names its **kind** (`rng`, `wall`, `mono`, `sched`, `chan`, `timer`, `fs`, `input`, `fault`)
-and its **stream or seam**; values are what the production code *received*, not what it did with them. Exact
-replay feeds entries back in order and **checks each request against the recorded next entry** — a request for
-`rng/jitter` when the trace says `rng/nonce`, or an `fs` append of a different length, is a divergence and stops
-the run with both sides printed. Scenario replay keeps the causal workload (`input`, `fault`) and lets the kernel
+Rules: every entry names its **kind** (`rng`, `wall`, `mono`, `sched`, `chan`, `timer`, `fs`, `input`, `fault`),
+its **stream or seam**, a **canonical request** and the **result** the production code received. *Request* is a
+canonical digest of everything the effect depends on — for a write: the **content hash of the bytes**, the target
+(file, offset), and the flags that change its meaning (`sync`, `create`, `truncate`) — never a length alone: two
+WAL records of equal length are a different write, and a trace that recorded only `len=214` would accept changed
+content as a faithful replay (entries 7 and 8 above are exactly that pair). *Result* is what came back: `Ok(n)`,
+a typed error, or a **partial completion** (`wrote=96` — the short write the durability argument turns on).
+Values are what the production code *received*, never what it did with them.
+
+Exact replay feeds entries back in order and **checks each request against the recorded next entry** — a request
+for `rng/jitter` when the trace says `rng/nonce`, an `fs` append whose content digest differs from the recorded
+one, a different offset or a flipped `sync` flag is a divergence and stops the run with both sides printed. The
+gate for this is a **same-length, different-content rejection test** (PR 2): record a run, replay it with one WAL
+record's bytes changed at equal length, and require a divergence — a replay harness that passes that unchanged is
+not detecting divergence, only re-seeding. Scenario replay keeps the causal workload (`input`, `fault`) and lets the kernel
 re-derive `sched`/`timer`/`rng` under changed code. Boundary-event views and checkpoints (D14's deferred half)
 extend the trace without changing an entry's shape.
 
+**The storage model — three layers, kept apart.** The plan's five distinctions collapse if "volatile" is one
+word, so the adapter models each layer and each fault names the layers it takes:
+
+| Layer | Holds | Lost on process kill | Lost on power loss |
+|---|---|---|---|
+| **process memory** | the store, buffered writer state, anything not yet handed to the kernel | **yes** | yes |
+| **OS page cache** | bytes accepted by `write` but not yet `fsync`/`fdatasync`ed | **no** — a completed write survives the process | **yes** |
+| **durable storage** | bytes whose sync returned `Ok` | no | no |
+| **directory metadata** | the entry a `rename` created, until the *directory* is fsynced | no | **yes**, independently of the file's own bytes |
+
+So a **process kill** loses process memory only: a write that returned `Ok` is still in the page cache and a
+restart reads it back. A **power loss** additionally drops unsynced page-cache bytes and unsynced directory
+entries — which is why the snapshot's rename is fsynced at the directory *before* the WAL is truncated (v2.4.4),
+and why `snapshot_install_syncs_the_directory` pins the wiring only: the property is unobservable without this
+adapter. The harness must not manufacture loss a process kill cannot cause, nor certify durability that only a
+sync establishes.
+
 **Faults the kernel can inject** (each a `fault` entry): channel full · frame drop on a named connection ·
-partition (a set of connections silent for a window) · process kill (volatile bytes lost, durable kept) · power
-loss (durable-but-unsynced bytes lost; directory entries not yet synced lost) · clock jump (wall) · slow disk
-(storage effects delayed past a timer).
+partition (a set of connections silent for a window) · **process kill** (process memory only) · **power loss**
+(process memory + unsynced page cache + unsynced directory entries) · short write (`Ok(n)` with `n <` requested) ·
+sync failure (`Err` after the bytes were accepted — the local-sync receipt's *durability not established*,
+`contracts-receipts.md` §2) · clock jump (wall) · slow disk (storage effects delayed past a timer).
 
 ## 6. The static forbidden-call check (D12: PR 3, not PR 7)
 

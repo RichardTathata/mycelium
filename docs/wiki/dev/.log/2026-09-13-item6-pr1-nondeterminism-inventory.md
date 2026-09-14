@@ -19,6 +19,23 @@ values are what production code *received*) and the minimum bundle (build, confi
 inputs, trace, witness) sufficient for exact reproduction with divergence detection (D14); the static forbidden-call
 check in PR 3 (D12); D13's three additions in place.
 
+**External review before merge (2026-09-14), three P2 corrections, all taken.** (1) *The trace recorded length, not
+identity:* two WAL records of equal length are a different write, so a replay checking `len=214` would accept
+changed content as faithful. Entries now carry a **canonical request digest** (content hash, target, offset, the
+flags that change meaning) **and the result** — `Ok(n)`, a typed error, or a partial completion (`wrote=96`) — with
+a same-length/different-content rejection test as PR 2's gate. (2) *Process death ≠ power loss:* the draft's
+"volatile bytes" conflated process memory, the OS page cache and durable storage. Now a four-layer table (process
+memory · page cache · durable storage · directory metadata) with each fault naming the layers it takes: a process
+kill loses process memory only (a completed write survives in the page cache); power loss additionally drops
+unsynced page-cache bytes and unsynced directory entries — which is exactly why v2.4.4 fsyncs the snapshot's
+directory before truncating the WAL. Short write and sync-failure faults added. (3) *Authentication is not
+replayable by recording its inputs:* verified in code — the JWKS cache holds `CachedKeys { at: Instant }` and
+compares `at.elapsed()` (`oidc.rs:128,174,187`), while `validate_exp = true` makes `jsonwebtoken` read the real
+wall clock inside a dependency we do not own. The kernel now records the **verified result** (`principal=…` or the
+refusal) as the input and declares authentication internals outside its coverage; the JWKS cache's monotonic read
+is ours and joins the monotonic seam if refresh behaviour ever needs replaying. The first draft listed that module
+under the wall clock alone — the inventory's own honesty rule caught by a reader, not by us.
+
 **Decided here.** Two clocks, not one (`wall` feeds the HLC and `causal_now_ms`; `mono` feeds intervals); five named
 RNG streams so a draw out of order is a divergence, not a coincidence; channel fullness is a *fault* the kernel
 schedules, since `kv().set == false` and dropped frames are exactly what the flake tier keeps seeing; test-module
