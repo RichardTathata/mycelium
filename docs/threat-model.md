@@ -240,10 +240,19 @@ observability*):
 *Redaction rules:* a bundle is produced by the recording seam, not by hand; credentials are recognised at the
 seam where they enter (auth headers, config secrets, key material) and replaced by a stable placeholder so replay
 determinism holds; a bundle that would need a protected artefact says so and links it by digest. *Attestation
-scope:* an attestation is bound to the digest of the exact object it vouches for and to the signer's current key
-(revocation excludes it everywhere, WS-D). *Verification is the reader's:* every consumer re-verifies signatures
-against keys it trusts for the named signer (identity-auth anchors, `sys/identity`, minus revocations) — a record
-supplied by anyone else is data, never authority.
+scope:* an attestation is bound to the digest of the exact object it vouches for and to the key that signed it.
+*Verification is the reader's, against its retained set:* every consumer re-verifies a signature against the keys
+**it** trusts for the named signer — the identity-auth anchors and the `sys/identity` history, which deliberately
+**retains** earlier keys (WS5) so that a signature made before a routine rotation still verifies, **minus the
+revocations that reader has received and validated** (WS-D). Two consequences the rules must state rather than
+assume: (i) *rotation is not revocation* — requiring the signer's *current* key would reject legitimate history;
+(ii) *revocation reaches a reader only when the revocation does* — a disconnected reader keeps trusting a revoked
+key until it reconnects (Boundary D's residual, in key form), so "excluded everywhere" means everywhere the
+revocation has propagated, never instantly. Therefore **present authorisation carries a freshness requirement**
+(the attestation's validity window and the reader's view of revocations must both be current before it grants
+anything now), while **historical attribution does not**: a record signed by a since-rotated or since-revoked key
+keeps its provenance — it says who signed what, then; it grants nothing today (posture rule 5's three lifecycles).
+A record supplied by anyone else is data, never authority.
 
 *What this section does not do:* it does not make the audit chain or an evidence export a proof of coverage, does
 not promise that a redaction map is complete for a custom seam an adopter adds, and does not encrypt anything in
