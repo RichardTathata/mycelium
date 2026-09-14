@@ -116,6 +116,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the shared rule that authority is recomputed, never inherited. §6 fixes what identity, evidence and replay artefacts
   may carry: verified claims and scoped attestations, never credentials; replay bundles redacted at the recording seam;
   a named protected-reproduction-artefact class. §1–4 unchanged. Items 2, 3 and 5 cite it from their PR 1 ADRs.
+- **Membership-governor cooldown is an explicit, bounded parameter; view staleness says when it is unknown**
+  (v3 contracts axis item 4's standalone honesty fix, plan §10.12.5 / private WP5). `GossipConfig::membership_cooldown_secs:
+  Option<u64>` (env `GOSSIP_MEMBERSHIP_COOLDOWN_SECS`): unset keeps the historical 3 × `health_check_interval_secs`,
+  set bounds oscillation independently of the ping cadence, never below 1 s; read once at governor start — live
+  timing intents do not alter it (decided in this change; a restart applies a new value and the doc says so).
+  `ViewConfidence` gains **`staleness_known: bool`** (also on `/stats` and `GET /gateway/fleet`): `false` when no
+  peer was heard inside the window, so `max_staleness_ms: 0` is read as *unknown*, not *perfectly fresh* — an
+  isolated node no longer reports the healthiest view in the fleet. Gates: `cooldown_is_an_explicit_bounded_parameter`,
+  `view_confidence_staleness_is_unknown_with_no_peers_heard`.
+  **`ViewConfidence` gains no public field:** `staleness_known()` is a derived accessor
+  (`peers_heard > 0`) and a hand-written `Serialize` puts the key in the JSON, so existing literals and
+  exhaustive destructures still compile — an external review showed that adding the field broke a
+  consumer that built the struct, and the type is not `#[non_exhaustive]`.
+  **`GossipConfig` does gain a field** (`membership_cooldown_secs`), and that is *not* additive by
+  Rust's rules: the struct is publicly constructible and not `#[non_exhaustive]`, so an exhaustive
+  literal over its fields stops compiling. The documented construction pattern — `GossipConfig::default()`
+  then assignment, or `..GossipConfig::default()` — is unaffected, which is why the break has gone
+  unremarked through every release that added a config field (item 7's three in this same section
+  included). It is recorded honestly here rather than called additive, and the `3.0.0` ledger now carries
+  the entry that ends the series: mark `GossipConfig` and the other operator-constructed config structs
+  `#[non_exhaustive]`, after which field additions are genuinely additive.
 - **Replay item 6 PR 1 — the nondeterminism inventory, coverage map and trace schema**
   (`docs/design/replay-nondeterminism-inventory.md`; plan §4, D12–D14). Every production site whose behaviour
   depends on something the process did not decide, counted on `main` and assigned an owner: the `mycelium-sim`

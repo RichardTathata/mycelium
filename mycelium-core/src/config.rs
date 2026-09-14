@@ -387,6 +387,11 @@ pub fn resolved_fanout(gossip_fanout: usize, max_active_connections: usize, know
     k.min(known_count).max(known_count.min(1)) // ≥1 when any peer is known
 }
 
+/// The membership governor's default cooldown, in health-check ticks, when
+/// [`GossipConfig::membership_cooldown_secs`] is unset — the value that was an unexported
+/// constant before v3 WP5 made the cooldown an explicit parameter.
+pub const DEFAULT_MEMBERSHIP_COOLDOWN_TICKS: u64 = 3;
+
 /// Unified configuration for all protocol components.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -410,6 +415,15 @@ pub struct GossipConfig {
     pub propagation_window_secs: u64,
     /// How often (seconds) the health monitor sends pings and evicts silent peers.
     pub health_check_interval_secs: u64,
+    /// Membership-governor **cooldown** (seconds): after this node joins or leaves a governed
+    /// group, how long it holds before rolling again for that group (v3 contracts axis item 4's
+    /// standalone honesty fix, WP5). `None` (default) = **3 × `health_check_interval_secs`**, the
+    /// value that was previously an unexported constant; set it explicitly to bound oscillation
+    /// independently of the ping cadence. Clamped to at least `1`. **Not** altered by live timing
+    /// intents (`sys/govern/timing/`): the cooldown is a stated parameter of the governor, read at
+    /// start — a change needs a restart, and says so. Env: `GOSSIP_MEMBERSHIP_COOLDOWN_SECS`.
+    #[serde(default)]
+    pub membership_cooldown_secs: Option<u64>,
     /// Initial TTL applied to locally-originated gossip messages.
     /// Each hop decrements this by one; a message with TTL 1 is not forwarded.
     pub default_ttl: u8,
@@ -915,6 +929,7 @@ impl Default for GossipConfig {
             bootstrap_peers: Vec::new(),
             propagation_window_secs: 60,
             health_check_interval_secs: 10,
+            membership_cooldown_secs:   None,
             default_ttl: 5,
             max_connections: 1024,
             writer_channel_depth: 1024,
@@ -1295,6 +1310,17 @@ impl GossipConfig {
         Ok(())
     }
 
+    /// The membership-governor cooldown in force: the explicit `membership_cooldown_secs`, or the
+    /// documented default of [`DEFAULT_MEMBERSHIP_COOLDOWN_TICKS`] × `health_check_interval_secs`;
+    /// never below one second.
+    pub fn membership_cooldown(&self) -> std::time::Duration {
+        let secs = self
+            .membership_cooldown_secs
+            .unwrap_or_else(|| self.health_check_interval_secs.saturating_mul(DEFAULT_MEMBERSHIP_COOLDOWN_TICKS))
+            .max(1);
+        std::time::Duration::from_secs(secs)
+    }
+
     /// Applies `GOSSIP_*` environment variable overrides to this config in-place.
     ///
     /// Called automatically by [`load_from_file`](Self::load_from_file). Call
@@ -1474,6 +1500,9 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_REQUIRE_IDENTITY_PROOFS") {
             self.require_identity_proofs = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
+        }
+        if let Ok(v) = env::var("GOSSIP_MEMBERSHIP_COOLDOWN_SECS") {
+            self.membership_cooldown_secs = Some(v.parse().map_err(GossipError::Parse)?);
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_IDENTITY_ISSUER") {
             self.gateway_identity_issuer = Some(v);

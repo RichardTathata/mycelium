@@ -169,7 +169,9 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
 
 Requires the `metrics` feature. Every series carries a `cluster` label when `cluster_name` is set,
 so these generalise across environments. The `_peers_heard`/`_peers_known` gauges let you **qualify**
-an alert by the observer's own view health (the RT1/RT2 caveat, in PromQL form).
+an alert by the observer's own view health (the RT1/RT2 caveat, in PromQL form). In the JSON
+(`/stats`, `/gateway/fleet`) the same caveat is `view_confidence.staleness_known`: when `false`, no peer was
+heard inside the window and `max_staleness_ms` is a placeholder `0` — read it as *unknown*, never as fresh.
 
 ```yaml
 groups:
