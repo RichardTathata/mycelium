@@ -443,7 +443,10 @@ outside the list although the node is listed; each of the four negative cases ab
 each state a threat model in prose — foreign principals and authenticated-but-abusive clients (2), evidence
 confidentiality and hash-as-credential (3), a compromised former holder and a forged epoch (5) — with no single
 document they cite. **Adopt:** one revision of `docs/threat-model.md` covering the three, written in Phase A and
-cited by each item's PR 1 ADR. Not code; a gate.
+cited by each item's PR 1 ADR. Not code; a gate. *Done 2026-09-13:* `docs/threat-model.md` revision 2 — §5
+Boundaries D–G (domain edge · authenticated-but-abusive client · evidence confidentiality and the hash-as-credential
+· compromised former holder and forged epoch) and §6 (verified claims · scoped attestations · redaction rules ·
+protected reproduction artefacts, the §9 rule); items 2, 3, 5 cite it from their PR 1 ADRs.
 
 ### 6.6 The `3.0.0` removal ledger *(rev 1.2)*
 "Additive only on 2.x" is a slogan until the list of what a substrate major would remove exists. Seeded now,
