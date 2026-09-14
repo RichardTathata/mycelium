@@ -123,6 +123,34 @@ impl QuorumObserver for QuorumAckTracker {
     }
 }
 
+#[cfg(test)]
+mod floor_tests {
+    //! The regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8):
+    //! executable pins of *today's* ack semantics. PR 4a changes this meaning by changing this pin.
+    use super::*;
+
+    /// Pins the `>=` propagation semantics: any update from a distinct peer at or after the write's
+    /// HLC counts as an ack — including a **newer overwrite** that means the peer never held this
+    /// payload. This is the documented overclaim (`set_with_min_acks` rustdoc, plan D9); the
+    /// exact-identity ack of PR 4a must flip the last assertion, in the open.
+    #[test]
+    fn floor_observe_counts_any_update_at_or_after_write_ts() {
+        let (tracker, rx) = QuorumAckTracker::new(1_000, /* self */ 1);
+        tracker.observe(1, 1_000);      // loopback from self: never an ack
+        assert_eq!(*rx.borrow(), 0);
+        tracker.observe(2, 999);        // older than the write: not evidence of it
+        assert_eq!(*rx.borrow(), 0);
+        tracker.observe(2, 1_000);      // exact timestamp from a peer: an ack
+        assert_eq!(*rx.borrow(), 1);
+        tracker.observe(2, 1_000);      // the same peer again: still one distinct peer
+        assert_eq!(*rx.borrow(), 1);
+        // The overclaim: a *newer* value from another peer counts although that peer holds a
+        // different payload. Today's contract is propagation, not exact-identity (ADR §1, §7).
+        tracker.observe(3, 5_000);
+        assert_eq!(*rx.borrow(), 2, "propagation semantics: a newer overwrite counts as an ack today");
+    }
+}
+
 /// Error returned by [`GossipAgent::set_with_min_acks`] when the durability threshold
 /// is not reached within the timeout.
 #[non_exhaustive]

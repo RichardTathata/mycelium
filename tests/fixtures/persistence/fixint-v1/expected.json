@@ -1,0 +1,12 @@
+{
+  "format": "fixint-v1",
+  "since": "v1.0.0",
+  "live": {
+    "snap-only/a": "snapshot value",
+    "both/newer-in-wal": "wal wins",
+    "both/newer-in-snapshot": "snapshot wins",
+    "wal-only/older-than-watermark": "delayed remote update",
+    "wal-only/newer": "appended after snapshot"
+  },
+  "tombstoned": ["tomb/deleted-in-wal"]
+}

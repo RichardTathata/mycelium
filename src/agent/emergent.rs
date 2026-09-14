@@ -540,6 +540,10 @@ pub async fn run_explain_responder(
             maybe = rx.recv() => {
                 let Some(sig) = maybe else { break };
                 let req = super::rpc::RpcRequest::from(sig);
+                if let Err(e) = super::gateway_caller::verify(&ctx, &req) {
+                    tracing::warn!(sender = %req.sender(), "explain: caller context refused: {e}");
+                    continue;
+                }
                 let since = req.payload().get(..8)
                     .and_then(|b| <[u8; 8]>::try_from(b).ok())
                     .map(u64::from_le_bytes)

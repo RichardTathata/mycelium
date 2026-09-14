@@ -3,7 +3,7 @@ use crate::signal::reconcile_boundary_from_store;
 #[cfg(feature = "tls")] use crate::signal::kv_ns;
 use crate::store::{apply_and_notify, intern_key};
 use crate::framing::GossipUpdate;
-#[cfg(feature = "tls")] use bytes::Bytes;
+use bytes::Bytes;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::{
@@ -262,6 +262,47 @@ impl GossipAgent {
         // precondition for routing traffic to a node that already serves. Set here so *every* started
         // node reports ready; capability advertisement remains an independent, incremental gossip.
         self.task_ctx.soft_state_advertised.store(true, Ordering::Release);
+        // Item 7 (gateway caller identity): publish the caller-context marker. A secure-profile
+        // gateway dispatches to this node only because this key exists — it says "my RPC receive
+        // path strips and verifies the `GatewayCaller` envelope". Self-owned under the `sys/`
+        // tripwire. Written by every node, gateway or not: any node can serve a tool or a skill.
+        //
+        // Written LAZILY — once a peer is connected, or after a short grace period — never inside
+        // `start()`: a gossip write fans out to the *bootstrap* peers too (`tasks.rs`), and a peer
+        // that is not listening yet puts this node's outbound writer to it into reconnect backoff,
+        // during which every later frame to that peer is dropped (`writer.rs`). Found 2026-09-13 by
+        // `distributed_lock_grants_single_holder_under_race`: the first-started node's commit keys
+        // never reached its peer. The hazard is core's and predates this marker (any KV write
+        // immediately after `start()` with a not-yet-up bootstrap peer hits it); the marker simply
+        // must not be the write that trips it. `provider_enforces_context` treats self as enforcing,
+        // so a single-node gateway needs no marker at all.
+        {
+            let ctx = Arc::clone(&self.task_ctx);
+            let key: Arc<str> = Arc::from(super::gateway_caller::marker_key(&self.node_id).as_str());
+            let mut srx = self.shutdown_tx.subscribe();
+            self.spawn_task(async move {
+                // The task set is drained at shutdown: a node that stops before any peer connects
+                // must not hold shutdown for the grace period (tuple-space
+                // `shutdown_with_parked_take_waiter_is_prompt` caught exactly that).
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                while ctx.peers.pin().is_empty() && tokio::time::Instant::now() < deadline {
+                    tokio::select! {
+                        _ = srx.wait_for(|v| *v) => return,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    }
+                }
+                if *srx.borrow() { return; }
+                let _ = kv_set(&ctx, key,
+                               Bytes::from_static(super::gateway_caller::marker_value(&ctx.config)));
+            });
+            if self.config.gateway_caller_profile == crate::config::GatewayCallerProfile::Legacy {
+                warn!(
+                    "gateway_caller_profile = legacy: gateway-originated calls run under this node's \
+                     identity (providers cannot tell the client from the node). For a rolling-upgrade \
+                     window only — switch to `secure` once every provider publishes sys/caller-context/."
+                );
+            }
+        }
         info!("Gossip agent started: {}", self.node_id);
         Ok(())
     }
