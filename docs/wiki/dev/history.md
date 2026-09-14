@@ -44,6 +44,12 @@ on-disk fixtures (`tests/fixtures/persistence/fixint-v1`, replayed in CI). Docs:
 philosophy Property 8 + litmus tests 4–5, the compatibility rule, the CLAUDE.md ack invariant. Wiki:
 [runtime-invariants](architecture/runtime-invariants.md) §Persistence, [testing](testing/testing.md),
 [`.log/2026-09-13-item1-pr1-contract-adr.md`](.log/2026-09-13-item1-pr1-contract-adr.md).
+## v3 contracts axis — item 8: threat model revision 2 — 2026-09-13 (unreleased)
+
+`docs/threat-model.md` §5 Boundaries D–G (domain edge · authenticated-but-abusive client · evidence confidentiality /
+hash-as-credential · compromised former holder / forged epoch) and §6 (verified claims · scoped attestations · redaction
+· protected reproduction artefacts). A document, a Phase A gate: items 2, 3, 5 cite it from their PR 1 ADRs. Plan §6.5
+marked done. Wiki: [security](security.md), [`.log/2026-09-13-threat-model-rev2.md`](.log/2026-09-13-threat-model-rev2.md).
 
 ## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
 

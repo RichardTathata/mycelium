@@ -89,6 +89,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   node's WAL" is corrected; tuple-space `complete` is the pipeline's receipt, never a destination commit; and
   PR 2 delivers `local_durability` through a new receipt-returning propose API rather than a new field on
   `ConsensusResult::Committed`, which would break exhaustive destructures under Rust's rules.
+### Changed
+
+- **Threat model revision 2** (`docs/threat-model.md`; v3 contracts axis item 8, plan §6.5). §5 adds the boundaries the
+  axis introduces — **D** a foreign principal across a domain edge (item 2), **E** an authenticated-but-abusive client
+  (items 7 and 2), **F** evidence confidentiality and the hash-as-credential (item 3), **G** a compromised former
+  mandate holder and a forged epoch (item 5) — each with gains, mitigations by item, and the operator's residual, and
+  the shared rule that authority is recomputed, never inherited. §6 fixes what identity, evidence and replay artefacts
+  may carry: verified claims and scoped attestations, never credentials; replay bundles redacted at the recording seam;
+  a named protected-reproduction-artefact class. §1–4 unchanged. Items 2, 3 and 5 cite it from their PR 1 ADRs.
 
 ---
 
