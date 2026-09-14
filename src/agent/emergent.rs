@@ -48,7 +48,7 @@ const HEARD_WINDOW: Duration = Duration::from_secs(30);
 /// diagnostic so a consumer never mistakes a local estimate for fleet ground truth. During a
 /// partition or opacity storm `peers_heard ≪ peers_known` (or a large `max_staleness_ms`) is the
 /// node self-labelling its partial view. Phase-1 fields; Phase 2 may add true HLC skew + last-AE.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewConfidence {
     /// Whose local view this is.
     pub observer:         String,
@@ -60,12 +60,40 @@ pub struct ViewConfidence {
     /// when [`staleness_known`](Self::staleness_known) is `true`**: with no peer heard inside the
     /// window there is no observation, and the `0` here is a placeholder, not "perfectly fresh".
     pub max_staleness_ms: u64,
-    /// `false` when this node has heard from **no** peer inside the window (`peers_heard == 0`):
-    /// staleness is *unknown*, not zero. A consumer that reads `max_staleness_ms` without this flag
-    /// would mistake an isolated node for a perfectly fresh one (WP5, the governor-honesty fix).
-    pub staleness_known: bool,
     /// Is the observer itself opaque/shedding (its own inputs may be degraded)?
     pub self_degraded:    bool,
+}
+
+impl ViewConfidence {
+    /// Is [`max_staleness_ms`](Self::max_staleness_ms) an **observation**? `false` when this node
+    /// has heard from no peer inside the window (`peers_heard == 0`): staleness is then *unknown*,
+    /// and the `0` in that field is a placeholder. A consumer that reads the age without this
+    /// check mistakes an isolated node for the freshest observer in the fleet (WP5, the
+    /// governor-honesty fix).
+    ///
+    /// Derived, not stored: it is exactly `peers_heard > 0`. Kept a method so the struct's shape
+    /// is unchanged for existing literals and exhaustive destructures (an external review of this
+    /// change, 2026-09-14); the JSON carries it as a `staleness_known` key all the same.
+    pub fn staleness_known(&self) -> bool {
+        self.peers_heard > 0
+    }
+}
+
+// Hand-written so the serialized form can carry the derived `staleness_known` key without adding
+// a public field (see the accessor above). JSON consumers gain a key — additive for them — while
+// Rust consumers see no shape change. Deserialization was never derived for this type.
+impl Serialize for ViewConfidence {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("ViewConfidence", 6)?;
+        st.serialize_field("observer", &self.observer)?;
+        st.serialize_field("peers_known", &self.peers_known)?;
+        st.serialize_field("peers_heard", &self.peers_heard)?;
+        st.serialize_field("max_staleness_ms", &self.max_staleness_ms)?;
+        st.serialize_field("staleness_known", &self.staleness_known())?;
+        st.serialize_field("self_degraded", &self.self_degraded)?;
+        st.end()
+    }
 }
 
 /// A detected **governed-group conflict** (P1, the #56 condition): observed live membership outside
@@ -386,7 +414,6 @@ pub fn compute_view_confidence(ctx: &TaskCtx) -> ViewConfidence {
         peers_known,
         peers_heard,
         max_staleness_ms,
-        staleness_known: peers_heard > 0,
         self_degraded: super::opacity::is_self_opaque(&ctx.kv_state, &ctx.node_id),
     }
 }
@@ -1528,12 +1555,17 @@ mod tests {
         );
         let vc = compute_view_confidence(&agent.task_ctx);
         assert_eq!(vc.peers_heard, 0);
-        assert!(!vc.staleness_known, "no observation ⇒ unknown, not fresh");
+        assert!(!vc.staleness_known(), "no observation ⇒ unknown, not fresh");
+        // The JSON carries the derived key even though the struct gained no field.
+        let json = serde_json::to_value(&vc).unwrap();
+        assert_eq!(json["staleness_known"], false);
+        assert_eq!(json["max_staleness_ms"], 0, "a placeholder, not an observation");
         // One peer heard just now ⇒ known, and the placeholder becomes a real (small) age.
         agent.task_ctx.peers.pin().insert(crate::NodeId::new("127.0.0.1", 2).unwrap(), std::time::Instant::now());
         let vc = compute_view_confidence(&agent.task_ctx);
         assert_eq!(vc.peers_heard, 1);
-        assert!(vc.staleness_known);
+        assert!(vc.staleness_known());
+        assert_eq!(serde_json::to_value(&vc).unwrap()["staleness_known"], true);
     }
 
     /// A healthy-fleet snapshot with a full, current view. Tests mutate one axis at a time.
@@ -1542,7 +1574,7 @@ mod tests {
             observer: "n1".into(),
             view_confidence: ViewConfidence {
                 observer: "n1".into(), peers_known: 3, peers_heard: 3,
-                max_staleness_ms: 0, staleness_known: true, self_degraded: false,
+                max_staleness_ms: 0, self_degraded: false,
             },
             governed_groups: vec![],
             capability_coverage_gaps: vec![],

@@ -48,8 +48,10 @@ philosophy Property 8 + litmus tests 4–5, the compatibility rule, the CLAUDE.m
 
 Item 4's standalone honesty fix (plan §10.12.5). `membership_cooldown_secs` replaces the unexported
 `3 × health_check_interval` constant (default preserved; env override; ≥ 1 s; read at start — live timing intents
-do not alter it, decided here); `ViewConfidence::staleness_known` so an isolated node's `max_staleness_ms: 0`
-reads as unknown. Two pins. [`.log/2026-09-13-wp5-cooldown-parameter.md`](.log/2026-09-13-wp5-cooldown-parameter.md).
+do not alter it, decided here); `ViewConfidence::staleness_known()` — a derived accessor plus a JSON key, **not** a new public field
+(review, 2026-09-14: the struct is publicly constructible and not `#[non_exhaustive]`) — so an isolated node's
+`max_staleness_ms: 0` reads as unknown. Two pins; a §6.6 ledger entry schedules `#[non_exhaustive]` for the
+operator-constructed config structs, the break that every config-field addition has been making quietly. [`.log/2026-09-13-wp5-cooldown-parameter.md`](.log/2026-09-13-wp5-cooldown-parameter.md).
 
 ## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
 

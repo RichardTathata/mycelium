@@ -1310,6 +1310,17 @@ impl GossipConfig {
         Ok(())
     }
 
+    /// The membership-governor cooldown in force: the explicit `membership_cooldown_secs`, or the
+    /// documented default of [`DEFAULT_MEMBERSHIP_COOLDOWN_TICKS`] × `health_check_interval_secs`;
+    /// never below one second.
+    pub fn membership_cooldown(&self) -> std::time::Duration {
+        let secs = self
+            .membership_cooldown_secs
+            .unwrap_or_else(|| self.health_check_interval_secs.saturating_mul(DEFAULT_MEMBERSHIP_COOLDOWN_TICKS))
+            .max(1);
+        std::time::Duration::from_secs(secs)
+    }
+
     /// Applies `GOSSIP_*` environment variable overrides to this config in-place.
     ///
     /// Called automatically by [`load_from_file`](Self::load_from_file). Call
@@ -1335,17 +1346,6 @@ impl GossipConfig {
     /// `GOSSIP_MAX_STORE_ENTRIES`, `GOSSIP_MAX_CLOCK_DRIFT_MS`,
     /// `GOSSIP_EPIDEMIC_EXTRA_PEERS`,
     /// `GOSSIP_GATEWAY_AUTH_TOKEN`.
-    /// The membership-governor cooldown in force: the explicit `membership_cooldown_secs`, or the
-    /// documented default of [`DEFAULT_MEMBERSHIP_COOLDOWN_TICKS`] × `health_check_interval_secs`;
-    /// never below one second.
-    pub fn membership_cooldown(&self) -> std::time::Duration {
-        let secs = self
-            .membership_cooldown_secs
-            .unwrap_or_else(|| self.health_check_interval_secs.saturating_mul(DEFAULT_MEMBERSHIP_COOLDOWN_TICKS))
-            .max(1);
-        std::time::Duration::from_secs(secs)
-    }
-
     pub fn apply_env_overrides(&mut self) -> Result<(), GossipError> {
         if let Ok(v) = env::var("GOSSIP_BIND_ADDRESS") {
             self.bind_address = v;
