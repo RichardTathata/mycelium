@@ -34,21 +34,40 @@ impl AppliedPolicy {
     }
 }
 
-/// Check whether `req`'s (signature-verified) sender may invoke a capability guarded by
-/// `applied`'s allowlist. On denial, seals an `Invoke`/`Denied` audit record — verified
-/// principal, `authorized_callers` reason — into the provider's tamper-evident chain before
-/// returning [`CallerVerdict::Denied`]. Call this in a provider's own `rpc_rx` loop and answer
-/// denied callers with an error.
+/// Check whether the principal behind `req` may invoke a capability guarded by `applied`'s
+/// allowlist. **Caller-context aware** (core item 7): a call a gateway dispatched for a client
+/// is judged by the *client's* principal (`oidc:…`, `token:…`, `anonymous`), never by the
+/// gateway node — listing the node does not admit its clients; a direct in-mesh call is judged
+/// by the (signature-verified) sender node id or its roles, as before. A caller context that
+/// fails verification is a denial (reason `caller_context`), never a fallback to the node.
+///
+/// On denial, seals an `Invoke`/`Denied` audit record — the principal, the reason — into the
+/// provider's tamper-evident chain before returning [`CallerVerdict::Denied`]. Call this in a
+/// provider's own `rpc_rx` loop and answer denied callers with an error.
 ///
 /// An empty allowlist admits everyone (and seals nothing).
 pub fn check_caller(applied: &AppliedPolicy, req: &RpcRequest) -> CallerVerdict {
-    let agent = applied.agent();
-    if agent.caller_authorized(req.sender(), applied.authorized_callers()) {
-        metrics::counter!("mycelium_guardrails_admits_total").increment(1);
-        CallerVerdict::Admitted
-    } else {
-        seal_denial(agent, req);
-        CallerVerdict::Denied
+    decide(applied.agent(), req, applied.authorized_callers())
+}
+
+fn decide(agent: &Arc<GossipAgent>, req: &RpcRequest, allow: &[Arc<str>]) -> CallerVerdict {
+    match agent.request_authorized(req, allow) {
+        Ok(true) => {
+            metrics::counter!("mycelium_guardrails_admits_total").increment(1);
+            CallerVerdict::Admitted
+        }
+        Ok(false) => {
+            let principal = agent.request_principal(req).map(|p| p.name()).unwrap_or_else(|_| req.sender().to_string());
+            seal_denial(agent, req, principal, "authorized_callers");
+            CallerVerdict::Denied
+        }
+        Err(e) => {
+            // The frame's sender is the only verified fact left; the claimed principal is not
+            // evidence, so it is not the record's principal.
+            seal_denial(agent, req, req.sender().to_string(), "caller_context");
+            tracing::warn!(kind = %req.kind(), sender = %req.sender(), "Tier C: caller context refused: {e}");
+            CallerVerdict::Denied
+        }
     }
 }
 
@@ -87,17 +106,18 @@ where
     let task = tokio::spawn(async move {
         let mut rx = agent.service().rpc_rx(Arc::clone(&kind));
         while let Some(req) = rx.recv().await {
-            if agent.caller_authorized(req.sender(), &allow) {
-                metrics::counter!("mycelium_guardrails_admits_total").increment(1);
-                let h = Arc::clone(&handler);
-                let a = Arc::clone(&agent);
-                tokio::spawn(async move {
-                    h(a, req).await;
-                });
-            } else {
-                seal_denial(&agent, &req);
-                let err = br#"{"error":"unauthorized: caller not in authorized_callers"}"#.to_vec();
-                agent.service().rpc_respond(&req, err);
+            match decide(&agent, &req, &allow) {
+                CallerVerdict::Admitted => {
+                    let h = Arc::clone(&handler);
+                    let a = Arc::clone(&agent);
+                    tokio::spawn(async move {
+                        h(a, req).await;
+                    });
+                }
+                CallerVerdict::Denied => {
+                    let err = br#"{"error":"unauthorized: caller not in authorized_callers"}"#.to_vec();
+                    agent.service().rpc_respond(&req, err);
+                }
             }
         }
     });
@@ -105,20 +125,22 @@ where
     GuardHandle { task }
 }
 
-/// Seal one `Invoke`/`Denied` record with the verified caller as principal and the RPC kind as
-/// target. Best-effort: a node without a tls identity cannot sign, so the seal is dropped (the
-/// gate itself still denies).
-fn seal_denial(agent: &Arc<GossipAgent>, req: &RpcRequest) {
+/// Seal one `Invoke`/`Denied` record with the denied principal (a gateway client's principal,
+/// or the verified sender node) and the RPC kind as target; `detail` also names the gateway
+/// node when a client was behind the call. Best-effort: a node without a tls identity cannot
+/// sign, so the seal is dropped (the gate itself still denies).
+fn seal_denial(agent: &Arc<GossipAgent>, req: &RpcRequest, principal: String, reason: &str) {
     // Operator signal: how many unauthorized invokes the Tier-C gate stopped (visible on the
     // node's /metrics when the embedder enables mycelium's `metrics` feature; a no-op otherwise).
     metrics::counter!("mycelium_guardrails_denials_sealed_total").increment(1);
     let detail = format!(
-        r#"{{"nonce":{},"reason":"authorized_callers"}}"#,
-        req.nonce()
+        r#"{{"nonce":{},"reason":"{reason}","via":"{}"}}"#,
+        req.nonce(),
+        req.sender()
     );
     let _ = agent.audit(
         AuditAction::Invoke,
-        req.sender().to_string(),
+        principal,
         req.kind().to_string(),
         AuditOutcome::Denied,
         Some(detail),

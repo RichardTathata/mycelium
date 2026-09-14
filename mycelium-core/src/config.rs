@@ -116,6 +116,42 @@ pub struct GatewayTlsConfig {
     pub key_pem_path: Option<PathBuf>,
 }
 
+/// How the HTTP gateway identifies the **originating client** to the provider it dispatches
+/// to (v3 contracts axis, item 7 — `docs/plans/v3-contracts-axis.md` §6.4, D27).
+///
+/// Every gateway-originated RPC (`POST /mcp` `tools/call`, `POST /a2a`, `/gateway/rpc/call`,
+/// `/gateway/scatter`, `/gateway/overlay/emit_reliable`, `/gateway/llm/*`) used to run under
+/// the **node's** identity, so a provider's `authorized_callers` saw the gateway node and never
+/// the client — a confused deputy. Under the secure profile the auth layer constructs a
+/// `GatewayCaller` (resolved principal · this node as the gateway · the scopes granted for the
+/// request) and the node attests it over the request digest; the provider verifies it and
+/// authorises the *client*, never the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayCallerProfile {
+    /// **Default.** Every gateway dispatch carries a caller context. The gateway refuses
+    /// (rather than silently running as the node) when it cannot: a provider that does not
+    /// enforce the context (no `sys/caller-context/{provider}` marker — a pre-2.5 node) is
+    /// answered with an explicit error naming the provider.
+    #[default]
+    Secure,
+    /// Node-as-caller dispatch, exactly as before item 7. **Only for a rolling upgrade window**
+    /// (gateways upgraded before their providers); logged at `warn!` on start. A §6.6 removal-ledger
+    /// entry: it never silently preserves impersonation in the secure profile.
+    Legacy,
+}
+
+impl std::str::FromStr for GatewayCallerProfile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "secure" => Ok(Self::Secure),
+            "legacy" => Ok(Self::Legacy),
+            other => Err(format!("unknown gateway caller profile '{other}' (expected 'secure' or 'legacy')")),
+        }
+    }
+}
+
 /// A gateway bearer token paired with its OAuth2-style scope grants.
 ///
 /// Scopes follow the `resource:verb` convention (`kv:read`, `kv:write`,
@@ -128,6 +164,22 @@ pub struct GatewayTlsConfig {
 /// deployments upgrade with no behaviour change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayToken {
+    /// The bearer token presented as `Authorization: Bearer <token>`.
+    pub token: String,
+    /// Scopes granted to this token. `["*"]` is full access.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+/// A **named** gateway bearer token (v3 item 7, review finding 2): its principal is
+/// `token:{issuer}/{name}` — stable across list reordering and qualified by the issuing gateway
+/// (`GossipConfig::gateway_identity_issuer`, default this node's id), so two gateways' first tokens
+/// are never the same identity unless the operator gives them the same issuer on purpose.
+/// Resolved before [`GatewayToken`] entries, whose principal stays positional (`token:{issuer}/#{i}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayNamedToken {
+    /// Stable identity of this credential within the issuer's namespace (never the secret).
+    pub name: String,
     /// The bearer token presented as `Authorization: Bearer <token>`.
     pub token: String,
     /// Scopes granted to this token. `["*"]` is full access.
@@ -794,6 +846,21 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_scoped_tokens: Vec<GatewayToken>,
 
+    /// Named scoped gateway tokens (`compliance`): like [`gateway_scoped_tokens`](Self::gateway_scoped_tokens)
+    /// but each carries a stable `name`, so its caller principal is `token:{issuer}/{name}` rather than a
+    /// list position. Prefer these; positional tokens are kept for compatibility.
+    #[serde(default)]
+    pub gateway_named_tokens: Vec<GatewayNamedToken>,
+
+    /// The issuing authority that qualifies every gateway-local caller principal (item 7):
+    /// `token:{issuer}/…` for bearer tokens, and the `via` a provider sees. `None` (default) = this
+    /// node's id, so two gateways never mint the same identity by accident. Set the **same** value on
+    /// gateways that deliberately share one identity namespace (a load-balanced pair with identical
+    /// token tables). OIDC principals are qualified by the IdP issuer instead. Env:
+    /// `GOSSIP_GATEWAY_IDENTITY_ISSUER`.
+    #[serde(default)]
+    pub gateway_identity_issuer: Option<String>,
+
     /// **Require signed identity proofs** (identity-auth Phase 3). When `true`, a `sys/identity/{V}`
     /// entry **without** a valid `sys/identity-proof/{V}` is **rejected** (not merged into
     /// `peer_keys`) — closing the last poisoning residual (an unsigned entry mimicking a pre-Phase-2
@@ -804,6 +871,14 @@ pub struct GossipConfig {
     /// See `docs/operations/cert-rotation.md`.
     #[serde(default)]
     pub require_identity_proofs: bool,
+
+    /// Gateway caller identity profile (item 7). `Secure` (default): every gateway-originated
+    /// dispatch carries an auth-layer-constructed, node-attested `GatewayCaller`, and a provider
+    /// that cannot enforce it is refused explicitly. `Legacy`: the pre-item-7 node-as-caller
+    /// dispatch, for a rolling-upgrade window only. Set via `GOSSIP_GATEWAY_CALLER_PROFILE`
+    /// (`secure` | `legacy`). See `docs/operations/rbac.md` §7.
+    #[serde(default)]
+    pub gateway_caller_profile: GatewayCallerProfile,
 
     /// Outbound egress allow-policy (WS3). Default: empty = allow all. Set
     /// `allow_hosts` to constrain which external hosts the substrate may reach
@@ -895,7 +970,10 @@ impl Default for GossipConfig {
             emergent_detectors_enabled:    false,
             gateway_auth_token:            None,
             gateway_scoped_tokens:         Vec::new(),
+            gateway_named_tokens:          Vec::new(),
+            gateway_identity_issuer:       None,
             require_identity_proofs:       false,
+            gateway_caller_profile:        GatewayCallerProfile::Secure,
             egress:                        EgressPolicy::default(),
             #[cfg(feature = "compliance")]
             oidc:                          None,
@@ -1396,6 +1474,15 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_REQUIRE_IDENTITY_PROOFS") {
             self.require_identity_proofs = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_IDENTITY_ISSUER") {
+            self.gateway_identity_issuer = Some(v);
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_CALLER_PROFILE") {
+            self.gateway_caller_profile = v.parse().map_err(|reason| GossipError::InvalidField {
+                field:  "gateway_caller_profile",
+                reason,
+            })?;
         }
         if let Ok(v) = env::var("GOSSIP_LOCALITY_PATH") {
             self.locality_path = v

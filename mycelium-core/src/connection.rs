@@ -27,8 +27,8 @@ use tracing::{error, warn};
 /// write naming *this* node is a namespace-ownership violation. `sys/quorum/`
 /// is deliberately excluded — peers legitimately write quorum evidence naming
 /// the node they observed.
-const SELF_OWNED_SYS_PREFIXES: [&str; 4] =
-    ["sys/identity/", "sys/load/", "sys/role/", "sys/tuple/"];
+const SELF_OWNED_SYS_PREFIXES: [&str; 5] =
+    ["sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/"];
 
 /// `sys/` namespace-ownership tripwire — **detection, not prevention**.
 ///

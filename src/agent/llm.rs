@@ -240,6 +240,18 @@ async fn handle_llm_invoke(
     use super::rpc::RpcRequest;
     let req = RpcRequest(signal);
 
+    // Item 7 (review finding 3): the built-in provider verifies the caller context before it
+    // touches a backend; a forged / unsigned / malformed / missing context is refused, never
+    // stripped and executed.
+    if let Err(e) = super::gateway_caller::verify(&ctx, &req) {
+        tracing::warn!(sender = %req.sender(), "llm.invoke: caller context refused: {e}");
+        let err = serde_json::to_vec(&LlmInvokeError {
+            error: "caller_context_refused".into(), detail: e.to_string(),
+        }).unwrap_or_default();
+        rpc_respond_ctx(&ctx, &req, Bytes::from(err));
+        return;
+    }
+
     // Parse request
     let invoke_req: LlmInvokeRequest = match serde_json::from_slice(&req.payload()) {
         Ok(r)  => r,

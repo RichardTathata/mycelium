@@ -11,6 +11,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Gateway caller identity (v3 contracts axis item 7, `docs/plans/v3-contracts-axis.md` §6.4 / D27).**
+  Every gateway-originated dispatch — `POST /mcp` `tools/call`, `POST /a2a`, `/gateway/rpc/call`,
+  `/gateway/scatter`, `/gateway/overlay/emit_reliable`, `/gateway/llm/{call,stream}` — used to run under
+  the **node's** identity, so a provider's `authorized_callers` saw the gateway node and never the client
+  (a confused deputy; the 2026-09-05 `/mcp` fix put the route behind auth but did not tell the provider who
+  called). Now the auth layer constructs a `GatewayCaller` on every dispatch — the **originating principal**
+  (`oidc:{subject}` · `token:#{index}` · `token:legacy` · `anonymous`, never the credential), the **gateway
+  node** acting on its behalf (`via`, checked against the frame's signature-verified sender), and the
+  **authority granted for the request** (the credential's scopes ∩ the route's scope, never `*`) — and the
+  node **attests it** (Ed25519 over `principal ‖ via ‖ scopes ‖ issued_at ‖ sha256(payload)` under `tls`).
+  It rides inside the RPC payload after the nonce; **wire v12 unchanged**. `RpcRequest::payload()` strips
+  it, so existing provider loops see exactly the application bytes; providers read it via
+  `GossipAgent::request_principal` / `gateway_caller`, and (`compliance`) authorise with the new
+  **`request_authorized`** — a gateway client is judged by its *principal* (listing the gateway node admits
+  nothing), a direct node call by node id / roles as before. `mycelium-guardrails` `check_caller` /
+  `guarded_rpc_serve` and SkillRunner use it; denial seals now name the client principal and the `via` node.
+  New: `McpHandle::register_mcp_tool_with_principal`; `/gateway/rpc/serve/{kind}` events carry an optional
+  `caller` object (`principal`, `via`, `scopes`, `attested`); `/a2a` resolves an *optional* bearer (valid ⇒
+  its principal, none ⇒ `anonymous`, unrecognised ⇒ 401 — never downgraded); `sys/caller-context/{node}`
+  marker (`b"1"`) written at start by every node. **Config:** `gateway_caller_profile` (`secure` default ·
+  `legacy`; env `GOSSIP_GATEWAY_CALLER_PROFILE`). **Secure profile refuses** — never silently runs as the
+  node — a provider without the marker (JSON-RPC `-32021` / HTTP `412` `provider_without_caller_context`,
+  naming the provider), a dispatch site without a context (`-32020`), and, at the provider, a forged /
+  unsigned / mis-attributed context (`CallerError`; MCP `-32022`). The `legacy` profile is node-as-caller
+  for a rolling-upgrade window (gateways upgraded before providers), logged at `warn!`, and a §6.6
+  removal-ledger entry. Gates: `gateway_caller_tests` in `src/agent/http.rs` (the four negative cases + the
+  `authorized_callers` gate under `tls`+`compliance`, `/a2a`) and `agent::gateway_caller::tests`.
+  Metric: `mycelium_gateway_caller_refusals_total{reason}`. Operator page: `docs/operations/rbac.md` §7.
+  **Behaviour note:** a deployment that listed the *gateway node* in a provider's `authorized_callers` to
+  admit HTTP clients must now list the clients' principals (that node-listing was the impersonation).
+  **Hardened after an external review of the first cut (2026-09-13/14), four findings, all closed with
+  regression tests:** (1) a raw `/gateway/signal/emit` of RPC-shaped bytes reached a provider *as the node*
+  — a secure-profile gateway node now publishes marker `"2"` and wraps its own `rpc_call`s in a signed
+  `node:{self}` envelope, so a bare frame from it is `CallerError::Missing`, never its action
+  (`raw_gateway_signal_cannot_pass_as_the_node`); (2) `token:#0` named the same identity on every gateway —
+  principals are now **issuer-qualified** (`token:{issuer}/{name|#i|legacy}`, `oidc:{idp}/{subject}`;
+  `gateway_identity_issuer`, default the node id; new `gateway_named_tokens` for stable names)
+  (`token_identities_are_qualified_by_the_issuing_gateway`); (3) the built-in LLM provider stripped an
+  envelope without verifying it — **`ServiceHandle::rpc_rx` now verifies at the receive boundary** and
+  answers refusals itself, covering every companion loop, and the LLM / MCP / explain receivers verify
+  directly (`llm_provider_refuses_an_unverified_context`); (4) malformed or oversized frames read as
+  "no envelope" and were admitted as the node — framing is a three-way `Frame::{Unframed, Framed,
+  Malformed}`, malformed refuses, and the producer refuses an over-bound envelope (`-32023` / HTTP 413)
+  instead of truncating (`malformed_frames_are_refused_never_treated_as_the_node`,
+  `producer_refuses_an_oversized_envelope`).
 - **Contracts axis item 1 PR 1 — the contracts-and-receipts ADR, the regression floor, golden on-disk
   fixtures** (`docs/design/contracts-receipts.md`; plan `docs/plans/v3-contracts-axis.md` §3, D8/D11/D24).
   The record states what an acknowledgement proves today at every site (`kv().set` = queued for gossip;
