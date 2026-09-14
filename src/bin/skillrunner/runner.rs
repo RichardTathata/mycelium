@@ -56,7 +56,13 @@ impl SkillRunner {
     async fn handle(&self, req: RpcRequest) {
         let start = Instant::now();
         let nonce = req.nonce();
-        let caller = req.sender().to_string();
+        // Item 7: the principal to attribute and authorise — a gateway client's principal when a
+        // verified caller context rides on the request, else the (signature-verified) sender node.
+        let caller = self
+            .agent
+            .request_principal(&req)
+            .map(|p| p.name())
+            .unwrap_or_else(|_| req.sender().to_string());
         let ns = self.skill.capability.ns.clone();
         let name = self.skill.capability.name.clone();
 
@@ -64,8 +70,11 @@ impl SkillRunner {
         // identity the incoming RPC sender is signature-verified at the
         // connection layer, so `req.sender()` is trustworthy here — the only
         // place `authorized_callers` can be *enforced* (the caller controls its
-        // own resolve). An empty allowlist is open. Denial is logged to the
-        // audit trail and answered with an error, never silently dropped.
+        // own resolve). Item 7: a gateway-dispatched call is judged by the
+        // client's verified principal, never by the gateway node; a caller
+        // context that fails verification is a denial. An empty allowlist is
+        // open. Denial is logged to the audit trail and answered with an
+        // error, never silently dropped.
         #[cfg(feature = "compliance")]
         {
             let allow: Vec<std::sync::Arc<str>> = self
@@ -75,7 +84,14 @@ impl SkillRunner {
                 .as_ref()
                 .map(|p| p.authorized_callers.iter().map(|s| std::sync::Arc::<str>::from(s.as_str())).collect())
                 .unwrap_or_default();
-            if !self.agent.caller_authorized(req.sender(), &allow) {
+            let (admitted, reason) = match self.agent.request_authorized(&req, &allow) {
+                Ok(ok) => (ok, "authorized_callers"),
+                Err(e) => {
+                    tracing::warn!("skill {ns}/{name}: caller context refused from {}: {e}", req.sender());
+                    (false, "caller_context")
+                }
+            };
+            if !admitted {
                 tracing::warn!("skill {ns}/{name}: denied unauthorized caller {caller}");
                 // Tamper-evident audit of the denial — verified principal, Denied outcome.
                 let _ = self.agent.audit(
@@ -83,7 +99,7 @@ impl SkillRunner {
                     caller.clone(),
                     format!("{ns}/{name}"),
                     mycelium::AuditOutcome::Denied,
-                    Some(serde_json::json!({"nonce": nonce, "reason": "authorized_callers"}).to_string()),
+                    Some(serde_json::json!({"nonce": nonce, "reason": reason, "via": req.sender().to_string()}).to_string()),
                 );
                 let err = serde_json::json!({"error": "unauthorized: caller not in authorized_callers"});
                 self.agent.service().rpc_respond(&req, Bytes::from(serde_json::to_vec(&err).unwrap_or_default()));

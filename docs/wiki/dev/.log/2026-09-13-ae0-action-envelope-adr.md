@@ -23,6 +23,18 @@ required boundary is rejected. Eleven negative fixtures are the CI gate the seam
 *named* at the gateway and closed only inside AE2's effect boundary. Mandate and budget facts are absent until
 items 5 and 4 exist — a clause that needs them yields `Indeterminate`, not a guess.
 
+**External review before merge (2026-09-14), three P2 gaps, all taken.** (1) The draft routed evidence "through the
+audit chain and out the sink" — but `seal_and_write` stores the whole signed record in gossip KV first, contradicting
+§6.7's *never gossip*. Now: a **node-local evidence journal** holds the records; the gossiped chain carries only a
+**safe reference record** (kind, ids, verified principal, verdict, policy revision, content hash), so the chain still
+covers the evidence without disseminating it. (2) `AuditSink::export` returns nothing, runs on a drain task and drops
+on saturation, so it cannot be the strict profile's durability barrier. Now: the journal's `append -> LocalSync`
+(item 1's receipt, `OnDisk` before the effect) is the ack-capable contract; the exporter is a separate cursor reader;
+three failure tests are named (saturation, persistence failure, lost acknowledgement ⇒ refuse in the strict profile).
+(3) "deny + no execution ⇒ effect none" was an inference from silence. Now: `none` only from an explicit **blocked**
+attestation scoped to the enforcement point and `attempt_id` (`execution: not_dispatched`, proposed to the consumer as
+a contract-1.2 addition); otherwise `unknown` / `unobserved`.
+
 **Next.** The evaluator seam (public, on item 7's `ResolvedPrincipal`): types, the hook between `gateway_auth`
 and the MCP dispatch, the reference evaluator, the fixtures as tests, secure-profile refusal. Then AE-T T2–T4 in
 the private companion.

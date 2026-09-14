@@ -102,24 +102,50 @@ What the enforcement point can assert about the authority behind the actor, each
 
 ## 5. Evidence — five records, one chain
 
-Every record is sealed into the node's tamper-evident audit chain (`AuditRecord { principal, action, target,
-outcome, detail }`, Ed25519, `sys/audit/`), leaves through the **`AuditSink`** (never through gossip — sensitive
-payloads stay outside KV; §6.7's rule), and carries: source identity · event time and receipt time · `policy` and
-`mandate` revision · `coverage` · `correlation` · correction/supersession references.
+Every record is written to a **node-local evidence journal** — durable, append-only, never gossiped — and
+carries: source identity · event time and receipt time · `policy` and `mandate` revision · `coverage` ·
+`correlation` · correction/supersession references. What enters the gossiped, tamper-evident audit chain
+(`sys/audit/{node}/{seq}`, `AuditRecord { principal, action, target, outcome, detail }`, Ed25519) is a **safe
+reference record** only: the record's kind, the `operation_id` / `attempt_id`, the verified principal, the
+decision verdict, the policy revision, and the **content hash** of the journal record — never arguments, argument
+digests' pre-images, resource details beyond the catalogue id, or any payload. The chain's ordering and
+hash-linking therefore cover the evidence (a journal record that does not match its chained hash is detectable)
+while the evidence itself stays where §6.7's rule puts it: outside gossip KV, leaving only through an exporter.
+*Why this correction (review of the first draft):* `seal_and_write` stores the complete signed record in gossip KV
+before mirroring it to the sink, so "seal it into the chain, export through the sink" would have disseminated
+sensitive action evidence to every node.
+
+**The journal contract (the acknowledgement the strict profile needs).** The journal is item 1's local-sync
+receipt applied to evidence: `append(record) -> LocalSync` returns `OnDisk` only after the record is fsynced,
+`Failed` when durability was not established, `NotConfigured` when the profile has no journal. The **exporter** is
+a separate cursor-based reader of the journal (the RA outbox shape, §6.7): it batches, signs and delivers, and it
+never gates an effect. The existing `AuditSink::export(&record)` returns nothing, runs on a drain task and can drop
+records when its bounded channel saturates — it is a mirror, and it **cannot** provide a durability barrier;
+AE0 therefore names the journal, not the sink, as the ack-capable contract. Failure tests the seam must carry:
+journal queue saturation ⇒ the strict profile refuses the effect (never drops the record silently); persistence
+failure (`Failed`) ⇒ refuse; a lost acknowledgement (the append future is dropped or times out) ⇒ refuse and
+record `DeliveryUnknown` for the evidence itself; the lenient profile logs and proceeds, and its evidence says so.
 
 | Record | Establishes | Never implies |
 |---|---|---|
 | **requested** | the envelope was assembled for `(actor, operation, resource)` | that it was permitted or ran |
 | **decided** | `permit` / `deny` / `indeterminate`, the checked constraints, `policy.revision` | that anything executed |
+| **blocked** | the enforcement point refused the dispatch for this `attempt_id` — an explicit attestation, scoped to that point | that no other route reached the resource |
 | **execution attempted** | dispatch happened (the receipt ladder's first rung: local application at the provider, or `DeliveryUnknown`) | completion |
 | **execution completed / failed / unknown** | item 1's receipt for `operation_id` / `attempt_id` — reuse, not a parallel ledger | the intended business outcome |
 | **outcome observed** | an *independent* observation of the effect, by a named observer | — acceptance remains a separate attributable decision (item 3) |
 
-Consumers read `effect` as `completed` / `failed` only when the execution record says so; `none` on `deny` with no
-execution; `unknown` on `attempted` / `unknown`; `unstated` when neither is given. `deny` + `completed` is an
+Consumers read `effect` as `completed` / `failed` only when the execution record says so; `unknown` on
+`attempted` / `unknown`; `unstated` when neither is given. **A denial with no execution record does not mean
+"no effect"** — a missing or delayed record is silence, and silence is never reassurance. `none` is read only from
+an explicit **blocked attestation**: the enforcement point records, for that `attempt_id`, that it refused the
+dispatch (`execution: not_dispatched`, scoped to *this* enforcement point — it says nothing about routes it does not
+front). Without that attestation the execution state is `unknown` or `unobserved`. `deny` + `completed` is an
 **enforcement gap** and is exported as such, never hidden. **Export failure must not create an unrecorded
-effect**: each profile declares its durable-audit-before-effect boundary (the sink's batch is acked before the
-effect proceeds, or the effect is refused) — a claim only the strict profile makes.
+effect**: the strict profile's boundary is *journal append acknowledged (`OnDisk`) before the effect proceeds, or
+the effect is refused*; a lenient profile declares that it does not make this claim. (`not_dispatched` is proposed to
+the evidence consumer as a contract-1.2 addition to its `execution` vocabulary — handover seam 2; until adopted,
+the runtime exports `unknown` with the attestation carried in the native record behind `evidence_ref`.)
 
 **Identity in evidence.** The logical agent id is the `subject`; a shared service principal is reported as such
 (no `execution_identity`); the item 7 delegation chain is carried in the native record behind `evidence_ref`,
@@ -203,7 +229,9 @@ deployment report, an ambiguous mapping or an absence of records.
 
 - **The seam** (public, on item 7): `ActionEvaluator` + `ActionEnvelope` + `Decision` types, the hook between
   `gateway_auth` and the MCP `tools/call` dispatch (then `/a2a`), the reference evaluator, the fixtures of §9 as
-  tests, `Indeterminate ⇒ refuse` in the secure profile. Five-part statement and SDK/operator parity in that PR.
+  tests, `Indeterminate ⇒ refuse` in the secure profile; **the node-local evidence journal** with its
+  `append -> LocalSync` receipt, the safe reference record into the audit chain, and the three failure tests
+  (saturation, persistence failure, lost acknowledgement). Five-part statement and SDK/operator parity in that PR.
 - **AE-T T2–T4** (private companion, on the seam): the Cedar adapter, the signed `AuditSink` exporter into the
   consumer's envelopes (Ed25519 over canonical JSON, ≤ 1000 records / ≤ 2 MiB, cursors, same `batch_id` ⇒
   byte-identical body), the procurement mapping subset; T-gate = scenario 2 locally.

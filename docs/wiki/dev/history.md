@@ -22,6 +22,16 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 7 gateway caller identity — 2026-09-13 (unreleased, main)
+
+The first code item of the v3 queue (plan rev 1.10 §10.12.1; private WP1). `GatewayCaller` on every
+gateway dispatch path (`tools/call`, `/a2a`, `rpc/call`, `scatter`, `emit_reliable`, `llm/*`): auth-layer
+constructed, node-attested over the request digest, carried inside the RPC payload (wire v12 unchanged),
+verified at the provider, authorised by *client principal* via `request_authorized` (guardrails +
+SkillRunner switched). `gateway_caller_profile` secure/legacy; `sys/caller-context/{node}` marker; the four
+negative cases + the `authorized_callers` gate + `/a2a` in CI. SDK parity: `RpcRequest.caller` on
+`rpc_serve` / `rpcServe`, READMEs; `docs/operations/rbac.md` §7. Wiki: [security](security.md) §WS1.5,
+[`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).
 ## v3 contracts axis — AE0: the action-envelope ADR — 2026-09-13 (unreleased)
 
 Queue §10.12.3, beside item 1's ADR. `docs/design/action-envelope-ae0.md`: the three questions a protected action

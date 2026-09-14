@@ -4,7 +4,7 @@
 
 ## Node-level HTTP endpoints (`gateway` feature)
 
-The four probes are **public by design** (M16 edge criterion — what a balancer or scraper needs with no credential); `/consensus/{*slot}` sits behind the gateway bearer when a token model is set (2026-09-05, with `/mcp` and `/signals/{kind}` — [security](security.md) §3). The whole public surface is the probes, `/bulk/{id}` (nonce-capability URL) and the A2A descriptor — `docs/operations/rbac.md`.
+The four probes are **public by design** (M16 edge criterion — what a balancer or scraper needs with no credential); `/consensus/{*slot}` sits behind the gateway bearer when a token model is set (2026-09-05, with `/mcp` and `/signals/{kind}` — [security](security.md) §3). The whole public surface is the probes, `/bulk/{id}` (nonce-capability URL) and the A2A descriptor — `docs/operations/rbac.md`. **Gateway caller identity (item 7, 2026-09-13):** every gateway-originated dispatch carries an auth-layer `GatewayCaller` the provider verifies; `gateway_caller_profile` (`secure` default / `legacy` for a rolling-upgrade window), the `sys/caller-context/{node}` marker, and the refusal metric `mycelium_gateway_caller_refusals_total{reason}` — runbook `docs/operations/rbac.md` §7, mechanism [security](security.md) §WS1.5.
 
 | Endpoint | Tells you |
 |---|---|
