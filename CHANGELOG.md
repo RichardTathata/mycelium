@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **rustls 0.23.40 → 0.23.45, rustls-webpki 0.103.13 → 0.103.15 — RUSTSEC-2026-0285**
+  ("TLS 1.3 handshake messages incorrectly accepted across encryption level boundaries"; fixed in
+  0.23.45). Lockfile bump, no manifest change and no API change; it reaches the substrate through
+  the `tls` feature (gossip mTLS, gateway TLS) and every `reqwest`/`hyper` TLS path. **The `v2.4.4`
+  tag ships the vulnerable version** — the fix lands with the next tag, as the wasmtime
+  RUSTSEC-2026-0222 note records for `v2.3.0`. Found by the `cargo audit` CI job, which had begun
+  failing on every open branch.
+
 ### Added
 
 - **Gateway caller identity (v3 contracts axis item 7, `docs/plans/v3-contracts-axis.md` §6.4 / D27).**
