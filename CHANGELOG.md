@@ -66,6 +66,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Malformed}`, malformed refuses, and the producer refuses an over-bound envelope (`-32023` / HTTP 413)
   instead of truncating (`malformed_frames_are_refused_never_treated_as_the_node`,
   `producer_refuses_an_oversized_envelope`).
+- **Contracts axis AE0 — the action-envelope ADR** (`docs/design/action-envelope-ae0.md`; plan §6.8, D36–D38).
+  The contract for runtime authorisation and evidence, written beside item 1's ADR so no second identity scheme
+  exists: the action envelope (item 1's `operation_id`/`attempt_id`, item 7's verified actor and `via`, operation,
+  exact resource, argument digest, mandate identity/epoch, `policy.revision` = the policy artifact's `sha256`,
+  validity, correlation, catalogue mapping), assembled only by the enforcement point; the `ActionEvaluator`
+  contract — permit · deny · indeterminate with checked constraints, reason, policy revision and evaluation errors;
+  indeterminate is never permit and the secure profile refuses on it; deterministic; replaceable; **Cedar
+  in-process as the one real adapter** (D37 adopted); five separate evidence records (requested · decided ·
+  attempted · completed/failed/unknown · outcome observed) sealed into the audit chain and exported through the
+  `AuditSink`, never gossip; the evidence consumer's catalogue identity carried, not re-minted; deployment reports
+  and `coverage.complete: false` for every route the enforcement point does not see; three strength profiles
+  (preflight = *SelfImposedPrevention* at one route, resource = *HardPrevention*, adapter = the adapter's own
+  contract); a pinned standards matrix; eleven negative fixtures. **No code, no wire change.** The evaluator seam
+  lands on item 7; AE-T T2–T4 in the private companion. **Review corrections (2026-09-14):** evidence lives in a
+  node-local journal and only a safe reference record enters the gossiped audit chain (the chain gossips whole
+  records, so "never gossip" needed that split); the journal's `append -> LocalSync` receipt, not `AuditSink`, is the
+  strict profile's durability barrier, with saturation / persistence-failure / lost-ack tests named; and a denial
+  implies "no effect" only through an explicit blocked attestation for the attempt, never from silence.
 - **Contracts axis item 1 PR 1 — the contracts-and-receipts ADR, the regression floor, golden on-disk
   fixtures** (`docs/design/contracts-receipts.md`; plan `docs/plans/v3-contracts-axis.md` §3, D8/D11/D24).
   The record states what an acknowledgement proves today at every site (`kv().set` = queued for gossip;
