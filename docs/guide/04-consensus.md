@@ -254,9 +254,10 @@ from live membership at proposal time: `cluster_propose`/`consistent_set` count
 `peers + self`, `group_propose` counts the emergent group's current members.
 For a 3-node cluster that's 2; for 5, it's 3. There is no "any-1" escape
 hatch by design: if you can tolerate non-majority confirmation you want
-`kv().set_with_min_acks` (propagation counting, Layer I — an ack is any peer update for the key at or after
-the write's timestamp, *not* receipt of the payload and *not* persistence; the exact-write receipt is the v3.0
-contracts axis, item 1), not consensus.
+`kv().set_with_min_acks` — **but not today**: that verb times out even when every peer holds the write,
+because the origin cannot observe its own write's propagation (`docs/design/contracts-receipts.md` §1a).
+Until item 1 PR 4b lands there is no non-majority confirmation primitive, and the honest choices are
+consensus or a plain gossip `set` whose contract is *queued for gossip*.
 
 **When to use `consistent_set` vs gossip `set`.**
 

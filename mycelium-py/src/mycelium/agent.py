@@ -560,9 +560,16 @@ class MyceliumAgent:
         *,
         timeout_secs: float = 5.0,
     ) -> int:
-        """Write ``value`` under ``key`` and wait for ``min_acks`` distinct peers to gossip an update
-        for the key at or after this write's timestamp — propagation evidence, not receipt of this
-        payload and not persistence (the exact-write receipt is the v3.0 contracts axis, item 1).
+        """Write ``value`` under ``key`` and wait for peer acknowledgements.
+
+        .. warning::
+
+           With ``min_acks >= 1`` this **times out even when every peer has received and applied
+           the write**. The origin of a write cannot observe that write's propagation on this
+           substrate (``docs/design/contracts-receipts.md`` section 1a); contracts axis item 1
+           PR 4b is the work that makes an acknowledgement obtainable. The write is applied and
+           gossiped either way, so a timeout never means the value was not written — do not retry
+           the write on the strength of it.
 
         Returns the number of peers that acknowledged the write (always ≥ ``min_acks``
         on success). Raises :class:`TimeoutError` when fewer than ``min_acks`` peers
@@ -574,8 +581,8 @@ class MyceliumAgent:
         Args:
             key:          KV key to write.
             value:        Bytes to store.
-            min_acks:     Minimum number of distinct peers that must gossip an update for the key
-                          (propagation; not payload receipt, not persistence).
+            min_acks:     Minimum number of distinct peers that must acknowledge. Any value ≥ 1
+                          cannot be satisfied today — see the warning above.
             timeout_secs: Maximum seconds to wait for confirmations.
 
         Raises:

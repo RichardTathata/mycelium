@@ -9,6 +9,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Contracts axis item 1 PR 4a — an acknowledgement now requires the payload's identity, and the
+  verb says what it cannot do** (`src/agent/kv_quorum.rs`, `kv_quorum_ext.rs`,
+  `mycelium-core/src/store.rs`; record `docs/design/contracts-receipts.md` §1a, §8). `set_with_min_acks`
+  counted an ack when any distinct origin gossiped **any** update for the key at or after the write's
+  HLC, so a **newer overwrite** — a payload that peer never received from us — satisfied the count.
+  That overclaim (D9) is gone: an ack now requires the inbound update's `content_hash` to equal this
+  write's. `QuorumObserver` gains `observe_update`, carrying the update's origin, stamp, nonce and
+  content hash; the default delegates to `observe`, so implementations written before this keep
+  compiling and behaving exactly as they did.
+
+  **What implementing it found, which the plan did not know.** The verb **cannot succeed on this
+  substrate and never could** — not a weaker guarantee than documented, a different one. Measured on
+  two connected nodes with the peer demonstrably holding the value:
+  `set_with_min_acks(1) -> Err(Timeout { acks_received: 0 })`. Three correct facts compose into it:
+  a `GossipUpdate`'s `sender` is its *originating* node, preserved across every forwarding hop, so a
+  peer relaying our write is attributed to **us** and the loopback filter discards it; fan-out
+  **excludes the origin**, so the relayed copy never comes back to us anyway; and anti-entropy
+  re-attributes delivered entries to the **receiving** node. No inbound frame says *a peer holds your
+  write*. The counter could only ever be moved by a different node independently writing the same key
+  — which is why the only two tests were a zero-ack case and a no-peers timeout: the success path had
+  never been exercised. The rustdoc now opens with this, and
+  `a_peer_holding_the_write_still_produces_no_acknowledgement` asserts the timeout **as the contract**,
+  with the peer holding the value in the same test, so PR 4b flips it in the open. **PR 4b is no
+  longer an enhancement to this verb; it is the only thing that can make it succeed.**
+
+  **Upgrade note.** `min_acks >= 1` still times out as it did before, so callers see no new failure.
+  The one behaviour change is that a concurrent writer of a *different* value to the same key can no
+  longer produce a false `Ok`. Anything that appeared to succeed was relying on that.
+
 ### Fixed
 
 - **CI: the reason-node job dispatched through the gateway before the gateway could dispatch**

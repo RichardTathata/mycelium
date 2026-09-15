@@ -19,7 +19,24 @@ use tracing::warn;
 /// lives above; core provides the notification mechanism, not the ack-counting law).
 pub trait QuorumObserver: Send + Sync {
     /// Record that `sender` (an `id_hash`) confirmed the tracked key at `timestamp`.
+    ///
+    /// `sender` is the update's **originating** node, preserved unchanged across every
+    /// forwarding hop — not the peer that relayed it. That distinction is what
+    /// [`observe_update`](Self::observe_update) exists to make visible; see its note.
     fn observe(&self, sender: u64, timestamp: u64);
+
+    /// Record an observation carrying the update's **identity**: its origin, HLC stamp,
+    /// dedup nonce, and the [`content_hash`](crate::receipt::content_hash) of the payload
+    /// that was applied.
+    ///
+    /// `apply_and_notify` calls this; the default delegates to [`observe`](Self::observe)
+    /// so implementations written before the contracts axis keep compiling and behaving
+    /// exactly as they did. An observer that needs to tell *this* payload from a newer
+    /// overwrite of the same key overrides it (contracts axis item 1 PR 4a).
+    fn observe_update(&self, sender: u64, timestamp: u64, nonce: u64, content_hash: u64) {
+        let _ = (nonce, content_hash);
+        self.observe(sender, timestamp);
+    }
 }
 
 /// Copy-on-write list of quorum observers for one key, stored in
@@ -744,8 +761,13 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> crate::receipt
         // Notify all in-flight set_with_min_acks waiters tracking this key
         // (concurrent same-key callers each hold their own tracker).
         if let Some(trackers) = kv.quorum_trackers.pin().get(&update.key) {
+            // Hash once for the whole list, and only when someone is actually tracking
+            // this key — the overwhelming majority of updates have no tracker.
+            let content = crate::receipt::content_hash(
+                update.key.as_ref(), update.value.as_ref(), update.is_tombstone,
+            );
             for tracker in trackers.iter() {
-                tracker.observe(update.sender, update.timestamp);
+                tracker.observe_update(update.sender, update.timestamp, update.nonce, content);
             }
         }
         #[cfg(feature = "metrics")]

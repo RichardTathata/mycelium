@@ -117,11 +117,12 @@ pub enum QuorumError {
 
 **When you see it:** `KvHandle::set_with_min_acks`.
 
-**Recoverability:** yes. The write succeeded locally and will propagate
-eventually. The `acks_received` field tells you how many peers did confirm;
-you can relax the propagation requirement or retry when more peers rejoin. (An ack means a peer gossiped an
-update for the key at or after this write's timestamp — propagation, not receipt of this payload, not
-persistence — see the v3.0 contracts axis, item 1, for the exact-write receipt.)
+**Recoverability:** yes — and note that on today's substrate this error is the *only* outcome for
+`min_acks >= 1`. The write succeeded locally and propagates normally; what cannot happen is the
+acknowledgement, because the origin of a write cannot observe that write's propagation
+(`docs/design/contracts-receipts.md` §1a). `acks_received` will be `0`. Do not treat the timeout as
+evidence the value was not written, and do not retry the write on the strength of it. Item 1 PR 4b is
+the work that makes an acknowledgement obtainable.
 
 ---
 

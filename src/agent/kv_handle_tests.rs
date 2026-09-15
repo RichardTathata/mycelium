@@ -183,6 +183,69 @@ async fn set_with_min_acks_zero() {
     assert_eq!(a.kv().get("sq-key"), Some(Bytes::from_static(b"val")));
 }
 
+/// The regression floor for item 1 PR 4b (contracts axis, `docs/design/contracts-receipts.md` §8).
+///
+/// Pins the structural gap PR 4a **measured but could not close**: a peer that has received and
+/// applied the write produces no acknowledgement, so `set_with_min_acks` times out in a healthy
+/// two-node cluster. Three facts compose into it — a `GossipUpdate`'s `sender` is its *originating*
+/// node and survives every hop; fan-out excludes the origin, so the relayed copy never returns to
+/// us; and anti-entropy re-attributes delivered entries to the receiving node. No inbound frame
+/// says "a peer holds your write".
+///
+/// This is deliberately asserted as a **failure**, not skipped: the verb's documentation now states
+/// that it cannot succeed, and a claim like that has to be executable. PR 4b's persisted-by-peer
+/// protocol flips this test, in the open, which is what the floor is for.
+#[tokio::test]
+async fn a_peer_holding_the_write_still_produces_no_acknowledgement() {
+    use crate::agent::kv_quorum::QuorumError;
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let mut cfg_a = GossipConfig::default();
+    cfg_a.bind_port = port_a;
+    cfg_a.bootstrap_peers = vec![id_b.clone()];
+    cfg_a.health_check_max_jitter_ms = 50;
+    let mut cfg_b = GossipConfig::default();
+    cfg_b.bind_port = port_b;
+    cfg_b.bootstrap_peers = vec![id_a.clone()];
+    cfg_b.health_check_max_jitter_ms = 50;
+    let a = GossipAgent::new(id_a, cfg_a);
+    let b = GossipAgent::new(id_b, cfg_b);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    // Structural poll, never a fixed sleep.
+    for _ in 0..300 {
+        if !a.peers().is_empty() && !b.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!a.peers().is_empty() && !b.peers().is_empty(), "the pair must form a cluster");
+
+    let r = a.kv().set_with_min_acks("mk/held", b"v".to_vec(), 1, Duration::from_secs(2)).await;
+
+    // The peer really does hold it — that is the whole point of the pin.
+    for _ in 0..300 {
+        if b.kv().get("mk/held").is_some() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        b.kv().get("mk/held"), Some(Bytes::from_static(b"v")),
+        "the write must have reached the peer",
+    );
+    match r {
+        Err(QuorumError::Timeout { acks_received }) => assert_eq!(
+            acks_received, 0,
+            "no inbound frame can attribute our own write's propagation to a peer",
+        ),
+        Ok(n) => panic!(
+            "PR 4b appears to have landed: {n} ack(s) while this pin still asserts none. \
+             Update the pin and the `set_with_min_acks` documentation together."
+        ),
+    }
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 #[tokio::test]
 async fn set_with_min_acks_timeout_no_peers() {
     use crate::agent::kv_quorum::QuorumError;
@@ -238,3 +301,4 @@ async fn test_subscribe_log_receives_live_append() {
     assert_eq!(entry.value, Bytes::from_static(b"msg1"));
     a.shutdown().await;
 }
+

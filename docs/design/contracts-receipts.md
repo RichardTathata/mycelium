@@ -20,7 +20,7 @@ baseline; each row is pinned by a test in §8 so that PRs 2–4 change a meaning
 |---|---|---|---|
 | `KvHandle::set` / `delete` (`mycelium-core/src/kv_handle.rs`) | `bool` | the update was **applied locally** and **queued** for gossip (`false`: queue full or shard dead — still applied locally, anti-entropy repairs; or the write was rejected as oversized — nothing applied) | that it reached disk, a peer, or anyone's handler |
 | `KvHandle::set_async` / `delete_async` | `bool` | as above, after awaiting queue capacity | as above |
-| `set_with_min_acks` (`KvQuorumExt`, `src/agent/kv_quorum_ext.rs`) | `Result<usize, QuorumError>` | `min_acks` distinct peers gossiped **some** update for the key with `timestamp >= write_ts` — *propagation evidence*, counted in `kv_quorum.rs::observe` | that any peer holds **this** payload (a newer overwrite counts), or persisted it. **The `>=` is an overclaim** (D9): PR 4a replaces it with an exact-identity ack |
+| `set_with_min_acks` (`KvQuorumExt`, `src/agent/kv_quorum_ext.rs`) | `Result<usize, QuorumError>` | **since PR 4a:** that a distinct *origin* gossiped an update under this key carrying **exactly this payload**, at or after this write's HLC. In a cluster where no one else writes the key, that is nothing at all — see §1a | that any peer received **our** write, or persisted anything. Before PR 4a a **newer overwrite** also counted (D9's overclaim) — a payload the peer never received from us |
 | `ConsensusResult::Committed { persisted, .. }` (`src/consensus.rs`) | `persisted: bool` | quorum committed and applied locally; `true` = the forced-`fdatasync` WAL append succeeded **or persistence is not configured** (nothing was promised); `false` = committed cluster-wide, **local durability not established** (the record may still be on disk: the write precedes the sync) | a tri-state collapsed into a bool (D24): `true` cannot distinguish *on disk* from *never promised*; `false` was documented as "not in this node's WAL", an overclaim corrected in this PR |
 | gateway `POST /gateway/overlay/consistent/set`, `/consensus/cross_group_propose` | JSON `"persisted": bool` | the same bool | the same collapse; SDKs model absence (`persisted: Optional[bool]` / `boolean \| null`) |
 | `emit_reliable` (`ServiceHandle`) | `AckResult::{Acknowledged, Timeout}` | `Acknowledged`: the target's handler ran and answered | `Timeout` is **not** "not delivered" — the handler may have run and the ack been lost |
@@ -37,6 +37,50 @@ Two facts that shape everything below:
 - **A timeout is not a negative.** In every row above, the absence of an ack within a deadline is
   compatible with the operation having fully happened. The substrate has no verb that returns
   "nothing happened".
+
+## 1a. What `set_with_min_acks` could never establish *(PR 4a, measured 2026-09-15)*
+
+The row above said *propagation evidence*, and PR 4a was scoped to narrow its `>=` to an
+exact-identity match. Implementing it turned up something the record had not: **the verb cannot
+observe its own write's propagation at all**, and never could.
+
+Measured before changing anything, on two connected nodes — the peer demonstrably holding the value:
+
+```
+set_with_min_acks(1) -> Err(Timeout { acks_received: 0 }); B holds the value: true
+```
+
+Three facts compose into it, each correct on its own and none visible from the call site:
+
+1. A `GossipUpdate`'s `sender` is its **originating** node, carried unchanged across every
+   forwarding hop (`connection.rs` forwards `GossipUpdate { ttl: fwd_ttl - 1, ..update }`). A peer
+   relaying our write is therefore attributed to **us**, and the tracker's loopback filter
+   (`sender != self_hash`, there to reject our own local apply) discards it.
+2. Fan-out **excludes the origin** (`try_send((data, update.sender, ForwardHint::All))`), so the
+   relayed copy is never sent back to us in the first place — echo suppression by origin, not by
+   previous hop.
+3. Anti-entropy re-attributes the entries it delivers to the **receiving** node
+   (`sender: node_id.id_hash()` in the `StateResponse` arm), so that path is loopback too.
+
+No inbound frame on this substrate says *a peer holds your write*. The counter could only ever be
+moved by **a different node independently originating a write to the same key** — which is why the
+only two tests were a zero-ack case and a no-peers timeout: the success path had never been
+exercised, in three years of the verb existing.
+
+**What PR 4a therefore did.** It removed the false positive it was scoped to remove — an ack now
+requires the payload's `content_hash` to match, so a newer overwrite counts for nothing — and it
+made the gap executable rather than latent:
+`a_peer_holding_the_write_still_produces_no_acknowledgement` asserts the timeout *as the contract*,
+with the peer holding the value in the same test. **PR 4b is not an enhancement to this verb; it is
+the only thing that can make it succeed.**
+
+**The lesson for this record.** §1's inventory was written by reading each call site's own code, and
+every row was right about what its code did. This row was wrong about what the *composition* did,
+because the three facts live in three different files and none of them is wrong. An inventory of
+claims needs at least one measurement per row, not only a reading — the same discipline §8's floor
+applies to semantics, applied to reachability.
+
+---
 
 ## 2. Decision — four receipts, kept strictly separate
 
@@ -164,7 +208,7 @@ justified where the tracker overlay was not because it does not couple the two c
 | `emit_reliable` | `Acknowledged` / `Timeout` | an application-level *receipt of handling*; `Timeout` ⇒ `DeliveryUnknown` |
 | mailbox `deliver_event` → `open_mailbox` | `bool` queued; the drain delivers | local application at the sender; durability = the mailbox key's local sync on a persisted node; delivery = the target's drain (a later local application there); no receipt crosses back |
 | tuple-space `take` / `complete` / requeue | claim under lease; atomic lane move | `take` = local application at the primary (+ local sync via its WAL); `complete` = the **pipeline's own** receipt — the item was acknowledged and the next stage queued, atomically, at the primary (local application + local sync there). It neither performs nor verifies the consumer's business transaction: idempotency makes a retry *safe*, it does not prove the effect *happened*. A destination-commit receipt, when the effects companion (PR 5/6) provides one, is a separate record linked to the same `operation_id`; `complete` never stands in for it. Lease expiry = `DeliveryUnknown` resolved by re-delivery |
-| `set_with_min_acks` | propagation count `>=` | today: replica *propagation* evidence, not replica sync; PR 4a: exact-identity; PR 4b: replica sync proper |
+| `set_with_min_acks` | propagation count `>=` | **nothing, on today's substrate** (§1a): the origin cannot observe its own write's propagation, so with `min_acks >= 1` the verb times out however widely the write spreads. PR 4a removed the newer-overwrite false positive and pinned the gap; PR 4b's persisted-by-peer protocol is what makes a replica-sync receipt obtainable |
 | `Committed { persisted }` | bool | local application (cluster-committed) + a collapsed local-sync receipt; PR 2 adds a receipt-returning propose API beside it (§5) — the variant's shape does not change on 2.x |
 
 ## 8. The regression floor (this PR, code)
@@ -173,7 +217,9 @@ Executable pins of *today's* semantics. A later PR changes a meaning by changing
 
 | Pin | Where | What it holds |
 |---|---|---|
-| `floor_observe_counts_any_update_at_or_after_write_ts` | `src/agent/kv_quorum.rs` | the `>=` propagation semantics of the min-acks tracker — the overclaim PR 4a replaces |
+| `observe_counts_only_this_exact_payload` (PR 4a, replaces `floor_observe_counts_any_update_at_or_after_write_ts`) | `src/agent/kv_quorum.rs` | an ack requires the payload's `content_hash`; a newer overwrite of the same key no longer counts. The pin PR 1 set for the `>=` rule, changed in the open by the PR that changed the meaning |
+| `the_identity_less_observation_is_never_an_ack` (PR 4a) | same | the trait's identity-less `observe` establishes nothing and so never counts — pre-4a observers keep compiling and simply cannot produce an acknowledgement |
+| `a_peer_holding_the_write_still_produces_no_acknowledgement` (PR 4a; the floor **for PR 4b**) | `src/agent/kv_handle_tests.rs` | a peer that has received and applied the write produces no ack, so the verb times out in a healthy two-node cluster (§1a). Asserted as a failure because the documentation now claims it; PR 4b flips it |
 | `floor_committed_persisted_is_true_when_persistence_unconfigured` | `src/lib_tests.rs` | `persisted: true` with no persistence configured — the D24 collapse PR 2 lifts |
 | `consensus_commit_reports_persisted_and_survives_restart` (existing) | `src/lib_tests.rs` | `persisted: true` means the fsynced WAL append |
 | `regression_snapshot_retains_wal_record_acked_before_local_apply`, `regression_writer_threshold_snapshot_right_after_ack_keeps_write` (existing) | `mycelium-core/src/persistence.rs` | the WAL-tail merge that makes persist-first admissible (§2.2) |

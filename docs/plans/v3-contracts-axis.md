@@ -159,7 +159,7 @@ API exposure, not a redesign. `kv_quorum.rs::observe` counts `timestamp >= write
 is real. The snapshot path lacked a directory fsync — fixed 2026-09-05 (#183).
 
 **Sequence.** PR1 ADR + regression floor · PR2 operation identity, typed receipts, failure vocabulary · PR3 required
-local sync + retained operation status · **PR4a** exact-identity ack on the existing quorum path · **PR4b**
+local sync + retained operation status · **PR4a** exact-identity ack on the existing quorum path *(done 2026-09-15; it also measured that the path can establish nothing — §8, ADR §1a)* · **PR4b**
 persisted-by-peer protocol · PR5 effects companion + SQLite reference destination · PR6 tuple-space consumer ·
 PR7 gateway/SDK parity. PRs 2–3 are the first usable release.
 
@@ -456,7 +456,7 @@ maintained in `ROADMAP.md`:
 |---|---|---|
 | `system_propose` (`#[deprecated]` alias) | 2.1.0 | `cluster_propose` |
 | `cluster_name` as a cosmetic label with no isolation | — | item 2's `DomainId` (the label may stay as a display name) |
-| the inferred `>=` acknowledgement in `set_with_min_acks` | — | item 1 PR 4a's exact-identity ack (kept behind a legacy flag until then) |
+| the inferred `>=` acknowledgement in `set_with_min_acks` | **resolved 2026-09-15 (PR 4a)** | replaced by the exact-identity (`content_hash`) ack; no legacy flag was needed, because the success path it would have preserved was unreachable (§8, ADR §1a) |
 | `ConsensusResult::Committed { persisted: bool }` | 2.4.2 | the D24 tri-state |
 | `GatewayAgent`-as-caller dispatch (the node acting for gateway clients) | — | item 7's `GatewayCaller` |
 | `GossipConfig` (and the operator-constructed config structs beside it) **not** being `#[non_exhaustive]` | — | mark them `#[non_exhaustive]` at `3.0.0`: every release adds config fields, and each such addition silently breaks an exhaustive struct literal today (found by an external review of WP5, 2026-09-14). One announced break ends a series of unannounced ones; the documented `Default` + assignment pattern is unaffected either way |
@@ -863,6 +863,16 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 - **(2026-09-06)** Rev 1.0 §6.2 claimed the membership cooldown shortens *live* when a timing intent shortens the
   health-check interval. False: both are fixed at start from the config snapshot; the governor never reads the hot
   timing value. Corrected in §6.2 and D20; the ROADMAP row and the wiki carry dated corrections. The reviewer found it.
+- **(2026-09-15, PR 4a)** We described `set_with_min_acks` as giving *propagation evidence* with a `>=` overclaim, and
+  scoped PR 4a to narrow the predicate. Both the ADR row and this plan were wrong about the composition: the verb
+  **cannot observe its own write's propagation at all**, so with `min_acks >= 1` it times out however widely the write
+  spreads. Measured on two connected nodes with the peer holding the value —
+  `Err(Timeout { acks_received: 0 })`. Three correct facts compose into it (origin-preserving `sender`,
+  fan-out that excludes the origin, anti-entropy re-attributing to the receiver); none is individually wrong, and the
+  claim was assembled by reading each site rather than measuring the whole. Recorded in
+  `docs/design/contracts-receipts.md` §1a. **Consequence for the plan: PR 4b is reclassified from an enhancement to
+  the only PR that can make this verb succeed**, and every row in the §1 inventory now owes a measurement, not a
+  reading.
 
 ---
 
@@ -937,6 +947,12 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
     5. **The cooldown parameter** (item 4, `membership_governor.rs:216`) and **item 8** travel alongside; neither blocks AE-T.
     6. Item 6 PR 1 and item 1 PR 4a keep their places; nothing else in this list moves.
 13. **Rev 1.11 (2026-09-13):** the **commitment companion** (§6.9, contract net) enters the queue directly after item 1 PR 2, as CN1; it is the first gallery entry to show the epoch's thesis (§1.2) executable.
+14. **Rev 1.13 (2026-09-15) — PR 4a done, and what it changed about 4b.** Item 1 PR 4a landed: the ack requires the
+    payload's `content_hash`, the newer-overwrite false positive is gone, and the §8 floor row moved with it. It also
+    established that `set_with_min_acks` **cannot succeed on today's substrate** (§8 correction, ADR §1a), which
+    promotes **PR 4b** from "the persisted-by-peer protocol, later" to the next item on the item 1 line: it is the only
+    work that can make a shipped verb return what its name says. The gap is pinned by
+    `a_peer_holding_the_write_still_produces_no_acknowledgement`, which 4b flips.
 11. **Done 2026-09-06:** `set_with_min_acks` documented honestly at all seven sites (rustdoc, both SDK READMEs and
    docstrings, two guides) — the reviewer's "document its actual semantics immediately".
 

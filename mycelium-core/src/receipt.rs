@@ -215,10 +215,15 @@ impl LocalDurability {
 
 /// Which **named, distinct peers** persisted this exact operation — the **replica sync** receipt.
 ///
-/// The origin is never counted. Today no verb returns a populated one: `set_with_min_acks` counts
-/// *propagation* (any update at or after the write's timestamp, from any peer), which is evidence
-/// that something newer exists, not that a named peer holds *this* payload. PR 4a makes the count
-/// exact-identity; PR 4b adds the persisted-by-peer protocol that fills `persisted_by`.
+/// The origin is never counted, and today **no verb returns a populated one**.
+///
+/// `set_with_min_acks` is the nearest thing and it cannot fill this receipt: the origin of a write
+/// never observes that write's propagation, because an update's `sender` is its originating node
+/// across every hop, fan-out excludes the origin, and anti-entropy re-attributes what it delivers
+/// to the receiving node (measured 2026-09-15; `docs/design/contracts-receipts.md` §1a). Since
+/// PR 4a its counter at least requires the payload's [`content_hash`] to match, so a newer
+/// overwrite is no longer mistaken for evidence. PR 4b adds the persisted-by-peer protocol that
+/// fills `persisted_by`.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplicaSync {

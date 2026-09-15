@@ -74,6 +74,39 @@ the other half was the tuple-space spurious-promotion split-brain
 ([companions/tuple-space](../companions/tuple-space.md), #158) — flood-relay latency masked it
 locally, the hosted 2-core runner exposed it.
 
+## A node can never observe its own write's propagation (2026-09-15)
+
+Three mechanisms compose into a hard limit that is invisible from any single call site, and that
+cost a shipped verb its entire success path:
+
+1. **`GossipUpdate::sender` is the *originating* node, not the relayer.** The forward path carries it
+   unchanged — `GossipUpdate { ttl: fwd_ttl - 1, ..update.clone() }` (`mycelium-core/src/connection.rs`),
+   and the zero-copy branch only decrements the TTL byte in place. A peer relaying our write is
+   therefore attributed to **us**.
+2. **Fan-out excludes the origin, not the previous hop.** `try_send((data, update.sender, ForwardHint::All))`
+   passes the *origin's* hash as the exclusion, so a relayed copy is never sent back to the node that
+   wrote it. Echo suppression is by origin.
+3. **Anti-entropy re-attributes what it delivers to the receiver.** The `StateResponse` arm rebuilds each
+   entry with `sender: node_id.id_hash()` — the **local** node — so those apply as loopback too.
+
+Each is correct on its own and each has a good reason. Together they mean **no inbound frame on this
+substrate says "a peer holds your write"**, so any mechanism that watches inbound updates for evidence
+of its own write's spread is watching a channel that structurally cannot carry it.
+
+This is what `set_with_min_acks` did. Its tracker counted an inbound update from `sender != self` at or
+after the write's HLC — which, given the three facts above, can only ever be **a different node
+independently writing the same key**. Measured on two connected nodes with the peer demonstrably
+holding the value: `set_with_min_acks(1) -> Err(Timeout { acks_received: 0 })`. The verb had shipped
+for three years with only a zero-ack test and a no-peers-timeout test, so the success path was never
+exercised. Pinned now by `a_peer_holding_the_write_still_produces_no_acknowledgement`
+(`src/agent/kv_handle_tests.rs`), asserted as a **failure** because the documentation claims it; item 1
+PR 4b's persisted-by-peer protocol is what flips it. Record:
+[contracts-receipts](../../../design/contracts-receipts.md) §1a.
+
+**The general rule this leaves.** Evidence that a peer holds something has to be *sent by that peer,
+about that thing*. Inferring it from the gossip stream reads a channel whose addressing was designed
+for propagation, not for attestation — and the two look identical from a call site.
+
 ## KV floods the cluster — a group is not a data-isolation boundary
 
 `WireMessage::Data` (the KV path) always forwards `ForwardHint::All`
