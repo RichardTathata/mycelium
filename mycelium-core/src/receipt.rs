@@ -36,7 +36,7 @@ use std::sync::Arc;
 /// It is a *correlation* identity, never authority: a client may supply one (that is the point —
 /// its retries must be recognisable), while who the caller *is* comes only from the verified
 /// caller context.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct OperationId(Arc<str>);
 
 impl OperationId {
@@ -96,6 +96,46 @@ impl AttemptId {
 impl std::fmt::Display for AttemptId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+// ── Prepared operations ──────────────────────────────────────────────────────
+
+/// An operation **stamped before dispatch** — identity, target, content binding and HLC — so the
+/// caller can retry it safely without needing the node, or its own earlier receipt, to remember
+/// anything.
+///
+/// This is what makes a retry safe after a **lost acknowledgement**. Re-issuing an ordinary write
+/// with the same [`OperationId`] mints a *fresh* HLC, so a retry that arrives after something newer
+/// took the key would outrank and silently undo it — the hazard D11 exists to prevent. Committing
+/// the same `PreparedWrite` again re-submits the original stamp, so a late retry loses LWW and is
+/// reported [`LocalApplication::Superseded`] instead (review of PR 3, 2026-09-15).
+///
+/// It is `Serialize`/`Deserialize` on purpose: a caller that must survive **its own** restart —
+/// the case where a receipt is lost — persists this token beside whatever made it decide to write.
+/// Small and self-contained: no node state, nothing to expire, nothing to evict.
+///
+/// A prepared write binds its content. Committing it with different bytes is a
+/// [`ReceiptError::Conflict`]; genuinely different content is a different operation and needs its
+/// own token.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PreparedWrite {
+    /// The logical operation.
+    pub operation_id: OperationId,
+    /// The key this operation writes.
+    pub key: Arc<str>,
+    /// The content binding, from [`content_hash`].
+    pub content_hash: u64,
+    /// The HLC allocated at preparation — reused by **every** attempt.
+    pub stamp: u64,
+}
+
+impl PreparedWrite {
+    /// Build a prepared write directly (the usual route is
+    /// [`KvHandle::prepare_write`](crate::kv_handle::KvHandle::prepare_write), which allocates the
+    /// stamp from the node's HLC).
+    pub fn new(operation_id: OperationId, key: Arc<str>, content_hash: u64, stamp: u64) -> Self {
+        Self { operation_id, key, content_hash, stamp }
     }
 }
 
@@ -415,6 +455,27 @@ pub enum ReceiptError {
     },
     /// The write was refused before anything was applied — an oversized value, a closed shard.
     Rejected(String),
+    /// A **required-sync** write did not establish durability, so **this attempt applied nothing
+    /// and gossiped nothing** — no reader, subscriber or peer saw the value as a result of the call.
+    ///
+    /// **What this does not promise.** That the operation can never become visible here. The WAL
+    /// writes a record *before* it syncs it, so a sync that fails may leave the bytes in `wal.bin`,
+    /// and a later replay would restore them — the value could appear after a restart even though
+    /// the call reported failure. The recovery outcome is **unknown**, and making it permanently
+    /// non-applied would need machinery the WAL does not have (a two-phase staging area, or a
+    /// compensating record that replay honours). Stated rather than implied, after review found the
+    /// first cut claiming the stronger property (2026-09-15).
+    ///
+    /// This is the one place the substrate *prevents* rather than detects, and it is admissible
+    /// because the caller asked for it as a contract (posture rule 3(i)): a write that must be
+    /// durable is refused rather than applied and reported as undurable.
+    /// `persistence_configured` distinguishes *this node was never able to* from *the attempt failed*.
+    DurabilityNotEstablished {
+        /// Whether persistence is configured at all on this node.
+        persistence_configured: bool,
+        /// What the WAL reported, or why it could not be asked.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ReceiptError {
@@ -431,6 +492,15 @@ impl std::fmt::Display for ReceiptError {
                 established.application, established.local_durability
             ),
             ReceiptError::Rejected(why) => write!(f, "write rejected: {why}"),
+            ReceiptError::DurabilityNotEstablished { persistence_configured: false, .. } => f.write_str(
+                "a required-sync write was refused: this node has no persistence configured, so it \
+                 cannot establish durability; nothing was applied",
+            ),
+            ReceiptError::DurabilityNotEstablished { reason, .. } => write!(
+                f,
+                "a required-sync write did not establish durability ({reason}); this attempt applied \
+                 nothing, though a written-but-unsynced record may still replay after a restart"
+            ),
         }
     }
 }

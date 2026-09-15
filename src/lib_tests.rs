@@ -5639,6 +5639,147 @@ mod receipt_tests {
         a.shutdown().await;
     }
 
+    /// PR 3, the strong path: a required-sync write establishes `OnDisk` whatever the node's
+    /// `SyncMode` is — `Async` would otherwise have left it `Buffered`.
+    #[tokio::test]
+    async fn a_required_sync_write_establishes_disk_even_in_async_mode() {
+        let (p, dir) = persistence("required", SyncMode::Async);
+        let a = agent_with(Some(p));
+        a.start().await.unwrap();
+
+        let relaxed = a.kv().set_with_receipt(&OperationId::new("op-relaxed"), "k/relaxed", b"v".to_vec()).await.unwrap();
+        assert_eq!(relaxed.local_durability, LocalDurability::Buffered, "the ordinary path takes what the mode gives");
+
+        let strong = a.kv().set_requiring_sync(&OperationId::new("op-strong"), "k/strong", b"v".to_vec()).await.unwrap();
+        assert_eq!(strong.local_durability, LocalDurability::OnDisk, "the strong path forces the sync");
+        assert!(strong.local_durability.is_durable());
+        assert_eq!(strong.application, LocalApplication::Applied);
+        assert_eq!(a.kv().get("k/strong").as_deref(), Some(&b"v"[..]));
+
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PR 3's whole point: when a required-sync write cannot establish durability, **nothing
+    /// became visible** — not in the store, not to a subscriber. The ordinary path cannot promise
+    /// this, because it applies before it persists.
+    #[tokio::test]
+    async fn a_refused_required_sync_write_leaves_nothing_visible() {
+        // No persistence configured: the node cannot make anything durable, so it refuses rather
+        // than apply and report undurable.
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let mut watch = a.kv().subscribe_prefix("k/");
+
+        let err = a
+            .kv()
+            .set_requiring_sync(&OperationId::new("op-nodurability"), "k/none", b"v".to_vec())
+            .await
+            .unwrap_err();
+        match err {
+            ReceiptError::DurabilityNotEstablished { persistence_configured, .. } => {
+                assert!(!persistence_configured, "this node never had persistence");
+            }
+            other => panic!("expected DurabilityNotEstablished, got {other:?}"),
+        }
+        assert!(a.kv().get("k/none").is_none(), "nothing was applied");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), watch.changed()).await.is_err(),
+            "no subscriber saw anything — the value never became visible"
+        );
+
+        // By contrast the ordinary path applies first: the same node accepts it and reports that
+        // nothing was promised. Both are honest; they are different contracts.
+        let ok = a.kv().set_with_receipt(&OperationId::new("op-relaxed"), "k/none", b"v".to_vec()).await.unwrap();
+        assert_eq!(ok.local_durability, LocalDurability::NotConfigured);
+        assert_eq!(a.kv().get("k/none").as_deref(), Some(&b"v"[..]), "the ordinary path did apply it");
+        a.shutdown().await;
+    }
+
+    /// The strong path retries like the ordinary one: same stamp, and a changed payload under the
+    /// same identity is refused.
+    #[tokio::test]
+    async fn a_required_sync_retry_keeps_the_stamp_and_refuses_changed_content() {
+        let (p, dir) = persistence("required-retry", SyncMode::Async);
+        let a = agent_with(Some(p));
+        a.start().await.unwrap();
+        let op = OperationId::new("op-strong-retry");
+        let first = a.kv().set_requiring_sync(&op, "k/sr", b"v".to_vec()).await.unwrap();
+        let again = a.kv().retry_requiring_sync(&first, "k/sr", b"v".to_vec()).await.unwrap();
+        assert_eq!(again.stamp, first.stamp, "a retry reuses the operation's stamp (D11)");
+        assert_ne!(again.attempt_id, first.attempt_id, "each delivery is distinguishable");
+        assert_eq!(again.local_durability, LocalDurability::OnDisk);
+        assert_eq!(again.application, LocalApplication::AlreadyCurrent);
+
+        let err = a.kv().retry_requiring_sync(&first, "k/sr", b"changed".to_vec()).await.unwrap_err();
+        assert!(matches!(err, ReceiptError::Conflict { .. }), "got {err:?}");
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review regression (PR 3, 2026-09-15): a caller that **loses the receipt** can still retry
+    /// safely, because it prepared the operation before dispatching it.
+    ///
+    /// Re-issuing `set_with_receipt` with the same `OperationId` would mint a fresh HLC and let a
+    /// late retry outrank — and silently undo — a newer value. Committing the same `PreparedWrite`
+    /// reuses the original stamp, so the retry loses LWW and says so.
+    #[tokio::test]
+    async fn a_prepared_write_survives_a_lost_acknowledgement_without_clobbering() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-lost-ack");
+
+        // Prepared *before* dispatch; the caller keeps this, not the receipt.
+        let prepared = a.kv().prepare_write(&op, "k/lost", b"original");
+        let first = a.kv().commit_prepared(&prepared, b"original".to_vec()).await.unwrap();
+        assert_eq!(first.application, LocalApplication::Applied);
+
+        // The response is lost — the caller has no receipt. Meanwhile something newer takes the key.
+        drop(first);
+        assert!(a.kv().set("k/lost", b"newer".to_vec()));
+
+        // The retry uses the token it kept. It must not undo the newer value.
+        let retry = a.kv().commit_prepared(&prepared, b"original".to_vec()).await.unwrap();
+        assert_eq!(retry.stamp, prepared.stamp, "the prepared stamp is reused, not re-ticked");
+        assert_eq!(retry.application, LocalApplication::Superseded);
+        assert_eq!(
+            a.kv().get("k/lost").as_deref(),
+            Some(&b"newer"[..]),
+            "the newer value survives the lost-acknowledgement retry",
+        );
+
+        // The contrast: re-issuing by operation id alone mints a fresh stamp and does clobber it.
+        let reissued = a.kv().set_with_receipt(&op, "k/lost", b"original".to_vec()).await.unwrap();
+        assert_ne!(reissued.stamp, prepared.stamp);
+        assert_eq!(reissued.application, LocalApplication::Applied);
+        assert_eq!(
+            a.kv().get("k/lost").as_deref(),
+            Some(&b"original"[..]),
+            "which is exactly why the prepared token exists",
+        );
+        a.shutdown().await;
+    }
+
+    /// A prepared write binds its content: committing different bytes under the same operation
+    /// identity is a conflict, and the token survives a round trip through serialisation — the
+    /// caller may persist it across its own restart.
+    #[tokio::test]
+    async fn a_prepared_write_binds_its_content_and_round_trips() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let prepared = a.kv().prepare_write(&OperationId::new("op-bound"), "k/bound", b"v");
+        let json = serde_json::to_string(&prepared).unwrap();
+        let restored: crate::PreparedWrite = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, prepared, "a caller can persist the token and come back to it");
+
+        let err = a.kv().commit_prepared(&restored, b"different".to_vec()).await.unwrap_err();
+        assert!(matches!(err, ReceiptError::Conflict { .. }), "got {err:?}");
+        assert!(a.kv().get("k/bound").is_none(), "the conflicting commit wrote nothing");
+        a.kv().commit_prepared(&restored, b"v".to_vec()).await.unwrap();
+        assert_eq!(a.kv().get("k/bound").as_deref(), Some(&b"v"[..]));
+        a.shutdown().await;
+    }
+
     /// An oversized write is refused before anything is applied — `Rejected`, not a receipt that
     /// claims an application that never happened.
     #[tokio::test]

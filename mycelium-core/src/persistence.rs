@@ -751,6 +751,32 @@ mod durability_tests {
             "append_sync must not report durability in Async mode either");
     }
 
+    /// Review regression (contracts axis PR 3, 2026-09-15): a record whose **sync never succeeded**
+    /// is still replayable, so a required-sync failure cannot promise the value will never appear
+    /// here.
+    ///
+    /// `wal_append` writes the bytes and *then* syncs. A failed sync therefore leaves a complete
+    /// record in `wal.bin`, and replay — which cannot tell a synced record from an unsynced one —
+    /// restores it. The first cut of `set_requiring_sync` documented "the value never became visible
+    /// here", which is true of the call and **not** of the recovery. The error now says the recovery
+    /// outcome is unknown; this test is why.
+    #[tokio::test]
+    async fn regression_an_unsynced_record_still_replays() {
+        let dir = unique_dir("unsynced-replays");
+        let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+        // `sync = false` is exactly the state a failed fsync leaves behind: bytes written, never synced.
+        wal_append(&mut file, &entry("user/unsynced", b"v", 10, false), false, None).await.unwrap();
+        drop(file);
+
+        let restored = replay_into_fresh_store(&dir).await;
+        assert_eq!(
+            live_value(&restored, "user/unsynced").as_deref(),
+            Some(&b"v"[..]),
+            "an unsynced record replays — so a durability failure must not claim the value can never appear",
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Review regression (contracts axis PR 2, 2026-09-15): the **receipt path's** append must not
     /// inherit `append`'s fire-and-forget `Ok`.
     ///
