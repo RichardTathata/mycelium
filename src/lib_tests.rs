@@ -5639,6 +5639,84 @@ mod receipt_tests {
         a.shutdown().await;
     }
 
+    /// PR 3, the strong path: a required-sync write establishes `OnDisk` whatever the node's
+    /// `SyncMode` is — `Async` would otherwise have left it `Buffered`.
+    #[tokio::test]
+    async fn a_required_sync_write_establishes_disk_even_in_async_mode() {
+        let (p, dir) = persistence("required", SyncMode::Async);
+        let a = agent_with(Some(p));
+        a.start().await.unwrap();
+
+        let relaxed = a.kv().set_with_receipt(&OperationId::new("op-relaxed"), "k/relaxed", b"v".to_vec()).await.unwrap();
+        assert_eq!(relaxed.local_durability, LocalDurability::Buffered, "the ordinary path takes what the mode gives");
+
+        let strong = a.kv().set_requiring_sync(&OperationId::new("op-strong"), "k/strong", b"v".to_vec()).await.unwrap();
+        assert_eq!(strong.local_durability, LocalDurability::OnDisk, "the strong path forces the sync");
+        assert!(strong.local_durability.is_durable());
+        assert_eq!(strong.application, LocalApplication::Applied);
+        assert_eq!(a.kv().get("k/strong").as_deref(), Some(&b"v"[..]));
+
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PR 3's whole point: when a required-sync write cannot establish durability, **nothing
+    /// became visible** — not in the store, not to a subscriber. The ordinary path cannot promise
+    /// this, because it applies before it persists.
+    #[tokio::test]
+    async fn a_refused_required_sync_write_leaves_nothing_visible() {
+        // No persistence configured: the node cannot make anything durable, so it refuses rather
+        // than apply and report undurable.
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let mut watch = a.kv().subscribe_prefix("k/");
+
+        let err = a
+            .kv()
+            .set_requiring_sync(&OperationId::new("op-nodurability"), "k/none", b"v".to_vec())
+            .await
+            .unwrap_err();
+        match err {
+            ReceiptError::DurabilityNotEstablished { persistence_configured, .. } => {
+                assert!(!persistence_configured, "this node never had persistence");
+            }
+            other => panic!("expected DurabilityNotEstablished, got {other:?}"),
+        }
+        assert!(a.kv().get("k/none").is_none(), "nothing was applied");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), watch.changed()).await.is_err(),
+            "no subscriber saw anything — the value never became visible"
+        );
+
+        // By contrast the ordinary path applies first: the same node accepts it and reports that
+        // nothing was promised. Both are honest; they are different contracts.
+        let ok = a.kv().set_with_receipt(&OperationId::new("op-relaxed"), "k/none", b"v".to_vec()).await.unwrap();
+        assert_eq!(ok.local_durability, LocalDurability::NotConfigured);
+        assert_eq!(a.kv().get("k/none").as_deref(), Some(&b"v"[..]), "the ordinary path did apply it");
+        a.shutdown().await;
+    }
+
+    /// The strong path retries like the ordinary one: same stamp, and a changed payload under the
+    /// same identity is refused.
+    #[tokio::test]
+    async fn a_required_sync_retry_keeps_the_stamp_and_refuses_changed_content() {
+        let (p, dir) = persistence("required-retry", SyncMode::Async);
+        let a = agent_with(Some(p));
+        a.start().await.unwrap();
+        let op = OperationId::new("op-strong-retry");
+        let first = a.kv().set_requiring_sync(&op, "k/sr", b"v".to_vec()).await.unwrap();
+        let again = a.kv().retry_requiring_sync(&first, "k/sr", b"v".to_vec()).await.unwrap();
+        assert_eq!(again.stamp, first.stamp, "a retry reuses the operation's stamp (D11)");
+        assert_ne!(again.attempt_id, first.attempt_id, "each delivery is distinguishable");
+        assert_eq!(again.local_durability, LocalDurability::OnDisk);
+        assert_eq!(again.application, LocalApplication::AlreadyCurrent);
+
+        let err = a.kv().retry_requiring_sync(&first, "k/sr", b"changed".to_vec()).await.unwrap_err();
+        assert!(matches!(err, ReceiptError::Conflict { .. }), "got {err:?}");
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An oversized write is refused before anything is applied — `Rejected`, not a receipt that
     /// claims an application that never happened.
     #[tokio::test]

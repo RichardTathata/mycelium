@@ -384,6 +384,78 @@ pub async fn kv_set_with_receipt(
         .queued(queued))
 }
 
+/// Write `value` under `key` **only if it can be made durable first** — the contracts axis' strong
+/// path (item 1 PR 3; `docs/design/contracts-receipts.md` §2.1, §2.2).
+///
+/// The ordering is deliberately the reverse of every other write site: **persist → apply → gossip**.
+/// `append_sync` forces an `fdatasync` in every [`SyncMode`](crate::config::SyncMode), and only when
+/// it returns does the value become visible locally or reach a peer. A caller that receives
+/// [`ReceiptError::DurabilityNotEstablished`] therefore knows something the ordinary path can never
+/// tell it: **nothing became visible at this node** — no reader saw it, no subscriber fired, nothing
+/// gossiped.
+///
+/// Persist-first is admissible here *only* because the snapshot merges the WAL tail before
+/// truncating (D8): a record fsynced before the caller applied it cannot be discarded. That
+/// dependency is pinned by `regression_snapshot_retains_wal_record_acked_before_local_apply` and
+/// `regression_writer_threshold_snapshot_right_after_ack_keeps_write`; if either fails, this
+/// ordering is no longer admissible.
+///
+/// A node with **no persistence configured** is refused outright rather than answered with a
+/// receipt that claims nothing: the caller asked for durability as a contract, and a node that
+/// cannot provide it must say so (posture rule 3(i) — prevention requested by the caller).
+pub async fn kv_set_requiring_sync(
+    ctx: &CoreCtx,
+    op: crate::receipt::OperationId,
+    attempt: crate::receipt::AttemptId,
+    key: Arc<str>,
+    value: Bytes,
+    stamp: Option<u64>,
+) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+    use crate::receipt::{content_hash, LocalDurability, ReceiptError, WriteReceipt};
+
+    if reject_oversized_write(&key, value.len()) {
+        return Err(ReceiptError::Rejected(format!(
+            "key + value exceeds MAX_KV_WRITE_BYTES ({} bytes)",
+            crate::framing::MAX_KV_WRITE_BYTES
+        )));
+    }
+
+    let Some(wal) = ctx.wal.get() else {
+        return Err(ReceiptError::DurabilityNotEstablished {
+            persistence_configured: false,
+            reason: "no WAL is attached to this node".to_string(),
+        });
+    };
+
+    let hash = content_hash(&key, &value, false);
+    let update = match stamp {
+        Some(ts) => make_gossip_update_stamped(&ctx.node_id, ctx.default_ttl, Arc::clone(&key), value, false, ts),
+        None => make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::clone(&key), value, false, &ctx.hlc),
+    };
+    let ts = update.timestamp;
+
+    // 1. Durable first. Nothing is visible yet: no store entry, no notification, no frame.
+    if let Err(e) = wal.append_sync(sync_entry_from(&update)).await {
+        return Err(ReceiptError::DurabilityNotEstablished {
+            persistence_configured: true,
+            reason: e.to_string(),
+        });
+    }
+
+    // 2. Now apply, and 3. gossip. The WAL-tail merge is what makes this ordering safe.
+    let application = crate::store::apply_and_notify_reporting(&ctx.kv_state, &update);
+
+    #[cfg(feature = "metrics")]
+    metrics::counter!("gossip_kv_writes_total").increment(1);
+    let tls = ctx.tls.get().map(Arc::as_ref);
+    let msg = make_kv_wire_msg(update, ctx.node_id.id_hash(), tls);
+    let queued = dispatch_gossip_send(&ctx.gossip_txs, msg, ctx.node_id.id_hash(), ForwardHint::All).await;
+
+    Ok(WriteReceipt::new(op, attempt, key, hash, ts, application)
+        .with_local_durability(LocalDurability::OnDisk)
+        .queued(queued))
+}
+
 /// Tombstones `key`, applies locally, queues WAL (try-send), gossips (try-send).
 pub fn kv_delete(ctx: &CoreCtx, key: Arc<str>) -> bool {
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, &ctx.hlc);

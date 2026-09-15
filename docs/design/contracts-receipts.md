@@ -68,6 +68,7 @@ Each row answers four questions on its own; no row borrows another's answer.
 |---|---|---|---|---|
 | Local application | at `apply_and_notify` | never promised | yes — that is the meaning of this receipt | the value is still in the store and may have gossiped; `Applied` stands |
 | Local sync | at `apply_and_notify` (apply-first) | when `append_sync` returns `Ok` | **yes** — the value is visible and may have propagated before `Err`; the receipt says `Failed`, the *application* receipt still says `Applied`. A caller that must not act on an undurable value reads the local-sync receipt before acting, not the store | applied and possibly propagated; **durability unknown** — `wal_append` writes the record before `sync_data`, so a failed sync leaves the bytes possibly on disk and a later `replay` may restore them; the receipt never claims the record is absent. What is promised: nothing; what may happen on restart: local replay *or* anti-entropy from peers |
+| Local sync (**required**, PR 3) | **only after** the forced sync returns — persist → apply → gossip | when `append_sync` returns `Ok`; the receipt is always `OnDisk` | **no** — nothing is applied, notified or gossiped until durability is established | on failure, **nothing became visible at this node**: no store entry, no subscriber, no frame. The one contract under which a durability error means the operation did not happen *here* (it says nothing about other nodes) |
 | Replica sync | at the origin's apply; at each replica's apply | when the named peer's persisted ack for this `operation_id` arrives | yes at the origin; the receipt lists which replicas answered | the origin's local receipts stand; the replica set is partial and named; `DeliveryUnknown` for the rest |
 | Destination commit | at the destination's transaction commit — **not** before (the destination decides visibility) | at that commit | **no** — the destination's transaction is the boundary; a retry before commit is deduped by `operation_id` inside it | the destination either committed (and will answer the retry with the same receipt) or did not; the companion reports `DeliveryUnknown` until a retry resolves it |
 
@@ -180,6 +181,7 @@ Executable pins of *today's* semantics. A later PR changes a meaning by changing
 | `golden_fixture_replays_every_released_on_disk_format` | same | §9 |
 | `set_with_min_acks_zero`, `set_with_min_acks_timeout_no_peers` (existing) | `src/agent/kv_handle_tests.rs` | the timeout is an error and the write is not rolled back |
 | `receipt_tests::*` (PR 2) | `src/lib_tests.rs` | the receipt path: an unpersisted node promises nothing; `Buffered` ≠ `OnDisk`; a late retry is `Superseded` and does not clobber the newer value (D11's rationale, executable); an *identical* retry is `AlreadyCurrent`, not `Superseded`; two retries from one receipt get distinct attempt identities; a retry reuses its stamp; same identity + different content is a `Conflict` that writes nothing; an oversized write is `Rejected` before it applies; a commit receipt separates agreement from local durability and reads a timeout as `DeliveryUnknown` |
+| `a_required_sync_write_establishes_disk_even_in_async_mode`, `a_refused_required_sync_write_leaves_nothing_visible`, `a_required_sync_retry_keeps_the_stamp_and_refuses_changed_content` (PR 3) | `src/lib_tests.rs` | the strong path forces `OnDisk` whatever the node's `SyncMode`; a refused required-sync write leaves **nothing visible** — no store entry and no subscriber, which is what persist-first buys and the ordinary path cannot promise; retries keep the stamp and refuse changed content |
 | `regression_append_acked_never_acks_a_dead_writer` (PR 2) | `mycelium-core/src/persistence.rs` | the receipt path's append awaits an acknowledgement: a dead writer is `Failed` in every sync mode, never `Buffered`. `append`'s fire-and-forget `Ok` in `Async`/`Os` is asserted alongside — it is why the receipt path cannot use it |
 | `content_hash_golden_vectors` (PR 2) | `mycelium-core/src/receipt.rs` | the receipt's content hash is FNV-1a/64 over a specified canonical encoding, pinned by literals verified against an independent implementation — a receipt travels between builds, so a drifting hash would raise false `Conflict`s |
 
@@ -198,6 +200,29 @@ WAL-only key whose HLC is *older* than the snapshot watermark (invariant 2), and
 When item 1 changes the format (a record with identities, PR 2/3), the writer of the new format adds
 `fixint-v2/…` and the old directory stays: every released file must still replay. The fixture is
 regenerated only by the ignored test `regenerate_golden_fixture_fixint_v1`, run by hand, never in CI.
+
+## 9a. Retained operation status — deferred, and why *(PR 3, 2026-09-15)*
+
+The plan pairs "required local sync" with **retained operation status**: a node remembering an
+operation's outcome so a retry can be answered from the record instead of re-executed. The
+required-sync half is built; the retention half is **deliberately not**, because implementing it as
+specified would cut against §6.
+
+A per-node map from `operation_id` to its receipt is *destination-side dedup wearing a different
+hat*. §6 places that rung at the destination on purpose: the effects companion's reference
+destination commits the business change **and** its dedup row in one transaction, which is what makes
+the effect exactly-once. A substrate-level registry cannot do that — it is not in the destination's
+transaction — so it would answer a retry "already done" while the destination's own state remains
+unknown. That is a higher rung claimed from a lower one, the failure this whole record exists to
+prevent.
+
+It also needs decisions a receipt PR should not make alone: how long a node must remember an
+operation, what bounds the memory, what eviction means for a caller whose retry arrives after it
+(silently re-executing is the honest answer, which is exactly what happens today without a registry).
+
+**Open question, not omission.** If retained status earns its place it will be as an explicit,
+bounded, opt-in facility whose receipts say *this node remembers doing it*, never *the destination
+did it* — and it belongs next to PR 5's destination work, where the rung it serves actually lives.
 
 ## 10. What this record does not decide
 

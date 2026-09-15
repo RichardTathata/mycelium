@@ -147,6 +147,72 @@ impl KvHandle {
         .await
     }
 
+    /// Write `value` under `key` **only if this node can make it durable first** — the strong
+    /// path (contracts axis item 1 PR 3).
+    ///
+    /// Where [`set_with_receipt`](Self::set_with_receipt) reports whatever durability the node's
+    /// `SyncMode` happened to establish (`OnDisk`, or `Buffered` under `Async`/`Os`), this one
+    /// *requires* `OnDisk`: it forces an `fdatasync` regardless of the mode, and **applies nothing
+    /// until that returns**. The receipt's `local_durability` is therefore always
+    /// [`LocalDurability::OnDisk`](crate::receipt::LocalDurability::OnDisk).
+    ///
+    /// The ordering is what makes the failure meaningful. Every other write applies first, so a
+    /// durability failure leaves a value that readers, subscribers and peers may already have seen.
+    /// Here, an error means **nothing became visible at this node**.
+    ///
+    /// # Errors
+    /// [`ReceiptError::DurabilityNotEstablished`] when this node has no persistence configured, or
+    /// when the forced sync failed — in both cases nothing was applied.
+    /// [`ReceiptError::Rejected`] for an oversized key + value.
+    pub async fn set_requiring_sync<K: Into<Arc<str>>>(
+        &self,
+        op: &crate::receipt::OperationId,
+        key: K,
+        value: impl Into<Bytes>,
+    ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+        let attempt = crate::receipt::AttemptId::fresh(op);
+        crate::ops::kv_set_requiring_sync(
+            &self.ctx,
+            op.clone(),
+            attempt,
+            key.into(),
+            value.into(),
+            None,
+        )
+        .await
+    }
+
+    /// [`set_requiring_sync`](Self::set_requiring_sync) as a retry of `prior`: the operation's
+    /// original stamp is reused and same-identity-different-content is refused, exactly as in
+    /// [`retry_with_receipt`](Self::retry_with_receipt).
+    pub async fn retry_requiring_sync<K: Into<Arc<str>>>(
+        &self,
+        prior: &crate::receipt::WriteReceipt,
+        key: K,
+        value: impl Into<Bytes>,
+    ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+        use crate::receipt::{content_hash, AttemptId, ReceiptError};
+        let key: Arc<str> = key.into();
+        let value: Bytes = value.into();
+        let hash = content_hash(&key, &value, false);
+        if key != prior.key || hash != prior.content_hash {
+            return Err(ReceiptError::Conflict {
+                operation_id: prior.operation_id.clone(),
+                expected: prior.content_hash,
+                found: hash,
+            });
+        }
+        crate::ops::kv_set_requiring_sync(
+            &self.ctx,
+            prior.operation_id.clone(),
+            AttemptId::fresh(&prior.operation_id),
+            key,
+            value,
+            Some(prior.stamp),
+        )
+        .await
+    }
+
     /// Re-submit the operation `prior` receipted, as a further attempt.
     ///
     /// Two contract rules live here (item 1, D11):

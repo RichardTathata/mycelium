@@ -415,6 +415,20 @@ pub enum ReceiptError {
     },
     /// The write was refused before anything was applied — an oversized value, a closed shard.
     Rejected(String),
+    /// A **required-sync** write could not establish durability, so **nothing was applied and
+    /// nothing was gossiped** — the value never became visible at this node.
+    ///
+    /// This is the one place the substrate *prevents* rather than detects, and it is admissible
+    /// because the caller asked for it as a contract (posture rule 3(i)): a write that must be
+    /// durable is refused outright when this node cannot make it durable, rather than applied and
+    /// reported as undurable. `persistence_configured` distinguishes *this node was never able to*
+    /// from *the attempt failed*.
+    DurabilityNotEstablished {
+        /// Whether persistence is configured at all on this node.
+        persistence_configured: bool,
+        /// What the WAL reported, or why it could not be asked.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ReceiptError {
@@ -431,6 +445,15 @@ impl std::fmt::Display for ReceiptError {
                 established.application, established.local_durability
             ),
             ReceiptError::Rejected(why) => write!(f, "write rejected: {why}"),
+            ReceiptError::DurabilityNotEstablished { persistence_configured: false, .. } => f.write_str(
+                "a required-sync write was refused: this node has no persistence configured, so it \
+                 cannot establish durability; nothing was applied",
+            ),
+            ReceiptError::DurabilityNotEstablished { reason, .. } => write!(
+                f,
+                "a required-sync write did not establish durability ({reason}); nothing was applied \
+                 at this node — the value never became visible here"
+            ),
         }
     }
 }
