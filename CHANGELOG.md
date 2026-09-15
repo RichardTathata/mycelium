@@ -42,6 +42,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **CI: the reason-node job dispatched through the gateway before the gateway could dispatch**
+  (`.github/workflows/ci.yml`). Two `TestCallTyped` cases failed with HTTP 412
+  `provider_without_caller_context` on 2026-09-15. Not a regression and not a gateway bug: under the
+  default secure caller-context profile (item 7) a gateway refuses to route to a provider whose
+  `sys/caller-context/{node}` marker it cannot see, which is the refusal working as designed. The job
+  gated on `/health` — the HTTP server being up — and then dispatched immediately, while the marker
+  is published lazily (once a peer connects, or after a 5 s grace, so the write cannot land in a
+  reconnect-backoff window) and must then gossip to the other node. Every dispatch in that window is
+  a 412. The gate now polls until the dispatching node can see both markers, and says so with the
+  count when it cannot. Same defect class as scenario 13's readiness poll: a structural poll that
+  proves a weaker property than the one the test depends on.
+
 - **CI: scenario 13's client deadlines were shorter than the server budgets they measured**
   (`tests/integration/scenarios/13_tuple_space.sh`). The 4-node Docker suite failed twice in three
   runs on 2026-09-15 — once on a put, once on take #9 — after a green streak of at least 97
