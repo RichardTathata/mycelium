@@ -250,3 +250,40 @@ forces: per-agent with fresh ports when nodes join one at a time (the wasm-host 
 16-attempt loop), **per-pair** when mutual bootstrap fixes both ports before either agent
 starts (`start_pair()` in the wiki tests — shut the half-started survivor down before
 re-attempting, and shut a discarded `Wiki` down explicitly, the Run-32 task-leak lesson).
+
+## A client deadline below the server's budget is a defect, not a flake
+
+"Never fix a flake by widening a timeout" (above) has a sharp exception that is easy to
+misapply it to, and the 2026-09-15 scenario-13 failures are the worked example. Ask which of
+two things the deadline is:
+
+- **A tolerance for slowness.** The operation would have answered correctly, just later than
+  the test was willing to wait. Widening it hides a real latency regression. Forbidden.
+- **The window in which the answer is allowed to arrive at all.** Set below the server's own
+  budget, the assertion is *unobservable by construction*: the client can only ever report that
+  it gave up first, never the verdict it was written to check. Raising it does not weaken the
+  test — it is what makes the test a test.
+
+Scenario 13 was the second kind. A tuple put costs up to 16 s server-side (`resolve_primary_blocking`
+waits 3 × `cap_refresh`, then one `rpc_call` at 10 s; a take's RPC deadline is `timeout_secs + 5`),
+and the scenario allowed the client 5 s for a put and exactly 10 for a take. It passed for weeks
+because the first attempt usually succeeds; it failed twice in three runs once scenarios 03/04/05
+started leaving an outbound writer in reconnect backoff, where a dropped request frame makes the
+caller wait out the full RPC deadline. **Before adjusting any deadline, write down the callee's
+budget and compare.** If the client's is smaller, that is the bug.
+
+Two diagnostic rules fell out of the same dig, both cheap and both worth copying:
+
+- **Never pipe `curl -sf` into a parser in an assertion.** It reports a lost request as
+  `jq exited 28` — no iteration, no status code, no body. Capture `%{http_code}` and the body and
+  say which iteration failed and what the server actually answered. The take loop learned this in
+  #150; the put loop beside it did not, and stayed blind for a year.
+- **Truncate the `-o` file before every request.** curl leaves it untouched when no response
+  arrives, so the failure report prints the *previous* iteration's body. The failing run reported
+  `take #9 ... body='{"id":8,…}'`, which reads as a wrong-id bug and is actually a timeout — a
+  diagnostic that invents a second, fictional defect is worse than none.
+
+The deeper rhyme with the contracts axis: each of these is a **record claiming more than the
+underlying event established** — curl's impatience reported as the server's answer, one
+iteration's body reported as another's. Same defect class as the receipts work, in the test
+harness rather than the product ([contracts-receipts](../../../design/contracts-receipts.md)).

@@ -9,6 +9,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI: scenario 13's client deadlines were shorter than the server budgets they measured**
+  (`tests/integration/scenarios/13_tuple_space.sh`). The 4-node Docker suite failed twice in three
+  runs on 2026-09-15 — once on a put, once on take #9 — after a green streak of at least 97
+  consecutive runs reaching back to 2026-07-16, the limit of the run listing. Not a regression: the
+  PR it first appeared on (#217) is purely additive, `git diff -U0` showing zero lines removed from
+  any executing path. The scenario invoked operations whose own budget is up to **16 seconds**
+  (`resolve_primary_blocking` waits 3 × `cap_refresh` = 6 s, then one `rpc_call` at 10 s; a take's
+  is `timeout_secs + 5 s`) while allowing the client **5 seconds** for a put and **exactly 10** for
+  a take. Any request frame lost to an outbound-writer reconnect backoff — routine right after
+  scenarios 03/04/05 restart node-a, the whole cluster and node-c — therefore failed the run with
+  curl's own impatience (exit 28, HTTP 000) instead of the gateway's answer. The single-shot
+  assertions now outlive the server budget they measure; the short deadlines inside `poll_until`
+  probes are left alone, because there the retry is the recovery. This is the *opposite* of the
+  forbidden "widen the timeout until it goes green": below the server's budget the assertion is
+  unobservable by construction, and the test can only ever report that it gave up first.
+  Two diagnostics went with it: the put loop now captures the HTTP code and body like the take
+  loop has since #150, rather than piping `curl -sf` into `jq` and reporting `jq exited 28`; and
+  both loops truncate the body file first, because curl leaves it untouched when no response
+  arrives — which is why the failing run printed take #9's result as `{"id":8,...}`, reading as a
+  wrong-id bug rather than the timeout it was.
+
+### Known issues
+
+- **The tuple-space role record has no freshness, so `/api/tuple` can report a departed node as
+  primary** (`sys/tuple/{node}/{ns}/role`, written by `spawn_metrics_writer`). The backpressure
+  pheromone written by the *same* loop stamps `written_at_ms` and evaporates after 3× the cadence;
+  the role record does neither, is never cleared on shutdown, and survives a restart in the
+  replayed WAL. An operator reading the monitoring endpoint therefore cannot distinguish "is
+  primary" from "published that it was primary at some point". This is the shape 2.5.0 closed for
+  `ViewConfidence` with `staleness_known`, and it belongs to the same contracts-axis posture: a
+  record must not claim more than the underlying state establishes. Found while root-causing the
+  scenario-13 failures above, where it was **not** the cause — that phase passed in both failing
+  runs. Queued against the axis rather than changed here, because it alters an operator-facing
+  response shape.
+
 ---
 
 ## [2.5.0] — 2026-09-15
