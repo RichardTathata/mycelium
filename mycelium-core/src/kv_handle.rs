@@ -123,10 +123,23 @@ impl KvHandle {
         key: K,
         value: impl Into<Bytes>,
     ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+        let attempt = crate::receipt::AttemptId::fresh(op);
+        self.set_with_receipt_as(op, &attempt, key, value).await
+    }
+
+    /// [`set_with_receipt`](Self::set_with_receipt) with a **caller-minted** attempt identity, for
+    /// a caller that numbers its own deliveries (and can guarantee it does not reuse a number).
+    pub async fn set_with_receipt_as<K: Into<Arc<str>>>(
+        &self,
+        op: &crate::receipt::OperationId,
+        attempt: &crate::receipt::AttemptId,
+        key: K,
+        value: impl Into<Bytes>,
+    ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
         crate::ops::kv_set_with_receipt(
             &self.ctx,
             op.clone(),
-            crate::receipt::AttemptId::of(op, 1),
+            attempt.clone(),
             key.into(),
             value.into(),
             None,
@@ -145,15 +158,29 @@ impl KvHandle {
     /// 2. **Same identity, different content is a [`ReceiptError::Conflict`]** — nothing is
     ///    written. An identity that meant two things would make every receipt about it ambiguous.
     ///
-    /// The returned receipt carries the next [`AttemptId`], so "the second try was acked" is
-    /// distinguishable from "the first was".
+    /// The returned receipt carries a **fresh** [`AttemptId`], so every delivery is
+    /// distinguishable — including two retries from the same prior receipt, which happens when a
+    /// retry's response is lost or when replacement workers share the last receipt they saw. Use
+    /// [`retry_with_receipt_as`](Self::retry_with_receipt_as) to mint the identity yourself.
     pub async fn retry_with_receipt<K: Into<Arc<str>>>(
         &self,
         prior: &crate::receipt::WriteReceipt,
         key: K,
         value: impl Into<Bytes>,
     ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
-        use crate::receipt::{content_hash, AttemptId, ReceiptError};
+        let attempt = crate::receipt::AttemptId::fresh(&prior.operation_id);
+        self.retry_with_receipt_as(prior, &attempt, key, value).await
+    }
+
+    /// [`retry_with_receipt`](Self::retry_with_receipt) with a **caller-minted** attempt identity.
+    pub async fn retry_with_receipt_as<K: Into<Arc<str>>>(
+        &self,
+        prior: &crate::receipt::WriteReceipt,
+        attempt: &crate::receipt::AttemptId,
+        key: K,
+        value: impl Into<Bytes>,
+    ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+        use crate::receipt::{content_hash, ReceiptError};
         let key: Arc<str> = key.into();
         let value: Bytes = value.into();
         let hash = content_hash(&key, &value, false);
@@ -164,19 +191,10 @@ impl KvHandle {
                 found: hash,
             });
         }
-        // The attempt number is derived from the prior attempt's suffix, so attempts stay ordered
-        // without the handle holding any per-operation state.
-        let n = prior
-            .attempt_id
-            .as_str()
-            .rsplit('#')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(1);
         crate::ops::kv_set_with_receipt(
             &self.ctx,
             prior.operation_id.clone(),
-            AttemptId::of(&prior.operation_id, n.saturating_add(1)),
+            attempt.clone(),
             key,
             value,
             Some(prior.stamp),

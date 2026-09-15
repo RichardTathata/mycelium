@@ -31,8 +31,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `OnDisk`/`Failed`/`NotConfigured` assumed every write is forced to disk or fails, true only under
   `SyncMode::Flush` or `append_sync`; under `Async`/`Os` a successful append is **`Buffered`** — it
   survives a process crash and not a power loss. Claiming `OnDisk` there would have been exactly the
-  overclaim this axis exists to end. Gates: seven `receipt_tests`, including the late retry that is
+  overclaim this axis exists to end. Gates: nine `receipt_tests`, including the late retry that is
   `Superseded` while the newer value survives — D11's rationale made executable. No wire change.
+  **Review corrections (2026-09-15):** the receipt path now appends through a new
+  `WalHandle::append_acked` and **awaits the writer's acknowledgement** — `append` is a `try_send`
+  in `Async`/`Os` that returns `Ok` even when the queue is full or the writer is gone, so a receipt
+  built on it claimed the bytes had reached the operating system when they may never have left the
+  process; a dead writer is now `Failed` in every mode. `LocalApplication` gains **`AlreadyCurrent`**
+  and **`Refused`**: an idempotent retry and a capacity refusal were both reported as `Superseded`,
+  claiming a newer value had won when none had. Attempt identities are **fresh per dispatch**
+  (`AttemptId::fresh`, with `*_as` verbs for callers that mint their own) — deriving them from the
+  prior receipt made two retries of one receipt indistinguishable, which is what happens when a
+  response is lost or replacement workers share a receipt. And the content hash is now **FNV-1a/64
+  over a specified canonical encoding with golden vectors**, replacing seeded `ahash`, which is not
+  an interchange format: its output may differ across versions and CPU features, so an unchanged
+  operation retried on another build could have raised a false `Conflict`.
 
 - **AE evaluator seam at the gateway** (`src/agent/action_evaluator.rs`; the code half of AE0,
   `docs/design/action-envelope-ae0.md`; plan §6.8 / D36–D38, queue §10.12.4). One hook between the

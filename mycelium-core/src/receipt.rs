@@ -69,7 +69,20 @@ impl std::fmt::Display for OperationId {
 pub struct AttemptId(Arc<str>);
 
 impl AttemptId {
-    /// The `n`-th attempt of `op`, rendered `{operation}#{n}`.
+    /// A **fresh identity for one dispatch**: `{operation}#{16 random hex}`.
+    ///
+    /// Each delivery gets its own, because two deliveries can otherwise collide: retrying twice
+    /// from the same prior receipt — which happens naturally when a retry's response is lost, or
+    /// when replacement workers share the last receipt they saw — would derive the same number
+    /// twice and make two distinct deliveries indistinguishable (review, 2026-09-15). A caller that
+    /// wants deterministic numbering mints its own with [`of`](Self::of) and passes it to the
+    /// `*_as` verbs.
+    pub fn fresh(op: &OperationId) -> Self {
+        Self(Arc::from(format!("{op}#{:016x}", fastrand::u64(..)).as_str()))
+    }
+
+    /// The `n`-th attempt of `op`, rendered `{operation}#{n}` — for a caller that numbers its own
+    /// attempts and can guarantee it does not reuse a number.
     pub fn of(op: &OperationId, n: u32) -> Self {
         Self(Arc::from(format!("{op}#{n}").as_str()))
     }
@@ -89,14 +102,33 @@ impl std::fmt::Display for AttemptId {
 // ── Rung 1: local application ────────────────────────────────────────────────
 
 /// What became of an operation at this node's store — the **local application** receipt.
+///
+/// Four outcomes, because the store's "nothing changed" covers three different truths and a
+/// receipt that called them all `Superseded` would claim a newer value had won when none had
+/// (found by review, 2026-09-15).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalApplication {
-    /// This operation's value is the one the store now holds.
+    /// This operation's value is the one the store now holds, and this write is what put it there.
     Applied,
-    /// A newer value already held the key, so LWW kept it. The operation is not lost or failed;
-    /// it is *superseded*, and a reader sees the newer value.
+    /// The store already held **exactly this operation's value at its stamp** — an idempotent
+    /// retry. Nothing changed because nothing needed to: the operation *is* current. Distinct from
+    /// [`Superseded`](Self::Superseded), where a *different, newer* value won.
+    AlreadyCurrent,
+    /// A **newer** value already held the key, so LWW kept it. The operation is not lost or
+    /// failed; a reader sees the newer value.
     Superseded,
+    /// The store **refused** the write: the live-entry cap (`max_store_entries`) was reached. The
+    /// key may be absent entirely — nothing newer won, and nothing was applied.
+    Refused,
+}
+
+impl LocalApplication {
+    /// Does the store now hold this operation's value — whether this write put it there or found
+    /// it already current?
+    pub fn is_current(&self) -> bool {
+        matches!(self, LocalApplication::Applied | LocalApplication::AlreadyCurrent)
+    }
 }
 
 // ── Rung 2: local sync ───────────────────────────────────────────────────────
@@ -405,19 +437,42 @@ impl std::fmt::Display for ReceiptError {
 
 impl std::error::Error for ReceiptError {}
 
-/// A stable content hash for conflict detection (see [`WriteReceipt::content_hash`]).
+/// A **specified, portable** content hash for conflict detection (see
+/// [`WriteReceipt::content_hash`]).
 ///
-/// Fixed-seed so it is identical across processes and runs — a receipt from one node must be
-/// comparable with a retry on another.
+/// **FNV-1a, 64-bit**, over a canonical encoding: the key's UTF-8 bytes, a `0x00` separator, the
+/// value's bytes, and a final `0x01`/`0x00` tombstone byte. Length-prefix-free but unambiguous,
+/// because the separator cannot occur in the key (a `str` may contain NUL, so the key length is
+/// mixed in first — see the encoding below).
+///
+/// The first cut used `ahash` with fixed seeds, which is **not** an interchange format: aHash
+/// documents that its output may differ across versions and CPU features, so the same unchanged
+/// operation retried on a different build could hash differently and raise a false
+/// [`ReceiptError::Conflict`] (found by review, 2026-09-15). A receipt that travels between nodes
+/// needs an algorithm that is specified, not merely seeded. Pinned by golden vectors in this
+/// module's tests.
+///
+/// This is a **divergence detector, not a security binding**: FNV-1a is not collision-resistant and
+/// an adversary who chooses both contents can collide it. Where a binding must resist that — the AE
+/// action envelope's argument digest — a cryptographic hash is used instead.
 pub fn content_hash(key: &str, value: &[u8], is_tombstone: bool) -> u64 {
-    use std::hash::{BuildHasher, Hash, Hasher};
-    static SEED: std::sync::OnceLock<ahash::RandomState> = std::sync::OnceLock::new();
-    let state = SEED.get_or_init(|| ahash::RandomState::with_seeds(0x5eed, 0xc0ffee, 0xfeed, 0xface));
-    let mut h = state.build_hasher();
-    key.hash(&mut h);
-    value.hash(&mut h);
-    is_tombstone.hash(&mut h);
-    h.finish()
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = OFFSET_BASIS;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(PRIME);
+        }
+    };
+    // Canonical encoding: key length (8 bytes, big-endian) ‖ key ‖ 0x00 ‖ value ‖ tombstone byte.
+    // The length prefix makes ("ab", "c") and ("a", "bc") distinct whatever the bytes contain.
+    feed(&(key.len() as u64).to_be_bytes());
+    feed(key.as_bytes());
+    feed(&[0x00]);
+    feed(value);
+    feed(&[if is_tombstone { 0x01 } else { 0x00 }]);
+    h
 }
 
 #[cfg(test)]
@@ -464,6 +519,50 @@ mod tests {
         assert_ne!(content_hash("k", b"v", false), content_hash("k", b"w", false));
         assert_ne!(content_hash("k", b"v", false), content_hash("j", b"v", false));
         assert_ne!(content_hash("k", b"", false), content_hash("k", b"", true), "a tombstone is not an empty value");
+        // The length prefix keeps a key/value split unambiguous.
+        assert_ne!(content_hash("ab", b"c", false), content_hash("a", b"bc", false));
+    }
+
+    /// **Golden vectors.** The receipt's hash is an interchange value — a retry may be issued by a
+    /// different build on different hardware, and a hash that drifted would raise a false
+    /// `Conflict`. These pin FNV-1a/64 over the canonical encoding; a change to either must fail
+    /// here and be a deliberate, versioned decision (review, 2026-09-15).
+    #[test]
+    fn content_hash_golden_vectors() {
+        // Computed from the specification: FNV-1a 64 over
+        // len(key) as 8 big-endian bytes ‖ key ‖ 0x00 ‖ value ‖ tombstone byte.
+        fn expected(key: &str, value: &[u8], tomb: bool) -> u64 {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(key.as_bytes());
+            bytes.push(0x00);
+            bytes.extend_from_slice(value);
+            bytes.push(if tomb { 0x01 } else { 0x00 });
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h
+        }
+        for (k, v, t) in [("", &b""[..], false), ("k", b"v", false), ("k", b"v", true), ("user/1", b"hello world", false)] {
+            assert_eq!(content_hash(k, v, t), expected(k, v, t), "key={k:?} value={v:?} tombstone={t}");
+        }
+        // Fixed literals, so a silent algorithm swap cannot pass by recomputing itself. These were
+        // verified against an independent implementation of FNV-1a/64 over the same canonical
+        // encoding, not copied from this code's output.
+        assert_eq!(content_hash("", b"", false), 0x69d3_07cc_20f6_ef8d);
+        assert_eq!(content_hash("k", b"v", false), 0xa498_890a_4e8a_2eaf);
+        assert_eq!(content_hash("k", b"v", true), 0xa498_880a_4e8a_2cfc);
+        assert_eq!(content_hash("user/1", b"hello world", false), 0x2565_4ee1_ba96_29b0);
+    }
+
+    #[test]
+    fn an_application_outcome_says_whether_the_value_is_current() {
+        assert!(LocalApplication::Applied.is_current());
+        assert!(LocalApplication::AlreadyCurrent.is_current(), "an idempotent retry is current, not superseded");
+        assert!(!LocalApplication::Superseded.is_current());
+        assert!(!LocalApplication::Refused.is_current(), "a capacity refusal is not a supersession");
     }
 
     #[test]

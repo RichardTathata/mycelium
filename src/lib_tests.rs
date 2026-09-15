@@ -5494,7 +5494,7 @@ mod receipt_tests {
         assert_eq!(r.application, LocalApplication::Applied);
         assert_eq!(r.local_durability, LocalDurability::NotConfigured);
         assert!(!r.local_durability.is_durable(), "nothing was promised, so nothing is durable");
-        assert_eq!(r.attempt_id, AttemptId::of(&op, 1));
+        assert!(r.attempt_id.as_str().starts_with("op-unpersisted#"), "{}", r.attempt_id);
         a.shutdown().await;
     }
 
@@ -5568,10 +5568,15 @@ mod receipt_tests {
         let third = a.kv().retry_with_receipt(&second, "k/retry", b"v".to_vec()).await.unwrap();
         assert_eq!(second.stamp, first.stamp, "a retry must not tick a fresh HLC (D11)");
         assert_eq!(third.stamp, first.stamp);
-        assert_eq!(first.attempt_id, AttemptId::of(&op, 1));
-        assert_eq!(second.attempt_id, AttemptId::of(&op, 2));
-        assert_eq!(third.attempt_id, AttemptId::of(&op, 3));
+        // Every delivery has its own identity; the operation's does not change.
+        assert_ne!(first.attempt_id, second.attempt_id);
+        assert_ne!(second.attempt_id, third.attempt_id);
+        assert_ne!(first.attempt_id, third.attempt_id);
         assert_eq!(second.operation_id, op, "the operation identity is stable across attempts");
+        // A caller that numbers its own deliveries still can.
+        let numbered = AttemptId::of(&op, 7);
+        let r = a.kv().retry_with_receipt_as(&first, &numbered, "k/retry", b"v".to_vec()).await.unwrap();
+        assert_eq!(r.attempt_id, numbered);
         a.shutdown().await;
     }
 
@@ -5591,6 +5596,46 @@ mod receipt_tests {
             other => panic!("expected Conflict, got {other:?}"),
         }
         assert_eq!(a.kv().get("k/c").as_deref(), Some(&b"original"[..]), "the conflicting retry wrote nothing");
+        a.shutdown().await;
+    }
+
+    /// Review regression (2026-09-15, finding 2): an identical retry is `AlreadyCurrent`, not
+    /// `Superseded` — nothing newer won, the operation *is* the current value.
+    #[tokio::test]
+    async fn an_identical_retry_is_already_current_not_superseded() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-idem");
+        let first = a.kv().set_with_receipt(&op, "k/idem", b"v".to_vec()).await.unwrap();
+        assert_eq!(first.application, LocalApplication::Applied);
+        let again = a.kv().retry_with_receipt(&first, "k/idem", b"v".to_vec()).await.unwrap();
+        assert_eq!(
+            again.application,
+            LocalApplication::AlreadyCurrent,
+            "an idempotent retry is current, not superseded by something newer"
+        );
+        assert!(again.application.is_current());
+        assert_eq!(a.kv().get("k/idem").as_deref(), Some(&b"v"[..]));
+        a.shutdown().await;
+    }
+
+    /// Review regression (2026-09-15, finding 3): two retries from the **same prior receipt** are
+    /// two deliveries and must not share an attempt identity — the case that arises when a retry's
+    /// response is lost, or when replacement workers share the last receipt they saw.
+    #[tokio::test]
+    async fn two_retries_from_one_receipt_get_distinct_attempt_identities() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-dup");
+        let first = a.kv().set_with_receipt(&op, "k/dup", b"v".to_vec()).await.unwrap();
+        let retry_a = a.kv().retry_with_receipt(&first, "k/dup", b"v".to_vec()).await.unwrap();
+        let retry_b = a.kv().retry_with_receipt(&first, "k/dup", b"v".to_vec()).await.unwrap();
+        assert_ne!(
+            retry_a.attempt_id, retry_b.attempt_id,
+            "two deliveries derived from one receipt must still be distinguishable"
+        );
+        assert_eq!(retry_a.operation_id, retry_b.operation_id);
+        assert_eq!(retry_a.stamp, retry_b.stamp, "both still reuse the operation's stamp");
         a.shutdown().await;
     }
 

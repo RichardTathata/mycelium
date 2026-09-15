@@ -357,12 +357,14 @@ pub async fn kv_set_with_receipt(
     // Apply first, then persist (persistence.rs durability invariant 1).
     let application = crate::store::apply_and_notify_reporting(&ctx.kv_state, &update);
 
+    // `append_acked`, never `append`: in `Async`/`Os` the latter is a `try_send` that returns `Ok`
+    // even when the queue is full or the writer is gone, so a receipt built on it would claim the
+    // bytes reached the operating system when they may never have left this process (review,
+    // 2026-09-15). The acknowledgement is of the *write*; whether it was also synced depends on the
+    // mode, which is what separates `OnDisk` from `Buffered`.
     let local_durability = match ctx.wal.get() {
         None => LocalDurability::NotConfigured,
-        Some(wal) => match wal.append(sync_entry_from(&update)).await {
-            // `append` fsyncs only in `Flush`; in `Async`/`Os` the bytes reach the page cache and
-            // survive a process crash but not a power loss. Saying `OnDisk` there would claim a
-            // durability this node never established — see `LocalDurability::Buffered`.
+        Some(wal) => match wal.append_acked(sync_entry_from(&update)).await {
             Ok(()) => match ctx.config.persistence.as_ref().map(|p| p.sync_mode) {
                 Some(crate::config::SyncMode::Flush) => LocalDurability::OnDisk,
                 _ => LocalDurability::Buffered,

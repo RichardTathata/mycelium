@@ -519,16 +519,18 @@ pub fn apply_to_store(store: &papaya::HashMap<Arc<str>, StoreEntry>, update: &Go
 /// `apply_and_notify` delegates here and discards the answer, so every existing call site is
 /// unchanged.
 pub fn apply_and_notify_reporting(kv: &KvState, update: &GossipUpdate) -> crate::receipt::LocalApplication {
-    use crate::receipt::LocalApplication;
-    if apply_and_notify_inner(kv, update) { LocalApplication::Applied } else { LocalApplication::Superseded }
+    apply_and_notify_inner(kv, update)
 }
 
 pub fn apply_and_notify(kv: &KvState, update: &GossipUpdate) {
     let _ = apply_and_notify_inner(kv, update);
 }
 
-/// The apply itself. `true` when this update's value won LWW and is now the store's.
-fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> bool {
+/// The apply itself, reporting which of the four outcomes occurred. "Nothing changed" is three
+/// different truths — already current, superseded by something newer, or refused by the cap — and
+/// the receipt must not flatten them (review, 2026-09-15).
+fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> crate::receipt::LocalApplication {
+    use crate::receipt::LocalApplication;
     if kv.max_store_entries > 0 && !update.is_tombstone {
         // The cap is defined over LIVE entries (config contract), so only a write that would
         // INCREASE the live count is subject to it: a live value for a key currently absent or
@@ -548,9 +550,8 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> bool {
                 cap = kv.max_store_entries,
                 "KV store live-entry cap reached; new live write dropped",
             );
-            // Dropped by the cap: this operation's value is not the store's. `Superseded` is the
-            // honest receipt — the write did not fail, and a reader sees whatever is there.
-            return false;
+            // Dropped by the cap: nothing newer won, and the key may be absent entirely.
+            return LocalApplication::Refused;
         }
     }
 
@@ -561,11 +562,15 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> bool {
     // Capture the old live timestamp inside the compute callback so there is no
     // TOCTOU window between reading the old entry and performing the CAS.
     let mut old_live: Option<(u64, u64)> = None; // (timestamp, value_hash) of an overwritten live entry
+    // Why the incoming update did not win, when it did not. Captured inside the CAS closure, which
+    // is the only place the losing comparison is visible; reset on every retry like `old_live`.
+    let mut lost_to_newer = false;
 
     let changed = {
         let guard = kv.store.pin();
         let result = guard.compute(Arc::clone(&update.key), |existing| {
             old_live = None; // reset on each CAS retry
+            lost_to_newer = false;
             match existing {
                 None => Operation::Insert(StoreEntry { data: val.clone(), timestamp: ts }),
                 Some((_, curr)) => {
@@ -575,6 +580,9 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> bool {
                         }
                         Operation::Insert(StoreEntry { data: val.clone(), timestamp: ts })
                     } else {
+                        // Already current (this exact operation, at its own stamp) or superseded
+                        // by a different, newer value? Only the loser can tell them apart.
+                        lost_to_newer = !(curr.timestamp == ts && curr.data == val);
                         Operation::Abort(())
                     }
                 }
@@ -582,6 +590,10 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> bool {
         });
         matches!(result, papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. })
     };
+
+    if !changed {
+        return if lost_to_newer { LocalApplication::Superseded } else { LocalApplication::AlreadyCurrent };
+    }
 
     if changed {
         // Maintain the exact live-entry count for the cap. `old_live` is Some iff this winning CAS
@@ -739,7 +751,7 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> bool {
         #[cfg(feature = "metrics")]
         metrics::gauge!("gossip_store_entries").set(kv.store.len() as f64);
     }
-    changed
+    LocalApplication::Applied
 }
 
 /// Returns all live (non-tombstone) key-value pairs whose key starts with `prefix`.
