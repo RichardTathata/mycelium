@@ -33,7 +33,66 @@ concurrency:
   group: scale-nightly
   cancel-in-progress: false
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
+  # ── Is there any scale evidence at all? ───────────────────────────────────────────────────────
+  #
+  # The job below runs only on a self-hosted box labelled `mycelium-scale`. When that box is
+  # offline the run does not fail — it sits **queued**, indefinitely, and eventually expires as
+  # "cancelled". On the runs list that looks like activity. It is the opposite: it is the absence
+  # of evidence, rendered as a spinner.
+  #
+  # That is exactly what happened between 2026-09-10 and 2026-09-15: every nightly in that window
+  # produced nothing — four expired as "cancelled", two were still queued days later — while the
+  # contracts work landed, and nobody noticed, because nothing ever went red. (Queued-not-failed is
+  # consistent with no runner carrying the label being online; the runner list itself needs admin
+  # scope to read, so that part is inference, not something this repo can check.)
+  # The plan's own words are "nothing scale-related can be evidenced until it is green"
+  # (docs/plans/v3-contracts-axis.md §10, item 8), so a silent gap is the one failure mode that matters.
+  #
+  # This hosted job cannot start the box, and does not pretend to. It asks a narrower question —
+  # *when did this workflow last actually succeed?* — and goes red when the answer is "too long
+  # ago" or "never". An alarm that fires on the absence of a signal, rather than on a bad signal,
+  # because absence is what this has been failing at.
+  evidence-freshness:
+    name: Scale evidence freshness (hosted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if the last successful scale run is stale
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_AGE_DAYS: '3'
+        run: |
+          set -euo pipefail
+          last=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/scale-nightly.yml/runs?status=success&per_page=1" \
+            --jq '.workflow_runs[0].updated_at // empty' 2>/dev/null || true)
+          if [ -z "$last" ]; then
+            echo "::error::No successful run of the scale suites has ever been recorded."
+            echo "Nothing scale-related can be evidenced until this goes green. The scale job runs"
+            echo "only on a self-hosted runner labelled 'mycelium-scale' (see the header of this"
+            echo "workflow for the one-time setup); while that box is offline the job queues"
+            echo "silently instead of failing."
+            exit 1
+          fi
+          last_s=$(date -u -d "$last" +%s)
+          now_s=$(date -u +%s)
+          age_d=$(( (now_s - last_s) / 86400 ))
+          echo "Last successful scale run: $last (${age_d}d ago; threshold ${MAX_AGE_DAYS}d)."
+          if [ "$age_d" -gt "$MAX_AGE_DAYS" ]; then
+            echo "::error::Scale evidence is ${age_d} days old (threshold ${MAX_AGE_DAYS})."
+            echo "The likely cause is that the self-hosted 'mycelium-scale' runner is offline, in"
+            echo "which case the scale job below is queued rather than failing. Check"
+            echo "Settings -> Actions -> Runners. Until this is green, treat every scale claim in"
+            echo "the docs as unevidenced."
+            exit 1
+          fi
+          echo "Scale evidence is current."
+
   scale:
     name: Scale suites (100-node + resilience + entries)
     runs-on: [self-hosted, mycelium-scale]
