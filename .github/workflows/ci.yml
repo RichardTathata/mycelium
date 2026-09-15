@@ -247,6 +247,31 @@ jobs:
               sleep 1
             done
           done
+          # `/health` proves the HTTP server is up. It does NOT prove the gateway can dispatch,
+          # and these tests dispatch immediately. Under the default secure caller-context profile
+          # (item 7) a gateway refuses to route to a provider whose `sys/caller-context/{node}`
+          # marker it cannot see — HTTP 412 `provider_without_caller_context`, correctly, rather
+          # than silently running the call as the node. That marker is published lazily (once a
+          # peer connects, or after a 5 s grace — `lifecycle.rs`, so the write cannot land in a
+          # reconnect-backoff window) and then has to gossip to the other node. Between "healthy"
+          # and "both markers visible" every dispatch is a 412, which is what reddened
+          # `TestCallTyped::*` on 2026-09-15.
+          #
+          # So gate on the thing the tests actually need. Same lesson as integration scenario 13:
+          # a readiness poll must prove the capability about to be used, not a weaker one that
+          # happens to be available (docs/wiki/dev/testing/testing.md).
+          for i in $(seq 1 60); do
+            seen=$(curl -sf "http://127.0.0.1:8101/gateway/kv/keys?prefix=sys/caller-context/" \
+                   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["keys"]))' 2>/dev/null || echo 0)
+            [ "$seen" -ge 2 ] && break
+            if [ "$i" -eq 60 ]; then
+              echo "node A never saw both caller-context markers (saw $seen); gateway dispatch would 412"
+              curl -s "http://127.0.0.1:8101/gateway/kv/keys?prefix=sys/caller-context/" || true
+              cat "$RUNNER_TEMP"/node-*.log
+              exit 1
+            fi
+            sleep 1
+          done
       - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
       - run: pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests/test_typed.py mycelium-py/tests/test_reason.py mycelium-py/tests/test_connection_reuse.py -v
         env:
