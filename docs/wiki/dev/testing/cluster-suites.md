@@ -50,13 +50,30 @@ Added 2026-07-10 after a bare "FAIL" with empty stderr cost several diagnosis ro
   60 s, warn-not-block) before scenarios run, so scenario windows measure convergence, not
   bring-up lag.
 - **S13 take-loop instrumentation** (`13_tuple_space.sh`): each take reports iteration + HTTP
-  code + body on failure (408 vs 5xx tell different stories).
+  code + body on failure (408 vs 5xx tell different stories). **The put loop beside it went
+  uninstrumented until 2026-09-15** — it piped `curl -sf` into `jq` and so reported a lost put as
+  `jq exited 28`, with no iteration, status or body. Instrumentation added to one loop is not
+  instrumentation added to the scenario; check the siblings.
+- **Truncate the `-o` body file before every request** (`13_tuple_space.sh`, 2026-09-15): curl
+  leaves it untouched when no response arrives, so a failure report prints the *previous*
+  iteration's body. The run that found this reported `take #9 ... body='{"id":8,…}'` — which reads
+  as a wrong-id bug and was a timeout. A diagnostic that invents a second, fictional defect is
+  worse than no diagnostic.
+- **Client deadlines must outlive the callee's own budget** (2026-09-15): every single-shot
+  assertion in S13 was set below the server-side budget of the call it made (5 s against a put
+  whose worst case is 16 s; exactly 10 s against a take's 16 s), so a request frame lost to writer
+  backoff surfaced as curl's impatience rather than the gateway's answer. Raising those is *not*
+  the forbidden timeout-widening — see [testing](testing.md) §*A client deadline below the
+  server's budget is a defect, not a flake* for the distinction and the check that precedes any
+  deadline change.
 
 ## The operating lesson
 
 A CPU-starved 2-core runner is a *feature*: it stretches timing windows (cap propagation,
 TIME_WAIT, connection warmup) into ranges fast local hardware never exhibits. Every "hosted
-CI is flaky" episode this suite has produced so far decomposed into a real defect. Diagnose
+CI is flaky" episode this suite has produced so far decomposed into a real defect — including the
+2026-09-15 pair that went red at the v2.5.0 tag, where the defect was arithmetic in the scenario's
+own deadlines and the merge it landed next to turned out to be a pure-insertion diff. Diagnose
 from captured node logs, never from code-reading — four wrong hypotheses in the #150 arc were
 each killed by data (full narrative: `.log/2026-07-09-connect-peer-s13.md`,
 `.log/2026-07-10-spurious-promotion-s13.md` in [dev](../dev.md)'s log).
