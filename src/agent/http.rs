@@ -1874,6 +1874,27 @@ fn ae_preflight(
     use super::action_evaluator as ae;
     let evaluator = ctx.agent_ctx.action_evaluator.get()?;
 
+    // Both evaluator questions asked behind the unwind boundary (AE0 §3): a panicking adapter
+    // cannot be used to build the envelope either.
+    let Some((wanted, mapping)) = ae::evaluator_facts(evaluator, operation, resource) else {
+        warn!(%operation, %resource, "AE preflight: evaluator panicked while reporting its facts");
+        return Some(ae::PreflightRefusal::NotEstablished(ae::Decision::indeterminate(
+            "evaluator panicked while reporting its facts",
+            "",
+        )));
+    };
+
+    // Only the argument names the policy declared cross into the envelope — and thence into the
+    // evidence record. Everything else stays in the request (AE0 §5).
+    let mut selected = serde_json::Map::new();
+    if let Some(obj) = arguments.as_object() {
+        for name in &wanted {
+            if let Some(v) = obj.get(name) {
+                selected.insert(name.clone(), v.clone());
+            }
+        }
+    }
+
     let operation_id = request["params"]["_meta"]["operation_id"]
         .as_str()
         .map(str::to_owned)
@@ -1897,7 +1918,8 @@ fn ae_preflight(
         operation: operation.to_string(),
         resource: resource.to_string(),
         arguments_digest: ae::arguments_digest(&canonical),
-        mapping: evaluator.mapping(operation, resource),
+        selected_arguments: selected,
+        mapping,
         // The expected policy revision comes from a deployment report, which the AE exporter
         // supplies (AE0 §6); until then the seam has no second opinion to compare against and the
         // stale-policy check simply does not fire.

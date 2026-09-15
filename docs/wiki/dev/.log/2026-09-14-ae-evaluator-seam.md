@@ -35,6 +35,34 @@ the item it governs, silently moving the gate onto the wrong method — the same
 had just reported against WP5's accessor. Worth naming: inserting *above* an attribute block, never
 between it and its item, is the rule; the `--no-default-features` build is what catches it.
 
+**External review before merge (2026-09-15), four P2s and one architectural point, all taken.**
+(1) *Unknown facts became a definite prohibition:* `requires_facts` was honoured for allowances only,
+so a prohibition resting on an absent mandate returned `Deny` with no error. Dispatch was refused
+either way — but the **evidence** claimed a prohibition had been established when it had not. Missing-
+fact handling now applies to both rule kinds. (2) *A stale permit survived inside its refusal:* the
+stale-policy branch kept the evaluator's verdict, so `refusal.decision().verdict` could read `Permit`
+— a contradiction for a consumer that reads the decision rather than the control flow. The effective
+verdict is now `Indeterminate`, with the superseded one preserved in `checked`. (3) *The panic
+guarantee did not hold:* this crate's release profile is `panic = "abort"`, where `catch_unwind`
+contains nothing, and `mapping()` ran outside the boundary besides. The trait now requires evaluators
+not to panic and says exactly where containment applies; `evaluator_facts` puts the other two calls
+behind the same boundary. (4) *Foreign adapters could not construct what the trait returns:*
+`Decision` and `ActionMapping` are `#[non_exhaustive]` with no public constructor, so
+`impl ActionEvaluator` in another crate failed with E0639 — the private Cedar adapter (AE-T T2)
+could literally not have been written, and a foreign evaluator could only ever return
+`Indeterminate`. Constructors and a builder were added, gated by a new **external-crate test**
+(`tests/ae_external_adapter.rs`, run in CI) — `--lib` alone could never have caught this.
+(5) *Architectural:* a digest establishes integrity but carries no meaning, so no adapter could
+decide *amount ≤ 500* from the envelope. `ActionEvaluator::security_relevant_arguments` now declares
+the names it needs and the gateway lifts exactly those into `selected_arguments`; a declared name the
+request did not carry is *not established*, never a silent mismatch. Only declared names cross, so
+the payload stays out of the evidence (AE0 §5).
+
+**The lesson worth keeping.** Three of the four were the same shape: a rule applied to one branch and
+not its mirror (allowance/prohibition), a verdict corrected in the control flow but not in the record,
+and an attribute applied for a good reason (`#[non_exhaustive]`, learned from the WP5 review) without
+asking *who constructs this type*. The external-crate test is the structural answer to the third.
+
 **Strength, stated once and everywhere.** A route-level preflight: *SelfImposedPrevention* for the routes
 this gateway fronts. Anything reaching a provider without traversing this gateway is outside the
 guarantee, and the evidence must say so (`coverage.complete: false`). Resource-side enforcement inside

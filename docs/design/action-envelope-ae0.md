@@ -40,7 +40,7 @@ context: a struct supplied by anyone else is not evidence.
 | `delegation` | item 7's represented-principal chain when present (AE1 extends: SPIFFE / customer identity bindings) | the auth layer; **workload identity alone confers no authority** |
 | `operation` | the native verb: MCP `tools/call {name}` · A2A `tasks/send {skillId}` · `rpc/call {kind}` · … | the route |
 | `resource` | the exact target: provider node + tool/skill/kind; under AE2 the protected resource's own identifier | the route; AE2: the resource |
-| `arguments` | the security-relevant arguments, or their **canonical digest** (`sha256` of canonical JSON) when the policy needs only integrity | the enforcement point computes the digest itself |
+| `arguments` | the security-relevant arguments **and** their canonical digest (`sha256` of canonical JSON) — the digest establishes integrity, the values carry the meaning a condition such as *amount ≤ 500* needs; a digest alone cannot decide one (review, 2026-09-15) | the enforcement point computes the digest itself and lifts **only the argument names the evaluator declared**, so the rest of the payload never enters the envelope or the evidence |
 | `mandate` | item 5's mandate identity + epoch when a mandate governs the resource (empty until item 5) | the resource fence (AE2) |
 | `policy.revision` | the revision the evaluator will evaluate — the **`sha256` of the loaded policy artifact**, as a string the runtime controls | the evaluator loader |
 | `validity` | issued-at (HLC physical ms), not-after | the enforcement point |

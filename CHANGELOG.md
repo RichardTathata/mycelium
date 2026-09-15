@@ -30,6 +30,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is outside the guarantee and the evidence must say so. Gates: the AE0 §9 negative fixtures as unit
   tests, plus two live-gateway tests (a prohibited and an uncovered tool are refused before the tool
   runs; an unattached seam changes nothing). No wire change, no KV prefix; `gateway` + `tls`.
+  **Review corrections (2026-09-15):** a prohibition whose own preconditions cannot be established
+  now answers `Indeterminate` with the missing fact named, not a definite `Deny` — dispatch was
+  refused either way, but the evidence had claimed a prohibition was *established* when it was not;
+  a stale-policy refusal now carries `Indeterminate` rather than the evaluator's original verdict
+  (a refusal containing `Permit` is a contradiction for the record, and the original is preserved in
+  `checked`); the panic guarantee is stated honestly — `catch_unwind` contains an evaluator panic
+  only in an unwinding build, and this crate's release profile is `panic = "abort"`, so the trait
+  requires evaluators not to panic, and the evaluator's *other* two calls now sit behind the same
+  boundary; and **`Decision` / `ActionMapping` / `ActionEnvelope` gained public constructors** —
+  being `#[non_exhaustive]` with none, they were unconstructible outside the crate (E0639), so a
+  foreign evaluator could never return a permit and the replaceable-evaluator premise was false. A
+  new external-crate test (`tests/ae_external_adapter.rs`, CI-run) is the gate for that. The
+  envelope also now carries the **security-relevant argument values** an evaluator declares it needs
+  (`ActionEvaluator::security_relevant_arguments`): a digest establishes integrity but cannot answer
+  *amount ≤ 500*, and only the declared names cross into the envelope or the evidence.
 
 ### Security
 
