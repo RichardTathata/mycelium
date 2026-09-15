@@ -81,13 +81,16 @@ pub(crate) fn remove_tracker(
 ///
 /// Created by `set_with_min_acks` and observed by `apply_and_notify`.
 pub(crate) struct QuorumAckTracker {
-    /// Minimum HLC timestamp of the write we are waiting for. Any incoming
-    /// update for the tracked key with `timestamp >= write_ts` from a peer
-    /// (i.e., `sender != self_hash`) counts as an ACK.
+    /// Lower bound on the tracked write's HLC stamp, taken immediately before the
+    /// write. Evidence older than this cannot be about this write.
     pub(crate) write_ts:  u64,
     /// `id_hash()` of this node — used to filter out loopback `apply_and_notify`
     /// calls that originate from our own local write.
     pub(crate) self_hash: u64,
+    /// [`content_hash`](mycelium_core::receipt::content_hash) of the exact payload this
+    /// write carries. An update that does not hash to this is **a different value**, and
+    /// counting it was the overclaim PR 4a removes.
+    pub(crate) write_content: u64,
     /// Set of peer `id_hash` values that have confirmed the write.
     pub(crate) acked_by:  HashMap<u64, ()>,
     /// Notifies the waiter whenever `acked_by.len()` increases.
@@ -95,11 +98,16 @@ pub(crate) struct QuorumAckTracker {
 }
 
 impl QuorumAckTracker {
-    pub(crate) fn new(write_ts: u64, self_hash: u64) -> (Arc<Self>, watch::Receiver<usize>) {
+    pub(crate) fn new(
+        write_ts: u64,
+        self_hash: u64,
+        write_content: u64,
+    ) -> (Arc<Self>, watch::Receiver<usize>) {
         let (tx, rx) = watch::channel(0usize);
         let tracker = Arc::new(Self {
             write_ts,
             self_hash,
+            write_content,
             acked_by:  HashMap::new(),
             notify_tx: tx,
         });
@@ -108,11 +116,34 @@ impl QuorumAckTracker {
 }
 
 impl QuorumObserver for QuorumAckTracker {
-    /// Called by `apply_and_notify` for every incoming update on the tracked key.
-    /// Increments the ACK count when the update is from a different node and
-    /// carries a timestamp at least as recent as the tracked write.
-    fn observe(&self, sender: u64, timestamp: u64) {
-        if sender != self.self_hash && timestamp >= self.write_ts {
+    /// The identity-less observation establishes nothing and therefore **never counts**.
+    ///
+    /// Before PR 4a this was the whole mechanism, and `sender != self && timestamp >= write_ts`
+    /// was enough to call an update an acknowledgement. It is not: a *newer overwrite* of the
+    /// same key satisfies both while carrying a payload the peer never received from us. An ack
+    /// needs the payload's identity, which only [`observe_update`](QuorumObserver::observe_update)
+    /// carries.
+    fn observe(&self, _sender: u64, _timestamp: u64) {}
+
+    /// Called by `apply_and_notify` for every incoming update on the tracked key. Counts the
+    /// update only when it is **this exact payload**, from an origin that is not us, at or after
+    /// the tracked write.
+    ///
+    /// **What this can establish, and what it structurally cannot.** `sender` is the update's
+    /// *originating* node, preserved across every forwarding hop, and the fan-out excludes the
+    /// origin — so a peer relaying our own write is both attributed to us and never sent back to
+    /// us. Anti-entropy re-attributes the entries it delivers to the receiving node. There is
+    /// therefore **no inbound frame on today's substrate that says "a peer holds your write"**,
+    /// and this counter cannot reach a non-zero value from our own write's propagation, however
+    /// widely it propagates. What it *can* count is a distinct origin independently gossiping this
+    /// same payload under this key. The persisted-by-peer protocol that makes a replica-sync
+    /// receipt obtainable is item 1 PR 4b; until it lands, `set_with_min_acks` cannot succeed and
+    /// says so.
+    fn observe_update(&self, sender: u64, timestamp: u64, _nonce: u64, content_hash: u64) {
+        if sender != self.self_hash
+            && timestamp >= self.write_ts
+            && content_hash == self.write_content
+        {
             let n = {
                 let guard = self.acked_by.pin();
                 guard.insert(sender, ());
@@ -125,29 +156,52 @@ impl QuorumObserver for QuorumAckTracker {
 
 #[cfg(test)]
 mod floor_tests {
-    //! The regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8):
-    //! executable pins of *today's* ack semantics. PR 4a changes this meaning by changing this pin.
+    //! The regression floor (contracts axis item 1, `docs/design/contracts-receipts.md` §8):
+    //! executable pins of the min-acks tracker's ack semantics. PR 1 pinned the `>=` propagation
+    //! rule; **PR 4a changed that meaning by changing this pin**, which is the discipline the
+    //! floor exists for.
     use super::*;
+    use mycelium_core::receipt::content_hash;
 
-    /// Pins the `>=` propagation semantics: any update from a distinct peer at or after the write's
-    /// HLC counts as an ack — including a **newer overwrite** that means the peer never held this
-    /// payload. This is the documented overclaim (`set_with_min_acks` rustdoc, plan D9); the
-    /// exact-identity ack of PR 4a must flip the last assertion, in the open.
+    /// PR 4a (2026-09-15) — replaces `floor_observe_counts_any_update_at_or_after_write_ts`.
+    ///
+    /// The old pin held that any update from a distinct origin at or after the write's HLC counted
+    /// as an ack, **including a newer overwrite carrying a payload that peer never received from
+    /// us**. That was the documented overclaim (plan D9). An ack now requires the payload's
+    /// identity to match, so a newer overwrite counts for nothing.
     #[test]
-    fn floor_observe_counts_any_update_at_or_after_write_ts() {
-        let (tracker, rx) = QuorumAckTracker::new(1_000, /* self */ 1);
-        tracker.observe(1, 1_000);      // loopback from self: never an ack
+    fn observe_counts_only_this_exact_payload() {
+        let mine = content_hash("k", b"mine", false);
+        let theirs = content_hash("k", b"theirs", false);
+        let (tracker, rx) = QuorumAckTracker::new(1_000, /* self */ 1, mine);
+
+        tracker.observe_update(1, 1_000, 1, mine);   // loopback from self: never an ack
         assert_eq!(*rx.borrow(), 0);
-        tracker.observe(2, 999);        // older than the write: not evidence of it
+        tracker.observe_update(2, 999, 2, mine);     // older than the write: not evidence of it
         assert_eq!(*rx.borrow(), 0);
-        tracker.observe(2, 1_000);      // exact timestamp from a peer: an ack
+        tracker.observe_update(2, 1_000, 3, mine);   // this payload, from a peer: an ack
         assert_eq!(*rx.borrow(), 1);
-        tracker.observe(2, 1_000);      // the same peer again: still one distinct peer
+        tracker.observe_update(2, 1_000, 4, mine);   // the same peer again: one distinct peer
         assert_eq!(*rx.borrow(), 1);
-        // The overclaim: a *newer* value from another peer counts although that peer holds a
-        // different payload. Today's contract is propagation, not exact-identity (ADR §1, §7).
-        tracker.observe(3, 5_000);
-        assert_eq!(*rx.borrow(), 2, "propagation semantics: a newer overwrite counts as an ack today");
+
+        // The flip. A *newer* value from another origin no longer counts: that peer holds a
+        // different payload, and saying otherwise was the overclaim.
+        tracker.observe_update(3, 5_000, 5, theirs);
+        assert_eq!(
+            *rx.borrow(), 1,
+            "a newer overwrite is not evidence that any peer holds THIS payload (PR 4a)",
+        );
+    }
+
+    /// The identity-less `observe` establishes nothing, so it must never count — not even for a
+    /// sender and timestamp that would have satisfied the pre-4a rule. Implementations that only
+    /// have this method keep compiling (the trait's default forwards to it); they simply cannot
+    /// produce an acknowledgement, which is the honest outcome.
+    #[test]
+    fn the_identity_less_observation_is_never_an_ack() {
+        let (tracker, rx) = QuorumAckTracker::new(1_000, 1, content_hash("k", b"v", false));
+        tracker.observe(2, 5_000);
+        assert_eq!(*rx.borrow(), 0, "no payload identity, no acknowledgement");
     }
 }
 
@@ -192,8 +246,11 @@ mod tests {
     fn concurrent_quorum_trackers_coexist_and_remove_only_self() {
         let kv = KvState::new(0);
         let key: Arc<str> = Arc::from("q/k");
-        let (t1, rx1) = QuorumAckTracker::new(100, 1);
-        let (t2, rx2) = QuorumAckTracker::new(100, 1);
+        // Both callers track the same payload, so the inbound updates below are evidence for
+        // both (PR 4a: an ack requires the payload's identity to match).
+        let content = mycelium_core::receipt::content_hash("q/k", b"v1", false);
+        let (t1, rx1) = QuorumAckTracker::new(100, 1, content);
+        let (t2, rx2) = QuorumAckTracker::new(100, 1, content);
         install_tracker(&kv.quorum_trackers, Arc::clone(&key), &t1);
         install_tracker(&kv.quorum_trackers, Arc::clone(&key), &t2);
 
@@ -208,7 +265,7 @@ mod tests {
         // First caller completes: removes ONLY its own tracker.
         remove_tracker(&kv.quorum_trackers, &key, &t1);
         apply_and_notify(&kv, &GossipUpdate {
-            sender: 8, key: Arc::clone(&key), value: Bytes::from_static(b"v2"),
+            sender: 8, key: Arc::clone(&key), value: Bytes::from_static(b"v1"),
             timestamp: 151, nonce: 2, ttl: 1, is_tombstone: false,
         });
         assert_eq!(*rx2.borrow(), 2, "surviving caller keeps receiving acks");

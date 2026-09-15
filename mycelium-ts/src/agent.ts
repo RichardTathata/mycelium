@@ -274,9 +274,12 @@ export class MyceliumAgent {
   }
 
   /**
-   * Writes `value` and waits for at least `minAcks` distinct peers to gossip an update for the key at or
-   * after this write's timestamp — propagation evidence, not receipt of this payload and not persistence
-   * (the exact-write receipt is the v3.0 contracts axis, item 1).
+   * Writes `value` and waits for peer acknowledgements.
+   *
+   * WARNING: with `minAcks >= 1` this times out even when every peer has received and applied the
+   * write. The origin of a write cannot observe that write's propagation on this substrate
+   * (docs/design/contracts-receipts.md section 1a); item 1 PR 4b is what makes it answerable. The
+   * write is applied and gossiped either way, so a timeout never means the value was not written.
    * Returns the confirmed peer count on success; throws `TimeoutError` on timeout.
    */
   async setWithMinAcks(

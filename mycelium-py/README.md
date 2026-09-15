@@ -206,10 +206,8 @@ All writes are gossiped to peers with last-write-wins (HLC) semantics.
 
 #### `set_with_min_acks(key, value, min_acks, *, timeout_secs=5.0) → int`
 
-Write `value` and wait until at least `min_acks` distinct peers have gossiped an update for the key at or
-after this write's timestamp. That is evidence of **propagation** (or of supersession by a newer write) — not
-that a peer received this exact payload, and not that anything was persisted; the exact-write,
-persisted-by-peer receipt is the v3.0 contracts axis, item 1. Returns the peer count on success; raises
+Write `value` and wait for peer acknowledgements. **⚠ With `min_acks >= 1` this times out even when every peer has received and applied the write.** The origin of a write cannot observe that write's propagation on this substrate (`docs/design/contracts-receipts.md` §1a); item 1 PR 4b is what makes it answerable. The write is applied and gossiped either way, so a timeout never means the value was not written.
+With `min_acks=0` it is an ordinary local write and returns `0`. Returns the peer count on success; raises
 `TimeoutError` on timeout.
 The write is **not** rolled back on timeout.
 

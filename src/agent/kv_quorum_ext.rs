@@ -21,17 +21,46 @@ use super::kv_quorum::QuorumError;
 /// [`set_with_min_acks`](KvQuorumExt::set_with_min_acks).
 pub trait KvQuorumExt {
     /// Writes `value` under `key` and waits for at least `min_acks` distinct peers
-    /// to confirm receipt before returning.
+    /// to confirm receipt before returning — **but see the warning below: on today's substrate
+    /// that confirmation cannot arrive.**
     ///
-    /// # What an ack is — propagation, not receipt, not durability
+    /// # ⚠ This verb cannot succeed on today's substrate
     ///
-    /// The tracker counts an ack when a distinct peer gossips **any** update for `key` at or after this write's HLC timestamp — evidence that the write *propagated* (or was already superseded by a newer one), **not** that the peer received this exact payload and **not** that it persisted anything. A newer competing write from a peer therefore satisfies the count for a
-    /// payload that peer never held. An exact-identity, persisted-by-peer receipt is the v3.0
-    /// contracts axis, item 1 (`docs/plans/v3-contracts-axis.md`, PR 4a/4b). It also does **not**
-    /// provide linearisability, total-order, or any consensus
-    /// guarantee. Two concurrent callers writing different values to the same key will
-    /// both succeed here; LWW resolves the winner silently. For a linearisable write
-    /// use [`consistent_set`](crate::GossipAgent::consistent_set).
+    /// Read this before calling it. With `min_acks >= 1` it will time out even when every peer in
+    /// the cluster has received and applied the write. That is not a bug in the peers; it is a
+    /// structural gap, measured and pinned by
+    /// `a_peer_holding_the_write_still_produces_no_acknowledgement` (`kv_handle_tests.rs`):
+    /// two connected nodes, the peer demonstrably holding the value, `Err(Timeout { acks_received: 0 })`.
+    ///
+    /// Three facts compose into it, none of which is visible from this signature:
+    ///
+    /// - A `GossipUpdate`'s `sender` is its **originating** node, preserved unchanged across every
+    ///   forwarding hop. A peer relaying our write is therefore attributed to *us*, and the
+    ///   tracker's loopback filter discards it.
+    /// - Fan-out **excludes the origin**, so the relayed copy is never sent back to us anyway.
+    /// - Anti-entropy re-attributes the entries it delivers to the **receiving** node.
+    ///
+    /// So no inbound frame on this substrate carries "a peer holds your write". What the counter
+    /// *can* observe is a distinct origin independently gossiping this same payload under this
+    /// key — real evidence that some peer holds this value, but not a receipt for this operation.
+    ///
+    /// # What an ack is — exact payload identity, still not durability
+    ///
+    /// Since the contracts axis' item 1 PR 4a, an ack requires the inbound update's
+    /// [`content_hash`](mycelium_core::receipt::content_hash) to equal this write's, from an origin
+    /// that is not us, at or after this write's HLC. Before 4a any update at or after that stamp
+    /// counted, so a **newer overwrite** — a payload that peer never received from us — satisfied
+    /// the count. That was the overclaim (plan D9); it is gone, and removing it is why a stray
+    /// concurrent writer can no longer produce a false `Ok`.
+    ///
+    /// It still establishes nothing about **durability**: no peer has promised that anything
+    /// reached its disk. The persisted-by-peer protocol that makes a replica-sync receipt
+    /// obtainable is item 1 PR 4b (`docs/design/contracts-receipts.md` §2.1, `docs/plans/v3-contracts-axis.md`).
+    ///
+    /// It is also **not** linearisability, total order, or consensus. Two concurrent callers
+    /// writing different values to the same key both succeed here and LWW resolves the winner
+    /// silently. For a linearisable write use
+    /// [`consistent_set`](crate::GossipAgent::consistent_set).
     ///
     /// # Errors
     ///
@@ -71,7 +100,11 @@ impl KvQuorumExt for KvHandle {
 
         let write_ts_min = ctx.hlc.tick();
         let self_hash    = ctx.node_id.id_hash();
-        let (tracker, mut rx) = QuorumAckTracker::new(write_ts_min, self_hash);
+        // The payload's identity, so a newer overwrite of this key can never be mistaken for
+        // evidence that a peer holds *this* value (PR 4a). `false` = not a tombstone: this verb
+        // only writes.
+        let write_content = mycelium_core::receipt::content_hash(key.as_ref(), value.as_ref(), false);
+        let (tracker, mut rx) = QuorumAckTracker::new(write_ts_min, self_hash, write_content);
         install_tracker(&ctx.kv_state.quorum_trackers, Arc::clone(&key), &tracker);
 
         let _ = kv_set_async(ctx, Arc::clone(&key), value).await;

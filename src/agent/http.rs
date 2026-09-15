@@ -34,7 +34,7 @@
 //! - `POST   /gateway/kv`                      — write a KV key
 //! - `DELETE /gateway/kv?key=K`                — delete (tombstone) a KV key
 //! - `GET    /gateway/kv/keys?prefix=P`        — list live keys (optionally filtered)
-//! - `POST   /gateway/kv/quorum`               — write + wait for N peer ACKs
+//! - `POST   /gateway/kv/quorum`               — write + wait for N peer ACKs (cannot succeed today; see the route doc)
 //! - `GET    /gateway/mailbox/{kind}`          — SSE stream of mailbox events for this node
 //! - `POST   /gateway/mailbox/deliver`         — deliver an event to a target's mailbox
 //! - `GET    /gateway/shard/{ns}/{name}?key=K` — deterministic shard owner for a key
@@ -2039,7 +2039,17 @@ async fn gw_kv_keys(
     Json(json!({ "keys": keys })).into_response()
 }
 
-/// `POST /gateway/kv/quorum` — write + wait for peer durability acknowledgements.
+/// `POST /gateway/kv/quorum` — write + wait for peer acknowledgements.
+///
+/// **⚠ With `min_acks >= 1` this route times out even when every peer has received and applied the
+/// write.** It is the HTTP face of
+/// [`set_with_min_acks`](crate::KvQuorumExt::set_with_min_acks) and inherits its limit exactly: the
+/// origin of a write cannot observe that write's propagation on this substrate, because an update's
+/// `sender` is its *originating* node across every hop, fan-out excludes the origin, and
+/// anti-entropy re-attributes what it delivers to the receiver. See the verb's documentation and
+/// `docs/design/contracts-receipts.md` §1a; item 1 PR 4b is what makes it answerable. The write
+/// itself is applied and gossiped either way — a timeout here never means the value was not
+/// written.
 ///
 /// Request body:
 /// ```json
@@ -2091,7 +2101,10 @@ async fn gw_kv_quorum(
 
     let write_ts_min = tc.hlc.tick();
     let self_hash    = tc.node_id.id_hash();
-    let (tracker, mut rx) = QuorumAckTracker::new(write_ts_min, self_hash);
+    // The payload's identity, so a newer overwrite of this key is never mistaken for evidence
+    // that a peer holds *this* value (contracts axis item 1 PR 4a). `false` = not a tombstone.
+    let write_content = mycelium_core::receipt::content_hash(key.as_ref(), value.as_ref(), false);
+    let (tracker, mut rx) = QuorumAckTracker::new(write_ts_min, self_hash, write_content);
     super::kv_quorum::install_tracker(&tc.kv_state.quorum_trackers, Arc::clone(&key), &tracker);
 
     kv_write(&tc, Arc::clone(&key), value, false);
