@@ -45,8 +45,8 @@ component, at which point. Four kinds, never conflated, never inferred from one 
 
 | Receipt | Establishes | Established by | Strength |
 |---|---|---|---|
-| **Local application** | the operation was applied to this node's store — `Applied`, or `Superseded` (a newer LWW value already held) | `apply_and_notify` | the store's own LWW rule; visible immediately |
-| **Local sync** | **this exact operation** crossed this node's persistence barrier — `OnDisk` (fsynced WAL record), `Failed` (**durability not established**: the writer was gone or the write or sync returned an error — the bytes may or may not be on disk, since `wal_append` writes before it syncs), `NotConfigured` (no persistence: nothing was promised) | the WAL writer's forced-`fdatasync` append (`WalHandle::append_sync`, since v2.4.2) | a durability claim in the module-doc sense: `Err` is never swallowed, and `Failed` is never read as *absent* |
+| **Local application** | what became of the operation at this node's store — `Applied` · `AlreadyCurrent` (an idempotent retry: the store already holds exactly this operation) · `Superseded` (a *different, newer* value won) · `Refused` (the live-entry cap declined it; the key may be absent) | `apply_and_notify_reporting` | the store's own LWW rule; visible immediately |
+| **Local sync** | **this exact operation** crossed this node's persistence barrier — `OnDisk` (fsynced WAL record), `Buffered` (the WAL accepted it but this node's `SyncMode` does not sync per append, so it survives a process crash and not a power loss), `Failed` (**durability not established**: the writer was gone or the write or sync returned an error — the bytes may or may not be on disk, since `wal_append` writes before it syncs), `NotConfigured` (no persistence: nothing was promised) | the WAL writer's forced-`fdatasync` append (`WalHandle::append_sync`, since v2.4.2) | a durability claim in the module-doc sense: `Err` is never swallowed, and `Failed` is never read as *absent* |
 | **Replica sync** | **named, distinct peers** — origin excluded — persisted **this exact operation** | a per-peer, identity-bound persisted ack (PR 4b; PR 4a first makes the existing count exact-identity) | strong only when the peer's ack is itself a local-sync receipt for the same `operation_id` |
 | **Destination commit** | the destination committed the business change **and** its dedup result **in one transaction** | the effects companion's reference destination (PR 5; SQLite) | exactly-once *effect*, by the destination's transaction, never by the substrate |
 
@@ -97,10 +97,28 @@ contract (§2.1); they may not silently share one meaning.
 
 ## 4. Failure vocabulary (names fixed here; types in PR 2)
 
-`Applied` · `Superseded` · `LocalDurability::{OnDisk, Failed, NotConfigured}` · `ReplicaSync { persisted_by:
-[NodeId], missing: [NodeId] }` · `DestinationCommit { destination, dedup: Fresh | Replayed }` · `Conflict`
-· **`DeliveryUnknown`**. Every verb on the receipt path returns one of these or a typed error; `bool`
-survives only on the existing verbs, deprecated where a receipt replaces it.
+`LocalApplication::{Applied, AlreadyCurrent, Superseded, Refused}` ·
+`LocalDurability::{OnDisk, Buffered, Failed, NotConfigured}` ·
+`ReplicaSync { persisted_by: [NodeId], missing: [NodeId] }` · `DestinationCommit { destination,
+dedup: Fresh | Replayed }` · `Conflict` · **`DeliveryUnknown`**. Every verb on the receipt path
+returns one of these or a typed error; `bool` survives only on the existing verbs, deprecated where
+a receipt replaces it.
+
+**Four application outcomes, not two (review, 2026-09-15).** The store's "nothing changed" covers
+three different truths: the operation *is* already the current value (an idempotent retry), a
+*different, newer* value won, or the live-entry cap refused the write and the key may be absent.
+Reporting all three as `Superseded` would claim a newer value had won when none had — the same class
+of overclaim as the durability one below, in the rung above it.
+
+**`Buffered` — a state this record was missing, found by implementing it (PR 2, 2026-09-15).** The
+three original states assumed every write is either forced to disk or failed. That is true only under
+`SyncMode::Flush` or an explicit `append_sync`: under `Async` or `Os` a successful append reaches the
+OS page cache, which **survives a process crash and is lost to a power failure**. A receipt claiming
+`OnDisk` there would have claimed a durability the node never established — precisely the overclaim
+this axis exists to end — and one claiming `Failed` would have denied a write that is very likely
+recoverable. `Buffered` says what is true, and PR 3's required-sync write is how a caller *demands*
+`OnDisk` instead. The layering matches item 6's storage model (`replay-nondeterminism-inventory.md`
+§5): process memory, OS page cache, durable storage, directory metadata are four different things.
 
 ## 5. Compatibility (§9's one rule; D24)
 
@@ -161,6 +179,9 @@ Executable pins of *today's* semantics. A later PR changes a meaning by changing
 | `regression_closed_writer_never_acks_success`, `regression_writer_dying_mid_request_is_an_error`, `append_sync_fdatasyncs_in_async_mode` (existing) | same | an ack is a durability claim |
 | `golden_fixture_replays_every_released_on_disk_format` | same | §9 |
 | `set_with_min_acks_zero`, `set_with_min_acks_timeout_no_peers` (existing) | `src/agent/kv_handle_tests.rs` | the timeout is an error and the write is not rolled back |
+| `receipt_tests::*` (PR 2) | `src/lib_tests.rs` | the receipt path: an unpersisted node promises nothing; `Buffered` ≠ `OnDisk`; a late retry is `Superseded` and does not clobber the newer value (D11's rationale, executable); an *identical* retry is `AlreadyCurrent`, not `Superseded`; two retries from one receipt get distinct attempt identities; a retry reuses its stamp; same identity + different content is a `Conflict` that writes nothing; an oversized write is `Rejected` before it applies; a commit receipt separates agreement from local durability and reads a timeout as `DeliveryUnknown` |
+| `regression_append_acked_never_acks_a_dead_writer` (PR 2) | `mycelium-core/src/persistence.rs` | the receipt path's append awaits an acknowledgement: a dead writer is `Failed` in every sync mode, never `Buffered`. `append`'s fire-and-forget `Ok` in `Async`/`Os` is asserted alongside — it is why the receipt path cannot use it |
+| `content_hash_golden_vectors` (PR 2) | `mycelium-core/src/receipt.rs` | the receipt's content hash is FNV-1a/64 over a specified canonical encoding, pinned by literals verified against an independent implementation — a receipt travels between builds, so a drifting hash would raise false `Conflict`s |
 
 ## 9. Golden on-disk fixtures (V2, this PR)
 

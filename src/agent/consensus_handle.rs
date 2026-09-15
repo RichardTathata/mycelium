@@ -48,6 +48,44 @@ pub struct ConsensusHandle {
     pub(crate) ctx: Arc<TaskCtx>,
 }
 
+/// Translate a [`ConsensusResult`] into the receipt vocabulary (item 1 PR 2).
+///
+/// The one judgement here: `persisted: true` on a node with **no persistence configured** means
+/// *nothing was promised*, not *on disk* — the collapse D24 names. The receipt separates them by
+/// reading the node's own configuration, which is the only place that distinction exists.
+fn receipt_from(
+    result: ConsensusResult,
+    ctx: &Arc<TaskCtx>,
+) -> Result<crate::CommitReceipt, crate::CommitError> {
+    use crate::{CommitError, CommitReceipt, LocalDurability};
+    match result {
+        ConsensusResult::Committed { slot, value, ballot, persisted, .. } => {
+            let durability = match (ctx.config.persistence.as_ref(), persisted) {
+                (None, _) => LocalDurability::NotConfigured,
+                // The commit path forces `append_sync`, which fsyncs in every `SyncMode`, so a
+                // `true` from a persisted node is genuinely on disk — unlike the ordinary write
+                // path, where `Async`/`Os` leaves the record `Buffered`.
+                (Some(_), true) => LocalDurability::OnDisk,
+                (Some(_), false) => LocalDurability::Failed(
+                    "the commit's WAL append did not acknowledge; durability not established".into(),
+                ),
+            };
+            Ok(CommitReceipt::new(slot, value, ballot, durability))
+        }
+        ConsensusResult::Timeout { slot, ballots_tried, .. } => {
+            Err(CommitError::DeliveryUnknown { slot, ballots_tried })
+        }
+        ConsensusResult::Superseded { slot, ballot } => Err(CommitError::Superseded { slot, ballot }),
+        ConsensusResult::TopologyUnsatisfied { slot, distinct_domains, domains_required, .. } => {
+            Err(CommitError::TopologyUnsatisfied {
+                slot,
+                distinct: distinct_domains,
+                required: domains_required,
+            })
+        }
+    }
+}
+
 impl ConsensusHandle {
     // ── Signal window helper ─────────────────────────────────────────────────
 
@@ -211,6 +249,42 @@ impl ConsensusHandle {
     /// Quorum defaults to `floor(N/2)+1` where N is `peers + 1` (including self).
     /// Set `config.quorum_size > 0` to override.
     #[tracing::instrument(level = "debug", skip(self, value), fields(node = %self.ctx.node_id))]
+    /// [`cluster_propose`](Self::cluster_propose), answering with a **receipt** instead of a
+    /// four-variant result (contracts axis item 1 PR 2; `docs/design/contracts-receipts.md`).
+    ///
+    /// The difference that matters is `Timeout`: it becomes
+    /// [`CommitError::DeliveryUnknown`](crate::CommitError::DeliveryUnknown), which says what is
+    /// true — the value may or may not have committed elsewhere — rather than inviting the reading
+    /// that nothing happened. On success the receipt carries the **local-sync** rung explicitly, so
+    /// "the cluster agreed" and "this node has it on disk" are two separate statements instead of
+    /// one collapsed `bool`.
+    ///
+    /// This is a **new verb**, not a new field on `ConsensusResult::Committed`: that variant's
+    /// fields are not `#[non_exhaustive]`, so growing it would break every exhaustive destructure
+    /// and construction (D24, corrected after review). The old verb and its `persisted: bool`
+    /// remain; `persisted == true` still folds *on disk* together with *nothing was promised*,
+    /// which is exactly what [`LocalDurability`](crate::LocalDurability) separates.
+    pub async fn cluster_propose_receipt(
+        &self,
+        slot:   &str,
+        value:  Bytes,
+        config: ConsensusConfig,
+    ) -> Result<crate::CommitReceipt, crate::CommitError> {
+        receipt_from(self.cluster_propose(slot, value, config).await, &self.ctx)
+    }
+
+    /// [`group_propose`](Self::group_propose), answering with a receipt. See
+    /// [`cluster_propose_receipt`](Self::cluster_propose_receipt).
+    pub async fn group_propose_receipt(
+        &self,
+        group:  &str,
+        slot:   &str,
+        value:  Bytes,
+        config: ConsensusConfig,
+    ) -> Result<crate::CommitReceipt, crate::CommitError> {
+        receipt_from(self.group_propose(group, slot, value, config).await, &self.ctx)
+    }
+
     pub async fn cluster_propose(
         &self,
         slot:   &str,

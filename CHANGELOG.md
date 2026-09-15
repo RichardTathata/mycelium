@@ -11,6 +11,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Contracts axis item 1 PR 2 — identities, typed receipts, the failure vocabulary**
+  (`mycelium-core/src/receipt.rs`; record `docs/design/contracts-receipts.md`). The vocabulary in
+  code: `OperationId` (caller-minted, stable across retries — a *correlation* identity, never
+  authority) and `AttemptId`; the four rungs as types — `LocalApplication::{Applied, Superseded}`,
+  `LocalDurability::{OnDisk, Buffered, Failed, NotConfigured}`, `ReplicaSync` and
+  `DestinationCommit` (vocabulary now, established by PR 4a/4b and PR 5); `ReceiptError::{Conflict,
+  DeliveryUnknown, Rejected}` and `CommitError`, with **no variant meaning "nothing happened"**.
+  New verbs, all additive: **`KvHandle::set_with_receipt`** returns a `WriteReceipt` naming each rung
+  it established and none above; **`KvHandle::retry_with_receipt`** re-submits an operation with its
+  **original HLC stamp** (D11 — a retry that ticked a fresh one could outrank and silently undo a
+  newer value) and refuses same-identity-different-content with `Conflict`, writing nothing;
+  **`ConsensusHandle::{cluster,group}_propose_receipt`** answer `Result<CommitReceipt, CommitError>`,
+  separating *the cluster agreed* from *this node has it on disk* and reading a timeout as
+  `DeliveryUnknown`. Per D24 these are **new verbs, not new fields**: `ConsensusResult::Committed`'s
+  shape is unchanged, since growing a non-`#[non_exhaustive]` variant would break every exhaustive
+  destructure. Core also gains `apply_and_notify_reporting` and `make_gossip_update_stamped`.
+  **A gap this implementation found in its own record:** `LocalDurability` needed a fourth state.
+  `OnDisk`/`Failed`/`NotConfigured` assumed every write is forced to disk or fails, true only under
+  `SyncMode::Flush` or `append_sync`; under `Async`/`Os` a successful append is **`Buffered`** — it
+  survives a process crash and not a power loss. Claiming `OnDisk` there would have been exactly the
+  overclaim this axis exists to end. Gates: nine `receipt_tests`, including the late retry that is
+  `Superseded` while the newer value survives — D11's rationale made executable. No wire change.
+  **Review corrections (2026-09-15):** the receipt path now appends through a new
+  `WalHandle::append_acked` and **awaits the writer's acknowledgement** — `append` is a `try_send`
+  in `Async`/`Os` that returns `Ok` even when the queue is full or the writer is gone, so a receipt
+  built on it claimed the bytes had reached the operating system when they may never have left the
+  process; a dead writer is now `Failed` in every mode. `LocalApplication` gains **`AlreadyCurrent`**
+  and **`Refused`**: an idempotent retry and a capacity refusal were both reported as `Superseded`,
+  claiming a newer value had won when none had. Attempt identities are **fresh per dispatch**
+  (`AttemptId::fresh`, with `*_as` verbs for callers that mint their own) — deriving them from the
+  prior receipt made two retries of one receipt indistinguishable, which is what happens when a
+  response is lost or replacement workers share a receipt. And the content hash is now **FNV-1a/64
+  over a specified canonical encoding with golden vectors**, replacing seeded `ahash`, which is not
+  an interchange format: its output may differ across versions and CPU features, so an unchanged
+  operation retried on another build could have raised a false `Conflict`.
+
 - **AE evaluator seam at the gateway** (`src/agent/action_evaluator.rs`; the code half of AE0,
   `docs/design/action-envelope-ae0.md`; plan §6.8 / D36–D38, queue §10.12.4). One hook between the
   gateway's auth layer and its dispatch: before a gateway-originated `tools/call` reaches a provider,

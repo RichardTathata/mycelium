@@ -5451,3 +5451,244 @@ async fn probe_tombstone_survives_replay_of_older_write() {
     );
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// Item 1 PR 2 — the receipt path: what a write establishes, rung by rung, and what a retry does.
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use crate::{
+        AttemptId, LocalApplication, LocalDurability, OperationId, PersistenceConfig, ReceiptError,
+        SyncMode,
+    };
+
+    fn agent_with(persistence: Option<PersistenceConfig>) -> Arc<GossipAgent> {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.persistence = persistence;
+        Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg))
+    }
+
+    fn persistence(tag: &str, sync_mode: SyncMode) -> (PersistenceConfig, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("myc-receipt-{tag}-{}", alloc_port()));
+        let _ = std::fs::remove_dir_all(&base);
+        (
+            PersistenceConfig {
+                base_path: base.clone(),
+                sync_mode,
+                snapshot_wal_threshold: 1_000_000,
+                snapshot_interval_secs: 3_600,
+            },
+            base,
+        )
+    }
+
+    /// With no persistence configured the receipt says `NotConfigured` — *nothing was promised* —
+    /// and never `OnDisk`. This is the distinction `persisted: bool` collapses (D24).
+    #[tokio::test]
+    async fn an_unpersisted_node_promises_nothing() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-unpersisted");
+        let r = a.kv().set_with_receipt(&op, "k/1", b"v".to_vec()).await.unwrap();
+        assert_eq!(r.application, LocalApplication::Applied);
+        assert_eq!(r.local_durability, LocalDurability::NotConfigured);
+        assert!(!r.local_durability.is_durable(), "nothing was promised, so nothing is durable");
+        assert!(r.attempt_id.as_str().starts_with("op-unpersisted#"), "{}", r.attempt_id);
+        a.shutdown().await;
+    }
+
+    /// The gap this PR found in its own record: under `SyncMode::Async` a successful append is
+    /// **buffered**, not on disk. A receipt claiming `OnDisk` here would claim a durability the
+    /// node never established; `Flush` is what establishes it.
+    #[tokio::test]
+    async fn a_buffered_write_does_not_claim_disk_but_a_flushed_one_does() {
+        let (p_async, dir_a) = persistence("async", SyncMode::Async);
+        let a = agent_with(Some(p_async));
+        a.start().await.unwrap();
+        let r = a.kv().set_with_receipt(&OperationId::new("op-a"), "k/async", b"v".to_vec()).await.unwrap();
+        assert_eq!(r.local_durability, LocalDurability::Buffered, "Async does not sync per append");
+        assert!(!r.local_durability.is_durable());
+        a.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir_a);
+
+        let (p_flush, dir_f) = persistence("flush", SyncMode::Flush);
+        let b = agent_with(Some(p_flush));
+        b.start().await.unwrap();
+        let r = b.kv().set_with_receipt(&OperationId::new("op-f"), "k/flush", b"v".to_vec()).await.unwrap();
+        assert_eq!(r.local_durability, LocalDurability::OnDisk, "Flush syncs every append");
+        assert!(r.local_durability.is_durable());
+        b.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir_f);
+    }
+
+    /// A late retry, arriving after a newer value legitimately took the key, is **`Superseded`** —
+    /// not applied, not failed — and crucially it does **not** clobber the newer value. That is
+    /// what reusing the original stamp buys (D11): had the retry ticked a fresh HLC it would have
+    /// outranked the newer write and silently undone it.
+    #[tokio::test]
+    async fn a_late_retry_is_superseded_and_does_not_clobber_the_newer_value() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-late");
+
+        // 1. The operation is written and receipted at stamp T1.
+        let first = a.kv().set_with_receipt(&op, "k/race", b"original".to_vec()).await.unwrap();
+        assert_eq!(first.application, LocalApplication::Applied);
+
+        // 2. Something newer takes the key (a fresh HLC, so T2 > T1).
+        assert!(a.kv().set("k/race", b"newer".to_vec()), "the newer write is queued");
+        assert_eq!(a.kv().get("k/race").as_deref(), Some(&b"newer"[..]));
+
+        // 3. The original operation is retried — same identity, same content, same stamp.
+        let retry = a.kv().retry_with_receipt(&first, "k/race", b"original".to_vec()).await.unwrap();
+        assert_eq!(retry.stamp, first.stamp, "the retry reuses T1");
+        assert_eq!(
+            retry.application,
+            LocalApplication::Superseded,
+            "a late retry loses LWW to the newer value, and the receipt says so"
+        );
+        assert_eq!(
+            a.kv().get("k/race").as_deref(),
+            Some(&b"newer"[..]),
+            "the newer value survives: this is why a retry must not tick a fresh HLC"
+        );
+        a.shutdown().await;
+    }
+
+    /// D11: a retry re-submits the **same stamp**, so the operation ranks identically under LWW
+    /// however often it is attempted — and each attempt is distinguishable.
+    #[tokio::test]
+    async fn a_retry_reuses_the_stamp_and_numbers_the_attempt() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-retry");
+        let first = a.kv().set_with_receipt(&op, "k/retry", b"v".to_vec()).await.unwrap();
+        let second = a.kv().retry_with_receipt(&first, "k/retry", b"v".to_vec()).await.unwrap();
+        let third = a.kv().retry_with_receipt(&second, "k/retry", b"v".to_vec()).await.unwrap();
+        assert_eq!(second.stamp, first.stamp, "a retry must not tick a fresh HLC (D11)");
+        assert_eq!(third.stamp, first.stamp);
+        // Every delivery has its own identity; the operation's does not change.
+        assert_ne!(first.attempt_id, second.attempt_id);
+        assert_ne!(second.attempt_id, third.attempt_id);
+        assert_ne!(first.attempt_id, third.attempt_id);
+        assert_eq!(second.operation_id, op, "the operation identity is stable across attempts");
+        // A caller that numbers its own deliveries still can.
+        let numbered = AttemptId::of(&op, 7);
+        let r = a.kv().retry_with_receipt_as(&first, &numbered, "k/retry", b"v".to_vec()).await.unwrap();
+        assert_eq!(r.attempt_id, numbered);
+        a.shutdown().await;
+    }
+
+    /// Same identity, different content is a `Conflict` — and **nothing is written**.
+    #[tokio::test]
+    async fn the_same_operation_with_different_content_conflicts_and_writes_nothing() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-conflict");
+        let first = a.kv().set_with_receipt(&op, "k/c", b"original".to_vec()).await.unwrap();
+        let err = a.kv().retry_with_receipt(&first, "k/c", b"changed".to_vec()).await.unwrap_err();
+        match err {
+            ReceiptError::Conflict { operation_id, expected, found } => {
+                assert_eq!(operation_id, op);
+                assert_ne!(expected, found);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(a.kv().get("k/c").as_deref(), Some(&b"original"[..]), "the conflicting retry wrote nothing");
+        a.shutdown().await;
+    }
+
+    /// Review regression (2026-09-15, finding 2): an identical retry is `AlreadyCurrent`, not
+    /// `Superseded` — nothing newer won, the operation *is* the current value.
+    #[tokio::test]
+    async fn an_identical_retry_is_already_current_not_superseded() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-idem");
+        let first = a.kv().set_with_receipt(&op, "k/idem", b"v".to_vec()).await.unwrap();
+        assert_eq!(first.application, LocalApplication::Applied);
+        let again = a.kv().retry_with_receipt(&first, "k/idem", b"v".to_vec()).await.unwrap();
+        assert_eq!(
+            again.application,
+            LocalApplication::AlreadyCurrent,
+            "an idempotent retry is current, not superseded by something newer"
+        );
+        assert!(again.application.is_current());
+        assert_eq!(a.kv().get("k/idem").as_deref(), Some(&b"v"[..]));
+        a.shutdown().await;
+    }
+
+    /// Review regression (2026-09-15, finding 3): two retries from the **same prior receipt** are
+    /// two deliveries and must not share an attempt identity — the case that arises when a retry's
+    /// response is lost, or when replacement workers share the last receipt they saw.
+    #[tokio::test]
+    async fn two_retries_from_one_receipt_get_distinct_attempt_identities() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-dup");
+        let first = a.kv().set_with_receipt(&op, "k/dup", b"v".to_vec()).await.unwrap();
+        let retry_a = a.kv().retry_with_receipt(&first, "k/dup", b"v".to_vec()).await.unwrap();
+        let retry_b = a.kv().retry_with_receipt(&first, "k/dup", b"v".to_vec()).await.unwrap();
+        assert_ne!(
+            retry_a.attempt_id, retry_b.attempt_id,
+            "two deliveries derived from one receipt must still be distinguishable"
+        );
+        assert_eq!(retry_a.operation_id, retry_b.operation_id);
+        assert_eq!(retry_a.stamp, retry_b.stamp, "both still reuse the operation's stamp");
+        a.shutdown().await;
+    }
+
+    /// An oversized write is refused before anything is applied — `Rejected`, not a receipt that
+    /// claims an application that never happened.
+    #[tokio::test]
+    async fn an_oversized_write_is_rejected_before_it_applies() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let big = vec![0u8; crate::framing::MAX_KV_WRITE_BYTES + 1];
+        let err = a.kv().set_with_receipt(&OperationId::new("op-big"), "k/big", big).await.unwrap_err();
+        assert!(matches!(err, ReceiptError::Rejected(_)), "got {err:?}");
+        assert!(a.kv().get("k/big").is_none(), "nothing was applied");
+        a.shutdown().await;
+    }
+
+    /// The consensus receipt separates "the cluster agreed" from "this node has it on disk", and
+    /// a timeout reads as `DeliveryUnknown` rather than as a negative.
+    #[cfg(feature = "consensus")]
+    #[tokio::test]
+    async fn a_commit_receipt_separates_agreement_from_local_durability() {
+        use crate::{CommitError, ConsensusConfig};
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
+        let solo = ConsensusConfig { quorum_size: 1, ..ConsensusConfig::default() };
+
+        let r = a
+            .consensus()
+            .cluster_propose_receipt("receipt/slot", Bytes::from_static(b"v"), solo.clone())
+            .await
+            .expect("committed");
+        assert_eq!(&*r.slot, "receipt/slot");
+        // Agreed cluster-wide, but this node persists nothing — the two statements stay apart.
+        assert_eq!(r.local_durability, LocalDurability::NotConfigured);
+        assert!(!r.local_durability.is_durable());
+
+        // A quorum that cannot be met times out, and the receipt vocabulary calls that unknown.
+        let impossible = ConsensusConfig {
+            quorum_size: 5,
+            max_ballots: 1,
+            phase1_timeout: Duration::from_millis(150),
+            ..ConsensusConfig::default()
+        };
+        let err = a
+            .consensus()
+            .cluster_propose_receipt("receipt/unknown", Bytes::from_static(b"v"), impossible)
+            .await
+            .unwrap_err();
+        match err {
+            CommitError::DeliveryUnknown { slot, .. } => assert_eq!(&*slot, "receipt/unknown"),
+            other => panic!("a timeout must read as DeliveryUnknown, got {other:?}"),
+        }
+        a.shutdown().await;
+    }
+}

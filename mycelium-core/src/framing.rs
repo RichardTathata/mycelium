@@ -397,6 +397,31 @@ pub enum ForwardHint {
 ///
 /// Callers obtain an `&Hlc` from whichever context holds it
 /// (`TaskCtx::hlc`, `ConnContext::hlc`, or `GossipAgent::task_ctx.hlc`).
+/// [`make_gossip_update`] with a **caller-supplied HLC** instead of a fresh tick.
+///
+/// The retry path of the contracts axis (item 1 PR 2, D11): re-submitting an operation must reuse
+/// its original stamp, or the same logical operation ranks differently under LWW on each attempt
+/// and a late retry can overwrite a newer value. Callers that are *not* retrying use
+/// [`make_gossip_update`].
+pub fn make_gossip_update_stamped(
+    node_id:      &crate::node_id::NodeId,
+    ttl:          u8,
+    key:          Arc<str>,
+    value:        bytes::Bytes,
+    is_tombstone: bool,
+    timestamp:    u64,
+) -> GossipUpdate {
+    GossipUpdate {
+        nonce:        fastrand::u64(1..),
+        sender:       node_id.id_hash(),
+        ttl,
+        is_tombstone,
+        timestamp,
+        key,
+        value,
+    }
+}
+
 pub fn make_gossip_update(
     node_id:      &crate::node_id::NodeId,
     ttl:          u8,

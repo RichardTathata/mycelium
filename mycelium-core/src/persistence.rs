@@ -156,6 +156,22 @@ impl WalHandle {
         self.send_and_await(entry, true).await
     }
 
+    /// Append and **await the writer's acknowledgement of the write**, without forcing an fsync
+    /// beyond what the node's `SyncMode` already does.
+    ///
+    /// This is the receipt path's append (contracts axis item 1). [`append`](Self::append) cannot
+    /// serve it: in `Async`/`Os` that method is a `try_send` that returns `Ok` even when the queue
+    /// is full or the writer is gone, so a receipt built on it would claim the bytes reached the
+    /// operating system when they may never have left this process (found by review, 2026-09-15).
+    ///
+    /// `Ok` means the writer's `write` returned — and, in `Flush` mode, its `fdatasync` too, since
+    /// the writer syncs whenever `force_sync || sync_mode == Flush`. `Err` means the record's
+    /// durability is **not established**: the writer is gone, the queue closed, or the write failed.
+    /// It never means the record is absent.
+    pub async fn append_acked(&self, entry: SyncEntry) -> io::Result<()> {
+        self.send_and_await(entry, false).await
+    }
+
     /// Ask the writer to snapshot immediately. Awaits completion; `Err` if the
     /// writer is gone or the snapshot failed.
     pub async fn trigger_snapshot(&self) -> io::Result<()> {
@@ -733,6 +749,36 @@ mod durability_tests {
         assert!(asynch.append(entry("user/key", b"x", 3, false)).await.is_ok());
         assert!(asynch.append_sync(entry("user/key", b"x", 4, false)).await.is_err(),
             "append_sync must not report durability in Async mode either");
+    }
+
+    /// Review regression (contracts axis PR 2, 2026-09-15): the **receipt path's** append must not
+    /// inherit `append`'s fire-and-forget `Ok`.
+    ///
+    /// In `Async`/`Os`, `append` is a `try_send` that returns `Ok` even when the writer is gone —
+    /// documented and fine for a verb whose `bool` never claimed durability, but fatal for a
+    /// receipt: `Ok` there became `LocalDurability::Buffered`, claiming the bytes had reached the
+    /// operating system when they may never have left this process. `append_acked` awaits the
+    /// writer's acknowledgement instead, so a dead writer is `Failed` — *durability not
+    /// established* — in every sync mode.
+    #[tokio::test]
+    async fn regression_append_acked_never_acks_a_dead_writer() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx); // the writer task is gone
+        for mode in [SyncMode::Flush, SyncMode::Async, SyncMode::Os] {
+            let wal = WalHandle::from_parts(tx.clone(), mode);
+            let e = wal
+                .append_acked(entry("user/key", b"v", 1, false))
+                .await
+                .expect_err("append_acked on a closed writer must not return Ok");
+            assert_eq!(e.kind(), io::ErrorKind::BrokenPipe, "mode {mode:?}");
+            // The contrast that motivates it: the fire-and-forget verb still says Ok here.
+            if mode != SyncMode::Flush {
+                assert!(
+                    wal.append(entry("user/key", b"v", 2, false)).await.is_ok(),
+                    "mode {mode:?}: `append` remains fire-and-forget — which is why the receipt path cannot use it",
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@
 
 use crate::context::CoreCtx;
 use crate::framing::{
-    dispatch_gossip_send, dispatch_gossip_try_send, make_gossip_update, make_kv_wire_msg,
+    dispatch_gossip_send, dispatch_gossip_try_send, make_gossip_update, make_gossip_update_stamped, make_kv_wire_msg,
     sync_entry_from, ForwardHint, WireMessage,
 };
 use crate::signal::{Boundary, Signal, SignalHandlers, SignalScope};
@@ -317,6 +317,71 @@ pub async fn kv_set_async(ctx: &CoreCtx, key: Arc<str>, value: Bytes) -> bool {
         &ctx.gossip_txs, msg,
         ctx.node_id.id_hash(), ForwardHint::All,
     ).await
+}
+
+/// Write `value` under `key` **and return what it established** — the contracts axis' write path
+/// (item 1 PR 2; `docs/design/contracts-receipts.md`).
+///
+/// Unlike [`kv_set_async`], whose `bool` is the gossip-queue result, this reports the receipt:
+/// the local-application rung (`Applied`/`Superseded` under LWW) and the local-sync rung
+/// (`OnDisk` / `Buffered` / `Failed` / `NotConfigured`). It does **not** claim any rung above:
+/// nothing here establishes that a peer holds the operation.
+///
+/// `stamp` re-submits a **pre-stamped** update: a retry must reuse its first attempt's HLC rather
+/// than tick a fresh one (D11), or the same operation would rank differently under LWW on every
+/// attempt. `None` stamps a new one.
+pub async fn kv_set_with_receipt(
+    ctx: &CoreCtx,
+    op: crate::receipt::OperationId,
+    attempt: crate::receipt::AttemptId,
+    key: Arc<str>,
+    value: Bytes,
+    stamp: Option<u64>,
+) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+    use crate::receipt::{content_hash, LocalDurability, ReceiptError, WriteReceipt};
+
+    if reject_oversized_write(&key, value.len()) {
+        return Err(ReceiptError::Rejected(format!(
+            "key + value exceeds MAX_KV_WRITE_BYTES ({} bytes)",
+            crate::framing::MAX_KV_WRITE_BYTES
+        )));
+    }
+
+    let hash = content_hash(&key, &value, false);
+    let update = match stamp {
+        Some(ts) => make_gossip_update_stamped(&ctx.node_id, ctx.default_ttl, Arc::clone(&key), value, false, ts),
+        None => make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::clone(&key), value, false, &ctx.hlc),
+    };
+    let ts = update.timestamp;
+
+    // Apply first, then persist (persistence.rs durability invariant 1).
+    let application = crate::store::apply_and_notify_reporting(&ctx.kv_state, &update);
+
+    // `append_acked`, never `append`: in `Async`/`Os` the latter is a `try_send` that returns `Ok`
+    // even when the queue is full or the writer is gone, so a receipt built on it would claim the
+    // bytes reached the operating system when they may never have left this process (review,
+    // 2026-09-15). The acknowledgement is of the *write*; whether it was also synced depends on the
+    // mode, which is what separates `OnDisk` from `Buffered`.
+    let local_durability = match ctx.wal.get() {
+        None => LocalDurability::NotConfigured,
+        Some(wal) => match wal.append_acked(sync_entry_from(&update)).await {
+            Ok(()) => match ctx.config.persistence.as_ref().map(|p| p.sync_mode) {
+                Some(crate::config::SyncMode::Flush) => LocalDurability::OnDisk,
+                _ => LocalDurability::Buffered,
+            },
+            Err(e) => LocalDurability::Failed(e.to_string()),
+        },
+    };
+
+    #[cfg(feature = "metrics")]
+    metrics::counter!("gossip_kv_writes_total").increment(1);
+    let tls = ctx.tls.get().map(Arc::as_ref);
+    let msg = make_kv_wire_msg(update, ctx.node_id.id_hash(), tls);
+    let queued = dispatch_gossip_send(&ctx.gossip_txs, msg, ctx.node_id.id_hash(), ForwardHint::All).await;
+
+    Ok(WriteReceipt::new(op, attempt, key, hash, ts, application)
+        .with_local_durability(local_durability)
+        .queued(queued))
 }
 
 /// Tombstones `key`, applies locally, queues WAL (try-send), gossips (try-send).

@@ -298,6 +298,11 @@ pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]
 pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns};
 pub use mycelium_core::error::GossipError;
+// The contracts axis' receipt vocabulary (item 1 PR 2) — what an acknowledgement proves, by rung.
+pub use mycelium_core::receipt::{
+    content_hash, AttemptId, CommitError, CommitReceipt, DedupOutcome, DestinationCommit,
+    LocalApplication, LocalDurability, OperationId, ReceiptError, ReplicaSync, WriteReceipt,
+};
 /// Crypto-shredding helper for GDPR right-to-erasure (WS-F) — see [`mycelium_core::erasure`].
 #[cfg(feature = "tls")]
 pub use mycelium_core::erasure::SubjectKeyRegistry;
