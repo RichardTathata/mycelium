@@ -70,9 +70,32 @@ exercised, in three years of the verb existing.
 **What PR 4a therefore did.** It removed the false positive it was scoped to remove — an ack now
 requires the payload's `content_hash` to match, so a newer overwrite counts for nothing — and it
 made the gap executable rather than latent:
-`a_peer_holding_the_write_still_produces_no_acknowledgement` asserts the timeout *as the contract*,
-with the peer holding the value in the same test. **PR 4b is not an enhancement to this verb; it is
-the only thing that can make it succeed.**
+`a_peer_holding_the_write_still_produces_no_acknowledgement` asserted the timeout *as the contract*,
+with the peer holding the value in the same test.
+
+**How PR 4b closed it (2026-09-15).** Not by a better predicate — no predicate over inbound updates
+can work, because the evidence is not in that stream. By **asking**. The origin sends each peer the
+operation's identity (stamp, content hash, key); the peer answers about its own state, and the
+answer is the evidence. Three properties follow, each of which is why a more obvious design was not
+taken:
+
+- **No wire change.** The exchange rides the existing RPC layer (individual-scope signals), so
+  `WIRE_VERSION` is untouched. A peer on an older build never answers, which reads as *unknown*.
+- **No retained operation status.** The peer answers from live state — does my store hold this exact
+  stamp and content, and is my WAL synced past it? Nothing is remembered per operation, so there is
+  no table to size or expire. The same conclusion §9a reached for the prepared write.
+- **No per-entry durability tracking.** Records append in order to one file, so a single
+  `fdatasync` (`WalHandle::sync`, added for this) establishes durability for **everything already
+  appended**.
+
+The verb moved up a layer to get there. `set_with_min_acks` is an extension trait on `KvHandle`,
+which holds only `CoreCtx` — and core knows nothing about RPC, deliberately. "Consistency as a
+service, not a foundation" had put the verb one layer *below* the protocol it needed. The
+replacement, `GossipAgent::set_with_replica_sync`, lives where both halves are reachable and returns
+a receipt naming who answered; the old verb is `#[deprecated]` and still cannot succeed.
+
+The PR 4a pin was replaced by `a_peer_holding_the_write_acknowledges_it`, in the open, which is what
+that pin existed for.
 
 **The lesson for this record.** §1's inventory was written by reading each call site's own code, and
 every row was right about what its code did. This row was wrong about what the *composition* did,
@@ -91,7 +114,7 @@ component, at which point. Four kinds, never conflated, never inferred from one 
 |---|---|---|---|
 | **Local application** | what became of the operation at this node's store — `Applied` · `AlreadyCurrent` (an idempotent retry: the store already holds exactly this operation) · `Superseded` (a *different, newer* value won) · `Refused` (the live-entry cap declined it; the key may be absent) | `apply_and_notify_reporting` | the store's own LWW rule; visible immediately |
 | **Local sync** | **this exact operation** crossed this node's persistence barrier — `OnDisk` (fsynced WAL record), `Buffered` (the WAL accepted it but this node's `SyncMode` does not sync per append, so it survives a process crash and not a power loss), `Failed` (**durability not established**: the writer was gone or the write or sync returned an error — the bytes may or may not be on disk, since `wal_append` writes before it syncs), `NotConfigured` (no persistence: nothing was promised) | the WAL writer's forced-`fdatasync` append (`WalHandle::append_sync`, since v2.4.2) | a durability claim in the module-doc sense: `Err` is never swallowed, and `Failed` is never read as *absent* |
-| **Replica sync** | **named, distinct peers** — origin excluded — persisted **this exact operation** | a per-peer, identity-bound persisted ack (PR 4b; PR 4a first makes the existing count exact-identity) | strong only when the peer's ack is itself a local-sync receipt for the same `operation_id` |
+| **Replica sync** | **named, distinct peers** — origin excluded — persisted **this exact operation** | *(PR 4b, done)* the origin asks; each peer checks its store for that exact stamp and content, forces an `fdatasync`, and answers. `persisted_by` names those that answered yes; everyone else is **unknown**, never "did not persist" | the peer's answer *is* its own local-sync receipt for that operation — it holds the record across its own restart, which `an_acknowledged_replica_still_holds_the_record_after_restart` gates |
 | **Destination commit** | the destination committed the business change **and** its dedup result **in one transaction** | the effects companion's reference destination (PR 5; SQLite) | exactly-once *effect*, by the destination's transaction, never by the substrate |
 
 Rules that hold for every kind:
@@ -208,7 +231,7 @@ justified where the tracker overlay was not because it does not couple the two c
 | `emit_reliable` | `Acknowledged` / `Timeout` | an application-level *receipt of handling*; `Timeout` ⇒ `DeliveryUnknown` |
 | mailbox `deliver_event` → `open_mailbox` | `bool` queued; the drain delivers | local application at the sender; durability = the mailbox key's local sync on a persisted node; delivery = the target's drain (a later local application there); no receipt crosses back |
 | tuple-space `take` / `complete` / requeue | claim under lease; atomic lane move | `take` = local application at the primary (+ local sync via its WAL); `complete` = the **pipeline's own** receipt — the item was acknowledged and the next stage queued, atomically, at the primary (local application + local sync there). It neither performs nor verifies the consumer's business transaction: idempotency makes a retry *safe*, it does not prove the effect *happened*. A destination-commit receipt, when the effects companion (PR 5/6) provides one, is a separate record linked to the same `operation_id`; `complete` never stands in for it. Lease expiry = `DeliveryUnknown` resolved by re-delivery |
-| `set_with_min_acks` | propagation count `>=` | **nothing, on today's substrate** (§1a): the origin cannot observe its own write's propagation, so with `min_acks >= 1` the verb times out however widely the write spreads. PR 4a removed the newer-overwrite false positive and pinned the gap; PR 4b's persisted-by-peer protocol is what makes a replica-sync receipt obtainable |
+| `set_with_min_acks` | propagation count `>=` | **nothing** — and now `#[deprecated]` (§1a). The origin cannot observe its own write's propagation, so it times out however widely the write spreads. Replaced by `GossipAgent::set_with_replica_sync`, which asks each peer and returns a **replica sync** receipt naming who answered and who is unknown |
 | `Committed { persisted }` | bool | local application (cluster-committed) + a collapsed local-sync receipt; PR 2 adds a receipt-returning propose API beside it (§5) — the variant's shape does not change on 2.x |
 
 ## 8. The regression floor (this PR, code)
@@ -219,7 +242,9 @@ Executable pins of *today's* semantics. A later PR changes a meaning by changing
 |---|---|---|
 | `observe_counts_only_this_exact_payload` (PR 4a, replaces `floor_observe_counts_any_update_at_or_after_write_ts`) | `src/agent/kv_quorum.rs` | an ack requires the payload's `content_hash`; a newer overwrite of the same key no longer counts. The pin PR 1 set for the `>=` rule, changed in the open by the PR that changed the meaning |
 | `the_identity_less_observation_is_never_an_ack` (PR 4a) | same | the trait's identity-less `observe` establishes nothing and so never counts — pre-4a observers keep compiling and simply cannot produce an acknowledgement |
-| `a_peer_holding_the_write_still_produces_no_acknowledgement` (PR 4a; the floor **for PR 4b**) | `src/agent/kv_handle_tests.rs` | a peer that has received and applied the write produces no ack, so the verb times out in a healthy two-node cluster (§1a). Asserted as a failure because the documentation now claims it; PR 4b flips it |
+| `a_peer_holding_the_write_acknowledges_it` (PR 4b, **replaces** `a_peer_holding_the_write_still_produces_no_acknowledgement`) | `src/agent/kv_handle_tests.rs` | the flip. PR 4a asserted the timeout as the contract so that closing the gap would have to change this pin in the open; PR 4b changed it. A peer now names itself in the receipt, the origin is never counted, and no peer is left unknown |
+| `an_acknowledged_replica_still_holds_the_record_after_restart` (PR 4b; the **Phase B exit gate**) | same | an acknowledgement survives the event it insures against: the peer answers `persisted`, is stopped and restarted from the same directory, and answers `persisted` again — from its replayed WAL, with nothing re-gossiped to it. A mechanism answering from memory would pass the first assertion and fail this |
+| `a_malformed_query_is_refused_never_guessed`, `a_query_round_trips_and_binds_all_three_fields`, `every_answer_round_trips` (PR 4b) | `src/agent/replica_sync.rs` | the query binds stamp, content and key together; a short, empty or non-UTF-8 frame is refused rather than answered as though it were a different question; an unknown answer tag is not an answer |
 | `floor_committed_persisted_is_true_when_persistence_unconfigured` | `src/lib_tests.rs` | `persisted: true` with no persistence configured — the D24 collapse PR 2 lifts |
 | `consensus_commit_reports_persisted_and_survives_restart` (existing) | `src/lib_tests.rs` | `persisted: true` means the fsynced WAL append |
 | `regression_snapshot_retains_wal_record_acked_before_local_apply`, `regression_writer_threshold_snapshot_right_after_ack_keeps_write` (existing) | `mycelium-core/src/persistence.rs` | the WAL-tail merge that makes persist-first admissible (§2.2) |

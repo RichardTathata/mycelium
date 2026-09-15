@@ -276,10 +276,10 @@ export class MyceliumAgent {
   /**
    * Writes `value` and waits for peer acknowledgements.
    *
-   * WARNING: with `minAcks >= 1` this times out even when every peer has received and applied the
-   * write. The origin of a write cannot observe that write's propagation on this substrate
-   * (docs/design/contracts-receipts.md section 1a); item 1 PR 4b is what makes it answerable. The
-   * write is applied and gossiped either way, so a timeout never means the value was not written.
+   * Since the substrate's item 1 PR 4b the gateway asks each peer whether it holds the operation.
+   * The count is peers whose store holds this exact write and whose WAL fdatasync returned Ok.
+   * Peers that do not answer are unknown, never "did not persist" — a timeout is not evidence the
+   * write failed, and the write is applied and gossiped either way.
    * Returns the confirmed peer count on success; throws `TimeoutError` on timeout.
    */
   async setWithMinAcks(

@@ -34,7 +34,7 @@
 //! - `POST   /gateway/kv`                      — write a KV key
 //! - `DELETE /gateway/kv?key=K`                — delete (tombstone) a KV key
 //! - `GET    /gateway/kv/keys?prefix=P`        — list live keys (optionally filtered)
-//! - `POST   /gateway/kv/quorum`               — write + wait for N peer ACKs (cannot succeed today; see the route doc)
+//! - `POST   /gateway/kv/quorum`               — write, then ask peers who holds it (item 1 PR 4b)
 //! - `GET    /gateway/mailbox/{kind}`          — SSE stream of mailbox events for this node
 //! - `POST   /gateway/mailbox/deliver`         — deliver an event to a target's mailbox
 //! - `GET    /gateway/shard/{ns}/{name}?key=K` — deterministic shard owner for a key
@@ -2041,15 +2041,16 @@ async fn gw_kv_keys(
 
 /// `POST /gateway/kv/quorum` — write + wait for peer acknowledgements.
 ///
-/// **⚠ With `min_acks >= 1` this route times out even when every peer has received and applied the
-/// write.** It is the HTTP face of
-/// [`set_with_min_acks`](crate::KvQuorumExt::set_with_min_acks) and inherits its limit exactly: the
-/// origin of a write cannot observe that write's propagation on this substrate, because an update's
-/// `sender` is its *originating* node across every hop, fan-out excludes the origin, and
-/// anti-entropy re-attributes what it delivers to the receiver. See the verb's documentation and
-/// `docs/design/contracts-receipts.md` §1a; item 1 PR 4b is what makes it answerable. The write
-/// itself is applied and gossiped either way — a timeout here never means the value was not
-/// written.
+/// Since item 1 PR 4b this route **asks** each peer whether it holds the operation, rather than
+/// watching the gossip stream for evidence the substrate cannot carry (`contracts-receipts.md`
+/// §1a — before 4b it timed out however widely the write spread). `acks_received` counts peers that
+/// answered *persisted*: their store holds this exact stamp and content and their WAL `fdatasync`
+/// returned `Ok`, so they hold it across their own restart.
+///
+/// On timeout, `unknown_peers` counts those that did not answer *persisted* — **unknown, never
+/// "did not persist"**. A peer may be unreachable, mid-restart, on a build without the handler, or
+/// already holding a newer value for the key. The write itself is applied and gossiped either way,
+/// so a timeout here never means the value was not written.
 ///
 /// Request body:
 /// ```json
@@ -2074,7 +2075,6 @@ async fn gw_kv_quorum(
     Json(body): Json<KvQuorumBody>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
-    use super::kv_quorum::QuorumAckTracker;
 
     let value = match base64::engine::general_purpose::STANDARD.decode(&body.value_b64) {
         Ok(v)  => Bytes::from(v),
@@ -2099,33 +2099,40 @@ async fn gw_kv_quorum(
         return Json(json!({ "ok": true, "acks_received": 0 })).into_response();
     }
 
-    let write_ts_min = tc.hlc.tick();
-    let self_hash    = tc.node_id.id_hash();
-    // The payload's identity, so a newer overwrite of this key is never mistaken for evidence
-    // that a peer holds *this* value (contracts axis item 1 PR 4a). `false` = not a tombstone.
-    let write_content = mycelium_core::receipt::content_hash(key.as_ref(), value.as_ref(), false);
-    let (tracker, mut rx) = QuorumAckTracker::new(write_ts_min, self_hash, write_content);
-    super::kv_quorum::install_tracker(&tc.kv_state.quorum_trackers, Arc::clone(&key), &tracker);
-
-    kv_write(&tc, Arc::clone(&key), value, false);
-
-    let result = tokio::time::timeout(timeout, async {
-        loop {
-            let n = *rx.borrow();
-            if n >= body.min_acks { return n; }
-            if rx.changed().await.is_err() { return *rx.borrow(); }
-        }
-    })
+    // Item 1 PR 4b: write, then **ask** the peers. The previous implementation installed a
+    // tracker and watched the gossip stream for evidence of its own write, which this substrate
+    // cannot carry (contracts-receipts.md §1a), so it timed out however widely the write spread.
+    let op = mycelium_core::receipt::OperationId::generate(&tc.node_id);
+    let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
+    let receipt = match mycelium_core::ops::kv_set_with_receipt(
+        &tc, op, attempt, Arc::clone(&key), value, None,
+    ).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e.to_string() }))).into_response(),
+    };
+    let replica = super::replica_sync::collect(
+        &tc,
+        super::replica_sync::Query {
+            stamp: receipt.stamp,
+            content_hash: receipt.content_hash,
+            key: Arc::clone(&key),
+        },
+        timeout,
+    )
     .await;
-
-    super::kv_quorum::remove_tracker(&tc.kv_state.quorum_trackers, &key, &tracker);
+    let acks = replica.persisted_by.len();
+    let result: Result<usize, ()> = if acks >= body.min_acks { Ok(acks) } else { Err(()) };
 
     match result {
         Ok(n)  => Json(json!({ "ok": true, "acks_received": n })).into_response(),
-        Err(_) => {
-            let n = *rx.borrow();
-            Json(json!({ "ok": false, "error": "timeout", "acks_received": n })).into_response()
-        }
+        Err(_) => Json(json!({
+            "ok": false,
+            "error": "timeout",
+            "acks_received": acks,
+            // Peers that did not answer "persisted" — unknown, never "did not persist".
+            "unknown_peers": replica.missing.len(),
+        })).into_response(),
     }
 }
 

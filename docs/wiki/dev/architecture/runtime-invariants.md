@@ -107,6 +107,16 @@ PR 4b's persisted-by-peer protocol is what flips it. Record:
 about that thing*. Inferring it from the gossip stream reads a channel whose addressing was designed
 for propagation, not for attestation — and the two look identical from a call site.
 
+**How it was closed (item 1 PR 4b, 2026-09-15).** By asking, since no predicate over inbound updates
+could work. The origin sends each peer the operation's identity; the peer checks its own store for
+that exact stamp and content, forces an `fdatasync`, and answers. It needs **no wire change** (the
+exchange rides the existing RPC layer), **no retained operation status** (the peer answers from live
+state), and **no per-entry durability tracking** (records append in order to one file, so one
+`fdatasync` covers everything already appended — `WalHandle::sync`). The verb had to move up a layer
+to do it: `KvHandle` holds only `CoreCtx`, and core knows nothing about RPC by design, so
+`GossipAgent::set_with_replica_sync` replaces the deprecated `set_with_min_acks`. A peer that does
+not answer is **unknown**, never "does not hold it".
+
 ## KV floods the cluster — a group is not a data-isolation boundary
 
 `WireMessage::Data` (the KV path) always forwards `ForwardHint::All`
