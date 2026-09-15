@@ -511,7 +511,24 @@ pub fn apply_to_store(store: &papaya::HashMap<Arc<str>, StoreEntry>, update: &Go
 /// [`crate::framing::make_gossip_update`], which is the canonical write-side
 /// factory for every higher layer — see that function's doc comment for the
 /// placement rationale and the layers it serves.
+/// [`apply_and_notify`], reporting the **local application** receipt (contracts axis item 1):
+/// `Applied` when this operation's value is the one the store now holds, `Superseded` when a newer
+/// value already held the key and LWW kept it. Superseded is not a failure — the operation lost a
+/// race it was always subject to, and a reader sees the newer value.
+///
+/// `apply_and_notify` delegates here and discards the answer, so every existing call site is
+/// unchanged.
+pub fn apply_and_notify_reporting(kv: &KvState, update: &GossipUpdate) -> crate::receipt::LocalApplication {
+    use crate::receipt::LocalApplication;
+    if apply_and_notify_inner(kv, update) { LocalApplication::Applied } else { LocalApplication::Superseded }
+}
+
 pub fn apply_and_notify(kv: &KvState, update: &GossipUpdate) {
+    let _ = apply_and_notify_inner(kv, update);
+}
+
+/// The apply itself. `true` when this update's value won LWW and is now the store's.
+fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> bool {
     if kv.max_store_entries > 0 && !update.is_tombstone {
         // The cap is defined over LIVE entries (config contract), so only a write that would
         // INCREASE the live count is subject to it: a live value for a key currently absent or
@@ -531,7 +548,9 @@ pub fn apply_and_notify(kv: &KvState, update: &GossipUpdate) {
                 cap = kv.max_store_entries,
                 "KV store live-entry cap reached; new live write dropped",
             );
-            return;
+            // Dropped by the cap: this operation's value is not the store's. `Superseded` is the
+            // honest receipt — the write did not fail, and a reader sees whatever is there.
+            return false;
         }
     }
 
@@ -720,6 +739,7 @@ pub fn apply_and_notify(kv: &KvState, update: &GossipUpdate) {
         #[cfg(feature = "metrics")]
         metrics::gauge!("gossip_store_entries").set(kv.store.len() as f64);
     }
+    changed
 }
 
 /// Returns all live (non-tombstone) key-value pairs whose key starts with `prefix`.

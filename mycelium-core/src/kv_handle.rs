@@ -100,6 +100,90 @@ impl KvHandle {
         kv_set_async(&self.ctx, key.into(), value.into()).await
     }
 
+    /// Write `value` under `key` and return **what the write established** — the contracts axis'
+    /// receipt path (item 1 PR 2; record `docs/design/contracts-receipts.md`).
+    ///
+    /// Where [`set`](Self::set) answers `bool` (was it queued for gossip?), this answers a
+    /// [`WriteReceipt`]: the **local-application** rung (`Applied`, or `Superseded` when a newer
+    /// value already held the key) and the **local-sync** rung (`OnDisk` only when this node
+    /// actually synced it; `Buffered` under `SyncMode::Async`/`Os`; `Failed` when durability was
+    /// not established — which is *not* the same as "the record is absent"; `NotConfigured` when
+    /// nothing was promised). It claims no rung above: nothing here says a peer holds the write.
+    ///
+    /// `op` is the caller's [`OperationId`] — stable across retries, so a retry is recognisable.
+    /// Retry through [`retry_with_receipt`](Self::retry_with_receipt), never by calling this
+    /// again: that would tick a fresh HLC and re-rank the same operation under LWW.
+    ///
+    /// # Errors
+    /// [`ReceiptError::Rejected`] when the write is refused before anything is applied (an
+    /// oversized key + value).
+    pub async fn set_with_receipt<K: Into<Arc<str>>>(
+        &self,
+        op: &crate::receipt::OperationId,
+        key: K,
+        value: impl Into<Bytes>,
+    ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+        crate::ops::kv_set_with_receipt(
+            &self.ctx,
+            op.clone(),
+            crate::receipt::AttemptId::of(op, 1),
+            key.into(),
+            value.into(),
+            None,
+        )
+        .await
+    }
+
+    /// Re-submit the operation `prior` receipted, as a further attempt.
+    ///
+    /// Two contract rules live here (item 1, D11):
+    ///
+    /// 1. **A retry reuses the original stamp.** The update carries `prior.stamp`, not a fresh HLC
+    ///    tick, so the same logical operation ranks identically under LWW however many times it is
+    ///    attempted. Without this a late retry could overwrite a newer value that had legitimately
+    ///    superseded it.
+    /// 2. **Same identity, different content is a [`ReceiptError::Conflict`]** — nothing is
+    ///    written. An identity that meant two things would make every receipt about it ambiguous.
+    ///
+    /// The returned receipt carries the next [`AttemptId`], so "the second try was acked" is
+    /// distinguishable from "the first was".
+    pub async fn retry_with_receipt<K: Into<Arc<str>>>(
+        &self,
+        prior: &crate::receipt::WriteReceipt,
+        key: K,
+        value: impl Into<Bytes>,
+    ) -> Result<crate::receipt::WriteReceipt, crate::receipt::ReceiptError> {
+        use crate::receipt::{content_hash, AttemptId, ReceiptError};
+        let key: Arc<str> = key.into();
+        let value: Bytes = value.into();
+        let hash = content_hash(&key, &value, false);
+        if key != prior.key || hash != prior.content_hash {
+            return Err(ReceiptError::Conflict {
+                operation_id: prior.operation_id.clone(),
+                expected: prior.content_hash,
+                found: hash,
+            });
+        }
+        // The attempt number is derived from the prior attempt's suffix, so attempts stay ordered
+        // without the handle holding any per-operation state.
+        let n = prior
+            .attempt_id
+            .as_str()
+            .rsplit('#')
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1);
+        crate::ops::kv_set_with_receipt(
+            &self.ctx,
+            prior.operation_id.clone(),
+            AttemptId::of(&prior.operation_id, n.saturating_add(1)),
+            key,
+            value,
+            Some(prior.stamp),
+        )
+        .await
+    }
+
     /// Like [`delete`](Self::delete), but awaits channel capacity instead of
     /// dropping the frame when the shard channel is full.
     #[must_use]
