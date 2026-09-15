@@ -140,3 +140,26 @@ linear seed-connection growth). Resolution, in order of lesson value:
 
 `swim_failure_detector` now defaults **true**. Rolling-upgrade caveat: don't mix SWIM-on/off
 nodes — flip a cluster together.
+
+
+## The nightly is only evidence when it runs (2026-09-15)
+
+The scale suites run on a **self-hosted** box labelled `mycelium-scale` — hosted runners cannot
+reach 100 nodes (the Docker-bridge iptables ceiling, below). That has a failure mode the hosted
+suites do not: when the box is offline the nightly does not fail, it **queues**, indefinitely, and
+expires as *cancelled* days later. On the Actions list that looks like activity. It is the absence
+of evidence rendered as a spinner.
+
+Every nightly between **2026-09-10 and 2026-09-15** produced nothing that way — four expired, two
+were still queued days later — while a release and five merges went by, and nobody noticed, because
+nothing ever went red. Queued-rather-than-failed is consistent with no labelled runner being online;
+reading the runner list needs admin scope, so that much is inference.
+
+A hosted `evidence-freshness` job now asks *when did this workflow last actually succeed?* and fails
+when the answer is older than three days or **never**. It cannot start the box. It makes the silence
+loud, which is the part that was missing.
+
+**The rule for reading this page.** Every measurement here is only as current as the last green
+nightly. When the freshness job is red, treat the scale numbers as historical, not as claims about
+the code on `main` — the same discipline the contracts axis applies to receipts, applied to
+evidence about performance.

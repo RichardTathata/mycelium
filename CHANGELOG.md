@@ -42,6 +42,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **CI: a missing scale runner was invisible, because a job nobody runs never goes red**
+  (`.github/workflows/scale-nightly.yml`). The scale suites run only on a self-hosted box labelled
+  `mycelium-scale`. While that box is offline the nightly does not fail — it **queues**, indefinitely,
+  and eventually expires as "cancelled". On the runs list that reads as activity; it is the absence of
+  evidence rendered as a spinner. Every nightly between 2026-09-10 and 2026-09-15 produced nothing
+  that way, unnoticed, while the contracts work landed. Adds a small hosted job that asks a narrower
+  question — *when did this workflow last actually succeed?* — and fails when the answer is older than
+  three days or "never", naming the likely cause. It cannot start the box and does not pretend to; it
+  makes the silence loud. Until it is green, every scale claim in the documentation is unevidenced,
+  which is what the plan has said all along (§10, item 8).
+
 - **CI: the reason-node job dispatched through the gateway before the gateway could dispatch**
   (`.github/workflows/ci.yml`). Two `TestCallTyped` cases failed with HTTP 412
   `provider_without_caller_context` on 2026-09-15. Not a regression and not a gateway bug: under the
