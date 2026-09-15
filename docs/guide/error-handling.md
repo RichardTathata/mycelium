@@ -117,12 +117,12 @@ pub enum QuorumError {
 
 **When you see it:** `KvHandle::set_with_min_acks`.
 
-**Recoverability:** yes — and note that on today's substrate this error is the *only* outcome for
-`min_acks >= 1`. The write succeeded locally and propagates normally; what cannot happen is the
-acknowledgement, because the origin of a write cannot observe that write's propagation
-(`docs/design/contracts-receipts.md` §1a). `acks_received` will be `0`. Do not treat the timeout as
-evidence the value was not written, and do not retry the write on the strength of it. Item 1 PR 4b is
-the work that makes an acknowledgement obtainable.
+**Recoverability:** yes. The write succeeded locally and propagates normally. Note this error is the
+*only* outcome of the deprecated `set_with_min_acks`, which watched the gossip stream for evidence the
+substrate does not carry (`docs/design/contracts-receipts.md` §1a); `acks_received` will be `0`. Its
+replacement `GossipAgent::set_with_replica_sync` asks each peer instead and returns a receipt rather
+than an error, with peers that did not answer reported as **unknown**. Either way, do not treat a
+timeout as evidence the value was not written, and do not retry the write on the strength of it.
 
 ---
 

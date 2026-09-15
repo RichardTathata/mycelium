@@ -175,6 +175,9 @@ fn gossip_channel_capacity_respected() {
 
 // ── set_with_min_acks (KvQuorumExt) ───────────────────────────────────────
 
+// Pins the deprecated verb's behaviour on purpose: it still ships, so what it does still
+// needs a test. `set_with_replica_sync` is the replacement and has its own gates.
+#[allow(deprecated)]
 #[tokio::test]
 async fn set_with_min_acks_zero() {
     let a = make_agent();
@@ -183,69 +186,187 @@ async fn set_with_min_acks_zero() {
     assert_eq!(a.kv().get("sq-key"), Some(Bytes::from_static(b"val")));
 }
 
-/// The regression floor for item 1 PR 4b (contracts axis, `docs/design/contracts-receipts.md` §8).
+/// Item 1 PR 4b — **the flip**. This replaces
+/// `a_peer_holding_the_write_still_produces_no_acknowledgement`, the pin PR 4a planted to record a
+/// gap it measured but could not close: a peer that had received and applied the write produced no
+/// acknowledgement, so the verb timed out in a healthy two-node cluster.
 ///
-/// Pins the structural gap PR 4a **measured but could not close**: a peer that has received and
-/// applied the write produces no acknowledgement, so `set_with_min_acks` times out in a healthy
-/// two-node cluster. Three facts compose into it — a `GossipUpdate`'s `sender` is its *originating*
-/// node and survives every hop; fan-out excludes the origin, so the relayed copy never returns to
-/// us; and anti-entropy re-attributes delivered entries to the receiving node. No inbound frame
-/// says "a peer holds your write".
-///
-/// This is deliberately asserted as a **failure**, not skipped: the verb's documentation now states
-/// that it cannot succeed, and a claim like that has to be executable. PR 4b's persisted-by-peer
-/// protocol flips this test, in the open, which is what the floor is for.
+/// PR 4a's pin asserted the timeout **as the contract** precisely so this PR would have to come and
+/// change it in the open rather than quietly make a documented impossibility possible. That is what
+/// this test is. The gap is closed by asking the peer instead of watching the gossip stream, which
+/// is the only thing that could close it — no predicate over inbound updates can work, because no
+/// inbound frame carries the evidence (`docs/design/contracts-receipts.md` §1a).
 #[tokio::test]
-async fn a_peer_holding_the_write_still_produces_no_acknowledgement() {
-    use crate::agent::kv_quorum::QuorumError;
+async fn a_peer_holding_the_write_acknowledges_it() {
+    use crate::{PersistenceConfig, SyncMode};
+
     let port_a = alloc_port();
     let port_b = alloc_port();
     let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
     let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
-    let mut cfg_a = GossipConfig::default();
-    cfg_a.bind_port = port_a;
-    cfg_a.bootstrap_peers = vec![id_b.clone()];
-    cfg_a.health_check_max_jitter_ms = 50;
-    let mut cfg_b = GossipConfig::default();
-    cfg_b.bind_port = port_b;
-    cfg_b.bootstrap_peers = vec![id_a.clone()];
-    cfg_b.health_check_max_jitter_ms = 50;
-    let a = GossipAgent::new(id_a, cfg_a);
-    let b = GossipAgent::new(id_b, cfg_b);
+    let base_a = std::env::temp_dir().join(format!("myc-rs-a-{port_a}"));
+    let base_b = std::env::temp_dir().join(format!("myc-rs-b-{port_b}"));
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
+
+    let mk = |port: u16, id: NodeId, peer: NodeId, base: std::path::PathBuf| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![peer];
+        cfg.health_check_max_jitter_ms = 50;
+        // `Async` on purpose: the answer must come from the peer's own forced sync, not from the
+        // node happening to run in Flush mode.
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: base,
+            sync_mode: SyncMode::Async,
+            snapshot_wal_threshold: 1_000_000,
+            snapshot_interval_secs: 3_600,
+        });
+        GossipAgent::new(id, cfg)
+    };
+    let a = mk(port_a, id_a.clone(), id_b.clone(), base_a.clone());
+    let b = mk(port_b, id_b.clone(), id_a.clone(), base_b.clone());
     a.start().await.unwrap();
     b.start().await.unwrap();
-    // Structural poll, never a fixed sleep.
     for _ in 0..300 {
         if !a.peers().is_empty() && !b.peers().is_empty() { break; }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(!a.peers().is_empty() && !b.peers().is_empty(), "the pair must form a cluster");
 
-    let r = a.kv().set_with_min_acks("mk/held", b"v".to_vec(), 1, Duration::from_secs(2)).await;
+    let receipt = a
+        .set_with_replica_sync("rs/held", b"v".to_vec(), Duration::from_secs(10))
+        .await
+        .expect("the local write must succeed");
 
-    // The peer really does hold it — that is the whole point of the pin.
+    assert!(
+        receipt.replica_sync.persisted_by.contains(&id_b),
+        "B must answer that it holds this operation on disk; persisted_by={:?} missing={:?}",
+        receipt.replica_sync.persisted_by, receipt.replica_sync.missing,
+    );
+    assert!(
+        !receipt.replica_sync.persisted_by.contains(&id_a),
+        "the origin is never counted as a replica",
+    );
+    assert!(receipt.replica_sync.missing.is_empty(), "every peer answered");
+
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
+}
+
+/// Item 1 PR 4b — the Phase B exit gate: **a peer that acknowledged persistence holds the record
+/// across its own crash and restart** (plan §2, Phase B).
+///
+/// The acknowledgement is only worth having if it survives the event it is insurance against. B
+/// answers `persisted`, B is then stopped and started again from the same directory, and the same
+/// question is asked: it must still answer yes, from the replayed WAL, without the value ever being
+/// re-gossiped to it. A weaker mechanism — one that answered from memory, or from "I saw that
+/// update once" — would pass the first assertion and fail this one.
+#[tokio::test]
+async fn an_acknowledged_replica_still_holds_the_record_after_restart() {
+    use crate::{PersistenceConfig, SyncMode};
+
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let base_a = std::env::temp_dir().join(format!("myc-rsr-a-{port_a}"));
+    let base_b = std::env::temp_dir().join(format!("myc-rsr-b-{port_b}"));
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
+
+    let mk = |port: u16, id: NodeId, peer: NodeId, base: std::path::PathBuf| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![peer];
+        cfg.health_check_max_jitter_ms = 50;
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: base,
+            sync_mode: SyncMode::Async,
+            snapshot_wal_threshold: 1_000_000,
+            snapshot_interval_secs: 3_600,
+        });
+        GossipAgent::new(id, cfg)
+    };
+
+    let a = mk(port_a, id_a.clone(), id_b.clone(), base_a.clone());
+    let b1 = mk(port_b, id_b.clone(), id_a.clone(), base_b.clone());
+    a.start().await.unwrap();
+    b1.start().await.unwrap();
     for _ in 0..300 {
-        if b.kv().get("mk/held").is_some() { break; }
+        if !a.peers().is_empty() && !b1.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let first = a
+        .set_with_replica_sync("rs/survives", b"v".to_vec(), Duration::from_secs(10))
+        .await
+        .expect("local write");
+    assert!(
+        first.replica_sync.persisted_by.contains(&id_b),
+        "B must acknowledge before the restart means anything; missing={:?}",
+        first.replica_sync.missing,
+    );
+
+    // B crashes and comes back on the same directory. Nothing re-gossips the value to it: A does
+    // not rewrite the key, so the only way B can answer yes again is its own replayed WAL.
+    b1.shutdown().await;
+    drop(b1);
+    let b2 = mk(port_b, id_b.clone(), id_a.clone(), base_b.clone());
+    b2.start().await.unwrap();
+    for _ in 0..300 {
+        if !a.peers().is_empty() && !b2.peers().is_empty() { break; }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(
-        b.kv().get("mk/held"), Some(Bytes::from_static(b"v")),
-        "the write must have reached the peer",
+        b2.kv().get("rs/survives"), Some(Bytes::from_static(b"v")),
+        "the restarted peer must have replayed the record from its own WAL",
     );
-    match r {
-        Err(QuorumError::Timeout { acks_received }) => assert_eq!(
-            acks_received, 0,
-            "no inbound frame can attribute our own write's propagation to a peer",
-        ),
-        Ok(n) => panic!(
-            "PR 4b appears to have landed: {n} ack(s) while this pin still asserts none. \
-             Update the pin and the `set_with_min_acks` documentation together."
-        ),
-    }
+
+    // Isolate the gate's actual claim from transport. What must survive the restart is B's ability
+    // to answer truthfully about its own disk; whether A can currently reach B is a different
+    // property, and conflating them would make this gate fail for reasons it is not about.
+    let q = crate::agent::replica_sync::Query {
+        stamp: first.stamp,
+        content_hash: first.content_hash,
+        key: std::sync::Arc::from("rs/survives"),
+    };
+    let local = crate::agent::replica_sync::answer(&b2.service().ctx, &q).await;
+    assert_eq!(
+        local, crate::agent::replica_sync::Answer::Persisted,
+        "the restarted peer must answer `persisted` about its own replayed record",
+    );
+
+    // 30 s, and the number is not a tolerance for slowness. A restarted peer keeps the same
+    // NodeId, so the origin still holds a writer entry for the connection that died and must work
+    // through reconnect backoff before any RPC reaches it. The deadline has to exceed that
+    // reconnection budget or the answer cannot arrive at all — the distinction drawn in
+    // testing.md §"A client deadline below the server's budget is a defect, not a flake". At 10 s
+    // this failed for exactly that reason while the assertion above already passed.
+    let after = crate::agent::replica_sync::collect(
+        &a.service().ctx,
+        q,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        after.persisted_by.contains(&id_b),
+        "an acknowledged replica must still hold the record after its own restart; \
+         persisted_by={:?} missing={:?}",
+        after.persisted_by, after.missing,
+    );
+
     a.shutdown().await;
-    b.shutdown().await;
+    b2.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base_a);
+    let _ = std::fs::remove_dir_all(&base_b);
 }
 
+// Pins the deprecated verb's behaviour on purpose: it still ships, so what it does still
+// needs a test. `set_with_replica_sync` is the replacement and has its own gates.
+#[allow(deprecated)]
 #[tokio::test]
 async fn set_with_min_acks_timeout_no_peers() {
     use crate::agent::kv_quorum::QuorumError;

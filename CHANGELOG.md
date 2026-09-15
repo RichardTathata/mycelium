@@ -9,6 +9,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Contracts axis item 1 PR 4b — the persisted-by-peer receipt** (`src/agent/replica_sync.rs`,
+  `GossipAgent::set_with_replica_sync`, `WalHandle::sync`; record
+  `docs/design/contracts-receipts.md` §1a, §2.1). PR 4a measured that the origin of a write cannot
+  observe that write's propagation, so no predicate over inbound updates could ever acknowledge it.
+  This closes the gap by **asking**: the origin sends each peer the operation's identity, and the
+  peer answers about its own state. `set_with_replica_sync` returns a `WriteReceipt` whose
+  `replica_sync.persisted_by` names peers that answered *persisted* — their store holds this exact
+  HLC stamp and content **and** their WAL `fdatasync` returned `Ok`, so they hold the record across
+  their own crash and restart. Everyone else is `missing`, which means **unknown, never "did not
+  persist"**: unreachable, mid-restart, on a build without the handler, or now holding a newer value
+  all land there, and none of them establishes absence.
+
+  Three properties, each the reason a more obvious design was not taken. **No wire change** — the
+  exchange rides the existing RPC layer, so `WIRE_VERSION` is untouched and a peer on an older build
+  simply never answers. **No retained operation status** — the peer answers from live state, so there
+  is no table to size or expire when a query arrives late, the same conclusion §9a reached for the
+  prepared write. **No per-entry durability tracking** — records append in order to one file, so the
+  new `WalHandle::sync` (an `fdatasync` that appends nothing, handled in the writer's own loop so it
+  cannot race an append) establishes durability for everything already appended.
+
+  **The verb moved up a layer, and the old one is deprecated.** `KvQuorumExt::set_with_min_acks` is
+  an extension trait on `KvHandle`, which holds only `CoreCtx` — and core knows nothing about RPC,
+  deliberately. "Consistency as a service, not a foundation" had put the verb one layer *below* the
+  protocol it needed. It is now `#[deprecated]` pointing at `set_with_replica_sync`, and still cannot
+  succeed; existing code keeps compiling. `POST /gateway/kv/quorum` asks peers too, so it works
+  again, and reports `unknown_peers` alongside `acks_received` on timeout.
+
+  Gates: `a_peer_holding_the_write_acknowledges_it` **replaces** PR 4a's
+  `a_peer_holding_the_write_still_produces_no_acknowledgement` — that pin asserted the timeout as
+  the contract precisely so closing the gap would have to change it in the open. The Phase B exit
+  gate, `an_acknowledged_replica_still_holds_the_record_after_restart`, stops and restarts the peer
+  from the same directory with nothing re-gossiped to it: it answers from its replayed WAL, so a
+  mechanism answering from memory would pass the first assertion and fail this one.
+
 ### Changed
 
 - **Contracts axis item 1 PR 4a — an acknowledgement now requires the payload's identity, and the

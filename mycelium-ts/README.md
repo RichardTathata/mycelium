@@ -211,7 +211,7 @@ All writes are gossiped to peers with last-write-wins (HLC) semantics.
 
 #### `setWithMinAcks(key, value, minAcks, options?) → Promise<number>`
 
-Write `value` and wait for peer acknowledgements. **⚠ With `min_acks >= 1` this times out even when every peer has received and applied the write.** The origin of a write cannot observe that write's propagation on this substrate (`docs/design/contracts-receipts.md` §1a); item 1 PR 4b is what makes it answerable. The write is applied and gossiped either way, so a timeout never means the value was not written.
+Write `value` and wait for peer acknowledgements. Since the substrate's item 1 PR 4b the gateway **asks** each peer whether it holds the operation, so this now succeeds: `acks_received` counts peers whose store holds this exact write and whose WAL `fdatasync` returned `Ok`. Peers that do not answer are reported as **unknown**, never as "did not persist" — a timeout is not evidence the write failed.
 With `minAcks: 0` it is an ordinary local write and returns `0`. Returns the peer count; throws
 `TimeoutError` on timeout.
 

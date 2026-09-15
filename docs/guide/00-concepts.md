@@ -90,10 +90,10 @@ separate `tools/` namespace. The first two are native Capabilities; the third is
 an edge standard.
 
 **Ack vs. receipt (v3 contracts axis, item 1).** Today's `bool` / `Ok` acknowledgements each
-prove something different — `kv().set` proves *queued for gossip*, `set_with_min_acks` proves
-**nothing a caller can obtain** (the origin cannot observe its own write's propagation, so it times
-out however widely the write spreads: §1a of the contracts record), `Committed { persisted }` folds
-*fsynced* and *never promised* into one `true`. A **receipt** names its rung on the ladder and nothing above it:
+prove something different — `kv().set` proves *queued for gossip*, the deprecated `set_with_min_acks` proves
+**nothing a caller can obtain** (§1a of the contracts record — its replacement `set_with_replica_sync`
+asks peers instead and names them), `Committed { persisted }` folds *fsynced* and *never promised*
+into one `true`. A **receipt** names its rung on the ladder and nothing above it:
 **local application** (`Applied` / `Superseded`) · **local sync** (this exact operation crossed
 this node's persistence barrier: `OnDisk` / `Failed` / `NotConfigured`) · **replica sync** (named
 peers persisted this exact operation) · **destination commit** (an external destination
