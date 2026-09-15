@@ -21,6 +21,7 @@ mod lifecycle;
 mod introspect;
 mod topology;
 pub(crate) mod kv_quorum;
+pub(crate) mod replica_sync;
 mod kv_quorum_ext;
 // kv_handle + mesh_handle moved to mycelium-core (v2 M3); the GossipAgent-driven
 // tests stay here.

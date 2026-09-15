@@ -562,14 +562,16 @@ class MyceliumAgent:
     ) -> int:
         """Write ``value`` under ``key`` and wait for peer acknowledgements.
 
-        .. warning::
+        Since the substrate's item 1 PR 4b the gateway **asks** each peer whether it holds the
+        operation, so this succeeds: the count is peers whose store holds this exact write and
+        whose WAL ``fdatasync`` returned ``Ok``.
 
-           With ``min_acks >= 1`` this **times out even when every peer has received and applied
-           the write**. The origin of a write cannot observe that write's propagation on this
-           substrate (``docs/design/contracts-receipts.md`` section 1a); contracts axis item 1
-           PR 4b is the work that makes an acknowledgement obtainable. The write is applied and
-           gossiped either way, so a timeout never means the value was not written — do not retry
-           the write on the strength of it.
+        .. note::
+
+           Peers that do not answer are **unknown**, never "did not persist" — unreachable,
+           mid-restart, or already holding a newer value all look the same from here. A timeout is
+           not evidence the write failed; it is applied and gossiped either way, so do not retry
+           the write on the strength of one.
 
         Returns the number of peers that acknowledged the write (always ≥ ``min_acks``
         on success). Raises :class:`TimeoutError` when fewer than ``min_acks`` peers
@@ -581,8 +583,8 @@ class MyceliumAgent:
         Args:
             key:          KV key to write.
             value:        Bytes to store.
-            min_acks:     Minimum number of distinct peers that must acknowledge. Any value ≥ 1
-                          cannot be satisfied today — see the warning above.
+            min_acks:     Minimum number of distinct peers that must answer that they hold this
+                          exact write on disk.
             timeout_secs: Maximum seconds to wait for confirmations.
 
         Raises:

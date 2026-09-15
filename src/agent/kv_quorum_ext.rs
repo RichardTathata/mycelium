@@ -24,7 +24,7 @@ pub trait KvQuorumExt {
     /// to confirm receipt before returning — **but see the warning below: on today's substrate
     /// that confirmation cannot arrive.**
     ///
-    /// # ⚠ This verb cannot succeed on today's substrate
+    /// # ⚠ Deprecated: this verb cannot succeed. Use `GossipAgent::set_with_replica_sync`
     ///
     /// Read this before calling it. With `min_acks >= 1` it will time out even when every peer in
     /// the cluster has received and applied the write. That is not a bug in the peers; it is a
@@ -54,8 +54,9 @@ pub trait KvQuorumExt {
     /// concurrent writer can no longer produce a false `Ok`.
     ///
     /// It still establishes nothing about **durability**: no peer has promised that anything
-    /// reached its disk. The persisted-by-peer protocol that makes a replica-sync receipt
-    /// obtainable is item 1 PR 4b (`docs/design/contracts-receipts.md` §2.1, `docs/plans/v3-contracts-axis.md`).
+    /// reached its disk. [`GossipAgent::set_with_replica_sync`](crate::GossipAgent::set_with_replica_sync)
+    /// (item 1 PR 4b) is the verb that does — it asks each peer, and returns a receipt naming who
+    /// answered and who is unknown. This one is kept only so existing code keeps compiling.
     ///
     /// It is also **not** linearisability, total order, or consensus. Two concurrent callers
     /// writing different values to the same key both succeed here and LWW resolves the winner
@@ -70,6 +71,13 @@ pub trait KvQuorumExt {
     // `KvHandle` and called directly (never behind a generic with auto-trait bounds),
     // so the `async_fn_in_trait` Send-bound caveat does not apply.
     #[allow(async_fn_in_trait)]
+    #[deprecated(
+        since = "2.6.0",
+        note = "cannot succeed: the origin of a write cannot observe that write's propagation \
+                (docs/design/contracts-receipts.md section 1a). Use \
+                GossipAgent::set_with_replica_sync, which asks peers instead of watching the \
+                gossip stream and returns a receipt naming who answered."
+    )]
     async fn set_with_min_acks(
         &self,
         key:      impl Into<Arc<str>>,
@@ -124,5 +132,76 @@ impl KvQuorumExt for KvHandle {
             Ok(n)  => Ok(n),
             Err(_) => Err(QuorumError::Timeout { acks_received: *rx.borrow() }),
         }
+    }
+}
+
+// ── The persisted-by-peer receipt (item 1 PR 4b) ────────────────────────────────────────────────
+
+impl crate::GossipAgent {
+    /// Writes `value` under `key`, then **asks every peer** whether it holds that exact operation
+    /// on disk, and returns a receipt naming who answered.
+    ///
+    /// This is the verb [`set_with_min_acks`](KvQuorumExt::set_with_min_acks) could never be.
+    /// That one watched the gossip stream for evidence of its own write, which the substrate
+    /// cannot carry: an update's `sender` is its originating node across every hop, fan-out
+    /// excludes the origin, and anti-entropy re-attributes what it delivers to the receiver
+    /// (`docs/design/contracts-receipts.md` §1a). Watching cannot work, so this asks.
+    ///
+    /// It lives on the agent rather than on [`KvHandle`](mycelium_core::KvHandle) because the
+    /// question is a cross-node protocol and the core handle has no way to send one — core knows
+    /// nothing about RPC, deliberately. "Consistency as a service, not a foundation" put the old
+    /// verb one layer too low to keep its promise.
+    ///
+    /// # What the receipt establishes
+    ///
+    /// [`ReplicaSync::persisted_by`](mycelium_core::receipt::ReplicaSync::persisted_by) names peers
+    /// that answered **persisted**: at the moment of answering, that peer's store held this key at
+    /// this exact HLC stamp with this exact content, and its WAL `fdatasync` returned `Ok` — so it
+    /// holds the record across its own crash and restart, because replay restores it.
+    ///
+    /// [`missing`](mycelium_core::receipt::ReplicaSync::missing) names everyone else, and means
+    /// **unknown — not "did not persist"**. A peer that is unreachable, mid-restart, running a
+    /// build without the handler, or holding a newer value for this key all land there. None of
+    /// those establishes absence, and a timeout is never a negative on this axis.
+    ///
+    /// The origin is never queried and never counted. Nothing here claims a **destination commit**:
+    /// no external system has been told anything.
+    ///
+    /// # Errors
+    ///
+    /// Only the local write can fail — [`ReceiptError`] as for any receipt-returning write. The
+    /// peer query never fails the call: peers that do not answer are reported as unknown, which is
+    /// the honest outcome and the reason this returns a receipt rather than a count.
+    pub async fn set_with_replica_sync(
+        &self,
+        key:     impl Into<Arc<str>>,
+        value:   impl Into<Bytes>,
+        timeout: Duration,
+    ) -> Result<mycelium_core::receipt::WriteReceipt, mycelium_core::receipt::ReceiptError> {
+        use mycelium_core::ops::kv_set_with_receipt;
+        use mycelium_core::receipt::{AttemptId, OperationId};
+
+        let key:   Arc<str> = key.into();
+        let value: Bytes    = value.into();
+        let ctx = Arc::clone(&self.service().ctx);
+
+        // One operation identity for the write and the question, so the peers are asked about
+        // exactly what was written and nothing has to be re-derived.
+        let op = OperationId::generate(self.node_id());
+        let attempt = AttemptId::fresh(&op);
+        let mut receipt =
+            kv_set_with_receipt(&ctx, op, attempt, Arc::clone(&key), value, None).await?;
+
+        receipt.replica_sync = super::replica_sync::collect(
+            &ctx,
+            super::replica_sync::Query {
+                stamp: receipt.stamp,
+                content_hash: receipt.content_hash,
+                key: Arc::clone(&key),
+            },
+            timeout,
+        )
+        .await;
+        Ok(receipt)
     }
 }

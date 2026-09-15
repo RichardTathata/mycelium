@@ -215,15 +215,15 @@ impl LocalDurability {
 
 /// Which **named, distinct peers** persisted this exact operation — the **replica sync** receipt.
 ///
-/// The origin is never counted, and today **no verb returns a populated one**.
+/// The origin is never counted. Filled by `GossipAgent::set_with_replica_sync` (item 1 PR 4b),
+/// which **asks** each peer whether it holds the operation rather than watching the gossip stream
+/// for evidence the substrate cannot carry (`docs/design/contracts-receipts.md` §1a).
 ///
-/// `set_with_min_acks` is the nearest thing and it cannot fill this receipt: the origin of a write
-/// never observes that write's propagation, because an update's `sender` is its originating node
-/// across every hop, fan-out excludes the origin, and anti-entropy re-attributes what it delivers
-/// to the receiving node (measured 2026-09-15; `docs/design/contracts-receipts.md` §1a). Since
-/// PR 4a its counter at least requires the payload's [`content_hash`] to match, so a newer
-/// overwrite is no longer mistaken for evidence. PR 4b adds the persisted-by-peer protocol that
-/// fills `persisted_by`.
+/// A name in `persisted_by` means: at the moment that peer answered, its store held this key at
+/// this exact HLC stamp with this exact content **and** its WAL `fdatasync` returned `Ok` — so it
+/// holds the record across its own crash and restart. A name in [`missing`](Self::missing) means
+/// **unknown**: unreachable, mid-restart, running a build without the handler, or now holding a
+/// newer value. None of those establishes that the peer does not hold it.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplicaSync {

@@ -160,7 +160,7 @@ is real. The snapshot path lacked a directory fsync — fixed 2026-09-05 (#183).
 
 **Sequence.** PR1 ADR + regression floor · PR2 operation identity, typed receipts, failure vocabulary · PR3 required
 local sync + retained operation status · **PR4a** exact-identity ack on the existing quorum path *(done 2026-09-15; it also measured that the path can establish nothing — §8, ADR §1a)* · **PR4b**
-persisted-by-peer protocol · PR5 effects companion + SQLite reference destination · PR6 tuple-space consumer ·
+persisted-by-peer protocol *(done 2026-09-15 — the origin asks rather than watches; §10.12.15)* · PR5 effects companion + SQLite reference destination · PR6 tuple-space consumer ·
 PR7 gateway/SDK parity. PRs 2–3 are the first usable release.
 
 **⚠ Divergences.**
@@ -947,6 +947,17 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
     5. **The cooldown parameter** (item 4, `membership_governor.rs:216`) and **item 8** travel alongside; neither blocks AE-T.
     6. Item 6 PR 1 and item 1 PR 4a keep their places; nothing else in this list moves.
 13. **Rev 1.11 (2026-09-13):** the **commitment companion** (§6.9, contract net) enters the queue directly after item 1 PR 2, as CN1; it is the first gallery entry to show the epoch's thesis (§1.2) executable.
+15. **Rev 1.14 (2026-09-15) — PR 4b done; the Phase B replica-sync line is closed.** The origin
+    **asks** rather than watching: each peer is sent the operation's identity, checks its store for
+    that exact stamp and content, forces an `fdatasync`, and answers. No wire change (it rides the
+    existing RPC layer), no retained operation status, no per-entry durability tracking — the three
+    properties that made a simpler design unnecessary are in ADR §1a. The verb **moved up a layer**:
+    `KvHandle` holds only `CoreCtx` and core knows nothing about RPC by design, so
+    `GossipAgent::set_with_replica_sync` replaces `KvQuorumExt::set_with_min_acks`, which is now
+    `#[deprecated]` and still cannot succeed. Phase B's gate — *a peer that acknowledged persistence
+    holds the record across its own crash/restart* — is met by
+    `an_acknowledged_replica_still_holds_the_record_after_restart`. PR 4a's pin was replaced in the
+    open by `a_peer_holding_the_write_acknowledges_it`.
 14. **Rev 1.13 (2026-09-15) — PR 4a done, and what it changed about 4b.** Item 1 PR 4a landed: the ack requires the
     payload's `content_hash`, the newer-overwrite false positive is gone, and the §8 floor row moved with it. It also
     established that `set_with_min_acks` **cannot succeed on today's substrate** (§8 correction, ADR §1a), which

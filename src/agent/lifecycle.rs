@@ -303,6 +303,10 @@ impl GossipAgent {
                 );
             }
         }
+        // Item 1 PR 4b: serve the persisted-by-peer query. Registered by every node, gateway or
+        // not — any node can hold a replica, so any node may be asked. The loop ends on its own
+        // when the agent shuts down (`rpc_rx` yields `None`), so it holds nothing open.
+        super::replica_sync::serve(self);
         info!("Gossip agent started: {}", self.node_id);
         Ok(())
     }
