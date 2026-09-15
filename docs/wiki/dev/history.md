@@ -32,6 +32,19 @@ SkillRunner switched). `gateway_caller_profile` secure/legacy; `sys/caller-conte
 negative cases + the `authorized_callers` gate + `/a2a` in CI. SDK parity: `RpcRequest.caller` on
 `rpc_serve` / `rpcServe`, READMEs; `docs/operations/rbac.md` §7. Wiki: [security](security.md) §WS1.5,
 [`.log/2026-09-13-item7-gateway-caller-identity.md`](.log/2026-09-13-item7-gateway-caller-identity.md).
+## v3 contracts axis — the AE evaluator seam — 2026-09-14 (unreleased)
+
+AE0's code half, on the merged item 7 (queue §10.12.4). `src/agent/action_evaluator.rs`: the
+`ActionEvaluator` trait (deterministic, replaceable), `ActionEnvelope` assembled only from facts the
+gateway verified, `Decision` with three verdicts, `preflight` enforcing what an adapter might get wrong
+(permit-with-errors, permit over an unmapped operation, stale revision, expired envelope, a panicking
+adapter — all refuse), and `ReferenceEvaluator` where an uncovered action is *authority not established*
+rather than a denial. Hooked at the MCP `tools/call` dispatch between `gateway_auth` and
+`gateway_rpc_call`; inert until `with_action_evaluator`. Gated on `gateway` + `tls` — the seam lives
+where it is enforced, and the argument digest has no non-cryptographic fallback. Gates: 13 AE0 §9
+fixtures + 2 live-gateway tests. Log:
+[`.log/2026-09-14-ae-evaluator-seam.md`](.log/2026-09-14-ae-evaluator-seam.md).
+
 ## v3 contracts axis — AE0: the action-envelope ADR — 2026-09-13 (unreleased)
 
 Queue §10.12.3, beside item 1's ADR. `docs/design/action-envelope-ae0.md`: the three questions a protected action

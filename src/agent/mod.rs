@@ -37,6 +37,11 @@ mod overlay_consistent;
 mod overlay_reliable;
 mod rpc;
 pub(crate) mod gateway_caller;
+/// The AE evaluator seam lives exactly where it is enforced: a gateway that can attest (`tls`
+/// carries both the caller attestation and `sha2` for the argument digest). In any other build it
+/// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod action_evaluator;
 #[cfg(feature = "gateway")]
 mod http;
 mod mcp;
@@ -108,6 +113,11 @@ pub(crate) use opacity::is_self_opaque;
 pub use mcp::McpClientHandle;
 pub use mcp::{McpError, McpToolHandle};
 pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub use action_evaluator::{
+    ActionEnvelope, ActionEvaluator, ActionMapping, Decision, MappingStatus, PreflightRefusal,
+    ReferenceEvaluator, Rule, Verdict,
+};
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
     CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,
@@ -434,6 +444,10 @@ pub(crate) struct TaskCtx {
     /// it before writing to KV. Lock #8 in the lock-order table (leaf).
     #[cfg(feature = "compliance")]
     pub(crate) audit_chain: Arc<std::sync::Mutex<audit::AuditChainState>>,
+    /// Optional runtime action evaluator (AE slice), set via `with_action_evaluator`. Absent =
+    /// the gateway preflight is inert and dispatch behaves exactly as before.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) action_evaluator: std::sync::OnceLock<Arc<dyn action_evaluator::ActionEvaluator>>,
     /// Optional external audit sink (SOC 2 WS-C), set via `with_audit_sink`.
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink: std::sync::OnceLock<Arc<dyn audit::AuditSink>>,
@@ -850,6 +864,8 @@ impl GossipAgent {
             schema_mismatch: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "compliance")]
             audit_chain: Arc::new(std::sync::Mutex::new(audit::AuditChainState::new())),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            action_evaluator: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -905,6 +921,22 @@ impl GossipAgent {
     ) {
         if self.data_at_rest_cipher.set(cipher).is_err() {
             tracing::warn!("with_data_at_rest_cipher called more than once; keeping the first cipher");
+        }
+    }
+
+    /// Attach the runtime [`ActionEvaluator`](action_evaluator::ActionEvaluator) this node's
+    /// gateway consults before dispatching a client's call (AE slice,
+    /// `docs/design/action-envelope-ae0.md`).
+    ///
+    /// **Inert until attached:** with no evaluator the gateway dispatches exactly as before, so
+    /// this is additive for every existing deployment. With one attached, a call whose authority
+    /// the policy does not establish is refused **at this gateway** — a route-level preflight, not
+    /// enforcement at the effect: anything reaching the provider without traversing this gateway is
+    /// outside the guarantee, and the evidence must say so. Settable once; a second call is ignored.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_action_evaluator(&self, evaluator: Arc<dyn action_evaluator::ActionEvaluator>) {
+        if self.task_ctx.action_evaluator.set(evaluator).is_err() {
+            tracing::warn!("with_action_evaluator: an evaluator is already attached; ignoring");
         }
     }
 

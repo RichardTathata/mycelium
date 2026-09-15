@@ -40,6 +40,10 @@ jobs:
       # In-suite decoder mini-fuzz (gated behind fuzz-internals). The fuzz/
       # targets existed for the whole project's life but were never executed
       # in CI, and an unbounded-allocation decode DoS sat uncaught (M2 Run-20).
+      # The AE seam's replaceable-evaluator premise: an evaluator written in *another crate* must
+      # compile and be able to permit, deny and be undecided. `--lib` would never catch a
+      # `#[non_exhaustive]` constructor hole, which is how one shipped into review (2026-09-15).
+      - run: cargo test --test ae_external_adapter --features tls,a2a
       - run: cargo test --lib --features fuzz-internals mini_fuzz_decoders_survive_adversarial_bytes
       - run: ./scripts/ci-retest.sh -p mycelium-tuple-space --features gateway
       # Examples are the documented contract for the guide chapters; an

@@ -1411,6 +1411,30 @@ async fn mcp_handler(
                 "params": {"name": name, "arguments": arguments},
             });
 
+            // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
+            // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose
+            // authority the policy does not establish never reaches the provider *through this
+            // gateway*. A route-level preflight, not enforcement at the effect
+            // (`docs/design/action-envelope-ae0.md` §7).
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            if let Some(refusal) = ae_preflight(
+                &ctx,
+                caller.as_ref(),
+                "tools/call",
+                &format!("tool:{name}@{provider_node_id}"),
+                &arguments,
+                &req,
+            ) {
+                return Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": {"code": refusal.json_rpc_code(), "message": refusal.to_string(),
+                              "data": {"reason": refusal.reason(),
+                                       "policy_revision": refusal.decision().policy_revision,
+                                       "checked": refusal.decision().checked,
+                                       "errors": refusal.decision().errors}},
+                })).into_response();
+            }
+
             // Item 7: the call carries the auth layer's caller context (never anything the
             // client put in `params`), or is refused — it is never dispatched as the node.
             match gateway_caller::gateway_rpc_call(
@@ -1828,6 +1852,91 @@ async fn gw_rpc_call(
             (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": "timeout" }))).into_response()
         }
         Err(e) => dispatch_refused(e),
+    }
+}
+
+/// Assemble an [`ActionEnvelope`](super::action_evaluator::ActionEnvelope) from facts this
+/// gateway verified and run the evaluator over it. `Some(refusal)` means do not dispatch.
+///
+/// Identity note: `operation_id` is a **correlation** identity, not authority, so a client may
+/// supply it (`params._meta.operation_id`) to make its own retries idempotent downstream — item 1's
+/// rule. Everything that *is* authority — the actor, the granted scopes — comes from the auth layer
+/// and never from the request body (item 7). The `attempt_id` is minted per dispatch here.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn ae_preflight(
+    ctx: &HttpCtx,
+    caller: Option<&ResolvedPrincipal>,
+    operation: &str,
+    resource: &str,
+    arguments: &serde_json::Value,
+    request: &serde_json::Value,
+) -> Option<super::action_evaluator::PreflightRefusal> {
+    use super::action_evaluator as ae;
+    let evaluator = ctx.agent_ctx.action_evaluator.get()?;
+
+    // Both evaluator questions asked behind the unwind boundary (AE0 §3): a panicking adapter
+    // cannot be used to build the envelope either.
+    let Some((wanted, mapping)) = ae::evaluator_facts(evaluator, operation, resource) else {
+        warn!(%operation, %resource, "AE preflight: evaluator panicked while reporting its facts");
+        return Some(ae::PreflightRefusal::NotEstablished(ae::Decision::indeterminate(
+            "evaluator panicked while reporting its facts",
+            "",
+        )));
+    };
+
+    // Only the argument names the policy declared cross into the envelope — and thence into the
+    // evidence record. Everything else stays in the request (AE0 §5).
+    let mut selected = serde_json::Map::new();
+    if let Some(obj) = arguments.as_object() {
+        for name in &wanted {
+            if let Some(v) = obj.get(name) {
+                selected.insert(name.clone(), v.clone());
+            }
+        }
+    }
+
+    let operation_id = request["params"]["_meta"]["operation_id"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("gw:{}/{:016x}", ctx.agent_ctx.node_id, fastrand::u64(..)));
+    let attempt_id = format!("{operation_id}/{:08x}", fastrand::u32(..));
+    let (actor, scopes) = match caller {
+        Some(c) => (c.principal.clone(), c.scopes.clone()),
+        None => (gateway_caller::PRINCIPAL_ANONYMOUS.to_string(), Vec::new()),
+    };
+    // Canonical arguments: serde_json's object serialization is key-ordered for `Map` in its
+    // default (BTreeMap) configuration, so the digest is stable for equal arguments.
+    let canonical = serde_json::to_vec(arguments).unwrap_or_default();
+    let now_ms = crate::hlc::physical_ms(ctx.agent_ctx.hlc.current());
+
+    let envelope = ae::ActionEnvelope {
+        operation_id,
+        attempt_id,
+        actor,
+        via: ctx.agent_ctx.node_id.clone(),
+        scopes,
+        operation: operation.to_string(),
+        resource: resource.to_string(),
+        arguments_digest: ae::arguments_digest(&canonical),
+        selected_arguments: selected,
+        mapping,
+        // The expected policy revision comes from a deployment report, which the AE exporter
+        // supplies (AE0 §6); until then the seam has no second opinion to compare against and the
+        // stale-policy check simply does not fire.
+        expected_policy_revision: None,
+        issued_at_ms: now_ms,
+        not_after_ms: now_ms.saturating_add(60_000),
+    };
+
+    match ae::preflight(Some(evaluator), &envelope, now_ms) {
+        Ok(_) => None,
+        Err(refusal) => {
+            warn!(actor = %envelope.actor, %operation, %resource,
+                  "AE preflight refused: {refusal}");
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => refusal.reason()).increment(1);
+            Some(refusal)
+        }
     }
 }
 
@@ -5476,5 +5585,117 @@ mod gateway_caller_tests {
         let n1 = who(p1, "named", Arc::clone(&seen)).await;
         assert_eq!(n1, format!("token:{}/ci-bot", g1.node_id()));
         g1.shutdown().await; g2.shutdown().await; provider.shutdown().await;
+    }
+}
+
+/// The AE evaluator seam at the live gateway (`docs/design/action-envelope-ae0.md`): the unit
+/// fixtures prove the decision rules; these prove the **wiring** — that a refusal stops the
+/// dispatch and a permit does not.
+#[cfg(all(test, feature = "tls", feature = "compliance"))]
+mod ae_seam_tests {
+    use crate::{GossipAgent, GossipConfig, NodeId, ReferenceEvaluator, Rule};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+    use std::time::Duration;
+
+    fn alloc_port() -> u16 { crate::test_util::alloc_port() }
+
+    async fn tools_call(http_port: u16, name: &str, args: serde_json::Value) -> serde_json::Value {
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{http_port}/mcp"))
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": {"name": name, "arguments": args}}))
+            .send().await.expect("tools/call");
+        assert_eq!(resp.status(), 200, "answered as JSON-RPC");
+        resp.json().await.unwrap()
+    }
+
+    /// An attached evaluator refuses at the gateway: the provider's tool never runs, the client
+    /// gets the decision, and a permitted call on the same node still works.
+    #[tokio::test]
+    async fn the_gateway_preflight_refuses_before_the_tool_runs() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("ae-seam-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+
+        // `anonymous` may call `allowed`; `forbidden` is prohibited outright; `uncovered` is in
+        // the catalogue but named by no allowance.
+        let me = agent.node_id().clone();
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-1")
+                .with_catalogue("cat-test", "1")
+                .map_action("tools/call", format!("tool:allowed@{me}"))
+                .map_action("tools/call", format!("tool:forbidden@{me}"))
+                .map_action("tools/call", format!("tool:uncovered@{me}"))
+                .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", format!("tool:allowed@{me}")))
+                .prohibit(Rule::new("*", "tools/call", format!("tool:forbidden@{me}"))),
+        ));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for tool in ["allowed", "forbidden", "uncovered"] {
+            let ran = Arc::clone(&ran);
+            handles.push(agent.mcp().register_mcp_tool(
+                tool,
+                serde_json::json!({"type": "object", "properties": {}}),
+                move |_args| {
+                    let ran = Arc::clone(&ran);
+                    async move { ran.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!("ran")) }
+                },
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Permitted: dispatched, the tool runs.
+        let body = tools_call(http_port, "allowed", serde_json::json!({})).await;
+        assert!(body.get("error").is_none(), "permitted call: {body}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+        // Prohibited: refused at the gateway with the decision; the tool does not run.
+        let body = tools_call(http_port, "forbidden", serde_json::json!({})).await;
+        assert_eq!(body["error"]["code"], -32030, "explicit prohibition denies: {body}");
+        assert_eq!(body["error"]["data"]["reason"], "action_denied");
+        assert_eq!(body["error"]["data"]["policy_revision"], "rev-1");
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the prohibited tool must not run");
+
+        // Uncovered by any allowance: *authority not established*, never reported as a denial.
+        let body = tools_call(http_port, "uncovered", serde_json::json!({})).await;
+        assert_eq!(body["error"]["code"], -32031, "incomplete allow-list: {body}");
+        assert_eq!(body["error"]["data"]["reason"], "authority_not_established");
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the uncovered tool must not run");
+
+        drop(handles);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// With no evaluator attached the gateway behaves exactly as before — the seam is additive.
+    #[tokio::test]
+    async fn without_an_evaluator_the_gateway_is_unchanged() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _h = agent.mcp().register_mcp_tool(
+            "square",
+            serde_json::json!({"type": "object", "properties": {"n": {"type": "number"}}}),
+            |args| async move { Ok(serde_json::json!(args["n"].as_f64().unwrap_or(0.0) * 2.0)) },
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let body = tools_call(http_port, "square", serde_json::json!({"n": 21.0})).await;
+        assert!(body.get("error").is_none(), "inert seam must not refuse: {body}");
+        assert!(body["result"]["content"][0]["text"].as_str().unwrap().contains("42"));
+        agent.shutdown().await;
     }
 }
