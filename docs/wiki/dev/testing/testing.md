@@ -152,6 +152,18 @@ Assert cluster state with a predicate poll (`poll_until(|| !a.peers().is_empty()
 `sleep(300ms)`. A fixed sleep passes by luck on fast machines and hides the race on slow
 ones; the structural poll converts a timing race into a deterministic failure.
 
+**Poll the predicate you actually depend on.** A structural poll is only as good as what it
+proves, and the easy mistake is gating on the readiest signal rather than the needed one. CI's
+reason-node job waited for `/health` and then dispatched through the gateway: `/health` proves the
+HTTP server is up, while a secure-profile gateway refuses to route to a provider whose
+`sys/caller-context/` marker it cannot see yet (item 7), correctly answering HTTP 412 rather than
+running the call as the node. That marker is published lazily and must then gossip, so between
+"healthy" and "dispatchable" every call is a 412 — which reddened the Python SDK job on 2026-09-15.
+The gate now polls until both markers are visible on the dispatching node. Integration scenario 13
+had the sibling version of this (a gossiped role record that survives a restart, so "primary" can be
+stale), and the client-deadline section below has the third. Before trusting a readiness poll, ask:
+*if this predicate is true and the next line still fails, what did I fail to prove?*
+
 The dual of that rule: **verify a new concurrency regression test against the broken code
 before trusting it.** A timing-shaped test can pass on the bug it was written to catch — the
 2026-09-02 pool-eviction gate's first draft (two threads + a start barrier) passed on the
