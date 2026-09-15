@@ -91,6 +91,43 @@ a correctness assumption, the choices-trace and bundle schema (D14), the static 
 additions (CAS retries to Loom, hash iteration order, lease-expiry clock reads). Concepts: *seam*, *bundle*.
 Wiki: [testing](testing/testing.md), [`.log/2026-09-13-item6-pr1-nondeterminism-inventory.md`](.log/2026-09-13-item6-pr1-nondeterminism-inventory.md).
 
+## v2.5.0 release — 2026-09-15 (tag `v2.5.0`)
+
+The **contracts MINOR** — the v3 contracts axis' first tranche, ten items merged between 2026-09-13
+and 2026-09-15. Wire **v12** (PREV 11) unchanged; on-disk format unchanged.
+
+**What an acknowledgement proves is now a receipt.** `mycelium-core/src/receipt.rs` carries the
+vocabulary — `OperationId` / `AttemptId`, `LocalApplication::{Applied, AlreadyCurrent, Superseded,
+Refused}`, `LocalDurability::{OnDisk, Buffered, Failed, NotConfigured}`, `ReplicaSync` and
+`DestinationCommit` (vocabulary until PR 4b and PR 5), `ReceiptError` and `CommitError` with **no
+variant meaning "nothing happened"**. New verbs return it: `set_with_receipt`, `retry_with_receipt`,
+`set_requiring_sync` (persist → apply → gossip, so a failure means *this attempt applied nothing*),
+`prepare_write` / `commit_prepared` (a caller-held stamp, so a lost acknowledgement can be retried
+without clobbering a newer value), and `{cluster,group}_propose_receipt`. `ConsensusResult::Committed`
+is deliberately **unchanged** — the receipt arrives on new verbs because growing a
+non-`#[non_exhaustive]` variant is not additive (D24).
+
+**A gateway call now carries who made it.** `GatewayCaller` (item 7): the auth layer constructs it,
+the node attests it over the request digest, and the provider verifies it — so `authorized_callers`
+judges the **client principal**, issuer-qualified, never the gateway node. `rpc_rx` verifies at the
+receive boundary, so every companion serve loop is covered. **Upgrade note:** a deployment that listed
+a gateway node to admit its clients must now list their principals.
+
+**An action can be refused before it reaches a provider.** The AE evaluator seam
+(`src/agent/action_evaluator.rs`): `ActionEvaluator` with permit / deny / **indeterminate**, an
+`ActionEnvelope` assembled only from verified facts, a deterministic `ReferenceEvaluator`, and the
+AE0 §9 negative fixtures as tests. Inert until `with_action_evaluator` attaches one; a **route-level
+preflight**, never enforcement at the effect.
+
+Also: threat model **revision 2** (boundaries D–G, and what identity/evidence/replay artefacts may
+carry); the replay **nondeterminism inventory** with its coverage map and trace schema; the membership
+governor's **cooldown as an explicit parameter** and `ViewConfidence::staleness_known()`; and
+**rustls 0.23.45** (RUSTSEC-2026-0285), which the `v2.4.4` tag ships vulnerable.
+
+**Nine external review rounds** ran across these, every finding fixed with a regression before merge.
+The recurring class was one thing: a receipt, a decision or a document claiming slightly more than the
+underlying operation established. Logs: the `.log/` entries dated 2026-09-13 → 2026-09-15.
+
 ## v2.4.4 release — 2026-09-12 (tag `v2.4.4`)
 
 Durability PATCH on the 2.4 line: the snapshot rename is fsynced at the directory before the WAL is

@@ -9,7 +9,60 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.5.0] — 2026-09-15
+
+Contracts MINOR on the 2.x line — the **v3 contracts axis' first tranche**: what an acknowledgement
+proves is now a typed receipt rather than a `bool`, a gateway call carries the identity of the client
+that made it, and a policy evaluator can refuse an action at the gateway before it reaches a provider.
+Wire **v12** (PREV 11) unchanged — a backwards-compatible rolling upgrade; on-disk format unchanged.
+
+**Two behaviour notes an upgrader must read.**
+
+1. **`authorized_callers` now judges the client, not the gateway node** (item 7). A deployment that
+   listed a gateway's *node id* in a provider's allowlist in order to admit its HTTP/SDK clients must
+   now list those clients' **principals** (`oidc:{issuer}/{subject}`, `token:{issuer}/{name}`, …).
+   That node-listing was the impersonation this release closes: every gateway dispatch previously ran
+   under the node's own identity, so a provider could not tell one client from another, or from the
+   node. Secure profile is the default; `gateway_caller_profile = legacy` restores the old dispatch
+   for a rolling-upgrade window and is a `3.0.0` removal-ledger entry.
+2. **`GossipConfig` gained fields**, which is *not* additive by Rust's rules: an exhaustive struct
+   literal over its fields stops compiling. The documented construction pattern —
+   `GossipConfig::default()` then assignment, or `..GossipConfig::default()` — is unaffected, which is
+   why this has passed unremarked through every release that added a config field. The `3.0.0` ledger
+   now carries the entry that ends the series (mark the operator-constructed config structs
+   `#[non_exhaustive]`). Same applies to `ConsensusResult::Committed`: it is **unchanged** here
+   precisely for this reason, and the new receipt arrives on new verbs instead.
+
+Everything else is additive: new types and verbs beside the existing ones, all `#[non_exhaustive]`
+with public constructors, and the pre-existing verbs keep their signatures and their meanings.
+
 ### Added
+
+- **Contracts axis item 1 PR 3 — the required local sync, and the prepared write**
+  (`KvHandle::set_requiring_sync` / `retry_requiring_sync` / `prepare_write` / `commit_prepared`;
+  record `docs/design/contracts-receipts.md` §2.1, §2.2, §9a). A write that **must** be durable: it
+  forces an `fdatasync` in every `SyncMode`, so its receipt is always `LocalDurability::OnDisk` where
+  the ordinary path would report `Buffered`, and the ordering is deliberately reversed —
+  **persist → apply → gossip** — so a failure means *this attempt applied nothing*: no store entry,
+  no subscriber, no frame. Persist-first is admissible only because the snapshot merges the WAL tail
+  before truncating (D8), and the two regressions pinning that dependency are cited at the call site.
+  A node with **no persistence configured is refused outright** rather than handed a receipt claiming
+  nothing — prevention the caller asked for as a contract (posture rule 3(i)) — through the new
+  `ReceiptError::DurabilityNotEstablished`, which separates *this node never could* from *the attempt
+  failed*. **`KvHandle::prepare_write`** stamps an operation *before dispatch* and returns a small
+  serialisable `PreparedWrite` (identity, key, content binding, HLC); `commit_prepared` and
+  `commit_prepared_requiring_sync` reuse that stamp on every attempt, so a caller that **lost the
+  acknowledgement** can retry safely — the retry is `Superseded` rather than a silent overwrite of a
+  newer value, while re-issuing by `OperationId` alone mints a fresh HLC and does clobber (the two are
+  contrasted in one test). **Review corrections (2026-09-15):** a failed required-sync write is
+  documented as leaving the **post-restart outcome unknown**, because the WAL writes before it syncs
+  and a failed sync may leave a replayable record — the first cut claimed the value could never appear
+  here (`regression_an_unsynced_record_still_replays`); and §9a's deferral of retained operation
+  status was argued wrongly — remembering a *local* write's stamp claims nothing about an external
+  transaction — so it is rewritten around the prepared-write token, which solves the
+  lost-acknowledgement case with no node-held state to size or expire.
 
 - **Contracts axis item 1 PR 2 — identities, typed receipts, the failure vocabulary**
   (`mycelium-core/src/receipt.rs`; record `docs/design/contracts-receipts.md`). The vocabulary in
