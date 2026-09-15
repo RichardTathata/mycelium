@@ -5717,6 +5717,69 @@ mod receipt_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Review regression (PR 3, 2026-09-15): a caller that **loses the receipt** can still retry
+    /// safely, because it prepared the operation before dispatching it.
+    ///
+    /// Re-issuing `set_with_receipt` with the same `OperationId` would mint a fresh HLC and let a
+    /// late retry outrank — and silently undo — a newer value. Committing the same `PreparedWrite`
+    /// reuses the original stamp, so the retry loses LWW and says so.
+    #[tokio::test]
+    async fn a_prepared_write_survives_a_lost_acknowledgement_without_clobbering() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let op = OperationId::new("op-lost-ack");
+
+        // Prepared *before* dispatch; the caller keeps this, not the receipt.
+        let prepared = a.kv().prepare_write(&op, "k/lost", b"original");
+        let first = a.kv().commit_prepared(&prepared, b"original".to_vec()).await.unwrap();
+        assert_eq!(first.application, LocalApplication::Applied);
+
+        // The response is lost — the caller has no receipt. Meanwhile something newer takes the key.
+        drop(first);
+        assert!(a.kv().set("k/lost", b"newer".to_vec()));
+
+        // The retry uses the token it kept. It must not undo the newer value.
+        let retry = a.kv().commit_prepared(&prepared, b"original".to_vec()).await.unwrap();
+        assert_eq!(retry.stamp, prepared.stamp, "the prepared stamp is reused, not re-ticked");
+        assert_eq!(retry.application, LocalApplication::Superseded);
+        assert_eq!(
+            a.kv().get("k/lost").as_deref(),
+            Some(&b"newer"[..]),
+            "the newer value survives the lost-acknowledgement retry",
+        );
+
+        // The contrast: re-issuing by operation id alone mints a fresh stamp and does clobber it.
+        let reissued = a.kv().set_with_receipt(&op, "k/lost", b"original".to_vec()).await.unwrap();
+        assert_ne!(reissued.stamp, prepared.stamp);
+        assert_eq!(reissued.application, LocalApplication::Applied);
+        assert_eq!(
+            a.kv().get("k/lost").as_deref(),
+            Some(&b"original"[..]),
+            "which is exactly why the prepared token exists",
+        );
+        a.shutdown().await;
+    }
+
+    /// A prepared write binds its content: committing different bytes under the same operation
+    /// identity is a conflict, and the token survives a round trip through serialisation — the
+    /// caller may persist it across its own restart.
+    #[tokio::test]
+    async fn a_prepared_write_binds_its_content_and_round_trips() {
+        let a = agent_with(None);
+        a.start().await.unwrap();
+        let prepared = a.kv().prepare_write(&OperationId::new("op-bound"), "k/bound", b"v");
+        let json = serde_json::to_string(&prepared).unwrap();
+        let restored: crate::PreparedWrite = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, prepared, "a caller can persist the token and come back to it");
+
+        let err = a.kv().commit_prepared(&restored, b"different".to_vec()).await.unwrap_err();
+        assert!(matches!(err, ReceiptError::Conflict { .. }), "got {err:?}");
+        assert!(a.kv().get("k/bound").is_none(), "the conflicting commit wrote nothing");
+        a.kv().commit_prepared(&restored, b"v".to_vec()).await.unwrap();
+        assert_eq!(a.kv().get("k/bound").as_deref(), Some(&b"v"[..]));
+        a.shutdown().await;
+    }
+
     /// An oversized write is refused before anything is applied — `Rejected`, not a receipt that
     /// claims an application that never happened.
     #[tokio::test]
