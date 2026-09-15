@@ -108,6 +108,13 @@ pub enum WalMsg {
     TriggerSnapshot {
         ack: oneshot::Sender<io::Result<()>>,
     },
+    /// `fdatasync` the WAL as it stands, appending nothing. Because appends are written in
+    /// order on one file, a successful sync establishes durability for **every record already
+    /// appended** — which is what lets a peer answer "yes, I hold that operation on disk"
+    /// without tracking durability per entry (contracts axis item 1 PR 4b).
+    Sync {
+        ack: oneshot::Sender<io::Result<()>>,
+    },
     #[allow(dead_code)]
     Shutdown,
 }
@@ -170,6 +177,22 @@ impl WalHandle {
     /// It never means the record is absent.
     pub async fn append_acked(&self, entry: SyncEntry) -> io::Result<()> {
         self.send_and_await(entry, false).await
+    }
+
+    /// `fdatasync` the WAL as it stands — **appending nothing** — and await the result.
+    ///
+    /// Records are appended in order to a single file, so `Ok` establishes that every record
+    /// appended before this call is on stable storage. That is what makes a replica-sync answer
+    /// possible without per-entry durability tracking: a peer asked whether it holds an operation
+    /// checks its store for that exact stamp and content, calls this, and answers on the result
+    /// (contracts axis item 1 PR 4b, `docs/design/contracts-receipts.md` §2.1).
+    ///
+    /// `Err` means durability is **not established** — the writer is gone or the `fdatasync`
+    /// failed. As everywhere else on this path, it never means the records are absent.
+    pub async fn sync(&self) -> io::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(WalMsg::Sync { ack: tx }).await.map_err(|_| writer_gone())?;
+        rx.await.unwrap_or_else(|_| Err(writer_gone()))
     }
 
     /// Ask the writer to snapshot immediately. Awaits completion; `Err` if the
@@ -410,6 +433,12 @@ async fn wal_writer_task(
                         let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
                         wal_entry_count = 0;
                         let _ = ack.send(result);
+                    }
+                    Some(WalMsg::Sync { ack }) => {
+                        // Nothing is appended: this syncs what is already there. Handled in the
+                        // same loop as Append so it cannot race a concurrent write — the ordering
+                        // is what makes "everything before this is durable" true.
+                        let _ = ack.send(wal_file.sync_data().await);
                     }
                 }
             }
