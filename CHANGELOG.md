@@ -40,6 +40,7 @@ with public constructors, and the pre-existing verbs keep their signatures and t
 
 ### Added
 
+
 - **Contracts axis item 1 PR 3 — the required local sync, and the prepared write**
   (`KvHandle::set_requiring_sync` / `retry_requiring_sync` / `prepare_write` / `commit_prepared`;
   record `docs/design/contracts-receipts.md` §2.1, §2.2, §9a). A write that **must** be durable: it
@@ -135,18 +136,6 @@ with public constructors, and the pre-existing verbs keep their signatures and t
   (`ActionEvaluator::security_relevant_arguments`): a digest establishes integrity but cannot answer
   *amount ≤ 500*, and only the declared names cross into the envelope or the evidence.
 
-### Security
-
-- **rustls 0.23.40 → 0.23.45, rustls-webpki 0.103.13 → 0.103.15 — RUSTSEC-2026-0285**
-  ("TLS 1.3 handshake messages incorrectly accepted across encryption level boundaries"; fixed in
-  0.23.45). Lockfile bump, no manifest change and no API change; it reaches the substrate through
-  the `tls` feature (gossip mTLS, gateway TLS) and every `reqwest`/`hyper` TLS path. **The `v2.4.4`
-  tag ships the vulnerable version** — the fix lands with the next tag, as the wasmtime
-  RUSTSEC-2026-0222 note records for `v2.3.0`. Found by the `cargo audit` CI job, which had begun
-  failing on every open branch.
-
-### Added
-
 - **Gateway caller identity (v3 contracts axis item 7, `docs/plans/v3-contracts-axis.md` §6.4 / D27).**
   Every gateway-originated dispatch — `POST /mcp` `tools/call`, `POST /a2a`, `/gateway/rpc/call`,
   `/gateway/scatter`, `/gateway/overlay/emit_reliable`, `/gateway/llm/{call,stream}` — used to run under
@@ -233,8 +222,8 @@ with public constructors, and the pre-existing verbs keep their signatures and t
   node's WAL" is corrected; tuple-space `complete` is the pipeline's receipt, never a destination commit; and
   PR 2 delivers `local_durability` through a new receipt-returning propose API rather than a new field on
   `ConsensusResult::Committed`, which would break exhaustive destructures under Rust's rules.
-### Changed
 
+### Changed
 - **Threat model revision 2** (`docs/threat-model.md`; v3 contracts axis item 8, plan §6.5). §5 adds the boundaries the
   axis introduces — **D** a foreign principal across a domain edge (item 2), **E** an authenticated-but-abusive client
   (items 7 and 2), **F** evidence confidentiality and the hash-as-credential (item 3), **G** a compromised former
@@ -276,6 +265,15 @@ with public constructors, and the pre-existing verbs keep their signatures and t
   choices trace (`seq · node · kind · stream/seam · value`) and the minimum failure bundle sufficient for **exact
   reproduction with divergence detection** are fixed for PR 2; the static forbidden-call check lands with the
   adapters in PR 3. No code.
+
+### Security
+- **rustls 0.23.40 → 0.23.45, rustls-webpki 0.103.13 → 0.103.15 — RUSTSEC-2026-0285**
+  ("TLS 1.3 handshake messages incorrectly accepted across encryption level boundaries"; fixed in
+  0.23.45). Lockfile bump, no manifest change and no API change; it reaches the substrate through
+  the `tls` feature (gossip mTLS, gateway TLS) and every `reqwest`/`hyper` TLS path. **The `v2.4.4`
+  tag ships the vulnerable version** — the fix lands with the next tag, as the wasmtime
+  RUSTSEC-2026-0222 note records for `v2.3.0`. Found by the `cargo audit` CI job, which had begun
+  failing on every open branch.
 
 ---
 
