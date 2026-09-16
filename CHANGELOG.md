@@ -87,7 +87,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   suites still never share the one Docker daemon, but a hosted job in a later run is no longer held
   behind a self-hosted job in an earlier one, and a newly pending scale job displaces the previous
   one instead of a queue of runs expiring one at a time. The rule this generalises to: *a check must
-  not sit inside the failure domain of the thing it checks.*
+  not sit inside the failure domain of the thing it checks.* Dispatched on the fix branch the alarm
+  started and reported, for the first time: *"No successful run of the scale suites has ever been
+  recorded"* — literally, across all 69 runs of the workflow since 2026-07-10, every one `cancelled`
+  with an empty `runner_name`. Every scale figure in the documentation rests on operator-run
+  `make test-scale`, never on CI, and should be cited that way until the box is online.
 
 - **CI: a missing scale runner was invisible, because a job nobody runs never goes red**
   (`.github/workflows/scale-nightly.yml`). The scale suites run only on a self-hosted box labelled

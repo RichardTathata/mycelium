@@ -172,3 +172,13 @@ job, where it still prevents two suites sharing the one Docker daemon but cannot
 in a later run behind a self-hosted job in an earlier one. The general rule: *a check must not sit
 inside the failure domain of the thing it checks* — placed in the workflow it watches, the alarm
 inherited the exact blockage it was there to report.
+
+**And what the alarm said when it could finally speak.** Dispatched on the fix branch, the hosted job
+started (rather than pending) and went red with *"No successful run of the scale suites has ever been
+recorded."* That is literal. Across **all 69 runs of this workflow since 2026-07-10**, every single
+conclusion is `cancelled`, and the sampled jobs carry an empty `runner_name` — they expired waiting
+for a runner that never claimed them. The 2026-09-10 → 09-15 window named above is not the outage; it
+is the part of a continuous outage that happened to be noticed. **No scale figure on this page has
+ever been produced by CI.** The numbers here come from operator-run `make test-scale` on a box big
+enough for them, and until `mycelium-scale` comes online that is the only provenance they have —
+which is exactly how they should be read and cited.

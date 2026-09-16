@@ -25,6 +25,13 @@ workflow's blocking resource, so the one condition it existed to report — noth
 was the one condition under which it could not run. Yesterday's entry said an alarm should fire on
 the absence of a signal; this one adds that it must be reachable when the signal is absent.
 
+**What the alarm said once it could run.** Dispatched on the fix branch, the hosted job started and
+failed with *"No successful run of the scale suites has ever been recorded."* Checked against the
+API: **all 69 runs since 2026-07-10 concluded `cancelled`**, and sampled jobs have an empty
+`runner_name` — expired waiting for a runner that never claimed them. The six-day window in
+yesterday's entry was not the outage, only the noticed part of it. Every scale number in the docs
+rests on operator-run `make test-scale`, never on CI.
+
 **Honest limit, unchanged.** Nothing here brings the box up, and queued-rather-than-failed is still
 *consistent with* no labelled runner being online rather than proof of it. What changed is that the
 repo now says so out loud every night instead of spinning.
