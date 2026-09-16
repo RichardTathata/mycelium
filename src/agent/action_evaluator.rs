@@ -429,6 +429,22 @@ pub enum Execution {
     None,
 }
 
+/// Which of AE0 §5's records this is.
+///
+/// One dispatch produces more than one: what was *decided*, and then what became of it. Keeping
+/// them as separate records rather than mutating one is the point — evidence is append-only, and a
+/// record that could be revised in place could be revised after someone read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordKind {
+    /// The evaluator's verdict for this attempt. Establishes nothing about execution.
+    #[default]
+    Decided,
+    /// What became of the dispatch this enforcement point made. Item 1's receipt for the same
+    /// `operation_id` / `attempt_id` — a reuse, not a parallel ledger.
+    Execution,
+}
+
 /// One authorisation decision, as sealed into the audit chain's `detail`.
 ///
 /// **Why this exists beside the audit record's own fields.** An [`AuditRecord`](crate::AuditRecord)
@@ -445,6 +461,10 @@ pub enum Execution {
 pub struct AeEvidence {
     /// Always [`AE_EVIDENCE_SCHEMA`].
     pub schema: String,
+    /// Which §5 record this is. Defaults to [`RecordKind::Decided`] so a record written before this
+    /// field existed still parses as what it was.
+    #[serde(default)]
+    pub kind: RecordKind,
     /// The logical agent — the verified principal, never a client-supplied string.
     pub subject: String,
     /// The native operation asked for.
@@ -499,6 +519,7 @@ impl AeEvidence {
     ) -> Self {
         Self {
             schema: AE_EVIDENCE_SCHEMA.to_string(),
+            kind: RecordKind::Decided,
             subject: envelope.actor.clone(),
             operation: envelope.operation.clone(),
             resource: envelope.resource.clone(),
@@ -518,6 +539,16 @@ impl AeEvidence {
             checked: decision.checked.clone(),
             reason: decision.reason.clone(),
         }
+    }
+
+    /// The **execution** record for this same attempt.
+    ///
+    /// Carries the decision's identities unchanged — `operation_id`, `attempt_id`, the principal,
+    /// the policy revision — because it is a statement about the same attempt, and correlating them
+    /// is the consumer's whole job. What it does **not** do is revise the decision: that record
+    /// stands exactly as written, and this one is appended beside it.
+    pub fn as_execution(&self, execution: Execution) -> Self {
+        Self { kind: RecordKind::Execution, execution, ..self.clone() }
     }
 
     /// The coarse audit outcome this decision summarises to.
@@ -618,7 +649,11 @@ impl AeReference {
     ) -> Self {
         Self {
             schema: AE_REFERENCE_SCHEMA.to_string(),
-            kind: "decided".to_string(),
+            kind: match evidence.kind {
+                RecordKind::Decided => "decided",
+                RecordKind::Execution => "execution",
+            }
+            .to_string(),
             operation_id: evidence.operation_id.clone(),
             attempt_id: evidence.attempt_id.clone(),
             principal: evidence.subject.clone(),

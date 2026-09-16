@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the execution record: what the gateway actually observed
+
+- Every permitted dispatch now produces a second journal record (`RecordKind::Execution`) beside its
+  decision, carrying the same `operation_id` / `attempt_id` / principal. Before this, every permitted
+  call exported as `effect: unknown` even though the gateway watched the provider answer.
+- `Ok(reply)` ⇒ `completed`, downgraded to `failed` when the JSON-RPC reply carries an `error`.
+  A dispatch refused before sending ⇒ `none`. **A timeout or transport error ⇒ `unknown`, never
+  `failed`** — the call may have run and the provider simply failed to answer.
+- Wired on the MCP `tools/call` route and both A2A paths. The mapping is one named function
+  (`observed_execution`) so the timeout rule is unit-tested rather than reasoned about.
+- Added: `RecordKind`, `AeEvidence::kind`, `AeEvidence::as_execution`.
+
 ### Added — a cursor-based reader for the evidence journal
 
 - `read_evidence_journal_from(path, cursor, max_records, max_bytes)` with `EvidenceCursor`,

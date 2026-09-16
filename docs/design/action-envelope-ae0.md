@@ -270,10 +270,25 @@ deployment report, an ambiguous mapping or an absence of records.
   bound is returned **alone** rather than skipped, and a truncated tail ends the page without moving
   the cursor past the unfinished record. This is the seam the exporter is built on — it does not
   itself ship anything.
+- **The execution record** — ✅ *shipped 2026-09-16*. Every permitted dispatch now produces a second
+  journal record (`RecordKind::Execution`) carrying the decision's identities unchanged and saying
+  what this gateway observed. Before it, every permitted call exported as `effect: unknown` even
+  though the gateway watched the provider answer — the evidence could say what an agent was
+  *allowed* to do and never what it *did*.
+  - `Ok(reply)` ⇒ `completed`, downgraded to `failed` when the JSON-RPC reply carries an `error`
+    (a reply that arrived is a completed RPC; whether the tool succeeded is the separate question
+    the consumer reads as `effect: failed`).
+  - A dispatch this gateway refused before sending ⇒ `none` — the one case where *nothing ran* can
+    be stated.
+  - **A timeout or transport error ⇒ `unknown`, never `failed`.** The call may have run and the
+    provider simply failed to answer; `failed` would be a claim about the world that a consumer
+    would act on. Item 1's `DeliveryUnknown`, and a hot invariant of this project.
+  - The record is **appended beside** the decision, never over it: evidence is append-only, and a
+    record revisable in place is revisable after someone has read it.
 - **Still to come on this line:** the remaining gateway dispatch paths beyond MCP and A2A; the
   **exporter** that consumes the reader seam and delivers (signing, cursors, retries — the private
-  companion's half); and the other four of §5's five records (`requested`, `blocked`, the execution
-  records, `outcome observed`) — the enforcement point writes `decided`.
+  companion's half); and three of §5's five records — `requested`, `blocked`, and `outcome observed`
+  (the last needs an *independent* observer and is not the enforcement point's to write).
 - **AE-T T2–T4** (private companion, on the seam): the Cedar adapter, the signed `AuditSink` exporter into the
   consumer's envelopes (Ed25519 over canonical JSON, ≤ 1000 records / ≤ 2 MiB, cursors, same `batch_id` ⇒
   byte-identical body), the procurement mapping subset; T-gate = scenario 2 locally.

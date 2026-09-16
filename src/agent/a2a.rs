@@ -317,7 +317,7 @@ async fn handle_tasks_send(
     // walked around by choosing a different door — and the evidence would still have said
     // `coverage.complete: false`, truthfully, while the remit went unenforced.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    if let Some(refusal) = super::http::ae_preflight(
+    let preflight = super::http::ae_preflight(
         &state.task_ctx,
         caller,
         "skill.invoke",
@@ -326,17 +326,29 @@ async fn handle_tasks_send(
         params,
         super::http::ENFORCEMENT_POINT_A2A,
     )
-    .await
-    {
+    .await;
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if let super::http::Preflight::Refuse(refusal) = &preflight {
         return jsonrpc_error(id, refusal.json_rpc_code(), &refusal.to_string());
     }
 
     // Item 7: the skill provider is told who called (the resolved bearer principal, or
     // `anonymous`), never just "the gateway node".
-    match gateway_caller::gateway_rpc_call(
+    let dispatched = gateway_caller::gateway_rpc_call(
         &state.task_ctx, caller, target,
         "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout,
-    ).await {
+    ).await;
+
+    // A timeout is *unknown*, never a negative — a long-running skill may well have completed.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    {
+        // The same mapping the MCP edge uses — a skill reply is raw output, not JSON-RPC, so there
+        // is no error envelope to inspect.
+        let observed = super::http::observed_execution(&dispatched);
+        super::http::ae_record_execution(&state.task_ctx, &preflight, observed).await;
+    }
+
+    match dispatched {
         Ok(reply) => {
             let task = completed_task(task_id.clone(), reply);
             state.tasks.pin().insert(task_id, A2aTask { task: task.clone(), created_at: Instant::now() });
@@ -422,7 +434,7 @@ pub(crate) async fn tasks_send_subscribe(
         // The streaming edge is the same enforcement point; a refusal becomes a failed task
         // rather than a silent drop, so the client learns the same thing it would on `tasks/send`.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        if let Some(refusal) = super::http::ae_preflight(
+        let preflight = super::http::ae_preflight(
             &state2.task_ctx,
             caller.as_ref(),
             "skill.invoke",
@@ -431,8 +443,9 @@ pub(crate) async fn tasks_send_subscribe(
             &Value::Null,
             super::http::ENFORCEMENT_POINT_A2A,
         )
-        .await
-        {
+        .await;
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if let super::http::Preflight::Refuse(refusal) = &preflight {
             let _ = tx
                 .send(Ok(Event::default().event("task_status_update").data(
                     json!({ "id": &task_id2, "status": { "state": "failed" },
@@ -444,10 +457,18 @@ pub(crate) async fn tasks_send_subscribe(
         }
 
         let timeout = Duration::from_secs(30);
-        match gateway_caller::gateway_rpc_call(
+        let dispatched = gateway_caller::gateway_rpc_call(
             &state2.task_ctx, caller.as_ref(), target,
             "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout,
-        ).await {
+        ).await;
+
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        {
+            let observed = super::http::observed_execution(&dispatched);
+            super::http::ae_record_execution(&state2.task_ctx, &preflight, observed).await;
+        }
+
+        match dispatched {
             Ok(reply) => {
                 let task = completed_task(task_id2.clone(), reply);
                 state2.tasks.pin().insert(task_id2.clone(), A2aTask { task: task.clone(), created_at: Instant::now() });
@@ -589,8 +610,10 @@ mod tests {
             &Value::Null,
             super::super::http::ENFORCEMENT_POINT_A2A,
         )
-        .await
-        .expect("a prohibited skill must be refused at the A2A edge");
+        .await;
+        let super::super::http::Preflight::Refuse(refusal) = refusal else {
+            panic!("a prohibited skill must be refused at the A2A edge")
+        };
         assert_eq!(refusal.json_rpc_code(), -32030);
         assert_eq!(refusal.reason(), "action_denied");
 
