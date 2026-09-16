@@ -165,6 +165,8 @@ check:
 ## CI gate set; run before a release or when you have touched wasm-host / a feature-conditional path.
 check-full: check
 	cargo test  --lib --features tls,metrics,a2a,llm
+	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
+
 	cargo test  --lib --no-default-features --features gateway
 	cargo test  -p mycelium-core          # the substrate suite (codec/framing/hlc/store/swim) + the wire back-compat gate
 	cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings

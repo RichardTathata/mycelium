@@ -9,6 +9,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — the AE gateway slice records what it enforces
+
+- **Every gateway authorisation decision is now sealed into the audit chain.** The evaluator preflight
+  refused and permitted and wrote nothing, so a node enforcing a declared remit produced no evidence at
+  all. Both outcomes are now recorded as an `AeEvidence` document (`mycelium.ae/evidence/1`) in the
+  audit record's `detail`, carrying the verdict, policy revision, checked constraints, execution and
+  reviewed mapping — facts the record's own three-valued outcome cannot hold without rounding
+  *not established* into *denied*. A decision that cannot be recorded now **refuses the dispatch**
+  (`PreflightRefusal::NotRecorded`, JSON-RPC `-32032`).
+- **`/a2a` is enforced.** Both A2A dispatch paths run the same preflight, under enforcement point
+  `gateway:a2a`. Previously only `tools/call` was guarded, so a remit could be walked around by
+  choosing the other edge.
+- **The stale-policy check can fire.** `GossipAgent::set_deployed_policy_revision` supplies the
+  revision an operator reported as deployed; the seam compares every decision against it. The
+  envelope's `expected_policy_revision` was hardcoded `None`, so the check was structurally dead.
+
+### Added
+
+- `AeEvidence`, `DecisionKind`, `MappingKind`, `Execution`, `AE_EVIDENCE_SCHEMA` — the evidence
+  document a gateway decision produces, and the schema a consumer matches on.
+- `GossipAgent::set_deployed_policy_revision` / `deployed_policy_revision`.
+- `PreflightRefusal::NotRecorded` (the enum is `#[non_exhaustive]`, so this is additive).
+- `with_action_evaluator` warns when built without `compliance`: such a node enforces but cannot
+  record, and an operator should not have to discover that from an empty evidence stream.
+- CI's compliance job now builds `a2a` alongside it. Neither standard gate built the pair, so a test
+  needing both would silently never have run.
+
 ### Added
 
 - **Contracts axis item 1 PR 4b — the persisted-by-peer receipt** (`src/agent/replica_sync.rs`,

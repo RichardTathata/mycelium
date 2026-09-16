@@ -34,6 +34,7 @@
 //! this gateway fronts — never `HardPrevention`, which only a resource fence earns.
 
 use crate::node_id::NodeId;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 // ── The envelope ─────────────────────────────────────────────────────────────
@@ -348,6 +349,210 @@ pub trait ActionEvaluator: Send + Sync + 'static {
     }
 }
 
+// ── The evidence record ──────────────────────────────────────────────────────
+
+/// The schema every AE evidence document carries in an audit record's `detail`.
+///
+/// A consumer matches on this exactly. An audit record without it is not an authorisation
+/// decision and must not be read as one — the chain carries every kind of event, and translating
+/// one of the others into a decision would be inventing authority that nothing granted.
+pub const AE_EVIDENCE_SCHEMA: &str = "mycelium.ae/evidence/1";
+
+/// The verdict, in the evidence document's own vocabulary.
+///
+/// Deliberately a separate type from [`Verdict`]: this one is serialised into a document other
+/// systems parse, so it is a wire contract and may not drift when the seam's enum gains a variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionKind {
+    /// Authority established for this exact action.
+    Permit,
+    /// An authority decided no.
+    Deny,
+    /// Authority not established. Never read as a permit, never shown as a prohibition.
+    Indeterminate,
+}
+
+impl From<Verdict> for DecisionKind {
+    fn from(v: Verdict) -> Self {
+        match v {
+            Verdict::Permit => DecisionKind::Permit,
+            Verdict::Deny => DecisionKind::Deny,
+            // A variant we do not know is not a permit and not a prohibition: it is something we
+            // cannot state, which is exactly indeterminate.
+            _ => DecisionKind::Indeterminate,
+        }
+    }
+}
+
+/// Whether the operation was bound to a reviewed business activity, on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MappingKind {
+    /// Bound to exactly one catalogue action.
+    Mapped,
+    /// Not in the catalogue at this revision. Never a guess from the tool's name.
+    Unmapped,
+    /// Bound to more than one action, or to one whose preconditions are not established.
+    Ambiguous,
+}
+
+impl From<MappingStatus> for MappingKind {
+    fn from(s: MappingStatus) -> Self {
+        match s {
+            MappingStatus::Mapped => MappingKind::Mapped,
+            MappingStatus::Ambiguous => MappingKind::Ambiguous,
+            // Unknown to us => not bound to a reviewed activity => not a business operation.
+            _ => MappingKind::Unmapped,
+        }
+    }
+}
+
+/// What became of the action after the decision.
+///
+/// `Unknown` is a first-class answer, not a gap, and [`Execution::None`] is different again:
+/// *nothing ran, and this point can say so*. A refusal is `None`; a permitted dispatch whose
+/// result this gateway did not watch is `Attempted`, which is the honest answer, because the
+/// gateway hands the call to a provider and does not observe what the provider then does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Execution {
+    /// Dispatched; the outcome was not observed here.
+    Attempted,
+    /// Ran to completion, observed by this point.
+    Completed,
+    /// Ran and failed, observed by this point.
+    Failed,
+    /// Not observed.
+    Unknown,
+    /// Refused before dispatch: nothing ran, and this point can say so.
+    None,
+}
+
+/// One authorisation decision, as sealed into the audit chain's `detail`.
+///
+/// **Why this exists beside the audit record's own fields.** An [`AuditRecord`](crate::AuditRecord)
+/// carries a principal, an action, a target and a *three-valued* outcome. An authorisation decision
+/// has a verdict, a policy revision, the constraints actually checked, whether the action then ran,
+/// and which reviewed activity it maps to. Rounding those into `Success | Denied | Error` loses the
+/// distinction between *prohibited* and *not established* — precisely the distinction this slice
+/// exists to protect. So the precise document travels here and the coarse fields stay a summary;
+/// a reader takes the document, never the summary.
+///
+/// **What never enters it:** arguments, argument values and policy text. What is evidenced is what
+/// the policy *checked*, and the digest binding the decision to one exact payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AeEvidence {
+    /// Always [`AE_EVIDENCE_SCHEMA`].
+    pub schema: String,
+    /// The logical agent — the verified principal, never a client-supplied string.
+    pub subject: String,
+    /// The native operation asked for.
+    pub operation: String,
+    /// The resource it was asked of.
+    pub resource: String,
+    /// Where the effect would land, when this point knows. `None` means *cannot be stated*.
+    pub destination: Option<String>,
+    /// The identity that executed. `None` means a shared principal, so attribution is to the
+    /// group rather than to the agent.
+    pub execution_identity: Option<String>,
+    /// What the evaluator decided.
+    pub decision: DecisionKind,
+    /// What became of the action.
+    pub execution: Execution,
+    /// The revision of the policy that decided.
+    pub policy_revision: String,
+    /// The digest of the deployed policy export, when one was established.
+    pub policy_digest: Option<String>,
+    /// The route that enforced.
+    pub enforcement_point: String,
+    /// The reviewed catalogue's identity, as its owner minted it. Never re-minted here.
+    pub catalogue: String,
+    /// That catalogue's revision.
+    pub catalogue_revision: String,
+    /// Whether this operation is mapped at that revision.
+    pub mapping_status: MappingKind,
+    /// The caller's correlation identity, stable across retries.
+    pub operation_id: String,
+    /// This dispatch's identity.
+    pub attempt_id: String,
+    /// Lowercase hex of the canonical argument digest — binds this decision to one exact payload
+    /// without carrying the payload.
+    pub arguments_digest: String,
+    /// The constraints the policy actually tested.
+    pub checked: Vec<String>,
+    /// The evaluator's human-legible reason. Never policy text.
+    pub reason: String,
+}
+
+impl AeEvidence {
+    /// The evidence for one decision over one envelope.
+    ///
+    /// `execution` is the enforcement point's own observation, because only it knows whether it
+    /// dispatched: a refusal is [`Execution::None`], a permitted dispatch this point did not watch
+    /// is [`Execution::Attempted`].
+    pub fn for_decision(
+        envelope: &ActionEnvelope,
+        decision: &Decision,
+        execution: Execution,
+        enforcement_point: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: AE_EVIDENCE_SCHEMA.to_string(),
+            subject: envelope.actor.clone(),
+            operation: envelope.operation.clone(),
+            resource: envelope.resource.clone(),
+            destination: None,
+            execution_identity: Some(envelope.actor.clone()),
+            decision: decision.verdict.into(),
+            execution,
+            policy_revision: decision.policy_revision.clone(),
+            policy_digest: None,
+            enforcement_point: enforcement_point.into(),
+            catalogue: envelope.mapping.catalogue.clone(),
+            catalogue_revision: envelope.mapping.revision.clone(),
+            mapping_status: envelope.mapping.status.into(),
+            operation_id: envelope.operation_id.clone(),
+            attempt_id: envelope.attempt_id.clone(),
+            arguments_digest: hex32(&envelope.arguments_digest),
+            checked: decision.checked.clone(),
+            reason: decision.reason.clone(),
+        }
+    }
+
+    /// The coarse audit outcome this decision summarises to.
+    ///
+    /// `Indeterminate` becoming `Error` is the least-bad of three coarse values, and is exactly why
+    /// [`AeEvidence::decision`] is carried separately: a reader taking the summary alone would see
+    /// a failure where the fact is *unknown*.
+    #[cfg(feature = "compliance")]
+    pub fn audit_outcome(&self) -> crate::AuditOutcome {
+        match self.decision {
+            DecisionKind::Permit => crate::AuditOutcome::Success,
+            DecisionKind::Deny => crate::AuditOutcome::Denied,
+            DecisionKind::Indeterminate => crate::AuditOutcome::Error,
+        }
+    }
+
+    /// Parse an AE document out of an audit record's `detail`.
+    ///
+    /// `None` for every record that is not one of ours — absent detail, non-JSON detail, or a
+    /// different `schema`. A foreign record is skipped, never coerced.
+    pub fn from_detail(detail: Option<&str>) -> Option<Self> {
+        let parsed: Self = serde_json::from_str(detail?).ok()?;
+        (parsed.schema == AE_EVIDENCE_SCHEMA).then_some(parsed)
+    }
+}
+
+/// Lowercase hex of a 32-byte digest.
+fn hex32(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
 // ── The preflight ────────────────────────────────────────────────────────────
 
 /// Why the preflight refused. Every variant refuses; none falls through to dispatch.
@@ -359,13 +564,22 @@ pub enum PreflightRefusal {
     /// Authority could not be established (missing facts, unsupported clause, evaluation error,
     /// unmapped operation, stale policy, expired envelope).
     NotEstablished(Decision),
+    /// The decision could not be written to the audit chain, so the action is refused **even when
+    /// the policy permitted it**.
+    ///
+    /// An action allowed to proceed with no record of why is the gap this slice exists to close:
+    /// enforcement without attribution is not governance, it is an unlogged gate. Refusing is
+    /// therefore the honest failure mode, and it is visible rather than silent.
+    NotRecorded(Decision),
 }
 
 impl PreflightRefusal {
     /// The decision behind the refusal.
     pub fn decision(&self) -> &Decision {
         match self {
-            PreflightRefusal::Denied(d) | PreflightRefusal::NotEstablished(d) => d,
+            PreflightRefusal::Denied(d)
+            | PreflightRefusal::NotEstablished(d)
+            | PreflightRefusal::NotRecorded(d) => d,
         }
     }
 
@@ -374,6 +588,7 @@ impl PreflightRefusal {
         match self {
             PreflightRefusal::Denied(_) => "action_denied",
             PreflightRefusal::NotEstablished(_) => "authority_not_established",
+            PreflightRefusal::NotRecorded(_) => "evidence_not_recorded",
         }
     }
 
@@ -382,6 +597,7 @@ impl PreflightRefusal {
         match self {
             PreflightRefusal::Denied(_) => -32030,
             PreflightRefusal::NotEstablished(_) => -32031,
+            PreflightRefusal::NotRecorded(_) => -32032,
         }
     }
 }
@@ -394,6 +610,11 @@ impl std::fmt::Display for PreflightRefusal {
             PreflightRefusal::NotEstablished(_) => {
                 write!(f, "authority not established under policy {}: {}", d.policy_revision, d.reason)
             }
+            PreflightRefusal::NotRecorded(_) => write!(
+                f,
+                "the decision under policy {} could not be recorded, so the action was refused",
+                d.policy_revision
+            ),
         }
     }
 }

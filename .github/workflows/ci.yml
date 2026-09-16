@@ -26,7 +26,11 @@ jobs:
       # testing.md and run by `make check` since v2.1 — but never in CI until
       # 2026-07-21 (wiki-lint finding: local green masked the gap, the exact
       # make-check-vs-CI-green family).
-      - run: ./scripts/ci-retest.sh --lib --features compliance
+      # `a2a` joins `compliance` here because the AE evidence tests need both: the audit
+      # chain lives behind `compliance` and the A2A enforcement point behind `a2a`, and
+      # neither standard gate built the pair — so a test of the two together silently
+      # never ran. Widening an existing gate can only catch more.
+      - run: ./scripts/ci-retest.sh --lib --features compliance,a2a
       # Consensus-free embed: gateway without the consensus feature must still
       # test green (a minimal-embed node forwards PROPOSE/VOTE/COMMIT without
       # running them). Same 2026-07-21 gap closure.

@@ -230,12 +230,31 @@ deployment report, an ambiguous mapping or an absence of records.
 - **The seam** — ✅ *shipped 2026-09-14* (`src/agent/action_evaluator.rs`): `ActionEvaluator` +
   `ActionEnvelope` + `Decision`, the hook between `gateway_auth` and the MCP `tools/call` dispatch, the
   deterministic `ReferenceEvaluator`, the §9 fixtures as tests, `Indeterminate ⇒ refuse`, and two
-  live-gateway tests. Inert until an evaluator is attached. **Still to come on this line:** `/a2a` and the
-  remaining gateway dispatch paths; **the node-local evidence journal** with its `append -> LocalSync`
-  receipt, the safe reference record into the audit chain, and the three failure tests (saturation,
-  persistence failure, lost acknowledgement); the deployment report that gives the enforcement point an
-  expected `policy.revision` (until then the seam's stale-policy check has no second opinion to compare
-  against and does not fire).
+  live-gateway tests. Inert until an evaluator is attached.
+- **The evidence the seam produces** — ✅ *shipped 2026-09-16*. The preflight previously refused and
+  permitted and wrote **nothing**: a deployment enforced a remit and produced no record at all, so any
+  exporter downstream had an empty stream to ship. Now every evaluated dispatch is sealed into the
+  node's tamper-evident audit chain as an [`AeEvidence`](../../src/agent/action_evaluator.rs) document
+  under `detail` (schema `mycelium.ae/evidence/1`), **both outcomes** — a permit with no record of why
+  is the same gap wearing a friendlier face, and a stream that omits its permits cannot support any
+  statement about what an agent was allowed to do. A record that cannot be written **refuses the
+  dispatch** (`PreflightRefusal::NotRecorded`): enforcement without attribution is not governance, it
+  is an unlogged gate, so the failure is visible rather than silent. A build without `compliance` has
+  no chain to write to; `with_action_evaluator` warns about that at attach time.
+- **`/a2a`** — ✅ *shipped 2026-09-16*. Both A2A dispatch paths (`tasks/send` and the
+  `tasks/sendSubscribe` stream) run the same preflight, recording under their own enforcement point
+  `gateway:a2a`. Until then the remit could be walked around by choosing the other door, while the
+  evidence went on saying `coverage.complete: false` — truthfully, and uselessly.
+- **The deployment report's expected revision** — ✅ *shipped 2026-09-16*.
+  `GossipAgent::set_deployed_policy_revision` gives the enforcement point the second opinion the
+  stale-policy check needs; `expected_policy_revision` was hardcoded `None`, so the check could never
+  fire and a gateway running a superseded policy was undetectable. Unset, it still does not fire —
+  that is now a reported fact rather than a structural impossibility.
+- **Still to come on this line:** the remaining gateway dispatch paths beyond MCP and A2A; the
+  node-local evidence journal with its `append -> LocalSync` receipt and the three failure tests
+  (saturation, persistence failure, lost acknowledgement) — today's sealing is a direct audit-chain
+  write, which is honest but gives the enforcement point no durability receipt to act on beyond
+  success or failure.
 - **AE-T T2–T4** (private companion, on the seam): the Cedar adapter, the signed `AuditSink` exporter into the
   consumer's envelopes (Ed25519 over canonical JSON, ≤ 1000 records / ≤ 2 MiB, cursors, same `batch_id` ⇒
   byte-identical body), the procurement mapping subset; T-gate = scenario 2 locally.

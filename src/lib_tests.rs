@@ -161,6 +161,8 @@ fn spawn_handler(
         audit_chain: Arc::new(std::sync::Mutex::new(crate::agent::audit::AuditChainState::new())),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         action_evaluator: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
         #[cfg(feature = "compliance")]
         audit_sink: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
@@ -880,6 +882,8 @@ async fn test_subscribe_notified_via_gossip() {
             audit_chain: Arc::new(std::sync::Mutex::new(crate::agent::audit::AuditChainState::new())),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             action_evaluator: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
