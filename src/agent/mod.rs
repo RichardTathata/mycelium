@@ -119,8 +119,8 @@ pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
     ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision, DecisionKind,
-    EvidenceState, Execution, MappingKind, MappingStatus, PreflightRefusal, ReferenceEvaluator, Rule,
-    Verdict, AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
+    EvidenceState, Execution, MappingKind, MappingStatus, PreflightRefusal, RecordKind,
+    ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
 };
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,

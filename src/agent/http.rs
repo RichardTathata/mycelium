@@ -1417,7 +1417,7 @@ async fn mcp_handler(
             // gateway*. A route-level preflight, not enforcement at the effect
             // (`docs/design/action-envelope-ae0.md` §7).
             #[cfg(all(feature = "gateway", feature = "tls"))]
-            if let Some(refusal) = ae_preflight(
+            let preflight = ae_preflight(
                 &ctx.agent_ctx,
                 caller.as_ref(),
                 "tools/call",
@@ -1426,8 +1426,9 @@ async fn mcp_handler(
                 &req["params"],
                 ENFORCEMENT_POINT_MCP,
             )
-            .await
-            {
+            .await;
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            if let Preflight::Refuse(refusal) = &preflight {
                 return Json(json!({
                     "jsonrpc": "2.0", "id": id,
                     "error": {"code": refusal.json_rpc_code(), "message": refusal.to_string(),
@@ -1440,14 +1441,33 @@ async fn mcp_handler(
 
             // Item 7: the call carries the auth layer's caller context (never anything the
             // client put in `params`), or is refused — it is never dispatched as the node.
-            match gateway_caller::gateway_rpc_call(
+            let dispatched = gateway_caller::gateway_rpc_call(
                 &ctx.agent_ctx,
                 caller.as_ref(),
                 provider_node_id,
                 std::sync::Arc::from(crate::signal::signal_kind::MCP_INVOKE),
                 Bytes::from(tool_req.to_string().into_bytes()),
                 Duration::from_secs(30),
-            ).await {
+            ).await;
+
+            // What this gateway actually observed. A timeout is **unknown**, never a negative: the
+            // call may well have run (item 1's rule, and the hot invariant). A dispatch the gateway
+            // itself refused before sending is the one case where nothing ran and it can say so.
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            {
+                use super::action_evaluator::Execution;
+                let mut observed = observed_execution(&dispatched);
+                // A reply that arrived is a completed RPC; whether the tool inside it succeeded is
+                // a separate question the consumer reads as `effect: failed`.
+                if observed == Execution::Completed
+                    && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b))
+                {
+                    observed = Execution::Failed;
+                }
+                ae_record_execution(&ctx.agent_ctx, &preflight, observed).await;
+            }
+
+            match dispatched {
                 Ok(reply_bytes) => {
                     let resp: serde_json::Value = serde_json::from_slice(&reply_bytes)
                         .unwrap_or_else(|_| json!({
@@ -1858,6 +1878,23 @@ async fn gw_rpc_call(
     }
 }
 
+/// What the preflight decided, and what the caller owes afterwards.
+///
+/// Three-valued rather than `Option<Refusal>` because a permitted dispatch leaves an obligation: the
+/// decision said what was *allowed*, and only the caller can say what then *happened*. Carrying the
+/// decided record out is what lets the execution record reuse its identities instead of re-deriving
+/// them — a second derivation is a second chance to disagree.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) enum Preflight {
+    /// No evaluator is attached. The seam is inert and the gateway behaves as it always did.
+    Inert,
+    /// Permitted. The caller dispatches, then reports the outcome with
+    /// [`ae_record_execution`].
+    Proceed(Box<super::action_evaluator::AeEvidence>),
+    /// Refused. Nothing is dispatched.
+    Refuse(super::action_evaluator::PreflightRefusal),
+}
+
 /// The MCP tool-call route, as it is named in every piece of evidence it produces.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) const ENFORCEMENT_POINT_MCP: &str = "gateway:mcp/tools/call";
@@ -1883,18 +1920,17 @@ pub(crate) async fn ae_preflight(
     arguments: &serde_json::Value,
     params: &serde_json::Value,
     enforcement_point: &str,
-) -> Option<super::action_evaluator::PreflightRefusal> {
+) -> Preflight {
     use super::action_evaluator as ae;
-    let evaluator = ctx.action_evaluator.get()?;
+    let Some(evaluator) = ctx.action_evaluator.get() else { return Preflight::Inert };
 
     // Both evaluator questions asked behind the unwind boundary (AE0 §3): a panicking adapter
     // cannot be used to build the envelope either.
     let Some((wanted, mapping)) = ae::evaluator_facts(evaluator, operation, resource) else {
         warn!(%operation, %resource, "AE preflight: evaluator panicked while reporting its facts");
-        return Some(ae::PreflightRefusal::NotEstablished(ae::Decision::indeterminate(
-            "evaluator panicked while reporting its facts",
-            "",
-        )));
+        return Preflight::Refuse(ae::PreflightRefusal::NotEstablished(
+            ae::Decision::indeterminate("evaluator panicked while reporting its facts", ""),
+        ));
     };
 
     // Only the argument names the policy declared cross into the envelope — and thence into the
@@ -1951,7 +1987,7 @@ pub(crate) async fn ae_preflight(
         Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),
         // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
         // record, nothing to refuse.
-        Ok(None) => return None,
+        Ok(None) => return Preflight::Inert,
         Err(refusal) => (refusal.decision().clone(), ae::Execution::None),
     };
 
@@ -1962,18 +1998,82 @@ pub(crate) async fn ae_preflight(
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => "evidence_not_recorded")
             .increment(1);
-        return Some(ae::PreflightRefusal::NotRecorded(decision));
+        return Preflight::Refuse(ae::PreflightRefusal::NotRecorded(decision));
     }
 
     match outcome {
-        Ok(_) => None,
+        Ok(_) => Preflight::Proceed(Box::new(evidence)),
         Err(refusal) => {
             warn!(actor = %envelope.actor, %operation, %resource,
                   "AE preflight refused: {refusal}");
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => refusal.reason()).increment(1);
-            Some(refusal)
+            Preflight::Refuse(refusal)
         }
+    }
+}
+
+/// What this gateway **observed** of a dispatch, in §5's vocabulary.
+///
+/// The rule that matters is the last arm. A timeout — or any transport error — leaves the call's
+/// fate genuinely open: the provider may have run it and failed to answer. Reporting `Failed` there
+/// would claim knowledge nobody has, and a consumer reading `failed` will act on it. So the honest
+/// answer is `Unknown`, which item 1 names `DeliveryUnknown` and which this project has as a hot
+/// invariant: *a timeout is never a negative*.
+///
+/// The one case where "nothing ran" can be stated is a dispatch this gateway refused before sending.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn observed_execution(
+    dispatched: &Result<Bytes, GatewayDispatchError>,
+) -> super::action_evaluator::Execution {
+    use super::action_evaluator::Execution;
+    match dispatched {
+        Ok(_) => Execution::Completed,
+        Err(GatewayDispatchError::ProviderWithoutContext(_))
+        | Err(GatewayDispatchError::ContextTooLarge) => Execution::None,
+        Err(_) => Execution::Unknown,
+    }
+}
+
+/// Did the provider's JSON-RPC reply carry an error?
+///
+/// A reply that arrived is a *completed* RPC; whether the tool inside it succeeded is a different
+/// question, and the consumer's `effect` reads `failed` from this. Unparseable bytes count as failed:
+/// something answered, and it was not an answer.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn reply_reports_failure(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .map(|v| v.get("error").is_some())
+        .unwrap_or(true)
+}
+
+/// Record what became of a dispatch this gateway permitted (AE0 §5's execution record).
+///
+/// **Why this is not optional.** Without it every permitted call exports as `effect: unknown`, even
+/// when this gateway watched the provider answer — so the evidence could say what an agent was
+/// *allowed* to do and never what it *did*, which is most of what anyone wants to know.
+///
+/// The record is appended beside the decision, never over it: `operation_id`, `attempt_id` and the
+/// principal are carried through unchanged so a consumer can correlate them, and the decision stands
+/// exactly as written.
+///
+/// A failure to record here does **not** retract the dispatch — it already happened, and pretending
+/// otherwise would be the one lie worse than silence. It is logged, and the reference record carries
+/// the journal's own state.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) async fn ae_record_execution(
+    ctx: &Arc<TaskCtx>,
+    preflight: &Preflight,
+    execution: super::action_evaluator::Execution,
+) {
+    let Preflight::Proceed(decided) = preflight else { return };
+    if let Err(e) = ae_record(ctx, &decided.as_execution(execution)).await {
+        // The effect has happened. The evidence for it has not.
+        warn!(
+            operation_id = %decided.operation_id,
+            attempt_id = %decided.attempt_id,
+            "AE: the execution record could not be established: {e}"
+        );
     }
 }
 
@@ -5835,7 +5935,7 @@ mod ae_seam_tests {
     #[cfg(feature = "compliance")]
     #[tokio::test]
     async fn evidence_goes_to_the_journal_and_only_a_reference_gossips() {
-        use crate::{AeEvidence, AeReference, DecisionKind, EvidenceState, Execution};
+        use crate::{AeEvidence, AeReference, DecisionKind, EvidenceState, Execution, RecordKind};
         use super::super::evidence_journal::{EvidenceJournal, EvidenceProfile};
 
         let gossip_port = alloc_port();
@@ -5888,13 +5988,29 @@ mod ae_seam_tests {
             .iter()
             .map(|b| serde_json::from_slice(b).expect("an AE evidence record"))
             .collect();
-        assert_eq!(journalled.len(), 2, "both decisions are journalled");
-        let deny = journalled.iter().find(|e| e.decision == DecisionKind::Deny).expect("the denial");
+        // Two decisions, and one execution record for the call that was actually dispatched.
+        let decided: Vec<&AeEvidence> =
+            journalled.iter().filter(|e| e.kind == RecordKind::Decided).collect();
+        let executed: Vec<&AeEvidence> =
+            journalled.iter().filter(|e| e.kind == RecordKind::Execution).collect();
+        assert_eq!(decided.len(), 2, "both decisions are journalled");
+        assert_eq!(executed.len(), 1, "only the permitted call was dispatched");
+
+        let deny = decided.iter().find(|e| e.decision == DecisionKind::Deny).expect("the denial");
         assert!(deny.resource.starts_with("tool:forbidden@"), "the journal keeps the detail");
         assert_eq!(deny.execution, Execution::None);
         let permit =
-            journalled.iter().find(|e| e.decision == DecisionKind::Permit).expect("the permit");
+            decided.iter().find(|e| e.decision == DecisionKind::Permit).expect("the permit");
+        // The *decision* still says only what was decided: it establishes nothing about execution.
         assert_eq!(permit.execution, Execution::Attempted);
+
+        // The execution record is what turns `effect: unknown` into something a page can use. It is
+        // appended beside the decision, carrying the same identities, never over it.
+        let ran = executed[0];
+        assert_eq!(ran.execution, Execution::Completed);
+        assert_eq!(ran.operation_id, permit.operation_id);
+        assert_eq!(ran.attempt_id, permit.attempt_id);
+        assert_eq!(ran.decision, DecisionKind::Permit, "the decision is carried, not re-decided");
 
         // ── The chain holds a reference, and nothing that identifies the action ──────────────
         let chain = agent.audit_stream(agent.node_id());
@@ -5902,7 +6018,8 @@ mod ae_seam_tests {
             .iter()
             .filter_map(|r| AeReference::from_detail(r.record.detail.as_deref()))
             .collect();
-        assert_eq!(refs.len(), 2, "each decision leaves one reference in the chain");
+        assert_eq!(refs.len(), 3, "each journal record leaves one reference in the chain");
+        assert_eq!(refs.iter().filter(|r| r.kind == "execution").count(), 1);
         for r in &refs {
             assert_eq!(r.evidence, EvidenceState::OnDisk);
             assert!(r.journal_sha256.is_some(), "a reference must cite the record it refers to");
@@ -6008,9 +6125,13 @@ mod ae_seam_tests {
                 .iter()
                 .filter_map(|r| AeReference::from_detail(r.record.detail.as_deref()))
                 .collect();
-            assert_eq!(refs.len(), 1);
-            assert_eq!(refs[0].evidence, EvidenceState::Unknown);
-            assert!(refs[0].journal_sha256.is_none(), "nothing to cite, so nothing is cited");
+            // Strict refused before dispatch, so there is only the decision. Lenient dispatched,
+            // so there is a decision and an execution record — both undurable, and both saying so.
+            assert_eq!(refs.len(), if expect_refusal { 1 } else { 2 });
+            for r in &refs {
+                assert_eq!(r.evidence, EvidenceState::Unknown);
+                assert!(r.journal_sha256.is_none(), "nothing to cite, so nothing is cited");
+            }
 
             agent.shutdown().await;
             let _ = std::fs::remove_dir_all(&cert_dir);
@@ -6070,6 +6191,45 @@ mod ae_seam_tests {
 
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// **A timeout is never a negative.** The call may have run; the provider may simply not have
+    /// answered. `Failed` would be a claim about the world, and a consumer would act on it.
+    #[test]
+    fn a_timeout_or_transport_error_is_unknown_never_failed() {
+        use super::super::action_evaluator::Execution;
+        use super::super::gateway_caller::GatewayDispatchError;
+        use super::super::rpc::RpcError;
+        use super::observed_execution;
+        use bytes::Bytes;
+
+        assert_eq!(
+            observed_execution(&Err(GatewayDispatchError::Rpc(RpcError::Timeout))),
+            Execution::Unknown
+        );
+        // Refused before it left this node: nothing ran, and that *can* be stated.
+        assert_eq!(
+            observed_execution(&Err(GatewayDispatchError::ContextTooLarge)),
+            Execution::None
+        );
+        assert_eq!(
+            observed_execution(&Err(GatewayDispatchError::ProviderWithoutContext(
+                NodeId::new("127.0.0.1", 1).unwrap(),
+            ))),
+            Execution::None
+        );
+        assert_eq!(observed_execution(&Ok(Bytes::from_static(b"{}"))), Execution::Completed);
+    }
+
+    /// A reply that arrived is a completed RPC. Whether the tool inside it succeeded is the separate
+    /// question the consumer reads as `effect: failed` — and bytes that parse as nothing count as a
+    /// failure, because something answered and it was not an answer.
+    #[test]
+    fn a_reply_carrying_an_error_is_a_failed_execution() {
+        use super::reply_reports_failure;
+        assert!(reply_reports_failure(br#"{"jsonrpc":"2.0","error":{"code":-32000}}"#));
+        assert!(reply_reports_failure(b"not json at all"));
+        assert!(!reply_reports_failure(br#"{"jsonrpc":"2.0","result":{"ok":true}}"#));
     }
 
     /// With no evaluator attached the gateway behaves exactly as before — the seam is additive.

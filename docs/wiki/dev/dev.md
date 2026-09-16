@@ -69,6 +69,11 @@ each entry carrying the same content hash the chain's `AeReference` cites. Neede
 evidence out of the chain left an `AuditSink`-based exporter seeing only references: durable and
 unreachable. Next on this line: the exporter itself (the private companion's half), and four of §5's
 five records.
+**The execution record shipped the same day** (PR #227): a permitted dispatch now writes a second
+journal record saying what the gateway observed — `completed`/`failed` from the provider's reply,
+`none` when refused before sending, and **`unknown` on a timeout, never `failed`** (the call may have
+run). Before it every permitted call read as `effect: unknown`, so the evidence could say what an
+agent was allowed to do and never what it did.
 **AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md): the envelope
 (item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
 `policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;
