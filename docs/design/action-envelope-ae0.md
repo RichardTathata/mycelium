@@ -285,6 +285,11 @@ deployment report, an ambiguous mapping or an absence of records.
     would act on. Item 1's `DeliveryUnknown`, and a hot invariant of this project.
   - The record is **appended beside** the decision, never over it: evidence is append-only, and a
     record revisable in place is revisable after someone has read it.
+  - **Event time is the record's own** (`at_ms`, from the envelope), not the exporter's read time.
+    An exporter re-reading after a lost cursor re-sends the same record ids, and the consumer
+    refuses a differing body under a reused id — so a timestamp the record does not carry is one
+    the exporter must invent, and an invented one cannot be stable. Both records of one attempt
+    carry the same `at_ms`, because they are about one attempt.
 - **Still to come on this line:** the remaining gateway dispatch paths beyond MCP and A2A; the
   **exporter** that consumes the reader seam and delivers (signing, cursors, retries — the private
   companion's half); and three of §5's five records — `requested`, `blocked`, and `outcome observed`

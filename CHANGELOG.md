@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`AeEvidence::at_ms` — the decision's own event time**, carried from the envelope's
+  `issued_at_ms` instead of being discarded. An exporter needs it, and needs it **stable**: record
+  ids derive from journal position, so an exporter that re-reads after losing its cursor re-sends
+  the same ids — and a body that differed, because it had stamped its own read time, is refused
+  under the consumer's *same id, byte-identical content* rule. A timestamp the record does not carry
+  is one the exporter must invent, and an invented one cannot be stable. Found by the exporter's own
+  retry test.
+- `AeEvidence` is now `#[non_exhaustive]`, so the next field addition is genuinely additive.
+  Construct it with `AeEvidence::for_decision`.
+
+### Changed
+
+- **Upgrade note:** `AeEvidence` gained a field and became `#[non_exhaustive]`, which breaks an
+  exhaustive struct literal — the same class as `GossipConfig`'s field additions in 2.5.0. Reading
+  and matching on fields is unaffected; only literal construction outside the crate is.
+
 ## [2.6.0] — 2026-09-16
 
 The **AE evidence MINOR** — the gateway now records what it enforces, and the record is one a
