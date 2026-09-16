@@ -544,8 +544,101 @@ impl AeEvidence {
     }
 }
 
+/// Whether the evidence for a decision was durably established, as the chain records it.
+///
+/// Carried so a reference record is never mistaken for proof that the evidence behind it exists.
+/// Under [`EvidenceProfile::Lenient`](super::evidence_journal::EvidenceProfile::Lenient) a dispatch
+/// may proceed without durable evidence, and this is where it says so — the alternative, a chain
+/// record that looks identical either way, would make the weaker profile invisible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceState {
+    /// The journal acknowledged the record as fsynced.
+    OnDisk,
+    /// The journal did not acknowledge in time. The record may exist; nobody knows.
+    Unknown,
+    /// The journal reported a failure, or its queue was full and the record was not written.
+    NotEstablished,
+    /// No journal is attached, so no evidence was produced at all.
+    NotConfigured,
+}
+
+/// The **safe reference record**: all that may enter the gossiped audit chain (AE0 §5).
+///
+/// # The rule, and why it is a rule
+///
+/// The audit chain is an ordinary signed KV entry, so everything in it reaches every node. The
+/// evidence itself therefore stays in the node-local [journal](super::evidence_journal), and the
+/// chain carries only: the record's kind, the identities, the verified principal, the verdict, the
+/// policy revision, the catalogue id, and the **content hash of the journal record**.
+///
+/// Never the exact resource, the arguments, an argument digest, the policy's reason, the checked
+/// constraints, or any payload. AE0 §5 adopted this after reviewing its own first draft, and the
+/// first implementation of gateway evidence then shipped the draft's shape anyway — sealing the
+/// whole document into the chain and disseminating every decision's details cluster-wide. This type
+/// exists so that mistake has to be made deliberately: there is no field here to put them in.
+///
+/// The hash is what keeps the chain meaningful despite carrying so little. The chain's ordering and
+/// hash-linking cover the evidence through it, so a journal record that does not match its chained
+/// hash is detectable — tamper-evidence without dissemination.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AeReference {
+    /// Always [`AE_REFERENCE_SCHEMA`].
+    pub schema: String,
+    /// Which of AE0 §5's five records this refers to. Today's enforcement point writes `decided`.
+    pub kind: String,
+    /// The caller's correlation identity.
+    pub operation_id: String,
+    /// This dispatch's identity.
+    pub attempt_id: String,
+    /// The verified principal (item 7).
+    pub principal: String,
+    /// The verdict.
+    pub decision: DecisionKind,
+    /// The revision of the policy that decided.
+    pub policy_revision: String,
+    /// The reviewed catalogue's id — the *only* mapping detail allowed here, and never the resource.
+    pub catalogue: String,
+    /// Lowercase hex of the journal record's content hash. `None` when no record was established,
+    /// in which case there is nothing to cite and `evidence` says why.
+    pub journal_sha256: Option<String>,
+    /// Whether the journal established the evidence this record points at.
+    pub evidence: EvidenceState,
+}
+
+/// The schema every safe reference record carries.
+pub const AE_REFERENCE_SCHEMA: &str = "mycelium.ae/reference/1";
+
+impl AeReference {
+    /// The reference for one decision, given what the journal established.
+    pub fn for_evidence(
+        evidence: &AeEvidence,
+        journal_sha256: Option<String>,
+        state: EvidenceState,
+    ) -> Self {
+        Self {
+            schema: AE_REFERENCE_SCHEMA.to_string(),
+            kind: "decided".to_string(),
+            operation_id: evidence.operation_id.clone(),
+            attempt_id: evidence.attempt_id.clone(),
+            principal: evidence.subject.clone(),
+            decision: evidence.decision,
+            policy_revision: evidence.policy_revision.clone(),
+            catalogue: evidence.catalogue.clone(),
+            journal_sha256,
+            evidence: state,
+        }
+    }
+
+    /// Parse a reference out of an audit record's `detail`.
+    pub fn from_detail(detail: Option<&str>) -> Option<Self> {
+        let parsed: Self = serde_json::from_str(detail?).ok()?;
+        (parsed.schema == AE_REFERENCE_SCHEMA).then_some(parsed)
+    }
+}
+
 /// Lowercase hex of a 32-byte digest.
-fn hex32(bytes: &[u8; 32]) -> String {
+pub(crate) fn hex32(bytes: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::with_capacity(64), |mut s, b| {
         let _ = write!(s, "{b:02x}");
@@ -564,7 +657,7 @@ pub enum PreflightRefusal {
     /// Authority could not be established (missing facts, unsupported clause, evaluation error,
     /// unmapped operation, stale policy, expired envelope).
     NotEstablished(Decision),
-    /// The decision could not be written to the audit chain, so the action is refused **even when
+    /// The decision's evidence could not be established, so the action is refused **even when
     /// the policy permitted it**.
     ///
     /// An action allowed to proceed with no record of why is the gap this slice exists to close:

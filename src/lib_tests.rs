@@ -163,6 +163,8 @@ fn spawn_handler(
         action_evaluator: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        evidence_journal: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         audit_sink: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
@@ -884,6 +886,8 @@ async fn test_subscribe_notified_via_gossip() {
             action_evaluator: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        evidence_journal: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]

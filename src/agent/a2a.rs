@@ -325,7 +325,9 @@ async fn handle_tasks_send(
         &json!({ "text": text }),
         params,
         super::http::ENFORCEMENT_POINT_A2A,
-    ) {
+    )
+    .await
+    {
         return jsonrpc_error(id, refusal.json_rpc_code(), &refusal.to_string());
     }
 
@@ -428,7 +430,9 @@ pub(crate) async fn tasks_send_subscribe(
             &json!({ "text": text }),
             &Value::Null,
             super::http::ENFORCEMENT_POINT_A2A,
-        ) {
+        )
+        .await
+        {
             let _ = tx
                 .send(Ok(Event::default().event("task_status_update").data(
                     json!({ "id": &task_id2, "status": { "state": "failed" },
@@ -550,15 +554,22 @@ mod tests {
     #[tokio::test]
     async fn the_a2a_edge_refuses_and_records_under_its_own_enforcement_point() {
         use crate::test_util::alloc_port;
-        use crate::{AeEvidence, Execution, ReferenceEvaluator, Rule};
+        use crate::{AeEvidence, AeReference, Execution, ReferenceEvaluator, Rule};
+        use super::super::evidence_journal::{self, EvidenceJournal, EvidenceProfile};
 
         let port = alloc_port();
         let cert_dir = std::env::temp_dir().join(format!("ae-a2a-{port}"));
+        let journal_path =
+            std::env::temp_dir().join(format!("ae-a2a-journal-{port}")).join("evidence.log");
         let _ = std::fs::remove_dir_all(&cert_dir);
+        let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
         let mut cfg = GossipConfig::default();
         cfg.bind_port = port;
         cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.with_evidence_journal(
+            EvidenceJournal::open(&journal_path, EvidenceProfile::Strict).unwrap(),
+        );
 
         let resource = "skill:danger@127.0.0.1:1".to_string();
         agent.with_action_evaluator(Arc::new(
@@ -578,24 +589,45 @@ mod tests {
             &Value::Null,
             super::super::http::ENFORCEMENT_POINT_A2A,
         )
+        .await
         .expect("a prohibited skill must be refused at the A2A edge");
         assert_eq!(refusal.json_rpc_code(), -32030);
         assert_eq!(refusal.reason(), "action_denied");
 
-        let evidence: Vec<AeEvidence> = agent
-            .audit_stream(agent.node_id())
+        // The evidence is in the node-local journal, in full.
+        let journalled: Vec<AeEvidence> = evidence_journal::read_evidence_journal(&journal_path)
+            .unwrap()
             .iter()
-            .filter_map(|r| AeEvidence::from_detail(r.record.detail.as_deref()))
+            .map(|b| serde_json::from_slice(b).expect("an AE evidence record"))
             .collect();
-        assert_eq!(evidence.len(), 1, "the A2A decision is recorded like any other");
-        let e = &evidence[0];
+        assert_eq!(journalled.len(), 1, "the A2A decision is recorded like any other");
+        let e = &journalled[0];
         assert_eq!(e.enforcement_point, super::super::http::ENFORCEMENT_POINT_A2A);
         assert_eq!(e.operation, "skill.invoke");
         assert_eq!(e.resource, resource);
         assert_eq!(e.execution, Execution::None, "nothing ran, and this point can say so");
 
+        // The chain carries a reference — and not the skill that was asked for.
+        let chain = agent.audit_stream(agent.node_id());
+        let refs: Vec<AeReference> = chain
+            .iter()
+            .filter_map(|r| AeReference::from_detail(r.record.detail.as_deref()))
+            .collect();
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].journal_sha256.is_some());
+        let gossiped: String = chain
+            .iter()
+            .map(|r| format!("{}|{}", r.record.target, r.record.detail.clone().unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !gossiped.contains("skill:danger"),
+            "the A2A resource reached the gossiped chain; §5 forbids it.\n{gossiped}"
+        );
+
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&cert_dir);
+        let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
     }
 
     #[test]

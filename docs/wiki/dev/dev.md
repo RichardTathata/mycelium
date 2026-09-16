@@ -51,13 +51,18 @@ tests prove the wiring refuses before a tool runs. A **route-level preflight**, 
 effect.
 **The seam started recording 2026-09-16** (PR #224): until then the preflight refused, logged, and wrote
 *nothing* — a node enforcing a declared remit produced no evidence at all. Every evaluated dispatch,
-**permit and refusal both**, is now sealed into the audit chain as an `AeEvidence` document
-(`mycelium.ae/evidence/1`) in `detail`; a decision that cannot be recorded **refuses the dispatch**
-(`PreflightRefusal::NotRecorded`). The same PR put the preflight on `/a2a` (both paths, enforcement
-point `gateway:a2a`) and gave the stale-policy check its second opinion
-(`set_deployed_policy_revision`), which was hardcoded `None` and so could never fire. Next on this line:
-the remaining dispatch paths, and the evidence journal's `append -> LocalSync` receipt with its three
-failure tests.
+**permit and refusal both**, is now recorded; a decision whose evidence cannot be established
+**refuses the dispatch** (`PreflightRefusal::NotRecorded`). The same PR put the preflight on `/a2a`
+(both paths, enforcement point `gateway:a2a`) and gave the stale-policy check its second opinion
+(`set_deployed_policy_revision`), which was hardcoded `None` and so could never fire.
+**Corrected the same day** (PR #225): #224 recorded by sealing the whole decision document into the
+audit chain, which **gossips to every node** — AE0 §5 forbids that and says why. Evidence now goes to
+the node-local `EvidenceJournal` (append-only, fsynced, never gossiped, item 1's `LocalDurability`),
+and the chain carries an `AeReference` — identities, verdict, policy revision, catalogue id, and the
+journal record's **content hash**, so tamper-evidence survives without dissemination. Three failure
+behaviours are tested: saturation and persistence failure refuse; a lost acknowledgement is
+`DeliveryUnknown`, never `Failed`. `EvidenceProfile` decides whether they gate the effect or are
+merely declared. Next on this line: the journal's cursor-based exporter, and four of §5's five records.
 **AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md): the envelope
 (item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
 `policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;

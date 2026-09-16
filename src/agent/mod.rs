@@ -43,6 +43,8 @@ pub(crate) mod gateway_caller;
 /// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod action_evaluator;
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod evidence_journal;
 #[cfg(feature = "gateway")]
 mod http;
 mod mcp;
@@ -116,9 +118,9 @@ pub use mcp::{McpError, McpToolHandle};
 pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
-    ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, Decision, DecisionKind, Execution,
-    MappingKind, MappingStatus, PreflightRefusal, ReferenceEvaluator, Rule, Verdict,
-    AE_EVIDENCE_SCHEMA,
+    ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision, DecisionKind,
+    EvidenceState, Execution, MappingKind, MappingStatus, PreflightRefusal, ReferenceEvaluator, Rule,
+    Verdict, AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
 };
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
@@ -460,6 +462,11 @@ pub(crate) struct TaskCtx {
     /// table for a value that is only ever wholly replaced.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) deployed_policy_revision: arc_swap::ArcSwapOption<String>,
+    /// The node-local evidence journal (AE0 §5), set via
+    /// [`GossipAgent::with_evidence_journal`]. Absent = decisions are enforced but not recorded,
+    /// which `with_action_evaluator` warns about.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) evidence_journal: std::sync::OnceLock<Arc<evidence_journal::EvidenceJournal>>,
     /// Optional external audit sink (SOC 2 WS-C), set via `with_audit_sink`.
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink: std::sync::OnceLock<Arc<dyn audit::AuditSink>>,
@@ -880,6 +887,8 @@ impl GossipAgent {
             action_evaluator: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            evidence_journal: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -958,8 +967,30 @@ impl GossipAgent {
             "with_action_evaluator: this build has no audit chain (`compliance` is off), so gateway \
              decisions will be enforced but NOT recorded"
         );
+        if self.task_ctx.evidence_journal.get().is_none() {
+            tracing::warn!(
+                "with_action_evaluator: no evidence journal is attached (see with_evidence_journal), \
+                 so gateway decisions will be enforced but NOT recorded"
+            );
+        }
         if self.task_ctx.action_evaluator.set(evaluator).is_err() {
             tracing::warn!("with_action_evaluator: an evaluator is already attached; ignoring");
+        }
+    }
+
+    /// Attach the node-local evidence journal decisions are recorded in (AE0 §5).
+    ///
+    /// **Evidence never gossips.** The journal is a local append-only file; what reaches the
+    /// tamper-evident chain is an [`AeReference`](action_evaluator::AeReference) carrying the
+    /// journal record's content hash and nothing that would disseminate the decision's details.
+    ///
+    /// Without a journal an attached evaluator still enforces, and records nothing —
+    /// [`with_action_evaluator`](Self::with_action_evaluator) warns about that, because an operator
+    /// should not have to infer it from an empty evidence stream.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_evidence_journal(&self, journal: Arc<evidence_journal::EvidenceJournal>) {
+        if self.task_ctx.evidence_journal.set(journal).is_err() {
+            tracing::warn!("with_evidence_journal: a journal is already attached; ignoring");
         }
     }
 
