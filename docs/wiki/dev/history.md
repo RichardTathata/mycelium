@@ -125,6 +125,27 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v2.7.0 release — 2026-09-16 (tag `v2.7.0`)
+
+A small **MINOR**, and the second defect this day found the same way: **by building a consumer against the
+substrate rather than by re-reading it**. The exporter needed an `at` for the consumer's `activity_observation`,
+`AeEvidence` carried no timestamp, so the exporter stamped its read time — and its own retry test failed within
+minutes. Read time is wrong twice over: record ids derive from journal position, so an exporter that loses its
+cursor and re-reads produces the *same* `batch_id` with a *different* body, which the consumer refuses under its
+*same id, byte-identical content* rule; and the contract asks for **event** time, not read time. The fix was one
+field the substrate was already holding — `ActionEnvelope::issued_at_ms`, which `for_decision` discarded. Both
+records of one attempt carry the same value, because they are about one attempt.
+
+The shape worth keeping: **a timestamp a record does not carry is one its reader has to invent, and an invented
+one cannot be stable.** True of any field a downstream contract requires — if the producer does not carry it,
+every consumer makes one up and they disagree. §5's remaining records (`requested`, `blocked`) should be checked
+against the consumer's required fields *before* they are written.
+
+`AeEvidence` also became `#[non_exhaustive]`: it is a type an exporter turns into a record another organisation
+parses, and the next field addition should not break anyone. Wire **v12** unchanged. Release gates: `make check`
+clean on the bumped tree, the five wire gates green, suites re-run on the release tree. Wiki:
+[`.log/2026-09-16-ae-evidence-event-time.md`](.log/2026-09-16-ae-evidence-event-time.md).
+
 ## v2.6.0 release — 2026-09-16 (tag `v2.6.0`)
 
 The **AE evidence MINOR**. Wire **v12** (PREV 11) unchanged; on-disk format unchanged; backwards-compatible

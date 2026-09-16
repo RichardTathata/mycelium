@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-09-16
+
+A small **MINOR**, and a correction found the honest way — by building a consumer against
+2.6.0 rather than by re-reading it. Wire **v12** (`PREV = 11`) **unchanged**; on-disk format
+unchanged; a backwards-compatible rolling upgrade.
+
+**The upgrade note:** `AeEvidence` gained a field and became `#[non_exhaustive]`, which breaks
+an exhaustive struct literal — the same class as `GossipConfig`'s field additions in 2.5.0.
+Reading and matching on fields is unaffected; construct it with `AeEvidence::for_decision`.
+
 ### Added
 
 - **`AeEvidence::at_ms` — the decision's own event time**, carried from the envelope's
