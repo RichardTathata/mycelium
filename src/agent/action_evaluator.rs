@@ -457,6 +457,10 @@ pub enum RecordKind {
 ///
 /// **What never enters it:** arguments, argument values and policy text. What is evidenced is what
 /// the policy *checked*, and the digest binding the decision to one exact payload.
+///
+/// `#[non_exhaustive]`: an exporter turns this into a record another organisation parses, and a
+/// field added later must not break it. Construct with [`for_decision`](Self::for_decision).
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AeEvidence {
     /// Always [`AE_EVIDENCE_SCHEMA`].
@@ -465,6 +469,21 @@ pub struct AeEvidence {
     /// field existed still parses as what it was.
     #[serde(default)]
     pub kind: RecordKind,
+    /// **Event time** — when the enforcement point assembled the envelope for this attempt, in
+    /// epoch milliseconds, from the node's HLC.
+    ///
+    /// The time of the *decision*, not of anything downstream. An exporter needs it for the
+    /// consumer's `at`, and needs it to be **stable**: record ids are derived from journal
+    /// position, so an exporter that re-reads after losing its cursor re-sends the same ids — and
+    /// a body that differed (because it had stamped its own read time) would be refused under the
+    /// consumer's *same id, byte-identical content* rule. A timestamp the record does not carry is
+    /// one the exporter has to invent, and an invented one cannot be stable. Found by the
+    /// exporter's own retry test, 2026-09-16.
+    ///
+    /// `#[serde(default)]` so a record written before this field existed still parses; it reads as
+    /// `0`, which is visibly not a time rather than quietly a plausible one.
+    #[serde(default)]
+    pub at_ms: u64,
     /// The logical agent — the verified principal, never a client-supplied string.
     pub subject: String,
     /// The native operation asked for.
@@ -520,6 +539,8 @@ impl AeEvidence {
         Self {
             schema: AE_EVIDENCE_SCHEMA.to_string(),
             kind: RecordKind::Decided,
+            // The envelope's own assembly time, carried rather than discarded — see `at_ms`.
+            at_ms: envelope.issued_at_ms,
             subject: envelope.actor.clone(),
             operation: envelope.operation.clone(),
             resource: envelope.resource.clone(),
@@ -547,6 +568,9 @@ impl AeEvidence {
     /// the policy revision — because it is a statement about the same attempt, and correlating them
     /// is the consumer's whole job. What it does **not** do is revise the decision: that record
     /// stands exactly as written, and this one is appended beside it.
+    ///
+    /// `at_ms` is carried too: both records are about **one attempt**, and an exporter that merges
+    /// them into a single observation needs one event time for it — the attempt's.
     pub fn as_execution(&self, execution: Execution) -> Self {
         Self { kind: RecordKind::Execution, execution, ..self.clone() }
     }

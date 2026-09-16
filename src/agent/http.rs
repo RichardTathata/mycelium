@@ -6001,6 +6001,9 @@ mod ae_seam_tests {
         assert_eq!(deny.execution, Execution::None);
         let permit =
             decided.iter().find(|e| e.decision == DecisionKind::Permit).expect("the permit");
+        // Event time is the decision's own, carried from the envelope — an exporter needs it stable,
+        // so it may not be invented downstream.
+        assert!(permit.at_ms > 0, "the decision carries its own event time");
         // The *decision* still says only what was decided: it establishes nothing about execution.
         assert_eq!(permit.execution, Execution::Attempted);
 
@@ -6011,6 +6014,7 @@ mod ae_seam_tests {
         assert_eq!(ran.operation_id, permit.operation_id);
         assert_eq!(ran.attempt_id, permit.attempt_id);
         assert_eq!(ran.decision, DecisionKind::Permit, "the decision is carried, not re-decided");
+        assert_eq!(ran.at_ms, permit.at_ms, "one attempt, one event time");
 
         // ── The chain holds a reference, and nothing that identifies the action ──────────────
         let chain = agent.audit_stream(agent.node_id());
