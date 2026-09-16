@@ -62,7 +62,13 @@ and the chain carries an `AeReference` — identities, verdict, policy revision,
 journal record's **content hash**, so tamper-evidence survives without dissemination. Three failure
 behaviours are tested: saturation and persistence failure refuse; a lost acknowledgement is
 `DeliveryUnknown`, never `Failed`. `EvidenceProfile` decides whether they gate the effect or are
-merely declared. Next on this line: the journal's cursor-based exporter, and four of §5's five records.
+merely declared.
+**The reader seam shipped the same day** (PR #226): `read_evidence_journal_from(path, cursor, …)`,
+§6.7's outbox shape — batch, ship, advance, with a byte-offset cursor so resuming stays cheap, and
+each entry carrying the same content hash the chain's `AeReference` cites. Needed because moving
+evidence out of the chain left an `AuditSink`-based exporter seeing only references: durable and
+unreachable. Next on this line: the exporter itself (the private companion's half), and four of §5's
+five records.
 **AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md): the envelope
 (item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
 `policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;
