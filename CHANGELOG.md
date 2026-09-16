@@ -105,6 +105,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **CI: the scale-evidence alarm could not fire, because it was queued behind the silence it
+  reports** (`.github/workflows/scale-nightly.yml`). The `evidence-freshness` job added on
+  2026-09-15 ran nothing at the first nightly after it shipped. The workflow carried a
+  **workflow-level** `concurrency` group, which queues the entire run — so with one run already
+  queued against the offline self-hosted box, run `35086785839` (2026-09-16) went `pending` with
+  **zero jobs created**, the hosted alarm among them. The group now sits on the `scale` job: two
+  suites still never share the one Docker daemon, but a hosted job in a later run is no longer held
+  behind a self-hosted job in an earlier one, and a newly pending scale job displaces the previous
+  one instead of a queue of runs expiring one at a time. The rule this generalises to: *a check must
+  not sit inside the failure domain of the thing it checks.* Dispatched on the fix branch the alarm
+  started and reported, for the first time: *"No successful run of the scale suites has ever been
+  recorded"* — literally, across all 69 runs of the workflow since 2026-07-10, every one `cancelled`
+  with an empty `runner_name`. Every scale figure in the documentation rests on operator-run
+  `make test-scale`, never on CI, and should be cited that way until the box is online.
+
 - **CI: a missing scale runner was invisible, because a job nobody runs never goes red**
   (`.github/workflows/scale-nightly.yml`). The scale suites run only on a self-hosted box labelled
   `mycelium-scale`. While that box is offline the nightly does not fail — it **queues**, indefinitely,

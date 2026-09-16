@@ -163,3 +163,22 @@ loud, which is the part that was missing.
 nightly. When the freshness job is red, treat the scale numbers as historical, not as claims about
 the code on `main` — the same discipline the contracts axis applies to receipts, applied to
 evidence about performance.
+
+**And the alarm has to be reachable (2026-09-16).** The freshness job did not fire at the first
+nightly after it shipped. `scale-nightly.yml` had a **workflow-level** `concurrency` group, which
+queues the whole run — so with one run already queued against the offline box, run `35086785839`
+went `pending` with zero jobs created, the hosted alarm included. The group now lives on the `scale`
+job, where it still prevents two suites sharing the one Docker daemon but cannot hold a hosted job
+in a later run behind a self-hosted job in an earlier one. The general rule: *a check must not sit
+inside the failure domain of the thing it checks* — placed in the workflow it watches, the alarm
+inherited the exact blockage it was there to report.
+
+**And what the alarm said when it could finally speak.** Dispatched on the fix branch, the hosted job
+started (rather than pending) and went red with *"No successful run of the scale suites has ever been
+recorded."* That is literal. Across **all 69 runs of this workflow since 2026-07-10**, every single
+conclusion is `cancelled`, and the sampled jobs carry an empty `runner_name` — they expired waiting
+for a runner that never claimed them. The 2026-09-10 → 09-15 window named above is not the outage; it
+is the part of a continuous outage that happened to be noticed. **No scale figure on this page has
+ever been produced by CI.** The numbers here come from operator-run `make test-scale` on a box big
+enough for them, and until `mycelium-scale` comes online that is the only provenance they have —
+which is exactly how they should be read and cited.
