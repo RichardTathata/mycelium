@@ -163,3 +163,12 @@ loud, which is the part that was missing.
 nightly. When the freshness job is red, treat the scale numbers as historical, not as claims about
 the code on `main` — the same discipline the contracts axis applies to receipts, applied to
 evidence about performance.
+
+**And the alarm has to be reachable (2026-09-16).** The freshness job did not fire at the first
+nightly after it shipped. `scale-nightly.yml` had a **workflow-level** `concurrency` group, which
+queues the whole run — so with one run already queued against the offline box, run `35086785839`
+went `pending` with zero jobs created, the hosted alarm included. The group now lives on the `scale`
+job, where it still prevents two suites sharing the one Docker daemon but cannot hold a hosted job
+in a later run behind a self-hosted job in an earlier one. The general rule: *a check must not sit
+inside the failure domain of the thing it checks* — placed in the workflow it watches, the alarm
+inherited the exact blockage it was there to report.

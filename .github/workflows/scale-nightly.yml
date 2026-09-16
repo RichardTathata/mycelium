@@ -27,11 +27,16 @@ on:
         default: all
         options: [all, scale, resilience, entries]
 
-# One scale run at a time on the single self-hosted box — never let a nightly and a manual dispatch
-# collide over the same Docker daemon.
-concurrency:
-  group: scale-nightly
-  cancel-in-progress: false
+# The "one scale run at a time on the single self-hosted box" rule lives on the `scale` job, NOT
+# here. A workflow-level `concurrency` group queues the **whole run**, jobs included — so while the
+# box was offline and one run sat queued against it, every later run went `pending` with *zero jobs
+# created*, and the hosted freshness alarm below could not start. The alarm was blocked by exactly
+# the condition it exists to report. Evidence: run 35086785839 (2026-09-16) pending with no jobs
+# behind run 34960720200 (2026-09-15), still queued for the runner a day later.
+#
+# At job level the guarantee is the same one that was actually wanted — two scale suites never
+# share the Docker daemon — and it costs the alarm nothing, because a hosted job in the same run is
+# no longer held behind a self-hosted job in a different one.
 
 permissions:
   actions: read
@@ -97,6 +102,11 @@ jobs:
     name: Scale suites (100-node + resilience + entries)
     runs-on: [self-hosted, mycelium-scale]
     timeout-minutes: 180
+    # Never let a nightly and a manual dispatch collide over the same Docker daemon. Scoped to this
+    # job so an offline box cannot hold the hosted alarm above hostage (see the note at the top).
+    concurrency:
+      group: scale-nightly
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
