@@ -260,28 +260,127 @@ fn count_records(path: &Path) -> std::io::Result<u64> {
     Ok(n)
 }
 
-/// Read every record back, in order. **The exporter's shape, and the tests' way of proving that what
-/// was acknowledged is what is on disk.
-pub fn read_evidence_journal(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
-    use std::io::Read as _;
+/// Where a reader has got to. Opaque-ish on purpose: an exporter stores it and hands it back.
+///
+/// The byte offset is what makes resuming cheap — a reader that had to re-walk the file to find its
+/// place would get slower for exactly as long as the node kept producing evidence, which is the
+/// wrong shape for something that runs forever.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EvidenceCursor {
+    /// Byte offset of the next record's length prefix.
+    pub offset: u64,
+    /// The sequence number the next record will carry.
+    pub seq:    u64,
+}
+
+/// One record, as a reader sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalEntry {
+    /// Position in this node's journal.
+    pub seq:          u64,
+    /// The record's content hash — **the same value the chain's
+    /// [`AeReference`](super::action_evaluator::AeReference) cites**, which is what lets an exporter
+    /// correlate what it is shipping with what the tamper-evident chain says about it.
+    pub content_hash: [u8; 32],
+    /// The record itself.
+    pub bytes:        Vec<u8>,
+}
+
+/// One page of the journal, and where to resume.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalPage {
+    /// The records read, in order.
+    pub entries: Vec<JournalEntry>,
+    /// Where the next read starts. Unchanged from the cursor passed in when nothing was read.
+    pub next:    EvidenceCursor,
+    /// Whether the read stopped at a bound rather than at the end of the file — so a caller knows
+    /// to come back rather than concluding it is caught up.
+    pub more:    bool,
+}
+
+/// Read a bounded page of the journal from `cursor`.
+///
+/// **The exporter's shape** (§6.7's outbox): batch, ship, advance — never re-read from the start,
+/// and never hold the whole journal in memory to find the end of it.
+///
+/// Bounds are the caller's, because only the caller knows what its consumer accepts; both are
+/// honoured, and `more` says whether the stop was a bound or the end of the file. A record larger
+/// than `max_bytes` is still returned **alone** rather than skipped: silently dropping evidence
+/// because it is inconveniently large is the failure mode this whole slice exists to avoid.
+///
+/// A truncated tail — where a crash landed mid-record — ends the page cleanly and leaves the cursor
+/// before it, so a later read picks the record up once the writer completes it.
+pub fn read_evidence_journal_from(
+    path: &Path,
+    cursor: EvidenceCursor,
+    max_records: usize,
+    max_bytes: usize,
+) -> std::io::Result<JournalPage> {
+    use std::io::{Read as _, Seek as _};
+
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(JournalPage { entries: Vec::new(), next: cursor, more: false });
+        }
         Err(e) => return Err(e),
     };
-    let mut out = Vec::new();
+    f.seek(std::io::SeekFrom::Start(cursor.offset))?;
+
+    let mut page = JournalPage { entries: Vec::new(), next: cursor, more: false };
+    let mut bytes_read = 0usize;
     let mut len = [0u8; 4];
     loop {
+        if page.entries.len() >= max_records {
+            page.more = true;
+            break;
+        }
         match f.read_exact(&mut len) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e),
         }
-        let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+        let want = u32::from_le_bytes(len) as usize;
+        let mut buf = vec![0u8; want];
         if f.read_exact(&mut buf).is_err() {
-            break; // truncated tail
+            // Truncated tail. Leave the cursor before it; the record is not lost, it is not
+            // finished.
+            break;
         }
-        out.push(buf);
+        // The size bound is checked *after* the first record, so one oversized record still travels
+        // rather than wedging the reader forever.
+        if !page.entries.is_empty() && bytes_read + want > max_bytes {
+            page.more = true;
+            break;
+        }
+        bytes_read += want;
+        page.next = EvidenceCursor {
+            offset: page.next.offset + 4 + want as u64,
+            seq:    page.next.seq + 1,
+        };
+        page.entries.push(JournalEntry {
+            seq:          page.next.seq - 1,
+            content_hash: Sha256::digest(&buf).into(),
+            bytes:        buf,
+        });
+    }
+    Ok(page)
+}
+
+/// Read every record back, in order. **The exporter should prefer
+/// [`read_evidence_journal_from`]** — this one is for tests and for small one-shot inspections, and
+/// it reads the whole file into memory.
+pub fn read_evidence_journal(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut cursor = EvidenceCursor::default();
+    loop {
+        let page = read_evidence_journal_from(path, cursor, 4096, usize::MAX)?;
+        let done = !page.more;
+        cursor = page.next;
+        out.extend(page.entries.into_iter().map(|e| e.bytes));
+        if done {
+            break;
+        }
     }
     Ok(out)
 }
@@ -373,6 +472,117 @@ mod tests {
         let third = j.append(b"three".to_vec()).await.unwrap();
         assert_eq!(third.seq, 2, "a restart continues the journal, it does not restart it");
         assert_eq!(read_evidence_journal(&path).unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_reader_resumes_from_its_cursor_instead_of_re_reading() {
+        let path = temp("cursor");
+        let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
+        for i in 0..5u8 {
+            j.append(vec![b'a' + i]).await.unwrap();
+        }
+
+        let first = read_evidence_journal_from(&path, EvidenceCursor::default(), 2, usize::MAX)
+            .unwrap();
+        assert_eq!(first.entries.len(), 2);
+        assert!(first.more, "stopping at a bound must say there is more");
+        assert_eq!(first.entries[0].seq, 0);
+
+        let second = read_evidence_journal_from(&path, first.next, 2, usize::MAX).unwrap();
+        assert_eq!(second.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
+
+        let third = read_evidence_journal_from(&path, second.next, 10, usize::MAX).unwrap();
+        assert_eq!(third.entries.len(), 1);
+        assert!(!third.more, "reaching the end is not the same as hitting a bound");
+
+        // Caught up: reading again returns nothing and does not move.
+        let again = read_evidence_journal_from(&path, third.next, 10, usize::MAX).unwrap();
+        assert!(again.entries.is_empty());
+        assert_eq!(again.next, third.next);
+    }
+
+    /// The hash a reader computes is the hash the chain's reference cites — the correlation the
+    /// whole split depends on. If these ever diverge, evidence and its chain record stop being
+    /// about each other and nobody can tell.
+    #[tokio::test]
+    async fn the_readers_hash_is_the_one_the_append_acknowledged() {
+        let path = temp("hashmatch");
+        let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
+        let a = j.append(b"decided-1".to_vec()).await.unwrap();
+        let b = j.append(b"decided-2".to_vec()).await.unwrap();
+
+        let page =
+            read_evidence_journal_from(&path, EvidenceCursor::default(), 10, usize::MAX).unwrap();
+        assert_eq!(page.entries[0].content_hash, a.content_hash);
+        assert_eq!(page.entries[1].content_hash, b.content_hash);
+        assert_eq!((page.entries[0].seq, page.entries[1].seq), (a.seq, b.seq));
+    }
+
+    #[tokio::test]
+    async fn a_byte_bound_splits_the_page_but_never_drops_a_record() {
+        let path = temp("bytebound");
+        let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
+        for _ in 0..4 {
+            j.append(vec![b'x'; 100]).await.unwrap();
+        }
+
+        let mut cursor = EvidenceCursor::default();
+        let mut seen = 0;
+        loop {
+            let page = read_evidence_journal_from(&path, cursor, 100, 150).unwrap();
+            if page.entries.is_empty() {
+                break;
+            }
+            // 150 bytes fits one 100-byte record, never two.
+            assert_eq!(page.entries.len(), 1);
+            seen += page.entries.len();
+            cursor = page.next;
+        }
+        assert_eq!(seen, 4, "every record is read, just across more pages");
+    }
+
+    /// A record bigger than the caller's byte bound still travels, alone. Skipping it would be the
+    /// silent drop the journal exists to make impossible.
+    #[tokio::test]
+    async fn an_oversized_record_is_returned_alone_rather_than_skipped() {
+        let path = temp("oversized");
+        let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
+        j.append(vec![b'y'; 5000]).await.unwrap();
+        j.append(b"small".to_vec()).await.unwrap();
+
+        let page = read_evidence_journal_from(&path, EvidenceCursor::default(), 10, 64).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].bytes.len(), 5000);
+        assert!(page.more);
+        let next = read_evidence_journal_from(&path, page.next, 10, 64).unwrap();
+        assert_eq!(next.entries[0].bytes, b"small".to_vec());
+    }
+
+    /// A crash landed mid-record. The page ends cleanly *before* it and the cursor does not move
+    /// past it, so when the writer finishes the record a later read picks it up.
+    #[tokio::test]
+    async fn a_truncated_tail_ends_the_page_without_losing_the_record() {
+        let path = temp("tornread");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // One complete record, then a length prefix whose body never arrived.
+        let mut bytes = vec![3u8, 0, 0, 0, b'o', b'n', b'e'];
+        bytes.extend_from_slice(&[9u8, 0, 0, 0, b'h', b'i']);
+        std::fs::write(&path, bytes).unwrap();
+
+        let page =
+            read_evidence_journal_from(&path, EvidenceCursor::default(), 10, usize::MAX).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].bytes, b"one".to_vec());
+        assert_eq!(page.next.offset, 7, "the cursor stops before the torn record");
+    }
+
+    #[tokio::test]
+    async fn a_journal_that_does_not_exist_yet_reads_as_empty_not_as_an_error() {
+        let path = temp("absent");
+        let page =
+            read_evidence_journal_from(&path, EvidenceCursor::default(), 10, usize::MAX).unwrap();
+        assert!(page.entries.is_empty());
+        assert!(!page.more);
     }
 
     #[tokio::test]

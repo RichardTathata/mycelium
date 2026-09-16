@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — a cursor-based reader for the evidence journal
+
+- `read_evidence_journal_from(path, cursor, max_records, max_bytes)` with `EvidenceCursor`,
+  `JournalEntry` and `JournalPage`: §6.7's outbox shape, so an exporter batches, ships and advances
+  rather than re-reading the journal from the start. The cursor carries a byte offset, so resuming
+  stays cheap however long the journal grows.
+- Each entry carries **the content hash the chain's `AeReference` cites**, so an exporter can
+  correlate what it ships with what the tamper-evident chain says about it.
+- A record larger than the caller's byte bound is returned alone rather than skipped; a truncated
+  tail ends the page without advancing past the unfinished record.
+- This matters now because the previous entry moved evidence out of the audit chain: an exporter
+  built on `AuditSink` sees only references, and must read the journal instead.
+
 ### Fixed — AE evidence is node-local, and only a reference gossips
 
 - **Corrects the entry below, from the same day.** That change recorded gateway decisions by sealing

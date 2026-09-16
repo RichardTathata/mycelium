@@ -262,10 +262,18 @@ deployment report, an ambiguous mapping or an absence of records.
   stale-policy check needs; `expected_policy_revision` was hardcoded `None`, so the check could never
   fire and a gateway running a superseded policy was undetectable. Unset, it still does not fire —
   that is now a reported fact rather than a structural impossibility.
+- **The journal's reader seam** — ✅ *shipped 2026-09-16*. `read_evidence_journal_from(path, cursor,
+  max_records, max_bytes)` is §6.7's outbox shape: batch, ship, advance, never re-read from the
+  start. The `EvidenceCursor` carries a byte offset, so resuming is cheap for a reader that runs
+  forever; each `JournalEntry` carries **the same content hash the chain's `AeReference` cites**,
+  which is the correlation the journal/chain split depends on. A record larger than the caller's byte
+  bound is returned **alone** rather than skipped, and a truncated tail ends the page without moving
+  the cursor past the unfinished record. This is the seam the exporter is built on — it does not
+  itself ship anything.
 - **Still to come on this line:** the remaining gateway dispatch paths beyond MCP and A2A; the
-  journal's cursor-based **exporter** (the RA outbox shape, §6.7) — today the journal is written and
-  read, and nothing yet ships from it; and the other four of §5's five records (`requested`,
-  `blocked`, the execution records, `outcome observed`) — the enforcement point writes `decided`.
+  **exporter** that consumes the reader seam and delivers (signing, cursors, retries — the private
+  companion's half); and the other four of §5's five records (`requested`, `blocked`, the execution
+  records, `outcome observed`) — the enforcement point writes `decided`.
 - **AE-T T2–T4** (private companion, on the seam): the Cedar adapter, the signed `AuditSink` exporter into the
   consumer's envelopes (Ed25519 over canonical JSON, ≤ 1000 records / ≤ 2 MiB, cursors, same `batch_id` ⇒
   byte-identical body), the procurement mapping subset; T-gate = scenario 2 locally.

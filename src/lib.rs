@@ -242,7 +242,8 @@ pub use agent::{
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{
-    read_evidence_journal, Appended, EvidenceJournal, EvidenceProfile, JournalError,
+    read_evidence_journal, read_evidence_journal_from, Appended, EvidenceCursor, EvidenceJournal,
+    EvidenceProfile, JournalEntry, JournalError, JournalPage,
 };
 #[cfg(feature = "consensus")]
 pub use agent::{ConsensusHandle, ConsistencyError, LockGuard, LockService};
