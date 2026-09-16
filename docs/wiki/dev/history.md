@@ -91,6 +91,23 @@ a correctness assumption, the choices-trace and bundle schema (D14), the static 
 additions (CAS retries to Loom, hash iteration order, lease-expiry clock reads). Concepts: *seam*, *bundle*.
 Wiki: [testing](testing/testing.md), [`.log/2026-09-13-item6-pr1-nondeterminism-inventory.md`](.log/2026-09-13-item6-pr1-nondeterminism-inventory.md).
 
+## v3 contracts axis — AE-T: evidence is node-local, only a reference gossips — 2026-09-16 (unreleased, PR #225)
+
+**Corrects the entry below, from the same day.** #224 recorded gateway decisions by sealing the whole decision
+document into the tamper-evident audit chain — an ordinary signed KV entry, so every node received the exact
+resource each call targeted, the policy's reason and the checked constraints. AE0 §5 forbids that in those words,
+having adopted the rule after reviewing its own first draft, which proposed the same thing. Missed because §11
+lists the journal as outstanding and that reads as *an addition* rather than *a correction of what you just wrote*;
+no test could have caught it, since they asserted the evidence was recorded and it was. No exposure — the path is
+inert without an attached evaluator. The correction: a node-local `EvidenceJournal` (append-only, fsynced, never
+gossiped, item 1's `LocalDurability`), and an `AeReference` in the chain carrying the journal record's **content
+hash** — tamper-evidence without dissemination, and no field on the type to put a resource in. Three failure
+behaviours tested (saturation and persistence failure refuse; a lost acknowledgement is `DeliveryUnknown`, never
+`Failed`), with `EvidenceProfile` choosing whether they gate the effect. The pin is a substring sweep over
+everything that gossips, not a field-by-field check, because the latter would pass against a type that quietly
+regained a `resource`. Wiki: [dev](dev.md) §AE,
+[`.log/2026-09-16-ae-evidence-is-node-local.md`](.log/2026-09-16-ae-evidence-is-node-local.md).
+
 ## v3 contracts axis — AE-T: the seam records what it enforces — 2026-09-16 (unreleased, PR #224)
 
 Three gaps on the AE line, found by building the private exporter *against* the seam rather than by reviewing it:

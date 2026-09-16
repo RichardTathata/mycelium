@@ -1425,7 +1425,9 @@ async fn mcp_handler(
                 &arguments,
                 &req["params"],
                 ENFORCEMENT_POINT_MCP,
-            ) {
+            )
+            .await
+            {
                 return Json(json!({
                     "jsonrpc": "2.0", "id": id,
                     "error": {"code": refusal.json_rpc_code(), "message": refusal.to_string(),
@@ -1873,7 +1875,7 @@ pub(crate) const ENFORCEMENT_POINT_A2A: &str = "gateway:a2a";
 /// rule. Everything that *is* authority — the actor, the granted scopes — comes from the auth layer
 /// and never from the request body (item 7). The `attempt_id` is minted per dispatch here.
 #[cfg(all(feature = "gateway", feature = "tls"))]
-pub(crate) fn ae_preflight(
+pub(crate) async fn ae_preflight(
     ctx: &Arc<TaskCtx>,
     caller: Option<&ResolvedPrincipal>,
     operation: &str,
@@ -1954,7 +1956,7 @@ pub(crate) fn ae_preflight(
     };
 
     let evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
-    if let Err(e) = ae_record(ctx, &evidence) {
+    if let Err(e) = ae_record(ctx, &evidence).await {
         warn!(actor = %envelope.actor, %operation, %resource,
               "AE preflight: the decision could not be recorded, so the action is refused: {e}");
         #[cfg(feature = "metrics")]
@@ -1975,41 +1977,97 @@ pub(crate) fn ae_preflight(
     }
 }
 
-/// Seal one AE decision into this node's tamper-evident audit chain.
+/// Record one AE decision: **journal first, then a reference into the chain** (AE0 §5).
 ///
-/// The record is the *only* durable trace a gateway decision leaves, so its failure is a refusal
-/// upstream rather than a log line here: see [`PreflightRefusal::NotRecorded`].
+/// The decision document goes to the node-local [journal](super::evidence_journal) — durable,
+/// append-only, never gossiped. What is sealed into the tamper-evident chain is an
+/// [`AeReference`](super::action_evaluator::AeReference): the verdict, the identities, the policy
+/// revision, the catalogue id, and the journal record's **content hash**. Nothing else, because the
+/// chain reaches every node and the evidence is not for every node.
 ///
-/// [`PreflightRefusal::NotRecorded`]: super::action_evaluator::PreflightRefusal::NotRecorded
-#[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
-fn ae_record(
+/// `Err` means *refuse the dispatch*. Which failures refuse is the operator's
+/// [`EvidenceProfile`](super::evidence_journal::EvidenceProfile): the strict profile gates the
+/// effect on durable evidence, the lenient one proceeds and the reference record says it did.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+async fn ae_record(
     ctx: &Arc<TaskCtx>,
     evidence: &super::action_evaluator::AeEvidence,
 ) -> Result<(), String> {
-    let detail = serde_json::to_string(evidence).map_err(|e| e.to_string())?;
-    super::audit::seal_and_write(
-        ctx,
-        super::audit::AuditAction::Invoke,
-        evidence.subject.clone(),
-        evidence.resource.clone(),
-        evidence.audit_outcome(),
-        Some(detail),
-    )
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    use super::action_evaluator::{AeReference, EvidenceState};
+    use super::evidence_journal::{EvidenceProfile, JournalError};
+
+    let bytes = serde_json::to_vec(evidence).map_err(|e| e.to_string())?;
+
+    let (journal_sha256, state, refuse) = match ctx.evidence_journal.get() {
+        // No journal: nothing is recorded, and the reference says exactly that rather than being
+        // absent. `with_action_evaluator` warns at attach time so this is never a surprise.
+        None => (None, EvidenceState::NotConfigured, None),
+        Some(journal) => match journal.append(bytes).await {
+            Ok(appended) => (
+                Some(super::action_evaluator::hex32(&appended.content_hash)),
+                EvidenceState::OnDisk,
+                None,
+            ),
+            Err(e) => {
+                // A lost acknowledgement is *unknown*, not failed: the record may be on disk, and
+                // claiming failure would assert knowledge nobody has.
+                let state = match e {
+                    JournalError::DeliveryUnknown => EvidenceState::Unknown,
+                    _ => EvidenceState::NotEstablished,
+                };
+                let refuse =
+                    matches!(journal.profile(), EvidenceProfile::Strict).then(|| e.to_string());
+                (None, state, refuse)
+            }
+        },
+    };
+
+    ae_seal_reference(ctx, &AeReference::for_evidence(evidence, journal_sha256, state));
+    match refuse {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
 }
 
-/// Without `compliance` this build has **no audit chain at all**, so there is nothing to write to
-/// and nothing that can fail. Such a node enforces without recording; `with_action_evaluator` warns
-/// about it at attach time, and any deployment report from such a node has to say so. Refusing every
-/// dispatch instead would break existing gateways that never asked for an evaluator.
-#[cfg(all(feature = "gateway", feature = "tls", not(feature = "compliance")))]
-fn ae_record(
-    _ctx: &Arc<TaskCtx>,
-    _evidence: &super::action_evaluator::AeEvidence,
-) -> Result<(), String> {
-    Ok(())
+/// Seal the safe reference record into the tamper-evident chain.
+///
+/// Best-effort by design: the journal is what gates the effect (AE0 §5 names it, not the chain and
+/// not the sink, as the ack-capable contract), and the chain adds ordering and hash-linking on top.
+/// A node without a `tls` identity gets a warning, not a refused dispatch — its evidence is still
+/// durable, just not chain-linked.
+///
+/// The audit record's `target` is the **catalogue id**, never the resource: `ae:{catalogue}` is the
+/// most specific thing §5 permits to gossip.
+#[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+fn ae_seal_reference(ctx: &Arc<TaskCtx>, reference: &super::action_evaluator::AeReference) {
+    use super::action_evaluator::DecisionKind;
+    let detail = match serde_json::to_string(reference) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("AE: the reference record did not serialise: {e}");
+            return;
+        }
+    };
+    let outcome = match reference.decision {
+        DecisionKind::Permit => super::audit::AuditOutcome::Success,
+        DecisionKind::Deny => super::audit::AuditOutcome::Denied,
+        DecisionKind::Indeterminate => super::audit::AuditOutcome::Error,
+    };
+    if let Err(e) = super::audit::seal_and_write(
+        ctx,
+        super::audit::AuditAction::Invoke,
+        reference.principal.clone(),
+        format!("ae:{}", reference.catalogue),
+        outcome,
+        Some(detail),
+    ) {
+        warn!("AE: the reference record could not be chained: {e}");
+    }
 }
+
+/// Without `compliance` there is no audit chain to link into. The journal still holds the evidence.
+#[cfg(all(feature = "gateway", feature = "tls", not(feature = "compliance")))]
+fn ae_seal_reference(_ctx: &Arc<TaskCtx>, _reference: &super::action_evaluator::AeReference) {}
 
 /// HTTP shape of a refused gateway dispatch (item 7): `412 Precondition Failed` — the
 /// precondition being a provider that enforces the caller context, or a context to send.
@@ -5767,20 +5825,27 @@ mod ae_seam_tests {
         let _ = std::fs::remove_dir_all(&cert_dir);
     }
 
-    /// **Enforcement without attribution is not governance.** Before this, the gateway refused and
-    /// permitted and wrote *nothing*: a deployment enforced a remit and produced no evidence at all,
-    /// so the exporter downstream would have shipped empty batches. Both outcomes are now sealed,
-    /// and the permit matters at least as much as the refusal — an evidence stream that omits what
-    /// an agent *was* allowed to do cannot support any statement about its conduct.
+    /// **Evidence is recorded, and it does not gossip.** The first version of this sealed the whole
+    /// decision document into the tamper-evident chain — which is an ordinary signed KV entry, so
+    /// every node received the exact resource a call targeted, the policy's reason and the
+    /// constraints it checked. AE0 §5 corrected against that shape after reviewing its own first
+    /// draft; this test is the pin that keeps the correction.
+    ///
+    /// The evidence lives in the node-local journal. The chain carries a reference and a hash.
     #[cfg(feature = "compliance")]
     #[tokio::test]
-    async fn every_gateway_decision_is_sealed_into_the_audit_chain() {
-        use crate::{AeEvidence, DecisionKind, Execution};
+    async fn evidence_goes_to_the_journal_and_only_a_reference_gossips() {
+        use crate::{AeEvidence, AeReference, DecisionKind, EvidenceState, Execution};
+        use super::super::evidence_journal::{EvidenceJournal, EvidenceProfile};
 
         let gossip_port = alloc_port();
         let http_port   = alloc_port();
         let cert_dir = std::env::temp_dir().join(format!("ae-evidence-{http_port}"));
+        let journal_path = std::env::temp_dir()
+            .join(format!("ae-journal-{http_port}"))
+            .join("evidence.log");
         let _ = std::fs::remove_dir_all(&cert_dir);
+        let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
         let mut cfg = GossipConfig::default();
         cfg.bind_port = gossip_port;
         cfg.http_port = Some(http_port);
@@ -5788,6 +5853,9 @@ mod ae_seam_tests {
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
 
         let me = agent.node_id().clone();
+        agent.with_evidence_journal(
+            EvidenceJournal::open(&journal_path, EvidenceProfile::Strict).unwrap(),
+        );
         agent.with_action_evaluator(Arc::new(
             ReferenceEvaluator::new("rev-7")
                 .with_catalogue("cat-test", "2")
@@ -5814,36 +5882,139 @@ mod ae_seam_tests {
         let refused = tools_call(http_port, "forbidden", serde_json::json!({})).await;
         assert_eq!(refused["error"]["code"], -32030);
 
-        let evidence: Vec<AeEvidence> = agent
-            .audit_stream(agent.node_id())
+        // ── The journal holds the evidence, in full ──────────────────────────────────────────
+        let journalled: Vec<AeEvidence> = super::super::evidence_journal::read_evidence_journal(&journal_path)
+            .unwrap()
             .iter()
-            .filter_map(|r| AeEvidence::from_detail(r.record.detail.as_deref()))
+            .map(|b| serde_json::from_slice(b).expect("an AE evidence record"))
             .collect();
-        assert_eq!(evidence.len(), 2, "both the permit and the refusal are recorded");
-
-        let permit = evidence.iter().find(|e| e.decision == DecisionKind::Permit).expect("the permit");
-        assert!(permit.resource.starts_with("tool:allowed@"));
-        assert_eq!(permit.policy_revision, "rev-7");
-        assert_eq!(permit.enforcement_point, super::ENFORCEMENT_POINT_MCP);
-        assert_eq!(permit.catalogue, "cat-test");
-        assert_eq!(permit.catalogue_revision, "2");
-        // Dispatched, and this gateway did not watch what the provider then did. `Attempted` is the
-        // honest answer; `Completed` would be a claim the gateway is in no position to make.
+        assert_eq!(journalled.len(), 2, "both decisions are journalled");
+        let deny = journalled.iter().find(|e| e.decision == DecisionKind::Deny).expect("the denial");
+        assert!(deny.resource.starts_with("tool:forbidden@"), "the journal keeps the detail");
+        assert_eq!(deny.execution, Execution::None);
+        let permit =
+            journalled.iter().find(|e| e.decision == DecisionKind::Permit).expect("the permit");
         assert_eq!(permit.execution, Execution::Attempted);
 
-        let deny = evidence.iter().find(|e| e.decision == DecisionKind::Deny).expect("the denial");
-        assert!(deny.resource.starts_with("tool:forbidden@"));
-        // Nothing ran, and this point can say so — which is what a consumer reads as `effect: none`.
-        assert_eq!(deny.execution, Execution::None);
-        // The precise fact is the document; the audit record's own outcome is only a summary.
-        assert_eq!(deny.audit_outcome(), crate::AuditOutcome::Denied);
+        // ── The chain holds a reference, and nothing that identifies the action ──────────────
+        let chain = agent.audit_stream(agent.node_id());
+        let refs: Vec<AeReference> = chain
+            .iter()
+            .filter_map(|r| AeReference::from_detail(r.record.detail.as_deref()))
+            .collect();
+        assert_eq!(refs.len(), 2, "each decision leaves one reference in the chain");
+        for r in &refs {
+            assert_eq!(r.evidence, EvidenceState::OnDisk);
+            assert!(r.journal_sha256.is_some(), "a reference must cite the record it refers to");
+            assert_eq!(r.catalogue, "cat-test");
+        }
 
-        // And the chain that carries them still verifies.
+        // The pin. Everything that gossips, as raw text — the record's own `target` included.
+        let gossiped: String = chain
+            .iter()
+            .map(|r| format!("{}|{}", r.record.target, r.record.detail.clone().unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "tool:forbidden",          // the exact resource — "resource details beyond the catalogue id"
+            "tool:allowed",
+            "prohibits this action",   // the policy's reason
+            "allows this action",
+        ] {
+            assert!(
+                !gossiped.contains(forbidden),
+                "{forbidden:?} reached the gossiped audit chain; §5 forbids it.\n{gossiped}"
+            );
+        }
+        // And the journal's hash is what ties the two together, so tampering stays detectable.
+        let cited = refs[0].journal_sha256.clone().unwrap();
+        let on_disk = super::super::evidence_journal::read_evidence_journal(&journal_path).unwrap();
+        let hashes: Vec<String> = on_disk
+            .iter()
+            .map(|b| {
+                use sha2::{Digest, Sha256};
+                super::super::action_evaluator::hex32(&<[u8; 32]>::from(Sha256::digest(b)))
+            })
+            .collect();
+        assert!(hashes.contains(&cited), "the reference cites a record that is actually on disk");
+
         agent.audit_verify(agent.node_id()).expect("the chain verifies");
 
         drop(handles);
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&cert_dir);
+        let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
+    }
+
+    /// **The profile decides what a failed journal means.** Strict gates the effect on durable
+    /// evidence; lenient proceeds, and the chain record says the evidence was never established —
+    /// so the weaker profile is legible as weaker rather than looking identical to the other kind.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn a_failing_journal_refuses_under_strict_and_is_declared_under_lenient() {
+        use crate::{AeReference, EvidenceState};
+        use super::super::evidence_journal::{EvidenceJournal, EvidenceProfile};
+
+        for (profile, expect_refusal) in
+            [(EvidenceProfile::Strict, true), (EvidenceProfile::Lenient, false)]
+        {
+            let gossip_port = alloc_port();
+            let http_port   = alloc_port();
+            let cert_dir = std::env::temp_dir().join(format!("ae-profile-{http_port}"));
+            let _ = std::fs::remove_dir_all(&cert_dir);
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = gossip_port;
+            cfg.http_port = Some(http_port);
+            cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+            let agent =
+                Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+
+            let me = agent.node_id().clone();
+            agent.with_evidence_journal(EvidenceJournal::stalled(profile));
+            agent.with_action_evaluator(Arc::new(
+                ReferenceEvaluator::new("rev-p")
+                    .with_catalogue("cat-test", "1")
+                    .map_action("tools/call", format!("tool:allowed@{me}"))
+                    .allow(Rule::new(
+                        crate::PRINCIPAL_ANONYMOUS,
+                        "tools/call",
+                        format!("tool:allowed@{me}"),
+                    )),
+            ));
+            agent.start().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _h = agent.mcp().register_mcp_tool(
+                "allowed",
+                serde_json::json!({"type": "object", "properties": {}}),
+                |_args| async move { Ok(serde_json::json!("ran")) },
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let body = tools_call(http_port, "allowed", serde_json::json!({})).await;
+            if expect_refusal {
+                assert_eq!(
+                    body["error"]["code"], -32032,
+                    "strict must not dispatch what it cannot evidence: {body}"
+                );
+                assert_eq!(body["error"]["data"]["reason"], "evidence_not_recorded");
+            } else {
+                assert!(body.get("error").is_none(), "lenient proceeds: {body}");
+            }
+
+            // Either way the chain says the evidence was not established — a lost acknowledgement
+            // is *unknown*, never "failed", because the record may well be on disk.
+            let refs: Vec<AeReference> = agent
+                .audit_stream(agent.node_id())
+                .iter()
+                .filter_map(|r| AeReference::from_detail(r.record.detail.as_deref()))
+                .collect();
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].evidence, EvidenceState::Unknown);
+            assert!(refs[0].journal_sha256.is_none(), "nothing to cite, so nothing is cited");
+
+            agent.shutdown().await;
+            let _ = std::fs::remove_dir_all(&cert_dir);
+        }
     }
 
     /// **The stale-policy check could never fire.** `expected_policy_revision` was hardcoded `None`,

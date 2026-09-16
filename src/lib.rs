@@ -236,9 +236,13 @@ pub use agent::{
 // The AE evaluator seam (runtime authorisation at the gateway) — present where it is enforced.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::{
-    ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, Decision, DecisionKind, Execution,
-    MappingKind, MappingStatus, PreflightRefusal, ReferenceEvaluator, Rule, Verdict,
-    AE_EVIDENCE_SCHEMA,
+    ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision, DecisionKind,
+    EvidenceState, Execution, MappingKind, MappingStatus, PreflightRefusal, ReferenceEvaluator, Rule,
+    Verdict, AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
+};
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub use agent::evidence_journal::{
+    read_evidence_journal, Appended, EvidenceJournal, EvidenceProfile, JournalError,
 };
 #[cfg(feature = "consensus")]
 pub use agent::{ConsensusHandle, ConsistencyError, LockGuard, LockService};

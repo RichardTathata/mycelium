@@ -231,16 +231,28 @@ deployment report, an ambiguous mapping or an absence of records.
   `ActionEnvelope` + `Decision`, the hook between `gateway_auth` and the MCP `tools/call` dispatch, the
   deterministic `ReferenceEvaluator`, the §9 fixtures as tests, `Indeterminate ⇒ refuse`, and two
   live-gateway tests. Inert until an evaluator is attached.
-- **The evidence the seam produces** — ✅ *shipped 2026-09-16*. The preflight previously refused and
-  permitted and wrote **nothing**: a deployment enforced a remit and produced no record at all, so any
-  exporter downstream had an empty stream to ship. Now every evaluated dispatch is sealed into the
-  node's tamper-evident audit chain as an [`AeEvidence`](../../src/agent/action_evaluator.rs) document
-  under `detail` (schema `mycelium.ae/evidence/1`), **both outcomes** — a permit with no record of why
-  is the same gap wearing a friendlier face, and a stream that omits its permits cannot support any
-  statement about what an agent was allowed to do. A record that cannot be written **refuses the
-  dispatch** (`PreflightRefusal::NotRecorded`): enforcement without attribution is not governance, it
-  is an unlogged gate, so the failure is visible rather than silent. A build without `compliance` has
-  no chain to write to; `with_action_evaluator` warns about that at attach time.
+- **The evidence the seam produces** — ✅ *shipped 2026-09-16, in the wrong shape; corrected the same
+  day*. The preflight previously refused and permitted and wrote **nothing**: a deployment enforced a
+  remit and produced no record at all. The first fix sealed the whole decision document into the
+  audit chain — **which §5 of this record forbids**, and for the reason §5 states: the chain is an
+  ordinary signed KV entry, so the exact resource, the policy's reason and the checked constraints
+  were disseminated to every node. The correction restores §5's shape:
+  - the decision document goes to the **node-local evidence journal**
+    (`src/agent/evidence_journal.rs`) — durable, append-only, fsynced, never gossiped, returning
+    item 1's `LocalDurability` (`OnDisk` only after the sync; `Buffered` is never produced here,
+    because evidence in a page cache cannot gate an effect);
+  - what enters the chain is an `AeReference` — kind, `operation_id` / `attempt_id`, principal,
+    verdict, policy revision, catalogue id, and the journal record's **content hash**. There is no
+    field on that type for anything else, so the mistake has to be made deliberately now;
+  - **both outcomes** are recorded. A permit with no record of why is the same gap wearing a
+    friendlier face.
+  - The three failure behaviours are implemented and tested: queue saturation ⇒ refused, never a
+    silent drop; persistence failure ⇒ refused; a lost acknowledgement ⇒ `DeliveryUnknown`, never
+    `Failed`, because the record may well be on disk. `EvidenceProfile::Strict` gates the effect on
+    all three; `Lenient` proceeds and the reference record carries `evidence: unknown` or
+    `not_established`, so the weaker profile is legible as weaker.
+  - Without a journal, decisions are enforced and not recorded; `with_action_evaluator` warns at
+    attach time, and the reference says `not_configured`.
 - **`/a2a`** — ✅ *shipped 2026-09-16*. Both A2A dispatch paths (`tasks/send` and the
   `tasks/sendSubscribe` stream) run the same preflight, recording under their own enforcement point
   `gateway:a2a`. Until then the remit could be walked around by choosing the other door, while the
@@ -251,10 +263,9 @@ deployment report, an ambiguous mapping or an absence of records.
   fire and a gateway running a superseded policy was undetectable. Unset, it still does not fire —
   that is now a reported fact rather than a structural impossibility.
 - **Still to come on this line:** the remaining gateway dispatch paths beyond MCP and A2A; the
-  node-local evidence journal with its `append -> LocalSync` receipt and the three failure tests
-  (saturation, persistence failure, lost acknowledgement) — today's sealing is a direct audit-chain
-  write, which is honest but gives the enforcement point no durability receipt to act on beyond
-  success or failure.
+  journal's cursor-based **exporter** (the RA outbox shape, §6.7) — today the journal is written and
+  read, and nothing yet ships from it; and the other four of §5's five records (`requested`,
+  `blocked`, the execution records, `outcome observed`) — the enforcement point writes `decided`.
 - **AE-T T2–T4** (private companion, on the seam): the Cedar adapter, the signed `AuditSink` exporter into the
   consumer's envelopes (Ed25519 over canonical JSON, ≤ 1000 records / ≤ 2 MiB, cursors, same `batch_id` ⇒
   byte-identical body), the procurement mapping subset; T-gate = scenario 2 locally.

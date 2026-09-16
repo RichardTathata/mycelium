@@ -9,6 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — AE evidence is node-local, and only a reference gossips
+
+- **Corrects the entry below, from the same day.** That change recorded gateway decisions by sealing
+  the whole decision document into the tamper-evident audit chain. The chain is an ordinary signed KV
+  entry, so every node received the exact resource each call targeted, the policy's reason, and the
+  constraints it checked — which `docs/design/action-envelope-ae0.md` §5 forbids, having adopted the
+  rule precisely to prevent it.
+- The decision document now goes to a **node-local evidence journal** (`EvidenceJournal`): durable,
+  append-only, fsynced, never gossiped, returning item 1's `LocalDurability`.
+- The audit chain carries an **`AeReference`** only: kind, `operation_id`/`attempt_id`, principal,
+  verdict, policy revision, catalogue id, and the journal record's content hash. The chain's
+  hash-linking still covers the evidence, so tampering stays detectable without dissemination.
+- Three failure behaviours, tested: queue saturation ⇒ refused, never a silent drop; persistence
+  failure ⇒ refused; a lost acknowledgement ⇒ `DeliveryUnknown`, never `Failed`. `EvidenceProfile`
+  chooses whether they gate the effect (`Strict`) or are declared in the record (`Lenient`).
+- Added: `EvidenceJournal`, `EvidenceProfile`, `JournalError`, `Appended`, `read_evidence_journal`,
+  `AeReference`, `EvidenceState`, `AE_REFERENCE_SCHEMA`,
+  `GossipAgent::with_evidence_journal`.
+
 ### Fixed — the AE gateway slice records what it enforces
 
 - **Every gateway authorisation decision is now sealed into the audit chain.** The evaluator preflight
