@@ -41,6 +41,11 @@ jobs:
       # `#[cfg(test)]` code is invisible). Same class of gap as the mini-fuzz below (M2 Run-20).
       # Includes the wire back-compat gate (`decode_wire_v11_*`) — the rolling-upgrade contract.
       - run: ./scripts/ci-retest.sh -p mycelium-core
+      # mycelium-sim (item 6's replay harness). Added with the crate, not after it: a crate
+      # with no gate is the "a job nobody runs never goes red" family, which this repository
+      # has already paid for once. Its own gate is the same-length/different-content
+      # divergence test — a harness that passes that unchanged is only re-seeding.
+      - run: ./scripts/ci-retest.sh -p mycelium-sim
       # In-suite decoder mini-fuzz (gated behind fuzz-internals). The fuzz/
       # targets existed for the whole project's life but were never executed
       # in CI, and an unbounded-allocation decode DoS sat uncaught (M2 Run-20).
@@ -80,6 +85,7 @@ jobs:
       # the 2026-07-11 restructure left this only in a comment (2026-07-21
       # wiki-lint finding; `make check` had it all along).
       - run: cargo clippy -p mycelium-core --lib --tests -- -D warnings
+      - run: cargo clippy -p mycelium-sim --all-targets -- -D warnings
 
   embedded:
     name: Gateway-free build (no default features)

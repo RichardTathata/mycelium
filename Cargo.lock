@@ -2262,6 +2262,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mycelium-sim"
+version = "2.7.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "mycelium-tuple-space"
 version = "2.7.0"
 dependencies = [
