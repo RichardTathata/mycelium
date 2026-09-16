@@ -125,6 +125,39 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v2.6.0 release — 2026-09-16 (tag `v2.6.0`)
+
+The **AE evidence MINOR**. Wire **v12** (PREV 11) unchanged; on-disk format unchanged; backwards-compatible
+rolling upgrade, and every addition is inert for a node that attaches no action evaluator.
+
+The arc of the day, told honestly because the shape of it is the lesson. The gateway enforced a declared remit
+and recorded **nothing** — logged, counted, returned. The first fix (#224) recorded by sealing the whole decision
+document into the tamper-evident audit chain, which is an ordinary signed KV entry: it **gossips to every node**.
+AE0 §5 forbids that in those words, having adopted the rule after reviewing its own first draft. Missed because
+§11 lists the journal as outstanding and that reads as *an addition* rather than *a correction of what you just
+wrote*; no test could have caught it, because they asserted the evidence was recorded and it was. Corrected the
+same day (#225): a node-local `EvidenceJournal` — append-only, fsynced, never gossiped, returning item 1's
+`LocalDurability` — with an `AeReference` in the chain carrying the journal record's **content hash**, so
+tamper-evidence survives without dissemination, and no field on the type to put a resource in. Then the two
+pieces that make it usable: a cursor-based reader (#226, §6.7's outbox shape) because moving evidence out of the
+chain had left an `AuditSink` exporter seeing only references — durable and unreachable; and the execution record
+(#227), because every permitted call had been exporting as `effect: unknown` while the gateway watched the
+provider answer, so the evidence could say what an agent was *allowed* to do and never what it *did*.
+
+Also in this release: `/a2a` enforced on both dispatch paths (previously a remit could be walked around by
+choosing the other door), a live stale-policy check (`expected_policy_revision` was hardcoded `None`, so it could
+never fire), and a CI gate that could never run — no standard build combined `compliance` with `a2a`.
+
+Three failure behaviours are implemented and tested rather than described: queue saturation refuses and never
+drops silently; persistence failure refuses; a lost acknowledgement is `DeliveryUnknown`, **never** `Failed`,
+because the record may well be on disk. `EvidenceProfile` decides whether they gate the effect.
+
+Release gates (RELEASING.md §2–3): `make check-full` green; the five wire gates green
+(`rolling_upgrade_read_frame_version_boundaries`, `rolling_upgrade_data_round_trips_losslessly_both_directions`,
+`rolling_upgrade_forwarding_re_encodes_at_current_version`, `read_frame_accepts_prev_wire_version`,
+`prev_wire_version_kv_write_is_applied_and_converges`). Seven shared crates bumped 2.5.0 → 2.6.0. Logs: the
+`.log/` entries dated 2026-09-16.
+
 ## v2.5.0 release — 2026-09-15 (tag `v2.5.0`)
 
 The **contracts MINOR** — the v3 contracts axis' first tranche, ten items merged between 2026-09-13
