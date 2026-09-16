@@ -9,7 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added — the execution record: what the gateway actually observed
+## [2.6.0] — 2026-09-16
+
+The **AE evidence MINOR** — the gateway now records what it enforces, and the record is one a
+customer could be shown. Wire **v12** (`PREV = 11`) **unchanged**; on-disk format unchanged; a
+backwards-compatible rolling upgrade. Every addition is inert for a node that attaches no action
+evaluator, so an existing deployment behaves exactly as it did.
+
+**The one upgrade note:** a node that *does* attach an evaluator should also attach an evidence
+journal (`GossipAgent::with_evidence_journal`). Without one it enforces and records nothing, and
+warns at attach time saying so.
+
+### Added
+
+#### the execution record: what the gateway actually observed
 
 - Every permitted dispatch now produces a second journal record (`RecordKind::Execution`) beside its
   decision, carrying the same `operation_id` / `attempt_id` / principal. Before this, every permitted
@@ -21,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`observed_execution`) so the timeout rule is unit-tested rather than reasoned about.
 - Added: `RecordKind`, `AeEvidence::kind`, `AeEvidence::as_execution`.
 
-### Added — a cursor-based reader for the evidence journal
+#### a cursor-based reader for the evidence journal
 
 - `read_evidence_journal_from(path, cursor, max_records, max_bytes)` with `EvidenceCursor`,
   `JournalEntry` and `JournalPage`: §6.7's outbox shape, so an exporter batches, ships and advances
@@ -34,43 +47,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - This matters now because the previous entry moved evidence out of the audit chain: an exporter
   built on `AuditSink` sees only references, and must read the journal instead.
 
-### Fixed — AE evidence is node-local, and only a reference gossips
-
-- **Corrects the entry below, from the same day.** That change recorded gateway decisions by sealing
-  the whole decision document into the tamper-evident audit chain. The chain is an ordinary signed KV
-  entry, so every node received the exact resource each call targeted, the policy's reason, and the
-  constraints it checked — which `docs/design/action-envelope-ae0.md` §5 forbids, having adopted the
-  rule precisely to prevent it.
-- The decision document now goes to a **node-local evidence journal** (`EvidenceJournal`): durable,
-  append-only, fsynced, never gossiped, returning item 1's `LocalDurability`.
-- The audit chain carries an **`AeReference`** only: kind, `operation_id`/`attempt_id`, principal,
-  verdict, policy revision, catalogue id, and the journal record's content hash. The chain's
-  hash-linking still covers the evidence, so tampering stays detectable without dissemination.
-- Three failure behaviours, tested: queue saturation ⇒ refused, never a silent drop; persistence
-  failure ⇒ refused; a lost acknowledgement ⇒ `DeliveryUnknown`, never `Failed`. `EvidenceProfile`
-  chooses whether they gate the effect (`Strict`) or are declared in the record (`Lenient`).
-- Added: `EvidenceJournal`, `EvidenceProfile`, `JournalError`, `Appended`, `read_evidence_journal`,
-  `AeReference`, `EvidenceState`, `AE_REFERENCE_SCHEMA`,
-  `GossipAgent::with_evidence_journal`.
-
-### Fixed — the AE gateway slice records what it enforces
-
-- **Every gateway authorisation decision is now sealed into the audit chain.** The evaluator preflight
-  refused and permitted and wrote nothing, so a node enforcing a declared remit produced no evidence at
-  all. Both outcomes are now recorded as an `AeEvidence` document (`mycelium.ae/evidence/1`) in the
-  audit record's `detail`, carrying the verdict, policy revision, checked constraints, execution and
-  reviewed mapping — facts the record's own three-valued outcome cannot hold without rounding
-  *not established* into *denied*. A decision that cannot be recorded now **refuses the dispatch**
-  (`PreflightRefusal::NotRecorded`, JSON-RPC `-32032`).
-- **`/a2a` is enforced.** Both A2A dispatch paths run the same preflight, under enforcement point
-  `gateway:a2a`. Previously only `tools/call` was guarded, so a remit could be walked around by
-  choosing the other edge.
-- **The stale-policy check can fire.** `GossipAgent::set_deployed_policy_revision` supplies the
-  revision an operator reported as deployed; the seam compares every decision against it. The
-  envelope's `expected_policy_revision` was hardcoded `None`, so the check was structurally dead.
-
-### Added
-
 - `AeEvidence`, `DecisionKind`, `MappingKind`, `Execution`, `AE_EVIDENCE_SCHEMA` — the evidence
   document a gateway decision produces, and the schema a consumer matches on.
 - `GossipAgent::set_deployed_policy_revision` / `deployed_policy_revision`.
@@ -79,8 +55,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   record, and an operator should not have to discover that from an empty evidence stream.
 - CI's compliance job now builds `a2a` alongside it. Neither standard gate built the pair, so a test
   needing both would silently never have run.
-
-### Added
 
 - **Contracts axis item 1 PR 4b — the persisted-by-peer receipt** (`src/agent/replica_sync.rs`,
   `GossipAgent::set_with_replica_sync`, `WalHandle::sync`; record
@@ -148,6 +122,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer produce a false `Ok`. Anything that appeared to succeed was relying on that.
 
 ### Fixed
+
+#### AE evidence is node-local, and only a reference gossips
+
+- **Corrects the entry below, from the same day.** That change recorded gateway decisions by sealing
+  the whole decision document into the tamper-evident audit chain. The chain is an ordinary signed KV
+  entry, so every node received the exact resource each call targeted, the policy's reason, and the
+  constraints it checked — which `docs/design/action-envelope-ae0.md` §5 forbids, having adopted the
+  rule precisely to prevent it.
+- The decision document now goes to a **node-local evidence journal** (`EvidenceJournal`): durable,
+  append-only, fsynced, never gossiped, returning item 1's `LocalDurability`.
+- The audit chain carries an **`AeReference`** only: kind, `operation_id`/`attempt_id`, principal,
+  verdict, policy revision, catalogue id, and the journal record's content hash. The chain's
+  hash-linking still covers the evidence, so tampering stays detectable without dissemination.
+- Three failure behaviours, tested: queue saturation ⇒ refused, never a silent drop; persistence
+  failure ⇒ refused; a lost acknowledgement ⇒ `DeliveryUnknown`, never `Failed`. `EvidenceProfile`
+  chooses whether they gate the effect (`Strict`) or are declared in the record (`Lenient`).
+- Added: `EvidenceJournal`, `EvidenceProfile`, `JournalError`, `Appended`, `read_evidence_journal`,
+  `AeReference`, `EvidenceState`, `AE_REFERENCE_SCHEMA`,
+  `GossipAgent::with_evidence_journal`.
+
+#### the AE gateway slice records what it enforces
+
+- **Every gateway authorisation decision is now sealed into the audit chain.** The evaluator preflight
+  refused and permitted and wrote nothing, so a node enforcing a declared remit produced no evidence at
+  all. Both outcomes are now recorded as an `AeEvidence` document (`mycelium.ae/evidence/1`) in the
+  audit record's `detail`, carrying the verdict, policy revision, checked constraints, execution and
+  reviewed mapping — facts the record's own three-valued outcome cannot hold without rounding
+  *not established* into *denied*. A decision that cannot be recorded now **refuses the dispatch**
+  (`PreflightRefusal::NotRecorded`, JSON-RPC `-32032`).
+- **`/a2a` is enforced.** Both A2A dispatch paths run the same preflight, under enforcement point
+  `gateway:a2a`. Previously only `tools/call` was guarded, so a remit could be walked around by
+  choosing the other edge.
+- **The stale-policy check can fire.** `GossipAgent::set_deployed_policy_revision` supplies the
+  revision an operator reported as deployed; the seam compares every decision against it. The
+  envelope's `expected_policy_revision` was hardcoded `None`, so the check was structurally dead.
 
 - **CI: the scale-evidence alarm could not fire, because it was queued behind the silence it
   reports** (`.github/workflows/scale-nightly.yml`). The `evidence-freshness` job added on
