@@ -91,6 +91,23 @@ a correctness assumption, the choices-trace and bundle schema (D14), the static 
 additions (CAS retries to Loom, hash iteration order, lease-expiry clock reads). Concepts: *seam*, *bundle*.
 Wiki: [testing](testing/testing.md), [`.log/2026-09-13-item6-pr1-nondeterminism-inventory.md`](.log/2026-09-13-item6-pr1-nondeterminism-inventory.md).
 
+## v3 contracts axis — AE-T: the seam records what it enforces — 2026-09-16 (unreleased, PR #224)
+
+Three gaps on the AE line, found by building the private exporter *against* the seam rather than by reviewing it:
+the exporter needed records and there were none. **The gateway wrote nothing** — `ae_preflight` refused, logged,
+counted and returned, so a node enforcing a declared remit produced no evidence at all. Every evaluated dispatch,
+**permit and refusal both**, is now sealed into the audit chain as an `AeEvidence` document
+(`mycelium.ae/evidence/1`) in `detail`; the document exists because a three-valued `AuditOutcome` collapses
+*prohibited* into *not established*. A record that cannot be written **refuses the dispatch**
+(`PreflightRefusal::NotRecorded`, `-32032`), permit included — enforcement without attribution is an unlogged gate.
+**`/a2a` was unguarded** (both paths now run the same preflight under `gateway:a2a`; the preflight takes a `TaskCtx`
+so the routes share one implementation). **The stale-policy check could never fire** — `expected_policy_revision`
+was hardcoded `None`; `set_deployed_policy_revision` supplies it. Plus a gate that could never run: no standard
+build combined `compliance` (the chain) with `a2a` (the route), so a test needing both would have passed locally and
+never run in CI — the make-check-vs-CI-green family, one layer down at the *feature combination*. Additive
+throughout. Wiki: [dev](dev.md) §AE,
+[`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
+
 ## v2.5.0 release — 2026-09-15 (tag `v2.5.0`)
 
 The **contracts MINOR** — the v3 contracts axis' first tranche, ten items merged between 2026-09-13

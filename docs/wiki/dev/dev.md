@@ -48,7 +48,16 @@ scenarios on AWS/GCP with Mycelium participants and NovusLens evidence views.
 `ReferenceEvaluator`, and the hook at the MCP `tools/call` dispatch — inert until
 `with_action_evaluator` attaches one. The AE0 §9 negative fixtures are its unit gates; two live-gateway
 tests prove the wiring refuses before a tool runs. A **route-level preflight**, never enforcement at the
-effect. Next on this line: `/a2a`, the evidence journal, the deployment report.
+effect.
+**The seam started recording 2026-09-16** (PR #224): until then the preflight refused, logged, and wrote
+*nothing* — a node enforcing a declared remit produced no evidence at all. Every evaluated dispatch,
+**permit and refusal both**, is now sealed into the audit chain as an `AeEvidence` document
+(`mycelium.ae/evidence/1`) in `detail`; a decision that cannot be recorded **refuses the dispatch**
+(`PreflightRefusal::NotRecorded`). The same PR put the preflight on `/a2a` (both paths, enforcement
+point `gateway:a2a`) and gave the stale-policy check its second opinion
+(`set_deployed_policy_revision`), which was hardcoded `None` and so could never fire. Next on this line:
+the remaining dispatch paths, and the evidence journal's `append -> LocalSync` receipt with its three
+failure tests.
 **AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md): the envelope
 (item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
 `policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;
