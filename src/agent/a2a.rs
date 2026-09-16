@@ -312,6 +312,23 @@ async fn handle_tasks_send(
     // a 30 s cap made every such composition fail with -32603 while the
     // pipeline was still working. Clients enforce their own HTTP timeouts.
     let timeout = Duration::from_secs(120);
+    // AE slice: the same evaluator preflight the MCP edge runs. `/a2a` is the *other* route a
+    // foreign agent acts through, so leaving it unguarded would mean the enforcement point could be
+    // walked around by choosing a different door — and the evidence would still have said
+    // `coverage.complete: false`, truthfully, while the remit went unenforced.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if let Some(refusal) = super::http::ae_preflight(
+        &state.task_ctx,
+        caller,
+        "skill.invoke",
+        &format!("skill:{skill_id}@{target}"),
+        &json!({ "text": text }),
+        params,
+        super::http::ENFORCEMENT_POINT_A2A,
+    ) {
+        return jsonrpc_error(id, refusal.json_rpc_code(), &refusal.to_string());
+    }
+
     // Item 7: the skill provider is told who called (the resolved bearer principal, or
     // `anonymous`), never just "the gateway node".
     match gateway_caller::gateway_rpc_call(
@@ -399,6 +416,28 @@ pub(crate) async fn tasks_send_subscribe(
                 .event("task_status_update")
                 .data(json!({ "id": &task_id3, "status": { "state": "working" } }).to_string())));
         });
+
+        // The streaming edge is the same enforcement point; a refusal becomes a failed task
+        // rather than a silent drop, so the client learns the same thing it would on `tasks/send`.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if let Some(refusal) = super::http::ae_preflight(
+            &state2.task_ctx,
+            caller.as_ref(),
+            "skill.invoke",
+            &format!("skill:{skill_id}@{target}"),
+            &json!({ "text": text }),
+            &Value::Null,
+            super::http::ENFORCEMENT_POINT_A2A,
+        ) {
+            let _ = tx
+                .send(Ok(Event::default().event("task_status_update").data(
+                    json!({ "id": &task_id2, "status": { "state": "failed" },
+                            "error": refusal.to_string() })
+                    .to_string(),
+                )))
+                .await;
+            return;
+        }
 
         let timeout = Duration::from_secs(30);
         match gateway_caller::gateway_rpc_call(
@@ -498,6 +537,65 @@ mod tests {
             GossipConfig::default(),
         );
         Arc::clone(&agent.task_ctx)
+    }
+
+    /// **`/a2a` was unguarded.** The evaluator ran on `tools/call` only, so a remit enforced at the
+    /// MCP edge could be walked around by choosing the other door — and the evidence would have gone
+    /// on saying `coverage.complete: false`, truthfully, while nothing was enforced there at all.
+    ///
+    /// This exercises the shared preflight with the A2A route's own parameters and asserts the
+    /// evidence names that route. The SSE call site above is compile-checked; standing up the
+    /// streaming stack to re-test the same function would buy little.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn the_a2a_edge_refuses_and_records_under_its_own_enforcement_point() {
+        use crate::test_util::alloc_port;
+        use crate::{AeEvidence, Execution, ReferenceEvaluator, Rule};
+
+        let port = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("ae-a2a-{port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+
+        let resource = "skill:danger@127.0.0.1:1".to_string();
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-a2a")
+                .with_catalogue("cat-test", "1")
+                .map_action("skill.invoke", resource.clone())
+                .prohibit(Rule::new("*", "skill.invoke", resource.clone())),
+        ));
+        agent.start().await.unwrap();
+
+        let refusal = super::super::http::ae_preflight(
+            &agent.task_ctx,
+            None,
+            "skill.invoke",
+            &resource,
+            &json!({ "text": "please do the forbidden thing" }),
+            &Value::Null,
+            super::super::http::ENFORCEMENT_POINT_A2A,
+        )
+        .expect("a prohibited skill must be refused at the A2A edge");
+        assert_eq!(refusal.json_rpc_code(), -32030);
+        assert_eq!(refusal.reason(), "action_denied");
+
+        let evidence: Vec<AeEvidence> = agent
+            .audit_stream(agent.node_id())
+            .iter()
+            .filter_map(|r| AeEvidence::from_detail(r.record.detail.as_deref()))
+            .collect();
+        assert_eq!(evidence.len(), 1, "the A2A decision is recorded like any other");
+        let e = &evidence[0];
+        assert_eq!(e.enforcement_point, super::super::http::ENFORCEMENT_POINT_A2A);
+        assert_eq!(e.operation, "skill.invoke");
+        assert_eq!(e.resource, resource);
+        assert_eq!(e.execution, Execution::None, "nothing ran, and this point can say so");
+
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
     }
 
     #[test]

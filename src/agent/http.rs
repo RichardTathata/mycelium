@@ -1418,12 +1418,13 @@ async fn mcp_handler(
             // (`docs/design/action-envelope-ae0.md` §7).
             #[cfg(all(feature = "gateway", feature = "tls"))]
             if let Some(refusal) = ae_preflight(
-                &ctx,
+                &ctx.agent_ctx,
                 caller.as_ref(),
                 "tools/call",
                 &format!("tool:{name}@{provider_node_id}"),
                 &arguments,
-                &req,
+                &req["params"],
+                ENFORCEMENT_POINT_MCP,
             ) {
                 return Json(json!({
                     "jsonrpc": "2.0", "id": id,
@@ -1855,6 +1856,15 @@ async fn gw_rpc_call(
     }
 }
 
+/// The MCP tool-call route, as it is named in every piece of evidence it produces.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) const ENFORCEMENT_POINT_MCP: &str = "gateway:mcp/tools/call";
+
+/// The A2A route. Gated on `a2a` as well: it is referenced only from that module, and an item
+/// alive in a build that never uses it is the feature-gated dead-code trap CI checks for.
+#[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
+pub(crate) const ENFORCEMENT_POINT_A2A: &str = "gateway:a2a";
+
 /// Assemble an [`ActionEnvelope`](super::action_evaluator::ActionEnvelope) from facts this
 /// gateway verified and run the evaluator over it. `Some(refusal)` means do not dispatch.
 ///
@@ -1863,16 +1873,17 @@ async fn gw_rpc_call(
 /// rule. Everything that *is* authority — the actor, the granted scopes — comes from the auth layer
 /// and never from the request body (item 7). The `attempt_id` is minted per dispatch here.
 #[cfg(all(feature = "gateway", feature = "tls"))]
-fn ae_preflight(
-    ctx: &HttpCtx,
+pub(crate) fn ae_preflight(
+    ctx: &Arc<TaskCtx>,
     caller: Option<&ResolvedPrincipal>,
     operation: &str,
     resource: &str,
     arguments: &serde_json::Value,
-    request: &serde_json::Value,
+    params: &serde_json::Value,
+    enforcement_point: &str,
 ) -> Option<super::action_evaluator::PreflightRefusal> {
     use super::action_evaluator as ae;
-    let evaluator = ctx.agent_ctx.action_evaluator.get()?;
+    let evaluator = ctx.action_evaluator.get()?;
 
     // Both evaluator questions asked behind the unwind boundary (AE0 §3): a panicking adapter
     // cannot be used to build the envelope either.
@@ -1895,10 +1906,10 @@ fn ae_preflight(
         }
     }
 
-    let operation_id = request["params"]["_meta"]["operation_id"]
+    let operation_id = params["_meta"]["operation_id"]
         .as_str()
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("gw:{}/{:016x}", ctx.agent_ctx.node_id, fastrand::u64(..)));
+        .unwrap_or_else(|| format!("gw:{}/{:016x}", ctx.node_id, fastrand::u64(..)));
     let attempt_id = format!("{operation_id}/{:08x}", fastrand::u32(..));
     let (actor, scopes) = match caller {
         Some(c) => (c.principal.clone(), c.scopes.clone()),
@@ -1907,28 +1918,52 @@ fn ae_preflight(
     // Canonical arguments: serde_json's object serialization is key-ordered for `Map` in its
     // default (BTreeMap) configuration, so the digest is stable for equal arguments.
     let canonical = serde_json::to_vec(arguments).unwrap_or_default();
-    let now_ms = crate::hlc::physical_ms(ctx.agent_ctx.hlc.current());
+    let now_ms = crate::hlc::physical_ms(ctx.hlc.current());
 
     let envelope = ae::ActionEnvelope {
         operation_id,
         attempt_id,
         actor,
-        via: ctx.agent_ctx.node_id.clone(),
+        via: ctx.node_id.clone(),
         scopes,
         operation: operation.to_string(),
         resource: resource.to_string(),
         arguments_digest: ae::arguments_digest(&canonical),
         selected_arguments: selected,
         mapping,
-        // The expected policy revision comes from a deployment report, which the AE exporter
-        // supplies (AE0 §6); until then the seam has no second opinion to compare against and the
-        // stale-policy check simply does not fire.
-        expected_policy_revision: None,
+        // The expected policy revision comes from the deployment report an operator filed, via
+        // `GossipAgent::set_deployed_policy_revision` (AE0 §6). Unset, the seam has no second
+        // opinion and the stale-policy check does not fire — which is why leaving it unset means a
+        // gateway running a superseded policy cannot be detected.
+        expected_policy_revision: ctx.deployed_policy_revision.load_full().map(|r| (*r).clone()),
         issued_at_ms: now_ms,
         not_after_ms: now_ms.saturating_add(60_000),
     };
 
-    match ae::preflight(Some(evaluator), &envelope, now_ms) {
+    // Decide, then record, *then* dispatch. Both outcomes are sealed: a permit with no record of
+    // why is precisely the gap this slice exists to close, so recording only refusals would leave
+    // the interesting half invisible — and an evidence stream that omits its permits cannot support
+    // any statement about what an agent was allowed to do.
+    let outcome = ae::preflight(Some(evaluator), &envelope, now_ms);
+    let (decision, execution) = match &outcome {
+        Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),
+        // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
+        // record, nothing to refuse.
+        Ok(None) => return None,
+        Err(refusal) => (refusal.decision().clone(), ae::Execution::None),
+    };
+
+    let evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
+    if let Err(e) = ae_record(ctx, &evidence) {
+        warn!(actor = %envelope.actor, %operation, %resource,
+              "AE preflight: the decision could not be recorded, so the action is refused: {e}");
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => "evidence_not_recorded")
+            .increment(1);
+        return Some(ae::PreflightRefusal::NotRecorded(decision));
+    }
+
+    match outcome {
         Ok(_) => None,
         Err(refusal) => {
             warn!(actor = %envelope.actor, %operation, %resource,
@@ -1938,6 +1973,42 @@ fn ae_preflight(
             Some(refusal)
         }
     }
+}
+
+/// Seal one AE decision into this node's tamper-evident audit chain.
+///
+/// The record is the *only* durable trace a gateway decision leaves, so its failure is a refusal
+/// upstream rather than a log line here: see [`PreflightRefusal::NotRecorded`].
+///
+/// [`PreflightRefusal::NotRecorded`]: super::action_evaluator::PreflightRefusal::NotRecorded
+#[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+fn ae_record(
+    ctx: &Arc<TaskCtx>,
+    evidence: &super::action_evaluator::AeEvidence,
+) -> Result<(), String> {
+    let detail = serde_json::to_string(evidence).map_err(|e| e.to_string())?;
+    super::audit::seal_and_write(
+        ctx,
+        super::audit::AuditAction::Invoke,
+        evidence.subject.clone(),
+        evidence.resource.clone(),
+        evidence.audit_outcome(),
+        Some(detail),
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Without `compliance` this build has **no audit chain at all**, so there is nothing to write to
+/// and nothing that can fail. Such a node enforces without recording; `with_action_evaluator` warns
+/// about it at attach time, and any deployment report from such a node has to say so. Refusing every
+/// dispatch instead would break existing gateways that never asked for an evaluator.
+#[cfg(all(feature = "gateway", feature = "tls", not(feature = "compliance")))]
+fn ae_record(
+    _ctx: &Arc<TaskCtx>,
+    _evidence: &super::action_evaluator::AeEvidence,
+) -> Result<(), String> {
+    Ok(())
 }
 
 /// HTTP shape of a refused gateway dispatch (item 7): `412 Precondition Failed` — the
@@ -5692,6 +5763,140 @@ mod ae_seam_tests {
         assert_eq!(ran.load(Ordering::SeqCst), 1, "the uncovered tool must not run");
 
         drop(handles);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// **Enforcement without attribution is not governance.** Before this, the gateway refused and
+    /// permitted and wrote *nothing*: a deployment enforced a remit and produced no evidence at all,
+    /// so the exporter downstream would have shipped empty batches. Both outcomes are now sealed,
+    /// and the permit matters at least as much as the refusal — an evidence stream that omits what
+    /// an agent *was* allowed to do cannot support any statement about its conduct.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn every_gateway_decision_is_sealed_into_the_audit_chain() {
+        use crate::{AeEvidence, DecisionKind, Execution};
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("ae-evidence-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+
+        let me = agent.node_id().clone();
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-7")
+                .with_catalogue("cat-test", "2")
+                .map_action("tools/call", format!("tool:allowed@{me}"))
+                .map_action("tools/call", format!("tool:forbidden@{me}"))
+                .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", format!("tool:allowed@{me}")))
+                .prohibit(Rule::new("*", "tools/call", format!("tool:forbidden@{me}"))),
+        ));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut handles = Vec::new();
+        for tool in ["allowed", "forbidden"] {
+            handles.push(agent.mcp().register_mcp_tool(
+                tool,
+                serde_json::json!({"type": "object", "properties": {}}),
+                move |_args| async move { Ok(serde_json::json!("ran")) },
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let permitted = tools_call(http_port, "allowed", serde_json::json!({})).await;
+        assert!(permitted.get("error").is_none(), "permitted call: {permitted}");
+        let refused = tools_call(http_port, "forbidden", serde_json::json!({})).await;
+        assert_eq!(refused["error"]["code"], -32030);
+
+        let evidence: Vec<AeEvidence> = agent
+            .audit_stream(agent.node_id())
+            .iter()
+            .filter_map(|r| AeEvidence::from_detail(r.record.detail.as_deref()))
+            .collect();
+        assert_eq!(evidence.len(), 2, "both the permit and the refusal are recorded");
+
+        let permit = evidence.iter().find(|e| e.decision == DecisionKind::Permit).expect("the permit");
+        assert!(permit.resource.starts_with("tool:allowed@"));
+        assert_eq!(permit.policy_revision, "rev-7");
+        assert_eq!(permit.enforcement_point, super::ENFORCEMENT_POINT_MCP);
+        assert_eq!(permit.catalogue, "cat-test");
+        assert_eq!(permit.catalogue_revision, "2");
+        // Dispatched, and this gateway did not watch what the provider then did. `Attempted` is the
+        // honest answer; `Completed` would be a claim the gateway is in no position to make.
+        assert_eq!(permit.execution, Execution::Attempted);
+
+        let deny = evidence.iter().find(|e| e.decision == DecisionKind::Deny).expect("the denial");
+        assert!(deny.resource.starts_with("tool:forbidden@"));
+        // Nothing ran, and this point can say so — which is what a consumer reads as `effect: none`.
+        assert_eq!(deny.execution, Execution::None);
+        // The precise fact is the document; the audit record's own outcome is only a summary.
+        assert_eq!(deny.audit_outcome(), crate::AuditOutcome::Denied);
+
+        // And the chain that carries them still verifies.
+        agent.audit_verify(agent.node_id()).expect("the chain verifies");
+
+        drop(handles);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// **The stale-policy check could never fire.** `expected_policy_revision` was hardcoded `None`,
+    /// so the seam had no second opinion and a gateway running a superseded policy was undetectable —
+    /// the exact condition the check exists for. An operator now reports the deployed revision, and
+    /// a decision from any other one is *authority not established*, never a permit.
+    #[tokio::test]
+    async fn a_reported_deployment_makes_a_stale_policy_detectable() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("ae-stale-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+
+        let me = agent.node_id().clone();
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-1")
+                .with_catalogue("cat-test", "1")
+                .map_action("tools/call", format!("tool:allowed@{me}"))
+                .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", format!("tool:allowed@{me}"))),
+        ));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _h = agent.mcp().register_mcp_tool(
+            "allowed",
+            serde_json::json!({"type": "object", "properties": {}}),
+            |_args| async move { Ok(serde_json::json!("ran")) },
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Control: with nothing reported there is nothing to compare against, and the call goes.
+        assert!(agent.deployed_policy_revision().is_none());
+        let body = tools_call(http_port, "allowed", serde_json::json!({})).await;
+        assert!(body.get("error").is_none(), "no reported deployment, so no staleness: {body}");
+
+        // The operator reports a *different* revision as deployed. The evaluator is now provably
+        // not the policy anyone signed off, and the same call stops.
+        agent.set_deployed_policy_revision("rev-2");
+        assert_eq!(agent.deployed_policy_revision().as_deref(), Some("rev-2"));
+        let body = tools_call(http_port, "allowed", serde_json::json!({})).await;
+        assert_eq!(body["error"]["code"], -32031, "a stale policy establishes nothing: {body}");
+        assert_eq!(body["error"]["data"]["reason"], "authority_not_established");
+
+        // Reporting the revision actually loaded lets it through again — the check is about
+        // agreement, not about being switched on.
+        agent.set_deployed_policy_revision("rev-1");
+        let body = tools_call(http_port, "allowed", serde_json::json!({})).await;
+        assert!(body.get("error").is_none(), "agreeing revisions permit: {body}");
+
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&cert_dir);
     }

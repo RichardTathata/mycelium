@@ -116,8 +116,9 @@ pub use mcp::{McpError, McpToolHandle};
 pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
-    ActionEnvelope, ActionEvaluator, ActionMapping, Decision, MappingStatus, PreflightRefusal,
-    ReferenceEvaluator, Rule, Verdict,
+    ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, Decision, DecisionKind, Execution,
+    MappingKind, MappingStatus, PreflightRefusal, ReferenceEvaluator, Rule, Verdict,
+    AE_EVIDENCE_SCHEMA,
 };
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
@@ -449,6 +450,16 @@ pub(crate) struct TaskCtx {
     /// the gateway preflight is inert and dispatch behaves exactly as before.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) action_evaluator: std::sync::OnceLock<Arc<dyn action_evaluator::ActionEvaluator>>,
+    /// The policy revision an operator has reported as deployed, set via
+    /// [`GossipAgent::set_deployed_policy_revision`]. The gateway puts it on every envelope as
+    /// `expected_policy_revision`, which is what lets the seam's stale-policy check fire at all:
+    /// without a second opinion there is nothing to compare a decision's revision against.
+    ///
+    /// `ArcSwapOption` rather than a lock, deliberately: a policy reload replaces it, the read is
+    /// on the dispatch path, and adding a `Mutex` here would mean adding a row to the lock-order
+    /// table for a value that is only ever wholly replaced.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) deployed_policy_revision: arc_swap::ArcSwapOption<String>,
     /// Optional external audit sink (SOC 2 WS-C), set via `with_audit_sink`.
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink: std::sync::OnceLock<Arc<dyn audit::AuditSink>>,
@@ -867,6 +878,8 @@ impl GossipAgent {
             audit_chain: Arc::new(std::sync::Mutex::new(audit::AuditChainState::new())),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             action_evaluator: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -936,9 +949,43 @@ impl GossipAgent {
     /// outside the guarantee, and the evidence must say so. Settable once; a second call is ignored.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn with_action_evaluator(&self, evaluator: Arc<dyn action_evaluator::ActionEvaluator>) {
+        // A build without `compliance` has no audit chain, so decisions cannot be recorded. The
+        // gateway will still enforce — and that is enforcement without attribution, which is a
+        // materially weaker thing than it looks like. Say so at attach time rather than leaving an
+        // operator to discover it from an empty evidence stream.
+        #[cfg(not(feature = "compliance"))]
+        tracing::warn!(
+            "with_action_evaluator: this build has no audit chain (`compliance` is off), so gateway \
+             decisions will be enforced but NOT recorded"
+        );
         if self.task_ctx.action_evaluator.set(evaluator).is_err() {
             tracing::warn!("with_action_evaluator: an evaluator is already attached; ignoring");
         }
+    }
+
+    /// Record the policy revision an operator has reported as **deployed**.
+    ///
+    /// The gateway puts this on every action envelope as `expected_policy_revision`. Until it is
+    /// set the seam's stale-policy check has nothing to compare against and simply does not fire —
+    /// so a gateway running a superseded policy is undetectable, which is the condition the check
+    /// exists for. Set it to the same string the deployment report carries.
+    ///
+    /// Callable again after a policy reload: the value is replaced wholesale, and the next dispatch
+    /// uses the new one.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn set_deployed_policy_revision(&self, revision: impl Into<String>) {
+        self.task_ctx
+            .deployed_policy_revision
+            .store(Some(Arc::new(revision.into())));
+    }
+
+    /// The deployed policy revision this node is comparing decisions against, if any.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn deployed_policy_revision(&self) -> Option<String> {
+        self.task_ctx
+            .deployed_policy_revision
+            .load_full()
+            .map(|s| (*s).clone())
     }
 
     /// Attach an external audit sink (SOC 2 WS-C) — a SIEM / WORM destination. Every record
