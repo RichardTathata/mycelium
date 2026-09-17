@@ -56,7 +56,14 @@ measures an *interval*. `Instant` is monotonic, so a backwards NTP step cannot m
 negative or enormous; `SystemTime` gives no such guarantee. Routing these through the wall clock
 would have been one function fewer and a new class of bug — a rate window that never expires, a
 backoff that fires instantly. `Instant` has no epoch, so the seam supplies one (the first read),
-which is what `Seams::mono_now_ns` already meant by "since the run began". `mono_since` replaces
+which is what `Seams::mono_now_ns` already meant by "since the run began" — **offset by
+`MONO_ORIGIN_NS`**, a year, so that a point *before* the run is representable. That offset is not
+cosmetic: `Instant` has the property (it is internally signed on Linux and offset on macOS, so
+`Instant::now() - 600s` is fine however young the process is) and a bare count from zero does not.
+`SignalLog::seed` reconstructs an entry that arrived `age_ms` ago and `warm_quorum_from_layer1` calls
+it *at startup*, so a zero origin would clamp every warmed record to the run's start and make stale
+quorum evidence read as live. `mycelium-sim`'s `Sources` starts at the same origin — a harness that
+disagreed here would disagree in the direction that hides the bug. `mono_since` replaces
 `Instant::elapsed` and saturates, because "earlier is actually later" cannot happen and a wrap would
 express that impossibility as five centuries elapsed — which a cooldown reads as long expired.
 

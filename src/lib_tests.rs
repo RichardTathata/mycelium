@@ -1963,9 +1963,18 @@ async fn test_last_signal_updates_after_deliver() {
     let _ = agent.mesh().emit(kind, SignalScope::Cluster, Bytes::new());
     // Give the local deliver() call time to record.
     time::sleep(Duration::from_millis(5)).await;
-    let ts = agent.mesh().last_signal(kind);
-    assert!(ts.is_some(), "last_signal should be Some after emit");
-    assert!(ts.unwrap() >= before, "timestamp should be at or after emit time");
+    // `last_signal` now returns the AGE rather than an `Instant` (item 6 PR 3). The same claim,
+    // stated on the age: the record cannot be older than the emit that produced it.
+    let age = agent.mesh().last_signal(kind);
+    assert!(age.is_some(), "last_signal should be Some after emit");
+    let age = age.unwrap();
+    assert!(
+        age <= before.elapsed(),
+        "the signal cannot have been recorded before the emit that produced it: \
+         age {age:?} > {:?} since emit",
+        before.elapsed()
+    );
+    assert!(age < Duration::from_secs(1), "and it was recorded just now, not long ago: {age:?}");
 }
 
 // ── suppress / unsuppress / is_suppressed ────────────────────────────────

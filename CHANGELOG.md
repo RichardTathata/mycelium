@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — **BREAKING**: `MeshHandle::last_signal` returns the age, not an `Instant`
+
+- `pub fn last_signal(&self, kind: &str) -> Option<Duration>` — **how long ago**, where it used to be
+  `Option<Instant>`. The age is what every caller computed from the `Instant` anyway, and it is what
+  the sibling `last_signal_persistent` has always returned, so the pair is now consistent.
+  **Migration:** `h.last_signal(k).map(|t| t.elapsed())` becomes `h.last_signal(k)`.
+- `MeshHandle::suppress` is **unchanged** — it always took a `Duration`.
+- `signal.rs`'s ten interval sites are on the clock seam: the sender log, the per-kind `last_seen`,
+  the suppression table, the quorum-evidence rate limiter, and the reorder buffer's hold. Baseline
+  **159 sites across 43 files**, from 170.
+
+### Added — the monotonic clock has a non-zero origin, and `seed_sender_log` has its first test
+
+- `sim_seam::MONO_ORIGIN_NS` (one year). `Instant` can represent a point *before* process start — on
+  both platforms it is internally offset, so `Instant::now() - 600s` is fine however young the
+  process is — and a bare "nanoseconds since we started" cannot. `SignalLog::seed` reconstructs an
+  entry that arrived `age_ms` ago and `warm_quorum_from_layer1` calls it **at startup**, so a zero
+  origin would clamp every warmed record to the run's start and make stale quorum evidence read as
+  live, in the one moment the mechanism exists for.
+- `mycelium-sim`'s `Sources` starts its monotonic clock at the same origin, so the harness does not
+  disagree with the thing it models.
+- `seed_sender_log` had **no test in either representation**. It has one now, and it fails if the
+  origin is zeroed.
+
 ### Changed — **BREAKING**: the peer table's timestamp is monotonic nanoseconds, not an `Instant`
 
 > **This sets the next release to MAJOR** (`RELEASING.md` §1: a breaking change to the public API).
