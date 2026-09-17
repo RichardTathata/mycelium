@@ -67,6 +67,16 @@ const MARKER: &str = "<!-- mycelium-section ";
 /// Configuration for a [`GitStore`].
 #[derive(Clone)]
 pub struct GitStoreConfig {
+    /// **Optional mandate fence** (v3 item 5 PR 3, `docs/design/scoped-mandates.md` §5).
+    ///
+    /// `None` (the default) is today's behaviour exactly — no ref is asserted and the push is
+    /// unchanged, so a store that has not opted in is unaffected.
+    ///
+    /// `Some` puts the mandate check **inside the same transactions as the content write**: a
+    /// `verify` line in the `update-ref --stdin` transaction locally, and `--atomic` plus
+    /// `--force-with-lease` on every push — including pushes that change only content, which is the
+    /// case an earlier hook-time read would miss.
+    pub mandate: Option<crate::mandate_fence::MandateFence>,
     /// The checkout root. Created (and `git init -b {branch}`ed) if absent.
     pub dir: PathBuf,
     /// The branch the store commits to.
@@ -122,6 +132,9 @@ impl std::fmt::Debug for GitStoreConfig {
 impl Default for GitStoreConfig {
     fn default() -> Self {
         Self {
+            // No fence by default: opting in is opting in, and every existing deployment keeps
+            // exactly the behaviour it has.
+            mandate:        None,
             dir:            PathBuf::from("wiki-repo"),
             branch:         "main".to_string(),
             subdir:         "pages".to_string(),
@@ -653,7 +666,16 @@ impl GitStore {
             // (old-value "" asserts creation for the unborn branch).
             let refname = self.refname();
             let old = head.unwrap_or("");
-            let (_, ok) = self.git_raw(&["update-ref", &refname, &commit, old], None)?;
+            // One ref transaction: with a fence configured, the mandate is verified *through
+            // commit* rather than before it, so a concurrent appointment cannot slip between the
+            // check and the write (§5(i)).
+            let txn = crate::mandate_fence::update_ref_stdin(
+                &refname,
+                &commit,
+                old,
+                self.cfg.mandate.as_ref(),
+            );
+            let (_, ok) = self.git_raw(&["update-ref", "--stdin"], Some(txn.as_bytes()))?;
             if !ok {
                 return Ok(CommitOutcome::RefMoved);
             }
@@ -1075,7 +1097,12 @@ impl WikiStore for GitStore {
             if attempt > 0 {
                 self.backoff(attempt); // P6.4: concurrent publishers queue, not fail
             }
-            let (_, pushed) = self.git_raw(&["push", "-q", "origin", &refspec], None)?;
+            // §5(ii): `--atomic` plus `--force-with-lease` on EVERY push, including this one if it
+            // changes only content — that "including" is what makes the mandate check part of the
+            // same remote ref transaction rather than an earlier read.
+            let push = crate::mandate_fence::push_args(&refspec, self.cfg.mandate.as_ref());
+            let push_argv: Vec<&str> = push.iter().map(String::as_str).collect();
+            let (_, pushed) = self.git_raw(&push_argv, None)?;
             if pushed {
                 let ls = self.git_ok(&["ls-remote", "origin", &refname], None)?;
                 let remote_sha =

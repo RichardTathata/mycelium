@@ -38,6 +38,10 @@ mod fs;
 mod ingest;
 #[cfg(feature = "git-store")]
 mod git_store;
+/// The mandate fence (v3 item 5 — `docs/design/scoped-mandates.md` §5): one ref transaction,
+/// one remote transaction.
+#[cfg(feature = "git-store")]
+pub mod mandate_fence;
 #[cfg(feature = "control-plane")]
 mod agent;
 #[cfg(feature = "control-plane")]
