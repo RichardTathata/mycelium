@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the scoped-mandates ADR, and `mandate/` + `log/wiki/` reserved (item 5 PR 1)
+
+- `docs/design/scoped-mandates.md` — the last of the three PR-1 ADRs Phase A's exit gate names.
+- **CAS is not authorization.** The wiki's CAS defeats stale *content*; a former curator who re-reads the
+  fresh content and re-submits **passes it**. So a stale mandate is `MandateSuperseded`, never `Conflict` —
+  because `Conflict` is the retry loop's input, and classifying it that way would hand a revoked curator to
+  the loop that refreshes and re-submits. **The retry loop would launder the revocation.**
+- **The axis's one architectural disagreement, recorded with both sides.** The reviewer proposed a
+  SQLite-backed daemon per wiki scope; that is a control plane for the scope. The *criterion* — the resource
+  must enforce — is accepted in full and met by the store that already serialises the bytes: for `GitStore`,
+  the mandate ref and the content ref move in **one** `update-ref` transaction, and every push is
+  `--atomic` with `--force-with-lease` on the mandate ref **including content-only writes**, so the check is
+  part of the same remote transaction rather than an earlier hook-time read. Fail closed on a non-atomic
+  remote. `FsStore`'s strict profile is **out of scope** and says so rather than letting silence imply a
+  guarantee.
+- `mandate/{scope}` and `log/wiki/{group}/proposals` reserved in both front doors before any code writes them.
+
+
 ### Added — the knowledge-layer ADR, and `knowledge/` reserved (item 3 PR 1)
 
 - `docs/design/knowledge-layer.md`: four record types (**judging is not recording**), six explicit link kinds,
