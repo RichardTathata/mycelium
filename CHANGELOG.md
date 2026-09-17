@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — partition, reconnect, revocation and rotation (item 2 PR 6)
+
+- **Reconnecting is not being ready.** `federation::session::PartnerLink` has three states, and the
+  middle one is the point: work is **refused** while a reconnected link's discovery is still stale.
+  Two states would leave a window in which the link is up and the catalogue predates the
+  partition — and whatever changed while it was down (a withdrawn export, a revoked grant, a
+  rotated key) is exactly what a caller would be acting on. Refused, not queued: a queue delivers
+  the same stale-view calls a moment later, having also hidden the reason.
+- `Down` and `Refreshing` stay distinct refusals, so a reconnect that never completes cannot
+  masquerade as a healthy link that happens to be refusing.
+- **Key rotation without a flag day.** `TrustBundle::rotate` accepts the retiring key for a
+  **bounded** window — unbounded overlap is not a rotation, it is two keys, and the compromised one
+  is still among them. Current key first, since after a rotation nearly all traffic carries it.
+- **Revocation is a tombstone, not a deletion.** `is_revoked` distinguishes *"we used to trust them
+  and stopped"* from *"we never heard of them"* — different facts, different operator response. It
+  beats rotation (a revoked partner has no acceptable keys, mid-rotation or not) and survives a
+  reconnect.
+- `TrustBundle::partners` is now `Vec<PartnerTrust>` rather than `Vec<(DomainId, [u8; 32])>`;
+  `TrustBundle::trusting(..)` builds the simple case. Both types are unreleased, so this is not a
+  break against v2.7.0.
+
+
 ### Added — two-gateway operation, budgets and outcomes (item 2 PR 5)
 
 - **Failover only for repeatable exports.** `Repeatability` is declared per export by the domain

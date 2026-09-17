@@ -299,7 +299,7 @@ mod tests {
         }
 
         fn bundle_for(domain: &DomainId, key: [u8; 32]) -> TrustBundle {
-            TrustBundle { partners: vec![(domain.clone(), key)] }
+            TrustBundle::trusting([(domain.clone(), key)])
         }
 
         fn check(

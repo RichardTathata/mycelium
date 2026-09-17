@@ -35,6 +35,7 @@
 pub mod call;
 pub mod catalog;
 pub mod gateway;
+pub mod session;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -145,6 +146,27 @@ impl DomainPolicy {
     }
 }
 
+/// One partner, its current key, and anything in transition (item 2 PR 6).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartnerTrust {
+    /// Whose entry this is.
+    pub domain: DomainId,
+    /// The key currently in force.
+    pub key: [u8; 32],
+    /// A key being **retired**, still accepted until the given epoch-millisecond deadline.
+    ///
+    /// Rotation without a flag day: for a bounded window both keys verify, so a partner can start
+    /// signing with the new one before every counterparty has finished updating. **Bounded**
+    /// because an unbounded overlap is not a rotation, it is two keys — and the compromised one is
+    /// still among them.
+    pub retiring: Option<([u8; 32], u64)>,
+    /// **Revoked.** Nothing from this partner is accepted, under any key, ignoring every other
+    /// field. Kept as a tombstone rather than deleted, so *"we used to trust them and stopped"* is
+    /// distinguishable from *"we never heard of them"* — the two mean different things to an
+    /// operator reading a refusal.
+    pub revoked: bool,
+}
+
 /// The partners this operator has chosen to trust, and their keys.
 ///
 /// **Bilateral operator configuration** — no registry, no trust-registry service (D25). A bundle is
@@ -152,14 +174,71 @@ impl DomainPolicy {
 /// which a third party can add an entry.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustBundle {
-    /// `(partner domain, its verifying key)`.
-    pub partners: Vec<(DomainId, [u8; 32])>,
+    /// One entry per partner.
+    pub partners: Vec<PartnerTrust>,
 }
 
 impl TrustBundle {
-    /// The key this operator has chosen to trust for `domain`, if any.
+    /// A bundle trusting each `(domain, key)` outright — the common case, and what tests want.
+    pub fn trusting(entries: impl IntoIterator<Item = (DomainId, [u8; 32])>) -> Self {
+        Self {
+            partners: entries
+                .into_iter()
+                .map(|(domain, key)| PartnerTrust { domain, key, retiring: None, revoked: false })
+                .collect(),
+        }
+    }
+
+    fn entry(&self, domain: &DomainId) -> Option<&PartnerTrust> {
+        self.partners.iter().find(|p| &p.domain == domain)
+    }
+
+    /// The key currently in force for `domain`, if it is trusted at all.
+    ///
+    /// Returns `None` for a revoked partner: a revoked entry is not a key that happens to fail, it
+    /// is an absence of trust.
     pub fn key_for(&self, domain: &DomainId) -> Option<&[u8; 32]> {
-        self.partners.iter().find(|(d, _)| d == domain).map(|(_, k)| k)
+        self.entry(domain).filter(|p| !p.revoked).map(|p| &p.key)
+    }
+
+    /// Every key acceptable for `domain` at `now_ms` — current first, then a retiring key whose
+    /// window has not closed.
+    ///
+    /// Callers try them in order. Current-first matters: after a rotation the overwhelming majority
+    /// of traffic is signed with the new key, and checking the old one first would spend a
+    /// signature verification on the unlikely case for the whole overlap window.
+    pub fn acceptable_keys(&self, domain: &DomainId, now_ms: u64) -> Vec<[u8; 32]> {
+        let Some(p) = self.entry(domain) else { return Vec::new() };
+        if p.revoked {
+            return Vec::new();
+        }
+        let mut keys = vec![p.key];
+        if let Some((old, until_ms)) = p.retiring
+            && now_ms <= until_ms
+        {
+            keys.push(old);
+        }
+        keys
+    }
+
+    /// Is this partner known but revoked? Distinct from unknown — see [`PartnerTrust::revoked`].
+    pub fn is_revoked(&self, domain: &DomainId) -> bool {
+        self.entry(domain).is_some_and(|p| p.revoked)
+    }
+
+    /// Stop accepting anything from `domain`, keeping the tombstone.
+    pub fn revoke(&mut self, domain: &DomainId) {
+        if let Some(p) = self.partners.iter_mut().find(|p| &p.domain == domain) {
+            p.revoked = true;
+        }
+    }
+
+    /// Rotate `domain` to `new_key`, accepting the previous one until `until_ms`.
+    pub fn rotate(&mut self, domain: &DomainId, new_key: [u8; 32], until_ms: u64) {
+        if let Some(p) = self.partners.iter_mut().find(|p| &p.domain == domain) {
+            p.retiring = Some((p.key, until_ms));
+            p.key = new_key;
+        }
     }
 }
 
@@ -228,6 +307,24 @@ pub fn verify_descriptor(
         return false;
     }
     mycelium_core::tls::verify_bytes(trusted, &descriptor.canonical_bytes(), signature)
+}
+
+/// Verify a descriptor during a key rotation: any key the bundle still accepts at `now_ms` will do.
+///
+/// Separate from [`verify_descriptor`] rather than replacing it, because a descriptor also pins its
+/// own `public_key`, and during an overlap that field legitimately lags the bundle's current key.
+#[cfg(feature = "tls")]
+pub fn verify_descriptor_rotating(
+    descriptor: &DomainDescriptor,
+    signature: &[u8],
+    bundle: &TrustBundle,
+    now_ms: u64,
+) -> bool {
+    let bytes = descriptor.canonical_bytes();
+    bundle
+        .acceptable_keys(&descriptor.domain, now_ms)
+        .iter()
+        .any(|k| *k == descriptor.public_key && mycelium_core::tls::verify_bytes(k, &bytes, signature))
 }
 
 /// Verify a policy the same way, against the key the bundle trusts for its domain.
@@ -431,12 +528,65 @@ mod tests {
 
     #[test]
     fn a_bundle_only_knows_partners_the_operator_put_in_it() {
-        let b = TrustBundle {
-            partners: vec![(did("beta.example"), [9u8; 32])],
-        };
+        let b = TrustBundle::trusting([(did("beta.example"), [9u8; 32])]);
         assert_eq!(b.key_for(&did("beta.example")), Some(&[9u8; 32]));
         assert_eq!(b.key_for(&did("gamma.example")), None, "no implicit trust");
         assert_eq!(TrustBundle::default().key_for(&did("beta.example")), None);
+    }
+
+    // ── rotation and revocation (item 2 PR 6) ────────────────────────────────────────────────
+
+    #[test]
+    fn a_revoked_partner_has_no_acceptable_keys_and_is_distinguishable_from_an_unknown_one() {
+        let mut b = TrustBundle::trusting([(did("beta.example"), [9u8; 32])]);
+        b.revoke(&did("beta.example"));
+
+        assert_eq!(b.key_for(&did("beta.example")), None, "revoked is an absence of trust");
+        assert!(b.acceptable_keys(&did("beta.example"), 0).is_empty());
+
+        // The distinction the tombstone exists for: "we used to trust them and stopped" is not the
+        // same fact as "we never heard of them", and an operator reading a refusal needs to know
+        // which.
+        assert!(b.is_revoked(&did("beta.example")));
+        assert!(!b.is_revoked(&did("gamma.example")), "never-known is not revoked");
+    }
+
+    /// **Rotation without a flag day.** For a bounded window both keys verify, so a partner can
+    /// start signing with the new one before every counterparty has finished updating.
+    #[test]
+    fn rotation_accepts_both_keys_until_the_window_closes() {
+        let old = [1u8; 32];
+        let new = [2u8; 32];
+        let mut b = TrustBundle::trusting([(did("beta.example"), old)]);
+        b.rotate(&did("beta.example"), new, 1_000);
+
+        let during = b.acceptable_keys(&did("beta.example"), 500);
+        assert_eq!(during, vec![new, old], "current first — most traffic is signed with the new key");
+
+        let at_deadline = b.acceptable_keys(&did("beta.example"), 1_000);
+        assert_eq!(at_deadline.len(), 2, "the window is inclusive of its stated deadline");
+
+        let after = b.acceptable_keys(&did("beta.example"), 1_001);
+        assert_eq!(after, vec![new], "past the window the old key is simply gone");
+    }
+
+    /// An unbounded overlap is not a rotation — it is two keys, and the compromised one is still
+    /// among them. The window closing is what makes it a rotation.
+    #[test]
+    fn a_retired_key_stops_being_accepted() {
+        let old = [1u8; 32];
+        let mut b = TrustBundle::trusting([(did("beta.example"), old)]);
+        b.rotate(&did("beta.example"), [2u8; 32], 1_000);
+        assert!(!b.acceptable_keys(&did("beta.example"), 9_999).contains(&old));
+    }
+
+    /// Revocation beats rotation: a revoked partner has no keys, mid-rotation or not.
+    #[test]
+    fn revoking_mid_rotation_accepts_neither_key() {
+        let mut b = TrustBundle::trusting([(did("beta.example"), [1u8; 32])]);
+        b.rotate(&did("beta.example"), [2u8; 32], 10_000);
+        b.revoke(&did("beta.example"));
+        assert!(b.acceptable_keys(&did("beta.example"), 500).is_empty());
     }
 
     // ── verification ─────────────────────────────────────────────────────────────────────────
@@ -458,7 +608,7 @@ mod tests {
             let mut d = descriptor();
             d.public_key = pk;
             let sig = mycelium_core::tls::sign_bytes(&sk, &d.canonical_bytes());
-            let bundle = TrustBundle { partners: vec![(d.domain.clone(), pk)] };
+            let bundle = TrustBundle::trusting([(d.domain.clone(), pk)]);
 
             assert!(verify_descriptor(&d, &sig, &bundle), "a correctly signed descriptor verifies");
 
@@ -489,7 +639,7 @@ mod tests {
             );
 
             // Listed, but with a different key than the descriptor claims.
-            let wrong = TrustBundle { partners: vec![(d.domain.clone(), [1u8; 32])] };
+            let wrong = TrustBundle::trusting([(d.domain.clone(), [1u8; 32])]);
             assert!(
                 !verify_descriptor(&d, &sig, &wrong),
                 "a descriptor whose key disagrees with the bundle's must be refused, not preferred"
@@ -504,7 +654,7 @@ mod tests {
 
             let mut d = descriptor();
             d.public_key = pk;
-            let bundle = TrustBundle { partners: vec![(d.domain.clone(), pk)] };
+            let bundle = TrustBundle::trusting([(d.domain.clone(), pk)]);
             assert!(
                 !verify_descriptor(&d, &policy_sig, &bundle),
                 "domain separation: a policy signature must not authenticate a descriptor"
