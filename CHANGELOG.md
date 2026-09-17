@@ -34,6 +34,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *the directory sync must precede the WAL truncation* — is now a **test that fails when the order
   is reversed**, printing the offending trace. `snapshot_install_syncs_the_directory` says that
   property "is not observable without a filesystem adapter"; it is now.
+- **The RNG seam**, on the inventory's five named streams. `ops.rs`'s nonces and its opacity
+  shedding roll now draw from `nonce` and `shed` — named rather than shared, so a new draw in one
+  subsystem does not move another's decisions and a scenario replay attributes a divergence to the
+  code that moved. `ops.rs` has left the baseline (4 → 0).
 - Gated: `make check-full` and CI build and test `-p mycelium-core --features sim`.
 
 

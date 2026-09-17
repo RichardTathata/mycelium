@@ -47,7 +47,7 @@ until it is ignored.
 how a tool quietly stops meaning anything while still passing. Thirty-four sites, about a fifth of
 the total, were invisible to a check whose entire job was to see them.
 
-**The debt, measured: 197 sites across 44 files** — after the alias fix. `hlc.rs` has left the
+**The debt, measured: 193 sites across 43 files** — after the alias fix. `hlc.rs` has left the
 baseline entirely, and `persistence.rs`'s WAL write path is routed even though its other sites
 remain.
 
@@ -79,6 +79,13 @@ That reversal *is* v2.4.4: a power loss between the truncation and the directory
 `snapshot.bin` beside an empty, fsynced `wal.bin`, and every acknowledged record since the previous
 snapshot is gone. A test asserting only "fsync_dir was called" passes on it. This is the first time
 the fix has had a test that could have caught the bug.
+
+**The RNG seam.** `ops.rs`'s three nonces and its shedding roll now draw from the named streams
+`nonce` and `shed`. Two properties are pinned through *production's* path rather than the kernel's
+API: a nonce draw does not move a shedding roll (the reason the streams are named at all), and a roll
+is never `1.0` — `fastrand::f32()` is in `[0,1)` and the shedding code relies on it, since a fill of
+`0.0` must always shed. A seam may change *where* a number comes from; it must not quietly change
+what kind of number it is. `ops.rs` has left the baseline: 4 → 0.
 
 **Next:** `persistence.rs`'s remaining 10 sites, `connection.rs` (~9 `Instant::now`), `tasks.rs`
 (~6 `fastrand` + ~6 timers), then PR 4's storage model and the WAL/snapshot witness.

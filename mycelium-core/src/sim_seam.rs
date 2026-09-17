@@ -174,6 +174,61 @@ pub(crate) fn wall_now_ms() -> u64 {
     installed::with_seams(real_wall_now_ms, |s| s.wall_now_ms())
 }
 
+// ── Randomness ───────────────────────────────────────────────────────────────────────────────
+//
+// Five named streams, from the inventory §2.2: `nonce`, `shed`, `jitter`, `select`, `govern`.
+// Named rather than one generator because two subsystems sharing a generator are coupled — adding
+// a draw in gossip shifts every later value in consensus, and a scenario replay of changed code
+// then diverges *everywhere* instead of at the change.
+//
+// Without `sim` these are the `fastrand` calls they replaced, so the distribution a shipped build
+// draws from is untouched. Under `sim` the value comes from the kernel's stream, and the mapping
+// from a `u64` draw is documented at each site — a seam may change *where* a number comes from, but
+// it must not quietly change *what kind* of number it is.
+
+/// A nonce-style draw: a `u64` at or above `lo`.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub(crate) fn rng_u64_from(_stream: &str, lo: u64) -> u64 {
+    fastrand::u64(lo..)
+}
+
+/// A nonce-style draw, from the kernel's named stream.
+///
+/// The mapping folds the draw into `lo..=u64::MAX`. It is very slightly biased when `lo > 0`, which
+/// is irrelevant for a nonce — the property that matters is uniqueness, not uniformity — and is
+/// stated rather than hidden, because a seam that silently changed a distribution would be a bug
+/// that only ever showed up as a statistical one.
+#[cfg(feature = "sim")]
+#[inline]
+pub(crate) fn rng_u64_from(stream: &str, lo: u64) -> u64 {
+    let draw = installed::with_seams(|| fastrand::u64(lo..), |s| s.rng_u64(stream));
+    if lo == 0 {
+        draw
+    } else {
+        lo.saturating_add(draw % (u64::MAX - lo + 1))
+    }
+}
+
+/// A roll in `[0, 1)`.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub(crate) fn rng_f32(_stream: &str) -> f32 {
+    fastrand::f32()
+}
+
+/// A roll in `[0, 1)`, from the kernel's named stream.
+///
+/// Twenty-four bits over `2^24`, so the result is **never** `1.0` — `fastrand::f32()` is in `[0,1)`
+/// and a shedding test pins exactly that (`ops.rs`: a fill of `0.0` must always shed). A seam that
+/// could return `1.0` would break a property the production code already relies on.
+#[cfg(feature = "sim")]
+#[inline]
+pub(crate) fn rng_f32(stream: &str) -> f32 {
+    let draw = installed::with_seams(|| u64::from(fastrand::u32(..)) << 32, |s| s.rng_u64(stream));
+    ((draw >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
 // ── Storage ──────────────────────────────────────────────────────────────────────────────────
 //
 // These wrap the three effects the durability argument turns on: the write, the file sync, and the
@@ -396,6 +451,87 @@ mod tests {
     fn with_no_kernel_installed_the_real_clock_is_read() {
         installed::take();
         assert!(wall_now_ms() > 1_700_000_000_000, "a real epoch-ms reading");
+    }
+
+    /// **The reason the streams are named.** Two subsystems on one generator are coupled: a new
+    /// draw in one shifts every later value in the other, and a scenario replay of changed code
+    /// then diverges *everywhere* rather than at the change. Checked through the seam, not the
+    /// kernel's API, because the seam is what production calls.
+    #[test]
+    fn a_nonce_draw_does_not_move_a_shedding_roll() {
+        let roll = |extra_nonces: usize| {
+            installed::install(SimContext {
+                kernel:  Kernel::recording(),
+                sources: Sources::seeded(4242, 0),
+                node:    "n1".into(),
+                offsets: Default::default(),
+            });
+            for _ in 0..extra_nonces {
+                rng_u64_from("nonce", 1);
+            }
+            let r = rng_f32("shed");
+            installed::take();
+            r
+        };
+        assert_eq!(roll(0), roll(5), "five extra nonces must not change the shedding roll");
+    }
+
+    /// `fastrand::f32()` is in `[0,1)` and the shedding code relies on it: a fill of `0.0` must
+    /// *always* shed, which is only true if the roll can never reach `1.0`. A seam that could
+    /// return `1.0` would break a property production already depends on.
+    #[test]
+    fn a_shedding_roll_is_never_one() {
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(7, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        for _ in 0..2_000 {
+            let r = rng_f32("shed");
+            assert!((0.0..1.0).contains(&r), "roll {r} outside [0,1)");
+        }
+        installed::take();
+    }
+
+    /// A nonce is drawn at or above its floor — the property the call sites rely on
+    /// (`fastrand::u64(1..)`: never zero).
+    #[test]
+    fn a_nonce_respects_its_floor() {
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(11, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        for _ in 0..1_000 {
+            assert!(rng_u64_from("nonce", 1) >= 1, "a nonce must never be zero");
+        }
+        installed::take();
+    }
+
+    /// And the draws replay: a recorded nonce comes back as itself, not as a fresh number.
+    #[test]
+    fn recorded_draws_replay_as_themselves() {
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(3, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let recorded: Vec<u64> = (0..4).map(|_| rng_u64_from("nonce", 1)).collect();
+        let ctx = installed::take().expect("installed");
+
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            // A different seed: a fresh draw would differ, a replayed one cannot.
+            sources: Sources::seeded(999, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let replayed: Vec<u64> = (0..4).map(|_| rng_u64_from("nonce", 1)).collect();
+        installed::take();
+        assert_eq!(recorded, replayed);
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {
