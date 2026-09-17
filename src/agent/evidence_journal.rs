@@ -221,10 +221,17 @@ impl EvidenceJournal {
 
         // `try_send`, not `send`: waiting on a full queue would turn saturation into latency and
         // hide the very condition the profile is supposed to decide about.
-        match self.tx.try_send(Msg::Append { bytes, ack: ack_tx }) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => return Err(JournalError::Saturated),
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(JournalError::Closed),
+        // Routed through the replay seam (item 6 PR 3). This queue's saturation behaviour is a
+        // *stated guarantee* — a full queue is refused, never silently dropped — so being able to
+        // replay the saturation is how that guarantee gets tested rather than asserted.
+        match mycelium_core::sim_seam::chan_try_send(
+            "ae/journal",
+            &self.tx,
+            Msg::Append { bytes, ack: ack_tx },
+        ) {
+            mycelium_core::sim_seam::ChanVerdict::Sent => {}
+            mycelium_core::sim_seam::ChanVerdict::Full => return Err(JournalError::Saturated),
+            mycelium_core::sim_seam::ChanVerdict::Closed => return Err(JournalError::Closed),
         }
 
         match tokio::time::timeout(ACK_TIMEOUT, ack_rx).await {

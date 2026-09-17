@@ -142,7 +142,13 @@ impl WalHandle {
         match self.sync_mode {
             SyncMode::Flush => self.send_and_await(entry, false).await,
             SyncMode::Async | SyncMode::Os => {
-                let _ = self.tx.try_send(WalMsg::Append { entry, ack: None, force_sync: false });
+// The WAL channel: a full queue here *skips an append*, which is why the inventory calls
+                // it out by name. Recorded, so a replay drops the same record.
+                let _ = crate::sim_seam::chan_try_send(
+                    WAL_CHAN,
+                    &self.tx,
+                    WalMsg::Append { entry, ack: None, force_sync: false },
+                );
                 Ok(())
             }
         }
@@ -152,7 +158,12 @@ impl WalHandle {
     /// Never awaits fsync. Silently drops if the channel is full —
     /// consistent with `GossipAgent::set`'s existing try_send semantics.
     pub fn append_try(&self, entry: SyncEntry) {
-        let _ = self.tx.try_send(WalMsg::Append { entry, ack: None, force_sync: false });
+// The WAL channel — see the note above.
+        let _ = crate::sim_seam::chan_try_send(
+            WAL_CHAN,
+            &self.tx,
+            WalMsg::Append { entry, ack: None, force_sync: false },
+        );
     }
 
     /// Append and await `fdatasync` **regardless of `sync_mode`** — the record is on
@@ -469,6 +480,9 @@ const DIR_SYNC: &str = "dir";
 const SNAP_TMP: &str = "snapshot.tmp";
 /// The snapshot itself.
 const SNAP_FILE: &str = "snapshot.bin";
+/// The WAL's bounded append channel. A full queue here skips a record, which the inventory names
+/// as one of the three things channel fullness decides.
+const WAL_CHAN: &str = "wal/append";
 /// The WAL tail read the snapshot merges before truncating — its own stream, because *this* read
 /// returning different bytes is the v2.4.3 failure and deserves to be legible on its own line.
 const WAL_TAIL: &str = "wal.bin#tail";

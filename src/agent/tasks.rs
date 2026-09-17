@@ -592,7 +592,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                 peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout,
                 &shutdown_tx, &dropped_frames, tls.clone(),
             ) {
-                let _ = tx.try_send(hello.clone());
+                let _ = mycelium_core::sim_seam::chan_try_send("writer/hello", &tx, hello.clone());
             }
         }
         // Send our current Merkle digest so any state restored from WAL/snapshot is not

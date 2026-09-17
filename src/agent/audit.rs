@@ -319,7 +319,8 @@ pub(crate) fn seal_and_write(
     // path via a bounded drain channel. The KV chain stays authoritative — a full channel
     // drops the mirror copy (re-exportable from the chain), never the chain record.
     if let Some(tx) = ctx.audit_sink_tx.get()
-        && tx.try_send(signed).is_err()
+        && mycelium_core::sim_seam::chan_try_send("audit/export", tx, signed)
+            != mycelium_core::sim_seam::ChanVerdict::Sent
     {
         tracing::warn!(
             "audit export sink channel full or closed; a record was not mirrored \

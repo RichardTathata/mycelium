@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — channel coverage across the substrate (item 6 PR 3)
+
+- Eight more bounded sends route through the channel seam: the **WAL append queue** (a full queue
+  skips a record — one of the three things the inventory says channel fullness decides), the
+  per-handler **signal** channel, the **StateRequest** writer, the **pong**, the **audit export**
+  drain, the **AE evidence journal**, and two pings.
+- The evidence journal's is the one worth naming: its saturation behaviour is a *stated guarantee* —
+  a full queue is refused, never silently dropped — so being able to **replay** the saturation is how
+  that guarantee gets tested rather than merely asserted.
+- Baseline **190 sites across 43 files**, from 199.
+- Left deliberately: four sends inside `tasks.rs` macro bodies and two SSE sends in `a2a.rs`. They
+  are recorded debt, not oversights.
+
+
 ### Added — the recovery-read and channel-readiness seams (item 6 PR 3)
 
 - `persistence.rs`'s three recovery reads — the snapshot, the WAL, and the WAL tail the snapshot

@@ -331,7 +331,9 @@ pub async fn handle_connection(
                         &sender, &peer_writers, task_ctx.hot.writer_depth(), backoff,
                         writer_idle_timeout, &shutdown, &kv_state.dropped_frames, tls.clone(),
                     ) {
-                        let _ = tx.try_send(pong);
+                        // A dropped pong looks to the peer exactly like a dead node, so the drop
+                        // is worth replaying rather than re-provoking.
+                        let _ = crate::sim_seam::chan_try_send("writer/pong", &tx, pong);
                     }
                     let bucket_hashes = crate::store::store_bucket_hashes(&kv_state);
                     request_state(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, writer_idle_timeout, &shutdown, &node_id, &kv_state.hash_acc, &kv_state.dropped_frames, bucket_hashes, tls.clone());

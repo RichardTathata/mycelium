@@ -54,7 +54,7 @@ impl GossipAgent {
                 sender: self.node_id.clone(),
                 known_peers: Vec::new(),
             });
-            let _ = tx.try_send(ping);
+            let _ = mycelium_core::sim_seam::chan_try_send("writer/ping", &tx, ping);
         }
     }
 
