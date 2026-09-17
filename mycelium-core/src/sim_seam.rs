@@ -367,26 +367,31 @@ impl ChanVerdict {
     }
 }
 
-/// A bounded send, without the kernel.
+/// Send on a bounded channel, without the kernel.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub fn chan_send(_stream: &str, attempt: impl FnOnce() -> ChanVerdict) -> ChanVerdict {
-    attempt()
+pub fn chan_try_send<T>(
+    _stream: &str,
+    tx: &tokio::sync::mpsc::Sender<T>,
+    msg: T,
+) -> ChanVerdict {
+    verdict_of(tx.try_send(msg))
 }
 
-/// A bounded send, through the kernel.
+/// Send on a bounded channel, through the kernel.
 ///
-/// In `Record` the real attempt decides and is written down. In `Replay` the recorded verdict
-/// decides: `Sent` performs the send, anything else does not. If a replayed `Sent` then finds the
-/// channel full, the replay's channel state has departed from the recording's — a divergence, and
-/// it stops rather than quietly dropping a frame the recording delivered.
+/// In `Record` the real send decides and is written down. In `Replay` the recorded verdict decides:
+/// `Sent` performs the send, anything else does not — and the message is dropped, exactly as the
+/// recording dropped it. A replayed `Sent` that finds the channel full is a divergence: the replay's
+/// channel state has departed from the recording's, and stopping is better than quietly losing a
+/// frame the recording delivered.
 #[cfg(feature = "sim")]
-pub fn chan_send(stream: &str, attempt: impl FnOnce() -> ChanVerdict) -> ChanVerdict {
+pub fn chan_try_send<T>(stream: &str, tx: &tokio::sync::mpsc::Sender<T>, msg: T) -> ChanVerdict {
     match installed::chan_mode() {
-        // No kernel: the real attempt, unchanged.
-        None => attempt(),
+        // No kernel: the real send, unchanged.
+        None => verdict_of(tx.try_send(msg)),
         Some(mycelium_sim::Mode::Record) => {
-            let verdict = attempt();
+            let verdict = verdict_of(tx.try_send(msg));
             installed::chan_record(stream, &verdict.encode());
             verdict
         }
@@ -395,15 +400,27 @@ pub fn chan_send(stream: &str, attempt: impl FnOnce() -> ChanVerdict) -> ChanVer
             if recorded == ChanVerdict::Sent {
                 // The recording delivered it, so the replay must too — a channel's effect is
                 // in-process, and the replay is reproducing that process.
-                let actual = attempt();
+                let actual = verdict_of(tx.try_send(msg));
                 assert!(
                     actual == ChanVerdict::Sent,
                     "replay diverged at chan {stream}: the recording sent, the replay got \
                      {actual:?} — the replay's channel state has departed from the recording's"
                 );
             }
+            // Recorded `Full`/`Closed`: `msg` is dropped here, which is what the recording did.
             recorded
         }
+    }
+}
+
+/// The verdict a `try_send` result carries.
+#[inline]
+fn verdict_of<T>(r: Result<(), tokio::sync::mpsc::error::TrySendError<T>>) -> ChanVerdict {
+    use tokio::sync::mpsc::error::TrySendError;
+    match r {
+        Ok(())                       => ChanVerdict::Sent,
+        Err(TrySendError::Full(_))   => ChanVerdict::Full,
+        Err(TrySendError::Closed(_)) => ChanVerdict::Closed,
     }
 }
 
@@ -801,58 +818,82 @@ mod tests {
         assert_eq!(ctx.kernel.trace().len(), 0);
     }
 
+    /// A channel with `cap` slots, already filled to the brim when `full` is set.
+    fn chan(cap: usize) -> (tokio::sync::mpsc::Sender<u8>, tokio::sync::mpsc::Receiver<u8>) {
+        tokio::sync::mpsc::channel(cap)
+    }
+
     /// **A dropped frame replays as a dropped frame.** Channel saturation is the kind of thing a
     /// test normally has to provoke by timing and then hope for; recorded, it is just a fact of the
-    /// run. The replay does not even attempt the send — asserted by an attempt closure that panics
-    /// if it is called.
+    /// run — the replay reproduces the drop without the channel needing to be full again.
     #[test]
-    fn a_full_channel_replays_as_full_without_attempting_the_send() {
+    fn a_full_channel_replays_as_full_even_when_the_replays_channel_has_room() {
+        let (tx, _rx) = chan(1);
+        tx.try_send(1).expect("fill the one slot");
+
         installed::install(SimContext {
             kernel:  Kernel::recording(),
             sources: Sources::seeded(2, 0),
             node:    "n1".into(),
             offsets: Default::default(),
         });
-        assert_eq!(chan_send("gossip/shard2", || ChanVerdict::Full), ChanVerdict::Full);
-        assert_eq!(chan_send("gossip/shard2", || ChanVerdict::Sent), ChanVerdict::Sent);
+        // Genuinely full: the recording captures a real drop.
+        assert_eq!(chan_try_send("gossip/shard2", &tx, 2), ChanVerdict::Full);
         let ctx = installed::take().expect("installed");
 
+        // The replay's channel has room — and must still drop, because the recording did.
+        let (tx2, _rx2) = chan(8);
         installed::install(SimContext {
             kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
             sources: Sources::seeded(2, 0),
             node:    "n1".into(),
             offsets: Default::default(),
         });
-        // Recorded `Full`: the send must not be attempted at all.
-        assert_eq!(
-            chan_send("gossip/shard2", || panic!("a replayed drop must not attempt the send")),
-            ChanVerdict::Full
-        );
-        // Recorded `Sent`: the send *is* attempted, because a channel's effect is in-process.
-        let attempted = std::cell::Cell::new(false);
-        assert_eq!(
-            chan_send("gossip/shard2", || {
-                attempted.set(true);
-                ChanVerdict::Sent
-            }),
-            ChanVerdict::Sent
-        );
-        assert!(attempted.get(), "a replayed send must really deliver");
+        assert_eq!(chan_try_send("gossip/shard2", &tx2, 2), ChanVerdict::Full);
         installed::take();
+        assert_eq!(tx2.capacity(), 8, "the replayed drop did not consume a slot");
     }
 
-    /// Per-shard streams: a drop on shard 2 and a drop on shard 5 are different events, and a trace
-    /// that merged them could not tell a reader which key stopped propagating.
+    /// A recorded send really delivers on replay — a channel's effect is in-process, and the replay
+    /// is reproducing that process.
     #[test]
-    fn shards_are_separate_streams() {
+    fn a_recorded_send_really_delivers_on_replay() {
+        let (tx, mut rx) = chan(4);
         installed::install(SimContext {
             kernel:  Kernel::recording(),
             sources: Sources::seeded(2, 0),
             node:    "n1".into(),
             offsets: Default::default(),
         });
-        chan_send("gossip/shard2", || ChanVerdict::Full);
-        chan_send("gossip/shard5", || ChanVerdict::Sent);
+        assert_eq!(chan_try_send("gossip/shard0", &tx, 7), ChanVerdict::Sent);
+        let ctx = installed::take().expect("installed");
+        assert_eq!(rx.try_recv().ok(), Some(7));
+
+        let (tx2, mut rx2) = chan(4);
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        assert_eq!(chan_try_send("gossip/shard0", &tx2, 7), ChanVerdict::Sent);
+        installed::take();
+        assert_eq!(rx2.try_recv().ok(), Some(7), "the replayed send must actually arrive");
+    }
+
+    /// Per-shard streams: a drop on shard 2 and a drop on shard 5 are different events, and a trace
+    /// that merged them could not tell a reader which key stopped propagating.
+    #[test]
+    fn shards_are_separate_streams() {
+        let (tx, _rx) = chan(4);
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        chan_try_send("gossip/shard2", &tx, 1);
+        chan_try_send("gossip/shard5", &tx, 2);
         let ctx = installed::take().expect("installed");
         let streams: Vec<String> =
             ctx.kernel.trace().entries().iter().map(|e| e.stream.clone()).collect();
@@ -860,26 +901,30 @@ mod tests {
     }
 
     /// The recording delivered a frame the replay cannot: the replay's channel state has departed,
-    /// and that is a divergence rather than a quietly dropped frame.
+    /// and that is a divergence rather than a frame quietly lost.
     #[test]
     #[should_panic(expected = "replay diverged at chan")]
     fn a_replayed_send_that_finds_the_channel_full_diverges() {
+        let (tx, _rx) = chan(4);
         installed::install(SimContext {
             kernel:  Kernel::recording(),
             sources: Sources::seeded(2, 0),
             node:    "n1".into(),
             offsets: Default::default(),
         });
-        chan_send("gossip/shard0", || ChanVerdict::Sent);
+        chan_try_send("gossip/shard0", &tx, 1);
         let ctx = installed::take().expect("installed");
 
+        // A replay whose channel is full where the recording's was not.
+        let (tx2, _rx2) = chan(1);
+        tx2.try_send(99).expect("fill it");
         installed::install(SimContext {
             kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
             sources: Sources::seeded(2, 0),
             node:    "n1".into(),
             offsets: Default::default(),
         });
-        chan_send("gossip/shard0", || ChanVerdict::Full);
+        chan_try_send("gossip/shard0", &tx2, 1);
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

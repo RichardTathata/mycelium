@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 use crate::stream::GossipStream;
-use tokio::{io::BufReader, sync::{mpsc::error::TrySendError, watch}};
+use tokio::{io::BufReader, sync::watch};
 use tracing::{error, warn};
 
 /// `sys/` sub-prefixes whose node-id segment immediately follows the prefix.
@@ -588,12 +588,18 @@ pub async fn handle_connection(
                         sender: sender.clone(), scope, kind, payload, hlc_seq,
                     });
                     let fwd_data = fwd_buf.freeze();
-                    match gossip_txs[shard].try_send((fwd_data, sender.id_hash(), hint)) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
+                    // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
+                    // run replays it instead of needing the timing that caused it.
+                    match crate::sim_seam::chan_try_send(
+                        &crate::framing::gossip_stream(shard),
+                        &gossip_txs[shard],
+                        (fwd_data, sender.id_hash(), hint),
+                    ) {
+                        crate::sim_seam::ChanVerdict::Sent => {}
+                        crate::sim_seam::ChanVerdict::Full => {
                             warn!("Gossip shard {} full, dropping signal forward from {}", shard, peer_addr);
                         }
-                        Err(TrySendError::Closed(_)) => {
+                        crate::sim_seam::ChanVerdict::Closed => {
                             error!("Gossip shard {} dead, signal will not propagate", shard);
                         }
                     }
@@ -653,12 +659,18 @@ pub async fn handle_connection(
                         // (fixed layout, v6 wire format). split().freeze() is O(1).
                         recv_buf[TTL_OFFSET] = fwd_ttl - 1;
                         let data = recv_buf.split().freeze();
-                        match gossip_txs[shard].try_send((data, update.sender, ForwardHint::All)) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
+                        // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
+                        // run replays it instead of needing the timing that caused it.
+                        match crate::sim_seam::chan_try_send(
+                        &crate::framing::gossip_stream(shard),
+                        &gossip_txs[shard],
+                        (data, update.sender, ForwardHint::All),
+                    ) {
+                            crate::sim_seam::ChanVerdict::Sent => {}
+                            crate::sim_seam::ChanVerdict::Full => {
                                 warn!("Gossip shard {} channel full, dropping forward from {}", shard, peer_addr);
                             }
-                            Err(TrySendError::Closed(_)) => {
+                            crate::sim_seam::ChanVerdict::Closed => {
                                 error!("Gossip shard {} is dead, dropping forward from {}", shard, peer_addr);
                             }
                         }
@@ -668,13 +680,19 @@ pub async fn handle_connection(
                         let fwd_update = GossipUpdate { ttl: fwd_ttl - 1, ..update.clone() };
                         let mut fwd_buf = BytesMut::with_capacity(256);
                         crate::codec::encode_wire(&mut fwd_buf, &WireMessage::Data(fwd_update));
-                        match gossip_txs[shard].try_send((fwd_buf.freeze(), update.sender, ForwardHint::All)) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
+                        // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
+                        // run replays it instead of needing the timing that caused it.
+                        match crate::sim_seam::chan_try_send(
+                        &crate::framing::gossip_stream(shard),
+                        &gossip_txs[shard],
+                        (fwd_buf.freeze(), update.sender, ForwardHint::All),
+                    ) {
+                            crate::sim_seam::ChanVerdict::Sent => {}
+                            crate::sim_seam::ChanVerdict::Full => {
                                 warn!("Gossip shard {} channel full, dropping v{} forward from {}",
                                     shard, crate::framing::PREV_WIRE_VERSION, peer_addr);
                             }
-                            Err(TrySendError::Closed(_)) => {
+                            crate::sim_seam::ChanVerdict::Closed => {
                                 error!("Gossip shard {} dead, dropping v{} forward from {}",
                                     shard, crate::framing::PREV_WIRE_VERSION, peer_addr);
                             }
@@ -749,12 +767,18 @@ pub async fn handle_connection(
                         signature,
                     };
                     crate::codec::encode_wire(&mut fwd_buf, &fwd_msg);
-                    match gossip_txs[shard].try_send((fwd_buf.freeze(), update.sender, ForwardHint::All)) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
+                    // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
+                    // run replays it instead of needing the timing that caused it.
+                    match crate::sim_seam::chan_try_send(
+                        &crate::framing::gossip_stream(shard),
+                        &gossip_txs[shard],
+                        (fwd_buf.freeze(), update.sender, ForwardHint::All),
+                    ) {
+                        crate::sim_seam::ChanVerdict::Sent => {}
+                        crate::sim_seam::ChanVerdict::Full => {
                             warn!("Gossip shard {} full, dropping SignedData forward from {}", shard, peer_addr);
                         }
-                        Err(TrySendError::Closed(_)) => {
+                        crate::sim_seam::ChanVerdict::Closed => {
                             error!("Gossip shard {} dead, dropping SignedData forward from {}", shard, peer_addr);
                         }
                     }

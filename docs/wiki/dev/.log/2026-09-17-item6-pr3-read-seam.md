@@ -32,8 +32,20 @@ with an attempt closure that panics if it is called: a replayed drop must not ev
 Per-shard streams (`gossip/shard2`), because a drop on shard 2 and a drop on shard 5 are different
 events, and a merged trace could not tell a reader which key stopped propagating.
 
-Routed at `framing::dispatch_gossip_try_send`, the one helper several call sites share. The direct
-`gossip_txs[shard].try_send` sites in `connection.rs` still bypass it and remain in the baseline.
+Routed at `framing::dispatch_gossip_try_send` and at `connection.rs`'s four direct sends, which
+bypass that helper and predate it.
+
+**A design flaw of my own, found by the checker.** The first shape took a *closure* wrapping the
+caller's `try_send`. That left the `try_send` in the call site, so when `try_send` was added to the
+forbidden-call pattern, correctly-routed code failed the check — it could not tell routed from
+unrouted. The fix is that **the seam owns the send**: `chan_try_send(stream, tx, msg)`. A seam you
+cannot enforce is a seam that erodes, which is the whole reason D12 moved the check forward to PR 3.
+
+**And the check's scope did not match the coverage map's.** §6's forbidden list names clocks, RNG and
+storage, but **not channels** — though the coverage map assigns channel fullness to the kernel. With
+`try_send` added, fifteen unrouted sends appeared across `persistence`, `signal`, `writer`, `a2a`,
+`tasks`, `audit` and `topology`. Baseline **199 across 45 files**: a widening, like the alias fix
+before it, where the number went up because the check got honest.
 
 **The earlier note, kept because the reasoning was right even though the conclusion changed.** The
 channel seam. The inventory says "capacity and fullness are

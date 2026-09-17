@@ -9,7 +9,7 @@ use std::sync::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::{mpsc, mpsc::error::TrySendError},
+    sync::mpsc,
 };
 use tracing::warn;
 
@@ -260,13 +260,11 @@ pub fn dispatch_gossip_try_send(
     let buf = crate::codec::wire_to_bytes(&msg);
     // Channel-readiness seam (item 6 PR 3): whether this shard was full is a kernel decision, so a
     // recorded run replays the drop rather than hoping to provoke it again by timing.
-    let verdict = crate::sim_seam::chan_send(&gossip_stream(shard), || {
-        match gossip_txs[shard].try_send((buf, sender_hash, hint)) {
-            Ok(())                       => crate::sim_seam::ChanVerdict::Sent,
-            Err(TrySendError::Full(_))   => crate::sim_seam::ChanVerdict::Full,
-            Err(TrySendError::Closed(_)) => crate::sim_seam::ChanVerdict::Closed,
-        }
-    });
+    let verdict = crate::sim_seam::chan_try_send(
+        &gossip_stream(shard),
+        &gossip_txs[shard],
+        (buf, sender_hash, hint),
+    );
     match verdict {
         crate::sim_seam::ChanVerdict::Sent => true,
         crate::sim_seam::ChanVerdict::Full => {
@@ -283,7 +281,7 @@ pub fn dispatch_gossip_try_send(
 /// One gossip shard's trace stream. Per-shard rather than one `gossip` stream, because a frame
 /// dropped on shard 2 and one dropped on shard 5 are different events, and a trace that merged them
 /// could not tell a reader which key stopped propagating.
-fn gossip_stream(shard: usize) -> String {
+pub(crate) fn gossip_stream(shard: usize) -> String {
     format!("gossip/shard{shard}")
 }
 

@@ -30,6 +30,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   divergence rather than a quietly dropped frame.
 - Per-shard streams (`gossip/shard2`), because a drop on one shard and a drop on another are
   different events and a merged trace could not say which key stopped propagating.
+- **The seam owns the send** (`chan_try_send(stream, tx, msg)`), rather than wrapping a closure
+  around the caller's `try_send`. Wrapping left the `try_send` in the call site, so the
+  forbidden-call check could not tell routed code from unrouted — a seam you cannot enforce is a
+  seam that erodes.
+- With that, `try_send` joins the forbidden-call pattern. The inventory's §6 list covered clocks,
+  RNG and storage but **omitted channels**, though the coverage map assigns them to the kernel.
+  Baseline **199 sites across 45 files** — 15 unrouted channel sends were invisible.
 
 
 ### Added — the first replay seams: the HLC wall clock and the WAL writes (item 6 PR 3)
