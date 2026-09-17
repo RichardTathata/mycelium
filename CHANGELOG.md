@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the authorized knowledge store and its heads (item 3 PR 3)
+
+- `knowledge::store`: records live here; the gossip KV namespace carries **bounded signed heads
+  only** (`knowledge/head/{issuer}/{stream}`, already reserved). `Head` is a pointer by
+  construction — there is nowhere in it to put a statement.
+- **The decision this makes true:** `advancing_a_head_does_not_remove_what_it_pointed_at`. Put
+  records in KV and last-write-wins becomes *last-writer-is-right* — two issuers who disagree
+  resolve to whichever had the later HLC, and the loser is gone. That is a clock race, not a truth
+  procedure. With heads only, an advancing head moves a pointer and both statements survive.
+- `KnowledgeStore::about(subject)` is what *"equivocation is preserved"* means operationally: a
+  reader is handed **the disagreement**, not the later writer's version of it. Stably ordered, so
+  two callers holding the same set cannot disagree about it.
+- **Authorized means two checks**, both local: an issuer publishes only its own heads, and **a head
+  only advances** — a stale copy re-delivered by anti-entropy cannot roll a stream backwards. The
+  refusal carries both sequence numbers, because *"we have newer"* and *"this is a duplicate"* are
+  indistinguishable without them.
+- A head may point at a record we have not fetched. That is **ordinary, not an error** — refusing it
+  would make discovery depend on having already discovered — and `is_resolvable` says so plainly.
+
+
 ### Added — typed knowledge records (item 3 PR 2)
 
 - `mycelium::knowledge` (`tls`): the four record types — `Claim` · `Observation` · **`Assessment`**
