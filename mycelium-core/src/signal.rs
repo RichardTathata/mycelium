@@ -24,7 +24,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 use tracing::warn;
 
 /// Default sender-log retention window (10 minutes).
@@ -257,9 +256,11 @@ impl HandlerTable {
                 && !trusted.iter().any(|id| id == &signal.sender) {
                     continue;
                 }
-            match fs.tx.try_send(signal.clone()) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
+            // Channel-readiness seam: a handler that cannot keep up drops a signal, and the drop
+            // is a kernel decision so a recorded run reproduces it.
+            match crate::sim_seam::chan_try_send(SIGNAL_CHAN, &fs.tx, signal.clone()) {
+                crate::sim_seam::ChanVerdict::Sent => {}
+                crate::sim_seam::ChanVerdict::Full => {
                     warn!(
                         kind = %signal.kind,
                         "Signal handler channel full; signal dropped. \
@@ -267,7 +268,7 @@ impl HandlerTable {
                          via signal_rx_with_capacity or reduce signal rate.",
                     );
                 }
-                Err(TrySendError::Closed(_)) => { has_closed = true; }
+                crate::sim_seam::ChanVerdict::Closed => { has_closed = true; }
             }
         }
         if has_closed {
@@ -947,6 +948,9 @@ pub mod kv_ns {
 
 use std::collections::{BinaryHeap, HashMap as StdHashMap};
 use std::cmp::Reverse;
+
+/// The per-handler signal channel — a handler that cannot keep up drops signals.
+const SIGNAL_CHAN: &str = "signal/handler";
 
 /// Per-`(sender, kind)` min-heap entry, ordered by ascending `hlc_seq`.
 struct PendingSignal {

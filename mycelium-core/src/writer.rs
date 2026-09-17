@@ -19,6 +19,9 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
+/// The writer channel a StateRequest goes out on; a full one skips a state sync.
+const STATE_REQ_CHAN: &str = "writer/state-request";
+
 /// Returns a jittered backoff in `[backoff/2, backoff*3/2]`.
 fn jittered(backoff: Duration) -> Duration {
     let half = backoff.as_millis() as u64 / 2;
@@ -371,7 +374,7 @@ pub fn request_state(
         &WireMessage::StateRequest { sender: sender.clone(), store_hash: hash, bucket_hashes },
     );
     let Some(tx) = get_or_spawn_writer(peer, peer_writers, writer_depth, backoff, idle_timeout, shutdown_tx, dropped_frames, tls) else { return; };
-    if tx.try_send(data).is_err() {
+    if crate::sim_seam::chan_try_send(STATE_REQ_CHAN, &tx, data) != crate::sim_seam::ChanVerdict::Sent {
         warn!("StateRequest writer for {}: channel full or closed; state sync skipped", peer);
     }
 }
