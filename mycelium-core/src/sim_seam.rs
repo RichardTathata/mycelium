@@ -70,10 +70,24 @@ pub fn mono_now_ns() -> u64 {
     real_mono_now_ns()
 }
 
+/// Where the monotonic clock starts counting, so that **a point before process start is
+/// representable**.
+///
+/// `Instant` has this property and a bare "nanoseconds since we started" does not, which is not a
+/// detail: `SignalLog::seed` reconstructs a sender-log entry that arrived `age_ms` ago, and
+/// `warm_quorum_from_layer1` calls it *at startup*, when the process is milliseconds old. Counting
+/// from zero would clamp every seeded entry to the origin — making warmed quorum evidence look
+/// newer than it is, in the one moment the whole mechanism exists for.
+///
+/// A year of headroom, which is more than any configured window (`signal_window_secs` defaults to
+/// 600 s) and leaves ~583 years of runtime before a `u64` of nanoseconds runs out. It is deliberately
+/// not an epoch: these values are only ever compared with each other.
+pub const MONO_ORIGIN_NS: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
+
 #[inline]
 fn real_mono_now_ns() -> u64 {
     static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    ORIGIN.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+    MONO_ORIGIN_NS + ORIGIN.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
 }
 
 /// How long since a reading taken by [`mono_now_ns`] — the replacement for `Instant::elapsed`.
@@ -736,8 +750,32 @@ mod tests {
         assert_eq!(w1, 1_789_000_000_000, "the seeded wall source");
         assert_eq!(w2, w1 + 1, "the wall clock advanced by its own step");
         assert_eq!(m2 - m1, 1_000_000, "the monotonic clock advanced by its own step, not the wall's");
-        assert!(m1 < 1_000_000_000, "an interval since the run began, not an epoch");
+        assert_eq!(m1, MONO_ORIGIN_NS, "the run's origin, and the kernel agrees with production");
+        assert!(m1 < 1_700_000_000_000_000_000, "nothing like an epoch reading");
         assert_eq!(ctx.kernel.trace().len(), 4, "all four reads are in the trace");
+    }
+
+    /// **A point before the run began is representable.** `Instant` has this property — on both
+    /// platforms it is internally offset, so `Instant::now() - 600s` is fine however young the
+    /// process is — and a bare "nanoseconds since we started" would not. `SignalLog::seed`
+    /// reconstructs an entry that arrived `age_ms` ago and is called *at startup*, so losing this
+    /// would clamp every warmed quorum record to the origin and make it look newer than it is.
+    #[test]
+    fn the_monotonic_origin_leaves_room_to_point_before_the_run_began() {
+        installed::take();
+        let now = mono_now_ns();
+        let a_year = 365u64 * 24 * 60 * 60 * 1_000_000_000;
+        assert!(
+            now >= a_year,
+            "a window subtracted from a fresh reading must not clamp: {now} < {a_year}"
+        );
+        // The case that motivated it: ten minutes before a process that is milliseconds old.
+        let ten_minutes = 600u64 * 1_000_000_000;
+        assert_eq!(
+            mono_between(now - ten_minutes, now),
+            std::time::Duration::from_secs(600),
+            "ten minutes before now is exactly ten minutes ago, not clamped to zero"
+        );
     }
 
     /// Without a kernel the seam is the real monotonic clock — an interval that only goes forward.
@@ -747,7 +785,12 @@ mod tests {
         let a = mono_now_ns();
         let b = mono_now_ns();
         assert!(b >= a, "a monotonic clock never goes backwards");
-        assert!(a < 60 * 60 * 1_000_000_000, "since this process started, not since the epoch");
+        // An hour past the origin at most: this counts from process start (plus the origin offset),
+        // not from the epoch.
+        assert!(
+            a - MONO_ORIGIN_NS < 60 * 60 * 1_000_000_000,
+            "since this process started, not since the epoch"
+        );
     }
 
     /// The replay returns the recorded values, whatever the machine's clock says.

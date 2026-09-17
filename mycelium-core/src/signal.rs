@@ -22,7 +22,7 @@ use papaya::HashMap as PapayaMap;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -130,7 +130,8 @@ impl Boundary {
 }
 
 /// Per-kind sender history shard type alias.
-type SenderLog = PapayaMap<Arc<str>, Arc<Mutex<VecDeque<(NodeId, Instant)>>>>;
+/// `(sender, received_at)` where `received_at` is monotonic nanoseconds from the clock seam.
+type SenderLog = PapayaMap<Arc<str>, Arc<Mutex<VecDeque<(NodeId, u64)>>>>;
 
 // ── SignalHandlers sub-types ──────────────────────────────────────────────────
 //
@@ -294,7 +295,7 @@ impl HandlerTable {
 /// during suppression — so `quorum()` counts all received signals, not just
 /// delivered ones.
 struct SignalLog {
-    last_seen:         PapayaMap<Arc<str>, Instant>,
+    last_seen:         PapayaMap<Arc<str>, u64>,
     sender_log:        SenderLog,
     sender_log_window: Duration,
 }
@@ -311,7 +312,7 @@ impl SignalLog {
     /// Records that `signal` was seen at `now`, updating both `last_seen` and
     /// the sender history. Lazy retention prunes the deque front while the
     /// oldest entry is older than `sender_log_window`.
-    fn record(&self, kind: &Arc<str>, sender: NodeId, now: Instant) {
+    fn record(&self, kind: &Arc<str>, sender: NodeId, now: u64) {
         self.last_seen.pin().insert(Arc::clone(kind), now);
         let window = self.sender_log_window;
         let arc = {
@@ -319,7 +320,7 @@ impl SignalLog {
             if let Some(existing) = guard.get(kind.as_ref()) {
                 Arc::clone(existing)
             } else {
-                let new_arc = Arc::new(Mutex::new(VecDeque::<(NodeId, Instant)>::new()));
+                let new_arc = Arc::new(Mutex::new(VecDeque::<(NodeId, u64)>::new()));
                 let mut result: Option<Arc<Mutex<VecDeque<_>>>> = None;
                 guard.compute(Arc::clone(kind), |existing| match existing {
                     Some((_, arc)) => { result = Some(Arc::clone(arc)); papaya::Operation::Abort(()) }
@@ -329,13 +330,13 @@ impl SignalLog {
             }
         };
         let mut log = arc.lock();
-        while log.front().map(|(_, t)| t.elapsed() >= window).unwrap_or(false) {
+        while log.front().map(|(_, t)| crate::sim_seam::mono_since(*t) >= window).unwrap_or(false) {
             log.pop_front();
         }
         log.push_back((sender, now));
     }
 
-    fn last_signal(&self, kind: &str) -> Option<Instant> {
+    fn last_signal(&self, kind: &str) -> Option<u64> {
         self.last_seen.pin().get(kind).copied()
     }
 
@@ -344,7 +345,7 @@ impl SignalLog {
         let log = arc.lock();
         let mut distinct: AHashSet<u64> = AHashSet::with_capacity(min_senders + 1);
         for (sender, received_at) in log.iter() {
-            if received_at.elapsed() > window { continue; }
+            if crate::sim_seam::mono_since(*received_at) > window { continue; }
             distinct.insert(sender.id_hash());
             if distinct.len() >= min_senders { return true; }
         }
@@ -362,7 +363,7 @@ impl SignalLog {
         let log = arc.lock();
         let mut distinct: AHashSet<u64> = AHashSet::with_capacity(min_senders + 1);
         for (sender, received_at) in log.iter() {
-            if received_at.elapsed() > window { continue; }
+            if crate::sim_seam::mono_since(*received_at) > window { continue; }
             let hash = sender.id_hash();
             if !member_hashes.contains(&hash) { continue; }
             distinct.insert(hash);
@@ -373,14 +374,17 @@ impl SignalLog {
 
     fn seed(&self, kind: Arc<str>, sender: NodeId, age_ms: u64) {
         if age_ms > self.sender_log_window.as_millis() as u64 { return; }
-        let received_at = Instant::now()
-            .checked_sub(Duration::from_millis(age_ms))
-            .unwrap_or_else(Instant::now);
+        // `age_ms` before now. This is why the monotonic origin is not zero
+        // (`sim_seam::MONO_ORIGIN_NS`): `warm_quorum_from_layer1` calls this at *startup*, so
+        // without the offset every warmed entry would clamp to the origin and look newer than it
+        // is — in the one moment the mechanism exists for.
+        let received_at =
+            crate::sim_seam::mono_now_ns().saturating_sub(Duration::from_millis(age_ms).as_nanos() as u64);
         let guard = self.sender_log.pin();
         let arc = if let Some(existing) = guard.get(kind.as_ref()) {
             Arc::clone(existing)
         } else {
-            let new_arc = Arc::new(Mutex::new(VecDeque::<(NodeId, Instant)>::new()));
+            let new_arc = Arc::new(Mutex::new(VecDeque::<(NodeId, u64)>::new()));
             let mut result: Option<Arc<Mutex<VecDeque<_>>>> = None;
             guard.compute(Arc::clone(&kind), |existing| match existing {
                 Some((_, arc)) => { result = Some(Arc::clone(arc)); papaya::Operation::Abort(()) }
@@ -394,7 +398,7 @@ impl SignalLog {
     /// Evicts sender_log entries older than `window`; drops kinds whose deque
     /// becomes empty.
     fn trim(&self, window: Duration) {
-        let cutoff = Instant::now() - window;
+        let cutoff = crate::sim_seam::mono_now_ns().saturating_sub(window.as_nanos() as u64);
         let to_remove: Vec<Arc<str>> = {
             let guard = self.sender_log.pin();
             guard.iter()
@@ -417,13 +421,14 @@ impl SignalLog {
 /// Per-kind refractory periods. `is_suppressed_at` is called once per
 /// `deliver` so the path is on the hot side; papaya keeps reads lock-free.
 struct SuppressionTable {
-    suppressed: PapayaMap<Arc<str>, Instant>,
+    /// Suppressed until this monotonic-nanosecond reading.
+    suppressed: PapayaMap<Arc<str>, u64>,
 }
 
 impl SuppressionTable {
     fn new() -> Self { Self { suppressed: PapayaMap::new() } }
 
-    fn suppress(&self, kind: Arc<str>, until: Instant) {
+    fn suppress(&self, kind: Arc<str>, until: u64) {
         self.suppressed.pin().insert(kind, until);
     }
 
@@ -432,16 +437,15 @@ impl SuppressionTable {
     }
 
     /// `now` is plumbed in so `deliver` uses the same instant for both the
-    /// log record and the suppression check, avoiding two `Instant::now()`
-    /// reads per delivery.
-    fn is_suppressed_at(&self, kind: &str, now: Instant) -> bool {
+    /// log record and the suppression check, avoiding two clock reads per delivery.
+    fn is_suppressed_at(&self, kind: &str, now: u64) -> bool {
         self.suppressed.pin().get(kind)
             .map(|until| now < *until)
             .unwrap_or(false)
     }
 
     fn is_suppressed(&self, kind: &str) -> bool {
-        self.is_suppressed_at(kind, Instant::now())
+        self.is_suppressed_at(kind, crate::sim_seam::mono_now_ns())
     }
 }
 
@@ -449,7 +453,7 @@ impl SuppressionTable {
 /// `{kind}/{sender}` key. Used to rate-limit Layer-I quorum-evidence writes
 /// to one per second per pair without reading `KvState`.
 struct QuorumEvidence {
-    quorum_written: PapayaMap<Arc<str>, Instant>,
+    quorum_written: PapayaMap<Arc<str>, u64>,
 }
 
 impl QuorumEvidence {
@@ -459,10 +463,10 @@ impl QuorumEvidence {
         let quorum_key: Arc<str> = Arc::from(
             format!("{}{}/{}", kv_ns::QUORUM, kind, sender).as_str()
         );
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         let should_write = self.quorum_written.pin()
             .get(&quorum_key)
-            .map(|last| now.duration_since(*last) > Duration::from_secs(1))
+            .map(|last| crate::sim_seam::mono_between(*last, now) > Duration::from_secs(1))
             .unwrap_or(true);
         if should_write {
             self.quorum_written.pin().insert(Arc::clone(&quorum_key), now);
@@ -475,11 +479,11 @@ impl QuorumEvidence {
         }
     }
 
-    fn trim(&self, window: Duration, now: Instant) {
+    fn trim(&self, window: Duration, now: u64) {
         let stale: Vec<Arc<str>> = self.quorum_written.pin()
             .iter()
             .filter_map(|(k, last)| {
-                if now.duration_since(*last) > window { Some(Arc::clone(k)) } else { None }
+                if crate::sim_seam::mono_between(*last, now) > window { Some(Arc::clone(k)) } else { None }
             })
             .collect();
         let guard = self.quorum_written.pin();
@@ -552,10 +556,10 @@ impl SignalHandlers {
     ///
     /// Hot-path design: records into [`SignalLog`] first (unconditional —
     /// quorum counting includes suppressed kinds), checks the
-    /// [`SuppressionTable`] using the same `now` (one `Instant::now()` call
-    /// per delivery), then delegates fan-out to [`HandlerTable`].
+    /// [`SuppressionTable`] using the same `now` (one clock read per delivery),
+    /// then delegates fan-out to [`HandlerTable`].
     pub fn deliver(&self, signal: &Signal) {
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         self.log.record(&signal.kind, signal.sender.clone(), now);
         if self.suppression.is_suppressed_at(&signal.kind, now) {
             #[cfg(feature = "metrics")]
@@ -568,11 +572,11 @@ impl SignalHandlers {
     }
 
     /// Returns when this node last admitted a signal of `kind`, or `None` if never.
-    pub fn last_signal(&self, kind: &str) -> Option<Instant> {
+    pub fn last_signal(&self, kind: &str) -> Option<u64> {
         self.log.last_signal(kind)
     }
 
-    pub fn suppress(&self, kind: Arc<str>, until: Instant) {
+    pub fn suppress(&self, kind: Arc<str>, until: u64) {
         self.suppression.suppress(kind, until);
     }
 
@@ -589,7 +593,7 @@ impl SignalHandlers {
     /// on each GC tick.
     pub fn trim_sender_log(&self, window: Duration) {
         self.log.trim(window);
-        self.evidence.trim(window, Instant::now());
+        self.evidence.trim(window, crate::sim_seam::mono_now_ns());
     }
 
     /// Seeds the sender log with a past entry reconstructed from a
@@ -956,7 +960,7 @@ const SIGNAL_CHAN: &str = "signal/handler";
 struct PendingSignal {
     hlc_seq:     u64,
     signal:      Signal,
-    received_at: Instant,
+    received_at: u64,
 }
 
 impl PartialEq  for PendingSignal { fn eq(&self, o: &Self) -> bool { self.hlc_seq == o.hlc_seq } }
@@ -1001,7 +1005,7 @@ impl SignalReorderBuffer {
             return vec![];
         }
         self.pending.entry(key.clone()).or_default()
-            .push(Reverse(PendingSignal { hlc_seq, signal, received_at: Instant::now() }));
+            .push(Reverse(PendingSignal { hlc_seq, signal, received_at: crate::sim_seam::mono_now_ns() }));
         self.drain(&key)
     }
 
@@ -1023,13 +1027,13 @@ impl SignalReorderBuffer {
     fn drain(&mut self, key: &(NodeId, Arc<str>)) -> Vec<Signal> {
         let Some(heap) = self.pending.get_mut(key) else { return vec![] };
         let wm = self.watermarks.entry(key.clone()).or_insert(0);
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
 
         // Determine flush policy once, before any pops change the depth.
         let depth_overflow = heap.len() > self.max_depth;
         let flush = depth_overflow
             || heap.peek().is_some_and(|Reverse(t)| {
-                now.duration_since(t.received_at) >= self.max_hold
+                crate::sim_seam::mono_between(t.received_at, now) >= self.max_hold
             });
 
         if !flush {
@@ -1061,6 +1065,50 @@ impl SignalReorderBuffer {
 
         if heap.is_empty() { self.pending.remove(key); }
         out
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    use crate::node_id::NodeId;
+    use std::time::Duration;
+
+    fn id(p: u16) -> NodeId { NodeId::new("127.0.0.1", p).unwrap() }
+
+    /// **A seeded entry really is as old as it says it is.**
+    ///
+    /// `seed_sender_log` reconstructs a sender-log entry that arrived `age_ms` ago, from a
+    /// `sys/quorum/` record, and `warm_quorum_from_layer1` calls it **at startup** — when the
+    /// process is milliseconds old. Its age therefore has to point *before* the process began,
+    /// which is why `sim_seam::MONO_ORIGIN_NS` is not zero.
+    ///
+    /// It had no test at all, in either representation. With a zero origin the reconstructed
+    /// timestamp clamps to the run's start, every warmed record looks brand new, and a quorum built
+    /// on stale evidence reads as live — in exactly the moment the mechanism exists for.
+    #[test]
+    fn a_seeded_entry_keeps_the_age_it_was_seeded_with() {
+        let handlers = SignalHandlers::new(Duration::from_secs(600));
+        let kind: Arc<str> = Arc::from("quorum.warm");
+        handlers.seed_sender_log(Arc::clone(&kind), id(9101), 500);
+
+        assert!(
+            handlers.quorum(&kind, 1, Duration::from_secs(5)),
+            "inside a 5 s window a 500 ms-old entry counts"
+        );
+        assert!(
+            !handlers.quorum(&kind, 1, Duration::from_millis(200)),
+            "but it is 500 ms old, so a 200 ms window must NOT count it — a clamped seed would"
+        );
+    }
+
+    /// The guard that was already there: an entry older than the window is not seeded at all.
+    #[test]
+    fn an_entry_older_than_the_window_is_not_seeded() {
+        let handlers = SignalHandlers::new(Duration::from_millis(100));
+        let kind: Arc<str> = Arc::from("quorum.stale");
+        handlers.seed_sender_log(Arc::clone(&kind), id(9102), 5_000);
+        assert!(!handlers.quorum(&kind, 1, Duration::from_secs(600)), "never recorded");
     }
 }
 

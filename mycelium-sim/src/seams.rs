@@ -44,9 +44,23 @@ pub struct Sources {
 }
 
 impl Sources {
+    /// Where the simulated monotonic clock starts.
+    ///
+    /// Matches `mycelium_core::sim_seam::MONO_ORIGIN_NS`, and for the same reason: a point *before*
+    /// the run began has to be representable, or code that reconstructs "this arrived `age` ago"
+    /// clamps to the origin under the kernel but not in production — which would make the harness
+    /// disagree with the thing it is modelling, in exactly the direction that hides a bug.
+    pub const MONO_ORIGIN_NS: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
+
     /// Sources seeded for exploration. `wall_ms` is the run's starting wall time.
     pub fn seeded(seed: u64, wall_ms: u64) -> Self {
-        Self { wall_ms, mono_ns: 0, seed, wall_step_ms: 1, mono_step_ns: 1_000_000 }
+        Self {
+            wall_ms,
+            mono_ns: Self::MONO_ORIGIN_NS,
+            seed,
+            wall_step_ms: 1,
+            mono_step_ns: 1_000_000,
+        }
     }
 
     /// Advance and read the wall clock.
@@ -286,7 +300,13 @@ mod tests {
         let wall = n.wall_now_ms().unwrap();
         let mono = n.mono_now_ns().unwrap();
         assert_eq!(wall, 1_789_000_000_000);
-        assert_eq!(mono, 0, "monotonic time starts at the run, not at the epoch");
+        assert_eq!(
+            mono,
+            Sources::MONO_ORIGIN_NS,
+            "monotonic time starts at the run's origin, not at the epoch — and the origin is not \
+             zero, so a point BEFORE the run began is representable"
+        );
+        assert!(mono < 1_789_000_000_000_000_000, "and it is nothing like a wall-clock reading");
 
         let kinds: Vec<_> = k.trace().entries().iter().map(|e| e.kind).collect();
         assert_eq!(kinds, vec![ChoiceKind::Wall, ChoiceKind::Mono]);
