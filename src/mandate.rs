@@ -32,12 +32,17 @@
 //! never lapsed" — and the three lifecycle events below become unrecordable, because each is about
 //! a particular term rather than about the holder.
 //!
-//! # What is not here
+//! # Where the enforcement lives
 //!
-//! The enforcement point. §5 of the record puts the check **inside the protected resource's own
-//! atomic boundary** — for `GitStore`, the mandate ref and the content ref moving in one
-//! `update-ref` transaction. That is a later PR. This module is the contract that enforcement will
-//! carry, and getting it right first is why it is separate.
+//! Not here. §5 of the record puts the check **inside the protected resource's own atomic
+//! boundary**, and that landed in PR 3: `mycelium-wiki::mandate_fence` puts a `verify` of the
+//! mandate ref inside the same `update-ref --stdin` transaction as the content write, and
+//! `--atomic` plus `--force-with-lease` on every push.
+//!
+//! This module is the contract that enforcement carries. Keeping them separate is why the contract
+//! could be got right before a write path depended on it.
+
+pub mod handover;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

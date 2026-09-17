@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the handover journal and incumbency rules (item 5 PR 4)
+
+- **"As history, not as conclusions" is a type, not an instruction.** `HandoverJournal::inherit`
+  does not return entries — it returns `Inherited`, in which a conclusion is *always attributed*.
+  There is no way to obtain a bare conclusion, so a successor cannot adopt its predecessor's
+  judgement without its context, nor become its apparent author. The same distinction the knowledge
+  layer draws between observation and assessment, applied where it is easiest to lose: at a change
+  of personnel.
+- **The readiness gate.** A successor is ready when it has read what it inherited, not when it was
+  appointed. `NotReady` carries how much is unread, because *"not ready"* with no number is
+  indistinguishable from a successor that is stuck. Progress is monotonic — one that could walk its
+  own progress backwards could pass the gate and then claim it had not.
+- **Incumbency rules**: consecutive terms, cumulative tenure, cooling-off, and **affiliated
+  principals** — without the last, rotating between two identities of the same operator would
+  satisfy every limit while changing nothing.
+- Claims held at the record's own wording: this **enforces configured eligibility rules**. Unset
+  rules mean unlimited, because a default limit would be the library deciding an operator's
+  governance for them.
+- `mandate`'s module doc corrected: it said the enforcement point was a later PR, and PR 3 landed
+  it.
+
+
 ### Added — the mandate fence inside `GitStore`'s own transactions (item 5 PR 3)
 
 - `mycelium-wiki::mandate_fence` plus `GitStoreConfig::mandate` (**`None` by default — today's
