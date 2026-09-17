@@ -224,6 +224,75 @@ pub(crate) async fn fs_write_all(
     res
 }
 
+/// A whole-file write.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub(crate) async fn fs_write(
+    path: &std::path::Path,
+    _name: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    tokio::fs::write(path, bytes).await
+}
+
+/// A whole-file write, through the kernel.
+#[cfg(feature = "sim")]
+pub(crate) async fn fs_write(
+    path: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    if installed::is_replaying() {
+        return installed::replay_fs(name, "write", bytes, false).map_err(std::io::Error::other);
+    }
+    let res = tokio::fs::write(path, bytes).await;
+    installed::record_fs(
+        name,
+        "write",
+        bytes,
+        false,
+        res.is_ok(),
+        &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
+    );
+    res
+}
+
+/// A rename — the step that publishes a snapshot, and whose durability needs the *directory* sync.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub(crate) async fn fs_rename(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    _name: &str,
+) -> std::io::Result<()> {
+    tokio::fs::rename(from, to).await
+}
+
+/// A rename, through the kernel. The request carries both paths, because renaming *somewhere else*
+/// is a different effect and a trace that recorded only the source would accept it.
+#[cfg(feature = "sim")]
+pub(crate) async fn fs_rename(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    name: &str,
+) -> std::io::Result<()> {
+    let both = format!("{}->{}", from.display(), to.display());
+    if installed::is_replaying() {
+        return installed::replay_fs(name, "rename", both.as_bytes(), false)
+            .map_err(std::io::Error::other);
+    }
+    let res = tokio::fs::rename(from, to).await;
+    installed::record_fs(
+        name,
+        "rename",
+        both.as_bytes(),
+        false,
+        res.is_ok(),
+        &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
+    );
+    res
+}
+
 /// `sync_data` on a file.
 #[cfg(not(feature = "sim"))]
 #[inline]

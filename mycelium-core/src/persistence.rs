@@ -465,6 +465,13 @@ async fn wal_writer_task(
 const WAL_FILE: &str = "wal.bin";
 /// The directory whose sync makes a rename durable.
 const DIR_SYNC: &str = "dir";
+/// The snapshot's temporary file, before it is renamed into place.
+const SNAP_TMP: &str = "snapshot.tmp";
+/// The snapshot itself.
+const SNAP_FILE: &str = "snapshot.bin";
+/// The WAL's post-truncation sync — a distinct stream from an ordinary append's sync, so the
+/// *ordering* against the directory sync is legible in a trace rather than buried among appends.
+const WAL_TRUNCATE: &str = "wal.bin#truncate";
 
 
 async fn open_wal(path: &std::path::Path) -> io::Result<tfs::File> {
@@ -637,12 +644,17 @@ async fn do_snapshot(
             None    => buf,
         }
     };
-    tfs::write(&tmp_path, &encoded).await?;
+    // The snapshot install, as five ordered kernel effects (item 6 PR 3): write the temp file, sync
+    // its bytes, rename it into place, sync the *directory* so the rename survives a power loss
+    // (3b below), and only then truncate the WAL. The order is the whole property — v2.4.4 exists
+    // because one of these was in the wrong place — so each is recorded and a trace catches a
+    // reordering or a removal.
+    crate::sim_seam::fs_write(&tmp_path, SNAP_TMP, &encoded).await?;
     {
         let f = tfs::File::open(&tmp_path).await?;
-        f.sync_data().await?;
+        crate::sim_seam::fs_sync_data(&f, SNAP_TMP).await?;
     }
-    tfs::rename(&tmp_path, &snap_path).await?;
+    crate::sim_seam::fs_rename(&tmp_path, &snap_path, SNAP_FILE).await?;
     // 3b. Make the RENAME durable before the WAL is truncated. `sync_data` on the file
     // covers its bytes, not the directory entry; without this, a power loss / kernel
     // panic after step 4 could leave the OLD snapshot.bin on disk next to an EMPTY,
@@ -651,10 +663,11 @@ async fn do_snapshot(
     // rename out), which is why the process-kill suite could never see this.
     fsync_dir(dir).await?;
 
-    // 4. Truncate WAL.
+    // 4. Truncate WAL. Recorded too: "the WAL was truncated" is the effect the directory sync above
+    // must precede, and a trace that showed them the other way round is the v2.4.4 regression.
     wal_file.seek(std::io::SeekFrom::Start(0)).await?;
     wal_file.set_len(0).await?;
-    wal_file.sync_data().await?;
+    crate::sim_seam::fs_sync_data(wal_file, WAL_TRUNCATE).await?;
 
     // 5. Lower opacity — tombstone the persistence key.
     let lower_upd = crate::framing::make_gossip_update(
@@ -964,6 +977,74 @@ mod durability_tests {
         assert!(dir.join("snapshot.bin").exists() && !dir.join("snapshot.tmp").exists());
         let restored = replay_into_fresh_store(&dir).await;
         assert_eq!(live_value(&restored, "k").as_deref(), Some(&b"v"[..]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **The power-loss ordering, finally observable.**
+    ///
+    /// `snapshot_install_syncs_the_directory` above says it plainly: *"the power-loss property
+    /// (rename durable before the WAL truncation) is not observable without a filesystem adapter"*,
+    /// so it could only pin the wiring. The adapter now exists, and the property is a sequence in
+    /// the trace: write the temp file, sync its bytes, rename it into place, **sync the directory**,
+    /// and only then truncate the WAL.
+    ///
+    /// Why the order and not just the presence: a directory sync *after* the truncation is exactly
+    /// the v2.4.4 bug — a power loss between them leaves the old `snapshot.bin` beside an empty,
+    /// fsynced `wal.bin`, and every acknowledged record since the previous snapshot is gone. A test
+    /// that only asserted "fsync_dir was called" would pass on that.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn the_snapshot_syncs_the_directory_before_it_truncates_the_wal() {
+        use mycelium_sim::{Kernel, Sources};
+
+        let dir  = unique_dir("sim-order");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        apply_and_notify(&state, &make_gossip_update(&node, 1, Arc::from("k"), Bytes::from_static(b"v"), false, &hlc));
+        let mut wal = open_wal(&dir.join("wal.bin")).await.unwrap();
+
+        crate::sim_seam::install(crate::sim_seam::SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(1, 1_789_000_000_000),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        do_snapshot(&dir, &state, &node, &hlc, 1, &mut wal, None).await.unwrap();
+        let ctx = crate::sim_seam::take().expect("kernel installed");
+
+        // Only the storage effects, in the order production produced them.
+        let fs: Vec<(String, String)> = ctx
+            .kernel
+            .trace()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == mycelium_sim::ChoiceKind::Fs)
+            .map(|e| (e.stream.clone(), e.request.split(' ').next().unwrap_or("").to_string()))
+            .collect();
+
+        let position = |stream: &str, op: &str| -> usize {
+            fs.iter()
+                .position(|(s, o)| s == stream && o == op)
+                .unwrap_or_else(|| panic!("no {op} on {stream} in {fs:?}"))
+        };
+
+        let tmp_written   = position("snapshot.tmp", "write");
+        let tmp_synced    = position("snapshot.tmp", "sync_data");
+        let renamed       = position("snapshot.bin", "rename");
+        let dir_synced    = position("dir", "sync_dir");
+        let wal_truncated = position("wal.bin#truncate", "sync_data");
+
+        assert!(tmp_written < tmp_synced, "the temp file's bytes are synced after they are written");
+        assert!(tmp_synced < renamed, "a snapshot is published only once its bytes are durable");
+        assert!(renamed < dir_synced, "the directory sync is what makes the rename durable");
+        assert!(
+            dir_synced < wal_truncated,
+            "THE v2.4.4 PROPERTY: the directory sync must precede the WAL truncation. \
+             Reversed, a power loss between them leaves the old snapshot beside an empty, fsynced \
+             WAL — every acknowledged record since the previous snapshot gone. Trace: {fs:?}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

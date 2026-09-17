@@ -47,7 +47,7 @@ until it is ignored.
 how a tool quietly stops meaning anything while still passing. Thirty-four sites, about a fifth of
 the total, were invisible to a check whose entire job was to see them.
 
-**The debt, measured: 199 sites across 44 files** — after the alias fix. `hlc.rs` has left the
+**The debt, measured: 197 sites across 44 files** — after the alias fix. `hlc.rs` has left the
 baseline entirely, and `persistence.rs`'s WAL write path is routed even though its other sites
 remain.
 
@@ -63,7 +63,24 @@ That needs the three-layer model (process memory · page cache · durable · dir
 fault injection of PR 4 — because *process death is not power loss*, and the harness must not
 manufacture a loss a process kill cannot cause nor certify durability only a sync establishes.
 
-**Next:** `persistence.rs`'s remaining 12 sites, `connection.rs` (~9 `Instant::now`), `tasks.rs`
+**The payoff, earlier than expected.** `snapshot_install_syncs_the_directory` opens by saying the
+power-loss property "is not observable without a filesystem adapter — the replay plan's point", and
+could only pin the wiring. With the adapter it is a **sequence in the trace**: write the temp file,
+sync its bytes, rename it into place, sync the *directory*, then truncate the WAL. The new test
+asserts those five in order, and — checked by reversing the production code — **fails when the
+directory sync moves after the truncation**, printing the offending trace:
+
+```
+[("snapshot.tmp","write"), ("snapshot.tmp","sync_data"), ("snapshot.bin","rename"),
+ ("wal.bin#truncate","sync_data"), ("dir","sync_dir")]
+```
+
+That reversal *is* v2.4.4: a power loss between the truncation and the directory sync leaves the old
+`snapshot.bin` beside an empty, fsynced `wal.bin`, and every acknowledged record since the previous
+snapshot is gone. A test asserting only "fsync_dir was called" passes on it. This is the first time
+the fix has had a test that could have caught the bug.
+
+**Next:** `persistence.rs`'s remaining 10 sites, `connection.rs` (~9 `Instant::now`), `tasks.rs`
 (~6 `fastrand` + ~6 timers), then PR 4's storage model and the WAL/snapshot witness.
 
 **Gates.** `make check` clean (the forbidden-call check inside it); core 179 without `sim`, 183 with;

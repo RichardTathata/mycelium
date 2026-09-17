@@ -30,6 +30,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (−5), and it did not follow `fs as tfs` aliases — which made `persistence.rs`, the module the
   inventory calls "the right first target" with 26 fs references, **entirely invisible** (+14).
   Baseline now **199 sites across 44 files**; it read 165 when the check first went green.
+- **The snapshot install is five ordered kernel effects**, and the v2.4.4 power-loss property —
+  *the directory sync must precede the WAL truncation* — is now a **test that fails when the order
+  is reversed**, printing the offending trace. `snapshot_install_syncs_the_directory` says that
+  property "is not observable without a filesystem adapter"; it is now.
 - Gated: `make check-full` and CI build and test `-p mycelium-core --features sim`.
 
 
