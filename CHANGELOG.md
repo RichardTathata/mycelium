@@ -9,6 +9,53 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — a snapshot's bytes no longer depend on hash iteration order
+
+- `do_snapshot` built its entry list by iterating the store and extending with the WAL tail, so the
+  **file's bytes depended on papaya's iteration order** — which is not stable across processes even
+  though the store's hasher is seeded. Two nodes holding identical logical state wrote
+  byte-different snapshots, making any byte-level comparison (checksum, dedup, fixture diff)
+  unsound. Entries are now sorted by key before encoding: the file is a function of the state it
+  represents.
+- Found by replaying the WAL/snapshot scenario, which is what the replay harness is for. Old
+  snapshots still replay — this changes only what is written.
+
+### Added — item 6 PR 4: the fault sweep
+
+- **A failure at any storage effect must leave an acknowledged record recoverable** — either the
+  snapshot carries it or the WAL still does; *neither* is the outcome v2.4.3 and v2.4.4 were both
+  about. Swept across all five install effects plus the WAL-tail read, by rewriting one recorded
+  outcome in the trace (the bundle format is text, and this is what that buys).
+- **A fault is an effect that does not happen.** The write-side seams now **decide before acting**
+  in replay: a recorded failure means the effect is skipped, not that an error is handed back after
+  the rename already renamed. Recording keeps the opposite order — it must act first, because the
+  real outcome is what gets written down.
+- `fs_read` honours the kernel's outcome too. Without that a fault injected at a read was silently
+  ignored, which matters most here: **v2.4.3 exists because a failed WAL-tail read was treated as an
+  empty tail** and the records it could not see were truncated away. That path is now verified by
+  injection rather than by a hand-built unreadable file.
+
+### Added — item 6 PR 4: the WAL/snapshot scenario replays from a bundle, with its witness
+
+- **The merge-removed witness**, as a `cfg(test)` toggle rather than a hand edit (the plan requires
+  this: a hand edit cannot be named in a bundle, re-run by someone else, or used to show the fix
+  still holds). It is the exact inverse of
+  `regression_snapshot_retains_wal_record_acked_before_local_apply`.
+- **The gate**: the race is recorded, written to a bundle naming that toggle, read back from disk,
+  and replayed — with a companion test proving the replay is a *check* (a different run diverges).
+
+### Changed — replay performs storage effects instead of suppressing them
+
+- A write's bytes are its request, so replay used to skip the effect. That breaks for **a run that
+  reads its own writes**: `do_snapshot` reads the WAL tail `wal_append` wrote earlier in the same
+  run, and a suppressed write left the tail empty, diverging against the run's own recording. The
+  kernel now decides the *outcome* while the effect really happens, which also means a recorded
+  failure replays as a failure.
+- **An effect's request no longer embeds absolute paths.** `fs_rename` recorded
+  `/tmp/run-123/snapshot.tmp->…`, so a bundle could only replay in the directory that produced it.
+  File names only — both ends still recorded.
+
+
 ### Changed — **BREAKING**: `MeshHandle::last_signal` returns the age, not an `Instant`
 
 - `pub fn last_signal(&self, kind: &str) -> Option<Duration>` — **how long ago**, where it used to be
