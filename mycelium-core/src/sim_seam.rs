@@ -73,11 +73,15 @@ pub fn mono_now_ns() -> u64 {
 /// Where the monotonic clock starts counting, so that **a point before process start is
 /// representable**.
 ///
-/// `Instant` has this property and a bare "nanoseconds since we started" does not, which is not a
-/// detail: `SignalLog::seed` reconstructs a sender-log entry that arrived `age_ms` ago, and
-/// `warm_quorum_from_layer1` calls it *at startup*, when the process is milliseconds old. Counting
-/// from zero would clamp every seeded entry to the origin — making warmed quorum evidence look
-/// newer than it is, in the one moment the whole mechanism exists for.
+/// `Instant` has this property and a bare "nanoseconds since we started" does not.
+///
+/// **The caller that originally motivated this no longer needs it.** `SignalLog::seed` reconstructs
+/// an entry that arrived `age_ms` ago and is called at startup; it briefly used this clock, and now
+/// uses `Instant` again (the public types went back, and `Instant::checked_sub` handles it
+/// natively). The offset is kept because the property is still real for any future caller that
+/// subtracts a window from a fresh reading — and because a clock whose zero is reachable is a
+/// clamping bug waiting for its first user. Recorded rather than silently retained: this rationale
+/// used to name `seed` as the reason, and that is no longer true.
 ///
 /// A year of headroom, which is more than any configured window (`signal_window_secs` defaults to
 /// 600 s) and leaves ~583 years of runtime before a `u64` of nanoseconds runs out. It is deliberately
@@ -103,6 +107,78 @@ fn real_mono_now_ns() -> u64 {
 #[inline]
 pub fn mono_since(earlier_ns: u64) -> std::time::Duration {
     mono_between(earlier_ns, mono_now_ns())
+}
+
+/// How long since `at` — the kernel-owned replacement for `Instant::elapsed()`.
+///
+/// # Why this exists beside [`mono_since`]
+///
+/// `mono_since` needs its argument to be a seam reading, which means the *stored type* has to
+/// change wherever it is used. For a public field like `CoreCtx::peers` that is an API break, and
+/// the break buys nothing: **what a replay must reproduce is the decision, not the representation.**
+/// Every staleness question is "how long since this", so recording *that* is sufficient — the
+/// `Instant` itself never needs to be reproduced, only the interval derived from it.
+///
+/// So the map keeps real `Instant`s, and every read of their age goes through here. Under a kernel
+/// the duration comes from the trace; without one it is `at.elapsed()` and nothing has changed.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn mono_elapsed(at: &std::time::Instant) -> std::time::Duration {
+    at.elapsed()
+}
+
+/// How long since `at`, through the kernel. See the no-`sim` arm for why the interval is recorded
+/// rather than the instant.
+#[cfg(feature = "sim")]
+pub fn mono_elapsed(at: &std::time::Instant) -> std::time::Duration {
+    std::time::Duration::from_nanos(installed::with_seams(
+        || at.elapsed().as_nanos() as u64,
+        |s| s.mono_now_ns(),
+    ))
+}
+
+/// Has `a` not yet reached `b`? — the kernel-owned replacement for `a < b` on two `Instant`s.
+///
+/// # Why a comparison needs a seam at all
+///
+/// [`mono_elapsed`] covers "how old is this", but three decisions compare two stamps the process
+/// took at different moments — suppression expiry, the sender-log trim cutoff, and peer eviction.
+/// Both sides are real `Instant`s, so a replay that re-took them would compare *its own* elapsed
+/// wall time, not the recording's, and reach a different answer.
+///
+/// Recording the **verdict** fixes that without touching the stored type: the boolean is what the
+/// code branches on, so the boolean is what the kernel owns. The same principle as everywhere else
+/// in this module — reproduce the decision, not the representation.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn mono_before(a: &std::time::Instant, b: &std::time::Instant) -> bool {
+    a < b
+}
+
+/// Has `a` not yet reached `b`, through the kernel?
+#[cfg(feature = "sim")]
+pub fn mono_before(a: &std::time::Instant, b: &std::time::Instant) -> bool {
+    installed::with_seams(|| u64::from(a < b), |s| s.mono_now_ns()) != 0
+}
+
+/// The interval between two `Instant`s the caller already holds — the kernel-owned replacement for
+/// `Instant::duration_since`.
+///
+/// Same argument as [`mono_elapsed`]: the decision depends on the interval, so the interval is what
+/// the kernel owns. Saturating, exactly as `duration_since` is.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn mono_span(earlier: &std::time::Instant, later: &std::time::Instant) -> std::time::Duration {
+    later.saturating_duration_since(*earlier)
+}
+
+/// The interval between two `Instant`s, through the kernel.
+#[cfg(feature = "sim")]
+pub fn mono_span(earlier: &std::time::Instant, later: &std::time::Instant) -> std::time::Duration {
+    std::time::Duration::from_nanos(installed::with_seams(
+        || later.saturating_duration_since(*earlier).as_nanos() as u64,
+        |s| s.mono_now_ns(),
+    ))
 }
 
 /// The interval between two readings from [`mono_now_ns`] — the replacement for
@@ -860,9 +936,9 @@ mod tests {
 
     /// **A point before the run began is representable.** `Instant` has this property — on both
     /// platforms it is internally offset, so `Instant::now() - 600s` is fine however young the
-    /// process is — and a bare "nanoseconds since we started" would not. `SignalLog::seed`
-    /// reconstructs an entry that arrived `age_ms` ago and is called *at startup*, so losing this
-    /// would clamp every warmed quorum record to the origin and make it look newer than it is.
+    /// process is — and a bare "nanoseconds since we started" would not. Kept as a property of this
+    /// clock for any caller that subtracts a window from a fresh reading; the caller that first
+    /// needed it (`SignalLog::seed`) is back on `Instant` and no longer does.
     #[test]
     fn the_monotonic_origin_leaves_room_to_point_before_the_run_began() {
         installed::take();

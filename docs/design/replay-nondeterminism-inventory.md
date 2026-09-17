@@ -67,6 +67,28 @@ disagreed here would disagree in the direction that hides the bug. `mono_since` 
 `Instant::elapsed` and saturates, because "earlier is actually later" cannot happen and a wrap would
 express that impossibility as five centuries elapsed — which a cooldown reads as long expired.
 
+**Deliberate admission (2026-09-17, reversing part of the same day's work).** The peer table,
+`SwimMembership`, `SignalHandlers` and `MeshHandle::last_signal` were converted to `u64` monotonic
+nanoseconds and have been **converted back to `Instant`**. Those are public types
+(`CoreCtx::peers`, `ConnContext::peers`, `pub mod swim_membership`, `pub mod signal`,
+`pub mod mesh_handle`), and changing them forced a MAJOR release for a representation change with
+**no consumers in the workspace** — every external use is `agent.peers()`, the method, which never
+changed.
+
+What a replay must reproduce is the **decision, not the representation**, and every staleness
+decision is one of three shapes. Each now has a seam, and the `Instant::now()` sites that merely
+*take a stamp* are admitted here because nothing branches on them directly:
+
+| Shape | Seam | Used by |
+|---|---|---|
+| "how long since this" | `mono_elapsed(&Instant)` | sender-log window, quorum windows, `last_signal_age` |
+| "how long between these two" | `mono_span(&Instant, &Instant)` | SWIM suspicion timeout, quorum-evidence rate limit, reorder hold |
+| "has this deadline passed" | `mono_before(&Instant, &Instant)` | suppression expiry, sender-log trim cutoff, peer eviction |
+
+The third exists because two stamps taken at different moments, compared directly, would have a
+replay comparing *its own* elapsed wall time rather than the recording's. Recording the **verdict**
+is what makes that reproducible without touching the stored type.
+
 **Three kinds of `Instant` live in this list, and only one of them is this seam's.**
 
 1. *Function-local elapsed timers* — `writer.rs`'s `last_fail`, `connection.rs`'s

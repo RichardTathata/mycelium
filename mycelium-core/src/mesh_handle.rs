@@ -242,14 +242,20 @@ impl MeshHandle {
         AdvertiseHandle { _cancel: cancel_tx }
     }
 
+    /// Returns when this node last admitted a signal of `kind`.
+    pub fn last_signal(&self, kind: &str) -> Option<std::time::Instant> {
+        self.ctx.signal_handlers.last_signal(kind)
+    }
+
     /// Returns **how long ago** this node last admitted a signal of `kind`, or `None` if never.
     ///
-    /// Changed from `Option<Instant>` in the item 6 PR 3 clock work. The age is what every caller
-    /// computed from the `Instant` anyway, it is what the sibling
-    /// [`last_signal_persistent`](Self::last_signal_persistent) has always returned — so the pair is
-    /// now consistent — and unlike a raw seam reading it means something on its own.
-    pub fn last_signal(&self, kind: &str) -> Option<Duration> {
-        self.ctx.signal_handlers.last_signal(kind).map(crate::sim_seam::mono_since)
+    /// Added rather than changing [`last_signal`](Self::last_signal)'s return type: the age is what
+    /// every caller computed from the `Instant` anyway, and it is what the sibling
+    /// [`last_signal_persistent`](Self::last_signal_persistent) has always returned — so the pair
+    /// reads consistently — but taking the old signature away would have been a break that bought
+    /// nothing. This is also the form the replay kernel owns (`sim_seam::mono_elapsed`).
+    pub fn last_signal_age(&self, kind: &str) -> Option<Duration> {
+        self.ctx.signal_handlers.last_signal(kind).map(|t| crate::sim_seam::mono_elapsed(&t))
     }
 
     /// Returns the age of the most recently seen evidence of `kind` in `sys/quorum/`.
@@ -273,9 +279,7 @@ impl MeshHandle {
 
     /// Suppresses local delivery of `kind` signals for `duration`.
     pub fn suppress(&self, kind: impl Into<Arc<str>>, duration: Duration) {
-        self.ctx
-            .signal_handlers
-            .suppress(kind.into(), crate::sim_seam::mono_now_ns().saturating_add(duration.as_nanos() as u64));
+        self.ctx.signal_handlers.suppress(kind.into(), std::time::Instant::now() + duration);
     }
 
     /// Lifts a suppression set by [`suppress`](Self::suppress) before it expires.
@@ -314,7 +318,7 @@ impl MeshHandle {
                     _ = &mut cancel_rx               => break,
                     _ = shutdown_rx.wait_for(|v| *v) => break,
                     _ = ticker.tick() => {
-                        let elapsed = signal_handlers.last_signal(&kind).map(crate::sim_seam::mono_since);
+                        let elapsed = signal_handlers.last_signal(&kind).map(|t| crate::sim_seam::mono_elapsed(&t));
                         let stale = match elapsed {
                             Some(dur) if dur <= threshold => false,
                             Some(_) => true,
