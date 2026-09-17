@@ -211,6 +211,9 @@ pub mod mesh_manifest;
 /// Federation identity and policy objects (v3 item 2 — `docs/design/federated-domains.md`).
 /// Types and canonical signing bytes only: no transport, no discovery, no `federation/` KV prefix.
 pub mod federation;
+/// The scoped-mandate contract (v3 item 5 — `docs/design/scoped-mandates.md`).
+/// The contract and the epoch check; the enforcement point inside a resource is a later PR.
+pub mod mandate;
 /// Typed knowledge records (v3 item 3 — `docs/design/knowledge-layer.md`).
 /// Records and links only: no store, no resolution, no gossip.
 #[cfg(feature = "tls")]

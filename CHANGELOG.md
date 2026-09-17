@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the scoped-mandate contract (item 5 PR 2)
+
+- `mycelium::mandate`: the appointment (holder · establishing authority · purpose · scope ·
+  **enumerated** operations · authority epoch · **separate term identity** · window), the three
+  lifecycle events, and `ResourceAuthority::check` — the shape the real enforcement point will carry.
+- **The decisive invariant is enforceable here**: once a resource has installed epoch E2, a mandate
+  authorized only under E1 is refused — *refresh, retry, reconnect and restart all give the same
+  answer*, which is the point, since those are the four ways a revoked holder ordinarily gets a
+  second chance.
+- **`MandateSuperseded` is its own refusal and never a `Conflict`.** `Conflict` is the retry loop's
+  input; classifying a stale mandate that way would hand a revoked curator to the exact loop that
+  refreshes content and re-submits, and **the retry loop would launder the revocation**. Supersession
+  is also reported *before* any other failing check, so the caller gets the answer that matters
+  rather than one inviting a fix that will not help.
+- **Epoch and term identity are separate fields on purpose.** The epoch orders authority; the term
+  says *which appointment*. Collapsing them makes "the same holder, reappointed after a gap"
+  indistinguishable from "the appointment never lapsed" — and the three lifecycle events, each about
+  a term, become unrecordable.
+- An installed epoch never goes backwards: the invariant is about what happens *after* an
+  installation, so an installation that could be undone would undo it.
+
+
 ### Added — the authorized knowledge store and its heads (item 3 PR 3)
 
 - `knowledge::store`: records live here; the gossip KV namespace carries **bounded signed heads
