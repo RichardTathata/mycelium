@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the authenticated federation call and the provider adapter (item 2 PR 4)
+
+- `federation::call::FederatedCaller` — a credential **bound to the call, not just the caller**. It
+  names the export it authorises, so a credential minted for `invoice.status` cannot invoke
+  `invoice.submit` from the same partner, in the same second, over the same connection. Item 7 fixed
+  the confused deputy inside a domain; this is the same fix one boundary out, where the caller is by
+  construction not ours.
+- **`AcceptedCall` preserves the origin to the provider** — the domain *and* the principal, verbatim,
+  rather than "the gateway called me". A provider that only ever sees the gateway cannot make an
+  authorisation decision of its own, nor say afterwards who it acted for. It also carries the
+  `policy_revision` that permitted the call, so *"under which rules"* has an answer.
+- **Cross-domain expiry is wall-clock, deliberately.** Everything else in the crate pushes intervals
+  onto a monotonic clock — but two domains share no monotonic origin, so a cross-domain deadline has
+  to be stated on the one clock both sides can name. The cost is skew, bounded explicitly by
+  `CallPolicy::skew_tolerance` rather than assumed away.
+- **The verifier bounds the lifetime, not the issuer.** `CallPolicy::max_lifetime` is the receiving
+  domain's own ceiling; without it a partner could mint a century-long credential and §10's *"issued
+  authority lasts only to its expiry"* would be a promise the issuer makes to itself.
+- Seven named refusals, kept distinct because each is a different thing for an operator to do — in
+  particular **`BadSignature` and `NotPermitted` never merge**: one says someone is forging, the
+  other says we chose not to grant it, and reading the first as the second sends the operator to
+  edit the wrong file.
+
+
 ### Added — filtered catalogs and the remote resolver (item 2 PR 3)
 
 - **Outbound: filter, then publish.** `federation::catalog::filtered_catalog` gives a partner only
