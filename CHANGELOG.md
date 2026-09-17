@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — typed knowledge records (item 3 PR 2)
+
+- `mycelium::knowledge` (`tls`): the four record types — `Claim` · `Observation` · **`Assessment`**
+  · `AcceptanceDecision` — and the six link kinds. Records only: no store, no resolution, no gossip.
+- **Immutability is arithmetic, not a convention.** A `RecordId` is derived from the record's
+  content, so *"there is no edit, only a further record"* cannot be violated by forgetting it —
+  changing any field produces a different record.
+- **An id names its issuer**, which is what makes the layer's sharpest rule *locally* checkable:
+  **an issuer retracts only its own statements**. With a bare digest, a reader would have to fetch
+  the target to know who issued it — so the rule could be skipped by any reader that had not.
+  Retraction is not moderation, and this is enforced from the retracting record alone.
+- **Challenging across issuers is allowed and is the point.** Only retraction is issuer-bound;
+  disagreement is what the layer preserves, and two issuers contradicting each other produce two
+  records that both exist.
+- A record's **kind** is in its signed bytes, so an observation's signature can never authenticate
+  an assessment — judging is not recording, down to the cryptography.
+
+
 ### Added — the federation example and guide (item 2 PR 7, completing the item)
 
 - `cargo run --example federated_domains --features tls` walks the whole item-2 lifecycle in one
