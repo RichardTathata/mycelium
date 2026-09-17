@@ -43,6 +43,7 @@
 //! could be got right before a write path depended on it.
 
 pub mod handover;
+pub mod restart;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

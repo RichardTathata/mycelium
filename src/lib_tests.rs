@@ -417,6 +417,59 @@ async fn two_meshes_never_learn_each_other() {
     );
 }
 
+// ── Durable proposals via the existing log verb (v3 item 5 PR 5) ──────────
+
+/// **§7 of the scoped-mandates record, demonstrated rather than typed.**
+///
+/// > Durable proposals via the existing log verb (`KvHandle::append` →
+/// > `log/wiki/{group}/proposals`) plus item 1's receipts — **not a service database**; the
+/// > evaporating queue becomes the discovery hint the plan wants.
+///
+/// §5 of that record refuses a resource-authoritative service process, and a durable proposal queue
+/// is exactly where one would sneak back in: it looks like storage rather than like a control
+/// plane. This test is the check that it did not — the proposal goes through the verb the substrate
+/// already has, lands in the namespace reserved for it, and reads back byte-identical.
+#[tokio::test]
+async fn a_durable_proposal_uses_the_existing_append_verb_and_the_reserved_namespace() {
+    use crate::mandate::{restart::{proposal_stream, Proposal}, PrincipalId, TermId};
+
+    let agent = make_agent();
+    let stream = proposal_stream("norfolk");
+
+    let proposal = Proposal {
+        proposer: PrincipalId::new("member-b").unwrap(),
+        term:     TermId::new("term-3").unwrap(),
+        target:   "pages/harvest.md".into(),
+        body:     b"# Harvest\n".to_vec(),
+        at_ms:    1_789_000_000_000,
+    };
+
+    // The existing verb. No new storage, no service.
+    let hlc = agent.kv().append(&stream, proposal.encode().unwrap());
+    assert!(hlc > 0, "append returns the log position it took");
+
+    // It landed under the prefix reserved at PR 1, not in a namespace of its own.
+    let keys: Vec<String> = agent
+        .kv()
+        .scan_prefix(mycelium_core::signal::kv_ns::LOG_WIKI)
+        .into_iter()
+        .map(|(k, _)| k.to_string())
+        .collect();
+    assert!(
+        keys.iter().any(|k| k.starts_with("log/wiki/norfolk/proposals/")),
+        "the proposal must live under the reserved log/wiki/ prefix, got {keys:?}"
+    );
+
+    // And it reads back through the same verb, byte-identical.
+    let entries = agent.kv().scan_log(&stream, 0, u64::MAX);
+    assert_eq!(entries.len(), 1, "exactly the one proposal");
+    assert_eq!(
+        Proposal::decode(&entries[0].value).unwrap(),
+        proposal,
+        "a proposal round-trips through the log verb without a database in the middle"
+    );
+}
+
 // ── Agent API ─────────────────────────────────────────────────────────────
 
 /// WS-C M8 G-C2: a cluster deployed with `GossipConfig::auto()` (no hand-set tuning
