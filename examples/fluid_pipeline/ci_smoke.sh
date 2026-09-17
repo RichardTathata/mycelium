@@ -58,13 +58,25 @@ fi
 PY="$VENV/bin/python"
 pass "python env ready"
 
+# Wait for a node's /health, with a budget generous enough for a cold CI runner.
+#
+# This was 100 x 0.2s = 20s, and it flaked on GitHub Actions (2026-09-17): a debug binary starting
+# on a cold runner, immediately after its own build, did not answer within 20s. Locally it answers
+# in well under a second, which is exactly why the budget went unnoticed.
+#
+# 50s is not a fix for a slow node — it is the acknowledgement that this gate is a *smoke test for
+# the pipeline*, not a startup-latency benchmark. A gate that fails intermittently for a reason it
+# is not testing teaches people to hit re-run, and then it is not a gate at all.
+#
+# The failure message now reports how long it actually waited, instead of leaving the reader to
+# count the loop.
 wait_health() {
-    local port="$1" name="$2"
-    for i in $(seq 1 100); do
+    local port="$1" name="$2" attempts=250 delay=0.2
+    for _ in $(seq 1 "$attempts"); do
         if curl -sf -o /dev/null "http://127.0.0.1:$port/health"; then return 0; fi
-        sleep 0.2
+        sleep "$delay"
     done
-    fail "$name did not become healthy on :$port"
+    fail "$name did not become healthy on :$port after ${attempts} attempts x ${delay}s"
 }
 
 start_nodes() {
