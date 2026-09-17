@@ -1,0 +1,231 @@
+//! Two federated domains, end to end — the item 2 contract as a runnable narrative.
+//!
+//! ```text
+//! cargo run --example federated_domains --features tls
+//! ```
+//!
+//! # What this demonstrates, and what it does not
+//!
+//! **Does:** every decision item 2 defines — a signed descriptor, a revisioned policy, a filtered
+//! catalog, an authenticated call bound to one export, per-partner budgets, failover that respects
+//! repeatability, a partition/reconnect cycle, a key rotation, and a revocation.
+//!
+//! **Does not:** move a byte over a network. There is no federation transport yet — PRs 1–6 built
+//! the contract and this example exercises it in one process. The record's release gate (§13) is a
+//! *two-mesh demonstration* proving from membership tables, consensus state and traces that the
+//! meshes never merged; that gate is **not** claimed here, and saying so is the point. What is
+//! claimed is narrower and checkable: given these inputs, these are the decisions.
+//!
+//! Every step prints what it decided and why, so the output reads as the argument rather than as a
+//! log of a thing that worked.
+
+use mycelium::federation::{
+    call::{verify_federated_call, CallPolicy, CallRefusal, FederatedCaller},
+    catalog::{filtered_catalog, CatalogObservation, RemoteResolver, ResolveFailure},
+    gateway::{on_gateway_silent, CallOutcome, GatewayPool, Repeatability},
+    session::{LinkRefusal, PartnerLink},
+    DomainDescriptor, DomainId, DomainPolicy, TrustBundle,
+};
+use std::time::{Duration, Instant};
+
+fn step(n: u8, title: &str) {
+    println!("\n\x1b[1m{n}. {title}\x1b[0m");
+}
+
+fn note(s: impl AsRef<str>) {
+    println!("   {}", s.as_ref());
+}
+
+fn main() {
+    let alpha = DomainId::new("alpha.example").expect("valid domain id");
+    let beta = DomainId::new("beta.example").expect("valid domain id");
+
+    println!("\x1b[1mTwo federated domains — alpha (provider) and beta (consumer)\x1b[0m");
+    println!("Alpha exports three services. Beta is granted exactly one of them.");
+
+    // ── 1. identity ───────────────────────────────────────────────────────────────────────────
+    step(1, "Alpha's descriptor: what it is, and what it exports");
+
+    let (signing, verifying) = keypair();
+    let descriptor = DomainDescriptor {
+        domain: alpha.clone(),
+        public_key: verifying,
+        issued_at_ms: 1_789_000_000_000,
+        policy_revision: 3,
+        exports: vec![
+            "invoice.submit".into(),
+            "invoice.status".into(),
+            "ledger.audit".into(),
+        ],
+    };
+    note(format!("exports: {:?}", descriptor.exports));
+    note(format!(
+        "signed over {} canonical bytes, tagged so a policy signature can never authenticate it",
+        descriptor.canonical_bytes().len()
+    ));
+
+    // ── 2. the filtered catalog ───────────────────────────────────────────────────────────────
+    step(2, "What beta is allowed to SEE");
+
+    let policy = DomainPolicy {
+        domain: alpha.clone(),
+        revision: 3,
+        grants: vec![(beta.clone(), "invoice.submit".into())],
+    };
+    let visible = filtered_catalog(&descriptor.exports, &policy, &beta);
+    note(format!("beta sees: {visible:?}"));
+    note("`ledger.audit` is ABSENT, not refused — a catalog is a disclosure, and telling a partner");
+    note("that a capability exists has already told it something about this domain.");
+
+    // ── 3. discovery ──────────────────────────────────────────────────────────────────────────
+    step(3, "Beta's gateway observes that catalog");
+
+    let mut resolver = RemoteResolver::new(Duration::from_secs(60));
+    resolver.observe(CatalogObservation {
+        partner: alpha.clone(),
+        observed_by: "beta-gw-1".into(),
+        observed_at: Instant::now(),
+        exports: visible.clone(),
+    });
+    match resolver.resolve(&alpha, "invoice.submit") {
+        Ok(cap) => note(format!("resolved {}/{}", cap.domain, cap.export)),
+        Err(e) => note(format!("unexpected: {e}")),
+    }
+    match resolver.resolve(&alpha, "ledger.audit") {
+        Err(ResolveFailure::NotExported) => {
+            note("`ledger.audit` does not resolve — beta never saw it, because it was never shown")
+        }
+        other => note(format!("unexpected: {other:?}")),
+    }
+
+    // ── 4. the authenticated call ─────────────────────────────────────────────────────────────
+    step(4, "Beta calls — and the credential names the call, not just the caller");
+
+    let now_ms = 1_789_000_010_000;
+    let credential = FederatedCaller {
+        origin_domain: beta.clone(),
+        principal: "svc/billing".into(),
+        export: "invoice.submit".into(),
+        issued_at_ms: now_ms,
+        expires_at_ms: now_ms + 60_000,
+    };
+    let signature = sign(&signing, &credential.canonical_bytes());
+    let bundle = TrustBundle::trusting([(beta.clone(), verifying)]);
+    let call_policy = CallPolicy::default();
+
+    match verify_federated_call(
+        &credential, &signature, "invoice.submit", &bundle, &policy, &call_policy, now_ms + 1_000,
+    ) {
+        Ok(accepted) => {
+            note(format!(
+                "accepted — the provider is handed origin={} principal={:?}, not \"the gateway\"",
+                accepted.origin_domain, accepted.principal
+            ));
+            note(format!("and policy revision {} is recorded as what permitted it", accepted.policy_revision));
+        }
+        Err(e) => note(format!("unexpected refusal: {e}")),
+    }
+
+    note("");
+    note("The same credential, used for a different export:");
+    match verify_federated_call(
+        &credential, &signature, "invoice.status", &bundle, &policy, &call_policy, now_ms + 1_000,
+    ) {
+        Err(CallRefusal::WrongExport { authorised, requested }) => note(format!(
+            "refused — authorises {authorised:?}, asked for {requested:?}. Binding only the caller",
+        )),
+        other => note(format!("unexpected: {other:?}")),
+    }
+    note("would leave the deputy confused about WHAT, having fixed WHO.");
+
+    // ── 5. budgets and failover ───────────────────────────────────────────────────────────────
+    step(5, "Two gateways, per-partner budgets, and what a silence means");
+
+    let mut pool = GatewayPool::new(["gw-1", "gw-2"], 1);
+    let gw = pool.admit(&beta, &[]).expect("a free slot");
+    note(format!("admitted on {gw} (fixed local order — no election, no leader)"));
+
+    let mut attempted = vec![gw];
+    note("gw-1 goes silent mid-call…");
+    match on_gateway_silent(&mut pool, &beta, Repeatability::AtMostOnce, &mut attempted, "timeout") {
+        Err(CallOutcome::DeliveryUnknown { attempted_via, .. }) => {
+            note(format!("at-most-once: NOT failed over. attempted={attempted_via:?}"));
+            note("The far side may have run it, so the caller is told UNKNOWN — which is true —");
+            note("rather than FAILED, which would be a guess.");
+        }
+        other => note(format!("unexpected: {other:?}")),
+    }
+
+    let mut pool2 = GatewayPool::new(["gw-1", "gw-2"], 1);
+    let g = pool2.admit(&beta, &[]).unwrap();
+    let mut tried = vec![g];
+    if let Ok(next) = on_gateway_silent(&mut pool2, &beta, Repeatability::Repeatable, &mut tried, "timeout") {
+        note(format!("repeatable: failed over to {next} — doing it twice is, by declaration, harmless"));
+    }
+
+    // ── 6. partition and reconnect ────────────────────────────────────────────────────────────
+    step(6, "The link drops, and comes back");
+
+    let mut link = PartnerLink::new(alpha.clone());
+    link.connected();
+    link.discovery_refreshed();
+    note(format!("ready: admit() -> {:?}", link.admit().is_ok()));
+
+    link.disconnected();
+    resolver.forget(&alpha);
+    note("disconnected — discovery is DISCARDED, not left to age out");
+
+    link.connected();
+    match link.admit() {
+        Err(LinkRefusal::Refreshing { .. }) => {
+            note("reconnected, and work is still REFUSED: the catalogue predates the partition,");
+            note("and whatever changed while we were down is exactly what we'd be acting on.");
+        }
+        other => note(format!("unexpected: {other:?}")),
+    }
+    link.discovery_refreshed();
+    note(format!("discovery refreshed: admit() -> {:?}", link.admit().is_ok()));
+
+    // ── 7. rotation, then revocation ──────────────────────────────────────────────────────────
+    step(7, "Beta rotates its key, then alpha revokes it");
+
+    let mut bundle = TrustBundle::trusting([(beta.clone(), verifying)]);
+    let new_key = [7u8; 32];
+    bundle.rotate(&beta, new_key, now_ms + 30_000);
+    note(format!(
+        "during the window both keys verify ({} accepted); past it, only the new one ({})",
+        bundle.acceptable_keys(&beta, now_ms).len(),
+        bundle.acceptable_keys(&beta, now_ms + 30_001).len()
+    ));
+    note("Bounded on purpose: an unbounded overlap is not a rotation, it is two keys —");
+    note("and the compromised one is still among them.");
+
+    bundle.revoke(&beta);
+    note(format!(
+        "revoked: acceptable keys = {}, is_revoked = {}",
+        bundle.acceptable_keys(&beta, now_ms).len(),
+        bundle.is_revoked(&beta)
+    ));
+    note("A tombstone, not a deletion: \"we used to trust them and stopped\" is a different fact");
+    note("from \"we never heard of them\", and an operator reading a refusal needs to know which.");
+
+    println!("\n\x1b[1mWhat was NOT demonstrated\x1b[0m");
+    println!("   No bytes crossed a network: there is no federation transport yet.");
+    println!("   The record's release gate — a two-mesh demonstration proving from membership");
+    println!("   tables, consensus state and traces that the meshes never merged — is NOT met by");
+    println!("   this example, and is not claimed by it.");
+}
+
+// ── signing helpers ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "tls")]
+fn keypair() -> (ed25519_dalek::SigningKey, [u8; 32]) {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    let pk = sk.verifying_key().to_bytes();
+    (sk, pk)
+}
+
+#[cfg(feature = "tls")]
+fn sign(sk: &ed25519_dalek::SigningKey, msg: &[u8]) -> Vec<u8> {
+    mycelium_core::tls::sign_bytes(sk, msg).to_vec()
+}

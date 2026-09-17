@@ -177,6 +177,12 @@ required-features = ["gateway", "test-util"]
 
 
 [[example]]
+name              = "federated_domains"
+path              = "examples/federated_domains.rs"
+# The whole item-2 contract needs signature verification.
+required-features = ["tls"]
+
+[[example]]
 name              = "ops_console"
 path              = "examples/ops_console/main.rs"
 required-features = ["gateway"]
