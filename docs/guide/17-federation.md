@@ -137,3 +137,50 @@ cargo run -p mycelium-coop-examples --bin federation_facts
 - [09 · Security](09-security.md) — the Ed25519 node identity that does the self-certifying.
 - Operators: [observability → Viewing AgentFacts](../operations/observability.md#viewing-agentfacts)
   — pulling and inspecting the served documents from the ops side.
+
+---
+
+## The other half: who may *invoke* what (v3 item 2)
+
+Everything above is the **discover-me** edge: AgentFacts, self-certified, pulled by anyone, and
+deliberately un-gated. `docs/design/federated-domains.md` adds the **invoke** edge beside it, and
+the boundary between them is a decision (D25), not an accident:
+
+> **NANDA is what a domain says about itself, verifiable by any fetcher. Federation is who may
+> invoke what, between partners.**
+
+So federation does **not** add a second well-known document, a registry or a trust-registry service.
+A `DomainDescriptor`'s public subset is an AgentFacts profile through the existing serializer; trust
+bundles stay bilateral operator configuration.
+
+### What exists today
+
+`mycelium::federation` — the contract, with no transport yet:
+
+| Module | What it decides |
+|---|---|
+| `federation` | `DomainId`, the signed `DomainDescriptor`, the revisioned `DomainPolicy`, the `TrustBundle` (with rotation and revocation) |
+| `federation::catalog` | what a partner may **see** (filter, then publish) and what this gateway has **observed**, with expiry |
+| `federation::call` | the credential bound to *this call*, and the provider adapter that preserves `origin` |
+| `federation::gateway` | per-partner budgets, failover only for repeatable exports, `DeliveryUnknown` |
+| `federation::session` | the partition/reconnect state machine — work refused until discovery refreshes |
+
+Run it:
+
+```bash
+cargo run --example federated_domains --features tls
+```
+
+The example walks the whole lifecycle and prints what each step decided *and why*.
+
+### What does not exist yet
+
+**No federation transport.** No bytes cross a network; PRs 1–6 built the contract and PR 7 shows it
+working in one process. The invocation edge, when it arrives, **is A2A** (D5) with domain-bound
+origin credentials — not a second call protocol, because two invocation edges with different auth
+models is the drift v2.4.1 and v2.4.2 were spent removing.
+
+**The release gate is not met.** The record asks for a two-mesh demonstration that proves *from
+membership tables, consensus state and traces* that the meshes never merged. `two_meshes_never_learn_each_other`
+is the harness for it and currently proves the easy half — two meshes that share no bootstrap peer
+stay separate. It becomes the real test once there is an edge for them to leak across.

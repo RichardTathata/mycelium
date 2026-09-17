@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the federation example and guide (item 2 PR 7, completing the item)
+
+- `cargo run --example federated_domains --features tls` walks the whole item-2 lifecycle in one
+  process — signed descriptor, filtered catalog, discovery with expiry, a call bound to one export,
+  per-partner budgets, failover that respects repeatability, a partition/reconnect cycle, a bounded
+  key rotation, a revocation — and prints what each step decided **and why**.
+- **It also prints what it did not demonstrate.** No bytes cross a network; there is no federation
+  transport yet. The record's release gate — a two-mesh demonstration proving *from membership
+  tables, consensus state and traces* that the meshes never merged — is **not** met by the example
+  and is not claimed by it.
+- Guide 17 gains the invoke-edge half, with D25's boundary stated once: *NANDA is what a domain says
+  about itself, verifiable by any fetcher; federation is who may invoke what, between partners.* No
+  second well-known document, no registry, no trust-registry service.
+
+
 ### Added — partition, reconnect, revocation and rotation (item 2 PR 6)
 
 - **Reconnecting is not being ready.** `federation::session::PartnerLink` has three states, and the
