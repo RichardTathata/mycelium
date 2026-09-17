@@ -170,6 +170,33 @@ supplies **ordering and exclusion**, the mandate supplies **entitlement**. That 
 Six tests, proved non-vacuous in both directions: breaking the fence fails exactly the two fence tests;
 inverting the convergence fails exactly the two issuance tests, and neither break fails the other's tests.
 
+### 7.2 "Every mutation path protected" — what makes that checkable, and the two exempt sites
+
+The plan (§6.3) claims **every mutation path protected**. What makes it true today is that `GitStore` funnels
+its content writes through **one chokepoint**, `commit_files`, which carries
+`mandate_fence::update_ref_stdin`; and `publish` carries `mandate_fence::push_args`. What makes it *stay* true
+is `scripts/check-wiki-mutation-fence.sh`, a baseline-diffing gate in `make check` and CI: a file that gains a
+ref-moving site without gaining a fence site fails, and so does a file that loses a fence site. Both directions
+are verified by planting the breakage.
+
+Two sites move a git ref **without** the mandate `verify`. Naming them is the point — an "every path" claim with
+unnamed exceptions is the thing that decays.
+
+- **`refresh`** — `update-ref <ref> <remote_sha>`, adopting the remote head as local truth. It creates no
+  content; it adopts what the remote's pre-receive hook already fenced. **Not a mutation path** in the mandate
+  sense.
+- **`publish`'s splice retry** — CAS-moves the **local** ref to a two-parent commit that re-parents our
+  already-fenced scope files onto theirs. The subsequent push *is* fenced (`--atomic` + `--force-with-lease` on
+  the mandate ref), so **the remote is protected**. But the local ref moves without re-verifying the mandate, so
+  **a revocation that lands mid-retry-loop is not observed locally until the push fails.** The exposure is a
+  local reader served from the local head in that window. Recorded rather than carried silently; closing it
+  means threading the fence through the splice path, which is a change to `publish`, not to the contract.
+
+**What the gate cannot see**, stated rather than glossed: it greps for `"update-ref"` literals and
+`mandate_fence::` paths. A ref moved through an unknown helper, by `git push` alone, or by writing `.git/refs`
+directly is invisible to it; it does not parse Rust and cannot prove the fenced site is the one on the write
+path — only that the counts have not drifted.
+
 ## 8. The decisive test is replay scenario B
 
 Built once, in item 6, and covering: competing appointments · delayed holders · resource restart · expiry ·

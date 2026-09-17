@@ -164,6 +164,7 @@ check:
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
+	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 
 ## check-full — check + the test suites + the (slow, wasmtime-heavy) wasm-host clippy. Mirrors the
 ## CI gate set; run before a release or when you have touched wasm-host / a feature-conditional path.
