@@ -19,7 +19,24 @@ recorded bytes would have replayed straight past it — it would have *reproduce
 its own stream (`wal.bin#tail`) because *that* read returning different bytes is the v2.4.3 failure
 exactly, and it deserves to be legible on its own line rather than mixed in with recovery reads.
 
-**What I did not build, and why.** The channel seam. The inventory says "capacity and fullness are
+**The channel seam, built after all — and the design is the point.** My first instinct was that
+wrapping `try_send` and recording the outcome would do. It will not, for a reason worth keeping: a
+file write in replay can be *skipped*, because the disk is restored from the bundle; a channel send
+**cannot**, because its effect is in-process and the replay is reproducing that process.
+
+So the kernel **decides** and the call site **honours**: `Sent` performs the send, `Full` does not,
+and a replayed `Sent` that finds the channel full is a divergence — the replay's channel state has
+departed from the recording's — rather than a frame quietly dropped. The test asserts the first half
+with an attempt closure that panics if it is called: a replayed drop must not even try.
+
+Per-shard streams (`gossip/shard2`), because a drop on shard 2 and a drop on shard 5 are different
+events, and a merged trace could not tell a reader which key stopped propagating.
+
+Routed at `framing::dispatch_gossip_try_send`, the one helper several call sites share. The direct
+`gossip_txs[shard].try_send` sites in `connection.rs` still bypass it and remain in the baseline.
+
+**The earlier note, kept because the reasoning was right even though the conclusion changed.** The
+channel seam. The inventory says "capacity and fullness are
 kernel state, so 'full' is a schedulable fault" — which means a *simulated* channel, not a wrapper
 around a real one. A channel send, unlike a file write, has in-process effects the replay is itself
 reproducing: if the recording says "full" the replay must not send, and if it says "sent" it must.

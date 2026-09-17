@@ -9,7 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added — the recovery-read seam (item 6 PR 3)
+### Added — the recovery-read and channel-readiness seams (item 6 PR 3)
 
 - `persistence.rs`'s three recovery reads — the snapshot, the WAL, and the WAL tail the snapshot
   merges — now go through the kernel. Baseline **184 sites across 43 files**.
@@ -21,6 +21,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recording did* is the **v2.4.3** class of failure — where a read error was mapped to an empty tail
   and acknowledged records were truncated away. A harness that supplied the recorded bytes would
   have replayed straight past it.
+- **The channel-readiness seam.** Whether a gossip shard was full is now a kernel decision, so a
+  recorded run *replays the dropped frame* instead of hoping to provoke it again by timing.
+- Its shape differs from storage, and has to. A file write in replay can be skipped — the disk is
+  restored from the bundle. A channel send **cannot**: its effect is in-process and the replay is
+  reproducing that process. So the kernel decides the verdict and the call site honours it: `Sent`
+  performs the send, `Full` does not, and a replayed `Sent` that finds the channel full is a
+  divergence rather than a quietly dropped frame.
+- Per-shard streams (`gossip/shard2`), because a drop on one shard and a drop on another are
+  different events and a merged trace could not say which key stopped propagating.
 
 
 ### Added — the first replay seams: the HLC wall clock and the WAL writes (item 6 PR 3)
