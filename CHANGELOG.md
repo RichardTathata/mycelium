@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the mandate fence inside `GitStore`'s own transactions (item 5 PR 3)
+
+- `mycelium-wiki::mandate_fence` plus `GitStoreConfig::mandate` (**`None` by default — today's
+  behaviour exactly**, so a store that has not opted in is unaffected).
+- **One ref transaction, not two operations.** With a fence, the content write becomes an
+  `update-ref --stdin` transaction carrying `verify <mandate-ref> <expected>` beside the content
+  update. The mandate is checked *through commit* rather than before it, so a concurrent appointment
+  cannot slip between the check and the write. Two separately successful CAS operations could
+  interleave; one transaction cannot.
+- **`--atomic` and `--force-with-lease` on every push — including content-only ones.** That
+  "including" is the load-bearing word: the obvious implementation reads the mandate ref, decides
+  the curator is current, then pushes — and an appointment moving in between lands a write under an
+  authority revoked microseconds earlier, with nothing in the transcript showing it. Asserting the
+  mandate's value *as part of the push* closes that window.
+- Verified against real git: the 30-test `GitStore` integration suite passes on the new transaction,
+  **including** `two_store_instances_race_the_ref_cas_not_each_other` and
+  `concurrent_erase_and_batch_write_serialise_through_the_ref_cas` — the two that exercise the CAS
+  property the change touches.
+- Stated rather than implied: the **remote's** atomicity and the **pre-receive hook** that verifies
+  the signed epoch are the other half of the fence, and are not covered by these tests.
+
+
 ### Added — the scoped-mandate contract (item 5 PR 2)
 
 - `mycelium::mandate`: the appointment (holder · establishing authority · purpose · scope ·
