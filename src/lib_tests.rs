@@ -260,6 +260,163 @@ async fn consensus_pair() -> ConsensusPair {
 }
 
 
+// ── The two-mesh harness (v3 item 2 PR 1) ─────────────────────────────────
+//
+// `docs/design/federated-domains.md` §2 states the invariant the whole item rests on: federation
+// connects exported services and **never joins the transports** — a foreign node never enters
+// membership, the native namespaces, anti-entropy state, or a quorum.
+//
+// §13's release gate says that must be proved "from membership tables, consensus state and traces",
+// **not from a narrative**. This is the scaffolding for that: build two meshes that share nothing,
+// then assert non-merger from the tables themselves. PRs 2–7 add the federation edge on top and
+// re-run these same assertions with it present — at which point they stop being trivially true and
+// start being the thing under test.
+
+/// Two independent meshes, each bootstrapped only within itself.
+struct TwoMeshes {
+    /// Domain A's nodes.
+    a: Vec<GossipAgent>,
+    /// Domain B's nodes.
+    b: Vec<GossipAgent>,
+}
+
+/// Build two meshes of `n` nodes each. No node in one lists any node of the other as a bootstrap
+/// peer — which is what "independently admitted" reduces to in a single-process test.
+async fn two_meshes(n: usize) -> TwoMeshes {
+    async fn mesh(n: usize) -> Vec<GossipAgent> {
+        let ports: Vec<u16> = (0..n).map(|_| alloc_port()).collect();
+        let ids: Vec<NodeId> = ports
+            .iter()
+            .map(|p| NodeId::new("127.0.0.1", *p).unwrap())
+            .collect();
+        let mut agents = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = ports[i];
+            // Bootstrap only within this mesh.
+            cfg.bootstrap_peers = ids
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, other)| other.clone())
+                .collect();
+            cfg.health_check_max_jitter_ms = 50;
+            let a = GossipAgent::new(id.clone(), cfg);
+            a.start().await.unwrap();
+            agents.push(a);
+        }
+        agents
+    }
+    let a = mesh(n).await;
+    let b = mesh(n).await;
+    // Structural poll: each mesh must actually form, or "they did not merge" is vacuously true
+    // because nothing connected to anything.
+    let (ra, rb) = (&a, &b);
+    poll_until(
+        || ra.iter().all(|x| !x.peers().is_empty()) && rb.iter().all(|x| !x.peers().is_empty()),
+        3_000,
+    )
+    .await;
+    TwoMeshes { a, b }
+}
+
+impl TwoMeshes {
+    /// Assert non-merger **from the tables**, per §2 of the record.
+    fn assert_never_merged(&self) {
+        let ids = |m: &Vec<GossipAgent>| -> Vec<String> {
+            m.iter().map(|x| x.node_id().to_string()).collect()
+        };
+        let (a_ids, b_ids) = (ids(&self.a), ids(&self.b));
+
+        // 1. Membership: no foreign node in any peer table. A foreign node here is one the failure
+        //    detector, the fan-out and quorum sizing would all count.
+        for node in &self.a {
+            let peers: Vec<String> = node.peers().iter().map(|p| p.to_string()).collect();
+            for foreign in &b_ids {
+                assert!(
+                    !peers.contains(foreign),
+                    "domain A node {} has domain B node {} in its peer table — the meshes merged",
+                    node.node_id(), foreign
+                );
+            }
+        }
+        for node in &self.b {
+            let peers: Vec<String> = node.peers().iter().map(|p| p.to_string()).collect();
+            for foreign in &a_ids {
+                assert!(
+                    !peers.contains(foreign),
+                    "domain B node {} has domain A node {} in its peer table — the meshes merged",
+                    node.node_id(), foreign
+                );
+            }
+        }
+
+        // 2. The native namespaces: no key naming a foreign node. Foreign state in `cap/`, `grp/`
+        //    or `sys/` is indistinguishable from local state once it is there.
+        for (mine, theirs, label) in
+            [(&self.a, &b_ids, "A"), (&self.b, &a_ids, "B")]
+        {
+            for node in mine {
+                for prefix in ["cap/", "grp/", "sys/"] {
+                    for (key, _) in node.kv().scan_prefix(prefix) {
+                        for foreign in theirs {
+                            assert!(
+                                !key.contains(foreign.as_str()),
+                                "domain {label} node {} holds {key}, which names foreign node \
+                                 {foreign} — foreign state entered the medium",
+                                node.node_id()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **The harness proves something, and proves it is not vacuous.**
+///
+/// Two meshes that share no bootstrap peer never learn each other — asserted from the peer tables
+/// and the native namespaces, not from the absence of an error. The second half is the part worth
+/// having: the same assertions are run against a *deliberately merged* pair, and must fail. Without
+/// that, a harness that checked nothing would pass this test too.
+#[tokio::test]
+async fn two_meshes_never_learn_each_other() {
+    let meshes = two_meshes(2).await;
+
+    // Give discovery a real chance to do the wrong thing before concluding it did not.
+    time::sleep(Duration::from_millis(300)).await;
+    meshes.assert_never_merged();
+
+    // Non-vacuity: one mesh, split into two halves, HAS merged — the same assertions must catch it.
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let mut cfg_a = GossipConfig::default();
+    cfg_a.bind_port = port_a;
+    cfg_a.bootstrap_peers = vec![id_b.clone()];
+    cfg_a.health_check_max_jitter_ms = 50;
+    let mut cfg_b = GossipConfig::default();
+    cfg_b.bind_port = port_b;
+    cfg_b.bootstrap_peers = vec![id_a.clone()];
+    cfg_b.health_check_max_jitter_ms = 50;
+    let a = GossipAgent::new(id_a, cfg_a);
+    let b = GossipAgent::new(id_b, cfg_b);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    poll_until(|| !a.peers().is_empty() && !b.peers().is_empty(), 3_000).await;
+
+    let merged = TwoMeshes { a: vec![a], b: vec![b] };
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        merged.assert_never_merged()
+    }));
+    assert!(
+        caught.is_err(),
+        "the harness must FAIL on two meshes that did merge — otherwise it asserts nothing"
+    );
+}
+
 // ── Agent API ─────────────────────────────────────────────────────────────
 
 /// WS-C M8 G-C2: a cluster deployed with `GossipConfig::auto()` (no hand-set tuning

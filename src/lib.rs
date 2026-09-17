@@ -301,7 +301,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{EgressPolicy, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{DomainProfile, EgressPolicy, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]

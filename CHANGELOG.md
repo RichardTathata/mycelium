@@ -9,6 +9,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the enforced domain profile and the two-mesh harness (item 2 PR 1, completing it)
+
+- **`DomainProfile::{Open, Enforced}`** (`GOSSIP_DOMAIN_PROFILE`), default `Open` so every existing
+  configuration is untouched. `Enforced` turns `federated-domains.md` §9 from prose into a
+  **refusal at `validate()`**, before a socket is opened: **TLS required** (admission *is* the
+  domain — without a per-node CA root, "independently admitted" has no mechanism behind it) and
+  **SWIM off** (its control datagrams are unauthenticated UDP; `swim.rs` signs nothing).
+  Operator note: `swim_failure_detector` defaults to *on*, so enabling the profile without also
+  turning SWIM off is refused **loudly**, rather than by quietly disabling a liveness mechanism
+  underneath you.
+- **The two-mesh harness.** Two meshes sharing no bootstrap peer are asserted never to learn each
+  other — **from the peer tables and the native `cap/`/`grp/`/`sys/` namespaces**, which is what
+  the record's release gate demands instead of a narrative. The test also runs those assertions
+  against a **deliberately merged** pair and requires them to *fail*, so a harness that checked
+  nothing could not pass.
+
+
 ### Added — the scoped-mandates ADR, and `mandate/` + `log/wiki/` reserved (item 5 PR 1)
 
 - `docs/design/scoped-mandates.md` — the last of the three PR-1 ADRs Phase A's exit gate names.
