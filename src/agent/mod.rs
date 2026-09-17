@@ -540,7 +540,7 @@ impl std::ops::Deref for TaskCtx {
 pub struct GossipAgent {
     pub(super) node_id: NodeId,
     pub(super) config: GossipConfig,
-    pub(super) peers: Arc<papaya::HashMap<NodeId, u64>>,
+    pub(super) peers: Arc<papaya::HashMap<NodeId, std::time::Instant>>,
     pub(super) peer_list_tx: watch::Sender<Arc<[NodeId]>>,
     pub(super) bootstrap_peers: Arc<[NodeId]>,
     pub(super) gossip_rxs: GossipRxs,
@@ -802,7 +802,7 @@ impl GossipAgent {
         let default_ttl   = config.default_ttl;
         let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, ForwardHint)>]> = gossip_txs_vec.into();
         // Last time each peer was heard from, in monotonic nanoseconds from the clock seam.
-        let peers_arc: Arc<papaya::HashMap<NodeId, u64>> = Arc::new(papaya::HashMap::new());
+        let peers_arc: Arc<papaya::HashMap<NodeId, std::time::Instant>> = Arc::new(papaya::HashMap::new());
         let config_arc = Arc::new(config.clone());
         // RPC/bulk reply correlation map. Created here so the core-level reply
         // interceptor can capture it; the same Arc is shared into `TaskCtx`

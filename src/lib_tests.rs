@@ -23,7 +23,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -80,7 +80,7 @@ fn data_update(key: &str, value: &[u8], nonce: u64, is_tombstone: bool) -> Gossi
 fn spawn_handler(
     socket: TcpStream,
     store: Arc<papaya::HashMap<Arc<str>, StoreEntry>>,
-    peers: Arc<papaya::HashMap<NodeId, u64>>,
+    peers: Arc<papaya::HashMap<NodeId, Instant>>,
     gossip_tx: mpsc::Sender<(Bytes, u64, crate::framing::ForwardHint)>,
     seen: Arc<ShardedSeen>,
     max_ttl: u8,
@@ -812,7 +812,7 @@ async fn test_deduplication() {
 #[tokio::test]
 async fn test_peer_registered_from_ping() {
     let (mut writer, reader) = loopback_pair().await;
-    let peers: Arc<papaya::HashMap<NodeId, u64>> = Arc::new(papaya::HashMap::new());
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
     let (tx, _rx) = mpsc::channel(10);
     let _ = spawn_handler(reader, Arc::new(papaya::HashMap::new()), Arc::clone(&peers), tx,
                           Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl);
@@ -829,7 +829,7 @@ async fn test_peer_registered_from_ping() {
 #[tokio::test]
 async fn test_ping_not_deduplicated() {
     let (mut writer, reader) = loopback_pair().await;
-    let peers: Arc<papaya::HashMap<NodeId, u64>> = Arc::new(papaya::HashMap::new());
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
     let (tx, _rx) = mpsc::channel(10);
     let _ = spawn_handler(reader, Arc::new(papaya::HashMap::new()), Arc::clone(&peers), tx,
                           Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl);
@@ -1098,7 +1098,7 @@ fn test_subscribe_multiple_receivers_same_key() {
 #[tokio::test]
 async fn test_piggybacked_peers_added_to_table() {
     let (mut writer, reader) = loopback_pair().await;
-    let peers: Arc<papaya::HashMap<NodeId, u64>> = Arc::new(papaya::HashMap::new());
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
     let (tx, _rx) = mpsc::channel(10);
     let _ = spawn_handler(reader, Arc::new(papaya::HashMap::new()), Arc::clone(&peers), tx,
                           Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl);
@@ -1127,7 +1127,7 @@ async fn test_piggybacked_peers_added_to_table() {
 #[tokio::test]
 async fn test_piggybacked_self_not_added() {
     let (mut writer, reader) = loopback_pair().await;
-    let peers: Arc<papaya::HashMap<NodeId, u64>> = Arc::new(papaya::HashMap::new());
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
     let (tx, _rx) = mpsc::channel(10);
     let _ = spawn_handler(reader, Arc::new(papaya::HashMap::new()), Arc::clone(&peers), tx,
                           Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl);
@@ -1146,16 +1146,13 @@ async fn test_piggybacked_self_not_added() {
 #[tokio::test]
 async fn test_piggybacked_known_peer_timestamp_not_overwritten() {
     let (mut writer, reader) = loopback_pair().await;
-    let peers: Arc<papaya::HashMap<NodeId, u64>> = Arc::new(papaya::HashMap::new());
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
     let (tx, _rx) = mpsc::channel(10);
     let _ = spawn_handler(reader, Arc::new(papaya::HashMap::new()), Arc::clone(&peers), tx,
                           Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl);
 
     let known_id: NodeId = "127.0.0.1:7777".parse().unwrap();
-    // Five seconds ago, or the start of the run if this process is younger — the clock seam
-    // counts from process start, not from an epoch.
-    let old_time = mycelium_core::sim_seam::mono_now_ns()
-        .saturating_sub(Duration::from_secs(5).as_nanos() as u64);
+    let old_time = Instant::now() - Duration::from_secs(5);
     peers.pin().insert(known_id.clone(), old_time);
 
     send_wire(&mut writer, &WireMessage::Ping {
@@ -1285,8 +1282,8 @@ async fn test_anti_entropy_skips_when_synced() {
 
     // Register sender as a known peer — the handler silently drops StateRequest
     // from unrecognised peers.
-    let peers: Arc<papaya::HashMap<NodeId, u64>> = Arc::new(papaya::HashMap::new());
-    peers.pin().insert(sender_id.clone(), mycelium_core::sim_seam::mono_now_ns());
+    let peers: Arc<papaya::HashMap<NodeId, Instant>> = Arc::new(papaya::HashMap::new());
+    peers.pin().insert(sender_id.clone(), Instant::now());
 
     let (mut writer, reader) = loopback_pair().await;
     let (tx, _rx) = mpsc::channel(10);
@@ -2120,18 +2117,18 @@ async fn test_last_signal_updates_after_deliver() {
     let _ = agent.mesh().emit(kind, SignalScope::Cluster, Bytes::new());
     // Give the local deliver() call time to record.
     time::sleep(Duration::from_millis(5)).await;
-    // `last_signal` now returns the AGE rather than an `Instant` (item 6 PR 3). The same claim,
-    // stated on the age: the record cannot be older than the emit that produced it.
-    let age = agent.mesh().last_signal(kind);
-    assert!(age.is_some(), "last_signal should be Some after emit");
-    let age = age.unwrap();
+    let ts = agent.mesh().last_signal(kind);
+    assert!(ts.is_some(), "last_signal should be Some after emit");
+    assert!(ts.unwrap() >= before, "timestamp should be at or after emit time");
+
+    // The additive sibling states the same claim as an age — `last_signal_age` was added rather
+    // than changing `last_signal`'s return type, so both are checked.
+    let age = agent.mesh().last_signal_age(kind).expect("an age too");
     assert!(
         age <= before.elapsed(),
-        "the signal cannot have been recorded before the emit that produced it: \
-         age {age:?} > {:?} since emit",
-        before.elapsed()
+        "the signal cannot have been recorded before the emit that produced it: {age:?}"
     );
-    assert!(age < Duration::from_secs(1), "and it was recorded just now, not long ago: {age:?}");
+    assert!(age < Duration::from_secs(1), "and it was recorded just now: {age:?}");
 }
 
 // ── suppress / unsuppress / is_suppressed ────────────────────────────────

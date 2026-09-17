@@ -5,17 +5,17 @@
 # kernel must eventually own, and a new one is a new way for a replay to stop reproducing.
 # Admitting a site means editing docs/design/replay-nondeterminism-inventory.md §2 as well
 # — the record is the decision, this file is only its machine-readable shadow.
-1 mycelium-core/src/connection.rs
+2 mycelium-core/src/connection.rs
 3 mycelium-core/src/framing.rs
 3 mycelium-core/src/kv_handle.rs
-5 mycelium-core/src/mesh_handle.rs
+6 mycelium-core/src/mesh_handle.rs
 7 mycelium-core/src/persistence.rs
 1 mycelium-core/src/rate.rs
 2 mycelium-core/src/receipt.rs
 2 mycelium-core/src/schema_handle.rs
-1 mycelium-core/src/signal.rs
-1 mycelium-core/src/swim_membership.rs
-5 mycelium-core/src/swim.rs
+11 mycelium-core/src/signal.rs
+2 mycelium-core/src/swim_membership.rs
+11 mycelium-core/src/swim.rs
 3 mycelium-core/src/writer.rs
 8 src/agent/a2a.rs
 2 src/agent/bulk.rs
@@ -24,7 +24,7 @@
 1 src/agent/cluster_tuner.rs
 9 src/agent/consensus_handle.rs
 2 src/agent/emergent_groups.rs
-1 src/agent/emergent.rs
+2 src/agent/emergent.rs
 5 src/agent/evidence_journal.rs
 1 src/agent/helpers.rs
 35 src/agent/http.rs
@@ -40,7 +40,7 @@
 2 src/agent/replica_sync.rs
 5 src/agent/rpc.rs
 3 src/agent/state_machine.rs
-2 src/agent/tasks.rs
+3 src/agent/tasks.rs
 1 src/bin/skillrunner/audit.rs
 1 src/bin/skillrunner/config.rs
 1 src/bin/skillrunner/main.rs

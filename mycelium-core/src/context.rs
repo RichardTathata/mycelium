@@ -166,10 +166,13 @@ pub struct CoreCtx {
 
     // ── Networking ───────────────────────────────────────────────────────────────
     /// Live peer table shared with the HTTP gateway for peer-count-based quorum sizing. The value
-    /// is when the peer was last heard from, in monotonic nanoseconds from the clock seam
-    /// (`sim_seam::mono_now_ns`) rather than an `Instant`, so a recorded run can replay a staleness
-    /// eviction without waiting for one.
-    pub peers: Arc<papaya::HashMap<NodeId, u64>>,
+    /// is when the peer was last heard from.
+    ///
+    /// The type stays `Instant`: what a replay must reproduce is the staleness *decision*, and
+    /// every such decision asks "how long since this", so the **interval** is what the kernel owns
+    /// (`sim_seam::mono_elapsed`). Changing the stored type would have been an API break that
+    /// bought nothing.
+    pub peers: Arc<papaya::HashMap<NodeId, std::time::Instant>>,
 
     /// **M7 distributed rate-limiting** (WS-C): per-sender locally-decided throttle budget (fps).
     /// Empty unless `rate_observation_enabled`. The rate-decider task sets a fair-share budget for a

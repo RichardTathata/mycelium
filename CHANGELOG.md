@@ -136,55 +136,50 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   File names only — both ends still recorded.
 
 
-### Changed — **BREAKING**: `MeshHandle::last_signal` returns the age, not an `Instant`
+### Added — `MeshHandle::last_signal_age`, and the clock seams that own a decision
 
-- `pub fn last_signal(&self, kind: &str) -> Option<Duration>` — **how long ago**, where it used to be
-  `Option<Instant>`. The age is what every caller computed from the `Instant` anyway, and it is what
-  the sibling `last_signal_persistent` has always returned, so the pair is now consistent.
-  **Migration:** `h.last_signal(k).map(|t| t.elapsed())` becomes `h.last_signal(k)`.
-- `MeshHandle::suppress` is **unchanged** — it always took a `Duration`.
-- `signal.rs`'s ten interval sites are on the clock seam: the sender log, the per-kind `last_seen`,
-  the suppression table, the quorum-evidence rate limiter, and the reorder buffer's hold. Baseline
-  **159 sites across 43 files**, from 170.
+**Additive. The next release stays a MINOR.** An earlier pass converted the peer table,
+`SwimMembership`, `SignalHandlers` and `MeshHandle::last_signal` to `u64` monotonic nanoseconds.
+Those are public types, so it forced a MAJOR — for a representation change with **no consumers in
+the workspace**: every external use is `agent.peers()`, the method, which never changed. It has been
+reverted.
+
+- **`MeshHandle::last_signal_age(kind) -> Option<Duration>`** is new; `last_signal` keeps its
+  `Option<Instant>` signature. The age is what callers computed anyway and is what the sibling
+  `last_signal_persistent` returns, so the pair reads consistently — but taking the old signature
+  away bought nothing.
+- **What a replay must reproduce is the decision, not the representation.** Every staleness decision
+  is one of three shapes, and each now has a seam, so the stored `Instant` never needs reproducing:
+
+  | Shape | Seam |
+  |---|---|
+  | "how long since this" | `sim_seam::mono_elapsed(&Instant)` |
+  | "how long between these two" | `sim_seam::mono_span(&Instant, &Instant)` |
+  | "has this deadline passed" | `sim_seam::mono_before(&Instant, &Instant)` |
+
+  The third matters most: suppression expiry, the sender-log trim cutoff and peer eviction compare
+  **two stamps the process took at different moments**. A replay that re-took them would compare its
+  own elapsed wall time rather than the recording's, so the *verdict* is what the kernel records.
+- Baseline **180 sites across 43 files**. The `Instant::now()` stamp sites are admitted deliberately
+  in `replay-nondeterminism-inventory.md` §2.1: nothing branches on them directly.
 
 ### Added — the monotonic clock has a non-zero origin, and `seed_sender_log` has its first test
 
-- `sim_seam::MONO_ORIGIN_NS` (one year). `Instant` can represent a point *before* process start — on
-  both platforms it is internally offset, so `Instant::now() - 600s` is fine however young the
-  process is — and a bare "nanoseconds since we started" cannot. `SignalLog::seed` reconstructs an
-  entry that arrived `age_ms` ago and `warm_quorum_from_layer1` calls it **at startup**, so a zero
-  origin would clamp every warmed record to the run's start and make stale quorum evidence read as
-  live, in the one moment the mechanism exists for.
+- `sim_seam::MONO_ORIGIN_NS` (one year), so a point *before* the run began is representable on the
+  `u64` clock as it is on `Instant`. Kept for any caller that subtracts a window from a fresh
+  reading; the caller that first needed it (`SignalLog::seed`) is back on `Instant` and no longer
+  does — recorded rather than left with a stale rationale.
 - `mycelium-sim`'s `Sources` starts its monotonic clock at the same origin, so the harness does not
   disagree with the thing it models.
-- `seed_sender_log` had **no test in either representation**. It has one now, and it fails if the
-  origin is zeroed.
-
-### Changed — **BREAKING**: the peer table's timestamp is monotonic nanoseconds, not an `Instant`
-
-> **This sets the next release to MAJOR** (`RELEASING.md` §1: a breaking change to the public API).
-> `CoreCtx` is re-exported from `mycelium-core`'s root and `peers` is a public field, so this is a
-> public-API break, not an internal one. It is on the v3 contracts axis, where a MAJOR is the
-> expected destination — but it is the first change in `[Unreleased]` that forces one.
-
-- `CoreCtx::peers`, `ConnContext::peers`, `SwimState::peers` and `TaskContext::peers` are
-  `Arc<papaya::HashMap<NodeId, u64>>`; `SwimMembership`'s `now` parameters and its `changed` field
-  follow. **Migration:** the value's meaning is unchanged — when the peer was last heard from — so a
-  reader swaps `t.elapsed()` for `mycelium_core::sim_seam::mono_since(*t)` and
-  `Instant::now()` for `mono_now_ns()`. There is no wire change; this is an in-process type only.
-- Baseline **170 sites across 43 files**, from 179.
-- The peer table and the SWIM membership table had to move together: `merge_gossip` passes one `now`
-  to both, and converting either alone would have left that function reading two different clocks.
-- `SwimMembership` needed no restructuring — it has always taken its clock as a parameter. Only the
-  type changed.
+- `seed_sender_log` had **no test in either representation**. It has one now.
 
 ### Added — `compute_view_confidence_at`, and the branch it made reachable
 
-- A consequence worth naming: monotonic nanoseconds count from **process start**, so unlike
-  `Instant::now() - Duration::from_secs(600)` there is no "ten minutes ago" for a test process alive
-  for milliseconds. The staleness branch of `compute_view_confidence` was therefore unreachable from
-  a test. Injecting `now` — the pattern `SwimMembership` already used — makes it reachable, and it is
-  now tested in both directions.
+- `compute_view_confidence_at(ctx, now)` injects the clock — the pattern `SwimMembership` already
+  used — so the **staleness branch is reachable from a test at all**, and it is now tested in both
+  directions. Added while the peer stamps were briefly `u64` (where there was no "ten minutes ago"
+  to construct) and **kept when they went back to `Instant`**: the testability is the point, not the
+  representation. `compute_view_confidence` is unchanged.
 
 ### Added — the monotonic-clock seam (item 6 PR 3)
 
