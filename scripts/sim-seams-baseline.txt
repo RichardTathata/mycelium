@@ -5,7 +5,7 @@
 # kernel must eventually own, and a new one is a new way for a replay to stop reproducing.
 # Admitting a site means editing docs/design/replay-nondeterminism-inventory.md §2 as well
 # — the record is the decision, this file is only its machine-readable shadow.
-6 mycelium-core/src/connection.rs
+2 mycelium-core/src/connection.rs
 3 mycelium-core/src/framing.rs
 3 mycelium-core/src/kv_handle.rs
 6 mycelium-core/src/mesh_handle.rs
@@ -16,7 +16,7 @@
 11 mycelium-core/src/signal.rs
 2 mycelium-core/src/swim_membership.rs
 11 mycelium-core/src/swim.rs
-6 mycelium-core/src/writer.rs
+3 mycelium-core/src/writer.rs
 8 src/agent/a2a.rs
 2 src/agent/bulk.rs
 5 src/agent/capability_handle.rs

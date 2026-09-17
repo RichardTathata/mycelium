@@ -125,10 +125,12 @@ pub async fn handle_connection(
     let anti_entropy_cooldown = Duration::from_secs(
         task_ctx.config.health_check_interval_secs.saturating_sub(1).max(1)
     );
-    let mut last_state_sent: Option<std::time::Instant> = None;
+    // Monotonic nanoseconds since the run began (clock seam), not an `Instant`: a cooldown is an
+    // interval, and the seam is what lets a replay reproduce one without waiting for it.
+    let mut last_state_sent: Option<u64> = None;
     // Per-connection inbound rate limiter. Resets every second; 0 = unlimited.
     // The limit is read from the hot cell each frame (WS-C M9) so it can be retuned live.
-    let mut rate_window_start = std::time::Instant::now();
+    let mut rate_window_start = crate::sim_seam::mono_now_ns();
     let mut rate_frame_count: u64 = 0;
     // M7 (WS-C) distributed rate-limiting: the immediate peer's identity (the sender key) + its
     // locally-decided throttle budget, refreshed once per window. Inert unless `rate_observation`.
@@ -154,7 +156,7 @@ pub async fn handle_connection(
         // distributed throttle (a fair-share budget decided from cluster-wide aggregate evidence).
         let global_limit = task_ctx.hot.inbound_fps();
         if global_limit > 0 || m7_enabled {
-            let elapsed = rate_window_start.elapsed();
+            let elapsed = crate::sim_seam::mono_since(rate_window_start);
             if elapsed >= Duration::from_secs(1) {
                 // Window rollover: publish this peer's observed rate as shared M7 evidence, then
                 // refresh its locally-decided throttle budget for the new window.
@@ -165,7 +167,7 @@ pub async fn handle_connection(
                     sender_throttle = crate::rate::throttle_for(&task_ctx, &peer_key);
                 }
                 rate_frame_count = 0;
-                rate_window_start = std::time::Instant::now();
+                rate_window_start = crate::sim_seam::mono_now_ns();
             }
             rate_frame_count += 1;
             let effective = match (global_limit, sender_throttle) {
@@ -351,7 +353,7 @@ pub async fn handle_connection(
                 }
                 // Rate-limit: one full anti-entropy scan per health-check interval per connection.
                 // A reconnecting peer gets a fresh connection and a fresh cooldown window.
-                if last_state_sent.is_some_and(|t| t.elapsed() < anti_entropy_cooldown) {
+                if last_state_sent.is_some_and(|t| crate::sim_seam::mono_since(t) < anti_entropy_cooldown) {
                     tracing::debug!(
                         "Anti-entropy cooldown active for {}; ignoring repeated StateRequest",
                         sender
@@ -372,7 +374,7 @@ pub async fn handle_connection(
                             }
                         });
                     }
-                    last_state_sent = Some(std::time::Instant::now());
+                    last_state_sent = Some(crate::sim_seam::mono_now_ns());
                     continue;
                 }
                 // Merkle delta sync (v12): the sender's `bucket_hashes` is its per-bucket
@@ -463,7 +465,7 @@ pub async fn handle_connection(
                         }
                     });
                 }
-                last_state_sent = Some(std::time::Instant::now());
+                last_state_sent = Some(crate::sim_seam::mono_now_ns());
             }
 
             WireMessage::StateResponse { entries } => {

@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
@@ -52,7 +52,9 @@ pub async fn run_peer_writer(
     let mut conn: Option<BufWriter<GossipStream>> = None;
     // Stores (fail_time, actual_backoff) where actual_backoff is jittered so
     // simultaneous reconnects after a partition don't all fire at the same instant.
-    let mut last_fail: Option<(Instant, Duration)> = None;
+    // (when it failed, how long to wait) — monotonic nanoseconds from the clock seam, so a replay
+    // reproduces a reconnect backoff instead of spending it.
+    let mut last_fail: Option<(u64, Duration)> = None;
     // Idle eviction: track when we last sent a frame. None = no timeout configured.
     let mut idle_deadline: Option<ttime::Instant> = if idle_timeout.is_zero() {
         None
@@ -82,7 +84,7 @@ pub async fn run_peer_writer(
         }
 
         if let Some((fail_time, fail_backoff)) = last_fail
-            && fail_time.elapsed() < fail_backoff {
+            && crate::sim_seam::mono_since(fail_time) < fail_backoff {
                 dropped_frames.fetch_add(1, Ordering::Relaxed);
                 peer_dropped.fetch_add(1, Ordering::Relaxed);
                 #[cfg(feature = "metrics")]
@@ -124,14 +126,14 @@ pub async fn run_peer_writer(
                             last_fail = None;
                         }
                         Err(e) => {
-                            last_fail = Some((Instant::now(), jittered(backoff)));
+                            last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));
                             warn!("TLS handshake to {} failed: {}", peer, e);
                             continue;
                         }
                     }
                 }
                 Err(e) => {
-                    last_fail = Some((Instant::now(), jittered(backoff)));
+                    last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));
                     warn!("Connect to {} failed: {}", peer, e);
                     continue;
                 }
@@ -177,7 +179,7 @@ pub async fn run_peer_writer(
             conn = None;
             // +1 for the frame that caused the write failure (already dequeued, never sent).
             let dropped = rx.len() + 1;
-            last_fail = Some((Instant::now(), jittered(backoff)));
+            last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));
             warn!("Write to {} failed; {} frame(s) will be dropped during backoff", peer, dropped);
         }
     }
@@ -426,6 +428,72 @@ mod tests {
         jh.await.unwrap();
         assert!(ah.is_finished(), "precondition: task finished ⇒ entry not live");
         WriterEntry { tx, peer_shutdown: Arc::new(ps), abort_handle: Some(ah), dropped: Arc::new(AtomicU64::new(0)) }
+    }
+
+    /// The reconnect backoff drops frames while it is running, and stops dropping once it expires.
+    ///
+    /// **This behaviour had no test in `mycelium-core` at all.** Breaking `sim_seam::mono_since` to
+    /// return zero left all 180 core tests green and failed exactly one test in the outer crate, by
+    /// a route with nothing to do with reconnecting. A conversion whose behaviour nothing checks is
+    /// a conversion nobody can review — so the clock seam's first call site gets the test its
+    /// absence made obvious.
+    #[tokio::test]
+    async fn the_reconnect_backoff_drops_frames_while_it_runs_and_stops_once_it_expires() {
+        // A port nothing listens on, so `connect` is refused at once and the test is decided by the
+        // backoff rather than by a network timeout.
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+
+        let (tx, rx) = mpsc::channel::<Bytes>(8);
+        let (_sd, sd_rx)   = watch::channel(false);
+        let (_psd, psd_rx) = watch::channel(false);
+        let dropped      = Arc::new(AtomicU64::new(0));
+        let peer_dropped = Arc::new(AtomicU64::new(0));
+
+        // `jittered` returns `[backoff/2, backoff*3/2]`, so 200 ms means a wait somewhere in
+        // 100..300 ms. Every assertion below sits well outside that band, so none of them depends
+        // on which value the draw produced.
+        let handle = tokio::spawn(run_peer_writer(
+            id(port), rx, Duration::from_millis(200), Duration::ZERO,
+            sd_rx, psd_rx, Arc::clone(&dropped), Arc::clone(&peer_dropped), None,
+        ));
+
+        /// Wait for a condition rather than for a duration — the two fixed waits below are the
+        /// backoff itself, which is the thing under test.
+        async fn until(mut f: impl FnMut() -> bool) -> bool {
+            for _ in 0..200 {
+                if f() { return true; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+
+        // Frame 1 provokes the failed connect that arms the backoff.
+        tx.send(Bytes::from_static(b"one")).await.unwrap();
+        assert!(until(|| tx.capacity() == 8).await, "the writer never took the first frame");
+
+        // Frame 2 arrives inside the backoff: dropped, with no connect attempted.
+        tx.send(Bytes::from_static(b"two")).await.unwrap();
+        assert!(
+            until(|| peer_dropped.load(Ordering::Relaxed) == 1).await,
+            "a frame sent inside the reconnect backoff must be dropped"
+        );
+
+        // Past the longest the jitter can make the backoff.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        tx.send(Bytes::from_static(b"three")).await.unwrap();
+        assert!(until(|| tx.capacity() == 8).await, "the writer never took the third frame");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            peer_dropped.load(Ordering::Relaxed), 1,
+            "once the backoff has elapsed the frame must provoke a fresh connect, not a drop"
+        );
+
+        handle.abort();
     }
 
     #[tokio::test]

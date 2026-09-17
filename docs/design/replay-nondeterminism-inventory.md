@@ -49,7 +49,29 @@ the canon.
 | `src/consensus.rs:337` `wall_now_ms` → `causal_now_ms` (= `max(wall, hlc physical)`) — used at 14 call sites: 3 in `consensus.rs`, 3 in `consensus_handle.rs`, 4 in `http.rs`, 1 in `overlay_consistent.rs` | **lease expiry**: whether a committed slot is live, whether a lock is held (D13: clock injection must reach these reads, not only the HLC) | wall-clock seam, via `causal_now_ms` taking the injected clock |
 | `src/agent/opacity.rs:108,130,149,359` · `capability_ops.rs:178,408` · `lifecycle.rs:464` · `tasks.rs:968` · `wiring.rs` · `consensus_handle.rs:187,250` · `mesh_handle.rs:253,316` · `kv_handle.rs:227,345` · `signal.rs:468` · `prompt.rs` | freshness of soft state (`is_fresh`, opacity, requirement expiry, intent TTLs), evidence timestamps | wall-clock seam (one `now_ms()` on the kernel clock) |
 | **OIDC verification** — `oidc.rs:128,174,187` (the JWKS cache's `CachedKeys { at: Instant }` and `at.elapsed() < JWKS_TTL`) and, **inside `jsonwebtoken`**, the wall-clock read behind `validation.validate_exp = true` (`oidc.rs:96`) | whether a token is accepted now, and whether the JWKS is refetched | **the verified result is the recorded input, not the token.** Recording the JWT and the JWKS response does *not* make authentication replayable: the same bytes replayed later fail an expiry check that reads the real wall clock inside a dependency we do not own, and the cache's monotonic TTL decides refetching independently. The kernel records `input oidc/verify → principal=…` (or the refusal) and **authentication internals are declared outside its coverage**; the JWKS cache's `Instant` read is ours and joins the monotonic seam if replaying refresh behaviour is ever wanted. Corrected 2026-09-14 after review — the first draft listed this module under the wall clock and called the token a sufficient input |
-| `mycelium-core/src/writer.rs:57,78,124,131,177` (idle timeout, reconnect backoff) · `connection.rs:131,168,240,373,464` (rate window, state-request cadence) · `swim.rs:160,222,232,237,473` · `swim_membership.rs` · `signal.rs:375–1014` (dedup windows, suppression, quorum-evidence trim, pending ordering) · `tasks.rs:780,867` · `mesh_handle.rs:136,165,271` · `rpc.rs:146,148` · `a2a.rs:124,318,400` · `http.rs:2718,2726` · `membership_governor.rs:186,191` (the **cooldown**, WP5) · `capability_handle.rs` | every interval-based decision: is this peer alive, is this signal a duplicate, has the backoff elapsed, has the cooldown elapsed | **monotonic-clock seam** — separate from the wall clock (the plan's rule: "monotonic and wall clocks separately"); `Instant` values become kernel ticks |
+| `mycelium-core/src/writer.rs:57,78,124,131,177` (idle timeout, reconnect backoff) · `connection.rs:131,168,240,373,464` (rate window, state-request cadence) · `swim.rs:160,222,232,237,473` · `swim_membership.rs` · `signal.rs:375–1014` (dedup windows, suppression, quorum-evidence trim, pending ordering) · `tasks.rs:780,867` · `mesh_handle.rs:136,165,271` · `rpc.rs:146,148` · `a2a.rs:124,318,400` · `http.rs:2718,2726` · `membership_governor.rs:186,191` (the **cooldown**, WP5) · `capability_handle.rs` | every interval-based decision: is this peer alive, is this signal a duplicate, has the backoff elapsed, has the cooldown elapsed | **monotonic-clock seam** — separate from the wall clock (the plan's rule: "monotonic and wall clocks separately"); `Instant` values become kernel ticks. **Seam landed 2026-09-17** (`sim_seam::mono_now_ns` / `mono_since`); `writer.rs`'s reconnect backoff and `connection.rs`'s rate window + anti-entropy cooldown are through it |
+
+**Why the monotonic seam is a second function and not a use of `wall_now_ms`.** Every site above
+measures an *interval*. `Instant` is monotonic, so a backwards NTP step cannot make an interval
+negative or enormous; `SystemTime` gives no such guarantee. Routing these through the wall clock
+would have been one function fewer and a new class of bug — a rate window that never expires, a
+backoff that fires instantly. `Instant` has no epoch, so the seam supplies one (the first read),
+which is what `Seams::mono_now_ns` already meant by "since the run began". `mono_since` replaces
+`Instant::elapsed` and saturates, because "earlier is actually later" cannot happen and a wrap would
+express that impossibility as five centuries elapsed — which a cooldown reads as long expired.
+
+**Three kinds of `Instant` live in this list, and only one of them is this seam's.**
+
+1. *Function-local elapsed timers* — `writer.rs`'s `last_fail`, `connection.rs`'s
+   `rate_window_start` and `last_state_sent`. A `u64` of monotonic nanoseconds, converted in place.
+   These are done.
+2. *`tokio::time::Instant` deadlines* — `writer.rs`'s `idle_deadline`, fed to `sleep_until`. These
+   belong to the **timer seam**, not this one: converting the reading without owning the sleep would
+   leave the deadline deterministic and the wait still real.
+3. *`Instant` in a shared type* — `Arc<papaya::HashMap<NodeId, Instant>>`, the peer table's
+   last-heard-from stamp, which appears in `ConnContext`, `SwimState`, `TaskContext` and their
+   tests. Changing it is a type change across two crates; it is its own increment, not a rider on
+   this one.
 
 ### 2.2 Randomness
 
