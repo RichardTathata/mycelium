@@ -538,7 +538,7 @@ pub(super) struct HealthMonitorContext {
     // identity + peer state
     pub(super) node_id:         NodeId,
     pub(super) bootstrap_peers: Arc<[NodeId]>,
-    pub(super) peers:           Arc<papaya::HashMap<NodeId, Instant>>,
+    pub(super) peers:           Arc<papaya::HashMap<NodeId, u64>>,
     pub(super) peer_writers:    Arc<papaya::HashMap<NodeId, WriterEntry>>,
     pub(super) peer_list_tx:    watch::Sender<Arc<[NodeId]>>,
     // shared substrate state
@@ -894,7 +894,14 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                 // failure detector (a confirmed-Dead member is removed via apply_effect), so
                 // skip staleness eviction here.
                 let eviction_window = Duration::from_secs(interval_secs.saturating_mul(peer_eviction_intervals));
-                let maybe_peer_cutoff = if swim_enabled { None } else { Instant::now().checked_sub(eviction_window) };
+                // Monotonic nanoseconds (clock seam). `checked_sub` keeps the old meaning exactly: a
+                // process younger than the window has no cutoff, so nothing is evicted for age it
+                // cannot yet have.
+                let maybe_peer_cutoff = if swim_enabled {
+                    None
+                } else {
+                    mycelium_core::sim_seam::mono_now_ns().checked_sub(eviction_window.as_nanos() as u64)
+                };
 
                 if let Some(peer_cutoff) = maybe_peer_cutoff {
                     let guard = peers.pin();

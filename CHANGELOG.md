@@ -9,6 +9,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — **BREAKING**: the peer table's timestamp is monotonic nanoseconds, not an `Instant`
+
+> **This sets the next release to MAJOR** (`RELEASING.md` §1: a breaking change to the public API).
+> `CoreCtx` is re-exported from `mycelium-core`'s root and `peers` is a public field, so this is a
+> public-API break, not an internal one. It is on the v3 contracts axis, where a MAJOR is the
+> expected destination — but it is the first change in `[Unreleased]` that forces one.
+
+- `CoreCtx::peers`, `ConnContext::peers`, `SwimState::peers` and `TaskContext::peers` are
+  `Arc<papaya::HashMap<NodeId, u64>>`; `SwimMembership`'s `now` parameters and its `changed` field
+  follow. **Migration:** the value's meaning is unchanged — when the peer was last heard from — so a
+  reader swaps `t.elapsed()` for `mycelium_core::sim_seam::mono_since(*t)` and
+  `Instant::now()` for `mono_now_ns()`. There is no wire change; this is an in-process type only.
+- Baseline **170 sites across 43 files**, from 179.
+- The peer table and the SWIM membership table had to move together: `merge_gossip` passes one `now`
+  to both, and converting either alone would have left that function reading two different clocks.
+- `SwimMembership` needed no restructuring — it has always taken its clock as a parameter. Only the
+  type changed.
+
+### Added — `compute_view_confidence_at`, and the branch it made reachable
+
+- A consequence worth naming: monotonic nanoseconds count from **process start**, so unlike
+  `Instant::now() - Duration::from_secs(600)` there is no "ten minutes ago" for a test process alive
+  for milliseconds. The staleness branch of `compute_view_confidence` was therefore unreachable from
+  a test. Injecting `now` — the pattern `SwimMembership` already used — makes it reachable, and it is
+  now tested in both directions.
+
 ### Added — the monotonic-clock seam (item 6 PR 3)
 
 - `sim_seam::mono_now_ns` / `mono_since` — **separate from the wall clock, and the separation is a

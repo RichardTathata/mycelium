@@ -69,9 +69,19 @@ express that impossibility as five centuries elapsed — which a cooldown reads 
    belong to the **timer seam**, not this one: converting the reading without owning the sleep would
    leave the deadline deterministic and the wait still real.
 3. *`Instant` in a shared type* — `Arc<papaya::HashMap<NodeId, Instant>>`, the peer table's
-   last-heard-from stamp, which appears in `ConnContext`, `SwimState`, `TaskContext` and their
-   tests. Changing it is a type change across two crates; it is its own increment, not a rider on
-   this one.
+   last-heard-from stamp, which appears in `CoreCtx`, `ConnContext`, `SwimState`, `TaskContext` and
+   their tests. **Done 2026-09-17**, together with `SwimMembership`: `merge_gossip` reads the clock
+   once and passes the same `now` to the membership table *and* to the peer table, so converting
+   either alone would have left that function reading two clocks. `SwimMembership` needed no
+   restructuring — it has always taken its clock as a parameter.
+
+**What the representation costs, and what that bought.** Monotonic nanoseconds count from *process
+start*, so `Instant::now() - Duration::from_secs(600)` has no equivalent — a test process alive for
+milliseconds has no "ten minutes ago" to insert. This made `compute_view_confidence`'s staleness
+branch unreachable from a test, which the existing test had never covered. The answer is the pattern
+`SwimMembership` already demonstrated: `compute_view_confidence_at(ctx, now_ns)`. The conversion
+therefore left the function *more* testable than it found it, and that is the question to ask at
+every remaining site — **what was the old type quietly making impossible to test?**
 
 ### 2.2 Randomness
 

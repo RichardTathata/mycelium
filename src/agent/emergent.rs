@@ -398,12 +398,23 @@ pub fn set_transitions(
 
 /// Compute this node's current [`ViewConfidence`] — cheap, on-demand (called by `/stats`).
 pub fn compute_view_confidence(ctx: &TaskCtx) -> ViewConfidence {
+    compute_view_confidence_at(ctx, mycelium_core::sim_seam::mono_now_ns())
+}
+
+/// [`compute_view_confidence`] with the clock supplied, the way `SwimMembership` has always taken
+/// its `now`.
+///
+/// The peer table's stamps became monotonic nanoseconds *since process start* (item 6 PR 3), and
+/// that has a consequence worth naming: unlike `Instant::now() - Duration::from_secs(600)`, there is
+/// no "ten minutes ago" for a test process that has been alive for milliseconds. Injecting `now` is
+/// how a test reaches the stale branch at all — the alternative was a branch nothing could exercise.
+pub fn compute_view_confidence_at(ctx: &TaskCtx, now_ns: u64) -> ViewConfidence {
     let guard = ctx.peers.pin();
     let peers_known = guard.len();
     let mut peers_heard = 0usize;
     let mut max_staleness_ms = 0u64;
     for (_id, last_seen) in guard.iter() {
-        let age = last_seen.elapsed();
+        let age = mycelium_core::sim_seam::mono_between(*last_seen, now_ns);
         if age <= HEARD_WINDOW {
             peers_heard += 1;
             max_staleness_ms = max_staleness_ms.max(age.as_millis() as u64);
@@ -1561,11 +1572,40 @@ mod tests {
         assert_eq!(json["staleness_known"], false);
         assert_eq!(json["max_staleness_ms"], 0, "a placeholder, not an observation");
         // One peer heard just now ⇒ known, and the placeholder becomes a real (small) age.
-        agent.task_ctx.peers.pin().insert(crate::NodeId::new("127.0.0.1", 2).unwrap(), std::time::Instant::now());
+        agent.task_ctx.peers.pin().insert(crate::NodeId::new("127.0.0.1", 2).unwrap(), mycelium_core::sim_seam::mono_now_ns());
         let vc = compute_view_confidence(&agent.task_ctx);
         assert_eq!(vc.peers_heard, 1);
         assert!(vc.staleness_known());
         assert_eq!(serde_json::to_value(&vc).unwrap()["staleness_known"], true);
+    }
+
+    /// The other direction: a peer last heard from before the window is **not** heard.
+    ///
+    /// The test the seam made possible. The peer table's stamps are now monotonic nanoseconds since
+    /// process start, so there is no `Instant::now() - 600s` to insert — this branch was reachable
+    /// only by injecting `now`, which is why `compute_view_confidence_at` exists. Without it the
+    /// staleness comparison could have been stuck at "always fresh" and the suite would have agreed.
+    #[test]
+    fn view_confidence_does_not_count_a_peer_last_heard_before_the_window() {
+        let agent = crate::GossipAgent::new(
+            crate::NodeId::new("127.0.0.1", 1).unwrap(),
+            crate::GossipConfig::default(),
+        );
+        let heard_at = mycelium_core::sim_seam::mono_now_ns();
+        agent.task_ctx.peers.pin().insert(crate::NodeId::new("127.0.0.1", 2).unwrap(), heard_at);
+
+        // One second inside the window: heard, with an age that is really measured.
+        let inside = heard_at + (HEARD_WINDOW.as_nanos() as u64) - 1_000_000_000;
+        let vc = compute_view_confidence_at(&agent.task_ctx, inside);
+        assert_eq!(vc.peers_heard, 1, "still inside the window");
+        assert!(vc.max_staleness_ms >= 28_000, "the age is measured, not assumed zero");
+
+        // One second past it: known about, not heard from.
+        let outside = heard_at + (HEARD_WINDOW.as_nanos() as u64) + 1_000_000_000;
+        let vc = compute_view_confidence_at(&agent.task_ctx, outside);
+        assert_eq!(vc.peers_known, 1, "the peer is still in the table");
+        assert_eq!(vc.peers_heard, 0, "but it has not been heard from inside the window");
+        assert!(!vc.staleness_known(), "nothing heard ⇒ unknown, not fresh");
     }
 
     /// A healthy-fleet snapshot with a full, current view. Tests mutate one axis at a time.

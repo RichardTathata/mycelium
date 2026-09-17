@@ -88,7 +88,18 @@ fn real_mono_now_ns() -> u64 {
 /// cooldown would read as long expired.
 #[inline]
 pub fn mono_since(earlier_ns: u64) -> std::time::Duration {
-    std::time::Duration::from_nanos(mono_now_ns().saturating_sub(earlier_ns))
+    mono_between(earlier_ns, mono_now_ns())
+}
+
+/// The interval between two readings from [`mono_now_ns`] — the replacement for
+/// `Instant::duration_since`, for the callers that are handed both ends.
+///
+/// Saturating for the same reason [`mono_since`] is, and it matches what it replaced:
+/// `Instant::duration_since` also saturates to zero rather than panicking when the arguments are
+/// the wrong way round.
+#[inline]
+pub fn mono_between(earlier_ns: u64, later_ns: u64) -> std::time::Duration {
+    std::time::Duration::from_nanos(later_ns.saturating_sub(earlier_ns))
 }
 
 #[cfg(feature = "sim")]

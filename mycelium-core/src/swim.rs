@@ -29,7 +29,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::{net::UdpSocket, sync::oneshot, sync::watch};
 use tracing::{debug, warn};
 
@@ -100,7 +100,7 @@ pub struct SwimState {
     /// Shared liveness/discovery map: gossip-learned `Alive` members are inserted here
     /// (so the bounded-fan-out reconcile + prober see the full cluster), and confirmed
     /// `Dead` members are removed + their TCP writer evicted.
-    peers: Arc<papaya::HashMap<NodeId, Instant>>,
+    peers: Arc<papaya::HashMap<NodeId, u64>>,
     peer_writers: Arc<papaya::HashMap<NodeId, WriterEntry>>,
     /// How many membership updates to piggyback on each `Ping`/`Ack` (bounded for MTU).
     gossip_updates: usize,
@@ -122,7 +122,7 @@ impl SwimState {
     pub fn new(
         socket: Arc<UdpSocket>,
         self_id: NodeId,
-        peers: Arc<papaya::HashMap<NodeId, Instant>>,
+        peers: Arc<papaya::HashMap<NodeId, u64>>,
         peer_writers: Arc<papaya::HashMap<NodeId, WriterEntry>>,
         gossip_updates: usize,
         peer_list_tx: tokio::sync::watch::Sender<Arc<[NodeId]>>,
@@ -157,7 +157,7 @@ impl SwimState {
     /// Merge inbound gossip and apply each effect to the shared `peers` map. Returns the
     /// updates we must re-gossip to refute a rumour about ourselves (if any).
     fn merge_gossip(&self, updates: &[MemberUpdate]) {
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         let mut effects = Vec::new();
         {
             let mut m = self.lock_membership();
@@ -174,7 +174,7 @@ impl SwimState {
     /// discovery hook (a node learned only via gossip becomes probeable + forwardable);
     /// `BecameDead` removes it and closes its connection. Refutation needs no side effect
     /// here — our bumped incarnation rides out on the next gossip sample.
-    fn apply_effect(&self, eff: ApplyEffect, now: Instant) {
+    fn apply_effect(&self, eff: ApplyEffect, now: u64) {
         match eff {
             ApplyEffect::BecameAlive(node) => {
                 if node != self.self_id {
@@ -219,7 +219,7 @@ impl SwimState {
         if *node == self.self_id {
             return;
         }
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         let eff = self.lock_membership().observe_alive(node, now);
         self.apply_effect(eff, now);
         refresh(&self.peers, node);
@@ -229,12 +229,12 @@ impl SwimState {
     /// recorded in the table and rides out on subsequent gossip samples; it is promoted
     /// to `Dead` by [`SwimState::tick_suspicion`] if no one refutes it in time.
     fn suspect(&self, node: &NodeId) {
-        let _ = self.lock_membership().suspect(node, Instant::now());
+        let _ = self.lock_membership().suspect(node, crate::sim_seam::mono_now_ns());
     }
 
     /// Promote suspects that have outlived `timeout` to `Dead`, removing them from `peers`.
     fn tick_suspicion(&self, timeout: Duration) {
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         let dead = self.lock_membership().promote_expired_suspects(now, timeout);
         for u in dead {
             self.apply_effect(ApplyEffect::BecameDead(u.node), now);
@@ -469,8 +469,8 @@ pub async fn run_swim_prober(
 
 /// Refresh a peer's last-seen timestamp to now, only if it is still present (do not
 /// resurrect a peer the eviction path just removed — retry-safe `compute`).
-fn refresh(peers: &papaya::HashMap<NodeId, Instant>, peer: &NodeId) {
-    let now = Instant::now();
+fn refresh(peers: &papaya::HashMap<NodeId, u64>, peer: &NodeId) {
+    let now = crate::sim_seam::mono_now_ns();
     peers.pin().compute(peer.clone(), |existing| match existing {
         Some(_) => papaya::Operation::Insert(now),
         None => papaya::Operation::Abort(()),
@@ -502,7 +502,7 @@ mod tests {
         let live = id(9102);
         let (plt, rx) = watch::channel::<Arc<[NodeId]>>(vec![bootstrap.clone()].into());
         let state = SwimState::new(socket, me, Arc::clone(&peers), writers, 6, plt, 0, 0);
-        state.apply_effect(ApplyEffect::BecameAlive(live.clone()), Instant::now());
+        state.apply_effect(ApplyEffect::BecameAlive(live.clone()), crate::sim_seam::mono_now_ns());
         let published = rx.borrow().clone();
         assert!(published.contains(&live),
             "BecameAlive must activate the live member even with a bootstrap-seeded watch");
@@ -540,7 +540,7 @@ mod tests {
 
     /// Spin up a live SWIM node (socket + state + running listener) on an ephemeral
     /// port, returning its state, identity, shutdown handle, and its `peers` map.
-    async fn spawn_node() -> (Arc<SwimState>, NodeId, Arc<watch::Sender<bool>>, Arc<papaya::HashMap<NodeId, Instant>>) {
+    async fn spawn_node() -> (Arc<SwimState>, NodeId, Arc<watch::Sender<bool>>, Arc<papaya::HashMap<NodeId, u64>>) {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let port = socket.local_addr().unwrap().port();
         let node = NodeId::new("127.0.0.1", port).unwrap();
@@ -619,7 +619,7 @@ mod tests {
         // Seed A's membership with C as alive, then have A probe B (carrying gossip).
         a.lock_membership().apply(
             &MemberUpdate { node: cid.clone(), incarnation: 0, status: MemberStatus::Alive },
-            Instant::now(),
+            crate::sim_seam::mono_now_ns(),
         );
         assert!(a.probe_direct(probe_addr(&bid), PT).await, "A reaches B");
 
@@ -635,10 +635,13 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_only_touches_present_peers() {
-        let peers: papaya::HashMap<NodeId, Instant> = papaya::HashMap::new();
+        let peers: papaya::HashMap<NodeId, u64> = papaya::HashMap::new();
         let present = id(9001);
         let absent = id(9002);
-        let old = Instant::now() - Duration::from_secs(60);
+        // A minute ago, or the start of the run if this process is younger than that — `saturating_sub`
+        // because the monotonic clock counts from process start, not from an epoch.
+        let old = crate::sim_seam::mono_now_ns()
+            .saturating_sub(Duration::from_secs(60).as_nanos() as u64);
         peers.pin().insert(present.clone(), old);
 
         refresh(&peers, &present);
