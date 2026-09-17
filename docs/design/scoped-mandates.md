@@ -127,6 +127,15 @@ own commentary: it describes near-simultaneous optimistic commitments that *late
 **Eventually agreeing on a holder does not prove that conflicting holders could never both act** — and a commit
 HLC orders epochs without proving its bearer was authorized to establish one.
 
+> **Amendment, 2026-09-17 (the D4 audit — §7.1).** The audit read `distributed_lock` rather than its summary,
+> and **the first half of that paragraph is wrong as applied to `LockService`.** The service does not stop at
+> optimistic commitment: it reads back the converged value and hands a guard **only** to the proposer whose own
+> value survived. Losers receive `Superseded` and never hold a token, so conflicting holders *cannot* both act.
+>
+> **The second half stands, and is now demonstrated rather than asserted**: the winner is whoever won an
+> LWW-HLC race, so the mechanism contains no appointing principal at all. The baseline is unchanged — but for
+> the narrower and better-founded reason that **the gap is entitlement, not exclusion.**
+
 ## 7. Durable proposals, and not a second fence
 
 - **Durable proposals use the existing log verb** — `KvHandle::append` → `log/wiki/{group}/proposals` — plus
@@ -135,6 +144,31 @@ HLC orders epochs without proving its bearer was authorized to establish one.
 - **Do not build a second fence beside `LockService`.** Its fencing token is the commit HLC (#166). This record
   declines to *certify* its converged-view issuance and declines to *replace* it unexamined: it is audited
   under the replay harness (scenario B) before either.
+
+### 7.1 The audit, and its verdict (D4, discharged 2026-09-17)
+
+`src/mandate/lock_audit.rs`. Read from `ConsensusHandle::distributed_lock`, the mechanism is:
+
+1. propose **optimistically** — `Committed` is *not* mutually exclusive (#164 bug A);
+2. wait for convergence and **read back the authoritative value** (commit keys are LWW-resolved by HLC);
+3. hand a `LockGuard` **only** to the proposer whose own value survived — everyone else gets
+   `ConsistencyError::Superseded` and *no token*;
+4. the token is the commit HLC, and the resource rejects anything below the highest it has seen.
+
+**Verdict, part 1 — no second fence.** The resource-side rule is structurally the same fence as
+`ResourceAuthority`, it already delivers the decisive invariant, and it delivers it for a reason that does not
+depend on issuance: the check is at the resource, so it does not care what any holder believes. A second
+mechanism beside it would add nothing to the property that matters. **The fence is for the *stale* holder —
+Kleppmann's case — not for a concurrent one, which step 3 has already excluded.**
+
+**Verdict, part 2 — what is missing is not a fence.** A token cannot carry an **appointer** (nothing
+corresponds to `Mandate::established_by`; winning is a fact about timestamps) and cannot carry **purpose,
+scope or enumerated operations** (a token is a `u64`). `WrongScope` and `NotEnumerated` are refusals *no token
+could produce* — a correctly-fenced holder passes the fence and is still refused by the mandate. So the lock
+supplies **ordering and exclusion**, the mandate supplies **entitlement**. That is a layering, not a duplicate.
+
+Six tests, proved non-vacuous in both directions: breaking the fence fails exactly the two fence tests;
+inverting the convergence fails exactly the two issuance tests, and neither break fails the other's tests.
 
 ## 8. The decisive test is replay scenario B
 

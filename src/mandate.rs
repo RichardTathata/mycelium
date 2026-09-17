@@ -43,6 +43,7 @@
 //! could be got right before a write path depended on it.
 
 pub mod handover;
+pub mod lock_audit;
 pub mod restart;
 pub mod scenario_b;
 

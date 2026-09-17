@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the D4 audit: `LockService` under scenario B, with a verdict (item 5)
+
+- **D4 discharged: no second fence.** The audit (`mandate::lock_audit`) read `distributed_lock` rather than its
+  summary, and **found the premise of the concern wrong.** The service does not stop at optimistic commitment:
+  it reads back the converged value and hands a `LockGuard` **only** to the proposer whose own value survived.
+  Losers get `Superseded` and *never hold a token*, so two concurrent holders cannot both stamp writes. The
+  fence exists for the **stale** holder — Kleppmann's case — and it delivers the decisive invariant for a reason
+  independent of issuance, because the check is at the resource. A second fence beside it would add nothing.
+- **What `LockService` does not supply is entitlement, and no fence reaches it.** A token cannot carry an
+  appointer (the holder is whoever won an LWW-HLC race; nothing corresponds to `Mandate::established_by`) and
+  cannot carry purpose, scope or enumerated operations (it is a `u64`). `WrongScope` and `NotEnumerated` are
+  refusals *no token could produce* — demonstrated against the real `ResourceAuthority`, where a
+  correctly-fenced holder passes the fence and is still refused. The lock supplies ordering and exclusion; the
+  mandate supplies entitlement.
+- **This amends the adopted record.** `docs/design/scoped-mandates.md` §6 claimed that eventual agreement "does
+  not prove that conflicting holders could never both act". For `LockService` the read-back filter does prove
+  exactly that, so §6 carries a dated amendment and the verdict is §7.1. **D2's baseline is unchanged** — but
+  now for the narrower, better-founded reason that the gap is *entitlement, not exclusion*.
+- Six tests, non-vacuous in both directions: breaking the fence fails exactly the two fence tests; inverting the
+  convergence fails exactly the two issuance tests; neither break disturbs the other's.
+
 ### Added — replay scenario B, the decisive test for scoped mandates (item 6 PR 5)
 
 - **A schedule sweep, not five hand-written tests.** Five tests check five orderings someone thought
