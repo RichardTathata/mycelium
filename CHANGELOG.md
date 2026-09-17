@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — filtered catalogs and the remote resolver (item 2 PR 3)
+
+- **Outbound: filter, then publish.** `federation::catalog::filtered_catalog` gives a partner only
+  the exports its policy grants — an ungranted export is **absent, not refused**. A catalog is a
+  disclosure, and disclosing that a capability exists already tells a partner something about this
+  domain.
+- **Inbound: attributable per-gateway observations.** `CatalogObservation` carries *who* saw it and
+  *when*, in fields rather than in a comment. Two gateways disagreeing is then a fact about the
+  gateways, not a contradiction to resolve; both stay visible to an operator.
+- **Discovery expires rather than being extended** (record §10). `RemoteResolver` refuses an
+  observation past its freshness window and says *which* failure it was — `UnknownDomain` ·
+  `NotExported` · `Expired { age }`. A resolver that quietly served a stale entry would turn a
+  partition into a wrong answer. Age comes from `sim_seam::mono_elapsed`, so a recorded run replays
+  an expiry instead of waiting for one.
+- **`RemoteCapability` is a distinct type** from a native capability. One type for both would make
+  "is this ours?" a question about a string prefix.
+- **Discovery is not authorisation.** The resolver answers *"was this offered, recently"*; whether
+  we may invoke it is the gateway's question at the invocation edge. Merging them would let a cache
+  grant something.
+
+
 ### Added — federation identity and policy objects (item 2 PR 2)
 
 - `mycelium::federation`: `DomainId`, the signed `DomainDescriptor`, the revisioned `DomainPolicy`,

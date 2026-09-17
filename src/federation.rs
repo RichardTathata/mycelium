@@ -32,6 +32,8 @@
 //! reusing the OIDC verifier (D6): *reuse the code, never the trust* — an object valid for one
 //! purpose must not be valid for another merely because the same key signed it.
 
+pub mod catalog;
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

@@ -89,6 +89,11 @@ The third exists because two stamps taken at different moments, compared directl
 replay comparing *its own* elapsed wall time rather than the recording's. Recording the **verdict**
 is what makes that reproducible without touching the stored type.
 
+The same admission covers `src/federation/catalog.rs` (item 2 PR 3): `CatalogObservation.observed_at`
+stores an `Instant`, and the one decision derived from it — *has discovery expired* — goes through
+`mono_elapsed`. The file's only forbidden-check hit is the `use std::time::Instant` import, which the
+check counts because such an import *enables* unqualified calls; there are none.
+
 **Three kinds of `Instant` live in this list, and only one of them is this seam's.**
 
 1. *Function-local elapsed timers* — `writer.rs`'s `last_fail`, `connection.rs`'s
