@@ -86,6 +86,9 @@ jobs:
       # wiki-lint finding; `make check` had it all along).
       - run: cargo clippy -p mycelium-core --lib --tests -- -D warnings
       - run: cargo clippy -p mycelium-sim --all-targets -- -D warnings
+      # The static forbidden-call check (item 6 PR 3, D12). Runs in the same job as clippy
+      # because it is the same kind of claim: the seams cannot erode while PR 4-7 are built.
+      - run: ./scripts/check-sim-seams.sh
 
   embedded:
     name: Gateway-free build (no default features)

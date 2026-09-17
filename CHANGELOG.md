@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the static forbidden-call check (item 6 PR 3, D12)
+
+- `scripts/check-sim-seams.sh` enforces the inventory's §6 rule: a new `SystemTime::now`,
+  `Instant::now`, `fastrand::`, `tokio::time::*`, `tokio::fs`/`std::fs` or `RandomState::new` outside
+  the replay seams fails the build. Without it the seams erode while PR 4–7 are built, and a replay
+  quietly stops reproducing with nothing to attribute it to.
+- Implemented as a baseline diff, **not** the `clippy.toml` `disallowed-methods` the record
+  suggested: that lint is workspace-global and cannot be scoped to modules, so it would fire inside
+  the seams and every test — which is exactly where these calls belong.
+- **Measured baseline: 190 sites across 45 files** — the debt PR 3's adapters and PR 4–7 draw down,
+  now visible rather than estimated.
+- Runs in `make check` and CI's clippy job.
+
+
 ### Added — `mycelium-sim`, the deterministic replay kernel (item 6 PR 2)
 
 - A new workspace crate implementing the trace schema PR 1 fixed
