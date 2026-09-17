@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the knowledge-layer ADR, and `knowledge/` reserved (item 3 PR 1)
+
+- `docs/design/knowledge-layer.md`: four record types (**judging is not recording**), six explicit link kinds,
+  and the load-bearing decision — **heads in the gossip medium, records in an authorized store**. Put records
+  in KV and last-write-wins becomes last-writer-is-right: two issuers who disagree would resolve to whichever
+  had the later HLC, which is a clock race, not a truth procedure. Equivocation is preserved instead.
+- `knowledge/head/{issuer}/{stream}` reserved in **both front doors** at PR 1, before any code writes it:
+  `kv_ns::KNOWLEDGE_HEAD` (`mycelium-core/src/signal.rs`) and the crate-doc namespace table (`src/lib.rs`).
+- The record states what it refuses (reputation scalars, inferred independence, mandatory LLM judgment,
+  consensus over truth) and keeps its two gates apart — a semantic one that is a CI property, and a
+  behavioural experiment that can only ever support a bounded claim.
+
+
 ### Added — the federated-domains ADR and the KV namespace sweep (item 2 PR 1)
 
 - `docs/design/federated-domains.md`: what a domain is, the three trust relationships kept apart, and the
