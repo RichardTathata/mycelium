@@ -44,6 +44,7 @@
 
 pub mod handover;
 pub mod restart;
+pub mod scenario_b;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
