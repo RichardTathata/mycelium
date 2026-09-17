@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the federated-domains ADR and the KV namespace sweep (item 2 PR 1)
+
+- `docs/design/federated-domains.md`: what a domain is, the three trust relationships kept apart, and the
+  decisions the plan left to this record. **D5 is decided: the federation call *is* A2A**, with domain-bound
+  origin credentials — there is no `POST /federation/v1/call`, because the A2A edge already exists and is
+  already enforced, and two invocation edges with different auth models is precisely the drift v2.4.1/v2.4.2
+  were spent removing. The record also states what would reopen that decision.
+- `scripts/check-kv-namespaces.sh`, in `make check` and CI: **foreign state never enters the gossip medium**
+  (D7). The plan asserted this check existed; it did not, and an invariant nothing runs is a sentence.
+  Verified in both directions — a planted violation in production code is caught with its citation, and the
+  same literal inside a test module is correctly ignored.
+
+
 ### Changed — **BREAKING**: `MeshHandle::last_signal` returns the age, not an `Instant`
 
 - `pub fn last_signal(&self, kind: &str) -> Option<Duration>` — **how long ago**, where it used to be
