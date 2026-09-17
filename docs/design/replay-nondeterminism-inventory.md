@@ -72,7 +72,30 @@ detect a draw made out of order (divergence), not merely reproduce the sequence.
 | `swim.rs:432` · `membership_governor.rs:224` · `emergent.rs:749` · `a2a.rs:121` · `tasks.rs` health/anti-entropy tickers | **periodic loops** | timer seam (`interval` → kernel tick stream) |
 | `consensus.rs:878,1085` · `consensus_handle.rs:157,162,223,232,447,494` · `http.rs:2395,2468,2702,2709` · `a2a.rs:387` · `kv_handle.rs:385` | **fixed sleeps inside protocol logic** — the 1 s "let the winning commit converge" after `distributed_lock`'s commit is the one whose *duration is a correctness assumption* (§4, and the 2026-09-13 lock-race finding) | timer seam; each is listed in the coverage map as a **schedule the kernel must explore** (0, exact, and > the sleep) |
 | every `tokio::select!` in `connection.rs`, `writer.rs`, `tasks.rs`, `swim.rs`, `signal.rs`, the governors, `mcp.rs`, `lifecycle.rs` | **which ready branch wins** | **scheduler seam**: the kernel decides readiness order; exploration permutes it |
-| bounded `mpsc` `try_send` (`gossip_txs` shards, WAL channel, signal handlers) | **"was the queue full"** — drops a frame, skips a WAL append, `false` from `kv().set` | **channel-readiness seam**: capacity and fullness are kernel state, so "full" is a schedulable fault |
+| bounded `mpsc` `try_send` (`gossip_txs` shards, WAL channel, signal handlers, the writer channels, the audit drain, the AE evidence journal) | **"was the queue full"** — drops a frame, skips a WAL append, `false` from `kv().set` | **channel-readiness seam**: capacity and fullness are kernel state, so "full" is a schedulable fault. **Routed** as of 2026-09-17 |
+
+**Stream identity is per destination, not per call site.** A drop on gossip shard 2 and a drop on
+shard 5 are different events; so are a drop to peer A and a drop to peer B. `targets` is an
+`AHashSet`, whose iteration order is not stable across processes (§2.5), so a single shared stream
+would hand one peer's recorded verdict to another — and the failure would look like a frame lost
+rather than a trace misread. Forwards and pings get *separate* stream families even though they share
+a channel, because they run in two different tasks and the interleaving of two tasks on one channel
+is itself nondeterministic; one sequence each is what lets each replay independently.
+
+**The seam's stream argument is eager, so a name is never formatted per event.** `chan_try_send`
+takes `&str`, and the argument is evaluated whether or not a kernel is installed — so a `format!` at
+a call site costs an allocation *in production builds*. Shard names come from a static table
+(`framing::SHARD_STREAMS`, with a cold formatted fallback above it, since `gossip_shards` is only
+validated non-zero); peer names are built once and cached beside the sender. A harness that makes the
+system slower in order to watch it has changed the thing it was measuring.
+
+**Deliberately outside the seam: the A2A SSE channels** (`a2a.rs:408,429`). Each is a fresh
+per-request channel of capacity 8 whose first send happens immediately on creation, so it cannot be
+full; recording it would add an event that is always `Sent`. The second send is worse than useless —
+it runs in a detached task after a 100 ms sleep, so recording it would make the trace depend on the
+tokio scheduler, which is precisely what the kernel exists to remove. These are a *decision*, not
+debt; they stay in the baseline as counted sites so that a *new* send in that file still fails the
+check.
 
 ### 2.4 Storage
 

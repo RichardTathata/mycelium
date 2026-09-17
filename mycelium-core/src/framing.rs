@@ -278,11 +278,45 @@ pub fn dispatch_gossip_try_send(
     }
 }
 
-/// One gossip shard's trace stream. Per-shard rather than one `gossip` stream, because a frame
-/// dropped on shard 2 and one dropped on shard 5 are different events, and a trace that merged them
-/// could not tell a reader which key stopped propagating.
-pub(crate) fn gossip_stream(shard: usize) -> String {
-    format!("gossip/shard{shard}")
+/// Pre-built gossip shard stream names.
+///
+/// The seam takes the stream as `&str`, and the argument is evaluated whether or not a kernel is
+/// installed — so a `format!` here would allocate **once per frame dispatch in production builds**,
+/// on the hottest path in the system. That is what the first version of this did, and it is the kind
+/// of cost a seam is never allowed to impose on the code it observes: a harness that makes the
+/// system slower to watch it has changed the thing it was measuring.
+///
+/// `gossip_shards` is only validated non-zero (`config.rs`), so a configuration above this table is
+/// legal. It falls back to a formatted name — cold by construction, since the default is the machine
+/// core count.
+static SHARD_STREAMS: [&str; 64] = [
+    "gossip/shard0", "gossip/shard1", "gossip/shard2", "gossip/shard3",
+    "gossip/shard4", "gossip/shard5", "gossip/shard6", "gossip/shard7",
+    "gossip/shard8", "gossip/shard9", "gossip/shard10", "gossip/shard11",
+    "gossip/shard12", "gossip/shard13", "gossip/shard14", "gossip/shard15",
+    "gossip/shard16", "gossip/shard17", "gossip/shard18", "gossip/shard19",
+    "gossip/shard20", "gossip/shard21", "gossip/shard22", "gossip/shard23",
+    "gossip/shard24", "gossip/shard25", "gossip/shard26", "gossip/shard27",
+    "gossip/shard28", "gossip/shard29", "gossip/shard30", "gossip/shard31",
+    "gossip/shard32", "gossip/shard33", "gossip/shard34", "gossip/shard35",
+    "gossip/shard36", "gossip/shard37", "gossip/shard38", "gossip/shard39",
+    "gossip/shard40", "gossip/shard41", "gossip/shard42", "gossip/shard43",
+    "gossip/shard44", "gossip/shard45", "gossip/shard46", "gossip/shard47",
+    "gossip/shard48", "gossip/shard49", "gossip/shard50", "gossip/shard51",
+    "gossip/shard52", "gossip/shard53", "gossip/shard54", "gossip/shard55",
+    "gossip/shard56", "gossip/shard57", "gossip/shard58", "gossip/shard59",
+    "gossip/shard60", "gossip/shard61", "gossip/shard62", "gossip/shard63"
+];
+
+/// The kernel stream a shard's bounded channel records on.
+///
+/// Per-shard rather than one gossip stream: a drop on shard 2 and a drop on shard 5 are different
+/// events, and a trace that merged them could not tell a reader which key stopped propagating.
+pub(crate) fn gossip_stream(shard: usize) -> std::borrow::Cow<'static, str> {
+    match SHARD_STREAMS.get(shard) {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None    => std::borrow::Cow::Owned(format!("gossip/shard{shard}")),
+    }
 }
 
 /// Like [`dispatch_gossip_try_send`] but awaits channel capacity instead of dropping.
@@ -536,6 +570,31 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use std::sync::Arc;
     use tokio::{io::AsyncWriteExt, net::{TcpListener, TcpStream}};
+
+    /// Every pre-built shard name must equal the one the fallback would format.
+    ///
+    /// The table exists so the hot path does not allocate; a typo in entry 37 would cost nothing at
+    /// compile time and would silently split shard 37's trace onto a stream nobody reads. This test
+    /// is the whole reason the table is safe to have.
+    #[test]
+    fn the_shard_name_table_agrees_with_the_formatted_fallback() {
+        for shard in 0..SHARD_STREAMS.len() {
+            assert_eq!(
+                gossip_stream(shard).as_ref(),
+                format!("gossip/shard{shard}"),
+                "table entry {shard} has drifted from the name the fallback would produce"
+            );
+        }
+        // Above the table the fallback really does take over, rather than panicking or wrapping —
+        // `gossip_shards` is only validated non-zero, so this is a reachable configuration.
+        let over = SHARD_STREAMS.len();
+        assert_eq!(gossip_stream(over).as_ref(), format!("gossip/shard{over}"));
+        assert!(matches!(gossip_stream(over), std::borrow::Cow::Owned(_)));
+        assert!(
+            matches!(gossip_stream(0), std::borrow::Cow::Borrowed(_)),
+            "a table hit must not allocate — that is the only reason the table exists"
+        );
+    }
 
     #[test]
     fn ttl_offset_matches_wire_layout() {

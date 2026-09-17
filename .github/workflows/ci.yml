@@ -89,6 +89,11 @@ jobs:
       # wiki-lint finding; `make check` had it all along).
       - run: cargo clippy -p mycelium-core --lib --tests -- -D warnings
       - run: cargo clippy -p mycelium-sim --all-targets -- -D warnings
+      # The seams' OTHER arm. `mycelium-sim` is the harness; the code that ROUTES through it lives
+      # in `mycelium-core` behind `--features sim`, and until now nothing linted that arm — the Test
+      # job runs its suite, which is not the same claim. Third instance of this family (compliance
+      # 2026-09-04, core tests 2026-07-21): a feature whose code is tested but never linted.
+      - run: cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings
       # The static forbidden-call check (item 6 PR 3, D12). Runs in the same job as clippy
       # because it is the same kind of claim: the seams cannot erode while PR 4-7 are built.
       - run: ./scripts/check-sim-seams.sh
