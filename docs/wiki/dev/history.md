@@ -108,6 +108,67 @@ everything that gossips, not a field-by-field check, because the latter would pa
 regained a `resource`. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-evidence-is-node-local.md`](.log/2026-09-16-ae-evidence-is-node-local.md).
 
+## v3 contracts axis — item 6 PR 3: the channel and monotonic-clock seams — 2026-09-17 (unreleased, PRs #235–#239)
+
+Five merged increments taking the forbidden-call baseline **199 → 159 sites across 43 files**. The routing was the
+smaller half; what the routing *found* was the rest.
+
+**Channels.** Twelve bounded sends now record their verdict and replay it: the WAL append queue (a full queue skips
+a record — one of the three consequences the inventory names), the per-handler signal channel, the `StateRequest`
+writer, the pong, the audit export drain, the AE evidence journal, and the peer writers. Stream identity is **per
+destination**, because `targets` is an `AHashSet` whose iteration order is not stable across processes — one shared
+stream would have handed peer A's recorded verdict to peer B, and the symptom would have read as *a frame lost*.
+Forwards and pings are separate stream families although they share a channel: two tasks, and the interleaving of
+two tasks on one channel is itself nondeterministic.
+
+**A cost the seam was imposing on production.** `chan_try_send` takes its stream as `&str`, and an argument is
+evaluated whether or not a kernel is installed — so the `format!("gossip/shard{n}")` introduced with the seam cost
+a heap allocation **per frame dispatch in ordinary builds**, on the hottest path in the system. Nothing failed;
+nothing would have, until someone benchmarked forwarding against v2.7.0. Fixed with a static name table (guarded by
+a test, because a typo in entry 37 would silently split that shard's trace onto a stream nobody reads) and per-peer
+names cached beside the sender. **A harness that makes the system slower in order to watch it has changed the thing
+it was measuring** — the rule this produced.
+
+**A whole lint scope nobody was running.** `mycelium-sim` was clippy-gated, but `mycelium-core --features sim` —
+the arm that *routes* through it, where every call site's sim path lives — was only ever compiled by the test job.
+Three warnings had been sitting there unseen. Third instance of one family (compliance 2026-09-04, core tests
+2026-07-21): **a feature whose code is tested but never linted.** Running a suite is not the same claim as linting
+the scope.
+
+**The monotonic clock**, kept separate from the wall clock because every site it replaces measures an *interval*:
+`Instant` is monotonic, so a backwards NTP step cannot make one negative, and `SystemTime` gives no such guarantee.
+`writer.rs`'s reconnect backoff, `connection.rs`'s rate window and anti-entropy cooldown, the peer table
+(**BREAKING**: `CoreCtx::peers` is `HashMap<NodeId, u64>`), `SwimMembership`, and `signal.rs`'s ten interval sites
+(**BREAKING**: `MeshHandle::last_signal` returns the *age*, consistent with its sibling `last_signal_persistent`).
+The peer table and the membership table had to move **together** — `merge_gossip` reads the clock once and hands the
+same `now` to both.
+
+**Two conversions landed on code nothing was checking.** Breaking `mono_since` left all 180 core tests green and
+failed one test in the outer crate, about replica restarts. `seed_sender_log` had no test in *either*
+representation. Both have one now, each verified against **both** failure directions — a gate checked in one
+direction catches one kind of mistake. The general form: **converting unguarded code is not a safe refactor, it is
+an untested change to production behaviour**, and the honest cost includes writing the test that should already
+have been there.
+
+**The representation's own cost, and what it bought.** Monotonic nanoseconds count from process start, so there is
+no `Instant::now() - 600s` for a test process alive for milliseconds. That made `compute_view_confidence`'s
+staleness branch unreachable — so it gained an injected `now`, the pattern `SwimMembership` had used all along, and
+is now tested both ways. And `SignalLog::seed` reconstructs "this arrived `age_ms` ago" *at startup*, which needs a
+point **before** the run: hence `sim_seam::MONO_ORIGIN_NS`, with `mycelium-sim`'s `Sources` starting at the same
+origin, because a harness that disagreed there would disagree in the direction that hides the bug.
+
+**A bug that was not one, recorded because the reasoning was sound.** `SignalLog::trim` does `Instant::now() -
+window`; `Instant - Duration` panics on underflow; the window defaults to 600 s; `Instant` is `CLOCK_MONOTONIC`.
+That argues for a reachable panic on any node started within ten minutes of boot, inside a task `tokio::spawn`
+swallows. Probing rather than filing it: `Instant::checked_sub` returns `Some` even for `u64::MAX / 2` seconds,
+because Rust's `Instant` is internally signed on Linux and offset on macOS. **Not real** — and the probe is what
+revealed the origin constraint above.
+
+Known gap, recorded rather than implied: the legacy non-SWIM staleness eviction in `tasks.rs` has no direct test.
+Deliberately outside the seam, with the reason in the inventory rather than as debt: the A2A SSE channels, which
+are per-request and cannot be full, one of them in a detached task whose scheduling the kernel exists to remove.
+Wiki: [dev](dev.md), `.log/` entries dated 2026-09-17.
+
 ## v3 contracts axis — AE-T: the seam records what it enforces — 2026-09-16 (unreleased, PR #224)
 
 Three gaps on the AE line, found by building the private exporter *against* the seam rather than by reviewing it:
