@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — fail-closed authority restart and durable proposals (item 5 PR 5)
+
+- **`RestartGuard` starts closed and admits nothing** until its installed epoch is read back from
+  durable state. The alternative that matters is spelled out by a test: had a restart **assumed
+  epoch `0`** — which is what a `Default` hands you — every superseded mandate would satisfy
+  `epoch >= installed`, and **every revoked holder would be readmitted at once**. The test asserts
+  that outcome against an assumed-zero authority, so the cost of the tempting default is on the
+  record rather than in a comment.
+- Re-establishing is monotonic: a stale durable read cannot walk the epoch backwards, which is the
+  decisive invariant's whole subject. Same shape as the federation link's `Refreshing` state —
+  *reconnected is not ready, and restarted is not authorised.*
+- **Durable proposals use the existing `append` verb**, not a service database. §5 refuses a
+  resource-authoritative service process, and a durable proposal queue is exactly where one would
+  sneak back in — it looks like storage rather than a control plane. A live test appends a proposal
+  through `KvHandle::append`, checks it landed under the `log/wiki/` prefix reserved at PR 1, and
+  reads it back byte-identical through `scan_log`.
+- A `Proposal` carries the **term** that made it: a proposal outlives its appointment, and a reader
+  needs to know which one it was rather than inferring it from a timestamp.
+
+
 ### Added — the handover journal and incumbency rules (item 5 PR 4)
 
 - **"As history, not as conclusions" is a type, not an instruction.** `HandoverJournal::inherit`
