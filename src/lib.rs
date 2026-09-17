@@ -208,6 +208,9 @@
 pub mod capability;
 pub mod capability_config;
 pub mod mesh_manifest;
+/// Federation identity and policy objects (v3 item 2 — `docs/design/federated-domains.md`).
+/// Types and canonical signing bytes only: no transport, no discovery, no `federation/` KV prefix.
+pub mod federation;
 
 // Layers I+II substrate live in the `mycelium-core` crate (ROADMAP §v2.0 M1, complete).
 // Re-exported here so existing `crate::store::…`, `crate::signal::…`, `crate::config::…`,

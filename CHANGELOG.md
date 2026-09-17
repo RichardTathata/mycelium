@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — federation identity and policy objects (item 2 PR 2)
+
+- `mycelium::federation`: `DomainId`, the signed `DomainDescriptor`, the revisioned `DomainPolicy`,
+  the bilateral `TrustBundle`, and the **canonical bytes** a signature is taken over. Types and
+  bytes only — no transport, no discovery, no `federation/` KV prefix, no wire change.
+- **A length-prefixed canonical form, not canonical JSON.** Canonical JSON *can* give byte
+  agreement and is a known foot-gun doing it — key order, non-ASCII escaping, surrogate pairs,
+  number formatting. Here we own both ends, so the encoding has no such freedom: length-prefixed
+  fields, fixed-width little-endian integers, one encoding per value.
+- **Domain separation is a security property.** Each object's bytes begin with a distinct tag, so a
+  policy signature can never authenticate a descriptor — D6's *"reuse the code, never the trust"*,
+  applied to our own objects.
+- **The trust bundle decides which key, not the descriptor.** A self-signed descriptor is not
+  authorised by being internally consistent; an unknown domain is refused however well-formed its
+  document is, and a descriptor whose key disagrees with the bundle's is refused rather than
+  preferred.
+- **Absence is denial** in `DomainPolicy::permits` — no wildcard, no inheritance, no default-allow,
+  because each is a way for a grant to exist that nobody wrote down.
+
+
 ### Added — the enforced domain profile and the two-mesh harness (item 2 PR 1, completing it)
 
 - **`DomainProfile::{Open, Enforced}`** (`GOSSIP_DOMAIN_PROFILE`), default `Open` so every existing
