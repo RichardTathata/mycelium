@@ -883,6 +883,18 @@ pub mod kv_ns {
     /// without waiting for the next advertise tick.
     pub const ADVERTISE: &str = "svc/";
 
+    /// **Reserved** for the knowledge layer (v3 item 3 PR 1, `docs/design/knowledge-layer.md`).
+    ///
+    /// Key: `knowledge/head/{issuer}/{stream}`. Value: a bounded, signed **discovery head** — a
+    /// pointer, never a record. The records and their evidence live in an authorized store, which is
+    /// the whole point: LWW may move a head, and moving a pointer cannot erase a competing
+    /// statement. Equivocation is therefore preserved rather than HLC-resolved, and the layer can
+    /// say *"these two issuers disagree"* instead of silently keeping the later one.
+    ///
+    /// Reserved at PR 1, before any code writes it, so the shape is settled while it is still free
+    /// to settle — the alternative is discovering at PR 4 that something else took the prefix.
+    pub const KNOWLEDGE_HEAD: &str = "knowledge/head/";
+
     /// Node identity namespace (library-internal — do not write from application code).
     ///
     /// Key: `sys/identity/{node_id}`. Value: 32-byte Ed25519 public key (raw bytes).
