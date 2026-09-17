@@ -160,6 +160,7 @@ check:
 	cargo clippy --lib --tests --features compliance -- -D warnings
 	cargo clippy --lib --no-default-features -- -D warnings
 	cargo clippy -p mycelium-core --lib --tests -- -D warnings
+	cargo clippy -p mycelium-sim --all-targets -- -D warnings   # the replay harness (item 6)
 
 ## check-full — check + the test suites + the (slow, wasmtime-heavy) wasm-host clippy. Mirrors the
 ## CI gate set; run before a release or when you have touched wasm-host / a feature-conditional path.
@@ -168,6 +169,7 @@ check-full: check
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
 
 	cargo test  --lib --no-default-features --features gateway
+	cargo test  -p mycelium-sim           # the kernel + the same-length/different-content gate
 	cargo test  -p mycelium-core          # the substrate suite (codec/framing/hlc/store/swim) + the wire back-compat gate
 	cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 

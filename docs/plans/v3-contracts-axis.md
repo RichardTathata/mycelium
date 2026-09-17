@@ -210,8 +210,8 @@ error to an empty tail — a real data-loss path, fixed the same day (v2.4.3). E
 right first target); `tasks.rs` ~6 `fastrand` + ~6 timers; `connection.rs` ~9 `Instant::now`;
 `membership_governor::decide` and `tuning_governor::gate` are already pure.
 
-**Sequence.** PR1 nondeterminism inventory + coverage map + trace schema · PR2 event kernel + clock/RNG interfaces +
-record/replay · PR3 storage/channel adapters + WAL writer seams **+ the static forbidden-call check** · PR4 WAL/snapshot
+**Sequence.** PR1 nondeterminism inventory + coverage map + trace schema *(done 2026-09-13)* · PR2 event kernel + clock/RNG interfaces +
+record/replay *(done 2026-09-16 — `mycelium-sim`; the gate is the same-length/different-content divergence test, and the crate was gated in `make check` and CI from its first commit)* · PR3 storage/channel adapters + WAL writer seams **+ the static forbidden-call check** · PR4 WAL/snapshot
 scenario + fault sweep + witness · PR5 handover (on item 5's real code) · PR6 interacting governors · PR7 CI corpus +
 tooling.
 

@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — `mycelium-sim`, the deterministic replay kernel (item 6 PR 2)
+
+- A new workspace crate implementing the trace schema PR 1 fixed
+  (`docs/design/replay-nondeterminism-inventory.md` §5): the **event kernel**, the **seams**
+  production reaches it through, the **choices trace**, and the **failure bundle**.
+- **It detects divergence rather than re-seeding.** In replay the kernel does not re-run the
+  production code's own randomness and hope it agrees — it checks each request against the recorded
+  next entry and *supplies* the recorded result. A run that re-seeds reproduces a failure only while
+  the code is unchanged, which is exactly when nobody needs it.
+- **The gate** (`mycelium-sim/tests/divergence.rs`): record a run, replay it with one WAL record's
+  bytes changed **at equal length**, and require a divergence. A harness that passes that unchanged
+  is not detecting divergence. A flipped `sync` flag and a moved offset diverge too.
+- Two clocks kept separate (wall time jumps, monotonic does not) and **named RNG streams** (so a new
+  draw in gossip does not move consensus, and a scenario replay attributes a divergence to the code
+  that actually moved).
+- Storage outcomes model the **short write** as neither success nor failure, because the durability
+  argument turns on it.
+- The bundle carries a **witness** — the assertion *and* the `cfg(test)` toggle that must make it
+  fail again. A bundle that replays but cannot fail proves only that the harness works.
+- Gated from the first commit: `make check`, `make check-full` and CI all run it.
+
+
 ## [2.7.0] — 2026-09-16
 
 A small **MINOR**, and a correction found the honest way — by building a consumer against
