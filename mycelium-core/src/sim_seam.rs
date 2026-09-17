@@ -43,7 +43,7 @@
 /// The real wall clock — the call this seam replaced, kept in one place.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) fn wall_now_ms() -> u64 {
+pub fn wall_now_ms() -> u64 {
     real_wall_now_ms()
 }
 
@@ -170,7 +170,7 @@ pub use installed::{install, take, SimContext};
 /// The wall clock, through the kernel.
 #[cfg(feature = "sim")]
 #[inline]
-pub(crate) fn wall_now_ms() -> u64 {
+pub fn wall_now_ms() -> u64 {
     installed::with_seams(real_wall_now_ms, |s| s.wall_now_ms())
 }
 
@@ -189,7 +189,7 @@ pub(crate) fn wall_now_ms() -> u64 {
 /// A nonce-style draw: a `u64` at or above `lo`.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) fn rng_u64_from(_stream: &str, lo: u64) -> u64 {
+pub fn rng_u64_from(_stream: &str, lo: u64) -> u64 {
     fastrand::u64(lo..)
 }
 
@@ -201,7 +201,7 @@ pub(crate) fn rng_u64_from(_stream: &str, lo: u64) -> u64 {
 /// that only ever showed up as a statistical one.
 #[cfg(feature = "sim")]
 #[inline]
-pub(crate) fn rng_u64_from(stream: &str, lo: u64) -> u64 {
+pub fn rng_u64_from(stream: &str, lo: u64) -> u64 {
     let draw = installed::with_seams(|| fastrand::u64(lo..), |s| s.rng_u64(stream));
     if lo == 0 {
         draw
@@ -213,7 +213,7 @@ pub(crate) fn rng_u64_from(stream: &str, lo: u64) -> u64 {
 /// A roll in `[0, 1)`.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) fn rng_f32(_stream: &str) -> f32 {
+pub fn rng_f32(_stream: &str) -> f32 {
     fastrand::f32()
 }
 
@@ -224,9 +224,71 @@ pub(crate) fn rng_f32(_stream: &str) -> f32 {
 /// could return `1.0` would break a property the production code already relies on.
 #[cfg(feature = "sim")]
 #[inline]
-pub(crate) fn rng_f32(stream: &str) -> f32 {
+pub fn rng_f32(stream: &str) -> f32 {
     let draw = installed::with_seams(|| u64::from(fastrand::u32(..)) << 32, |s| s.rng_u64(stream));
     ((draw >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+/// An index below `n` — the shape every "pick one" and every shuffle step uses.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn rng_usize_below(_stream: &str, n: usize) -> usize {
+    fastrand::usize(..n)
+}
+
+/// An index below `n`, from the kernel's named stream.
+///
+/// `n == 0` returns `0` rather than panicking as `fastrand::usize(..0)` would: a seam is not the
+/// place to change whether a caller's bug is a panic, but it is also not the place to introduce a
+/// new one. Callers here always pass a non-empty length.
+#[cfg(feature = "sim")]
+#[inline]
+pub fn rng_usize_below(stream: &str, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let draw = installed::with_seams(|| fastrand::usize(..n) as u64, |s| s.rng_u64(stream));
+    (draw % n as u64) as usize
+}
+
+/// A `u64` below `n`.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn rng_u64_below(_stream: &str, n: u64) -> u64 {
+    fastrand::u64(0..n)
+}
+
+/// A `u64` below `n`, from the kernel's named stream.
+#[cfg(feature = "sim")]
+#[inline]
+pub fn rng_u64_below(stream: &str, n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    installed::with_seams(|| fastrand::u64(0..n), |s| s.rng_u64(stream)) % n
+}
+
+/// Shuffle in place.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn rng_shuffle<T>(_stream: &str, slice: &mut [T]) {
+    fastrand::shuffle(slice);
+}
+
+/// Shuffle in place, from the kernel's named stream.
+///
+/// Fisher–Yates over kernel draws rather than `fastrand::shuffle`, because a shuffle has to be
+/// *one draw per step* for a replay to check it: a single opaque call would record nothing the
+/// kernel could compare, and a changed shuffle would replay as identical.
+#[cfg(feature = "sim")]
+pub fn rng_shuffle<T>(stream: &str, slice: &mut [T]) {
+    if slice.len() < 2 {
+        return;
+    }
+    for i in (1..slice.len()).rev() {
+        let j = rng_usize_below(stream, i + 1);
+        slice.swap(i, j);
+    }
 }
 
 // ── Storage ──────────────────────────────────────────────────────────────────────────────────
@@ -244,7 +306,7 @@ pub(crate) fn rng_f32(stream: &str) -> f32 {
 /// `write_all`, recorded.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) async fn fs_write_all(
+pub async fn fs_write_all(
     file: &mut tokio::fs::File,
     _name: &str,
     bytes: &[u8],
@@ -255,7 +317,7 @@ pub(crate) async fn fs_write_all(
 
 /// `write_all`, through the kernel.
 #[cfg(feature = "sim")]
-pub(crate) async fn fs_write_all(
+pub async fn fs_write_all(
     file: &mut tokio::fs::File,
     name: &str,
     bytes: &[u8],
@@ -282,7 +344,7 @@ pub(crate) async fn fs_write_all(
 /// A whole-file write.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) async fn fs_write(
+pub async fn fs_write(
     path: &std::path::Path,
     _name: &str,
     bytes: &[u8],
@@ -292,7 +354,7 @@ pub(crate) async fn fs_write(
 
 /// A whole-file write, through the kernel.
 #[cfg(feature = "sim")]
-pub(crate) async fn fs_write(
+pub async fn fs_write(
     path: &std::path::Path,
     name: &str,
     bytes: &[u8],
@@ -315,7 +377,7 @@ pub(crate) async fn fs_write(
 /// A rename — the step that publishes a snapshot, and whose durability needs the *directory* sync.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) async fn fs_rename(
+pub async fn fs_rename(
     from: &std::path::Path,
     to: &std::path::Path,
     _name: &str,
@@ -326,7 +388,7 @@ pub(crate) async fn fs_rename(
 /// A rename, through the kernel. The request carries both paths, because renaming *somewhere else*
 /// is a different effect and a trace that recorded only the source would accept it.
 #[cfg(feature = "sim")]
-pub(crate) async fn fs_rename(
+pub async fn fs_rename(
     from: &std::path::Path,
     to: &std::path::Path,
     name: &str,
@@ -351,14 +413,14 @@ pub(crate) async fn fs_rename(
 /// `sync_data` on a file.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) async fn fs_sync_data(file: &tokio::fs::File, _name: &str) -> std::io::Result<()> {
+pub async fn fs_sync_data(file: &tokio::fs::File, _name: &str) -> std::io::Result<()> {
     file.sync_data().await
 }
 
 /// `sync_data`, through the kernel. The empty byte slice is deliberate: a sync has no content, and
 /// what makes it a distinct effect is the file it names and the flag.
 #[cfg(feature = "sim")]
-pub(crate) async fn fs_sync_data(file: &tokio::fs::File, name: &str) -> std::io::Result<()> {
+pub async fn fs_sync_data(file: &tokio::fs::File, name: &str) -> std::io::Result<()> {
     if installed::is_replaying() {
         return installed::replay_fs(name, "sync_data", &[], true)
             .map_err(|e| std::io::Error::other(e));
@@ -378,14 +440,14 @@ pub(crate) async fn fs_sync_data(file: &tokio::fs::File, name: &str) -> std::io:
 /// `sync_all` on a directory — what makes a preceding `rename` survive a power loss.
 #[cfg(not(feature = "sim"))]
 #[inline]
-pub(crate) async fn fs_sync_dir(dir: &tokio::fs::File, _name: &str) -> std::io::Result<()> {
+pub async fn fs_sync_dir(dir: &tokio::fs::File, _name: &str) -> std::io::Result<()> {
     dir.sync_all().await
 }
 
 /// The directory sync, through the kernel. Recorded under its own op so the *ordering* property —
 /// directory sync before WAL truncation — is visible in the trace and a divergence when removed.
 #[cfg(feature = "sim")]
-pub(crate) async fn fs_sync_dir(dir: &tokio::fs::File, name: &str) -> std::io::Result<()> {
+pub async fn fs_sync_dir(dir: &tokio::fs::File, name: &str) -> std::io::Result<()> {
     if installed::is_replaying() {
         return installed::replay_fs(name, "sync_dir", &[], true)
             .map_err(|e| std::io::Error::other(e));
@@ -532,6 +594,54 @@ mod tests {
         let replayed: Vec<u64> = (0..4).map(|_| rng_u64_from("nonce", 1)).collect();
         installed::take();
         assert_eq!(recorded, replayed);
+    }
+
+    /// A shuffle is **one draw per step**, not one opaque call. A single call would record nothing
+    /// the kernel could compare, so a changed shuffle would replay as identical — which is the
+    /// failure the whole harness exists to make impossible.
+    #[test]
+    fn a_shuffle_is_one_recorded_draw_per_step_and_replays_identically() {
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(5, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let mut v: Vec<u32> = (0..8).collect();
+        rng_shuffle("select", &mut v);
+        let ctx = installed::take().expect("installed");
+        let recorded = v.clone();
+
+        // Seven steps for eight elements — Fisher-Yates, one draw each.
+        assert_eq!(ctx.kernel.trace().len(), 7, "one draw per step, visible to the kernel");
+
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(4242, 0), // a different seed: a fresh shuffle would differ
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let mut again: Vec<u32> = (0..8).collect();
+        rng_shuffle("select", &mut again);
+        installed::take();
+        assert_eq!(again, recorded, "the replayed shuffle is the recorded one");
+    }
+
+    /// A one-element slice draws nothing — there is no decision to record.
+    #[test]
+    fn a_trivial_shuffle_records_no_decision() {
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(5, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let mut one = [7u8];
+        rng_shuffle("select", &mut one);
+        let mut none: [u8; 0] = [];
+        rng_shuffle("select", &mut none);
+        let ctx = installed::take().expect("installed");
+        assert_eq!(ctx.kernel.trace().len(), 0);
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

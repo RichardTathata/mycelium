@@ -53,6 +53,8 @@ llm = ["gateway"]
 compliance = ["mycelium-core/compliance", "gateway", "tls", "dep:sha2", "dep:jsonwebtoken"]
 # Exposes `test_util::alloc_port` (a bind-verified port allocator) for companion integration
 # tests. Test-only — no runtime deps, never enable in a production build.
+# Forwards core's replay seams (item 6). Off in every shipped build.
+sim = ["mycelium-core/sim"]
 test-util = []
 
 # The `fuzz/` directory is its own cargo-fuzz crate; keep it out of any

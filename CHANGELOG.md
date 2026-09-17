@@ -38,6 +38,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shedding roll now draw from `nonce` and `shed` — named rather than shared, so a new draw in one
   subsystem does not move another's decisions and a scenario replay attributes a divergence to the
   code that moved. `ops.rs` has left the baseline (4 → 0).
+- **Peer selection, shuffles and tick jitter** route through the `select` and `jitter` streams; the
+  `sim` feature is forwarded from `mycelium` to core so the outer crate can reach the seams. A
+  shuffle is **one recorded draw per step** — a single opaque call would record nothing the kernel
+  could compare, so a changed shuffle would replay as identical. `tasks.rs` 9 → 3 sites.
 - Gated: `make check-full` and CI build and test `-p mycelium-core --features sim`.
 
 

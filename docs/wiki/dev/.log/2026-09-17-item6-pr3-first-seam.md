@@ -47,7 +47,7 @@ until it is ignored.
 how a tool quietly stops meaning anything while still passing. Thirty-four sites, about a fifth of
 the total, were invisible to a check whose entire job was to see them.
 
-**The debt, measured: 193 sites across 43 files** — after the alias fix. `hlc.rs` has left the
+**The debt, measured: 187 sites across 43 files** — after the alias fix. `hlc.rs` has left the
 baseline entirely, and `persistence.rs`'s WAL write path is routed even though its other sites
 remain.
 
@@ -86,6 +86,13 @@ API: a nonce draw does not move a shedding roll (the reason the streams are name
 is never `1.0` — `fastrand::f32()` is in `[0,1)` and the shedding code relies on it, since a fill of
 `0.0` must always shed. A seam may change *where* a number comes from; it must not quietly change
 what kind of number it is. `ops.rs` has left the baseline: 4 → 0.
+
+**Selection and jitter.** `tasks.rs`'s peer picks, its two shuffles and its tick jitter now draw
+from `select` and `jitter`; the `sim` feature is forwarded from `mycelium` to core so the outer crate
+can reach the seams at all. The shuffle is the interesting one: **one recorded draw per step**, not
+one opaque `fastrand::shuffle` call — a single call would record nothing the kernel could compare, so
+a changed shuffle would replay as identical, which is precisely the failure this harness exists to
+make impossible. `tasks.rs` 9 → 3.
 
 **Next:** `persistence.rs`'s remaining 10 sites, `connection.rs` (~9 `Instant::now`), `tasks.rs`
 (~6 `fastrand` + ~6 timers), then PR 4's storage model and the WAL/snapshot witness.

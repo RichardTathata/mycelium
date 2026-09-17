@@ -28,6 +28,13 @@ use tokio::{
 };
 use tracing::{debug, error, warn};
 
+/// The inventory's named RNG streams (§2.2) used here: peer selection and shuffles draw from
+/// `select`, tick jitter from `jitter`. Separate streams so adding a shuffle does not move a
+/// jitter, and a scenario replay attributes a divergence to the code that actually changed.
+const SELECT_STREAM: &str = "select";
+/// Tick jitter's stream.
+const JITTER_STREAM: &str = "jitter";
+
 
 // ── Liveness guards ────────────────────────────────────────────────────────────
 
@@ -414,7 +421,7 @@ pub(super) async fn run_gossip_shard(
                                 // emissions. When a self_locality is configured, a stable
                                 // sort by shared_prefix_len then biases toward topology-
                                 // closer peers while preserving random tie-breaking.
-                                fastrand::shuffle(&mut non_members);
+                                mycelium_core::sim_seam::rng_shuffle(SELECT_STREAM, &mut non_members);
                                 if let Some(self_loc) = self_locality.as_ref() {
                                     let pl_guard = peer_localities.pin();
                                     non_members.sort_by_key(|p| {
@@ -481,7 +488,7 @@ fn reconcile_active_targets(
     // 3. Fill the deficit up to k with uniform-random picks.
     let mut added = Vec::new();
     while active.len() < k && !pool.is_empty() {
-        let pick = pool.swap_remove(fastrand::usize(..pool.len()));
+        let pick = pool.swap_remove(mycelium_core::sim_seam::rng_usize_below(SELECT_STREAM, pool.len()));
         if active.insert(pick.clone()) { added.push(pick); }
     }
 
@@ -494,7 +501,7 @@ fn reconcile_active_targets(
             .cloned()
             .collect();
         for i in 0..drop_n.min(victims.len()) {
-            let j = i + fastrand::usize(..victims.len() - i);
+            let j = i + mycelium_core::sim_seam::rng_usize_below(SELECT_STREAM, victims.len() - i);
             victims.swap(i, j);
             active.remove(&victims[i]);
             removed.push(victims[i].clone());
@@ -551,7 +558,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
     let _alive_guard = AliveGuard(Arc::clone(&health_monitor_alive));
 
     let max_jitter = if health_check_max_jitter > 0 { health_check_max_jitter } else { interval_secs * 500 };
-    let jitter_ms = fastrand::u64(0..max_jitter.max(1));
+    let jitter_ms = mycelium_core::sim_seam::rng_u64_below(JITTER_STREAM, max_jitter.max(1));
     tokio::select! {
         _ = time::sleep(Duration::from_millis(jitter_ms)) => {}
         _ = shutdown_rx.wait_for(|v| *v) => return,
@@ -653,7 +660,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                     None
                 } else {
                     for i in 0..ping_peer_sample_size.min(known.len()) {
-                        let j = i + fastrand::usize(..known.len() - i);
+                        let j = i + mycelium_core::sim_seam::rng_usize_below(SELECT_STREAM, known.len() - i);
                         known.swap(i, j);
                     }
                     known.truncate(ping_peer_sample_size);
@@ -734,7 +741,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                 if swim_enabled && cached_ping_targets.len() >= k && k > 1
                     && let Some(v) = cached_ping_targets
                         .iter()
-                        .nth(fastrand::usize(..cached_ping_targets.len()))
+                        .nth(mycelium_core::sim_seam::rng_usize_below(SELECT_STREAM, cached_ping_targets.len()))
                         .cloned()
                 {
                     cached_ping_targets.remove(&v);
