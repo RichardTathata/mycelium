@@ -1280,6 +1280,106 @@ mod durability_tests {
         std::fs::remove_dir_all(&bdir).ok();
     }
 
+    /// **The fault sweep.** A failure at *any* storage effect in the run must not lose a record
+    /// that was acknowledged.
+    ///
+    /// The property, stated so it can be checked rather than believed: after the run — however it
+    /// ended — the acknowledged record is recoverable from disk. Either the snapshot carries it, or
+    /// the WAL still does. The one outcome ruled out is *neither*, which is what v2.4.3 and v2.4.4
+    /// were both about.
+    ///
+    /// **A fault is an effect that does not happen**, not an error handed back after the fact. The
+    /// seam decides before acting in replay (`sim_seam::installed::planned_fs`), so an injected
+    /// failure at the rename really leaves the rename undone. Without that this test would be
+    /// checking a fiction: a "failed" rename that had already renamed.
+    ///
+    /// The faults are injected by rewriting one recorded outcome in the trace — the bundle format is
+    /// text, and that is the point of it being text.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn a_fault_at_any_storage_effect_leaves_the_acknowledged_record_recoverable() {
+        use mycelium_sim::{ChoiceKind, Kernel, Sources, Trace};
+
+        // A clean run, to learn the effect sequence.
+        let (clean, ok) = race_run("sweep-rec", Kernel::recording()).await;
+        ok.expect("the clean run must succeed");
+
+        let faultable: Vec<(u64, String, String)> = clean
+            .entries()
+            .iter()
+            .filter(|e| e.kind == ChoiceKind::Fs)
+            .map(|e| (e.seq, e.stream.clone(), e.request.split(' ').next().unwrap_or("").to_string()))
+            .collect();
+        assert!(faultable.len() >= 6, "the run has storage effects to fault: {faultable:?}");
+
+        for (seq, stream, op) in faultable {
+            // The same trace with this one effect failing.
+            let faulted_text: String = clean
+                .to_text()
+                .lines()
+                .map(|line| {
+                    let mut parts: Vec<&str> = line.split('\t').collect();
+                    if parts.first().and_then(|s| s.parse::<u64>().ok()) == Some(seq)
+                        && let Some(last) = parts.last_mut()
+                    {
+                        *last = "Err(injected fault)";
+                    }
+                    parts.join("\t")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let faulted = Trace::parse(&faulted_text).expect("the faulted trace still parses");
+
+            // Replay it against its own directory, and see what survives.
+            let dir  = unique_dir(&format!("sweep-{seq}"));
+            let node = NodeId::new("127.0.0.1", 1).unwrap();
+            let mut wal = open_wal(&dir.join("wal.bin")).await.unwrap();
+            crate::sim_seam::install(crate::sim_seam::SimContext {
+                kernel:  Kernel::replaying(faulted),
+                sources: Sources::seeded(1, 1_789_000_000_000),
+                node:    "n1".into(),
+                offsets: Default::default(),
+            });
+            let hlc   = Arc::new(crate::hlc::Hlc::new());
+            let state = KvState::new(0);
+            apply_and_notify(&state, &make_gossip_update(
+                &node, 1, Arc::from("k"), Bytes::from_static(b"v"), false, &hlc));
+            let unapplied = SyncEntry {
+                key:          Arc::from("b"),
+                value:        Bytes::from_static(b"v-b"),
+                timestamp:    hlc.tick(),
+                is_tombstone: false,
+            };
+            let appended = wal_append(&mut wal, &unapplied, true, None).await;
+            let snapshotted = if appended.is_ok() {
+                do_snapshot(&dir, &state, &node, &hlc, 1, &mut wal, None).await
+            } else {
+                Ok(())
+            };
+            crate::sim_seam::take();
+            drop(wal);
+
+            // A fault *before* the record was acknowledged is not this property's business — there
+            // was nothing to lose yet.
+            if appended.is_err() {
+                eprintln!("SWEEP seq={seq} {stream} {op}: fault before the ack — skipped");
+                std::fs::remove_dir_all(&dir).ok();
+                continue;
+            }
+            eprintln!("SWEEP seq={seq} {stream} {op}: checked (snapshot {:?})", snapshotted.is_ok());
+
+            // Whatever happened after the acknowledgement, a restart must still find the record.
+            let restored = replay_into_fresh_store(&dir).await;
+            assert_eq!(
+                live_value(&restored, "b").as_deref(),
+                Some(&b"v-b"[..]),
+                "a fault at seq {seq} ({stream} {op}) lost an acknowledged record — the snapshot \
+                 did not carry it and the WAL no longer holds it. snapshot result: {snapshotted:?}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
     /// The replay is a **check**, not a re-run: a schedule that departs from the recording stops.
     ///
     /// Without this the test above proves only that the harness can run twice.

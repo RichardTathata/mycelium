@@ -20,6 +20,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Found by replaying the WAL/snapshot scenario, which is what the replay harness is for. Old
   snapshots still replay — this changes only what is written.
 
+### Added — item 6 PR 4: the fault sweep
+
+- **A failure at any storage effect must leave an acknowledged record recoverable** — either the
+  snapshot carries it or the WAL still does; *neither* is the outcome v2.4.3 and v2.4.4 were both
+  about. Swept across all five install effects plus the WAL-tail read, by rewriting one recorded
+  outcome in the trace (the bundle format is text, and this is what that buys).
+- **A fault is an effect that does not happen.** The write-side seams now **decide before acting**
+  in replay: a recorded failure means the effect is skipped, not that an error is handed back after
+  the rename already renamed. Recording keeps the opposite order — it must act first, because the
+  real outcome is what gets written down.
+- `fs_read` honours the kernel's outcome too. Without that a fault injected at a read was silently
+  ignored, which matters most here: **v2.4.3 exists because a failed WAL-tail read was treated as an
+  empty tail** and the records it could not see were truncated away. That path is now verified by
+  injection rather than by a hand-built unreadable file.
+
 ### Added — item 6 PR 4: the WAL/snapshot scenario replays from a bundle, with its witness
 
 - **The merge-removed witness**, as a `cfg(test)` toggle rather than a hand edit (the plan requires

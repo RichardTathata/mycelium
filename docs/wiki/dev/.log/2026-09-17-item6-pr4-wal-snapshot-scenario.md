@@ -1,4 +1,4 @@
-## [2026-09-17] ingest | item 6 PR 4 — the WAL/snapshot scenario, and the two bugs replaying it found
+## [2026-09-17] ingest | item 6 PR 4 — the WAL/snapshot scenario, and the three bugs replaying it found
 
 Up: [dev](../dev.md) · record `docs/design/replay-nondeterminism-inventory.md` §2.4, §2.5 · plan
 `docs/plans/v3-contracts-axis.md` §4 · code `mycelium-core/src/{persistence,sim_seam}.rs`.
@@ -69,14 +69,37 @@ in 8; `a_snapshot_is_byte_identical_for_the_same_state_whatever_order_it_was_bui
 same keys in two different orders and catches it 4 times in 4. A flaky detector is a detector that
 teaches people to re-run, so the flaky one was replaced rather than kept.
 
+### The fault sweep (added the same day)
+
+The property, stated so it can be checked rather than believed: **after the run, however it ended,
+the acknowledged record is recoverable from disk** — either the snapshot carries it or the WAL still
+does. *Neither* is the outcome v2.4.3 and v2.4.4 were both about.
+
+Building it forced one more correction. Rewriting a recorded outcome to `Err` did **not** inject a
+fault: `kernel_fs` was called *after* the effect had already happened, so the sweep would have been
+checking a fiction — a "failed" rename that had already renamed. The two modes need opposite orders,
+and now have them:
+
+- **Record** acts first, because the real outcome is the thing being written down.
+- **Replay** decides first, and skips the effect when the decision says it failed.
+
+So a fault is not a lie told to the caller; it is an effect that does not happen.
+
+`fs_read` had the same gap in a place that matters more: an injected read fault was ignored entirely,
+and **v2.4.3 exists because a failed WAL-tail read was treated as an empty tail** and the records it
+could not see were truncated away. The read now honours the kernel's outcome, so the sweep confirms
+the abort by injection rather than by a hand-built unreadable file.
+
+**Not vacuous, and checked as such.** Six of the eight storage effects reach the assertion; the two
+skipped are the WAL append and its sync, where a fault means nothing was acknowledged yet. Verified
+to *catch* a loss by forcing the merge-removed witness on: the sweep fails at seq 12
+(`wal.bin#truncate`), naming the effect.
+
+**A limitation, recorded rather than left implicit:** `wal_file.set_len(0)` is not routed, so the
+truncation itself cannot be faulted — only its following sync. The sweep covers the effect *after*
+the point of no return, not the point itself.
+
 ### Gates
 
-`make check` clean · core **186** / **212** (sim) · `mycelium-sim` 24 + 6 · mycelium **522**
+`make check` clean · core **186** / **213** (sim) · `mycelium-sim` 24 + 6 · mycelium **522**
 (`compliance,a2a`) / **403** (`sim`).
-
-### What PR 4 still owes
-
-The **fault sweep** (§4 lists "scenario + fault sweep + witness"). The seam change above is its
-precondition — a recorded `FsOutcome::Err` now replays as an error — but sweeping a fault across each
-of the five ordered install effects, and asserting no outcome loses an acknowledged record, is not
-written yet.

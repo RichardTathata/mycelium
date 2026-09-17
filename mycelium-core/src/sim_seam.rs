@@ -196,10 +196,45 @@ mod installed {
         })
     }
 
-    /// A read's result goes through the kernel the same way, but a read never fabricates: the bytes
-    /// that came back are the request, and the kernel only checks them.
-    pub fn record_fs(file: &str, op: &str, bytes: &[u8], sync: bool, ok: bool, err: &str) {
-        let _ = kernel_fs(file, op, bytes, sync, ok, err);
+    /// Ask the kernel what should happen to this effect, **before it happens**.
+    ///
+    /// `None` means "no kernel, or we are recording" — the caller performs the effect and then
+    /// reports it with [`kernel_fs`]. `Some(outcome)` means a replay has already decided, and the
+    /// caller performs the effect **only if that outcome is `Ok`**.
+    ///
+    /// # Why the order matters (item 6 PR 4, the fault sweep)
+    ///
+    /// The two modes genuinely need opposite orders. Recording *must* act first, because the real
+    /// outcome is the thing being written down. Replay *must* decide first, or an injected fault
+    /// cannot prevent anything: a recorded `Err` applied after the fact would report a failed rename
+    /// that had already renamed, and a sweep built on that would be testing a fiction.
+    ///
+    /// So a fault is not a lie told to the caller — it is an effect that does not happen.
+    pub fn planned_fs(file: &str, op: &str, bytes: &[u8], sync: bool)
+        -> Option<Result<(), String>>
+    {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let ctx = guard.as_mut()?;
+            if ctx.kernel.mode() != mycelium_sim::Mode::Replay {
+                return None;
+            }
+            let offset = *ctx.offsets.get(file).unwrap_or(&0);
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            let decided = match seams.fs(file, op, bytes, offset, sync, || unreachable!(
+                "replay never produces an outcome; it reads the recorded one"
+            )) {
+                Ok(o) => o,
+                Err(d) => panic!("{d}"),
+            };
+            Some(match decided {
+                mycelium_sim::FsOutcome::Ok(n) | mycelium_sim::FsOutcome::Short(n) => {
+                    *ctx.offsets.entry(file.to_string()).or_insert(0) += n as u64;
+                    Ok(())
+                }
+                mycelium_sim::FsOutcome::Err(e) => Err(e),
+            })
+        })
     }
 
     /// Which mode the installed kernel is in, or `None` when there is no kernel.
@@ -527,6 +562,21 @@ pub async fn fs_write_all(
     use tokio::io::AsyncWriteExt as _;
     // The effect happens in both modes (see `installed::kernel_fs`); the kernel decides the outcome,
     // so a recorded failure replays as a failure.
+    // Decide first, then act — see `installed::planned_fs`. In replay a recorded failure means the
+    // effect does not happen at all, which is what makes a fault sweep honest.
+    if let Some(decided) = installed::planned_fs(name, "write_all", bytes, false) {
+        return match decided {
+            Ok(()) => {
+                let res = file.write_all(bytes).await;
+                assert!(
+                    res.is_ok(),
+                    "replay diverged at {name}/write_all: the recording succeeded, the replay got {res:?}"
+                );
+                Ok(())
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        };
+    }
     let res = file.write_all(bytes).await;
     installed::kernel_fs(
         name,
@@ -557,6 +607,21 @@ pub async fn fs_write(
     name: &str,
     bytes: &[u8],
 ) -> std::io::Result<()> {
+    // Decide first, then act — see `installed::planned_fs`. In replay a recorded failure means the
+    // effect does not happen at all, which is what makes a fault sweep honest.
+    if let Some(decided) = installed::planned_fs(name, "write", bytes, false) {
+        return match decided {
+            Ok(()) => {
+                let res = tokio::fs::write(path, bytes).await;
+                assert!(
+                    res.is_ok(),
+                    "replay diverged at {name}/write: the recording succeeded, the replay got {res:?}"
+                );
+                Ok(())
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        };
+    }
     let res = tokio::fs::write(path, bytes).await;
     installed::kernel_fs(
         name,
@@ -596,6 +661,21 @@ pub async fn fs_rename(
         p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
     };
     let both = format!("{}->{}", name_of(from), name_of(to));
+    // Decide first, then act — see `installed::planned_fs`. In replay a recorded failure means the
+    // effect does not happen at all, which is what makes a fault sweep honest.
+    if let Some(decided) = installed::planned_fs(name, "rename", both.as_bytes(), false) {
+        return match decided {
+            Ok(()) => {
+                let res = tokio::fs::rename(from, to).await;
+                assert!(
+                    res.is_ok(),
+                    "replay diverged at {name}/rename: the recording succeeded, the replay got {res:?}"
+                );
+                Ok(())
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        };
+    }
     let res = tokio::fs::rename(from, to).await;
     installed::kernel_fs(
         name,
@@ -638,15 +718,22 @@ pub async fn fs_read(path: &std::path::Path, name: &str) -> std::io::Result<Vec<
         Ok(bytes) => bytes.clone(),
         Err(_) => Vec::new(),
     };
-    installed::record_fs(
+    // The kernel decides the outcome the caller sees. A read is still *performed* — its bytes are
+    // its result, not its request, so there is nothing to supply — but a recorded failure has to
+    // come back as a failure, or a fault injected at a read is silently ignored. That matters here
+    // more than anywhere: v2.4.3 exists because a failed WAL-tail read was treated as an empty tail
+    // and the records it could not see were truncated away.
+    match installed::kernel_fs(
         name,
         "read",
         &digest,
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    );
-    res
+    ) {
+        Ok(()) => res,
+        Err(e) => Err(std::io::Error::other(e)),
+    }
 }
 
 /// `sync_data` on a file.
@@ -660,6 +747,21 @@ pub async fn fs_sync_data(file: &tokio::fs::File, _name: &str) -> std::io::Resul
 /// what makes it a distinct effect is the file it names and the flag.
 #[cfg(feature = "sim")]
 pub async fn fs_sync_data(file: &tokio::fs::File, name: &str) -> std::io::Result<()> {
+    // Decide first, then act — see `installed::planned_fs`. In replay a recorded failure means the
+    // effect does not happen at all, which is what makes a fault sweep honest.
+    if let Some(decided) = installed::planned_fs(name, "sync_data", &[], true) {
+        return match decided {
+            Ok(()) => {
+                let res = file.sync_data().await;
+                assert!(
+                    res.is_ok(),
+                    "replay diverged at {name}/sync_data: the recording succeeded, the replay got {res:?}"
+                );
+                Ok(())
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        };
+    }
     let res = file.sync_data().await;
     installed::kernel_fs(
         name,
@@ -683,6 +785,21 @@ pub async fn fs_sync_dir(dir: &tokio::fs::File, _name: &str) -> std::io::Result<
 /// directory sync before WAL truncation — is visible in the trace and a divergence when removed.
 #[cfg(feature = "sim")]
 pub async fn fs_sync_dir(dir: &tokio::fs::File, name: &str) -> std::io::Result<()> {
+    // Decide first, then act — see `installed::planned_fs`. In replay a recorded failure means the
+    // effect does not happen at all, which is what makes a fault sweep honest.
+    if let Some(decided) = installed::planned_fs(name, "sync_dir", &[], true) {
+        return match decided {
+            Ok(()) => {
+                let res = dir.sync_all().await;
+                assert!(
+                    res.is_ok(),
+                    "replay diverged at {name}/sync_dir: the recording succeeded, the replay got {res:?}"
+                );
+                Ok(())
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        };
+    }
     let res = dir.sync_all().await;
     installed::kernel_fs(
         name,
