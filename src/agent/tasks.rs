@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, mpsc::error::TrySendError, watch, Semaphore},
+    sync::{mpsc, watch, Semaphore},
     task::JoinSet,
     time,
 };
@@ -237,7 +237,9 @@ pub(super) async fn run_gossip_shard(
     targets.extend(bootstrap_peers.iter().cloned());
     let remaining = max_forwarding_peers.saturating_sub(targets.len());
     targets.extend(cached_peer_list.iter().take(remaining).cloned());
-    let mut sender_cache: AHashMap<NodeId, mpsc::Sender<Bytes>> = AHashMap::new();
+    // Sender plus the kernel stream it records on — see `writer_stream`; the name is built once
+    // per peer, and dies with the sender it names.
+    let mut sender_cache: AHashMap<NodeId, (mpsc::Sender<Bytes>, Arc<str>)> = AHashMap::new();
     // Per-group member set cache. Keyed by group name; value is (generation, member set).
     // Invalidated whenever grp_generation advances (any grp/ KV change).
     let mut group_member_cache: AHashMap<Arc<str>, (u64, AHashSet<NodeId>)> = AHashMap::new();
@@ -245,35 +247,38 @@ pub(super) async fn run_gossip_shard(
     macro_rules! send_to_peer {
         ($peer:expr, $data:expr) => {{
             let peer: &NodeId = $peer;
-            let tx = if let Some(t) = sender_cache.get(peer) {
-                t.clone()
+            let (tx, stream) = if let Some(e) = sender_cache.get(peer) {
+                e.clone()
             } else {
                 let Some(t) = get_or_spawn_writer(
                     peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                 ) else { continue; };
-                sender_cache.insert(peer.clone(), t.clone());
-                t
+                let e = (t, writer_stream("forward", peer));
+                sender_cache.insert(peer.clone(), e.clone());
+                e
             };
-            match tx.try_send($data.clone()) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
+            match mycelium_core::sim_seam::chan_try_send(&stream, &tx, $data.clone()) {
+                mycelium_core::sim_seam::ChanVerdict::Sent => {}
+                mycelium_core::sim_seam::ChanVerdict::Full => {
                     dropped_frames.fetch_add(1, Ordering::Relaxed);
                     warn!("Peer writer channel full, dropping forward to {}", peer);
                 }
-                Err(TrySendError::Closed(_)) => {
+                mycelium_core::sim_seam::ChanVerdict::Closed => {
                     debug!("Peer writer for {} closed; respawning and retrying", peer);
                     sender_cache.remove(peer);
                     let Some(new_tx) = get_or_spawn_writer(
                         peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                     ) else { continue; };
-                    sender_cache.insert(peer.clone(), new_tx.clone());
-                    match new_tx.try_send($data.clone()) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
+                    sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
+                    // The retry is a second event on the *same* stream: same peer, same logical
+                    // channel, and the trace orders the two.
+                    match mycelium_core::sim_seam::chan_try_send(&stream, &new_tx, $data.clone()) {
+                        mycelium_core::sim_seam::ChanVerdict::Sent => {}
+                        mycelium_core::sim_seam::ChanVerdict::Full => {
                             dropped_frames.fetch_add(1, Ordering::Relaxed);
                             warn!("Respawned writer for {} is full; frame dropped", peer);
                         }
-                        Err(TrySendError::Closed(_)) => {
+                        mycelium_core::sim_seam::ChanVerdict::Closed => {
                             debug!("Respawned writer for {} closed immediately", peer);
                         }
                     }
@@ -461,6 +466,22 @@ pub(super) async fn run_gossip_shard(
 /// stopping it accumulating O(N) inbound connections). Returns `(added, removed)` —
 /// the caller fires anti-entropy for newly active peers and evicts the writers of
 /// dropped ones.
+/// The kernel stream a peer's writer channel records on.
+///
+/// **Per peer, not one stream for all forwards.** `targets` is an `AHashSet`, whose iteration order
+/// is not stable across processes, so a single shared stream would hand one peer's recorded verdict
+/// to another — the same argument that makes gossip shards separate streams.
+///
+/// **Forwards and pings are separate streams even though they share a channel.** They run in two
+/// different tasks, and the interleaving of two tasks on one channel is itself nondeterministic;
+/// giving each its own sequence is what lets each replay independently.
+///
+/// Built once per peer and cached beside the sender: the seam takes `&str` eagerly, so a name
+/// formatted per frame would allocate on the forwarding path.
+fn writer_stream(kind: &str, peer: &NodeId) -> Arc<str> {
+    format!("writer/{kind}/{peer}").into()
+}
+
 fn reconcile_active_targets(
     active:           &mut AHashSet<NodeId>,
     known:            &AHashSet<NodeId>,   // current live peers (excludes self)
@@ -622,7 +643,9 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
     let bootstrap_no_self: AHashSet<NodeId> =
         bootstrap_set.iter().filter(|p| **p != node_id).cloned().collect();
     let mut last_peer_set: AHashSet<NodeId> = AHashSet::new();
-    let mut ping_sender_cache: AHashMap<NodeId, mpsc::Sender<Bytes>> = AHashMap::new();
+    // Sender plus its kernel stream, as in the forwarding task — a different stream family, because
+    // this is a different task sending on the same channel.
+    let mut ping_sender_cache: AHashMap<NodeId, (mpsc::Sender<Bytes>, Arc<str>)> = AHashMap::new();
     // SWIM anti-entropy de-churning state. `last_anti_entropy` records when we last fired a
     // StateRequest to each peer, so a churning forwarding set cannot re-trigger a sync storm
     // (each re-add used to re-request state, and the responder spawns a persistent idle-timeout
@@ -821,32 +844,32 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                 // iptables FORWARD / conntrack entry). Without SWIM, ping as before.
                 if let Some(ping_data) = ping_data.as_ref() {
                     for peer in &cached_ping_targets {
-                        let tx = if let Some(t) = ping_sender_cache.get(peer) {
-                            t.clone()
+                        let (tx, stream) = if let Some(e) = ping_sender_cache.get(peer) {
+                            e.clone()
                         } else {
                             let Some(t) = get_or_spawn_writer(
                                 peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                             ) else { continue; };
-                            ping_sender_cache.insert(peer.clone(), t.clone());
-                            t
+                            let e = (t, writer_stream("ping", peer));
+                            ping_sender_cache.insert(peer.clone(), e.clone());
+                            e
                         };
-                        match tx.try_send(ping_data.clone()) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
+                        match mycelium_core::sim_seam::chan_try_send(&stream, &tx, ping_data.clone()) {
+                            mycelium_core::sim_seam::ChanVerdict::Sent => {}
+                            mycelium_core::sim_seam::ChanVerdict::Full => {
                                 warn!("Peer writer channel full, dropping ping to {}", peer);
                             }
-                            Err(TrySendError::Closed(_)) => {
+                            mycelium_core::sim_seam::ChanVerdict::Closed => {
                                 debug!("Peer writer for {} closed; respawning for ping retry", peer);
                                 ping_sender_cache.remove(peer);
                                 let Some(new_tx) = get_or_spawn_writer(
                                     peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                                 ) else { continue; };
-                                ping_sender_cache.insert(peer.clone(), new_tx.clone());
-                                match new_tx.try_send(ping_data.clone()) {
-                                    Ok(()) => {}
-                                    Err(_) => {
-                                        debug!("Respawned writer for {} could not accept ping", peer);
-                                    }
+                                ping_sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
+                                if mycelium_core::sim_seam::chan_try_send(&stream, &new_tx, ping_data.clone())
+                                    != mycelium_core::sim_seam::ChanVerdict::Sent
+                                {
+                                    debug!("Respawned writer for {} could not accept ping", peer);
                                 }
                             }
                         }

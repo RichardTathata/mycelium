@@ -161,6 +161,7 @@ check:
 	cargo clippy --lib --no-default-features -- -D warnings
 	cargo clippy -p mycelium-core --lib --tests -- -D warnings
 	cargo clippy -p mycelium-sim --all-targets -- -D warnings   # the replay harness (item 6)
+	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
 
 ## check-full — check + the test suites + the (slow, wasmtime-heavy) wasm-host clippy. Mirrors the

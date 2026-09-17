@@ -460,7 +460,7 @@ pub async fn fs_write_all(
     // the recording already accounted for.
     if installed::is_replaying() {
         return installed::replay_fs(name, "write_all", bytes, false)
-            .map_err(|e| std::io::Error::other(e));
+            .map_err(std::io::Error::other);
     }
     let res = file.write_all(bytes).await;
     installed::record_fs(
@@ -597,7 +597,7 @@ pub async fn fs_sync_data(file: &tokio::fs::File, _name: &str) -> std::io::Resul
 pub async fn fs_sync_data(file: &tokio::fs::File, name: &str) -> std::io::Result<()> {
     if installed::is_replaying() {
         return installed::replay_fs(name, "sync_data", &[], true)
-            .map_err(|e| std::io::Error::other(e));
+            .map_err(std::io::Error::other);
     }
     let res = file.sync_data().await;
     installed::record_fs(
@@ -624,7 +624,7 @@ pub async fn fs_sync_dir(dir: &tokio::fs::File, _name: &str) -> std::io::Result<
 pub async fn fs_sync_dir(dir: &tokio::fs::File, name: &str) -> std::io::Result<()> {
     if installed::is_replaying() {
         return installed::replay_fs(name, "sync_dir", &[], true)
-            .map_err(|e| std::io::Error::other(e));
+            .map_err(std::io::Error::other);
     }
     let res = dir.sync_all().await;
     installed::record_fs(

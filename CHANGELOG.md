@@ -9,6 +9,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the peer writer channels, and a cost the seam was quietly imposing (item 6 PR 3)
+
+- The four **peer-writer** sends — forwards and TCP pings, each with its respawn retry — route
+  through the channel seam. Baseline **186 sites across 43 files**, from 190.
+- **Streams are per destination.** A drop to peer A and a drop to peer B are different events, and
+  `targets` is an `AHashSet` whose iteration order is not stable across processes — so one shared
+  stream would have handed one peer's recorded verdict to another, and the failure would have looked
+  like a lost frame rather than a misread trace. Forwards and pings get separate stream families
+  because they are two tasks sending on one channel.
+
+### Fixed — the seam no longer allocates on the gossip hot path
+
+- `chan_try_send` takes its stream as `&str`, and the argument is evaluated **whether or not a
+  kernel is installed** — so the `format!("gossip/shard{n}")` introduced with the channel seam cost
+  a heap allocation per frame dispatch in ordinary production builds. Shard names now come from a
+  static table with a cold formatted fallback above it; peer names are built once and cached beside
+  the sender. A harness that makes the system slower in order to watch it has changed the thing it
+  was measuring.
+
+### Fixed — `mycelium-core --features sim` is now linted, not just tested
+
+- `mycelium-sim` was clippy-gated but the arm that *routes* through it — every seam call site under
+  `--features sim` — was only ever compiled by the test job. Added to `make check` and CI. This is
+  the third instance of the family (compliance 2026-09-04, core tests 2026-07-21): a feature whose
+  code is tested but never linted.
+
 ### Added — channel coverage across the substrate (item 6 PR 3)
 
 - Eight more bounded sends route through the channel seam: the **WAL append queue** (a full queue
