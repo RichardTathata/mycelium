@@ -152,6 +152,50 @@ impl std::str::FromStr for GatewayCallerProfile {
     }
 }
 
+/// Whether this node runs under the **enforced domain profile** (v3 contracts axis, item 2 PR 1 —
+/// `docs/design/federated-domains.md` §9).
+///
+/// A domain is one independently admitted gossip mesh (§1 of that record). The enforced profile is
+/// the configuration in which that sentence is true rather than aspirational, and it is a
+/// *refusal*, not advice: `validate()` rejects a configuration that claims the profile and does not
+/// meet it, at construction, before a socket is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DomainProfile {
+    /// **Default.** Today's behaviour, unchanged — every existing configuration keeps working and
+    /// nothing new is required of it.
+    #[default]
+    Open,
+    /// The profile a federated deployment runs: **TLS required, SWIM off**.
+    ///
+    /// The SWIM requirement is specific rather than precautionary. SWIM's control datagrams are
+    /// **unauthenticated UDP** — `mycelium-core/src/swim.rs` signs nothing — so a membership
+    /// protocol any host on the path can forge is not one to run at a federation boundary. TLS is
+    /// required because admission *is* the domain: without it there is no per-node CA root, and
+    /// "independently admitted" has no mechanism behind it.
+    ///
+    /// **Note for operators:** `swim_failure_detector` defaults to **on**, so turning this profile
+    /// on without also turning SWIM off is refused at `validate()` — deliberately loudly, rather
+    /// than by quietly disabling SWIM underneath you. Changing a liveness mechanism is not
+    /// something a profile flag should do behind your back.
+    ///
+    /// What this profile does **not** claim: process isolation between domains (the deployment's
+    /// claim, not the library's), or that federation is implemented — PRs 2–7 build that. It claims
+    /// exactly that this node is configured the way a domain member must be.
+    Enforced,
+}
+
+impl std::str::FromStr for DomainProfile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "open" => Ok(Self::Open),
+            "enforced" => Ok(Self::Enforced),
+            other => Err(format!("unknown domain profile '{other}' (expected 'open' or 'enforced')")),
+        }
+    }
+}
+
 /// A gateway bearer token paired with its OAuth2-style scope grants.
 ///
 /// Scopes follow the `resource:verb` convention (`kv:read`, `kv:write`,
@@ -894,6 +938,10 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_caller_profile: GatewayCallerProfile,
 
+    /// Domain profile (v3 item 2 PR 1). `Open` (default) is today's behaviour. `Enforced` requires
+    /// TLS and refuses SWIM — see [`DomainProfile`]; `validate()` enforces it.
+    pub domain_profile: DomainProfile,
+
     /// Outbound egress allow-policy (WS3). Default: empty = allow all. Set
     /// `allow_hosts` to constrain which external hosts the substrate may reach
     /// (enforced at the MCP client bridge). A node-local posture, not a coordinator.
@@ -989,6 +1037,7 @@ impl Default for GossipConfig {
             gateway_identity_issuer:       None,
             require_identity_proofs:       false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
+            domain_profile:                DomainProfile::Open,
             egress:                        EgressPolicy::default(),
             #[cfg(feature = "compliance")]
             oidc:                          None,
@@ -1104,6 +1153,28 @@ impl GossipConfig {
     /// Called automatically by `GossipAgent::start` and [`load_from_file`](Self::load_from_file).
     /// Call manually after mutating fields directly to catch errors early.
     pub fn validate(&self) -> Result<(), GossipError> {
+        // The enforced domain profile (item 2 PR 1). Checked first and refused outright: a node
+        // that claims the profile and does not meet it should not reach the point of opening a
+        // socket, because by then a partner has something to talk to.
+        if self.domain_profile == DomainProfile::Enforced {
+            if self.swim_failure_detector {
+                return Err(GossipError::InvalidField {
+                    field: "swim_failure_detector",
+                    reason: "the enforced domain profile requires SWIM off: its control datagrams \
+                             are unauthenticated UDP (swim.rs signs nothing), and a membership \
+                             protocol any host on the path can forge is not one to run at a \
+                             federation boundary (docs/design/federated-domains.md §9)".into(),
+                });
+            }
+            if self.tls.is_none() {
+                return Err(GossipError::InvalidField {
+                    field: "tls",
+                    reason: "the enforced domain profile requires TLS: admission IS the domain, and \
+                             without a per-node CA root 'independently admitted' has no mechanism \
+                             behind it (docs/design/federated-domains.md §1, §9)".into(),
+                });
+            }
+        }
         if self.bind_address.is_empty() {
             return Err(GossipError::InvalidField { field: "bind_address", reason: "cannot be empty".into() });
         }
@@ -1513,6 +1584,12 @@ impl GossipConfig {
                 reason,
             })?;
         }
+        if let Ok(v) = env::var("GOSSIP_DOMAIN_PROFILE") {
+            self.domain_profile = v.parse().map_err(|reason| GossipError::InvalidField {
+                field:  "domain_profile",
+                reason,
+            })?;
+        }
         if let Ok(v) = env::var("GOSSIP_LOCALITY_PATH") {
             self.locality_path = v
                 .split('/')
@@ -1816,6 +1893,82 @@ mod tests {
         let mut cfg = GossipConfig::default();
         cfg.gossip_shards = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    // ── the enforced domain profile (item 2 PR 1) ────────────────────────────────────────────
+    //
+    // The profile is a *refusal*, so each test below is the refusal happening — and the last two
+    // are the ones that matter: a check that only ever rejects is as useless as one that only ever
+    // accepts, so `Open` must be untouched and a correct `Enforced` config must pass.
+
+    /// SWIM off is the point of the profile, not a nicety: its control datagrams are
+    /// unauthenticated UDP, and that is exactly what must not run at a federation boundary.
+    #[test]
+    fn the_enforced_domain_profile_refuses_swim() {
+        let mut cfg = GossipConfig {
+            domain_profile: DomainProfile::Enforced,
+            tls: Some(TlsConfig::default()),
+            ..Default::default()
+        };
+        cfg.swim_failure_detector = true;
+        let err = cfg.validate().expect_err("SWIM on must be refused under the enforced profile");
+        assert!(
+            format!("{err}").contains("swim_failure_detector"),
+            "the refusal must name the field that caused it: {err}"
+        );
+    }
+
+    /// Admission *is* the domain. Without TLS there is no per-node CA root, so "independently
+    /// admitted" has no mechanism behind it and the profile would be a label.
+    #[test]
+    fn the_enforced_domain_profile_refuses_a_missing_ca_root() {
+        // SWIM defaults to ON, so it must be turned off here or the profile refuses on SWIM first
+        // and this test would pass without ever exercising the TLS check. (Found by writing it:
+        // the first version asserted on the wrong field's message.)
+        let mut cfg = GossipConfig {
+            domain_profile: DomainProfile::Enforced,
+            tls: None,
+            ..Default::default()
+        };
+        cfg.swim_failure_detector = false;
+        let err = cfg.validate().expect_err("no TLS must be refused under the enforced profile");
+        assert!(format!("{err}").contains("tls"), "the refusal must name the field: {err}");
+    }
+
+    /// A correctly configured domain member validates — otherwise the profile would be
+    /// unreachable, which is a refusal that rejects everything.
+    #[test]
+    fn a_correctly_configured_domain_member_validates() {
+        let mut cfg = GossipConfig {
+            domain_profile: DomainProfile::Enforced,
+            tls: Some(TlsConfig::default()),
+            ..Default::default()
+        };
+        cfg.swim_failure_detector = false;
+        cfg.validate().expect("TLS on, SWIM off is exactly what the profile asks for");
+    }
+
+    /// **Every existing configuration keeps working.** The default profile is `Open`, and nothing
+    /// the enforced profile requires is required of anyone who has not asked for it.
+    #[test]
+    fn the_open_profile_is_the_default_and_requires_nothing_new() {
+        let cfg = GossipConfig::default();
+        assert_eq!(cfg.domain_profile, DomainProfile::Open, "default must not change behaviour");
+
+        let mut swim_on_no_tls = GossipConfig::default();
+        swim_on_no_tls.swim_failure_detector = true;
+        swim_on_no_tls.tls = None;
+        swim_on_no_tls
+            .validate()
+            .expect("a config the enforced profile would refuse must still be valid when Open");
+    }
+
+    #[test]
+    fn domain_profile_parses_and_rejects_nonsense() {
+        assert_eq!("open".parse::<DomainProfile>().unwrap(), DomainProfile::Open);
+        assert_eq!("  Enforced ".parse::<DomainProfile>().unwrap(), DomainProfile::Enforced);
+        let err = "strict".parse::<DomainProfile>().expect_err("not a profile");
+        assert!(err.contains("'open' or 'enforced'"), "the error must say what is accepted: {err}");
     }
 
     #[test]
