@@ -46,6 +46,9 @@ jobs:
       # has already paid for once. Its own gate is the same-length/different-content
       # divergence test — a harness that passes that unchanged is only re-seeding.
       - run: ./scripts/ci-retest.sh -p mycelium-sim
+      # And the seams under `sim`: without this the routed path is never built in CI, and
+      # `sim_seam` would be a module that compiles only on the author's machine.
+      - run: ./scripts/ci-retest.sh -p mycelium-core --features sim
       # In-suite decoder mini-fuzz (gated behind fuzz-internals). The fuzz/
       # targets existed for the whole project's life but were never executed
       # in CI, and an unbounded-allocation decode DoS sat uncaught (M2 Run-20).

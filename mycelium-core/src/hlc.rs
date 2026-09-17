@@ -82,10 +82,7 @@
 //!   inbound rejection of out-of-bound updates (store-level quarantine) is
 //!   a candidate for the next wire-policy pass.
 
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
 
 /// Default bound on how far ahead of the local wall clock a *remote* HLC
@@ -125,12 +122,14 @@ pub fn pack(phys_ms: u64, logical: u64) -> u64 {
 /// Returns the current wall-clock time in milliseconds since the Unix epoch.
 /// Saturates to 0 if the clock is somehow before the epoch (a Windows-only
 /// edge case after manual clock changes).
+///
+/// **The HLC's one wall-clock read** — the seam the replay inventory calls clean (§2.1), and the
+/// read every write's LWW rank depends on. Routed through [`crate::sim_seam`] so a recorded run can
+/// replay it; without the `sim` feature that is the same `SystemTime::now()` call it has always
+/// been, so the substrate pays nothing for the harness's existence.
 #[inline]
 fn wall_now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    crate::sim_seam::wall_now_ms()
 }
 
 /// Hybrid Logical Clock. Internal state is a single `AtomicU64` storing the

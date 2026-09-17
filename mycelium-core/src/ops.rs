@@ -18,6 +18,13 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+/// The inventory's named RNG streams (§2.2). Declared once so a trace written today and a reader
+/// written later cannot disagree about which stream a draw came from.
+const NONCE_STREAM: &str = "nonce";
+/// The opacity shedding roll's stream — separate from `nonce`, so adding a nonce draw does not
+/// move a shedding decision.
+const SHED_STREAM: &str = "shed";
+
 /// Checks the boundary and opacity gate, then delivers `signal` locally.
 /// `combined_fill` is `max(handler_fill, shard_fill)` — pre-computed by the caller.
 fn deliver_locally(
@@ -39,7 +46,7 @@ fn deliver_locally(
             crate::signal::signal_kind::BOUNDARY_OPAQUE
                 | crate::signal::signal_kind::BOUNDARY_TRANSPARENT
         ) => true,
-        _ => combined_fill == 0.0 || fastrand::f32() >= combined_fill,
+        _ => combined_fill == 0.0 || crate::sim_seam::rng_f32(SHED_STREAM) >= combined_fill,
     };
     if admit {
         signal_handlers.deliver(signal);
@@ -54,7 +61,7 @@ pub fn emit_signal(
     scope:   SignalScope,
     payload: Bytes,
 ) -> bool {
-    let nonce = fastrand::u64(1..);
+    let nonce = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
     let ts = crate::hlc::physical_ms(ctx.hlc.current());
     ctx.seen.mark_and_check(nonce, ts);
     let sig = Signal {
@@ -92,7 +99,7 @@ pub fn emit_signal_ordered(
     scope:   SignalScope,
     payload: Bytes,
 ) -> bool {
-    let nonce   = fastrand::u64(1..);
+    let nonce   = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
     let ts      = crate::hlc::physical_ms(ctx.hlc.current());
     let hlc_seq = ctx.hlc.tick();
     ctx.seen.mark_and_check(nonce, ts);
@@ -127,7 +134,7 @@ pub async fn emit_signal_async(
     scope:   SignalScope,
     payload: Bytes,
 ) -> bool {
-    let nonce = fastrand::u64(1..);
+    let nonce = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
     let ts = crate::hlc::physical_ms(ctx.hlc.current());
     ctx.seen.mark_and_check(nonce, ts);
     let handler_fill = ctx.signal_handlers.fill_ratio(&kind);

@@ -171,6 +171,7 @@ check-full: check
 
 	cargo test  --lib --no-default-features --features gateway
 	cargo test  -p mycelium-sim           # the kernel + the same-length/different-content gate
+	cargo test  -p mycelium-core --features sim   # the seams actually route through the kernel
 	cargo test  -p mycelium-core          # the substrate suite (codec/framing/hlc/store/swim) + the wire back-compat gate
 	cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 

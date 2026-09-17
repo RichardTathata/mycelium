@@ -22,14 +22,18 @@
 #   should be regenerated so the count cannot silently drift back up.
 #
 # WHAT IT CANNOT SEE — stated rather than glossed
-#   It matches qualified call sites (`Instant::now`, `tokio::fs::…`) **and** the imports that enable
-#   unqualified ones (`use std::time::Instant`), so an unqualified call still needs a visible import.
+#   It matches qualified call sites (`Instant::now`, `tokio::fs::…`), the imports that enable
+#   unqualified ones (`use std::time::Instant`), and `fs as <alias>` imports **plus every use of
+#   that alias** — the last because `persistence.rs` aliases `tokio::fs` to `tfs` and was otherwise
+#   invisible to this check entirely.
 #   It does not parse Rust: a call reached through a re-export this script does not know about, or
 #   through a type alias, is invisible to it. That is a real gap, and the honest mitigation is that
 #   the baseline makes *movement* visible even when it cannot attribute it.
 #
 # EXEMPT
-#   `mycelium-sim/**` (the seams themselves), test files, and each top-level `#[cfg(test)]` item —
+#   `mycelium-sim/**` and `sim_seam.rs` (the seams themselves — §6 exempts the seam
+#   implementations, which is where these calls are supposed to live), test files, and each
+#   top-level `#[cfg(test)]` item —
 #   a test that reads the real clock is doing its job. Note "each item", not "everything after the
 #   first": production code below a test module is still production code.
 #
@@ -43,7 +47,7 @@ cd "$(dirname "$0")/.."
 BASELINE="scripts/sim-seams-baseline.txt"
 
 # The forbidden shapes. Kept as one alternation so the list is readable and matches §6 one-for-one.
-PATTERN='SystemTime::now|Instant::now|fastrand::|tokio::time::(sleep|interval|timeout|Instant)|tokio::fs::|std::fs::|RandomState::new|use std::time::\{?[^}]*Instant|use tokio::time::'
+PATTERN='SystemTime::now|Instant::now|fastrand::|tokio::time::(sleep|interval|timeout|Instant)|tokio::fs::|std::fs::|RandomState::new|use std::time::\{?[^}]*Instant|use tokio::time::|fs as [a-z_]'
 
 # Production sources only. `mycelium-sim` is the seam; `loom-spike` is a different mechanism
 # (coverage map: Loom owns CAS interleavings, not the kernel).
@@ -52,7 +56,28 @@ scan_files() {
     ! -name '*_tests.rs' \
     ! -name 'lib_tests.rs' \
     ! -name 'test_util.rs' \
+    ! -name 'sim_seam.rs' \
     | sort
+}
+
+# Any `fs as <alias>` import in this file, as an extra alternation.
+#
+# `persistence.rs` — the module the inventory calls "the right first target", with 26 fs references
+# — imports `fs as tfs` inside a grouped `use tokio::{…}` and then writes `tfs::read(…)`. The first
+# version of this check matched only `tokio::fs::`, so that file was **entirely invisible**: the
+# check reported "clean" on the single most important file in its scope. Third bug in this script,
+# same failure mode as the other two — wrong in the safe direction, which is how a tool quietly
+# stops meaning anything.
+alias_pattern() {
+  local file="$1"
+  local aliases
+  aliases=$(grep -oE 'fs as [a-z_][a-z0-9_]*' "$file" 2>/dev/null | awk '{print $3}' | sort -u || true)
+  local extra=""
+  while IFS= read -r a; do
+    [ -z "$a" ] && continue
+    extra="$extra|\\b$a::"
+  done <<< "$aliases"
+  printf '%s' "$extra"
 }
 
 # Count forbidden sites outside test code.
@@ -67,8 +92,11 @@ count_in() {
   awk '
     /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1 }
     skip && /^}/                       { skip = 0; next }
+    # Comments are prose, not calls. A doc comment that *names* `SystemTime::now` to explain why it
+    # is no longer called would otherwise count as a call — which it did, on this very file.
+    /^[[:space:]]*\/\//                { next }
     !skip                              { print }
-  ' "$file" | grep -cE "$PATTERN" || true
+  ' "$file" | grep -cE "$PATTERN$(alias_pattern "$file")" || true
 }
 
 generate() {

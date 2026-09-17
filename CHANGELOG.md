@@ -9,6 +9,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the first replay seams: the HLC wall clock and the WAL writes (item 6 PR 3)
+
+- `mycelium-core`'s `sim_seam` module, and a `sim` feature that routes the nondeterministic reads
+  the coverage map assigns to the kernel through it. **Off in every shipped build**: without `sim`
+  the module compiles to the calls it replaced, so the substrate pays nothing for the harness.
+- The HLC's one wall-clock read — "the clean seam", and the read every write's LWW rank depends on —
+  now records and replays. A replay returns the recorded value whatever the machine's clock says,
+  and a read the recording never made stops the run rather than inventing one.
+- Forbidden-call baseline down to **185 sites across 43 files** (from 190): `hlc.rs` has left it
+  entirely, which is what routing a seam is supposed to look like.
+- **The WAL's write, file sync and directory sync** are now kernel effects too. Their *order* is
+  the durability property — a record is durable only once the sync returns — so dropping the sync
+  is a **divergence**, caught by the trace before PR 4's storage model can simulate the loss it
+  would cause.
+- A replayed write does not touch the disk: the mode is checked before the `await`, so a replay
+  cannot mutate state the recording already accounted for.
+- **Three bugs found in the forbidden-call check from the previous entry, all by testing the
+  checker:** it ignored everything after the first `#[cfg(test)]` (+25 sites), it counted comments
+  (−5), and it did not follow `fs as tfs` aliases — which made `persistence.rs`, the module the
+  inventory calls "the right first target" with 26 fs references, **entirely invisible** (+14).
+  Baseline now **199 sites across 44 files**; it read 165 when the check first went green.
+- **The snapshot install is five ordered kernel effects**, and the v2.4.4 power-loss property —
+  *the directory sync must precede the WAL truncation* — is now a **test that fails when the order
+  is reversed**, printing the offending trace. `snapshot_install_syncs_the_directory` says that
+  property "is not observable without a filesystem adapter"; it is now.
+- **The RNG seam**, on the inventory's five named streams. `ops.rs`'s nonces and its opacity
+  shedding roll now draw from `nonce` and `shed` — named rather than shared, so a new draw in one
+  subsystem does not move another's decisions and a scenario replay attributes a divergence to the
+  code that moved. `ops.rs` has left the baseline (4 → 0).
+- **Peer selection, shuffles and tick jitter** route through the `select` and `jitter` streams; the
+  `sim` feature is forwarded from `mycelium` to core so the outer crate can reach the seams. A
+  shuffle is **one recorded draw per step** — a single opaque call would record nothing the kernel
+  could compare, so a changed shuffle would replay as identical. `tasks.rs` 9 → 3 sites.
+- Gated: `make check-full` and CI build and test `-p mycelium-core --features sim`.
+
+
 ### Added — the static forbidden-call check (item 6 PR 3, D12)
 
 - `scripts/check-sim-seams.sh` enforces the inventory's §6 rule: a new `SystemTime::now`,
