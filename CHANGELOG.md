@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — two-gateway operation, budgets and outcomes (item 2 PR 5)
+
+- **Failover only for repeatable exports.** `Repeatability` is declared per export by the domain
+  that offers it — a default would be wrong either way round, since one risks doing something twice
+  and the other quietly disables failover for everything. An `AtMostOnce` export is **never** failed
+  over: the far side may have run it, so the caller gets `DeliveryUnknown` (item 1's vocabulary —
+  *a timeout is never a negative*) rather than `Failed`, which would assert something we do not know.
+  **That distinction survives running out of gateways**, which is exactly when it is easiest to lose.
+- **Budgets are per partner, not per gateway.** A single pool would let a busy partner starve
+  everyone else — availability for one bought at the cost of the rest, with nobody deciding it. A
+  partner at its limit is refused (`NoCapacity`, naming the limit) while others proceed untouched;
+  refused rather than queued, because an unbounded queue is the same starvation with a longer delay.
+- **No leader among gateways.** Selection is a fixed local order: no election, no shared state, no
+  message exchanged to decide. A leader would be a coordination dependency that must be up and
+  agreed upon for two *healthy* domains to keep talking — the thing the substrate exists not to need.
+- A silent gateway's slot is released, so a timeout does not leak capacity.
+
+
 ### Added — the authenticated federation call and the provider adapter (item 2 PR 4)
 
 - `federation::call::FederatedCaller` — a credential **bound to the call, not just the caller**. It

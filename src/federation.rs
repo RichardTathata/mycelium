@@ -34,6 +34,7 @@
 
 pub mod call;
 pub mod catalog;
+pub mod gateway;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
