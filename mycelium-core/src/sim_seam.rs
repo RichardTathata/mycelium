@@ -410,6 +410,47 @@ pub async fn fs_rename(
     res
 }
 
+/// Read a whole file.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub async fn fs_read(path: &std::path::Path, _name: &str) -> std::io::Result<Vec<u8>> {
+    tokio::fs::read(path).await
+}
+
+/// Read a whole file, **checked** against the recording rather than supplied by it.
+///
+/// # Why a read is checked and a write is supplied
+///
+/// A write's bytes are its *request* — the kernel already knows them, so a replay can skip the
+/// effect entirely. A read's bytes are its *result*, and the trace is a line per decision: putting
+/// a snapshot's contents in it would make the trace the disk image. The bundle already carries disk
+/// images (`initial/`), so in replay the read really happens, against the restored state, and the
+/// seam compares what came back with what was recorded.
+///
+/// That makes this a **divergence check on recovery**: *the recovery read returned different bytes
+/// than the recording did* is exactly the v2.4.3 class of failure — where a read error was mapped
+/// to an empty tail and acknowledged records were truncated away. A harness that supplied the
+/// recorded bytes instead would have replayed straight past it.
+#[cfg(feature = "sim")]
+pub async fn fs_read(path: &std::path::Path, name: &str) -> std::io::Result<Vec<u8>> {
+    let res = tokio::fs::read(path).await;
+    // The result, canonically: what came back, not how long it was. Two snapshots of equal length
+    // are different snapshots.
+    let digest: Vec<u8> = match &res {
+        Ok(bytes) => bytes.clone(),
+        Err(_) => Vec::new(),
+    };
+    installed::record_fs(
+        name,
+        "read",
+        &digest,
+        false,
+        res.is_ok(),
+        &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
+    );
+    res
+}
+
 /// `sync_data` on a file.
 #[cfg(not(feature = "sim"))]
 #[inline]
@@ -755,6 +796,53 @@ mod tests {
         });
         let mut f2 = open(&tmp("content-replay")).await;
         let _ = fs_write_all(&mut f2, "wal.bin", b"BBBB").await;
+    }
+
+    /// **A recovery read that returns different bytes is a divergence.** This is the v2.4.3 class:
+    /// a read whose result changed — there, an error mapped to an empty tail, so acknowledged
+    /// records were truncated away. A harness that *supplied* the recorded bytes would have replayed
+    /// straight past it; one that checks them stops.
+    #[tokio::test]
+    #[should_panic(expected = "replay diverged")]
+    async fn a_recovery_read_returning_different_bytes_diverges() {
+        let path = tmp("read");
+        tokio::fs::write(&path, b"snapshot-AAAA").await.expect("write");
+
+        install_recording();
+        let got = fs_read(&path, "snapshot.bin").await.expect("read");
+        assert_eq!(got, b"snapshot-AAAA");
+        let ctx = installed::take().expect("installed");
+
+        // Same length, different content — the disk changed under the replay.
+        tokio::fs::write(&path, b"snapshot-BBBB").await.expect("rewrite");
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(9, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let _ = fs_read(&path, "snapshot.bin").await;
+    }
+
+    /// The same bytes replay cleanly — the check is on content, not on having read at all.
+    #[tokio::test]
+    async fn an_identical_recovery_read_replays_without_diverging() {
+        let path = tmp("read-same");
+        tokio::fs::write(&path, b"snapshot-AAAA").await.expect("write");
+
+        install_recording();
+        fs_read(&path, "snapshot.bin").await.expect("read");
+        let ctx = installed::take().expect("installed");
+
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(9, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let again = fs_read(&path, "snapshot.bin").await.expect("read");
+        installed::take();
+        assert_eq!(again, b"snapshot-AAAA");
     }
 
     /// A replay asked for a read the recording never made: the run stops rather than inventing one.

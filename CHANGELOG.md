@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the recovery-read seam (item 6 PR 3)
+
+- `persistence.rs`'s three recovery reads — the snapshot, the WAL, and the WAL tail the snapshot
+  merges — now go through the kernel. Baseline **184 sites across 43 files**.
+- **A read is checked, not supplied.** A write's bytes are its *request*, so a replay can skip the
+  effect; a read's bytes are its *result*, and putting a snapshot's contents in a line-per-decision
+  trace would make the trace the disk image. The bundle already carries disk images, so in replay
+  the read really happens against restored state and the seam compares what came back.
+- That makes it a divergence check on recovery: *the recovery read returned different bytes than the
+  recording did* is the **v2.4.3** class of failure — where a read error was mapped to an empty tail
+  and acknowledged records were truncated away. A harness that supplied the recorded bytes would
+  have replayed straight past it.
+
+
 ### Added — the first replay seams: the HLC wall clock and the WAL writes (item 6 PR 3)
 
 - `mycelium-core`'s `sim_seam` module, and a `sim` feature that routes the nondeterministic reads

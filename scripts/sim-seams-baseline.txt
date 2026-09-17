@@ -9,7 +9,7 @@
 3 mycelium-core/src/framing.rs
 3 mycelium-core/src/kv_handle.rs
 6 mycelium-core/src/mesh_handle.rs
-10 mycelium-core/src/persistence.rs
+7 mycelium-core/src/persistence.rs
 1 mycelium-core/src/rate.rs
 2 mycelium-core/src/receipt.rs
 2 mycelium-core/src/schema_handle.rs
