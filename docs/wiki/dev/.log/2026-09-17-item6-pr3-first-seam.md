@@ -21,7 +21,7 @@ check exists, and why it landed first.
 **No kernel installed falls back to the real clock.** Most tests here never install one, and they
 must keep working unchanged: 179 core tests pass without `sim`, 183 with it.
 
-**Two bugs in the checker, both found by testing the checker.**
+**Three bugs in the checker, all found by testing the checker.**
 
 1. It excluded *everything after the first `#[cfg(test)]`*, so a live `Instant::now()` appended below
    a test module passed. Fixing it to skip each test *item* raised the count 165 → 190: twenty-five
@@ -31,17 +31,40 @@ must keep working unchanged: 179 core tests pass without `sim`, 183 with it.
    Excluding comment lines dropped the count 190 → 185 and made `hlc.rs` leave the baseline entirely
    — which is what routing a seam is supposed to look like.
 
-Both were found the same way: plant a site, check the checker fails; write a comment, check it does
-not. *A checker nobody has watched fail is a checker nobody knows works* — and a checker nobody has
-watched **pass** on a near-miss is one that will cry wolf until it is ignored.
+3. It did not follow **aliased imports**. `persistence.rs` does `use tokio::{fs as tfs, …}` and then
+   writes `tfs::read(…)`; the check matched only `tokio::fs::`, so the module the inventory calls
+   *"the right first target"* — 26 fs references — was **entirely invisible**. The check reported
+   "clean" on the single most important file in its scope. Following `fs as <alias>` imports and
+   every use of the alias added 14 sites, and surfaced 2 more in `lifecycle.rs`.
 
-**The debt, measured: 185 sites across 43 files.** One down.
+All three were found the same way: plant a site, check the checker fails; write a comment, check it
+does not; route a real seam and check the count actually moves. *A checker nobody has watched fail is
+a checker nobody knows works* — and one nobody has watched **pass** on a near-miss will cry wolf
+until it is ignored.
 
-**Next in PR 3:** the storage adapters — `persistence.rs` (~25 `tokio::fs` calls, the inventory's
-"right first target"), then `connection.rs` (~9 `Instant::now`) and `tasks.rs` (~6 `fastrand` + ~6
-timers). Storage is a bigger change than the clock: it needs the three-layer model (process memory ·
-page cache · durable · directory metadata) the inventory sets out, because *process death is not
-power loss* and the harness must not manufacture a loss a process kill cannot cause.
+**The arithmetic is the point.** The check read 165 sites when it first went green. It now reads
+**199**. Every one of the three bugs was wrong in the *safe* direction — under-reporting — which is
+how a tool quietly stops meaning anything while still passing. Thirty-four sites, about a fifth of
+the total, were invisible to a check whose entire job was to see them.
+
+**The debt, measured: 199 sites across 44 files** — after the alias fix. `hlc.rs` has left the
+baseline entirely, and `persistence.rs`'s WAL write path is routed even though its other sites
+remain.
+
+**The storage seams, and what they do not yet do.** The WAL's `write_all`, its `sync_data` and the
+directory `sync_all` (the v2.4.4 effect) are kernel effects now. Their *order* is the durability
+property, so **dropping the sync is a divergence** — caught by the trace before PR 4's storage model
+can simulate the loss it would cause. A replayed write does not touch the disk: the mode is checked
+before the `await`, or a replay would mutate state the recording already accounted for.
+
+What they do **not** do: model storage state. A replay checks the sequence and content of effects; it
+does not reconstruct the disk, so it cannot yet answer *what would a reader see after a power loss*.
+That needs the three-layer model (process memory · page cache · durable · directory metadata) and the
+fault injection of PR 4 — because *process death is not power loss*, and the harness must not
+manufacture a loss a process kill cannot cause nor certify durability only a sync establishes.
+
+**Next:** `persistence.rs`'s remaining 12 sites, `connection.rs` (~9 `Instant::now`), `tasks.rs`
+(~6 `fastrand` + ~6 timers), then PR 4's storage model and the WAL/snapshot witness.
 
 **Gates.** `make check` clean (the forbidden-call check inside it); core 179 without `sim`, 183 with;
 `make check-full` and CI now build and test the `sim` path.

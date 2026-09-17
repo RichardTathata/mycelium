@@ -10,6 +10,7 @@
 3 mycelium-core/src/kv_handle.rs
 6 mycelium-core/src/mesh_handle.rs
 4 mycelium-core/src/ops.rs
+12 mycelium-core/src/persistence.rs
 1 mycelium-core/src/rate.rs
 2 mycelium-core/src/receipt.rs
 2 mycelium-core/src/schema_handle.rs
@@ -30,7 +31,7 @@
 35 src/agent/http.rs
 2 src/agent/intent.rs
 1 src/agent/kv_quorum_ext.rs
-4 src/agent/lifecycle.rs
+6 src/agent/lifecycle.rs
 3 src/agent/lock_service.rs
 6 src/agent/membership_governor.rs
 2 src/agent/mod.rs

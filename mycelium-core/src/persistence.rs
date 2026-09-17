@@ -460,6 +460,13 @@ async fn wal_writer_task(
 
 // ── WAL I/O ──────────────────────────────────────────────────────────────────
 
+/// Trace stream names for the storage seams. One place, so a trace written today and a reader
+/// written later cannot disagree about what a stream is called.
+const WAL_FILE: &str = "wal.bin";
+/// The directory whose sync makes a rename durable.
+const DIR_SYNC: &str = "dir";
+
+
 async fn open_wal(path: &std::path::Path) -> io::Result<tfs::File> {
     tfs::OpenOptions::new()
         .create(true)
@@ -489,9 +496,12 @@ async fn wal_append(
     buf.put_u32_le(payload.len() as u32);
     buf.extend_from_slice(&payload);
 
-    file.write_all(&buf).await?;
+    // Routed through the replay seams (item 6 PR 3). The *order* of these two is the durability
+    // property — a record is durable only once the sync returns — so both are kernel effects and a
+    // trace that lost the sync would diverge.
+    crate::sim_seam::fs_write_all(file, WAL_FILE, &buf).await?;
     if sync {
-        file.sync_data().await?;
+        crate::sim_seam::fs_sync_data(file, WAL_FILE).await?;
     }
     Ok(())
 }
@@ -508,7 +518,9 @@ async fn fsync_dir(dir: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         let d = tfs::File::open(dir).await?;
-        d.sync_all().await
+        // The effect that makes a preceding `rename` survive a power loss (v2.4.4). Recorded under
+        // its own op so its *removal* is a divergence, not a silent regression.
+        crate::sim_seam::fs_sync_dir(&d, DIR_SYNC).await
     }
     #[cfg(not(unix))]
     {

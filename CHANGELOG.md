@@ -9,7 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added — the first replay seam: the HLC wall clock (item 6 PR 3)
+### Added — the first replay seams: the HLC wall clock and the WAL writes (item 6 PR 3)
 
 - `mycelium-core`'s `sim_seam` module, and a `sim` feature that routes the nondeterministic reads
   the coverage map assigns to the kernel through it. **Off in every shipped build**: without `sim`
@@ -19,6 +19,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a read the recording never made stops the run rather than inventing one.
 - Forbidden-call baseline down to **185 sites across 43 files** (from 190): `hlc.rs` has left it
   entirely, which is what routing a seam is supposed to look like.
+- **The WAL's write, file sync and directory sync** are now kernel effects too. Their *order* is
+  the durability property — a record is durable only once the sync returns — so dropping the sync
+  is a **divergence**, caught by the trace before PR 4's storage model can simulate the loss it
+  would cause.
+- A replayed write does not touch the disk: the mode is checked before the `await`, so a replay
+  cannot mutate state the recording already accounted for.
+- **Three bugs found in the forbidden-call check from the previous entry, all by testing the
+  checker:** it ignored everything after the first `#[cfg(test)]` (+25 sites), it counted comments
+  (−5), and it did not follow `fs as tfs` aliases — which made `persistence.rs`, the module the
+  inventory calls "the right first target" with 26 fs references, **entirely invisible** (+14).
+  Baseline now **199 sites across 44 files**; it read 165 when the check first went green.
 - Gated: `make check-full` and CI build and test `-p mycelium-core --features sim`.
 
 
