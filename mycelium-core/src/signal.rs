@@ -883,6 +883,25 @@ pub mod kv_ns {
     /// without waiting for the next advertise tick.
     pub const ADVERTISE: &str = "svc/";
 
+    /// **Reserved** for scoped mandates (v3 item 5 PR 1, `docs/design/scoped-mandates.md`).
+    ///
+    /// Key: `mandate/{scope}`. Value: `(holder, authority epoch)`.
+    ///
+    /// **A mandate here is an announcement, not the enforcement point.** The check that matters
+    /// happens inside the protected resource's own atomic boundary — for `GitStore`, the mandate ref
+    /// and the content ref move in one `update-ref` transaction. A mandate that lived only in KV
+    /// would be a fact everyone agrees on and nothing enforces, which is the failure the record's
+    /// decisive invariant is written against.
+    pub const MANDATE: &str = "mandate/";
+
+    /// **Reserved** for durable wiki proposals (v3 item 5 PR 1) — a stream under [`LOG`]'s
+    /// `log/{stream}/{hlc_hex}` shape, written with the existing `KvHandle::append` verb.
+    ///
+    /// Key: `log/wiki/{group}/proposals`. Durable proposals use the log verb plus item 1's receipts
+    /// rather than a service database; the *evaporating* KV queue stays what it always was — a
+    /// delivery hint, not a record.
+    pub const LOG_WIKI: &str = "log/wiki/";
+
     /// **Reserved** for the knowledge layer (v3 item 3 PR 1, `docs/design/knowledge-layer.md`).
     ///
     /// Key: `knowledge/head/{issuer}/{stream}`. Value: a bounded, signed **discovery head** — a
