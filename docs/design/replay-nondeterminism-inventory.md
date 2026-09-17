@@ -212,6 +212,25 @@ error under the `sim` feature (a `#[cfg]`-gated `deny` lint or a `clippy.toml` `
 to those modules). It lands *with* the adapters in PR 3 so the seams cannot erode while PR 4–7 are built. Test
 modules and the seam implementations are exempt; a new site is admitted only by editing this inventory.
 
+**Shipped 2026-09-17 as `scripts/check-sim-seams.sh`, and neither mechanism this record suggested.** Clippy's
+`disallowed-methods` is real but **workspace-global** — it cannot be scoped to modules, so it would fire inside
+the seam implementations and every test, which is exactly where these calls belong; and Rust has no `#[cfg]`-gated
+lint for "do not call this function". The rule this record actually states — *a new site is admitted only by
+editing this inventory* — is enforced instead by diffing per-file counts against a checked-in baseline
+(`scripts/sim-seams-baseline.txt`), which fails on an increase and reports a decrease as progress. It runs in
+`make check` and in CI's clippy job.
+
+**The measured baseline: 190 sites across 45 files.** That is the debt PR 3's adapters and PR 4–7 draw down, and
+the number is now visible rather than estimated.
+
+*What it cannot see, stated rather than glossed:* it matches qualified call sites and the `use` imports that enable
+unqualified ones, but it does not parse Rust — a call reached through an unknown re-export or a type alias is
+invisible. **And a caution from building it:** the first version excluded *everything after the first
+`#[cfg(test)]`*, so a live `Instant::now` appended below a test module passed. Fixing it to skip each test item
+rather than the file's tail raised the count from 165 to 190 — twenty-five sites that a plausible-looking check had
+been silently ignoring. It was found by planting a site and checking the checker failed, which is the only way
+these are found.
+
 ## 7. What this record does not decide
 
 The kernel's API (PR 2), the adapter traits' exact shapes (PR 3), the minimiser (PR 4+), and whether the
