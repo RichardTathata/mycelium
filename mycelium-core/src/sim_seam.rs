@@ -53,6 +53,44 @@ fn real_wall_now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+/// The monotonic clock, in nanoseconds since this process first read it.
+///
+/// **Not the wall clock, and the difference is a correctness property rather than a preference.**
+/// Every site this replaces measures an *interval* — how long since the rate window opened, how long
+/// since the last failure. `Instant` is monotonic, so a backwards NTP step cannot make an interval
+/// negative or enormous; `SystemTime` gives no such guarantee. Routing these through `wall_now_ms`
+/// would have been one function fewer and a new class of bug: a rate window that never expires, a
+/// backoff that fires instantly.
+///
+/// `Instant` has no epoch, so the seam supplies one — the first read — which is exactly what
+/// `Seams::mono_now_ns` already means by "since the run began".
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn mono_now_ns() -> u64 {
+    real_mono_now_ns()
+}
+
+#[inline]
+fn real_mono_now_ns() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+}
+
+/// How long since a reading taken by [`mono_now_ns`] — the replacement for `Instant::elapsed`.
+///
+/// It exists so a call site reads the way it read before (`mono_since(t) < cooldown` against
+/// `t.elapsed() < cooldown`); a conversion that made the surrounding code harder to follow would
+/// have traded a real property for a testing one.
+///
+/// Saturating, because the readings are monotonic by construction and a replay supplies them from
+/// the trace — "earlier is actually later" cannot happen, and saturating is how that is spelled.
+/// A wrapping subtraction would express the same impossibility as *five centuries elapsed*, which a
+/// cooldown would read as long expired.
+#[inline]
+pub fn mono_since(earlier_ns: u64) -> std::time::Duration {
+    std::time::Duration::from_nanos(mono_now_ns().saturating_sub(earlier_ns))
+}
+
 #[cfg(feature = "sim")]
 mod installed {
     use mycelium_sim::{Kernel, Seams, Sources};
@@ -202,6 +240,14 @@ pub use installed::{install, take, SimContext};
 #[inline]
 pub fn wall_now_ms() -> u64 {
     installed::with_seams(real_wall_now_ms, |s| s.wall_now_ms())
+}
+
+/// The monotonic clock, through the kernel. See the no-`sim` arm for why it is separate from
+/// [`wall_now_ms`] — the two are different clocks, and a trace that merged them would be unreadable.
+#[cfg(feature = "sim")]
+#[inline]
+pub fn mono_now_ns() -> u64 {
+    installed::with_seams(real_mono_now_ns, |s| s.mono_now_ns())
 }
 
 // ── Randomness ───────────────────────────────────────────────────────────────────────────────
@@ -662,6 +708,35 @@ mod tests {
         assert_eq!(a, 1_789_000_000_000, "the seeded source, not the machine's clock");
         assert_eq!(b, a + 1, "and it advances deterministically");
         assert_eq!(ctx.kernel.trace().len(), 2, "both reads are in the trace");
+    }
+
+    /// The monotonic clock is a **separate** stream from the wall clock, and interleaving the two
+    /// must not make either read the other's value. They measure different things — an epoch and an
+    /// interval — and a trace that merged them would be unreadable by anyone debugging from it.
+    #[test]
+    fn the_monotonic_clock_is_not_the_wall_clock() {
+        install_recording();
+        let w1 = wall_now_ms();
+        let m1 = mono_now_ns();
+        let w2 = wall_now_ms();
+        let m2 = mono_now_ns();
+        let ctx = installed::take().expect("installed");
+
+        assert_eq!(w1, 1_789_000_000_000, "the seeded wall source");
+        assert_eq!(w2, w1 + 1, "the wall clock advanced by its own step");
+        assert_eq!(m2 - m1, 1_000_000, "the monotonic clock advanced by its own step, not the wall's");
+        assert!(m1 < 1_000_000_000, "an interval since the run began, not an epoch");
+        assert_eq!(ctx.kernel.trace().len(), 4, "all four reads are in the trace");
+    }
+
+    /// Without a kernel the seam is the real monotonic clock — an interval that only goes forward.
+    #[test]
+    fn the_monotonic_seam_falls_back_to_a_real_monotonic_reading() {
+        installed::take();
+        let a = mono_now_ns();
+        let b = mono_now_ns();
+        assert!(b >= a, "a monotonic clock never goes backwards");
+        assert!(a < 60 * 60 * 1_000_000_000, "since this process started, not since the epoch");
     }
 
     /// The replay returns the recorded values, whatever the machine's clock says.

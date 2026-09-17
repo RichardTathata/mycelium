@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the monotonic-clock seam (item 6 PR 3)
+
+- `sim_seam::mono_now_ns` / `mono_since` — **separate from the wall clock, and the separation is a
+  correctness property.** Every site these replace measures an *interval*; `Instant` is monotonic, so
+  a backwards NTP step cannot make one negative or enormous, and `SystemTime` gives no such
+  guarantee. Reusing `wall_now_ms` would have been one function fewer and a new class of bug: a rate
+  window that never expires, a backoff that fires instantly.
+- `writer.rs`'s reconnect backoff and `connection.rs`'s inbound rate window and anti-entropy
+  cooldown now go through it. Baseline **179 sites across 43 files**, from 186.
+- Scope stated rather than implied: `tokio::time::Instant` deadlines belong to the **timer** seam
+  (converting the reading without owning the sleep would leave the wait real), and the peer table's
+  `Arc<papaya::HashMap<NodeId, Instant>>` is a type change across two crates and gets its own
+  increment.
+
+### Added — a test for the reconnect backoff, which had none
+
+- Breaking `mono_since` left all 180 `mycelium-core` tests green and failed exactly one test in the
+  outer crate, by a route with nothing to do with reconnecting. The backoff now has a direct test,
+  verified against **both** failure directions — a backoff that never expires and one that never
+  applies.
+
 ### Added — the peer writer channels, and a cost the seam was quietly imposing (item 6 PR 3)
 
 - The four **peer-writer** sends — forwards and TCP pings, each with its respawn retry — route
