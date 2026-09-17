@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — replay scenario B, the decisive test for scoped mandates (item 6 PR 5)
+
+- **A schedule sweep, not five hand-written tests.** Five tests check five orderings someone thought
+  of; the invariant is about *every* ordering, and the ones that break it are the ones nobody
+  pictured — which is the entire argument for item 6 existing. The sweep generates schedules from
+  §8's five cases (competing appointments · delayed holders · resource restart · expiry ·
+  **revocation with no subsequent content write**) and asserts the invariant after **every step of
+  every schedule**, not only at the end.
+- **The case the ADR singles out is the one a hand-written test omits.** A revocation followed by a
+  write is easy to observe — something fails. A revocation followed by *nothing* is where a mandate
+  silently remains effective, because nobody looked. The sweep includes idle schedules that knock
+  only much later.
+- **The sweep is proved non-vacuous**: a deliberately broken resource — one that checks against
+  epoch `0` rather than what it installed — is caught. And a *current* mandate still commits, so the
+  invariant cannot be satisfied by refusing everything, which is the failure mode the knowledge
+  layer's own gate warns about.
+- Expiry is reported as `OutOfWindow`, not as supersession: a current mandate past its window failed
+  for a different reason and says so.
+
+
 ### Added — fail-closed authority restart and durable proposals (item 5 PR 5)
 
 - **`RestartGuard` starts closed and admits nothing** until its installed epoch is read back from
