@@ -29,7 +29,9 @@
 #   the baseline makes *movement* visible even when it cannot attribute it.
 #
 # EXEMPT
-#   `mycelium-sim/**` (the seams themselves), test files, and each top-level `#[cfg(test)]` item —
+#   `mycelium-sim/**` and `sim_seam.rs` (the seams themselves — §6 exempts the seam
+#   implementations, which is where these calls are supposed to live), test files, and each
+#   top-level `#[cfg(test)]` item —
 #   a test that reads the real clock is doing its job. Note "each item", not "everything after the
 #   first": production code below a test module is still production code.
 #
@@ -52,6 +54,7 @@ scan_files() {
     ! -name '*_tests.rs' \
     ! -name 'lib_tests.rs' \
     ! -name 'test_util.rs' \
+    ! -name 'sim_seam.rs' \
     | sort
 }
 
@@ -67,6 +70,9 @@ count_in() {
   awk '
     /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1 }
     skip && /^}/                       { skip = 0; next }
+    # Comments are prose, not calls. A doc comment that *names* `SystemTime::now` to explain why it
+    # is no longer called would otherwise count as a call — which it did, on this very file.
+    /^[[:space:]]*\/\//                { next }
     !skip                              { print }
   ' "$file" | grep -cE "$PATTERN" || true
 }

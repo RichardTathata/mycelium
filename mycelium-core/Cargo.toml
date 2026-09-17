@@ -22,12 +22,18 @@ tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep
 metrics = ["dep:metrics"]
 # Signed-identity surface the compliance layer builds on (audit/RBAC live upstream).
 compliance = ["tls"]
+# Routes the nondeterministic reads the coverage map assigns to the kernel through
+# `sim_seam`, so a run can be recorded and replayed (item 6). Off in every shipped build:
+# without it `sim_seam` compiles to the calls it replaced and the substrate pays nothing.
+sim = ["dep:mycelium-sim"]
 # Exposes a handful of `#[cfg(test)]` helpers (N_GOSSIP_SHARDS, store_hash, …) to
 # dependent crates' test builds — `#[cfg(test)]` items are invisible across a crate
 # boundary. Enabled by the full crate's dev-dependency; never in a normal build.
 test-support = []
 
 [dependencies]
+# Test harness only, and optional: see the `sim` feature.
+mycelium-sim = { path = "../mycelium-sim", optional = true }
 tokio = { version = "1.35", features = ["full"] }
 fastrand = "2"
 papaya = "0.1"

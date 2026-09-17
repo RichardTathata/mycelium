@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the first replay seam: the HLC wall clock (item 6 PR 3)
+
+- `mycelium-core`'s `sim_seam` module, and a `sim` feature that routes the nondeterministic reads
+  the coverage map assigns to the kernel through it. **Off in every shipped build**: without `sim`
+  the module compiles to the calls it replaced, so the substrate pays nothing for the harness.
+- The HLC's one wall-clock read — "the clean seam", and the read every write's LWW rank depends on —
+  now records and replays. A replay returns the recorded value whatever the machine's clock says,
+  and a read the recording never made stops the run rather than inventing one.
+- Forbidden-call baseline down to **185 sites across 43 files** (from 190): `hlc.rs` has left it
+  entirely, which is what routing a seam is supposed to look like.
+- Gated: `make check-full` and CI build and test `-p mycelium-core --features sim`.
+
+
 ### Added — the static forbidden-call check (item 6 PR 3, D12)
 
 - `scripts/check-sim-seams.sh` enforces the inventory's §6 rule: a new `SystemTime::now`,
