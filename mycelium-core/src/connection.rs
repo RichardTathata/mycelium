@@ -16,7 +16,7 @@ use bytes::{Bytes, BytesMut};
 use std::{
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use crate::stream::GossipStream;
 use tokio::{io::BufReader, sync::watch};
@@ -68,7 +68,8 @@ pub struct ConnContext {
     /// signal_boundary, signal_handlers, kv_state, wal, default_ttl, …).
     /// The upper crate passes `Arc::clone(&task_ctx.core)`.
     pub task_ctx:            Arc<CoreCtx>,
-    pub peers:               Arc<papaya::HashMap<NodeId, Instant>>,
+    /// Last time each peer was heard from — monotonic nanoseconds from the clock seam.
+    pub peers:               Arc<papaya::HashMap<NodeId, u64>>,
     pub shutdown:            Arc<watch::Sender<bool>>,
     pub peer_writers:        Arc<papaya::HashMap<NodeId, WriterEntry>>,
     pub backoff:             Duration,
@@ -239,7 +240,7 @@ pub async fn handle_connection(
 
         match msg {
             WireMessage::Ping { sender, known_peers } => {
-                let now = Instant::now();
+                let now = crate::sim_seam::mono_now_ns();
                 let sender_is_new = {
                     let guard = peers.pin();
                     // Never peer with OURSELVES. A spoofed/reflected Ping carrying this node's own

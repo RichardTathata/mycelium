@@ -16,7 +16,6 @@
 use crate::node_id::NodeId;
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
 
 /// Liveness status of a member in the SWIM table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +62,9 @@ pub enum ApplyEffect {
 struct Entry {
     incarnation: u64,
     status: MemberStatus,
-    changed: Instant,
+    /// When the status last changed — monotonic nanoseconds from the clock seam, supplied by the
+    /// caller. This table has always taken its clock as a parameter; only the type changed.
+    changed: u64,
 }
 
 /// The local view of cluster membership.
@@ -84,7 +85,7 @@ impl SwimMembership {
 
     /// Merge one gossiped update, returning the side effect to apply. `now` is injected
     /// so the table stays pure/testable.
-    pub fn apply(&mut self, u: &MemberUpdate, now: Instant) -> ApplyEffect {
+    pub fn apply(&mut self, u: &MemberUpdate, now: u64) -> ApplyEffect {
         // A rumour about ourselves: refute Suspect/Dead by out-incarnating it.
         if u.node == self.self_id {
             return match u.status {
@@ -133,14 +134,14 @@ impl SwimMembership {
 
     /// Locally observe that `node` is alive (e.g. we just got an `Ack`). Records it at
     /// its current incarnation, defaulting to incarnation 0 for a first sighting.
-    pub fn observe_alive(&mut self, node: &NodeId, now: Instant) -> ApplyEffect {
+    pub fn observe_alive(&mut self, node: &NodeId, now: u64) -> ApplyEffect {
         let inc = self.members.get(node).map(|e| e.incarnation).unwrap_or(0);
         self.apply(&MemberUpdate { node: node.clone(), incarnation: inc, status: MemberStatus::Alive }, now)
     }
 
     /// Locally suspect `node` (both direct and indirect probes failed). Only takes effect
     /// if it is currently `Alive`; returns the update to gossip, or `None`.
-    pub fn suspect(&mut self, node: &NodeId, now: Instant) -> Option<MemberUpdate> {
+    pub fn suspect(&mut self, node: &NodeId, now: u64) -> Option<MemberUpdate> {
         let e = self.members.get_mut(node)?;
         if e.status == MemberStatus::Alive {
             e.status = MemberStatus::Suspect;
@@ -155,10 +156,10 @@ impl SwimMembership {
     /// Returns the confirmed-dead nodes (the caller removes them from `peers` + gossips
     /// `Dead`). The entries are retained as `Dead` tombstones so a late `Alive` rumour at
     /// the same incarnation cannot resurrect them (only a higher incarnation can).
-    pub fn promote_expired_suspects(&mut self, now: Instant, timeout: std::time::Duration) -> Vec<MemberUpdate> {
+    pub fn promote_expired_suspects(&mut self, now: u64, timeout: std::time::Duration) -> Vec<MemberUpdate> {
         let mut dead = Vec::new();
         for (node, e) in self.members.iter_mut() {
-            if e.status == MemberStatus::Suspect && now.duration_since(e.changed) >= timeout {
+            if e.status == MemberStatus::Suspect && crate::sim_seam::mono_between(e.changed, now) >= timeout {
                 e.status = MemberStatus::Dead;
                 e.changed = now;
                 dead.push(MemberUpdate { node: node.clone(), incarnation: e.incarnation, status: MemberStatus::Dead });
@@ -230,7 +231,7 @@ mod tests {
     #[test]
     fn first_alive_sighting_becomes_alive() {
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         assert_eq!(m.apply(&alive(2, 0), now), ApplyEffect::BecameAlive(id(2)));
         // Re-applying the same alive is a no-op (already alive).
         assert_eq!(m.apply(&alive(2, 0), now), ApplyEffect::None);
@@ -240,7 +241,7 @@ mod tests {
     #[test]
     fn higher_incarnation_always_wins() {
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         m.apply(&suspect(2, 5), now); // suspect at inc 5
         // Alive at higher inc overrides suspect → becomes alive again.
         assert_eq!(m.apply(&alive(2, 6), now), ApplyEffect::BecameAlive(id(2)));
@@ -251,7 +252,7 @@ mod tests {
     #[test]
     fn equal_incarnation_precedence_dead_over_suspect_over_alive() {
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         m.apply(&alive(2, 4), now);
         // Suspect at same inc overrides alive (no peers effect yet).
         assert_eq!(m.apply(&suspect(2, 4), now), ApplyEffect::None);
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn dead_tombstone_not_resurrected_at_same_incarnation() {
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         m.apply(&dead(2, 7), now);
         assert_eq!(m.apply(&alive(2, 7), now), ApplyEffect::None, "same-inc alive can't revive a tombstone");
         // Only a strictly higher incarnation revives it.
@@ -275,7 +276,7 @@ mod tests {
     #[test]
     fn self_refutes_suspect_and_dead_by_outincarnating() {
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         assert_eq!(m.self_incarnation(), 0);
         // Someone suspects us at inc 0 → we bump to 1 and refute.
         assert_eq!(m.apply(&suspect(1, 0), now), ApplyEffect::RefutedSelf(1));
@@ -303,7 +304,7 @@ mod tests {
         ) {
             let status = match status_sel { 0 => MemberStatus::Alive, 1 => MemberStatus::Suspect, _ => MemberStatus::Dead };
             let mut m = SwimMembership::new(NodeId::new("127.0.0.1", self_port).unwrap());
-            let now = std::time::Instant::now();
+            let now = crate::sim_seam::mono_now_ns();
             // A rumour about some other node, and (the overflow-prone path) a rumour about SELF.
             let other = MemberUpdate { node: NodeId::new("127.0.0.1", port).unwrap(), incarnation: inc, status };
             let mine  = MemberUpdate { node: NodeId::new("127.0.0.1", self_port).unwrap(), incarnation: inc, status };
@@ -325,7 +326,7 @@ mod tests {
         // refutation power and gets us evicted cluster-wide). Saturating pins us high — degraded but
         // alive and non-panicking.
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         let effect = m.apply(&suspect(1, u64::MAX), now); // must not panic
         assert_eq!(effect, ApplyEffect::RefutedSelf(u64::MAX));
         assert_eq!(m.self_incarnation(), u64::MAX, "must saturate, not wrap to 0");
@@ -334,15 +335,15 @@ mod tests {
     #[test]
     fn suspect_then_promote_after_timeout() {
         let mut m = SwimMembership::new(id(1));
-        let t0 = Instant::now();
+        let t0 = crate::sim_seam::mono_now_ns();
         m.apply(&alive(2, 0), t0);
         // suspect() only fires from Alive.
         assert!(m.suspect(&id(2), t0).is_some());
         assert!(m.suspect(&id(2), t0).is_none(), "already suspect");
         // Not yet expired.
-        assert!(m.promote_expired_suspects(t0 + Duration::from_millis(100), Duration::from_secs(1)).is_empty());
+        assert!(m.promote_expired_suspects(t0 + 100 * 1_000_000, Duration::from_secs(1)).is_empty());
         // Expired → promoted to Dead.
-        let dead = m.promote_expired_suspects(t0 + Duration::from_secs(2), Duration::from_secs(1));
+        let dead = m.promote_expired_suspects(t0 + 2 * 1_000_000_000, Duration::from_secs(1));
         assert_eq!(dead.len(), 1);
         assert_eq!(dead[0].status, MemberStatus::Dead);
         assert!(m.alive_members().is_empty());
@@ -351,7 +352,7 @@ mod tests {
     #[test]
     fn gossip_sample_includes_self_and_is_bounded() {
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         for p in 2..20 { m.apply(&alive(p, 0), now); }
         let sample = m.gossip_sample(5);
         assert_eq!(sample.len(), 6, "self + up to n others");
@@ -365,7 +366,7 @@ mod tests {
         // arbitrary and the random half must carry full coverage. A pure newest-first sample
         // would emit the same fixed subset forever; the random tail must reach every member.
         let mut m = SwimMembership::new(id(1));
-        let now = Instant::now();
+        let now = crate::sim_seam::mono_now_ns();
         for p in 2..=60 { m.apply(&alive(p, 0), now); } // 59 stable members, n=6 per sample
         let mut seen = std::collections::HashSet::new();
         for _ in 0..400 {
