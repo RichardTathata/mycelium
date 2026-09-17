@@ -148,53 +148,45 @@ mod installed {
         CTX.with(|c| c.borrow_mut().take())
     }
 
-    /// Is a replay in progress? Asked *before* an `await`, because in replay the effect must not
-    /// happen at all — the recorded outcome is supplied instead, and performing the write anyway
-    /// would make the replay mutate state the recording already accounted for.
-    pub fn is_replaying() -> bool {
-        CTX.with(|c| {
-            c.borrow()
-                .as_ref()
-                .is_some_and(|ctx| ctx.kernel.mode() == mycelium_sim::Mode::Replay)
-        })
-    }
-
-    /// Record a storage effect that really happened.
+    /// Put a storage effect through the kernel, and return the outcome the kernel decides.
     ///
-    /// The offset is tracked per file so the request carries *where* as well as *what* — an append
-    /// that lands at a different position is a different effect even with identical bytes.
-    pub fn record_fs(file: &str, op: &str, bytes: &[u8], sync: bool, ok: bool, err: &str) {
+    /// **The effect really happens in both modes**, and the caller has already performed it when it
+    /// calls this. In `Record` the kernel writes down what happened; in `Replay` it checks the
+    /// request against the recorded one and hands back the *recorded* outcome, which is how an
+    /// injected fault replays as a fault rather than as whatever the replay's disk did.
+    ///
+    /// # Why the effect is not suppressed in replay (item 6 PR 4)
+    ///
+    /// It used to be: a write's bytes are its request, so the kernel already knows them and the
+    /// write looked redundant. That reasoning has a hole, and the WAL/snapshot scenario is standing
+    /// in it — **a run that reads its own writes**. `do_snapshot` reads the WAL tail that
+    /// `wal_append` wrote earlier in the same run; the bundle's `initial/` image restores the state
+    /// *before* the run, so with the write suppressed the tail read comes back empty and the replay
+    /// diverges against its own recording. Found by replaying the scenario, which is what PR 4 is
+    /// for.
+    ///
+    /// Performing it is also the model this module already documents for reads — *"in replay the
+    /// read really happens, against the restored state"*. The restored state simply has to include
+    /// what this run wrote. A replay runs against its own directory, so there is nothing to
+    /// double-apply.
+    pub fn kernel_fs(file: &str, op: &str, bytes: &[u8], sync: bool, ok: bool, err: &str)
+        -> Result<(), String>
+    {
         CTX.with(|c| {
             let mut guard = c.borrow_mut();
-            let Some(ctx) = guard.as_mut() else { return };
+            let Some(ctx) = guard.as_mut() else { return Ok(()) };
             let offset = *ctx.offsets.get(file).unwrap_or(&0);
-            let outcome = if ok {
+            let observed = if ok {
                 mycelium_sim::FsOutcome::Ok(bytes.len())
             } else {
                 mycelium_sim::FsOutcome::Err(err.to_string())
             };
             let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
-            if let Err(d) = seams.fs(file, op, bytes, offset, sync, || outcome) {
-                panic!("{d}");
-            }
-            if ok {
-                *ctx.offsets.entry(file.to_string()).or_insert(0) += bytes.len() as u64;
-            }
-        });
-    }
-
-    /// Supply a recorded storage effect during replay, checking the request first.
-    pub fn replay_fs(file: &str, op: &str, bytes: &[u8], sync: bool) -> Result<(), String> {
-        CTX.with(|c| {
-            let mut guard = c.borrow_mut();
-            let Some(ctx) = guard.as_mut() else { return Ok(()) };
-            let offset = *ctx.offsets.get(file).unwrap_or(&0);
-            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
-            let outcome = match seams.fs(file, op, bytes, offset, sync, || unreachable!()) {
+            let decided = match seams.fs(file, op, bytes, offset, sync, || observed) {
                 Ok(o) => o,
                 Err(d) => panic!("{d}"),
             };
-            match outcome {
+            match decided {
                 mycelium_sim::FsOutcome::Ok(n) | mycelium_sim::FsOutcome::Short(n) => {
                     *ctx.offsets.entry(file.to_string()).or_insert(0) += n as u64;
                     Ok(())
@@ -202,6 +194,12 @@ mod installed {
                 mycelium_sim::FsOutcome::Err(e) => Err(e),
             }
         })
+    }
+
+    /// A read's result goes through the kernel the same way, but a read never fabricates: the bytes
+    /// that came back are the request, and the kernel only checks them.
+    pub fn record_fs(file: &str, op: &str, bytes: &[u8], sync: bool, ok: bool, err: &str) {
+        let _ = kernel_fs(file, op, bytes, sync, ok, err);
     }
 
     /// Which mode the installed kernel is in, or `None` when there is no kernel.
@@ -527,22 +525,18 @@ pub async fn fs_write_all(
     bytes: &[u8],
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt as _;
-    // Checked before the `await`: in replay the write must not happen, or the replay mutates state
-    // the recording already accounted for.
-    if installed::is_replaying() {
-        return installed::replay_fs(name, "write_all", bytes, false)
-            .map_err(std::io::Error::other);
-    }
+    // The effect happens in both modes (see `installed::kernel_fs`); the kernel decides the outcome,
+    // so a recorded failure replays as a failure.
     let res = file.write_all(bytes).await;
-    installed::record_fs(
+    installed::kernel_fs(
         name,
         "write_all",
         bytes,
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    );
-    res
+    )
+    .map_err(std::io::Error::other)
 }
 
 /// A whole-file write.
@@ -563,19 +557,16 @@ pub async fn fs_write(
     name: &str,
     bytes: &[u8],
 ) -> std::io::Result<()> {
-    if installed::is_replaying() {
-        return installed::replay_fs(name, "write", bytes, false).map_err(std::io::Error::other);
-    }
     let res = tokio::fs::write(path, bytes).await;
-    installed::record_fs(
+    installed::kernel_fs(
         name,
         "write",
         bytes,
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    );
-    res
+    )
+    .map_err(std::io::Error::other)
 }
 
 /// A rename — the step that publishes a snapshot, and whose durability needs the *directory* sync.
@@ -597,21 +588,24 @@ pub async fn fs_rename(
     to: &std::path::Path,
     name: &str,
 ) -> std::io::Result<()> {
-    let both = format!("{}->{}", from.display(), to.display());
-    if installed::is_replaying() {
-        return installed::replay_fs(name, "rename", both.as_bytes(), false)
-            .map_err(std::io::Error::other);
-    }
+    // **File names, not absolute paths.** Both ends are recorded because a rename that moved a
+    // different file is a different effect — but an absolute path is run-specific (a temp directory
+    // per run), and a request carrying one can only ever replay in the directory that produced it.
+    // A bundle is meant to replay on another machine, so the request has to be portable.
+    let name_of = |p: &std::path::Path| {
+        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    };
+    let both = format!("{}->{}", name_of(from), name_of(to));
     let res = tokio::fs::rename(from, to).await;
-    installed::record_fs(
+    installed::kernel_fs(
         name,
         "rename",
         both.as_bytes(),
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    );
-    res
+    )
+    .map_err(std::io::Error::other)
 }
 
 /// Read a whole file.
@@ -666,20 +660,16 @@ pub async fn fs_sync_data(file: &tokio::fs::File, _name: &str) -> std::io::Resul
 /// what makes it a distinct effect is the file it names and the flag.
 #[cfg(feature = "sim")]
 pub async fn fs_sync_data(file: &tokio::fs::File, name: &str) -> std::io::Result<()> {
-    if installed::is_replaying() {
-        return installed::replay_fs(name, "sync_data", &[], true)
-            .map_err(std::io::Error::other);
-    }
     let res = file.sync_data().await;
-    installed::record_fs(
+    installed::kernel_fs(
         name,
         "sync_data",
         &[],
         true,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    );
-    res
+    )
+    .map_err(std::io::Error::other)
 }
 
 /// `sync_all` on a directory — what makes a preceding `rename` survive a power loss.
@@ -693,20 +683,16 @@ pub async fn fs_sync_dir(dir: &tokio::fs::File, _name: &str) -> std::io::Result<
 /// directory sync before WAL truncation — is visible in the trace and a divergence when removed.
 #[cfg(feature = "sim")]
 pub async fn fs_sync_dir(dir: &tokio::fs::File, name: &str) -> std::io::Result<()> {
-    if installed::is_replaying() {
-        return installed::replay_fs(name, "sync_dir", &[], true)
-            .map_err(std::io::Error::other);
-    }
     let res = dir.sync_all().await;
-    installed::record_fs(
+    installed::kernel_fs(
         name,
         "sync_dir",
         &[],
         true,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    );
-    res
+    )
+    .map_err(std::io::Error::other)
 }
 
 #[cfg(all(test, feature = "sim"))]

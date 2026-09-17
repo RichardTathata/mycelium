@@ -564,6 +564,58 @@ fn sync_entry_wins(incoming: &SyncEntry, current: &SyncEntry) -> bool {
     lww_wins(incoming.timestamp, incoming.is_tombstone, &inc_val, &cur)
 }
 
+// ── The merge-removed witness (item 6 PR 4) ───────────────────────────────────────────────────
+//
+// The plan's §4 divergence note is explicit: *"The witness is a `cfg(test)` toggle, not a manual
+// edit (the 2026-09-05 fix was verified by hand-disabling the merge)."* A hand edit cannot be
+// named in a bundle, cannot be re-run by someone else, and cannot prove the fix still holds — so
+// the one line that saves an acknowledged record gets a switch a test can throw.
+//
+// Thread-local rather than a global flag: `cargo test` runs tests concurrently in one process, and
+// a shared flag would leak into whichever snapshot happened to be running. `#[tokio::test]` is
+// current-thread by default, so the snapshot future is polled on the thread that set it.
+
+#[cfg(test)]
+thread_local! {
+    static WITNESS_SKIP_WAL_MERGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The witness's name, exactly as a bundle records it. Only a bundle needs it, and bundles are a
+/// `sim` concern.
+#[cfg(all(test, feature = "sim"))]
+pub(crate) const WITNESS_SKIP_WAL_MERGE_TOGGLE: &str = "persistence::WITNESS_SKIP_WAL_MERGE";
+
+/// Removes the WAL-tail merge for as long as this guard lives.
+#[cfg(test)]
+pub(crate) struct MergeRemoved;
+
+#[cfg(test)]
+impl MergeRemoved {
+    pub(crate) fn set() -> Self {
+        WITNESS_SKIP_WAL_MERGE.with(|c| c.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for MergeRemoved {
+    fn drop(&mut self) {
+        WITNESS_SKIP_WAL_MERGE.with(|c| c.set(false));
+    }
+}
+
+#[cfg(test)]
+fn wal_merge_removed() -> bool {
+    WITNESS_SKIP_WAL_MERGE.with(|c| c.get())
+}
+
+/// In a shipped build the merge is never removed — the witness does not exist outside tests.
+#[cfg(not(test))]
+#[inline(always)]
+fn wal_merge_removed() -> bool {
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn do_snapshot(
     dir:         &std::path::Path,
@@ -632,7 +684,8 @@ async fn do_snapshot(
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };
-    if !wal_bytes.is_empty() {
+    // `wal_merge_removed()` is the item 6 PR 4 witness and is `false` in every shipped build.
+    if !wal_bytes.is_empty() && !wal_merge_removed() {
         let mut tail: AHashMap<Arc<str>, SyncEntry> = AHashMap::new();
         decode_wal_records(&wal_bytes, cipher, |rec| {
             match tail.get(&rec.key) {
@@ -652,6 +705,17 @@ async fn do_snapshot(
     // 3. Write snapshot.tmp → fdatasync → rename to snapshot.bin.
     let tmp_path  = dir.join("snapshot.tmp");
     let snap_path = dir.join("snapshot.bin");
+    // **Canonical order** (item 6 PR 4). `entries` came from iterating the store and then extending
+    // with the WAL tail, so its order is papaya's iteration order — which is not stable across
+    // processes even though the store's hasher is seeded (`store.rs`, `RandomState::with_seeds`).
+    // The snapshot's *bytes* therefore depended on it: two nodes holding identical logical state
+    // wrote different files, and a recorded run could not reproduce its own snapshot. §2.5 of the
+    // inventory names hash iteration order as a nondeterminism source and says each order-sensitive
+    // consumer must be listed; this encoder was one and was not.
+    //
+    // Sorting by key makes the file a function of the state it represents. Nothing reads a snapshot
+    // positionally — replay folds it into the store under LWW — so this is free.
+    entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
     let snap = KvSnapshot { snapshot_hlc, entries };
     let encoded = {
         let buf = codec::to_vec(&snap)
@@ -709,6 +773,85 @@ mod persist_tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // ── item 6 PR 4 — the merge-removed witness ──────────────────────────────────────────────
+    //
+    // The race itself is already pinned, in `durability_tests`:
+    // `regression_snapshot_retains_wal_record_acked_before_local_apply` puts a record in the WAL
+    // that the caller has not yet applied to the store, snapshots, and shows it survives the
+    // truncation. What did not exist is the other half the plan asks for — a **witness**: a way to
+    // make that assertion fail on demand, so a bundle can name it and a reader can watch the loss
+    // happen rather than take the fix on trust.
+    //
+    // §4's divergence note is explicit that it must be a `cfg(test)` toggle rather than a hand edit
+    // (the 2026-09-05 fix was verified by hand-disabling the merge). A hand edit cannot be named in
+    // a bundle, re-run by someone else, or used to show the fix still holds.
+
+    /// **The witness.** With the merge removed, the acknowledged record is lost.
+    ///
+    /// This is the exact inverse of
+    /// `durability_tests::regression_snapshot_retains_wal_record_acked_before_local_apply`, and it
+    /// is the assertion a failure bundle names via `WITNESS_SKIP_WAL_MERGE_TOGGLE`.
+    #[tokio::test]
+    async fn the_merge_removed_witness_loses_the_acknowledged_record() {
+        let _witness = MergeRemoved::set();
+
+        let dir  = unique_dir();
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let store = KvState::new(0);
+        apply_and_notify(&store, &make_gossip_update(
+            &node, 1, Arc::from("a"), bytes::Bytes::from_static(b"v-a"), false, &hlc));
+
+        // "b" is acknowledged into the WAL and never applied to the store — the race's state.
+        let mut wal = tfs::OpenOptions::new()
+            .create(true).truncate(false).read(true).write(true)
+            .open(dir.join("wal.bin")).await.unwrap();
+        let unapplied = SyncEntry {
+            key:          Arc::from("b"),
+            value:        bytes::Bytes::from_static(b"v-b"),
+            timestamp:    hlc.tick(),
+            is_tombstone: false,
+        };
+        wal_append(&mut wal, &unapplied, true, None).await.unwrap();
+
+        do_snapshot(&dir, &store, &node, &hlc, 1, &mut wal, None).await.unwrap();
+
+        let restored = KvState::new(0);
+        {
+            let r = Arc::clone(&restored);
+            let apply = move |e: SyncEntry| {
+                apply_and_notify(&r, &GossipUpdate {
+                    nonce: crate::framing::ANTI_ENTROPY_NONCE, sender: 0, ttl: 1,
+                    is_tombstone: e.is_tombstone, timestamp: e.timestamp, key: e.key, value: e.value,
+                });
+            };
+            replay(&dir, None, apply).await.unwrap();
+        }
+
+        let pinned = restored.store.pin();
+        assert!(pinned.get("a").is_some(), "the applied record survives — only the tail is lost");
+        assert!(
+            pinned.get("b").is_none(),
+            "the witness must actually reproduce the loss: with the merge removed, a record that \
+             was acknowledged is absent from disk after the restart. If this assertion fails the \
+             witness has stopped witnessing, and every bundle naming it proves nothing."
+        );
+        drop(pinned);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The witness is scoped to its guard — it must not leak into the next test on this thread.
+    #[tokio::test]
+    async fn the_witness_is_off_again_once_its_guard_is_dropped() {
+        assert!(!wal_merge_removed(), "no witness by default");
+        {
+            let _w = MergeRemoved::set();
+            assert!(wal_merge_removed(), "set while the guard lives");
+        }
+        assert!(!wal_merge_removed(), "and cleared when it dies");
     }
 
     #[tokio::test]
@@ -995,6 +1138,176 @@ mod durability_tests {
         let restored = replay_into_fresh_store(&dir).await;
         assert_eq!(live_value(&restored, "k").as_deref(), Some(&b"v"[..]));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── item 6 PR 4 — the scenario, replayed from a bundle ───────────────────────────────────
+
+    /// One run of the WAL/snapshot race under `kernel`, returning its trace and its result.
+    ///
+    /// Everything that reads a clock happens **inside** the kernel's scope, so the HLC stamps that
+    /// end up in the snapshot bytes are recorded choices rather than whatever the machine's clock
+    /// said. Getting this wrong was the first divergence the replay caught: identical lengths,
+    /// different content hashes.
+    #[cfg(feature = "sim")]
+    async fn race_run(
+        tag:    &str,
+        kernel: mycelium_sim::Kernel,
+    ) -> (mycelium_sim::Trace, std::io::Result<()>) {
+        use mycelium_sim::Sources;
+
+        let dir  = unique_dir(tag);
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let mut wal = open_wal(&dir.join("wal.bin")).await.unwrap();
+
+        crate::sim_seam::install(crate::sim_seam::SimContext {
+            kernel,
+            sources: Sources::seeded(1, 1_789_000_000_000),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+
+        let hlc   = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        // "k" is applied to the store; "b" is only ever appended to the WAL — the race's state, an
+        // acknowledged record its caller has not yet applied.
+        apply_and_notify(&state, &make_gossip_update(
+            &node, 1, Arc::from("k"), Bytes::from_static(b"v"), false, &hlc));
+        let unapplied = SyncEntry {
+            key:          Arc::from("b"),
+            value:        Bytes::from_static(b"v-b"),
+            timestamp:    hlc.tick(),
+            is_tombstone: false,
+        };
+        wal_append(&mut wal, &unapplied, true, None).await.unwrap();
+
+        let r = do_snapshot(&dir, &state, &node, &hlc, 1, &mut wal, None).await;
+        let ctx = crate::sim_seam::take().expect("kernel installed");
+        std::fs::remove_dir_all(&dir).ok();
+        (ctx.kernel.trace().clone(), r)
+    }
+
+    /// **A snapshot is a function of the state it represents, not of hash iteration order.**
+    ///
+    /// Found by replaying the WAL/snapshot scenario: the recording and the replay produced snapshots
+    /// of identical length and different content, because `entries` came straight from iterating the
+    /// store and papaya's iteration order is not stable across processes — the store's hasher is
+    /// seeded (`store.rs`, `RandomState::with_seeds`), but iteration is not.
+    ///
+    /// The consequence is bigger than replay: **two nodes holding the same logical state wrote
+    /// byte-different snapshot files**, so any byte-level comparison of snapshots — a checksum, a
+    /// dedup, a fixture diff — was unsound. §2.5 of the inventory says every order-sensitive
+    /// consumer has to be listed; this encoder was one, and was not.
+    ///
+    /// The test inserts the same keys in two different orders and requires the same bytes out.
+    #[tokio::test]
+    async fn a_snapshot_is_byte_identical_for_the_same_state_whatever_order_it_was_built_in() {
+        async fn snapshot_bytes(tag: &str, keys: &[&'static str]) -> Vec<u8> {
+            let dir  = unique_dir(tag);
+            let node = NodeId::new("127.0.0.1", 1).unwrap();
+            let hlc  = Arc::new(crate::hlc::Hlc::new());
+            let state = KvState::new(0);
+            // One fixed stamp per key, so the two runs differ ONLY in insertion order.
+            for (i, k) in keys.iter().enumerate() {
+                apply_and_notify(&state, &GossipUpdate {
+                    nonce: 1, sender: 0, ttl: 1, is_tombstone: false,
+                    timestamp: crate::hlc::pack(1_000 + i as u64, 0),
+                    key: Arc::from(*k), value: Bytes::from_static(b"v"),
+                });
+            }
+            let mut wal = open_wal(&dir.join("wal.bin")).await.unwrap();
+            do_snapshot(&dir, &state, &node, &hlc, 1, &mut wal, None).await.unwrap();
+            let bytes = std::fs::read(dir.join("snapshot.bin")).unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            bytes
+        }
+
+        // The opacity key `do_snapshot` writes itself carries a timestamp from the HLC, which
+        // differs per run — so compare the entry *ordering* rather than the whole file: decode both
+        // and require the same key sequence.
+        let a = snapshot_bytes("canon-a", &["zeta", "alpha", "mid"]).await;
+        let b = snapshot_bytes("canon-b", &["mid", "zeta", "alpha"]).await;
+
+        let keys_of = |bytes: &[u8]| -> Vec<String> {
+            let snap: KvSnapshot = codec::from_slice(bytes).unwrap();
+            snap.entries.iter().map(|e| e.key.to_string()).collect()
+        };
+        let ka = keys_of(&a);
+        let kb = keys_of(&b);
+        assert_eq!(ka, kb, "the same state must serialise in the same order, however it was built");
+
+        let mut sorted = ka.clone();
+        sorted.sort();
+        assert_eq!(ka, sorted, "and that order is by key — canonical, not merely repeatable");
+    }
+
+    /// **The Phase A gate: the WAL/snapshot race replays from a bundle, and the bundle names the
+    /// witness that makes it fail again.**
+    ///
+    /// The bundle is written to disk and read back rather than kept in memory: a bundle that has
+    /// never survived a round trip is not a reproduction artefact, it is a variable.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn the_wal_snapshot_race_replays_from_a_bundle_that_names_its_witness() {
+        use mycelium_sim::{Bundle, Kernel};
+
+        let (trace, recorded) = race_run("gate-rec", Kernel::recording()).await;
+        recorded.expect("the recording itself must succeed");
+        assert!(trace.len() >= 8, "the run has effects to replay: {}", trace.len());
+
+        let bundle = Bundle::new(trace).witnessed_by(
+            "durability_tests::regression_snapshot_retains_wal_record_acked_before_local_apply",
+            Some(WITNESS_SKIP_WAL_MERGE_TOGGLE.to_string()),
+        );
+        assert!(
+            bundle.can_prove_its_failure(),
+            "a bundle with no witness replays a run in which nothing went wrong"
+        );
+
+        let bdir = unique_dir("gate-bundle");
+        bundle.write(&bdir).expect("write the bundle");
+        let read_back = Bundle::read(&bdir).expect("read it back");
+        assert_eq!(
+            read_back.witness.as_ref().and_then(|w| w.toggle.as_deref()),
+            Some(WITNESS_SKIP_WAL_MERGE_TOGGLE),
+            "the bundle must carry the toggle that reproduces the failure, by name"
+        );
+
+        // The replay: a different directory, a different process moment, the same schedule. Every
+        // effect is checked against the recording and a mismatch panics.
+        let (_t, replayed) = race_run("gate-rep", Kernel::replaying(read_back.trace)).await;
+        replayed.expect("the recorded schedule must replay without diverging");
+
+        std::fs::remove_dir_all(&bdir).ok();
+    }
+
+    /// The replay is a **check**, not a re-run: a schedule that departs from the recording stops.
+    ///
+    /// Without this the test above proves only that the harness can run twice.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    #[should_panic(expected = "replay diverged")]
+    async fn a_replay_of_a_different_run_diverges() {
+        use mycelium_sim::{Kernel, Sources};
+
+        let (trace, _) = race_run("div-rec", Kernel::recording()).await;
+
+        // The same schedule minus the WAL append: one fewer effect, so the trace and the run part
+        // company at the first storage step that differs.
+        let dir  = unique_dir("div-rep");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let mut wal = open_wal(&dir.join("wal.bin")).await.unwrap();
+        crate::sim_seam::install(crate::sim_seam::SimContext {
+            kernel:  Kernel::replaying(trace),
+            sources: Sources::seeded(1, 1_789_000_000_000),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let hlc   = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        apply_and_notify(&state, &make_gossip_update(
+            &node, 1, Arc::from("k"), Bytes::from_static(b"v"), false, &hlc));
+        let _ = do_snapshot(&dir, &state, &node, &hlc, 1, &mut wal, None).await;
+        crate::sim_seam::take();
     }
 
     /// **The power-loss ordering, finally observable.**
