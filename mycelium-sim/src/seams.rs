@@ -228,6 +228,19 @@ impl<'k> Seams<'k> {
         Ok(FsOutcome::decode(&out).unwrap_or(FsOutcome::Err("unparseable recorded outcome".into())))
     }
 
+    /// A bounded-channel send, and what the kernel decided about it.
+    ///
+    /// Capacity and fullness are *kernel state*: "the queue was full" drops a frame or skips a WAL
+    /// append, so it is a schedulable fault, not an accident of timing to be reproduced by luck.
+    pub fn chan(
+        &mut self,
+        stream: &str,
+        request: &str,
+        observed: impl FnOnce() -> String,
+    ) -> Result<String, Divergence> {
+        self.kernel.decide(Some(&self.node), ChoiceKind::Chan, stream, request, observed)
+    }
+
     /// An external input — a token verification, an LLM reply, an MCP response.
     ///
     /// Inputs and faults are the *causal workload*: scenario replay keeps these and lets the kernel

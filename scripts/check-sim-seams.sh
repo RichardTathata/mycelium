@@ -47,7 +47,7 @@ cd "$(dirname "$0")/.."
 BASELINE="scripts/sim-seams-baseline.txt"
 
 # The forbidden shapes. Kept as one alternation so the list is readable and matches §6 one-for-one.
-PATTERN='SystemTime::now|Instant::now|fastrand::|tokio::time::(sleep|interval|timeout|Instant)|tokio::fs::|std::fs::|RandomState::new|use std::time::\{?[^}]*Instant|use tokio::time::|fs as [a-z_]'
+PATTERN='SystemTime::now|Instant::now|fastrand::|tokio::time::(sleep|interval|timeout|Instant)|tokio::fs::|std::fs::|RandomState::new|use std::time::\{?[^}]*Instant|use tokio::time::|fs as [a-z_]|\.try_send\('
 
 # Production sources only. `mycelium-sim` is the seam; `loom-spike` is a different mechanism
 # (coverage map: Loom owns CAS interleavings, not the kernel).

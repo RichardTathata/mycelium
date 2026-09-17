@@ -141,6 +141,36 @@ mod installed {
         })
     }
 
+    /// Which mode the installed kernel is in, or `None` when there is no kernel.
+    pub fn chan_mode() -> Option<mycelium_sim::Mode> {
+        CTX.with(|c| c.borrow().as_ref().map(|ctx| ctx.kernel.mode()))
+    }
+
+    /// Write down what a bounded send actually did.
+    pub fn chan_record(stream: &str, verdict: &str) {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(ctx) = guard.as_mut() else { return };
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            if let Err(d) = seams.chan(stream, "try_send", || verdict.to_string()) {
+                panic!("{d}");
+            }
+        });
+    }
+
+    /// The verdict the recording gave this send.
+    pub fn chan_replay(stream: &str) -> String {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(ctx) = guard.as_mut() else { return String::new() };
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            match seams.chan(stream, "try_send", || unreachable!()) {
+                Ok(v) => v,
+                Err(d) => panic!("{d}"),
+            }
+        })
+    }
+
     /// Route one read through the kernel, or fall back to the real source when none is installed.
     ///
     /// The fallback matters: most tests in this repository do not install a kernel, and they must
@@ -291,6 +321,109 @@ pub fn rng_shuffle<T>(stream: &str, slice: &mut [T]) {
     }
 }
 
+// ── Channels ─────────────────────────────────────────────────────────────────────────────────
+//
+// "Was the queue full" is a decision, not an accident. A full gossip shard drops a frame; a full WAL
+// channel skips an append; both change what the node then does. The inventory puts capacity and
+// fullness in the kernel so fullness becomes a *schedulable fault* rather than something a test
+// hopes to provoke by timing.
+//
+// The shape differs from storage, and it has to. A file write in replay can be skipped — the disk is
+// restored from the bundle. A channel send **cannot**: its effect is in-process and the replay is
+// reproducing that process. So the kernel decides the verdict, and the call site honours it — the
+// send is performed when and only when the recording says it happened.
+
+/// What the kernel decided about a bounded send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChanVerdict {
+    /// The message went into the channel.
+    Sent,
+    /// The channel was full. The message did not go in, and the caller takes its drop path.
+    Full,
+    /// The receiver is gone.
+    Closed,
+}
+
+// Only the `sim` path encodes a verdict into a trace; in a shipped build these would be dead, and
+// the --no-default-features clippy is the gate that says so.
+#[cfg(feature = "sim")]
+impl ChanVerdict {
+    fn encode(self) -> String {
+        match self {
+            ChanVerdict::Sent => "Sent".into(),
+            ChanVerdict::Full => "Full".into(),
+            ChanVerdict::Closed => "Closed".into(),
+        }
+    }
+
+    fn decode(s: &str) -> Self {
+        match s {
+            "Sent" => ChanVerdict::Sent,
+            "Closed" => ChanVerdict::Closed,
+            // An unreadable verdict is treated as `Full`: the conservative reading, because a
+            // dropped frame is recoverable and a phantom send is not.
+            _ => ChanVerdict::Full,
+        }
+    }
+}
+
+/// Send on a bounded channel, without the kernel.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn chan_try_send<T>(
+    _stream: &str,
+    tx: &tokio::sync::mpsc::Sender<T>,
+    msg: T,
+) -> ChanVerdict {
+    verdict_of(tx.try_send(msg))
+}
+
+/// Send on a bounded channel, through the kernel.
+///
+/// In `Record` the real send decides and is written down. In `Replay` the recorded verdict decides:
+/// `Sent` performs the send, anything else does not — and the message is dropped, exactly as the
+/// recording dropped it. A replayed `Sent` that finds the channel full is a divergence: the replay's
+/// channel state has departed from the recording's, and stopping is better than quietly losing a
+/// frame the recording delivered.
+#[cfg(feature = "sim")]
+pub fn chan_try_send<T>(stream: &str, tx: &tokio::sync::mpsc::Sender<T>, msg: T) -> ChanVerdict {
+    match installed::chan_mode() {
+        // No kernel: the real send, unchanged.
+        None => verdict_of(tx.try_send(msg)),
+        Some(mycelium_sim::Mode::Record) => {
+            let verdict = verdict_of(tx.try_send(msg));
+            installed::chan_record(stream, &verdict.encode());
+            verdict
+        }
+        Some(mycelium_sim::Mode::Replay) => {
+            let recorded = ChanVerdict::decode(&installed::chan_replay(stream));
+            if recorded == ChanVerdict::Sent {
+                // The recording delivered it, so the replay must too — a channel's effect is
+                // in-process, and the replay is reproducing that process.
+                let actual = verdict_of(tx.try_send(msg));
+                assert!(
+                    actual == ChanVerdict::Sent,
+                    "replay diverged at chan {stream}: the recording sent, the replay got \
+                     {actual:?} — the replay's channel state has departed from the recording's"
+                );
+            }
+            // Recorded `Full`/`Closed`: `msg` is dropped here, which is what the recording did.
+            recorded
+        }
+    }
+}
+
+/// The verdict a `try_send` result carries.
+#[inline]
+fn verdict_of<T>(r: Result<(), tokio::sync::mpsc::error::TrySendError<T>>) -> ChanVerdict {
+    use tokio::sync::mpsc::error::TrySendError;
+    match r {
+        Ok(())                       => ChanVerdict::Sent,
+        Err(TrySendError::Full(_))   => ChanVerdict::Full,
+        Err(TrySendError::Closed(_)) => ChanVerdict::Closed,
+    }
+}
+
 // ── Storage ──────────────────────────────────────────────────────────────────────────────────
 //
 // These wrap the three effects the durability argument turns on: the write, the file sync, and the
@@ -403,6 +536,47 @@ pub async fn fs_rename(
         name,
         "rename",
         both.as_bytes(),
+        false,
+        res.is_ok(),
+        &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
+    );
+    res
+}
+
+/// Read a whole file.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub async fn fs_read(path: &std::path::Path, _name: &str) -> std::io::Result<Vec<u8>> {
+    tokio::fs::read(path).await
+}
+
+/// Read a whole file, **checked** against the recording rather than supplied by it.
+///
+/// # Why a read is checked and a write is supplied
+///
+/// A write's bytes are its *request* — the kernel already knows them, so a replay can skip the
+/// effect entirely. A read's bytes are its *result*, and the trace is a line per decision: putting
+/// a snapshot's contents in it would make the trace the disk image. The bundle already carries disk
+/// images (`initial/`), so in replay the read really happens, against the restored state, and the
+/// seam compares what came back with what was recorded.
+///
+/// That makes this a **divergence check on recovery**: *the recovery read returned different bytes
+/// than the recording did* is exactly the v2.4.3 class of failure — where a read error was mapped
+/// to an empty tail and acknowledged records were truncated away. A harness that supplied the
+/// recorded bytes instead would have replayed straight past it.
+#[cfg(feature = "sim")]
+pub async fn fs_read(path: &std::path::Path, name: &str) -> std::io::Result<Vec<u8>> {
+    let res = tokio::fs::read(path).await;
+    // The result, canonically: what came back, not how long it was. Two snapshots of equal length
+    // are different snapshots.
+    let digest: Vec<u8> = match &res {
+        Ok(bytes) => bytes.clone(),
+        Err(_) => Vec::new(),
+    };
+    installed::record_fs(
+        name,
+        "read",
+        &digest,
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
@@ -644,6 +818,115 @@ mod tests {
         assert_eq!(ctx.kernel.trace().len(), 0);
     }
 
+    /// A channel with `cap` slots, already filled to the brim when `full` is set.
+    fn chan(cap: usize) -> (tokio::sync::mpsc::Sender<u8>, tokio::sync::mpsc::Receiver<u8>) {
+        tokio::sync::mpsc::channel(cap)
+    }
+
+    /// **A dropped frame replays as a dropped frame.** Channel saturation is the kind of thing a
+    /// test normally has to provoke by timing and then hope for; recorded, it is just a fact of the
+    /// run — the replay reproduces the drop without the channel needing to be full again.
+    #[test]
+    fn a_full_channel_replays_as_full_even_when_the_replays_channel_has_room() {
+        let (tx, _rx) = chan(1);
+        tx.try_send(1).expect("fill the one slot");
+
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        // Genuinely full: the recording captures a real drop.
+        assert_eq!(chan_try_send("gossip/shard2", &tx, 2), ChanVerdict::Full);
+        let ctx = installed::take().expect("installed");
+
+        // The replay's channel has room — and must still drop, because the recording did.
+        let (tx2, _rx2) = chan(8);
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        assert_eq!(chan_try_send("gossip/shard2", &tx2, 2), ChanVerdict::Full);
+        installed::take();
+        assert_eq!(tx2.capacity(), 8, "the replayed drop did not consume a slot");
+    }
+
+    /// A recorded send really delivers on replay — a channel's effect is in-process, and the replay
+    /// is reproducing that process.
+    #[test]
+    fn a_recorded_send_really_delivers_on_replay() {
+        let (tx, mut rx) = chan(4);
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        assert_eq!(chan_try_send("gossip/shard0", &tx, 7), ChanVerdict::Sent);
+        let ctx = installed::take().expect("installed");
+        assert_eq!(rx.try_recv().ok(), Some(7));
+
+        let (tx2, mut rx2) = chan(4);
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        assert_eq!(chan_try_send("gossip/shard0", &tx2, 7), ChanVerdict::Sent);
+        installed::take();
+        assert_eq!(rx2.try_recv().ok(), Some(7), "the replayed send must actually arrive");
+    }
+
+    /// Per-shard streams: a drop on shard 2 and a drop on shard 5 are different events, and a trace
+    /// that merged them could not tell a reader which key stopped propagating.
+    #[test]
+    fn shards_are_separate_streams() {
+        let (tx, _rx) = chan(4);
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        chan_try_send("gossip/shard2", &tx, 1);
+        chan_try_send("gossip/shard5", &tx, 2);
+        let ctx = installed::take().expect("installed");
+        let streams: Vec<String> =
+            ctx.kernel.trace().entries().iter().map(|e| e.stream.clone()).collect();
+        assert_eq!(streams, vec!["gossip/shard2", "gossip/shard5"]);
+    }
+
+    /// The recording delivered a frame the replay cannot: the replay's channel state has departed,
+    /// and that is a divergence rather than a frame quietly lost.
+    #[test]
+    #[should_panic(expected = "replay diverged at chan")]
+    fn a_replayed_send_that_finds_the_channel_full_diverges() {
+        let (tx, _rx) = chan(4);
+        installed::install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        chan_try_send("gossip/shard0", &tx, 1);
+        let ctx = installed::take().expect("installed");
+
+        // A replay whose channel is full where the recording's was not.
+        let (tx2, _rx2) = chan(1);
+        tx2.try_send(99).expect("fill it");
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(2, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        chan_try_send("gossip/shard0", &tx2, 1);
+    }
+
     fn tmp(name: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
@@ -755,6 +1038,53 @@ mod tests {
         });
         let mut f2 = open(&tmp("content-replay")).await;
         let _ = fs_write_all(&mut f2, "wal.bin", b"BBBB").await;
+    }
+
+    /// **A recovery read that returns different bytes is a divergence.** This is the v2.4.3 class:
+    /// a read whose result changed — there, an error mapped to an empty tail, so acknowledged
+    /// records were truncated away. A harness that *supplied* the recorded bytes would have replayed
+    /// straight past it; one that checks them stops.
+    #[tokio::test]
+    #[should_panic(expected = "replay diverged")]
+    async fn a_recovery_read_returning_different_bytes_diverges() {
+        let path = tmp("read");
+        tokio::fs::write(&path, b"snapshot-AAAA").await.expect("write");
+
+        install_recording();
+        let got = fs_read(&path, "snapshot.bin").await.expect("read");
+        assert_eq!(got, b"snapshot-AAAA");
+        let ctx = installed::take().expect("installed");
+
+        // Same length, different content — the disk changed under the replay.
+        tokio::fs::write(&path, b"snapshot-BBBB").await.expect("rewrite");
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(9, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let _ = fs_read(&path, "snapshot.bin").await;
+    }
+
+    /// The same bytes replay cleanly — the check is on content, not on having read at all.
+    #[tokio::test]
+    async fn an_identical_recovery_read_replays_without_diverging() {
+        let path = tmp("read-same");
+        tokio::fs::write(&path, b"snapshot-AAAA").await.expect("write");
+
+        install_recording();
+        fs_read(&path, "snapshot.bin").await.expect("read");
+        let ctx = installed::take().expect("installed");
+
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(ctx.kernel.trace().clone()),
+            sources: Sources::seeded(9, 0),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+        let again = fs_read(&path, "snapshot.bin").await.expect("read");
+        installed::take();
+        assert_eq!(again, b"snapshot-AAAA");
     }
 
     /// A replay asked for a read the recording never made: the run stops rather than inventing one.

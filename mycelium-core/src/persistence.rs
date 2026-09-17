@@ -248,7 +248,7 @@ where
     // The watermark is decoded for format compatibility but deliberately unused
     // (durability invariant 2, module doc).
     let _snapshot_hlc = if snapshot_path.exists() {
-        match tfs::read(&snapshot_path).await {
+        match crate::sim_seam::fs_read(&snapshot_path, SNAP_FILE).await {
             Ok(raw) => {
                 // Decrypt the snapshot blob if a cipher is configured; a decrypt
                 // failure is treated like a corrupt snapshot (skipped).
@@ -295,7 +295,7 @@ where
     // the latter (durability invariant 2, module doc). `snapshot_hlc` stays
     // informational only.
     if wal_path.exists() {
-        match tfs::read(&wal_path).await {
+        match crate::sim_seam::fs_read(&wal_path, WAL_FILE).await {
             Ok(bytes) => decode_wal_records(&bytes, cipher, |entry| {
                 if entry.timestamp > max_ts { max_ts = entry.timestamp; }
                 apply_fn(entry);
@@ -469,6 +469,9 @@ const DIR_SYNC: &str = "dir";
 const SNAP_TMP: &str = "snapshot.tmp";
 /// The snapshot itself.
 const SNAP_FILE: &str = "snapshot.bin";
+/// The WAL tail read the snapshot merges before truncating — its own stream, because *this* read
+/// returning different bytes is the v2.4.3 failure and deserves to be legible on its own line.
+const WAL_TAIL: &str = "wal.bin#tail";
 /// The WAL's post-truncation sync — a distinct stream from an ordinary append's sync, so the
 /// *ordering* against the directory sync is legible in a trace rather than buried among appends.
 const WAL_TRUNCATE: &str = "wal.bin#truncate";
@@ -610,7 +613,7 @@ async fn do_snapshot(
     // A read failure here must ABORT the snapshot: proceeding as if the tail were empty
     // would write a snapshot without those records and then truncate them in step 4 —
     // turning a transient read error into data loss. Absent file = empty tail (fresh dir).
-    let wal_bytes = match tfs::read(dir.join("wal.bin")).await {
+    let wal_bytes = match crate::sim_seam::fs_read(&dir.join("wal.bin"), WAL_TAIL).await {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),

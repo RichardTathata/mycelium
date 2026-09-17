@@ -9,6 +9,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the recovery-read and channel-readiness seams (item 6 PR 3)
+
+- `persistence.rs`'s three recovery reads — the snapshot, the WAL, and the WAL tail the snapshot
+  merges — now go through the kernel. Baseline **184 sites across 43 files**.
+- **A read is checked, not supplied.** A write's bytes are its *request*, so a replay can skip the
+  effect; a read's bytes are its *result*, and putting a snapshot's contents in a line-per-decision
+  trace would make the trace the disk image. The bundle already carries disk images, so in replay
+  the read really happens against restored state and the seam compares what came back.
+- That makes it a divergence check on recovery: *the recovery read returned different bytes than the
+  recording did* is the **v2.4.3** class of failure — where a read error was mapped to an empty tail
+  and acknowledged records were truncated away. A harness that supplied the recorded bytes would
+  have replayed straight past it.
+- **The channel-readiness seam.** Whether a gossip shard was full is now a kernel decision, so a
+  recorded run *replays the dropped frame* instead of hoping to provoke it again by timing.
+- Its shape differs from storage, and has to. A file write in replay can be skipped — the disk is
+  restored from the bundle. A channel send **cannot**: its effect is in-process and the replay is
+  reproducing that process. So the kernel decides the verdict and the call site honours it: `Sent`
+  performs the send, `Full` does not, and a replayed `Sent` that finds the channel full is a
+  divergence rather than a quietly dropped frame.
+- Per-shard streams (`gossip/shard2`), because a drop on one shard and a drop on another are
+  different events and a merged trace could not say which key stopped propagating.
+- **The seam owns the send** (`chan_try_send(stream, tx, msg)`), rather than wrapping a closure
+  around the caller's `try_send`. Wrapping left the `try_send` in the call site, so the
+  forbidden-call check could not tell routed code from unrouted — a seam you cannot enforce is a
+  seam that erodes.
+- With that, `try_send` joins the forbidden-call pattern. The inventory's §6 list covered clocks,
+  RNG and storage but **omitted channels**, though the coverage map assigns them to the kernel.
+  Baseline **199 sites across 45 files** — 15 unrouted channel sends were invisible.
+
+
 ### Added — the first replay seams: the HLC wall clock and the WAL writes (item 6 PR 3)
 
 - `mycelium-core`'s `sim_seam` module, and a `sim` feature that routes the nondeterministic reads
