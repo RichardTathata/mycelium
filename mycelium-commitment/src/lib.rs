@@ -42,7 +42,8 @@
 //! caller (`now_ms`), so every decision here is pure in time and a harness can drive it.
 
 use bytes::Bytes;
-use mycelium::{GossipAgent, OperationId, ReceiptError, WriteReceipt};
+use mycelium::mandate::{Mandate, MandateRefusal, ResourceAuthority};
+use mycelium::{CommitError, CommitReceipt, ConsensusConfig, GossipAgent, OperationId, ReceiptError, WriteReceipt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -161,6 +162,14 @@ pub struct Awarded {
     pub receipt: WriteReceipt,
 }
 
+/// An award committed through a consensus round (CN2), with item 1's commit receipt: the cluster
+/// agreed, and `commit.local_durability` says whether *this* node has it on disk — two statements.
+#[derive(Clone, Debug)]
+pub struct AwardedLinearizable {
+    pub award: Award,
+    pub commit: CommitReceipt,
+}
+
 /// Why an award was not made. **Each is a visible state, not a retry.**
 #[derive(Debug)]
 pub enum CommitmentRefusal {
@@ -172,6 +181,18 @@ pub enum CommitmentRefusal {
     AlreadyAwarded(Award),
     /// The award's write did not yield a receipt (item 1's vocabulary: the fate may be unknown).
     Receipt(ReceiptError),
+    /// A linearizable award's round produced no commit before its deadline: the award **may or may
+    /// not** have committed elsewhere. Not "no award" — a retry resolves it as `AlreadyAwarded` or
+    /// as a fresh commit.
+    AwardUnknown { ballots_tried: u32 },
+    /// A linearizable award's round was refused for a reason other than an existing award.
+    NotCommitted(String),
+    /// The acceptor's mandate did not authorize the acceptance (CN3): a stale holder's award is
+    /// `Superseded { installed, presented }` — the resource has moved to a later epoch than the
+    /// one this mandate was minted under. Refused **before** any write.
+    Mandate(MandateRefusal),
+    /// The mandate presented is not the acceptor's own: it names another holder.
+    MandateNotTheAcceptors { holder: String, acceptor: String },
     /// A record in the medium did not decode.
     Encoding(String),
 }
@@ -183,6 +204,15 @@ impl std::fmt::Display for CommitmentRefusal {
             Self::NoOffers => f.write_str("nobody offered before the deadline — a visible state, not a retry"),
             Self::AlreadyAwarded(a) => write!(f, "already awarded to {} (offer at hlc {})", a.participant, a.offer_hlc),
             Self::Receipt(e) => write!(f, "the award's write returned no receipt: {e:?}"),
+            Self::AwardUnknown { ballots_tried } => write!(
+                f,
+                "the award's round reached no commit after {ballots_tried} ballot(s) — it may or may not have committed; retry"
+            ),
+            Self::NotCommitted(e) => write!(f, "the award's round was refused: {e}"),
+            Self::Mandate(e) => write!(f, "the acceptor's mandate does not authorize the acceptance: {e}"),
+            Self::MandateNotTheAcceptors { holder, acceptor } => {
+                write!(f, "the mandate names {holder} as holder, but the acceptor is {acceptor}")
+            }
             Self::Encoding(e) => write!(f, "a record did not decode: {e}"),
         }
     }
@@ -274,10 +304,11 @@ impl ContractNet {
             .collect()
     }
 
-    /// **Award** the requirement by `rule` over the offers made by its deadline, writing the award
-    /// **with a receipt** under `operation_id = cn/{requirement}/award`. Refused — not overwritten —
-    /// when an award already exists; refused visibly when nobody offered.
-    pub async fn award(&self, requirement: &str, rule: AwardRule, now_ms: u64) -> Result<Awarded, CommitmentRefusal> {
+    /// **Plan** an award: read the head, any existing award and the offers made by the deadline,
+    /// and choose by `rule` — **no write**. [`award`](Self::award) is this followed by
+    /// [`commit_award`](Self::commit_award); they are separate so a harness can interleave two
+    /// declarers' steps and show what the plain path cannot promise (CN2's witness).
+    pub fn plan_award(&self, requirement: &str, rule: AwardRule, now_ms: u64) -> Result<Award, CommitmentRefusal> {
         let announcement = self.announcement(requirement).ok_or(CommitmentRefusal::NotAnnounced)?;
         if let Some(existing) = self.award_of(requirement) {
             return Err(CommitmentRefusal::AlreadyAwarded(existing));
@@ -285,27 +316,106 @@ impl ContractNet {
         let eligible: Vec<(u64, Offer)> =
             self.offers(requirement).into_iter().filter(|(_, o)| o.offered_at_ms <= announcement.deadline_ms).collect();
         let (offer_hlc, offer) = rule.choose(&eligible).cloned().ok_or(CommitmentRefusal::NoOffers)?;
-        let operation_id = award_key(requirement);
-        let award = Award {
+        Ok(Award {
             requirement: requirement.to_string(),
             participant: offer.participant,
             declarer: self.me.clone(),
             offer_hlc,
             awarded_at_ms: now_ms,
-            operation_id: operation_id.clone(),
-        };
+            operation_id: award_key(requirement),
+        })
+    }
+
+    /// **Commit** a planned award with a receipt under `operation_id = cn/{requirement}/award` —
+    /// the plain KV path, for **one declarer per requirement**. Between a plan and its commit
+    /// another declarer may have committed; two racing declarers both commit and LWW keeps one
+    /// (CN2's sweep shows it). Where two may race, use
+    /// [`commit_award_linearizable`](Self::commit_award_linearizable).
+    pub async fn commit_award(&self, award: Award) -> Result<Awarded, CommitmentRefusal> {
         let receipt = self
             .agent
             .kv()
-            .set_with_receipt(&OperationId::new(operation_id), award_key(requirement).as_str(), encode(&award))
+            .set_with_receipt(&OperationId::new(award.operation_id.clone()), award_key(&award.requirement).as_str(), encode(&award))
             .await
             .map_err(CommitmentRefusal::Receipt)?;
         Ok(Awarded { award, receipt })
     }
 
-    /// The award, if the requirement has one.
+    /// **Award** the requirement by `rule` over the offers made by its deadline, writing the award
+    /// **with a receipt** under `operation_id = cn/{requirement}/award`. Refused — not overwritten —
+    /// when an award already exists; refused visibly when nobody offered. Plan, then commit.
+    pub async fn award(&self, requirement: &str, rule: AwardRule, now_ms: u64) -> Result<Awarded, CommitmentRefusal> {
+        let award = self.plan_award(requirement, rule, now_ms)?;
+        self.commit_award(award).await
+    }
+
+    /// **Commit a planned award linearizably** (CN2): through a consensus round on the slot
+    /// `cn/{requirement}/award`, so that of two declarers racing exactly one commits and the other
+    /// is `AlreadyAwarded` **with the committed award** — the plan's *"a `group_propose` round where
+    /// the award must be linearizable"*. A round with no commit before its deadline is
+    /// [`CommitmentRefusal::AwardUnknown`]: the award may have committed elsewhere, and a retry
+    /// resolves it. The commit receipt says what the cluster agreed and, separately, whether this
+    /// node has it on disk.
+    pub async fn commit_award_linearizable(&self, award: Award) -> Result<AwardedLinearizable, CommitmentRefusal> {
+        let slot = award_key(&award.requirement);
+        match self.agent.consensus().cluster_propose_receipt(&slot, encode(&award), ConsensusConfig::default()).await {
+            Ok(commit) => Ok(AwardedLinearizable { award, commit }),
+            Err(CommitError::Superseded { .. }) => {
+                let existing = self.award_of(&award.requirement).ok_or_else(|| {
+                    CommitmentRefusal::Encoding("superseded, but the committed award did not decode".into())
+                })?;
+                Err(CommitmentRefusal::AlreadyAwarded(existing))
+            }
+            Err(CommitError::DeliveryUnknown { ballots_tried, .. }) => Err(CommitmentRefusal::AwardUnknown { ballots_tried }),
+            Err(other) => Err(CommitmentRefusal::NotCommitted(other.to_string())),
+        }
+    }
+
+    /// [`plan_award`](Self::plan_award) then [`commit_award_linearizable`](Self::commit_award_linearizable).
+    pub async fn award_linearizable(
+        &self,
+        requirement: &str,
+        rule: AwardRule,
+        now_ms: u64,
+    ) -> Result<AwardedLinearizable, CommitmentRefusal> {
+        let award = self.plan_award(requirement, rule, now_ms)?;
+        self.commit_award_linearizable(award).await
+    }
+
+    /// **Commit a planned award under the acceptor's mandate** (CN3): the mandate must be the
+    /// acceptor's own, and `authority` — the requirement's scope, at its installed epoch — must
+    /// authorize the operation `accept` for it *now*. A stale holder's award, minted under an epoch
+    /// the resource has moved past, is [`CommitmentRefusal::Mandate`] with
+    /// `MandateRefusal::Superseded { installed, presented }`. The check runs **before any write**;
+    /// a passing check commits linearizably. Where a deployment has no mandates, use
+    /// [`commit_award_linearizable`](Self::commit_award_linearizable) — this method is not a
+    /// mandate check that can be skipped, it is one that is either made or not called.
+    pub async fn commit_award_under_mandate(
+        &self,
+        award: Award,
+        acceptor: &Mandate,
+        authority: &ResourceAuthority,
+        now_ms: u64,
+    ) -> Result<AwardedLinearizable, CommitmentRefusal> {
+        if acceptor.holder.as_str() != award.participant {
+            return Err(CommitmentRefusal::MandateNotTheAcceptors {
+                holder: acceptor.holder.as_str().to_string(),
+                acceptor: award.participant,
+            });
+        }
+        authority.check(acceptor, "accept", now_ms).map_err(CommitmentRefusal::Mandate)?;
+        self.commit_award_linearizable(award).await
+    }
+
+    /// The award, if the requirement has one: a linearizable award (the consensus slot) first, then
+    /// a plain one (the KV head).
     pub fn award_of(&self, requirement: &str) -> Option<Award> {
-        self.agent.kv().get(&award_key(requirement)).and_then(|b| decode(&b))
+        let slot = award_key(requirement);
+        self.agent
+            .consensus()
+            .consensus_get(&slot)
+            .and_then(|b| decode(&b))
+            .or_else(|| self.agent.kv().get(&slot).and_then(|b| decode(&b)))
     }
 
     /// **Report** against an award's operation: what became of the work, or that it is unknown.
@@ -442,6 +552,151 @@ mod tests {
         assert!(matches!(hub.award("pickup-2", AwardRule::LowestParticipant, 200).await, Err(CommitmentRefusal::NoOffers)),
             "an offer after the deadline is not considered");
         assert_eq!(hub.offers("pickup-2").len(), 1, "but it is on the record");
+        agent.shutdown().await;
+    }
+
+    /// CN2's witness and its rule, as an **explicit interleaving** — the kernel has no scheduler
+    /// seam yet, so the race is written out rather than scheduled. Plain path: A plans, B plans,
+    /// A commits, B commits — both `Ok`, and the head holds B's: a double award, kept by LWW. The
+    /// linearizable path, same order: A commits, B is `AlreadyAwarded` with A's award. Both
+    /// declarers are on one node, so consensus is local: this shows the mechanism, not a
+    /// multi-node race.
+    #[tokio::test]
+    async fn two_declarers_racing_the_plain_award_both_win_but_the_linearizable_award_refuses_the_second() {
+        let agent = live().await;
+        let hub_a = ContractNet::new(Arc::clone(&agent), "hub-a");
+        let hub_b = ContractNet::new(Arc::clone(&agent), "hub-b");
+        let d = ContractNet::new(Arc::clone(&agent), "driver-a");
+
+        hub_a.announce("plain", "1 crate", "any", 100, 0);
+        d.offer("plain", "3 km", 1);
+        let plan_a = hub_a.plan_award("plain", AwardRule::LowestParticipant, 10).unwrap();
+        let plan_b = hub_b.plan_award("plain", AwardRule::LowestParticipant, 11).unwrap();
+        assert!(hub_a.commit_award(plan_a).await.is_ok());
+        assert!(hub_b.commit_award(plan_b).await.is_ok(), "the plain path lets the second commit too");
+        assert_eq!(hub_a.award_of("plain").unwrap().declarer, "hub-b", "LWW kept the later write: a double award, silently");
+
+        hub_a.announce("linear", "1 crate", "any", 100, 0);
+        d.offer("linear", "3 km", 1);
+        let plan_a = hub_a.plan_award("linear", AwardRule::LowestParticipant, 10).unwrap();
+        let plan_b = hub_b.plan_award("linear", AwardRule::LowestParticipant, 11).unwrap();
+        let first = hub_a.commit_award_linearizable(plan_a).await.expect("the first round commits");
+        assert_eq!(first.award.declarer, "hub-a");
+        match hub_b.commit_award_linearizable(plan_b).await {
+            Err(CommitmentRefusal::AlreadyAwarded(existing)) => assert_eq!(existing.declarer, "hub-a"),
+            other => panic!("the second declarer must be refused with the committed award, got {other:?}"),
+        }
+        assert_eq!(hub_b.award_of("linear").unwrap().declarer, "hub-a", "and everyone reads the one award");
+        agent.shutdown().await;
+    }
+
+    /// CN2's replay half, as far as it goes today — **a pin on a gap, not a claim**. A linearizable
+    /// award recorded under the kernel on a whole node and replayed on the same identity
+    /// **diverges**, and the divergence is the one the inventory predicted: at seq 7 the recording
+    /// has the membership governor's `rng jitter` draw and the replay has the award round's
+    /// `consensus/defer` timer — two tasks whose interleaving belongs to the scheduler, and no seam
+    /// owns it (`replay-nondeterminism-inventory.md` §2.3, the unrouted `select!` row). The award's
+    /// own effects replay; the node's do not. This test asserts the divergence *happens* and names
+    /// it, so the day the scheduler seam lands it fails and is flipped into the claim.
+    ///
+    /// (A first attempt replayed on a node with a fresh port and diverged earlier, at a gossip
+    /// `try_send`: the shard a key maps to hashes the key, and the key carries the node id. Not
+    /// nondeterminism — a different node. Both runs now share one identity.)
+    #[tokio::test]
+    async fn a_whole_node_recording_of_a_linearizable_award_diverges_without_a_scheduler_seam() {
+        use mycelium::sim_seam::{install, take, SimContext};
+        use mycelium_sim::{Kernel, Sources, Trace};
+
+        async fn run(kernel: Kernel, port: u16) -> (Trace, Award) {
+            install(SimContext {
+                kernel,
+                sources: Sources::seeded(7, 1_789_000_000_000),
+                node: "n1".into(),
+                offsets: Default::default(),
+            });
+            let agent = Arc::new(GossipAgent::new(
+                NodeId::new("127.0.0.1", port).unwrap(),
+                GossipConfig { bind_port: port, ..Default::default() },
+            ));
+            agent.start().await.expect("the node binds its port");
+            let hub = ContractNet::new(Arc::clone(&agent), "hub");
+            let d = ContractNet::new(Arc::clone(&agent), "driver-a");
+            hub.announce("replayed", "1 crate", "any", 100, 0);
+            d.offer("replayed", "2 km", 1);
+            let awarded = hub.award_linearizable("replayed", AwardRule::LowestParticipant, 10).await.expect("awarded");
+            agent.shutdown().await;
+            let ctx = take().expect("the kernel was installed on this thread");
+            (ctx.kernel.trace().clone(), awarded.award)
+        }
+
+        let port = mycelium::test_util::alloc_port();
+        let (trace, recorded) = run(Kernel::recording(), port).await;
+        assert!(trace.len() > 6, "the round touched the seams: {} entries", trace.len());
+        assert_eq!(recorded.participant, "driver-a");
+
+        // The replay runs on the same thread (current-thread runtime), so the installed kernel is
+        // the one it sees; a divergence panics inside `run`, which the join reports.
+        let outcome = tokio::spawn(run(Kernel::replaying(trace), port)).await;
+        take(); // whatever state the panicked run left installed
+        let err = outcome.expect_err("without a scheduler seam a whole-node replay diverges — if this passed, flip this test into the claim");
+        let msg = err.into_panic().downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(msg.contains("replay diverged"), "the failure is a divergence, not something else: {msg}");
+        assert!(msg.contains("jitter") || msg.contains("consensus/defer") || msg.contains("tick"),
+            "and it is an interleaving of two tasks' seam requests, as predicted: {msg}");
+    }
+
+    fn mandate_for(holder: &str, epoch: u64) -> Mandate {
+        use mycelium::mandate::{PrincipalId, TermId};
+        Mandate {
+            holder: PrincipalId::new(holder).unwrap(),
+            established_by: PrincipalId::new("coop-board").unwrap(),
+            purpose: "drive pickups".into(),
+            scope: "redistribution/pickups".into(),
+            operations: vec!["accept".into()],
+            epoch,
+            term: TermId::new(format!("term-{epoch}")).unwrap(),
+            valid_from_ms: 0,
+            valid_until_ms: u64::MAX,
+        }
+    }
+
+    /// CN3 — the negative case: the acceptor's mandate is checked against the resource's installed
+    /// epoch **before** the award is written. A holder whose mandate was minted under epoch 1 is
+    /// refused once the resource has installed epoch 2 — `Superseded { installed: 2, presented: 1 }`
+    /// — and nothing was written; a mandate that is not the acceptor's own is refused by name; a
+    /// current mandate's award commits, linearizably.
+    #[tokio::test]
+    async fn a_stale_holders_award_is_refused_as_superseded_before_any_write() {
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let d = ContractNet::new(Arc::clone(&agent), "driver-a");
+        hub.announce("mandated", "2 crates", "before close", 100, 0);
+        d.offer("mandated", "4 km", 1);
+        let authority = ResourceAuthority::new("redistribution/pickups", 2);
+
+        let stale = mandate_for("driver-a", 1);
+        let plan = hub.plan_award("mandated", AwardRule::LowestParticipant, 10).unwrap();
+        match hub.commit_award_under_mandate(plan.clone(), &stale, &authority, 10).await {
+            Err(CommitmentRefusal::Mandate(MandateRefusal::Superseded { installed, presented })) => {
+                assert_eq!((installed, presented), (2, 1));
+            }
+            other => panic!("a stale holder must be refused as superseded, got {other:?}"),
+        }
+        assert!(hub.award_of("mandated").is_none(), "refused before any write");
+
+        let someone_elses = mandate_for("driver-b", 2);
+        match hub.commit_award_under_mandate(plan.clone(), &someone_elses, &authority, 10).await {
+            Err(CommitmentRefusal::MandateNotTheAcceptors { holder, acceptor }) => {
+                assert_eq!((holder.as_str(), acceptor.as_str()), ("driver-b", "driver-a"));
+            }
+            other => panic!("another holder's mandate must be refused by name, got {other:?}"),
+        }
+        assert!(hub.award_of("mandated").is_none(), "still nothing written");
+
+        let current = mandate_for("driver-a", 2);
+        let awarded = hub.commit_award_under_mandate(plan, &current, &authority, 10).await.expect("a current mandate commits");
+        assert_eq!(awarded.award.participant, "driver-a");
+        assert_eq!(hub.award_of("mandated").unwrap().participant, "driver-a");
         agent.shutdown().await;
     }
 

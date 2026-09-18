@@ -233,6 +233,10 @@ pub mod knowledge;
 // log keys) and need `hlc::physical_ms` to read them without copying the bit layout — it is
 // already `pub mod hlc` in `mycelium-core`, so this commits to nothing that crate does not.
 pub use mycelium_core::{config, error, hlc, signal};
+/// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
+/// can record and replay its own runs under the kernel (item 6; first used by CN2).
+#[cfg(feature = "sim")]
+pub use mycelium_core::sim_seam;
 pub(crate) use mycelium_core::{
     connection, framing, locality, node_id, persistence, seen, store, stream, tls, writer,
 };

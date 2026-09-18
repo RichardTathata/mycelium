@@ -2231,6 +2231,7 @@ dependencies = [
  "bytes",
  "ed25519-dalek",
  "mycelium",
+ "mycelium-sim",
  "serde",
  "serde_json",
  "tokio",
