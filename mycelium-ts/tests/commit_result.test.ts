@@ -22,8 +22,30 @@ test.each([
 ])("persisted is surfaced: %j → %p", async (body, expected) => {
   stub(body);
   const a = new MyceliumAgent("127.0.0.1", 1, 1000);
-  expect(await a.consistentSet("k", Buffer.from("v"))).toEqual({ persisted: expected });
-  expect(await a.crossGroupPropose("slot", Buffer.from("v"), groups)).toEqual({ persisted: expected });
+  const absent = { persisted: expected, localDurability: null, localDurabilityError: null };
+  expect(await a.consistentSet("k", Buffer.from("v"))).toEqual(absent);
+  expect(await a.crossGroupPropose("slot", Buffer.from("v"), groups)).toEqual(absent);
+});
+
+test.each([
+  // v2.8.0 gateway: the receipt vocabulary beside `persisted`.
+  [{ ok: true, persisted: true, local_durability: "on_disk" }, "on_disk", null],
+  // `persisted: true` also covers "nothing was promised" — the collapse the new field undoes.
+  [{ ok: true, persisted: true, local_durability: "not_configured" }, "not_configured", null],
+  [{ ok: true, persisted: false, local_durability: "failed", local_durability_error: "no ack" }, "failed", "no ack"],
+  [{ ok: true, persisted: true }, null, null],  // pre-v2.8.0 gateway: fields absent
+])("local durability is surfaced: %j → %s", async (body, durability, error) => {
+  stub(body);
+  const a = new MyceliumAgent("127.0.0.1", 1, 1000);
+  const results = [
+    await a.consistentSet("k", Buffer.from("v")),
+    await a.crossGroupPropose("slot", Buffer.from("v"), groups),
+  ];
+  for (const r of results) {
+    expect(r.localDurability).toBe(durability);
+    expect(r.localDurabilityError).toBe(error);
+    expect(r.persisted).toBe(body.persisted);   // the old field is untouched by the new one
+  }
 });
 
 test("a failed commit still rejects", async () => {

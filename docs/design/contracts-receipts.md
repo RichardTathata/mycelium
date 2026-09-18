@@ -205,6 +205,18 @@ scheduled for the `3.0.0` ledger with the removal of `persisted` (§6.6). `set_w
 signature; its *meaning* tightens in PR 4a (exact identity) with the `>=` behaviour kept behind a legacy
 flag until then.
 
+> **Landed 2026-09-18 (PR 7, gateway/SDK parity).** The two consensus-backed gateway verbs
+> (`overlay/consistent/set`, `cross_group_propose`) answer `"local_durability"` beside `"persisted"`,
+> named by `LocalDurability::tag` — `on_disk` · `buffered` · `not_configured` · `failed` (+
+> `"local_durability_error"` for the last) — and the handlers go through the same `receipt_from` as
+> `cluster_propose_receipt`, so HTTP cannot drift from Rust. `"persisted"` is read off the result
+> *before* it becomes a receipt: the old field is unchanged and its floor pin does not move. The SDKs
+> read the fields (`local_durability` / `localDurability`; absent → `None` / `null`). The live test
+> shows the collapse undone — a node without persistence answers `persisted: true` **and**
+> `not_configured`. Not shown live: `failed` (a stopped writer is not inducible from outside); its
+> rendering is unit-pinned. `persisted` itself is still not `#[deprecated]` — that step waits for the
+> 2.8.0 cut, with the rest of the receipt verbs' deprecation notes.
+
 ## 6. Reconciling with `exactly-once-effect.md` (D11)
 
 That record **declined-with-evidence** a shared *in-flight tracker* code overlay across the tuple space

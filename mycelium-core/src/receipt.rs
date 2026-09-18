@@ -209,6 +209,26 @@ impl LocalDurability {
     pub fn is_durable(&self) -> bool {
         matches!(self, LocalDurability::OnDisk)
     }
+
+    /// The state's stable name — the **one vocabulary** the gateway JSON (`"local_durability"`)
+    /// and the SDKs share (item 1 PR 7): `on_disk` · `buffered` · `not_configured` · `failed`.
+    /// Pinned by a test, because a rename here is a wire change for every SDK.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            LocalDurability::OnDisk => "on_disk",
+            LocalDurability::Buffered => "buffered",
+            LocalDurability::Failed(_) => "failed",
+            LocalDurability::NotConfigured => "not_configured",
+        }
+    }
+
+    /// Why durability was not established — `Some` only for [`Failed`](Self::Failed).
+    pub fn failure_reason(&self) -> Option<&str> {
+        match self {
+            LocalDurability::Failed(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 // ── Rung 3: replica sync (vocabulary; established by PR 4a/4b) ───────────────
@@ -553,6 +573,20 @@ pub fn content_hash(key: &str, value: &[u8], is_tombstone: bool) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gateway JSON and both SDKs read these four strings (item 1 PR 7). A rename is a wire
+    /// change: this pin moves only in the open.
+    #[test]
+    fn the_durability_tags_are_the_wire_vocabulary() {
+        assert_eq!(LocalDurability::OnDisk.tag(), "on_disk");
+        assert_eq!(LocalDurability::Buffered.tag(), "buffered");
+        assert_eq!(LocalDurability::NotConfigured.tag(), "not_configured");
+        assert_eq!(LocalDurability::Failed("disk".into()).tag(), "failed");
+        assert_eq!(LocalDurability::Failed("disk".into()).failure_reason(), Some("disk"));
+        for state in [LocalDurability::OnDisk, LocalDurability::Buffered, LocalDurability::NotConfigured] {
+            assert_eq!(state.failure_reason(), None, "{state:?} carries no failure reason");
+        }
+    }
 
     #[test]
     fn a_receipt_names_its_rung_and_nothing_above_it() {

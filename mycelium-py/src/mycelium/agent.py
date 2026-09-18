@@ -190,18 +190,44 @@ class CommitResult:
       the node you are talking to.
     * ``None``  — the gateway predates v2.4.2 and did not report the field.
 
+    ``persisted`` folds two states into ``True`` — *on disk* and *nothing was promised* (no
+    persistence configured on that node). ``local_durability`` (v2.8.0, the receipt vocabulary of
+    ``docs/design/contracts-receipts.md``) separates them, with the same names the Rust
+    ``LocalDurability`` uses:
+
+    * ``"on_disk"``        — the forced fdatasync returned; the one state that establishes durability.
+    * ``"buffered"``       — accepted by the WAL, not yet synced (never produced by a consensus
+      commit, which forces the sync; named so the vocabulary is complete).
+    * ``"not_configured"`` — that node has no persistence; nothing was promised, nothing is claimed.
+    * ``"failed"``         — durability was not established; ``local_durability_error`` says why.
+    * ``None``             — the gateway predates v2.8.0.
+
     Truthiness is *not* the commit status (the method raises on a failed commit); it is
-    ``persisted is True``.
+    ``persisted is True``. ``on_disk`` is the stricter question.
     """
     persisted: Optional[bool]
+    local_durability: Optional[str] = None
+    local_durability_error: Optional[str] = None
 
     def __bool__(self) -> bool:
         return self.persisted is True
 
+    @property
+    def on_disk(self) -> bool:
+        """``True`` only when the gateway node established the slot on its own disk — never for
+        ``"not_configured"``, which ``persisted`` also reports as ``True``."""
+        return self.local_durability == "on_disk"
+
     @staticmethod
     def _from_json(data: dict) -> "CommitResult":
         p = data.get("persisted")
-        return CommitResult(persisted=None if p is None else bool(p))
+        d = data.get("local_durability")
+        e = data.get("local_durability_error")
+        return CommitResult(
+            persisted=None if p is None else bool(p),
+            local_durability=None if d is None else str(d),
+            local_durability_error=None if e is None else str(e),
+        )
 
 
 @dataclass

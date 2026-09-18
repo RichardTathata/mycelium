@@ -350,7 +350,11 @@ match agent.group_propose("workers", "coordinator", Bytes::from("node-7"), cfg).
 // `persisted` (since v2.4.2) reports *local* durability of the committed slot: the WAL append is
 // forced to fdatasync in every SyncMode; `false` means the cluster commit stands but this node did
 // not get it onto disk (logged at error). Match with `..` if you don't need it. The gateway's
-// propose / overlay/consistent/set JSON carries the same field as "persisted".
+// propose / overlay/consistent/set JSON carries the same field as "persisted" — and, since v2.8.0,
+// "local_durability" beside it: the receipt's `LocalDurability` as "on_disk" · "buffered" ·
+// "not_configured" · "failed" (+ "local_durability_error" for the last), which separates *on disk*
+// from *nothing was promised* — two states `persisted` folds into one `true`. In Rust, ask
+// `cluster_propose_receipt` / `group_propose_receipt` for the same receipt instead of the bool.
 
 // System-wide proposal (all known peers vote).
 let _ = agent.cluster_propose("global/epoch", Bytes::from("42"), ConsensusConfig::default()).await;

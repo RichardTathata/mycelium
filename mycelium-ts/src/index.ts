@@ -3,6 +3,7 @@ export {
   CapabilityHandle,
   CommitResult,
   DemandStatus,
+  LocalDurability,
   LockGuard,
   LogEntry,
   MailboxEvent,

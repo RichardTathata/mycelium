@@ -62,6 +62,29 @@ def test_persisted_is_surfaced(port, reply, expected):
         assert bool(r) is (expected is True)
 
 
+@pytest.mark.parametrize("reply,durability,error,on_disk", [
+    # v2.8.0 gateway: the receipt vocabulary beside `persisted`.
+    ({"ok": True, "persisted": True, "local_durability": "on_disk"}, "on_disk", None, True),
+    # `persisted: True` also covers "nothing was promised" — the collapse the new field undoes.
+    ({"ok": True, "persisted": True, "local_durability": "not_configured"},
+     "not_configured", None, False),
+    ({"ok": True, "persisted": False, "local_durability": "failed",
+      "local_durability_error": "the commit's WAL append did not acknowledge"},
+     "failed", "the commit's WAL append did not acknowledge", False),
+    ({"ok": True, "persisted": True}, None, None, False),   # pre-v2.8.0 gateway: fields absent
+])
+def test_local_durability_is_surfaced(port, reply, durability, error, on_disk):
+    _Stub.reply = reply
+    with MyceliumAgent("127.0.0.1", port) as agent:
+        r1 = agent.consistent_set("k", b"v")
+        r2 = agent.cross_group_propose("slot", b"v", GROUPS)
+    for r in (r1, r2):
+        assert r.local_durability == durability
+        assert r.local_durability_error == error
+        assert r.on_disk is on_disk
+        assert r.persisted is reply["persisted"]   # the old field is untouched by the new one
+
+
 def test_failed_commit_still_raises(port):
     _Stub.reply = {"ok": False, "error": "superseded"}
     with MyceliumAgent("127.0.0.1", port) as agent:

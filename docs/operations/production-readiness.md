@@ -44,7 +44,9 @@ this page is the index + the gate.
 
 - ☐ **Persistence enabled** with a `sync_mode` matched to your durability need; consensus committed
   slots are always fsynced regardless — check `ConsensusResult::Committed { persisted }` (gateway
-  `"persisted"`): `false` means committed cluster-wide but not on this node's disk.
+  `"persisted"`): `false` means committed cluster-wide but not on this node's disk. The strict
+  question is the receipt's (`cluster_propose_receipt`; gateway `"local_durability"` since v2.8.0):
+  only `"on_disk"` establishes it — `"not_configured"` is a `persisted: true` that promised nothing.
   → [deployment.md §Restart behaviour](deployment.md)
 - ☐ **Restart rehearsed** — single-node WAL replay **and** full-cluster cold restart (anti-entropy
   recovery) both verified in staging. A restarted node re-bootstraps with no rejoin ceremony.
