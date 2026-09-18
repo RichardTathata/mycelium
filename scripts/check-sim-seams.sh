@@ -38,13 +38,15 @@
 #   Put test-only methods in a separate top-level `#[cfg(test)] impl` block; a baseline that moves
 #   when no site moved is the signal that someone did not.
 #
-#   `use tokio::time;` followed by `time::interval(…)` / `time::sleep(…)` is INVISIBLE to the
+#   `use tokio::time;` followed by `time::interval(…)` / `time::sleep(…)` WAS invisible to the
 #   `tokio::time::*` pattern — the same alias gap the `fs as <alias>` handling closes for the
-#   filesystem, not closed here. Found 2026-09-18 routing nine interval sites through the timer seam:
-#   the baseline moved for the four files that spell `tokio::time::interval` out and not for the three
-#   (`opacity.rs`, `emergent_groups.rs`, `tasks.rs`) that go through the alias, whose tickers this check
-#   had never counted. Closing it regenerates a baseline of pre-existing sites across the tree, so it
-#   is its own change; until then a `time::` call site is only as visible as its import line.
+#   filesystem. Found 2026-09-18 routing nine interval sites through the timer seam: the baseline
+#   moved for the four files that spell `tokio::time::interval` out and not for the three
+#   (`opacity.rs`, `emergent_groups.rs`, `tasks.rs`) that go through the alias, whose tickers this
+#   check had never counted. **Closed the same day** (`alias_pattern`, the `time` half): a file that
+#   imports the module under any spelling has its `<alias>::sleep|interval|timeout|Instant` sites
+#   counted, and the baseline was regenerated to admit the pre-existing ones — 19 sites in eight
+#   files, 166 → 185. A `time as <alias>` import is handled but has no user today.
 #
 # EXEMPT
 #   `mycelium-sim/**` and `sim_seam.rs` (the seams themselves — §6 exempts the seam
@@ -93,6 +95,23 @@ alias_pattern() {
     [ -z "$a" ] && continue
     extra="$extra|\\b$a::"
   done <<< "$aliases"
+
+  # The same gap for the timer: `use tokio::time;`, a grouped `use tokio::{…, time, …}` (on one
+  # line or with `time,` on its own), `use tokio::time::{self, …}` and `use tokio::time as <alias>`
+  # each make `<alias>::sleep(…)` / `::interval(…)` / `::timeout(…)` / `::Instant` a tokio timer
+  # call the `tokio::time::` pattern never sees. Found 2026-09-18 routing nine tickers (below);
+  # closed here. The call-site alternation is guarded on the left by `(^|[^:a-zA-Z_])` rather than
+  # `\b`, so `std::time::Instant` and `tokio::time::sleep` are not matched a second time through it.
+  # The bare `use tokio::time;` line itself is not counted — it enables nothing on its own.
+  local time_aliases
+  time_aliases=$(grep -oE '^use tokio::time as [a-z_][a-z0-9_]*' "$file" 2>/dev/null | awk '{print $5}' || true)
+  if grep -qE '^use tokio::time;|^use tokio::time::\{[[:space:]]*self|^use tokio::\{.*[[:space:],{]time([[:space:],}]|::\{[[:space:]]*self)|^[[:space:]]+time,[[:space:]]*$' "$file" 2>/dev/null; then
+    time_aliases="$time_aliases"$'\n'"time"
+  fi
+  while IFS= read -r a; do
+    [ -z "$a" ] && continue
+    extra="$extra|(^|[^:a-zA-Z_])$a::(sleep|interval|timeout|Instant)"
+  done <<< "$time_aliases"
   printf '%s' "$extra"
 }
 

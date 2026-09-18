@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — the seams check sees timer calls through a module alias (item 6 follow-on)
+
+- **`scripts/check-sim-seams.sh`** now counts `time::sleep|interval|timeout|Instant` in any file that imports
+  `tokio::time` as a module (`use tokio::time;`, grouped `use tokio::{…, time, …}`, `time::{self, …}`,
+  `time as <alias>`) — the `fs as <alias>` gap over again, for the timer, found while routing nine tickers
+  (#276) and recorded in the script's header as open. The regenerated baseline admits **19 pre-existing
+  sites in eight files (166 → 185)**; nothing in the tree changed, only what the check can see. Verified by
+  planting: a `time::sleep` line fails the check at exactly +1 while a `std::time::Instant` type mention beside
+  it adds nothing (the left guard, not `\b`), and commenting one alias site out reports as progress.
+
 ### Added — the membership governor through the contract (item 4 PR 4a)
 
 - **`GossipAgent::set_control_profile` / `control_profile` / `control_would_hold_count`** — the node's profile
