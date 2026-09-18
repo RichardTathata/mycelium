@@ -50,6 +50,8 @@ pub(crate) mod action_evaluator;
 pub(crate) mod journal;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod evidence_journal;
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod federation_http;
 #[cfg(feature = "gateway")]
 mod http;
 mod mcp;
@@ -132,7 +134,7 @@ pub use action_evaluator::{
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
     CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,
-    legacy_token_principal, named_token_principal, node_principal, oidc_principal, positional_token_principal,
+    federation_principal, legacy_token_principal, named_token_principal, node_principal, oidc_principal, positional_token_principal,
 };
 pub use state_machine::{AgentPolicy, ExecutionState, AgentStateMachine, PolicyViolation};
 pub use scatter::{ScatterError, ScatterResult};
@@ -486,6 +488,10 @@ pub(crate) struct TaskCtx {
     /// which `with_action_evaluator` warns about.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) evidence_journal: std::sync::OnceLock<Arc<evidence_journal::EvidenceJournal>>,
+    /// The federation edge (item 2 PR 8), set via `with_federation_edge`. Absent = this gateway
+    /// serves no federated calls: a presented credential is refused, never anonymised.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) federation_edge: std::sync::OnceLock<Arc<crate::federation::edge::FederationEdge>>,
     /// Optional external audit sink (SOC 2 WS-C), set via `with_audit_sink`.
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink: std::sync::OnceLock<Arc<dyn audit::AuditSink>>,
@@ -912,6 +918,8 @@ impl GossipAgent {
             deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             evidence_journal: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            federation_edge: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -1102,6 +1110,21 @@ impl GossipAgent {
     /// Must be called before [`start`](Self::start).
     ///
     /// Requires the `a2a` cargo feature.
+    /// Attach the federation edge (item 2 PR 8): this domain's identity, exports, policy and
+    /// trust bundle. Serves the filtered catalogue on `/federation/catalog` and admits federated
+    /// credentials on `/a2a`. Call **before** `start()`, like [`with_a2a`](Self::with_a2a): the
+    /// catalogue route is merged into the gateway's routes at start. A second call keeps the
+    /// first edge and warns.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_federation_edge(self, edge: Arc<crate::federation::edge::FederationEdge>) -> Self {
+        if self.task_ctx.federation_edge.set(Arc::clone(&edge)).is_err() {
+            tracing::warn!("with_federation_edge: an edge is already attached; keeping the first");
+            return self;
+        }
+        self.with_http_routes(federation_http::federation_router(edge));
+        self
+    }
+
     #[cfg(feature = "a2a")]
     pub fn with_a2a(self) -> Self {
         let ctx   = Arc::clone(&self.task_ctx);

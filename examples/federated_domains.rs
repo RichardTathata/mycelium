@@ -10,11 +10,12 @@
 //! catalog, an authenticated call bound to one export, per-partner budgets, failover that respects
 //! repeatability, a partition/reconnect cycle, a key rotation, and a revocation.
 //!
-//! **Does not:** move a byte over a network. There is no federation transport yet — PRs 1–6 built
-//! the contract and this example exercises it in one process. The record's release gate (§13) is a
-//! *two-mesh demonstration* proving from membership tables, consensus state and traces that the
-//! meshes never merged; that gate is **not** claimed here, and saying so is the point. What is
-//! claimed is narrower and checkable: given these inputs, these are the decisions.
+//! **Does not:** move a byte over a network. PRs 1–6 built the contract and this example exercises
+//! it in one process; the transport's first arm (PR 8, `federation::edge` + `federation::client`)
+//! is exercised by the two-mesh test in `src/lib_tests.rs`, not here. The record's release gate
+//! (§13) is a *two-mesh demonstration* proving from membership tables, consensus state and traces
+//! that the meshes never merged; that gate is **not** claimed here, and saying so is the point.
+//! What is claimed is narrower and checkable: given these inputs, these are the decisions.
 //!
 //! Every step prints what it decided and why, so the output reads as the argument rather than as a
 //! log of a thing that worked.

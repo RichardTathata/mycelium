@@ -115,6 +115,13 @@ pub fn oidc_principal(issuer: &str, subject: &str) -> String { format!("oidc:{is
 /// The principal a node's **own** RPC carries in its self envelope: `node:{node id}`. A provider
 /// maps it back to [`RequestPrincipal::Node`].
 pub fn node_principal(node: &NodeId) -> String { format!("node:{node}") }
+
+/// A federated caller (item 2 PR 8): the partner domain is the issuer, the principal is the one
+/// the partner's credential named. `federation:beta.example/svc/billing` — never the gateway that
+/// carried it, which is item 7's fix one boundary further out.
+pub fn federation_principal(origin_domain: &str, principal: &str) -> String {
+    format!("federation:{origin_domain}/{principal}")
+}
 /// Domain separator for the signed message.
 #[cfg(feature = "tls")]
 const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";

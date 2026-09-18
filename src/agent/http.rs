@@ -548,6 +548,18 @@ fn gateway_identity_issuer(ctx: &TaskCtx) -> String {
 /// but unrecognised bearer is refused (never silently downgraded to anonymous). No scope is
 /// required, so none is granted.
 async fn a2a_optional_auth(ctx: Arc<HttpCtx>, mut request: Request, next: Next) -> Response {
+    // Item 2 PR 8: a federation credential, if presented, is the caller's identity — authenticated
+    // here, authorised for its export in the handler. Present-and-refused is a refusal, never
+    // anonymous (see `federation_http`).
+    #[cfg(feature = "tls")]
+    match super::federation_http::authenticate_presented(&ctx.agent_ctx, request.headers()) {
+        Ok(None) => {}
+        Ok(Some(identity)) => {
+            super::federation_http::insert_identity(&mut request, identity);
+            return next.run(request).await;
+        }
+        Err(response) => return *response,
+    }
     let presented = request.headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -582,9 +594,23 @@ async fn gateway_auth_if_gateway_path(
         gateway_auth(State(ctx), request, next).await
     } else if request.uri().path() == "/a2a" {
         a2a_optional_auth(ctx, request, next).await
+    } else if request.uri().path().starts_with("/federation/") {
+        federation_path_auth(ctx, request, next).await
     } else {
         next.run(request).await
     }
+}
+
+/// `/federation/*` (item 2 PR 8): a credential is required. Without `tls` no federation route is
+/// ever mounted, so the branch falls through to the router's 404.
+#[cfg(feature = "tls")]
+async fn federation_path_auth(ctx: Arc<HttpCtx>, request: Request, next: Next) -> Response {
+    super::federation_http::federation_auth(Arc::clone(&ctx.agent_ctx), request, next).await
+}
+
+#[cfg(not(feature = "tls"))]
+async fn federation_path_auth(_ctx: Arc<HttpCtx>, request: Request, next: Next) -> Response {
+    next.run(request).await
 }
 
 /// Map a presented bearer token to `(principal, scopes)`, or `None` if unrecognised.

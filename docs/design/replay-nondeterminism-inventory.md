@@ -84,6 +84,7 @@ decision is one of three shapes. Each now has a seam, and the `Instant::now()` s
 | "how long since this" | `mono_elapsed(&Instant)` | sender-log window, quorum windows, `last_signal_age` |
 | "how long between these two" | `mono_span(&Instant, &Instant)` | SWIM suspicion timeout, quorum-evidence rate limit, reorder hold |
 | "has this deadline passed" | `mono_before(&Instant, &Instant)` | suppression expiry, sender-log trim cutoff, peer eviction |
+| "an instant to store" | `mono_instant()` | `CatalogObservation::observed_at` as constructed by the federation client (item 2 PR 8) — identical in both arms; the read stays `mono_elapsed` |
 
 The third exists because two stamps taken at different moments, compared directly, would have a
 replay comparing *its own* elapsed wall time rather than the recording's. Recording the **verdict**
@@ -92,7 +93,7 @@ is what makes that reproducible without touching the stored type.
 The same admission covers `src/federation/catalog.rs` (item 2 PR 3): `CatalogObservation.observed_at`
 stores an `Instant`, and the one decision derived from it — *has discovery expired* — goes through
 `mono_elapsed`. The file's only forbidden-check hit is the `use std::time::Instant` import, which the
-check counts because such an import *enables* unqualified calls; there are none.
+check counts because such an import *enables* unqualified calls; there are none. **PR 8 (the federation client) is the first production site that *constructs* such an instant**, and it does so through `mono_instant()` — the seam owns the construction, the resolver still reads the age through `mono_elapsed`, and the client has no forbidden-check hit at all.
 
 **Three kinds of `Instant` live in this list, and only one of them is this seam's.**
 

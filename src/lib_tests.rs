@@ -168,6 +168,8 @@ fn spawn_handler(
         deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        federation_edge: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         audit_sink: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
@@ -326,14 +328,24 @@ async fn two_meshes(n: usize) -> TwoMeshes {
 impl TwoMeshes {
     /// Assert non-merger **from the tables**, per §2 of the record.
     fn assert_never_merged(&self) {
-        let ids = |m: &Vec<GossipAgent>| -> Vec<String> {
+        let a: Vec<&GossipAgent> = self.a.iter().collect();
+        let b: Vec<&GossipAgent> = self.b.iter().collect();
+        assert_never_merged(&a, &b);
+    }
+}
+
+/// The harness's assertions over borrowed nodes, so a test that holds a node in an `Arc` (the
+/// federation transport's gateway node, PR 8) runs the same checks.
+fn assert_never_merged(a: &[&GossipAgent], b: &[&GossipAgent]) {
+    {
+        let ids = |m: &[&GossipAgent]| -> Vec<String> {
             m.iter().map(|x| x.node_id().to_string()).collect()
         };
-        let (a_ids, b_ids) = (ids(&self.a), ids(&self.b));
+        let (a_ids, b_ids) = (ids(a), ids(b));
 
         // 1. Membership: no foreign node in any peer table. A foreign node here is one the failure
         //    detector, the fan-out and quorum sizing would all count.
-        for node in &self.a {
+        for node in a {
             let peers: Vec<String> = node.peers().iter().map(|p| p.to_string()).collect();
             for foreign in &b_ids {
                 assert!(
@@ -343,7 +355,7 @@ impl TwoMeshes {
                 );
             }
         }
-        for node in &self.b {
+        for node in b {
             let peers: Vec<String> = node.peers().iter().map(|p| p.to_string()).collect();
             for foreign in &a_ids {
                 assert!(
@@ -357,7 +369,7 @@ impl TwoMeshes {
         // 2. The native namespaces: no key naming a foreign node. Foreign state in `cap/`, `grp/`
         //    or `sys/` is indistinguishable from local state once it is there.
         for (mine, theirs, label) in
-            [(&self.a, &b_ids, "A"), (&self.b, &a_ids, "B")]
+            [(a, &b_ids, "A"), (b, &a_ids, "B")]
         {
             for node in mine {
                 for prefix in ["cap/", "grp/", "sys/"] {
@@ -1104,6 +1116,8 @@ async fn test_subscribe_notified_via_gossip() {
         deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        federation_edge: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -6115,5 +6129,357 @@ mod receipt_tests {
             other => panic!("a timeout must read as DeliveryUnknown, got {other:?}"),
         }
         a.shutdown().await;
+    }
+}
+
+// ── The federation transport, first arm (v3 item 2 PR 8) ─────────────────
+//
+// PRs 1–7 ended every page with "no bytes cross a network". This module is where they do, and
+// where the PR 1 harness's `assert_never_merged` stops being trivially true: a call has crossed
+// from domain B to domain A's gateway, and the tables must still show two meshes.
+#[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
+mod federation_transport {
+    use super::*;
+    use crate::federation::{
+        call::{CallPolicy, FederatedCaller},
+        client::{ClientError, FederationClient, GatewayEndpoint},
+        edge::{now_ms, FederationEdge, PresentedCall, HEADER_FEDERATED_CALL},
+        gateway::{CallOutcome, Repeatability},
+        session::{LinkRefusal, LinkState},
+        DomainId, DomainPolicy, TrustBundle,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    fn keypair(seed: u8) -> (ed25519_dalek::SigningKey, [u8; 32]) {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        (sk, vk)
+    }
+
+    /// A mesh of `n` nodes bootstrapped only within itself; node 0 optionally runs a gateway
+    /// with the A2A edge and the federation edge. Mirrors the PR 1 harness's builder.
+    async fn mesh(n: usize, gateway: Option<(u16, Arc<FederationEdge>)>) -> Vec<GossipAgent> {
+        let ports: Vec<u16> = (0..n).map(|_| alloc_port()).collect();
+        let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+        let mut agents = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = ports[i];
+            cfg.bootstrap_peers = ids.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| o.clone()).collect();
+            cfg.health_check_max_jitter_ms = 50;
+            let a = match (&gateway, i) {
+                (Some((http_port, edge)), 0) => {
+                    cfg.http_port = Some(*http_port);
+                    GossipAgent::new(id.clone(), cfg).with_a2a().with_federation_edge(Arc::clone(edge))
+                }
+                _ => GossipAgent::new(id.clone(), cfg),
+            };
+            a.start().await.unwrap();
+            agents.push(a);
+        }
+        agents
+    }
+
+    /// A provider on `agent` for skill `demo/whoami` that answers with the principal it was told,
+    /// and counts how many calls actually reached it. The capability itself is advertised by the
+    /// caller (the registration must outlive the test body).
+    fn whoami_provider(agent: Arc<GossipAgent>, calls: Arc<AtomicUsize>) {
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let reply = match agent.request_principal(&req) {
+                    Ok(p) => p.name(),
+                    Err(e) => format!("refused:{e}"),
+                };
+                agent.service().rpc_respond(&req, reply.into_bytes());
+            }
+        });
+    }
+
+    fn whoami() -> crate::capability::Capability {
+        crate::capability::Capability::new("demo", "whoami")
+    }
+
+    fn task_body(skill: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
+            "params": {"skillId": skill, "message": {"role": "user", "parts": [{"type": "text", "text": "?"}]}},
+        })
+    }
+
+    fn cred(beta: &DomainId, export: &str, sk: &ed25519_dalek::SigningKey) -> PresentedCall {
+        let now = now_ms();
+        PresentedCall::sign(
+            &FederatedCaller {
+                origin_domain: beta.clone(),
+                principal: "svc/billing".into(),
+                export: export.into(),
+                issued_at_ms: now,
+                expires_at_ms: now + 60_000,
+            },
+            sk,
+        )
+    }
+
+    /// **The release gate's first leg.** Domain B discovers domain A's catalogue and invokes an
+    /// export over HTTP, with the provider told `federation:beta.example/svc/billing`; the export
+    /// B was not granted is refused before any byte is sent; a forged, an ungranted and a
+    /// revoked credential are refused at the gateway with no dispatch; and the two meshes'
+    /// tables show they never merged — now that something has crossed.
+    #[tokio::test]
+    async fn a_federated_call_crosses_and_the_meshes_still_never_merge() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(7);
+
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami", "demo/secret"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy::default(),
+        ));
+        let http_port = alloc_port();
+        let mut a = mesh(2, Some((http_port, Arc::clone(&edge)))).await;
+        let a0 = Arc::new(a.remove(0));
+        let a_rest = a;
+        let b = mesh(2, None).await;
+        {
+            let (a0, a_rest, b) = (&a0, &a_rest, &b);
+            poll_until(
+                || !a0.peers().is_empty() && a_rest.iter().all(|x| !x.peers().is_empty()) && b.iter().all(|x| !x.peers().is_empty()),
+                3_000,
+            )
+            .await;
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _reg = a0.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&a0), Arc::clone(&calls));
+        let cap_key = format!("cap/{}/demo/whoami", a0.node_id());
+        poll_until(|| a0.kv().get(&cap_key).is_some(), 5_000).await;
+
+        let client = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
+            vec![GatewayEndpoint { id: "gw-a0".into(), base_url: format!("http://127.0.0.1:{http_port}") }],
+            1, Duration::from_secs(30),
+        );
+
+        // 1. Before discovery: refused locally, the link is Down. No HTTP.
+        assert!(matches!(
+            client.call("demo/whoami", "?", Repeatability::AtMostOnce).await,
+            Err(ClientError::Link(LinkRefusal::Down { .. }))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // 2. Discovery: the catalogue is the grant, not the export list.
+        let exports = client.connect().await.expect("catalogue fetch");
+        assert_eq!(exports, vec!["demo/whoami".to_string()]);
+        assert_eq!(client.link_state(), LinkState::Ready);
+
+        // 3. The call crosses, and the provider is told who asked — not "the gateway".
+        let reply = client.call("demo/whoami", "?", Repeatability::AtMostOnce).await.expect("federated call");
+        assert_eq!(reply, crate::federation_principal("beta.example", "svc/billing"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // 4. An export the catalogue never named: refused by the resolver, before any byte.
+        assert!(matches!(
+            client.call("demo/secret", "?", Repeatability::AtMostOnce).await,
+            Err(ClientError::Resolve(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // 5. Plants at the gateway — each must be refused *without a dispatch*.
+        let raw = reqwest::Client::new();
+        let a2a = format!("http://127.0.0.1:{http_port}/a2a");
+        let catalog = format!("http://127.0.0.1:{http_port}/federation/catalog");
+        // 5a. Granted export, but a credential minted for a different one: WrongExport, -32003.
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/secret", &beta_sk).to_header_value())
+            .json(&task_body("demo/whoami")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32003, "{v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains("authorises"), "{v}");
+        // 5b. Named and signed, but not granted: NotPermitted, -32003.
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/secret", &beta_sk).to_header_value())
+            .json(&task_body("demo/secret")).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32003, "{v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains("policy does not grant"), "{v}");
+        // 5c. Forged: signed by a key alpha does not trust — refused at the auth layer, 401.
+        let (forger, _) = keypair(9);
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &forger).to_header_value())
+            .json(&task_body("demo/whoami")).send().await.unwrap();
+        assert_eq!(r.status(), 401);
+        // 5d. Tampered in transit: a field changed after signing.
+        let mut tampered = cred(&beta, "demo/whoami", &beta_sk);
+        tampered.principal = "svc/admin".into();
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, tampered.to_header_value())
+            .json(&task_body("demo/whoami")).send().await.unwrap();
+        assert_eq!(r.status(), 401);
+        // 5e. Malformed: tried to present, failed — refused, never anonymised.
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, "{not a credential")
+            .json(&task_body("demo/whoami")).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        // 5f. Two identities on one request.
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+            .header(axum::http::header::AUTHORIZATION, "Bearer anything")
+            .json(&task_body("demo/whoami")).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        // 5g. Streaming is not a federated call.
+        let mut subscribe = task_body("demo/whoami");
+        subscribe["method"] = serde_json::Value::String("tasks/sendSubscribe".into());
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+            .json(&subscribe).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32003, "{v}");
+        // 5h. The catalogue needs its reserved export: a call credential cannot fetch it.
+        let r = raw.get(&catalog).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+            .send().await.unwrap();
+        assert_eq!(r.status(), 403);
+        let r = raw.get(&catalog).send().await.unwrap();
+        assert_eq!(r.status(), 401, "no credential, no catalogue");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no plant reached the provider");
+
+        // 6. Anonymous A2A is unchanged: no credential, no bearer → dispatched as `anonymous`.
+        let r = raw.post(&a2a).json(&task_body("demo/whoami")).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::PRINCIPAL_ANONYMOUS, "{v}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // 7. Revocation at the provider, mid-session: the next call is refused at the auth
+        //    layer with no dispatch. The client learns it from the refusal, not from gossip.
+        edge.revoke(&beta);
+        match client.call("demo/whoami", "?", Repeatability::AtMostOnce).await {
+            Err(ClientError::Refused { status: 401, message, .. }) => {
+                assert!(message.contains("not in the trust bundle"), "{message}")
+            }
+            other => panic!("a revoked partner must be refused at the gateway, got {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // 8. The tables, after bytes crossed: two meshes. Non-vacuity of "bytes crossed": the
+        //    provider was reached exactly twice — the federated call and the anonymous one.
+        let a_nodes: Vec<&GossipAgent> = std::iter::once(a0.as_ref()).chain(a_rest.iter()).collect();
+        let b_nodes: Vec<&GossipAgent> = b.iter().collect();
+        assert_never_merged(&a_nodes, &b_nodes);
+        assert_eq!(a0.peers().len(), 1, "domain A's gateway node peers with its own mesh only");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        for n in a_nodes.iter().chain(b_nodes.iter()) {
+            n.shutdown().await;
+        }
+    }
+
+    /// **Disconnect, reconnect, revoke — on the client side; and a silent gateway.** A link
+    /// marked down refuses with no HTTP until the catalogue is fetched again (reconnected is not
+    /// ready); a client-side revocation is final, whatever the partner would have answered; a
+    /// silent gateway is `DeliveryUnknown` for an at-most-once call and a failover for a
+    /// repeatable one; a gateway with no edge refuses a presented credential rather than
+    /// anonymising it.
+    #[tokio::test]
+    async fn the_client_side_link_and_a_silent_gateway() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(11);
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy::default(),
+        ));
+        let http_port = alloc_port();
+        let mut a = mesh(1, Some((http_port, edge))).await;
+        let a0 = Arc::new(a.remove(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _reg = a0.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&a0), Arc::clone(&calls));
+        let cap_key = format!("cap/{}/demo/whoami", a0.node_id());
+        poll_until(|| a0.kv().get(&cap_key).is_some(), 5_000).await;
+
+        let dead_port = alloc_port();
+        let endpoints = vec![
+            GatewayEndpoint { id: "gw-dead".into(), base_url: format!("http://127.0.0.1:{dead_port}") },
+            GatewayEndpoint { id: "gw-live".into(), base_url: format!("http://127.0.0.1:{http_port}") },
+        ];
+        let client = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(), endpoints, 1, Duration::from_secs(30),
+        );
+
+        // connect tries the dead gateway, then the live one.
+        assert_eq!(client.connect().await.unwrap(), vec!["demo/whoami".to_string()]);
+
+        // At-most-once through the dead gateway (admitted first): unknown, never retried.
+        match client.call("demo/whoami", "?", Repeatability::AtMostOnce).await {
+            Err(ClientError::Outcome(CallOutcome::DeliveryUnknown { attempted_via, .. })) => {
+                assert_eq!(attempted_via, vec!["gw-dead".to_string()])
+            }
+            other => panic!("expected DeliveryUnknown via the dead gateway, got {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // Repeatable: the same first choice, then the failover carries it.
+        let reply = client.call("demo/whoami", "?", Repeatability::Repeatable).await.expect("failover");
+        assert_eq!(reply, crate::federation_principal("beta.example", "svc/billing"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Down: refused locally until reconnected; reconnect refreshes before new work.
+        client.disconnect();
+        assert_eq!(client.link_state(), LinkState::Down);
+        assert_eq!(client.last_catalogue(), None);
+        assert!(matches!(
+            client.call("demo/whoami", "?", Repeatability::Repeatable).await,
+            Err(ClientError::Link(LinkRefusal::Down { .. }))
+        ));
+        client.connect().await.unwrap();
+        assert!(client.call("demo/whoami", "?", Repeatability::Repeatable).await.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Revoked on this side: final. The fetch itself is not refused; the link never comes back.
+        client.revoke();
+        assert!(matches!(
+            client.call("demo/whoami", "?", Repeatability::Repeatable).await,
+            Err(ClientError::Link(LinkRefusal::Revoked { .. }))
+        ));
+        assert!(client.connect().await.is_ok());
+        assert!(matches!(
+            client.call("demo/whoami", "?", Repeatability::Repeatable).await,
+            Err(ClientError::Link(LinkRefusal::Revoked { .. }))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // A gateway with no edge refuses a presented credential rather than anonymising it.
+        let bare_port = alloc_port();
+        let bare = {
+            let gossip_port = alloc_port();
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = gossip_port;
+            cfg.http_port = Some(bare_port);
+            GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a()
+        };
+        bare.start().await.unwrap();
+        // The listener binds after `start` returns; wait for it rather than for a fixed time.
+        let http = reqwest::Client::new();
+        let bare_url = format!("http://127.0.0.1:{bare_port}/a2a");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let r = loop {
+            let sent = http
+                .post(&bare_url)
+                .header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+                .json(&task_body("demo/whoami"))
+                .send()
+                .await;
+            match sent {
+                Ok(r) => break r,
+                Err(_) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(20)).await,
+                Err(e) => panic!("the bare gateway never came up: {e}"),
+            }
+        };
+        assert_eq!(r.status(), 401);
+
+        bare.shutdown().await;
+        a0.shutdown().await;
     }
 }

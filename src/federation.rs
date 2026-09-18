@@ -7,9 +7,11 @@
 //!
 //! # What is here and what is deliberately not
 //!
-//! **Types and bytes only.** There is no transport, no discovery, no `federation/` KV prefix (§8 of
-//! the record forbids one, and `scripts/check-kv-namespaces.sh` enforces the absence). The
-//! invocation edge is A2A (§5), added in PR 4. Nothing here touches the wire.
+//! **The contract is types and bytes.** This file and `catalog`/`call`/`gateway`/`session` decide;
+//! none of them touches the wire. The transport's first arm (PR 8) is `edge` (provider side, `tls`)
+//! and `client` (consumer side, `gateway` + `tls`), which carry those decisions over HTTP and add
+//! none of their own. There is no `federation/` KV prefix (§8 of the record forbids one, and
+//! `scripts/check-kv-namespaces.sh` enforces the absence). The invocation edge is A2A (§5).
 //!
 //! # Why a length-prefixed canonical form and not canonical JSON
 //!
@@ -36,6 +38,13 @@ pub mod call;
 pub mod catalog;
 pub mod gateway;
 pub mod session;
+/// The transport's provider side (item 2 PR 8): the credential's wire form, the edge that
+/// authenticates and authorises it, the catalogue reply.
+#[cfg(feature = "tls")]
+pub mod edge;
+/// The transport's consumer side (item 2 PR 8): link, resolver and pool driven by HTTP.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub mod client;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

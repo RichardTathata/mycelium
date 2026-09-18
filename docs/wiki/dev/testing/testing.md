@@ -265,6 +265,35 @@ sides, until someone re-records deliberately. Verified by tampering one content 
 gate fails on that effect) and re-recording (identical bytes). Not built: the minimiser and a replay binary. Log:
 [`.log/2026-09-18-item6-pr7-replay-corpus.md`](../.log/2026-09-18-item6-pr7-replay-corpus.md).
 
+## The federation transport's two-mesh test (item 2 PR 8, 2026-09-18)
+
+`src/lib_tests.rs` → `federation_transport` (features `gateway` + `tls` + `a2a`, so it runs in the main
+`cargo test --lib --features tls,metrics,a2a,llm` job). Two real meshes in one process, bootstrapped only within
+themselves; domain A's first node also runs a gateway with `with_a2a()` and `with_federation_edge(...)`; domain
+B talks to it only through a `FederationClient` over `reqwest`. The PR 1 harness's `assert_never_merged` was
+lifted to a free function over `&[&GossipAgent]` so a node held in an `Arc` (the provider task needs
+`request_principal`) can be checked by the same code.
+
+What it proves, and how it is kept non-vacuous:
+
+- **Bytes crossed.** A counter on the provider: exactly two dispatches in the whole run — the federated call
+  and one anonymous A2A call (the unchanged path) — and *zero* from the eight plants at the gateway.
+- **Never merged, with bytes crossing.** The harness assertions run last, after the call; the gateway node's
+  peer table has exactly its own mesh.
+- **Refused before any byte** is asserted by the error variant (`Link(Down)`, `Resolve`), not by absence of a
+  dispatch alone.
+- **A silent gateway is a real one:** a second client lists a dead port first; at-most-once is
+  `DeliveryUnknown { attempted_via: ["gw-dead"] }`, repeatable fails over to the live one.
+
+**Readiness, not sleeps.** The gateway's listener binds after `start()` returns. The tests wait on the
+capability key (as the A2A caller test does) or, for a bare gateway with no capability, on a bounded
+connect loop — the first draft probed too early and failed on `ConnectionRefused` (recorded here so the next
+gateway test does not repeat it).
+
+**What it does not prove:** the traces leg of the release gate; anything about TLS (plain HTTP on loopback);
+policy change *mid-partition* (a revocation mid-session is exercised, a partition is not); the catalogue reply's
+integrity (unsigned in this arm).
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy
