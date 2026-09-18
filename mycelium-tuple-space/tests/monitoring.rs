@@ -84,6 +84,14 @@ async fn pressure_pheromone_hysteresis() {
     }
     let r = ts.put("s", Bytes::from_static(b"over")).await;
     assert!(matches!(r, Err(TupleError::Backpressure { .. })));
+    // Item 4 PR 5: the refusal is counted at the primary and reported beside the admitted and the
+    // taken — a visible outcome, not a silence — and the count is cumulative.
+    let adm = ts.admission(Some("s")).expect("the primary reports admission");
+    let s = adm.iter().find(|a| a.stage.as_ref() == "s").expect("stage s");
+    assert_eq!((s.admitted, s.rejected, s.taken, s.high_watermark), (10, 1, 0, 10));
+    let _ = ts.put("s", Bytes::from_static(b"over-again")).await;
+    let s = ts.admission(Some("s")).unwrap().into_iter().find(|a| a.stage.as_ref() == "s").unwrap();
+    assert_eq!(s.rejected, 2, "cumulative");
 
     // Pheromone appears within one metrics cadence.
     let node = agent.node_id().to_string();

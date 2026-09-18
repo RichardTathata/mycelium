@@ -462,6 +462,7 @@ maintained in `ROADMAP.md`:
 | the inferred `>=` acknowledgement in `set_with_min_acks` | **resolved 2026-09-15 (PR 4a)** | replaced by the exact-identity (`content_hash`) ack; no legacy flag was needed, because the success path it would have preserved was unreachable (§8, ADR §1a) |
 | `ConsensusResult::Committed { persisted: bool }` | 2.4.2 | the D24 tri-state |
 | `GatewayAgent`-as-caller dispatch (the node acting for gateway clients) | — | item 7's `GatewayCaller` |
+| `BoardConfig` gaining `high_watermark: Option<u64>` while not `#[non_exhaustive]` (item 4 PR 5, 2026-09-18) | 2.8.0 | an exhaustive struct literal of `BoardConfig` breaks; the documented `..Default::default()` pattern does not — same ledger entry as the row below, one more struct |
 | `GossipConfig` (and the operator-constructed config structs beside it) **not** being `#[non_exhaustive]` | — | mark them `#[non_exhaustive]` at `3.0.0`: every release adds config fields, and each such addition silently breaks an exhaustive struct literal today (found by an external review of WP5, 2026-09-14). One announced break ends a series of unannounced ones; the documented `Default` + assignment pattern is unaffected either way |
 
 None of these *requires* `3.0.0`; each is additive-with-deprecation on 2.x. The ledger exists so the major, if

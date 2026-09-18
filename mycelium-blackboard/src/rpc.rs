@@ -16,6 +16,10 @@ use std::sync::Arc;
 use crate::{AttrMatch, Blackboard, Fact, Predicate};
 
 pub(crate) const ST_OK: u8 = 0;
+/// A `post` refused at admission (item 4 PR 5): `[ST_BACKPRESSURE][available u64][high_watermark u64]`.
+/// Code 2 was unused; a pre-2.8 client decodes it through `status_err` as a generic `Rpc` error,
+/// which is the same refusal with less detail, never a false success.
+pub(crate) const ST_BACKPRESSURE: u8 = 2;
 pub(crate) const ST_NOT_FOUND: u8 = 3;
 pub(crate) const ST_ERR: u8 = 4;
 
@@ -192,6 +196,15 @@ pub(crate) fn dec_opt_fact_resp(resp: &Bytes) -> Result<Option<Fact>, crate::Bla
 fn status_err(resp: &Bytes) -> crate::BlackboardError {
     match resp.first() {
         Some(&ST_NOT_FOUND) => crate::BlackboardError::NotFound,
+        Some(&ST_BACKPRESSURE) => {
+            let word = |at: usize| resp.get(at..at + 8).and_then(|s| s.try_into().ok()).map(u64::from_le_bytes);
+            match (word(1), word(9)) {
+                (Some(available), Some(high_watermark)) => {
+                    crate::BlackboardError::Backpressure { available, high_watermark }
+                }
+                _ => crate::BlackboardError::Rpc("malformed backpressure response".into()),
+            }
+        }
         _ => crate::BlackboardError::Rpc("board primary returned error".into()),
     }
 }
@@ -230,6 +243,12 @@ pub(crate) fn spawn_primary_handlers(bb: &Arc<Blackboard>) -> Vec<tokio::task::J
         match (get_attrs(&p, &mut off), get_payload(&p, &mut off)) {
             (Some(attrs), Some(payload)) => match me.serve_post(attrs, payload) {
                 Ok(id) => { let mut b = vec![ST_OK]; b.extend_from_slice(&id.to_le_bytes()); b }
+                Err(crate::BlackboardError::Backpressure { available, high_watermark }) => {
+                    let mut b = vec![ST_BACKPRESSURE];
+                    b.extend_from_slice(&available.to_le_bytes());
+                    b.extend_from_slice(&high_watermark.to_le_bytes());
+                    b
+                }
                 Err(_) => vec![ST_ERR],
             },
             _ => vec![ST_ERR],
@@ -351,5 +370,27 @@ impl Blackboard {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    /// Item 4 PR 5: the refusal crosses the RPC as itself — available and watermark intact — and a
+    /// truncated frame is a malformed response, never a false success.
+    #[test]
+    fn a_backpressure_status_round_trips_with_its_numbers() {
+        let mut b = vec![ST_BACKPRESSURE];
+        b.extend_from_slice(&7u64.to_le_bytes());
+        b.extend_from_slice(&5u64.to_le_bytes());
+        match dec_id_resp(&Bytes::from(b.clone())) {
+            Err(crate::BlackboardError::Backpressure { available, high_watermark }) => {
+                assert_eq!((available, high_watermark), (7, 5))
+            }
+            other => panic!("expected the refusal with its numbers, got {other:?}"),
+        }
+        b.truncate(9);
+        assert!(matches!(dec_id_resp(&Bytes::from(b)), Err(crate::BlackboardError::Rpc(_))), "truncated is malformed");
     }
 }

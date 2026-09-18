@@ -74,6 +74,10 @@ pub(crate) struct StageState {
     pub(crate) take_total: AtomicU64,
     /// Puts delivered directly to a parked worker (never queued).
     pub(crate) hot_total: AtomicU64,
+    /// Puts **refused at admission** because the stage stood at its high watermark (item 4 PR 5:
+    /// a rejection is a visible outcome, reported beside the admitted and the taken, never a
+    /// silence). Counted here, at the primary, which owns this deficit.
+    pub(crate) rejected_total: AtomicU64,
     queue_waits_us: Mutex<VecDeque<u32>>,
 }
 
@@ -91,6 +95,7 @@ impl StageState {
             put_total: AtomicU64::new(0),
             take_total: AtomicU64::new(0),
             hot_total: AtomicU64::new(0),
+            rejected_total: AtomicU64::new(0),
             queue_waits_us: Mutex::new(VecDeque::with_capacity(64)),
         }
     }
@@ -151,6 +156,7 @@ pub(crate) struct StageMetrics {
     pub put_total: u64,
     pub take_total: u64,
     pub hot_total: u64,
+    pub rejected_total: u64,
     pub queue_p99_us: u32,
 }
 
@@ -212,6 +218,7 @@ impl TupleStore {
     pub(crate) fn put(&self, stage: &str, payload: Bytes) -> Result<u64, TupleError> {
         let state = self.stage(stage);
         if state.depth.load(Ordering::Relaxed) >= self.high_watermark {
+            state.rejected_total.fetch_add(1, Ordering::Relaxed);
             return Err(TupleError::Backpressure { retry_after_ms: 500 });
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -355,6 +362,7 @@ impl TupleStore {
     pub(crate) fn put_keyed(&self, stage: &str, key: Arc<str>, payload: Bytes) -> Result<u64, TupleError> {
         let state = self.stage(stage);
         if state.depth.load(Ordering::Relaxed) >= self.high_watermark {
+            state.rejected_total.fetch_add(1, Ordering::Relaxed);
             return Err(TupleError::Backpressure { retry_after_ms: 500 });
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -681,8 +689,25 @@ impl TupleStore {
                 put_total: state.put_total.load(Ordering::Relaxed),
                 take_total: state.take_total.load(Ordering::Relaxed),
                 hot_total: state.hot_total.load(Ordering::Relaxed),
+                rejected_total: state.rejected_total.load(Ordering::Relaxed),
                 queue_p99_us: state.queue_p99_us(),
                 stage,
+            })
+            .collect()
+    }
+
+    /// Admission at each stage — what was admitted, what was refused at the watermark, what was
+    /// taken — for one stage or all (item 4 PR 5). Lock-free, like `depth`.
+    pub(crate) fn admission(&self, stage: Option<&str>) -> Vec<crate::StageAdmission> {
+        let map = self.stages.pin();
+        map.iter()
+            .filter(|(name, _)| stage.is_none_or(|s| s == name.as_ref()))
+            .map(|(name, state)| crate::StageAdmission {
+                stage: Arc::clone(name),
+                admitted: state.put_total.load(Ordering::Relaxed),
+                rejected: state.rejected_total.load(Ordering::Relaxed),
+                taken: state.take_total.load(Ordering::Relaxed),
+                high_watermark: self.high_watermark,
             })
             .collect()
     }
