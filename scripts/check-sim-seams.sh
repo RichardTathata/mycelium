@@ -30,6 +30,14 @@
 #   through a type alias, is invisible to it. That is a real gap, and the honest mitigation is that
 #   the baseline makes *movement* visible even when it cannot attribute it.
 #
+#   The test-module skip runs from a `#[cfg(test)]` to the next `}` at column 0. That is right for a
+#   top-level item and WRONG for a `#[cfg(test)]` on an item *inside* an `impl` or `mod`: the skip
+#   then swallows the rest of the enclosing block, and production code after the gated item goes
+#   uncounted. Found 2026-09-18 when a test-only method inside `impl Journal` hid `append`'s
+#   `tokio::time::timeout` — the baseline dropped by one for a file whose sites had not changed.
+#   Put test-only methods in a separate top-level `#[cfg(test)] impl` block; a baseline that moves
+#   when no site moved is the signal that someone did not.
+#
 # EXEMPT
 #   `mycelium-sim/**` and `sim_seam.rs` (the seams themselves — §6 exempts the seam
 #   implementations, which is where these calls are supposed to live), test files, and each

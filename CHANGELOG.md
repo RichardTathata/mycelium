@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — the node-local journal is its own mechanism (item 4 PR 3a, a pure move)
+
+- **`agent::journal`** now holds the append-only, fsynced, never-gossiped journal — the file, the bounded queue,
+  the writer, the reader and its cursor — and **`EvidenceJournal` is a thin AE profile over it**. Every public
+  name the evidence journal exported is still exported from the same place, unchanged; the AE journal still
+  records its queue under the replay stream `ae/journal`, so a trace recorded before the split still matches.
+  The rights ledger (item 4 PR 3) is the mechanism's second user; two fsynced journals side by side is how
+  guarantees drift, which is why the move comes first.
+- The replay-seam **stream is now a parameter of `Journal::open`**, not a constant — the inventory's rule is
+  *stream identity per destination*, so a replay of one journal can never hand another its verdict.
+- **Gated on its first user's features for now.** An ungated module with no user in a minimal build is dead code
+  there, and `--no-default-features` clippy said so on the first attempt — the feature-gated dead-code trap,
+  caught by the gate built for it. PR 3 ungates the journal and makes `sha2` unconditional in the same change
+  the ledger lands, when there is a user in every build.
+- The eleven mechanism tests moved with the mechanism; one wrapper pin added. The seams baseline was
+  regenerated because five forbidden sites moved file, one to one.
+- **A blind spot in the forbidden-call check, found by the move.** The first regeneration counted *four*
+  sites in the new file for the same five calls: the check skips from a `#[cfg(test)]` to the next brace at
+  column 0, so a test-only method gated *inside* the `impl` hid everything after it — including `append`'s
+  `tokio::time::timeout` — from the gate. The test-only helpers now live in a separate top-level
+  `#[cfg(test)] impl` block, and the script's "what it cannot see" section records the rule: a baseline that
+  moves when no site moved is the signal.
+
+
 ### Added — the adaptive-stability contract types (item 4 PR 2)
 
 - **`mycelium::control`** — pure decisions only; no governor changes, no actuator touched, the rights ledger is

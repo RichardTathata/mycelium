@@ -25,10 +25,10 @@
 3 src/agent/consensus_handle.rs
 2 src/agent/emergent_groups.rs
 2 src/agent/emergent.rs
-5 src/agent/evidence_journal.rs
 1 src/agent/helpers.rs
 35 src/agent/http.rs
 2 src/agent/intent.rs
+5 src/agent/journal.rs
 1 src/agent/kv_quorum_ext.rs
 6 src/agent/lifecycle.rs
 3 src/agent/lock_service.rs

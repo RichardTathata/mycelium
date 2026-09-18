@@ -43,6 +43,13 @@ pub(crate) mod gateway_caller;
 /// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod action_evaluator;
+/// The node-local fsynced journal — the *mechanism* (item 4 PR 3a): the AE evidence journal is a
+/// thin profile over it and the rights ledger will be the second, because a second journal beside
+/// the first is how guarantees drift. Gated on its first user's features until the ledger lands
+/// (item 4 PR 3), which ungates it — in a build with no user every item here is dead code, and
+/// `--no-default-features` clippy is the gate that says so.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod journal;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod evidence_journal;
 #[cfg(feature = "gateway")]
