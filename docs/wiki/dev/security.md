@@ -155,3 +155,31 @@ audit 2026-07-15 pass 3).
 >   like a `PREV_WIRE_VERSION` window in [cert-rotation](../../operations/cert-rotation.md).
 >
 > Full design: [`docs/design/identity-authentication.md`](../../design/identity-authentication.md).
+
+## Federated domains — the trust boundary (v3 item 2, 2026-09-17)
+
+Record `docs/design/federated-domains.md`; code `src/federation.rs` + `src/federation/`. **A domain is one
+independently admitted gossip mesh.** Federation connects *exported services* across domains and **never joins
+transports** — the two meshes stay two meshes, which is the whole security claim. Three trust relationships kept
+apart (record §3): admission into a mesh · trust in a partner domain's identity · authorisation of one call.
+
+The decisions that carry the boundary, each a checked thing rather than a sentence:
+
+- **D5 — the invocation edge *is* A2A.** No second protocol; `FederatedCaller` / `verify_federated_call`
+  (`federation/call.rs`) sign and verify the existing call shape.
+- **D6 — reuse the cryptography, never the trust.** OIDC's primitives are borrowed; its issuers are not trusted.
+  A `TrustBundle` (`federation.rs`) **decides which key** may sign a partner's descriptor or policy, so a
+  self-signed descriptor is not authorised by being internally consistent. Rotation and revocation are first-class.
+- **D7 — no `federation/` KV prefix.** Foreign state never enters the gossip medium. `scripts/check-kv-namespaces.sh`
+  (`make check`, CI) fails on a forbidden prefix literal in production code — the plan had claimed this sweep
+  existed; it was built at PR 1 when it turned out not to.
+- **D25 — the NANDA boundary.** AgentFacts publication is the *edge*, not the trust root ([companions](companions/companions.md)).
+- **Canonical encodings** are length-prefixed, fixed-width LE, with **domain-separation tags** — chosen over
+  canonical JSON because we own both ends. A policy signature can never authenticate a descriptor.
+- **A gateway that goes silent is handled** (`GatewayPool`, `on_gateway_silent`); a `PartnerLink` has a
+  `Refreshing` state because *reconnected is not ready*; revocation mid-partition is a first-class transition.
+
+**What is not built:** the transport. The two-mesh harness is scaffolding, `examples/federated_domains.rs`
+says so when it runs, and the record's release gate — *prove from membership tables, consensus state and traces
+that the meshes never merged* — cannot be met until there is a transport to sever. Ledger:
+[history](history.md) → *item 2*.

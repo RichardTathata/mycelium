@@ -24,7 +24,7 @@ The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/expl
 
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
-Record `docs/design/knowledge-layer.md` (PR 1, the ADR, 2026-09-17); code `src/knowledge/` behind `tls`.
+Record `docs/design/knowledge-layer.md` (PR 1, the ADR, #243, 2026-09-17); code `src/knowledge/` behind `tls`.
 **PR 2 (#254)** the four typed records — claim · observation · **assessment** (judging is not recording) ·
 acceptance decision — with six link kinds and `RecordId { issuer, digest }` so a retraction is checkable
 without a fetch; **PR 3 (#255)** the store: heads in the gossip medium, records in an authorized store, so
@@ -45,6 +45,72 @@ construction — §6 made structural); a verified AgentFacts document as a **cla
 which resolution can never count as evidence. `mycelium::hlc` made public (additive) on the way. **The
 behavioural claim — that evidence-aware selection picks better providers — is research-track (§13) and
 unmade.** Log: [`.log/2026-09-18-item3-knowledge-layer.md`](.log/2026-09-18-item3-knowledge-layer.md).
+
+## v3 contracts axis — item 2: federated domains, PRs 1–7 — 2026-09-17 (unreleased, #242, #245–#253)
+
+Record `docs/design/federated-domains.md` (the ADR, #242); code `src/federation.rs` +
+`src/federation/{catalog,call,gateway,session}.rs`. A domain is **one independently admitted gossip mesh**;
+federation connects *exported services* and **never joins transports**. **PR 1 (#245)** the enforced domain
+profile, the two-mesh harness (*scaffolding* — it stands in for a transport that does not exist), and
+`scripts/check-kv-namespaces.sh`: the plan claimed a namespace sweep existed and it did not, so D7 (no
+`federation/` KV prefix) became a checked invariant in `make check` + CI. **PR 2 (#246)** `DomainId`,
+`DomainDescriptor`, `DomainPolicy`, `TrustBundle`/`PartnerTrust` with rotation and revocation, pinned test
+vectors; a **length-prefixed canonical encoding with domain-separation tags** rather than canonical JSON (we
+own both ends, so the encoding has no freedom left in it), so a policy signature can never authenticate a
+descriptor, and **the trust bundle decides which key** — a self-signed descriptor is not authorised by being
+internally consistent. **PR 3 (#249)** `filtered_catalog` + `RemoteResolver` — exported services only.
+**PR 4 (#250)** `FederatedCaller` / `verify_federated_call`: **D5, the invocation edge *is* A2A**, not a
+second protocol; **D6, reuse OIDC's cryptography, never its trust**. **PR 5 (#251)** `GatewayPool`,
+two-gateway operation, budgets, outcomes. **PR 6 (#252)** `PartnerLink` — partition, reconnect (a
+`Refreshing` state: *reconnected is not ready*), revocation, rotation. **PR 7 (#253)**
+`examples/federated_domains.rs` — runs the lifecycle and **ends by printing what it did not demonstrate** —
+and the guide. **Not done, stated plainly:** the federation transport. The record's release gate (*prove from
+membership tables, consensus state and traces that the meshes never merged*) is not met, because there is no
+transport to sever. Wiki: [security](security.md) → *Federated domains*.
+
+## v3 contracts axis — item 5: scoped mandates, PRs 1–5 + D4 + two follow-ons — 2026-09-17/18 (unreleased, #244, #256–#259, #261–#263)
+
+Record `docs/design/scoped-mandates.md` (the ADR, #244; log
+[`.log/2026-09-17-item5-pr1-mandates-adr.md`](.log/2026-09-17-item5-pr1-mandates-adr.md)); code `src/mandate.rs` +
+`src/mandate/{handover,restart,scenario_b,lock_audit,partition}.rs`, `mycelium-wiki/src/mandate_fence.rs`.
+Everything is judged by one sentence: *once the resource acknowledges epoch E2, nothing authorized only under
+E1 can commit — even if its holder refreshes, retries, reconnects or restarts.* **PR 2 (#256)** the contract:
+`Mandate`, `ResourceAuthority::check` (**epoch first**), `MandateRefusal::Superseded` — **never `Conflict`**,
+because `Conflict` is the retry loop's input and the loop would launder a revocation; epoch and term identity
+kept separate; the three `LifecycleEvent`s recorded apart. **PR 3 (#257)** the fence *inside* `GitStore`'s own
+transactions (D26): `update_ref_stdin` puts a `verify` of the mandate ref in the same `update-ref --stdin`
+transaction as the content write; `push_args` adds `--atomic` + `--force-with-lease` on **every** push. The
+remote half (pre-receive hook) is untested — stated. **PR 4 (#258)** `HandoverJournal::inherit()` — the
+successor inherits **history, not conclusions**; every inherited conclusion is attributed; incumbency rules.
+**PR 5 (#259)** `RestartGuard` fail-closed (a test demonstrates that assuming epoch `0` on restart readmits
+every revoked holder at once); durable proposals via the existing `KvHandle::append` under `log/wiki/`, not a
+service database. **D4 discharged (#261)** — `lock_audit.rs`: the audit read `distributed_lock` and found the
+premise wrong: it reads back the converged value and hands a guard **only** to the proposer whose value
+survived, so losers hold no token — **no second fence**; what `LockService` lacks is *entitlement* (no
+appointer, no scope), not exclusion. **§6 of the adopted record was amended, dated**, rather than rewritten;
+D2's baseline (owner-authorized appointment) stands for a narrower reason. **#262** the mutation-fence gate
+(`scripts/check-wiki-mutation-fence.sh`, in `make check` + CI) makes "every mutation path protected"
+checkable and **names the two exempt sites** — `refresh` (adopts the fenced remote head) and `publish`'s
+splice retry (moves the *local* ref without re-verifying; the push is fenced, so the remote is protected;
+recorded §7.2). **#263** the partition table (`partition.rs`) — **not a fence**, a client-side refusal to
+*promise*; derived from *expiry is locally decidable, revocation is not*. The decisive test is scenario B
+(item 6 PR 5, #260, below). Wiki: [companions/wiki](companions/wiki.md) → *The mandate fence*.
+
+## v3 contracts axis — item 6 PRs 4–5: the two replay scenarios — 2026-09-17 (unreleased, #241, #260)
+
+**PR 4 (#241)** scenario A, the WAL/snapshot race (`mycelium-core/src/persistence.rs`, log
+[`.log/2026-09-17-item6-pr4-wal-snapshot-scenario.md`](.log/2026-09-17-item6-pr4-wal-snapshot-scenario.md)): the
+`cfg(test)` **merge-removed witness** (`MergeRemoved`, an RAII guard) that must fail; the fs seams restructured
+to **decide before acting** (`kernel_fs` + `planned_fs`) so an injected fault actually prevents the effect;
+and the **canonical entry sort** — replaying found that two nodes with identical logical state wrote
+byte-different snapshots, because papaya's iteration order leaked into the file. Three bugs found *by
+replaying*: replay suppressed writes so a run could not read its own; effect requests embedded absolute paths
+so no bundle replayed elsewhere; a fault did not prevent the effect. Phase A exit gate met: the race replays
+from a bundle and its witness fails. **PR 5 (#260)** scenario B (`src/mandate/scenario_b.rs`): a **schedule
+sweep, not five hand-written tests** — the invariant asserted after *every step of every schedule*; the ADR's
+named case (revocation with **no** subsequent write — idle schedules that knock much later) included;
+non-vacuous twice (a resource that ignores its installed epoch is caught; a *current* mandate still commits);
+the sweep asserts its own size. Wiki: [testing](testing/testing.md) → *Replay scenarios A and B*.
 
 ## v3 contracts axis — item 7 gateway caller identity — 2026-09-13 (unreleased, main)
 
