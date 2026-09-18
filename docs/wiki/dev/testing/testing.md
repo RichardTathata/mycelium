@@ -333,6 +333,70 @@ test (its edge is unkeyed and its client does not require a signature — the si
 tests above); anything under the `sim` kernel (the choreography is wall-clock, with structural polls); the rogue-CA plant is a
 timing-bounded negative (1.5 s), with gw2's join as its positive control.
 
+## The two-mesh Docker suite (item 2 PR 10b, 2026-09-18)
+
+```bash
+make test-federation          # ~4 min after the image build; CI job `federation`
+make test-federation-clean    # tear down, including the plant
+make federation-keys          # derive the suite's public keys from its fixed seeds
+```
+
+The same choreography as the in-process test above, with the two caveats that test could not
+remove: **process isolation** (one container per node) and a **real network severance**
+(`docker network disconnect`). This is the only place item 2's release gate is claimed without a
+caveat. Files: `examples/federation_node.rs` (one binary, four roles — `member`, `gateway`,
+`probe`, `keys`), `docker/docker-compose.federation.yml`, `docker/Dockerfile.federation`,
+`tests/integration/run_federation.sh`.
+
+**Four networks, and why the fourth is not optional.** `alpha-net` and `beta-net` carry each mesh;
+`edge` carries the federation path (alpha's two gateways, beta's probe); `control` carries the
+runner's commands to the probe. The runner severs the link by disconnecting the probe from `edge` —
+if it drove the probe over `edge` it would cut its own control channel in the same instant, and the
+test would hang instead of observing. The runner is deliberately **not** on `edge`.
+
+**Everything is asserted from a table, never a log line.** Each node serves `/fed-admin/tables`
+(membership, the `cap/ grp/ sys/ consensus/` entries with keys *and* values, and
+`connected_peers`), plus propose / committed / kv / policy / revoke. Those routes mount through
+`with_http_routes` **outside** `/gateway/`, so they are unauthenticated by the library's documented
+rule for merged routers — they are test-only, on a private network, and nothing in `src/` depends
+on them.
+
+**What it found, which is why it exists.** With the edge network disconnected the client **hung**
+instead of returning. A *refusing* partner sends a TCP reset and fails fast; a **blackholed** one —
+interface gone, default route still present — sends nothing, and an unbounded connect waits
+forever. Since PR 5 promises `DeliveryUnknown` for a silent gateway, a client that never returns
+cannot deliver that verdict: a contract defect, not a test artefact. Fixed with a bounded HTTP
+client (`FederationClient::with_timeouts`, defaults 5 s connect / 30 s request) and pinned
+in-process by `a_blackholed_gateway_is_unknown_within_a_bound_rather_than_hanging`, which points a
+client at `192.0.2.1` (RFC 5737 TEST-NET-1) and asserts the **bound**, not the error — on a host
+that answers `ENETUNREACH` the call fails fast and the bound still holds. **The in-process test
+could not have found this:** its "severance" is a shut-down gateway, and a refusal fails fast.
+
+**Four things the first drafts got wrong, recorded so the next Docker suite does not repeat them:**
+- *The harness cannot share the path it severs* (the four-network point above).
+- *A bind mount of the repo is empty* on any host whose checkout is outside Docker Desktop's
+  file-sharing list — the runner exited 127 on a script that was plainly there. The script is baked
+  into the runner image instead, and its Dockerfile sits in `tests/integration/` because the
+  repo-root `.dockerignore` excludes that directory from the root context on purpose.
+- *The runner image has `docker-cli`, not the compose plugin*, and no compose file is mounted into
+  it. The admission plant therefore starts with `docker run`, which is why the image and the CA
+  volumes carry pinned names (`mycelium-federation-node:test`, `mycelium-fed-{alpha,beta}-ca`).
+- *Two shell bugs cost a full run each.* `${2:-{}}` closes the expansion at the first `}` and
+  appends a stray one, silently corrupting every request carrying a body — which is why `connect`
+  passed while `call` did not. And `sh -c "post …"` spawns a shell where the helper function does
+  not exist: 26 checks failed for that reason alone while the code under test was fine. Every check
+  now calls a function **in the runner's own shell**, and `check` prints the last probe body on
+  failure.
+
+**Non-vacuity.** The plant asserts the rogue container is *up* before asserting it has no peers, so
+"beta's CA cannot join alpha" is about admission rather than about a container that failed to
+start; the capability polls before the first call make "the call crossed" a statement about
+federation rather than about a race with gossip.
+
+**What it does not prove:** TLS on the federation edge (intra-mesh traffic is TLS under each
+domain's CA, as the enforced profile requires; the gateways' HTTP is plain inside the compose
+network); a hostile network between domains; more than two domains; anything under the `sim` kernel.
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy

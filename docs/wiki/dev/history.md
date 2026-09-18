@@ -372,6 +372,36 @@ re-addressed reply breaks its own signature. The wire gained three fields, `sign
 reader still parses. Remaining in row 10: the Docker two-mesh suite and SDK verbs. Log:
 [`.log/2026-09-18-item2-pr10a-signed-catalogue.md`](.log/2026-09-18-item2-pr10a-signed-catalogue.md).
 
+## v3 contracts axis — item 2 PR 10b: the two-mesh Docker suite; the gate met without a caveat — 2026-09-18 (unreleased)
+
+PR 9 met item 2's release gate in one process and named what that left open: a shared address space, and a
+"severance" that was a shut-down gateway. This suite removes both — one container per node, and the federation
+link cut with `docker network disconnect`. `make test-federation` (CI job `federation`);
+`examples/federation_node.rs` (one binary, four roles: `member`, `gateway`, `probe`, `keys`),
+`docker/docker-compose.federation.yml`, `docker/Dockerfile.federation`, `tests/integration/run_federation.sh`.
+Two meshes of real containers under two auto-generated CAs, the enforced profile everywhere; every assertion
+reads a node's own `/fed-admin/tables` (membership, the `cap/ grp/ sys/ consensus/` entries with keys *and*
+values, `connected_peers`), never a log line. **Two design findings, both caught by reading the first draft
+rather than by running it.** *Four networks, not three:* the runner severs the link by disconnecting the probe
+from `edge`, so it must not drive the probe over `edge` — the probe also sits on `control`, which only the
+runner shares, and the runner is not on `edge` at all; the harness's plane is deliberately not the path under
+test. *The runner image has `docker-cli`, not the compose plugin*, and the compose file is not mounted into it,
+so the admission plant (a node holding beta's CA, bootstrapped at alpha) starts with `docker run` — which is
+why the image and the CA volumes carry pinned names. The plant asserts the rogue is *up* before asserting it
+has no peers, so the negative is about admission rather than a dead container. **The defect it found, which
+is the point of building it:** with the edge disconnected the client *hung* rather than returning — a refusing
+partner sends a TCP reset and fails fast, a **blackholed** one (interface gone, default route still present)
+sends nothing, and an unbounded connect waits forever; since a silent gateway is contractually
+`DeliveryUnknown`, a client that never returns cannot deliver that verdict. Fixed by bounding the client's HTTP
+(5 s connect / 30 s request, `FederationClient::with_timeouts`) and pinned in-process against RFC 5737
+TEST-NET-1 by `a_blackholed_gateway_is_unknown_within_a_bound_rather_than_hanging`, which asserts the *bound*
+rather than the error. **The in-process choreography could not have found it** — its severance is a shut-down
+gateway, and a refusal fails fast; that is precisely why the record asked for this suite. Keys are **derived**
+(`FED_ROLE=keys`, `make federation-keys`): a mistyped public key would read as `BadSignature`, a defect in the
+thing under test rather than in its fixture. **With this the gate is met without a caveat.** Still open (row
+11): SDK verbs, TLS on the federation edge itself, a hostile network between domains, more than two domains.
+Log: [`.log/2026-09-18-item2-pr10b-docker-two-mesh.md`](.log/2026-09-18-item2-pr10b-docker-two-mesh.md).
+
 ## v3 contracts axis — item 5: scoped mandates, PRs 1–5 + D4 + two follow-ons — 2026-09-17/18 (unreleased, #244, #256–#259, #261–#263)
 
 Record `docs/design/scoped-mandates.md` (the ADR, #244; log

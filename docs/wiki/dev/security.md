@@ -206,8 +206,13 @@ reply is signed (PR 10a, 2026-09-18):** `CatalogReply` is signed under the domai
 form that covers the domain **and the partner it was filtered for**, so a reply cannot be replayed to another
 partner or answered by a gateway without the key; `FederationEdge::with_signing_key` signs,
 `FederationClient::with_partner_key` requires — an unsigned, forged, wrong-domain or misaddressed catalogue is
-`ClientError::Catalogue` and the link stays `Down`. Freshness stays the resolver's job. **What is still not
-built:** the Docker two-mesh suite (process isolation and a real network severance are its claim, not this
-test's), SDK verbs, TLS on the edge in the test (run the edge behind `gateway_tls`), and streaming
+`ClientError::Catalogue` and the link stays `Down`. Freshness stays the resolver's job. **The gate is met
+without a caveat (PR 10b, 2026-09-18):** the two-mesh **Docker** suite runs the same choreography with one
+container per node and the federation link cut by `docker network disconnect` — the two things the in-process
+test could not claim. `make test-federation`; CI job `federation`; files `examples/federation_node.rs`,
+`docker/docker-compose.federation.yml`, `tests/integration/run_federation.sh`. Every assertion reads a node's
+own tables, never a log line. **What is still not built:** SDK verbs, TLS on the federation edge itself (run it
+behind `gateway_tls`; intra-mesh traffic is already TLS under each domain's CA, which the enforced profile
+requires), a hostile network between domains, more than two domains, and streaming
 (`tasks/sendSubscribe` under a credential is refused: federated calls are unary, §5).
 `examples/federated_domains.rs` still runs in one process and says so. Ledger: [history](history.md) → *item 2*.

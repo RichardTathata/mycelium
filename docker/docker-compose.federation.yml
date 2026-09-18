@@ -1,0 +1,209 @@
+# The two-mesh federation suite (v3 item 2 PR 10b) — item 2's release gate with process isolation
+# and a real network severance, which the in-process choreography (src/lib_tests.rs) cannot claim.
+#
+#   make test-federation
+#
+# Topology. Two meshes that share nothing: domain **alpha** (a1, a2, gw1, gw2) on `alpha-net` under
+# one auto-generated CA (volume `mycelium-fed-alpha-ca`), domain **beta** (b1, b2) on `beta-net`
+# under another (`mycelium-fed-beta-ca`). The only path between the domains is `edge`: alpha's two
+# gateways and beta's probe — the consumer side, one `FederationClient` behind a control API, not a
+# mesh node.
+#
+# **Four networks, and why the fourth exists.** The runner severs the federation link by
+# `docker network disconnect mycelium-fed-edge mycelium-fed-beta-probe`. If the runner drove the
+# probe over that same network it would cut its own control channel, so the probe also sits on
+# `control`, which only the runner shares. That is the harness's plane, deliberately not the
+# federation path — and it is why the runner is **not** on `edge` at all.
+#
+# Static IPs: a node id is `ip:port`, and a gateway sits on two networks, so its mesh-side address
+# is passed explicitly (`MYCELIUM_HOSTNAME`) rather than guessed from `hostname -I`.
+#
+# Keys. Alpha signs catalogues under seed 11…11, beta signs credentials under 22…22; the public
+# halves arrive as `ALPHA_PUBLIC_KEY` / `BETA_PUBLIC_KEY` from the Makefile, which derives them
+# (`make federation-keys`). Test material, in the clear on purpose.
+#
+# The image and volume names are pinned (`image:`, `name:`) because the runner starts the
+# admission plant with `docker run` and needs to name both.
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.federation
+  image: mycelium-federation-node:test
+  restart: "no"
+  environment: &node-env
+    RUST_LOG: "warn,federation_node=info"
+    MYCELIUM_PORT: "57000"
+    MYCELIUM_HTTP_PORT: "8300"
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:8300/ready"]
+    interval: 3s
+    timeout: 3s
+    retries: 40
+    start_period: 5s
+
+services:
+  alpha-a1:
+    <<: *node
+    container_name: mycelium-fed-alpha-a1
+    environment:
+      <<: *node-env
+      FED_ROLE: member
+      FED_DOMAIN: alpha.example
+      FED_CA_DIR: /ca
+      FED_EXPORTS: "demo/whoami,demo/secret"
+      MYCELIUM_HOSTNAME: 172.30.0.11
+      MYCELIUM_PEERS: "172.30.0.12:57000,172.30.0.13:57000"
+    volumes: [ "alpha-ca:/ca" ]
+    networks:
+      alpha-net: { ipv4_address: 172.30.0.11 }
+
+  alpha-a2:
+    <<: *node
+    container_name: mycelium-fed-alpha-a2
+    environment:
+      <<: *node-env
+      FED_ROLE: member
+      FED_DOMAIN: alpha.example
+      FED_CA_DIR: /ca
+      MYCELIUM_HOSTNAME: 172.30.0.12
+      MYCELIUM_PEERS: "172.30.0.11:57000,172.30.0.13:57000"
+    volumes: [ "alpha-ca:/ca" ]
+    networks:
+      alpha-net: { ipv4_address: 172.30.0.12 }
+
+  alpha-gw1:
+    <<: *node
+    container_name: mycelium-fed-alpha-gw1
+    environment:
+      <<: *node-env
+      FED_ROLE: gateway
+      FED_DOMAIN: alpha.example
+      FED_CA_DIR: /ca
+      FED_EXPORTS: "demo/whoami,demo/secret"
+      FED_GRANTS: "beta.example=demo/whoami"
+      FED_TRUST: "beta.example=${BETA_PUBLIC_KEY}"
+      FED_SIGNING_SEED: "1111111111111111111111111111111111111111111111111111111111111111"
+      MYCELIUM_HOSTNAME: 172.30.0.13
+      MYCELIUM_PEERS: "172.30.0.11:57000,172.30.0.12:57000"
+    volumes: [ "alpha-ca:/ca" ]
+    networks:
+      alpha-net: { ipv4_address: 172.30.0.13 }
+      edge:      { ipv4_address: 172.32.0.13 }
+
+  alpha-gw2:
+    <<: *node
+    container_name: mycelium-fed-alpha-gw2
+    environment:
+      <<: *node-env
+      FED_ROLE: gateway
+      FED_DOMAIN: alpha.example
+      FED_CA_DIR: /ca
+      FED_EXPORTS: "demo/whoami,demo/secret"
+      FED_GRANTS: "beta.example=demo/whoami"
+      FED_TRUST: "beta.example=${BETA_PUBLIC_KEY}"
+      FED_SIGNING_SEED: "1111111111111111111111111111111111111111111111111111111111111111"
+      MYCELIUM_HOSTNAME: 172.30.0.14
+      MYCELIUM_PEERS: "172.30.0.11:57000,172.30.0.12:57000"
+    volumes: [ "alpha-ca:/ca" ]
+    networks:
+      alpha-net: { ipv4_address: 172.30.0.14 }
+      edge:      { ipv4_address: 172.32.0.14 }
+
+  beta-b1:
+    <<: *node
+    container_name: mycelium-fed-beta-b1
+    environment:
+      <<: *node-env
+      FED_ROLE: member
+      FED_DOMAIN: beta.example
+      FED_CA_DIR: /ca
+      MYCELIUM_HOSTNAME: 172.31.0.11
+      MYCELIUM_PEERS: "172.31.0.12:57000"
+    volumes: [ "beta-ca:/ca" ]
+    networks:
+      beta-net: { ipv4_address: 172.31.0.11 }
+
+  beta-b2:
+    <<: *node
+    container_name: mycelium-fed-beta-b2
+    environment:
+      <<: *node-env
+      FED_ROLE: member
+      FED_DOMAIN: beta.example
+      FED_CA_DIR: /ca
+      MYCELIUM_HOSTNAME: 172.31.0.12
+      MYCELIUM_PEERS: "172.31.0.11:57000"
+    volumes: [ "beta-ca:/ca" ]
+    networks:
+      beta-net: { ipv4_address: 172.31.0.12 }
+
+  beta-probe:
+    <<: *node
+    container_name: mycelium-fed-beta-probe
+    environment:
+      RUST_LOG: "warn,federation_node=info"
+      FED_ROLE: probe
+      FED_ORIGIN: beta.example
+      FED_PRINCIPAL: svc/billing
+      FED_SIGNING_SEED: "2222222222222222222222222222222222222222222222222222222222222222"
+      FED_PARTNER: alpha.example
+      FED_PARTNER_KEY: "${ALPHA_PUBLIC_KEY}"
+      FED_GATEWAYS: "gw-1=http://172.32.0.13:8300,gw-2=http://172.32.0.14:8300"
+      FED_CONTROL_PORT: "8400"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8400/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 3s
+    networks:
+      edge:    { ipv4_address: 172.32.0.21 }
+      control: { ipv4_address: 172.33.0.21 }
+
+  # The script is baked into this image rather than bind-mounted: a bind mount of the repo yields
+  # an empty directory on any host whose checkout is outside Docker Desktop's file-sharing list
+  # (which is how this suite first failed — the runner exited 127). Its Dockerfile sits beside the
+  # script because the repo-root `.dockerignore` excludes `tests/integration/` from the root
+  # context on purpose. Only the socket is mounted, because the runner really does cut the network
+  # and start the plant.
+  runner:
+    build:
+      context: ../tests/integration
+      dockerfile: Dockerfile.federation-runner
+    container_name: mycelium-fed-runner
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      alpha-a1:   { condition: service_healthy }
+      alpha-a2:   { condition: service_healthy }
+      alpha-gw1:  { condition: service_healthy }
+      alpha-gw2:  { condition: service_healthy }
+      beta-b1:    { condition: service_healthy }
+      beta-b2:    { condition: service_healthy }
+      beta-probe: { condition: service_healthy }
+    networks:
+      alpha-net: { ipv4_address: 172.30.0.100 }
+      beta-net:  { ipv4_address: 172.31.0.100 }
+      control:   { ipv4_address: 172.33.0.100 }
+    restart: "no"
+
+volumes:
+  alpha-ca:
+    name: mycelium-fed-alpha-ca
+  beta-ca:
+    name: mycelium-fed-beta-ca
+
+networks:
+  alpha-net:
+    name: mycelium-fed-alpha
+    ipam: { config: [ { subnet: 172.30.0.0/24 } ] }
+  beta-net:
+    name: mycelium-fed-beta
+    ipam: { config: [ { subnet: 172.31.0.0/24 } ] }
+  edge:
+    name: mycelium-fed-edge
+    ipam: { config: [ { subnet: 172.32.0.0/24 } ] }
+  control:
+    name: mycelium-fed-control
+    ipam: { config: [ { subnet: 172.33.0.0/24 } ] }

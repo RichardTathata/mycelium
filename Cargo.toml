@@ -185,6 +185,13 @@ path              = "examples/federated_domains.rs"
 required-features = ["tls"]
 
 [[example]]
+name              = "federation_node"
+path              = "examples/federation_node.rs"
+# The two-mesh Docker suite's binary (item 2 PR 10b): the federation edge + client need the
+# gateway, TLS and the A2A edge; the control API and admin routes use axum directly.
+required-features = ["gateway", "tls", "a2a", "cli"]
+
+[[example]]
 name              = "knowledge_layer"
 path              = "examples/knowledge_layer.rs"
 # `knowledge` is behind `tls` — the record types verify Ed25519 signatures.
