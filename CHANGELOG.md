@@ -36,6 +36,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium::sim_seam`** re-exported under the `sim` feature, so a companion on the public API can record
   and replay its own runs. `mycelium-commitment` now enables `mycelium/consensus`.
 
+### Added — admission control at the companions' queues, reported (item 4 PR 5)
+
+- **`mycelium-tuple-space`:** each stage counts the `put`s its watermark refused; **`TupleSpace::admission(stage)`**
+  reports `admitted` · `rejected` · `taken` · `high_watermark` per stage — `Some` at the primary, `None` on a
+  secondary (*ask the primary*, not *nothing was refused*: the depth RPC's fixed encoding cannot carry it) — and
+  the metrics writer publishes `…/stage/{stage}/rejected_total` beside the other counters. The bound itself is
+  unchanged; what changes is that a rejection is now a visible outcome beside completions (adaptive-stability §1).
+- **`mycelium-blackboard`:** its first admission bound — **`BoardConfig.high_watermark: Option<u64>`** (`None` =
+  unbounded, the behaviour before) — refusing `post` with **`BlackboardError::Backpressure { available,
+  high_watermark }`**, counted in **`BoardStats.rejected`**, crossing the RPC as itself (status code 2; a pre-2.8
+  client sees a generic `Rpc` error, never a false success). Replication and WAL replay never refuse. Two-step
+  and self-imposed: a burst can briefly overshoot; a Tier B bound, not a hard one.
+- Example `mycelium-tuple-space/examples/admission.rs`; runbook `docs/operations/admission-control.md`.
+  **Upgrade notes:** `BoardConfig` and `BoardStats` gained a field each — exhaustive struct literals break
+  (`..Default::default()` / `stats()` are unaffected); §6.6 of the plan names `BoardConfig`.
+
 ### Added — the commitment companion (v3 §6.9, CN1)
 
 - **`mycelium-commitment`** — the contract net as five records on the public API, a composition and not a

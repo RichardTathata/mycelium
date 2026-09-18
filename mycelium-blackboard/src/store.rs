@@ -54,6 +54,9 @@ pub struct BoardStats {
     pub acked: u64,
     pub released: u64,
     pub requeued: u64,
+    /// `post`s refused at admission because the pool stood at the high watermark (item 4 PR 5;
+    /// v2.8.0). Reported beside the others: a rejection is a visible outcome, not a silence.
+    pub rejected: u64,
 }
 
 /// The pure, in-memory board: typed facts with non-destructive [`read`](Self::read) and competitive
@@ -62,6 +65,9 @@ pub struct BoardStore {
     inner: Mutex<BoardInner>,
     next_id: AtomicU64,
     posted: AtomicU64,
+    rejected: AtomicU64,
+    /// The admission bound on `available`; `None` = unbounded.
+    high_watermark: Option<u64>,
     claimed: AtomicU64,
     acked: AtomicU64,
     released: AtomicU64,
@@ -103,6 +109,8 @@ impl BoardStore {
             inner: Mutex::new(BoardInner { available: BTreeMap::new(), inflight: HashMap::new() }),
             next_id: AtomicU64::new(0),
             posted: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+            high_watermark: None,
             claimed: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             released: AtomicU64::new(0),
@@ -113,7 +121,24 @@ impl BoardStore {
 
     /// Post a fact (Linda `out`). **Non-destructive** — it joins the claimable pool and, in the
     /// agent-backed board (later phases), gossips to every reader. Returns the fact id.
+    /// Bound admission: a `post` that finds `available` at or past `high_watermark` is refused and
+    /// counted. `None` leaves the pool unbounded. Replication (`post_with_id`) and WAL replay are
+    /// not admission and never refuse.
+    pub fn with_high_watermark(mut self, high_watermark: Option<u64>) -> Self {
+        self.high_watermark = high_watermark;
+        self
+    }
+
     pub fn post(&self, attributes: BTreeMap<String, String>, payload: Bytes) -> Result<u64, BlackboardError> {
+        if let Some(high_watermark) = self.high_watermark {
+            // One short lock for the count, released before the WAL append (row 27 stays a leaf).
+            // The check and the insert are not one step: a self-imposed bound, not a hard one.
+            let available = self.inner.lock().available.len() as u64;
+            if available >= high_watermark {
+                self.rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(BlackboardError::Backpressure { available, high_watermark });
+            }
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         if let Some(wal) = &self.wal {
             wal.append(&WalRecord::Post { id, attributes: attributes.clone(), payload: payload.clone() })?;
@@ -308,6 +333,7 @@ impl BoardStore {
             acked: self.acked.load(Ordering::Relaxed),
             released: self.released.load(Ordering::Relaxed),
             requeued: self.requeued.load(Ordering::Relaxed),
+            rejected: self.rejected.load(Ordering::Relaxed),
         }
     }
 }
@@ -333,6 +359,35 @@ mod tests {
         assert!(!Predicate::new().eq("feeder", "9").matches(&f), "wrong value");
         assert!(!Predicate::new().present("price").matches(&f), "absent attr");
         assert!(Predicate::new().matches(&f), "empty predicate matches all");
+    }
+
+    /// Item 4 PR 5: a bounded board refuses a `post` at the watermark, counts it beside the other
+    /// counters, and admits again once a claim makes room; replication (`post_with_id`) is not
+    /// admission and never refuses; an unbounded board (the default) never refuses.
+    #[test]
+    fn post_is_refused_and_counted_at_the_high_watermark_but_replication_never_is() {
+        let store = BoardStore::transient().with_high_watermark(Some(2));
+        store.post(surplus("1", "1.0"), Bytes::new()).unwrap();
+        store.post(surplus("2", "1.0"), Bytes::new()).unwrap();
+        match store.post(surplus("3", "1.0"), Bytes::new()) {
+            Err(BlackboardError::Backpressure { available, high_watermark }) => assert_eq!((available, high_watermark), (2, 2)),
+            other => panic!("the third post must be refused at the watermark, got {other:?}"),
+        }
+        assert_eq!((store.stats().posted, store.stats().rejected), (2, 1), "reported beside the others");
+        // Replication is not admission: it lands past the watermark and is never refused.
+        store.post_with_id(900, surplus("9", "1.0"), Bytes::new()).unwrap();
+        assert_eq!((store.depth().available, store.stats().rejected), (3, 1));
+        // Claims make room; the next post is admitted; the count of refusals stays.
+        let _ = claim_one(&store, &Predicate::new().eq("feeder", "1"));
+        let _ = claim_one(&store, &Predicate::new().eq("feeder", "2"));
+        store.post(surplus("4", "1.0"), Bytes::new()).expect("room again");
+        assert_eq!((store.stats().posted, store.stats().rejected), (4, 1));
+
+        let unbounded = BoardStore::transient();
+        for i in 0..50 {
+            unbounded.post(surplus(&i.to_string(), "1.0"), Bytes::new()).expect("unbounded never refuses");
+        }
+        assert_eq!(unbounded.stats().rejected, 0);
     }
 
     fn claim_one(store: &BoardStore, pred: &Predicate) -> Fact {

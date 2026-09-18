@@ -248,6 +248,23 @@ pub struct TupleDepth {
     pub inflight: u32,
 }
 
+/// Admission at one stage, **read at the primary** (item 4 PR 5, `docs/design/adaptive-stability.md`
+/// §1's service objective: *rejected work reported beside completions, because a rejection is a
+/// visible outcome, not a silence*). `rejected` counts `put`s refused at the watermark — the
+/// self-imposed bound the primary enforces at the point where work is admitted (Tier B). Cumulative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageAdmission {
+    pub stage: Arc<str>,
+    /// `put`s accepted (queued or handed straight to a parked worker).
+    pub admitted: u64,
+    /// `put`s refused because the stage stood at `high_watermark`.
+    pub rejected: u64,
+    /// Items handed to a worker by `take`.
+    pub taken: u64,
+    /// The bound in force.
+    pub high_watermark: u32,
+}
+
 // ─── TupleSpace ──────────────────────────────────────────────────────────────
 
 /// Companion handle to an `Arc<GossipAgent>`. Producer and worker API for one
@@ -515,6 +532,7 @@ impl TupleSpace {
                     let _ = kv.set(format!("{sb}/put_total"), Bytes::from(m.put_total.to_string()));
                     let _ = kv.set(format!("{sb}/take_total"), Bytes::from(m.take_total.to_string()));
                     let _ = kv.set(format!("{sb}/hot_total"), Bytes::from(m.hot_total.to_string()));
+                    let _ = kv.set(format!("{sb}/rejected_total"), Bytes::from(m.rejected_total.to_string()));
                     let _ = kv.set(
                         format!("{sb}/queue_p99_us"),
                         Bytes::from(m.queue_p99_us.to_string()),
@@ -1327,6 +1345,15 @@ impl TupleSpace {
 
     /// Depth snapshot for one stage (`Some`) or all stages (`None`), served
     /// by the current primary.
+    /// Admission counters for one stage or all — **`Some` only at the primary**, which owns the
+    /// queue and its deficit (§3 of the adaptive-stability record); a secondary answers `None`,
+    /// which means *ask the primary*, not *nothing was refused*. Not carried over the depth RPC,
+    /// whose encoding is fixed; the metrics writer publishes `rejected_total` per stage beside
+    /// the other counters.
+    pub fn admission(&self, stage: Option<&str>) -> Option<Vec<StageAdmission>> {
+        self.serving_locally().map(|store| store.admission(stage))
+    }
+
     pub async fn depth(
         &self,
         stage: Option<&str>,

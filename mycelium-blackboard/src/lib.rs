@@ -134,6 +134,9 @@ pub enum BlackboardError {
     NotFound,
     /// No node currently serves this board (later phases — role resolution).
     NoProvider,
+    /// A `post` refused at admission: the claimable pool stood at the configured
+    /// `high_watermark` (item 4 PR 5). Counted in `BoardStats::rejected`; a visible outcome.
+    Backpressure { available: u64, high_watermark: u64 },
     /// Transport error talking to the board primary (later phases).
     Rpc(String),
     /// WAL I/O error (persistent boards).
@@ -145,6 +148,10 @@ impl std::fmt::Display for BlackboardError {
         match self {
             BlackboardError::NotFound => write!(f, "unknown claim id"),
             BlackboardError::NoProvider => write!(f, "no blackboard primary resolvable"),
+            BlackboardError::Backpressure { available, high_watermark } => write!(
+                f,
+                "post refused at admission: {available} facts available, high watermark {high_watermark}"
+            ),
             BlackboardError::Rpc(s) => write!(f, "rpc error: {s}"),
             BlackboardError::Io(e) => write!(f, "wal io error: {e}"),
         }
@@ -207,6 +214,12 @@ pub struct BoardConfig {
     /// Capability advertisement refresh. Readers evaporate ads at 3×, so promotion latency after a
     /// primary crash is ≈3× this value.
     pub cap_refresh: Duration,
+    /// Admission bound on the claimable pool (item 4 PR 5): a `post` that would take `available`
+    /// to or past this is refused with [`BlackboardError::Backpressure`] and counted in
+    /// [`BoardStats::rejected`]. `None` = unbounded, the behaviour before v2.8.0. Applies at
+    /// admission only — replication and WAL replay never refuse. A self-imposed bound (Tier B),
+    /// not a hard one: a burst can briefly overshoot between the check and the insert.
+    pub high_watermark: Option<u64>,
 }
 
 impl Default for BoardConfig {
@@ -219,6 +232,7 @@ impl Default for BoardConfig {
             checkpoint_every: 500,
             claim_timeout_secs: 300,
             cap_refresh: Duration::from_secs(10),
+            high_watermark: None,
         }
     }
 }
@@ -278,7 +292,8 @@ impl Blackboard {
                 BoardStore::persistent(&self.cfg.wal_path, self.cfg.checkpoint_every)?
             } else {
                 BoardStore::transient()
-            };
+            }
+            .with_high_watermark(self.cfg.high_watermark);
             *g = Some(Arc::new(store));
         }
         Ok(())

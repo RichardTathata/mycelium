@@ -22,6 +22,19 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 4 PR 5: admission control at the companions' queues, reported — 2026-09-18 (unreleased)
+
+The last row of item 4's table (`docs/design/adaptive-stability.md` §9). The tuple space's watermark already
+refused a `put`; the refusal was a silence — `put_total`, `take_total`, `hot_total` and no count of what was
+turned away. Now each stage counts `rejected_total`; `TupleSpace::admission` reports it beside `admitted` and
+`taken` at the primary (`None` elsewhere: the depth RPC's fixed encoding cannot grow, and §3 says the primary
+owns the deficit); the metrics writer publishes it. The blackboard had no bound; it gets `BoardConfig.high_watermark`
+(`None` = unbounded), refusing `post` with a counted `Backpressure` that crosses its RPC as itself — a free
+status code — while replication and replay never refuse. Both are Tier B: self-imposed, two-step, not hard.
+**The mechanism was there; the report was the gap.** With this, item 4 is complete: PRs 1, 2, 3a, 3, 4a, 4b, 4c,
+5. Example `examples/admission`, runbook `docs/operations/admission-control.md`, §6.6 names `BoardConfig`. Log:
+[`.log/2026-09-18-item4-pr5-admission-control.md`](.log/2026-09-18-item4-pr5-admission-control.md).
+
 ## v3 contracts axis — item 6 PR 7: the replay corpus and its gate — 2026-09-18 (unreleased)
 
 The last PR of item 6's sequence. A checked-in bundle — scenario A, thirteen effects, at
