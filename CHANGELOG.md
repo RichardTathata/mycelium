@@ -122,6 +122,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and its own change, since closing it regenerates a baseline of pre-existing sites across the tree.
 - Three seam tests (nominal schedule recorded; replay advances the clocks without waiting; sleep-as-tick diverges).
 
+### Added — the tuple-space consumer with effect recovery (item 1 PR 6)
+
+- **`mycelium-effects::tuple_consumer`** (feature `tuple-space`, optional so the crate's core couples to neither
+  companion): a worker that `take`s an item, **commits its effect at the destination first**, and only then
+  `ack`s or `complete`s. The operation id is derived from the item — `tuple/{namespace}/{stage}/{id}` — and the
+  tuple id survives lease expiry and a WAL restart, so a re-delivered item is a *new attempt of the same
+  operation* and its apply comes back `Replayed`. That is the effect recovery the receipts record's §7 promised
+  for PR 5/6: `complete` is the pipeline's receipt and never stands in for the destination's.
+- **A refused effect is not acknowledged.** The item stays in flight for re-delivery; `DeliveryUnknown` and
+  `Failed` resolve on retry, and `Conflict` is surfaced as the poison pill it is — dead-lettering is the caller's
+  policy, because acknowledging it would make a conflicting effect vanish.
+- Three live tests (a primary over a WAL on a bind-verified port): a worker that committed and died before
+  acknowledging is re-delivered on restart and replays with one row; a refused effect's item comes back after
+  restart with its id intact — the test that pins the ordering, since the replay test alone would pass for a
+  consumer that acked first; and the ordinary fresh path. The ordering inversion is verified by planting it.
+
 ### Added — the effects companion: the destination-commit receipt as a reference destination (item 1 PR 5)
 
 - **`mycelium-effects`**, a new companion crate on the public API. The substrate provides three of item 1's four
