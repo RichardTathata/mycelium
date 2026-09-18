@@ -244,7 +244,10 @@ flap. *A first-only violation report masks:* the witness said "no flap" while th
 the 1 s release spacing alone bounds the release rate, so a lost hysteresis only changes how often a proposal is
 held; recorded as what the sweep does not prove. The tuning plant (no spacing) was caught at once. **Not
 shown:** the ADR's sharper sentence — loops oscillating together while each is stable alone — the witness
-removes every breaker at once. Ledger: [history](../history.md) → *item 6 PR 6*.
+removes every breaker at once. Ledger: [history](../history.md) → *item 6 PR 6*. *Since the profile ladder was wired through every governor
+(item 4 §7, 2026-09-18):* the "settles" sweep runs under the enforcing profiles, where the breakers act; under
+`Legacy` the same breakers are not consulted and the schedules flap; under `Observe` they flap while counting
+every hold not made — `Legacy` is the ladder's own witness.
 
 ## The replay corpus (item 6 PR 7, 2026-09-18)
 

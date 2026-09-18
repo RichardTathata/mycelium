@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — the control profile reaches every governor; the shadow-mode rollout runbook (item 4 §7)
+
+- **`Legacy` is again exactly the pre-4b behaviour.** The tuning gate's spacing and settling and the opacity
+  boundary's release spacing act only from `EnforceLocal` up; under `Observe` they are evaluated and **counted**
+  (`held_by_spacing` / `held_by_settling` / `opacity_releases_spaced` then mean *would have held*;
+  `GovernorSnapshot.profile` says which reading) and nothing is held; under `Legacy` the contract is not
+  consulted. `TuningGovernor::set_control_profile` (fanned out by `GossipAgent::set_control_profile`).
+- **The provisioner's rights refusal is Tier C:** an install the ledger says the node holds no unit for is refused
+  only under `EnforceAllocated`; every other profile admits it, counts it in the new
+  `Provisioner::rights_would_refuse()`, and still records `admission.rejected` in the ledger.
+- **Scenario C** pins the ladder: the "settles" sweep runs under the enforcing profiles; under `Legacy` the same
+  breakers do nothing and the schedules flap; under `Observe` they flap while counting every hold not made.
+- **Gateway:** `GET /gateway/govern` gains `control` — the node's profile and its tripwires (`would_hold`,
+  `opacity_releases_spaced`, the tuning counters with the profile they were taken under) — and each param's
+  `pending`; **`POST /gateway/govern/profile`** (`govern:write`) steps the ladder by name (`legacy` · `observe` ·
+  `enforce-local` · `enforce-allocated`, `Profile::{name, parse}`, pinned); an unknown name is `400` and changes
+  nothing. Per node, like every govern route.
+- **Runbook:** `docs/operations/control-profiles.md` — the ladder per governor, the tripwires to watch before
+  stepping up, rollback, the routes. **Upgrade note:** `GovernorSnapshot` gained `profile`;
+  `opacity::spaced_transition` (crate-private) now takes the profile and returns `Spaced`.
+
 ### Added — the award under the acceptor's mandate (v3 §6.9, CN3)
 
 - **`ContractNet::commit_award_under_mandate(award, acceptor, authority, now_ms)`** — the mandate must be

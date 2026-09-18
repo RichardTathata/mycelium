@@ -159,6 +159,10 @@ pub struct TuningGovernor {
     held_settling: AtomicU64,
     /// Actions that were never seen at the knob inside the settle timeout.
     settled_unknown: AtomicU64,
+    /// The node's control profile, fanned out by `GossipAgent::set_control_profile` (ADR §7):
+    /// `Legacy` is the old gate exactly — the contract is not consulted; `Observe` evaluates it and
+    /// **counts** what it would have held, holding nothing; `EnforceLocal`/`EnforceAllocated` hold.
+    profile: AtomicU8,
 }
 
 impl Default for TuningGovernor {
@@ -174,6 +178,7 @@ impl Default for TuningGovernor {
             held_spacing: AtomicU64::new(0),
             held_settling: AtomicU64::new(0),
             settled_unknown: AtomicU64::new(0),
+            profile: AtomicU8::new(Profile::Legacy.as_u8()),
         }
     }
 }
@@ -220,6 +225,13 @@ impl TuningGovernor {
             Ratchet::Off => {}
         }
 
+        // The contract, under the node's profile (ADR §7): `Legacy` does not consult it — this is
+        // the gate as it was; `Observe` evaluates it and counts what it would have held, holding
+        // nothing; the enforcing profiles hold.
+        let profile = Profile::from_u8(self.profile.load(Ordering::Relaxed));
+        if profile == Profile::Legacy {
+            return Some(v);
+        }
         let spec = self.spec_for(param);
         // Reconcile the last action against what the knob reads back.
         let pending = p.pending_value.load(Ordering::Relaxed);
@@ -234,7 +246,9 @@ impl TuningGovernor {
                 match control::may_propose(&state, &spec, now_ms) {
                     Err(_) => {
                         self.held_settling.fetch_add(1, Ordering::Relaxed);
-                        return None;
+                        if profile.enforces() {
+                            return None;
+                        }
                     }
                     Ok(()) => {
                         p.pending_value.store(NO_PENDING, Ordering::Relaxed);
@@ -251,9 +265,16 @@ impl TuningGovernor {
         let last = p.last_action_ms.load(Ordering::Relaxed);
         if !control::spacing_allows(&spec, (last != NO_ACTION_MS).then_some(last), now_ms) {
             self.held_spacing.fetch_add(1, Ordering::Relaxed);
-            return None;
+            if profile.enforces() {
+                return None;
+            }
         }
         Some(v)
+    }
+
+    /// The node's control profile, as fanned out by `GossipAgent::set_control_profile`.
+    pub fn set_control_profile(&self, profile: Profile) {
+        self.profile.store(profile.as_u8(), Ordering::Relaxed);
     }
 
     /// The caller applied `value` to `param`'s knob: start the spacing and settle clocks. Through
@@ -416,6 +437,7 @@ impl TuningGovernor {
             held_by_spacing: self.held_spacing.load(Ordering::Relaxed),
             held_by_settling: self.held_settling.load(Ordering::Relaxed),
             settled_unknown: self.settled_unknown.load(Ordering::Relaxed),
+            profile: Profile::from_u8(self.profile.load(Ordering::Relaxed)),
         }
     }
 }
@@ -428,13 +450,18 @@ impl TuningGovernor {
 pub struct GovernorSnapshot {
     pub auto_enabled: bool,
     pub params: [ParamSnapshot; 3],
-    /// Recommendations held because the param was acted on inside the spacing interval.
+    /// Recommendations held because the param was acted on inside the spacing interval — or,
+    /// under `Observe`, that **would** have been; the profile says which.
     pub held_by_spacing: u64,
-    /// Recommendations held because the last action had not yet been seen at the knob.
+    /// Recommendations held because the last action had not yet been seen at the knob — or, under
+    /// `Observe`, that would have been.
     pub held_by_settling: u64,
     /// Actions that were never seen at the knob inside the settle timeout — each one a knob
     /// that did not take the value it was given, or a caller that did not report what it applied.
     pub settled_unknown: u64,
+    /// The profile the counters were taken under (ADR §7). Under `Legacy` the contract is not
+    /// consulted and the counters do not move.
+    pub profile: Profile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -574,9 +601,33 @@ mod tests {
         s.params.iter().find(|p| p.param == HotParam::WriterDepth).unwrap()
     }
 
+    /// ADR §7: under `Legacy` the contract is not consulted — timing set, action taken, and the
+    /// next recommendation still passes, uncounted. Under `Observe` it is evaluated and counted,
+    /// and still passes. Only an enforcing profile holds.
+    #[test]
+    fn the_profile_ladder_legacy_ignores_observe_counts_enforce_holds() {
+        let g = TuningGovernor::default();
+        g.set_control_timing(1_000, 1_000);
+        g.acted_at(HotParam::WriterDepth, 4096, 0);
+        // Legacy (the default): the old gate exactly.
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 1), Some(5000));
+        let s = g.snapshot();
+        assert_eq!((s.profile, s.held_by_spacing, s.held_by_settling), (Profile::Legacy, 0, 0));
+        // Observe: would have been held (the knob has not read back, and it is inside the spacing) — counted, not held.
+        g.set_control_profile(Profile::Observe);
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 2), Some(5000));
+        let s = g.snapshot();
+        assert_eq!((s.profile, s.held_by_settling), (Profile::Observe, 1), "would-hold counted");
+        // EnforceLocal: held.
+        g.set_control_profile(Profile::EnforceLocal);
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 3), None);
+        assert_eq!(g.snapshot().held_by_settling, 2);
+    }
+
     #[test]
     fn without_timing_the_gate_is_the_old_gate() {
         let g = TuningGovernor::default();
+        g.set_control_profile(Profile::EnforceLocal);
         g.acted_at(HotParam::WriterDepth, 4096, 0);
         // Right after an action, a different value on a knob that has not read back: with both
         // timings at 0 nothing is spaced, nothing settles, nothing is counted — the old behaviour.
@@ -588,6 +639,7 @@ mod tests {
     #[test]
     fn spacing_holds_a_second_change_inside_the_interval() {
         let g = TuningGovernor::default();
+        g.set_control_profile(Profile::EnforceLocal);
         g.set_control_timing(1_000, 0);
         g.acted_at(HotParam::WriterDepth, 4096, 0);
         assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 4096, 500), None, "inside the interval");
@@ -598,6 +650,7 @@ mod tests {
     #[test]
     fn a_recommendation_equal_to_current_is_not_an_action() {
         let g = TuningGovernor::default();
+        g.set_control_profile(Profile::EnforceLocal);
         g.set_control_timing(1_000, 1_000);
         g.acted_at(HotParam::WriterDepth, 4096, 0);
         // Same value, knob already there: returned, and neither clock is consulted.
@@ -609,6 +662,7 @@ mod tests {
     #[test]
     fn settling_holds_until_the_knob_reads_back() {
         let g = TuningGovernor::default();
+        g.set_control_profile(Profile::EnforceLocal);
         g.set_control_timing(0, 1_000);
         g.acted_at(HotParam::WriterDepth, 4096, 0);
         assert_eq!(writer(&g.snapshot()).pending, Some(4096), "the action is pending");
@@ -622,6 +676,7 @@ mod tests {
     #[test]
     fn an_unobserved_action_settles_as_unknown_past_the_timeout() {
         let g = TuningGovernor::default();
+        g.set_control_profile(Profile::EnforceLocal);
         g.set_control_timing(0, 1_000);
         g.acted_at(HotParam::WriterDepth, 4096, 0);
         // Past the timeout the knob never read back: the governor proceeds, and says so.
@@ -636,6 +691,7 @@ mod tests {
         // `gate` returned a value the policy then refused: nothing was applied, `acted` is not
         // called, and the next recommendation is neither spaced nor held by a phantom action.
         let g = TuningGovernor::default();
+        g.set_control_profile(Profile::EnforceLocal);
         g.set_control_timing(1_000, 1_000);
         assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 0), Some(5000));
         assert_eq!(g.gate_at(HotParam::WriterDepth, 6000, 1024, 1), Some(6000));
