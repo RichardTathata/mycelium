@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the adaptive-stability contract types (item 4 PR 2)
+
+- **`mycelium::control`** — pure decisions only; no governor changes, no actuator touched, the rights ledger is
+  PR 3. `ActionClass` (speculative scale-up · routine scale-down · protective shed · rescue from zero) and **the
+  decisive rule as one function**, `holds_on_uncertainty`: *uncertainty holds speculation and routine scale-down;
+  it never holds protective shedding or rescue from zero.* The tests write the same table by hand and pin the two
+  against each other, so the rule cannot drift from its statement.
+- **`decide(class, &ViewConfidence, &ConfidenceBound, Profile)`** takes the real, public `ViewConfidence` — no
+  parallel struct — and reports *why* it held (`Uncertainty::{StalenessUnknown, Stale, TooFewHeard,
+  SelfDegraded}`). **An isolated node is uncertain, not fresh**: the WP5 `staleness_known` correction is now
+  consequential rather than advisory.
+- **Four profiles, shadow first.** `Legacy` never consults the predicate; `Observe` **records a would-hold and
+  proceeds** — a distinct `Decision::WouldHold` variant, not a flag, so a caller cannot mistake it for `Proceed`;
+  `EnforceLocal` and `EnforceAllocated` hold.
+- `ControlSpec` (one governor, one actuator, spacing, settle timeout, bound, profile), a stable `ActionId`, and
+  the two new loop-breakers as pure checks: **spacing** (saturating — a clock that reads earlier than the last
+  action refuses rather than wrapping into "long ago") and **settling** (no proposal while the last action is
+  unobserved and inside the timeout; past it, settled as `unknown`).
+- Nine tests; the rule and the observe-proceeds property each verified by planting their inversion.
+
 ### Added — the adaptive-stability ADR (item 4 PR 1)
 
 - **`docs/design/adaptive-stability.md`** — the contract behind the governors, and the record that unblocks the
