@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — evidence-aware resolution (item 3 PR 4)
+
+- **It wraps `resolve_for_caller`; it does not replace it.** The native gates (`is_fresh`, schema id) run first
+  and an entry that fails them never reaches evidence evaluation. `mycelium::knowledge::resolution` then binds
+  to the exact release, classifies, and returns one of four outcomes **with reasons**.
+- **Evidence decides eligibility; the router decides choice.** `filter_accepted` *filters and never reorders*,
+  so a well-evidenced but overloaded provider cannot beat a better-placed one (or the reverse). Interleaving the
+  two is the thing this ordering exists to prevent.
+- **Evidence never grants what authorization denies** — it can only narrow. The module takes already-authorized
+  candidates and has no way to add one.
+- The four rules are mechanisms rather than prose: **no reputation scalar** (nothing aggregates across subjects,
+  so "good at X" cannot imply "good at Y" — no value spans them); **identity is not independence** (independence
+  is a reader-configured control group, never inferred from issuer keys); **missing evidence is uncertainty**
+  (`InsufficientEvidence` is distinct from `Rejected` so a reader can tell "we do not know" from "we looked and
+  it is bad"); and **refreshing an advertisement never refreshes evidence** (evidence ages on its own record
+  timestamps, so a liveness heartbeat cannot launder a stale assessment).
+- Also enforced: only an **assessment** counts as evidence — a claim is what someone said about themselves and
+  an observation is a report; **a provider cannot vouch for itself** (the issuer is in the record id, so this is
+  checkable without a fetch); and **evidence binds to one release**, with a length-prefixed subject so a crafted
+  release name cannot collide with another's.
+- Twelve tests; the independence-by-group and self-assessment rules verified non-vacuous by breaking each.
+
 ### Added — the partition table: what a disconnected curator may do (item 5)
 
 - **The policy sentence made checkable.** §6.3 says *a disconnected curator may prepare proposals but cannot

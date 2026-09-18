@@ -34,6 +34,7 @@
 //! (`kv_ns::KNOWLEDGE_HEAD`) and carries **bounded signed heads only** — pointers, never records —
 //! because LWW may move a pointer, and moving a pointer cannot erase a competing statement.
 
+pub mod resolution;
 pub mod store;
 
 use serde::{Deserialize, Serialize};
