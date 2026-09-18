@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the rights ledger (item 4 PR 3)
+
+- **`mycelium::control::ledger`** — the ledger of allocated rights the ADR's §4 decided, on the node-local
+  journal (`agent::journal`, now **ungated**, with `sha2` unconditional: a minimal build gains one small
+  pure-Rust crate already in every `tls` tree). `Right { holder, resource, units, allocated_by, term, state,
+  valid_until_ms }` — native units, item 5's `TermId`, five states **all of which count** (`Unknown` is a
+  state, not a zero).
+- **Persist, then apply.** Every mutation is appended and fsynced first and applied to the view only on an
+  `OnDisk` receipt; a record that did not reach disk allocates nothing and the refusal carries the journal's own
+  reason (`NotDurable`). **No method takes a peer set** — a holder that vanishes from discovery keeps its right,
+  and re-allocating a live term is `Duplicate`; a released, expired or revoked one *is* reissuable. Both halves
+  are tests, because a ledger that passed only the first would never free anything.
+- **`admission.rejected` is a journal record**, beside completions: `admit` refuses an over-request *and*
+  records it, and the count survives a reopen. `may_admit` is the pure check; consumption of units against a
+  right (reserve → act → reconcile) is PR 4.
+- **A journal the ledger cannot decode fails the open** rather than starting empty over a full file — which
+  would readmit nothing and reissue everything.
+- **`RightsHead`** — the bounded claim that may enter the medium (`rights/head/{holder}`): live units per
+  resource, sorted, at the last recorded sequence; canonical bytes via `serde_fixint` (golden-pinned, already
+  the byte layer under the audit chain); `verify` under `tls`. Publishing it is PR 4.
+- Nine tests (one `tls`-gated). The dead-code trap bit once more on the way — `Journal::path()` had only a
+  gated caller — and the fix is a real use (the ledger folds from the journal's own path), not an `allow`.
+
 ### Changed — the node-local journal is its own mechanism (item 4 PR 3a, a pure move)
 
 - **`agent::journal`** now holds the append-only, fsynced, never-gossiped journal — the file, the bounded queue,

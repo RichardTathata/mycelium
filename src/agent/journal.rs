@@ -7,9 +7,9 @@
 //! ledger (`docs/design/adaptive-stability.md` §4) is the second: an allocated right that gossiped
 //! would evaporate with its holder's discovery entry and be issued twice, and an LWW medium would
 //! let a later writer overwrite it. Two fsynced append-only journals side by side is how guarantees
-//! drift — so the mechanism lives here and each user is a thin profile over it. It is gated on its
-//! first user's features until the ledger lands (PR 3), which ungates it: a module with no user in
-//! a build is dead code there, and the `--no-default-features` clippy is the gate that says so.
+//! drift — so the mechanism lives here and each user is a thin profile over it. It was gated on its
+//! first user's features until the ledger landed (PR 3) and gave it a user in every build: a module
+//! with no user in a build is dead code there, and the `--no-default-features` clippy said so.
 //!
 //! Nothing here knows what a record means. Bytes in; a content hash, a sequence number and item 1's
 //! receipt out.

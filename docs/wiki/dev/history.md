@@ -22,7 +22,7 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## v3 contracts axis — item 4 PR 1: the adaptive-stability ADR — 2026-09-18 (unreleased, PR #270)
+## v3 contracts axis — item 4 PR 1: the adaptive-stability ADR — 2026-09-18 (unreleased, PR #273; #270 was auto-closed by the stacked-PR trap)
 
 Record `docs/design/adaptive-stability.md`; reservations `rights/head/{holder}` (namespace table +
 `kv_ns::RIGHTS_HEAD`). The record behind the governors, and the one D30 makes the resource-accounting slice wait
@@ -54,6 +54,15 @@ enclosing block when `#[cfg(test)]` sits on an inner item** — a test-only meth
 `append`'s timeout and the baseline dropped 5 → 4 for a file whose sites had not changed. Test-only helpers now
 live in a top-level `#[cfg(test)] impl`; the script's header records the rule. Log:
 [`.log/2026-09-18-item4-pr3a-journal-split.md`](.log/2026-09-18-item4-pr3a-journal-split.md).
+
+**PR 3 (#274) — the rights ledger, `src/control/ledger.rs`.** On the ungated journal (`sha2` unconditional
+from here). `Right` with five counted states; **persist-then-apply** — a record that did not reach disk
+allocates nothing; **no method takes a peer set**, so discovery loss cannot reach the ledger, a live term is
+`Duplicate` to reissue and a released/expired/revoked one is reissuable (both halves tested — passing only the
+first would never free anything); `admission.rejected` a journal record beside completions; a fail-closed open
+over an undecodable journal; `RightsHead` over `serde_fixint` bytes, `tls`-gated verify. Reserve → act →
+reconcile and publishing the head are PR 4. Log:
+[`.log/2026-09-18-item4-pr3-rights-ledger.md`](.log/2026-09-18-item4-pr3-rights-ledger.md).
 
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
