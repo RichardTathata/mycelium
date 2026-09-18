@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the adaptive-stability ADR (item 4 PR 1)
+
+- **`docs/design/adaptive-stability.md`** — the contract behind the governors, and the record that unblocks the
+  resource-accounting slice (D30: the ledger's vocabulary and backend are item 4's decisions). Three promises
+  kept apart with their strength in the **guardrails tiers** (D17): a hard bound is `HardPrevention` *only* when
+  backed by exclusive, durably accounted rights; otherwise it is a convergence target, the membership governor's
+  own honest phrase.
+- **The decisive rule:** *uncertainty holds speculation and routine scale-down; it never holds protective
+  shedding, and never holds rescue from zero capacity.* `ViewConfidence` becomes actionable and per-input through
+  a predicate over four action classes — PR 2 makes it pure and swept.
+- **The rights ledger's shape is decided:** rights **cannot live in gossip KV** — soft state that evaporates is
+  right for an advertisement and issues a right twice when its holder drops out of discovery. The ledger is a
+  node-local, fsynced, never-gossiped journal in the `EvidenceJournal`'s shape on item 1's durability; only a
+  bounded signed head gossips. `Right { holder, resource, units, allocated_by, term, state }` — native units,
+  item 5's term identity, five counted states including `unknown`; persisted before acting; **never reclaimed
+  because an owner vanished from discovery**; `admission.rejected` a first-class outcome. Exclusivity is by
+  allocation, not by consensus.
+- One owner per actuator and **one owner per deficit**, named; loop-breaking points named (the existing `gate`
+  hysteresis and WP5 cooldown kept; spacing and settling new); the combined-feedback test is replay stage 6
+  (D19); the workload probe consumes the companions' depth signals (D18); four profiles, shadow first.
+- `rights/head/{holder}` reserved in the namespace table and `kv_ns::RIGHTS_HEAD`. Nothing writes it until PR 3.
+
 ### Added — the timer seam, first arm: fixed sleeps, and the converge sleep routed (item 6 PR 3 tail)
 
 - **`sim_seam::sleep_ms(stream, ms)`** — the replay inventory's §2.3 row for *fixed sleeps inside protocol
