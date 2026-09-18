@@ -234,6 +234,13 @@ impl FederationClient {
         s.last_catalogue = None;
     }
 
+    /// Retire one of the partner's gateways (it was replaced, or is known dead): it is never
+    /// admitted again. Its endpoint stays configured so an in-flight release for it is harmless.
+    /// Returns whether it was in the pool.
+    pub fn retire_gateway(&self, gateway_id: &str) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).pool.retire(gateway_id)
+    }
+
     /// Revoke the partner on this side: no call is ever admitted again, whatever it answers.
     pub fn revoke(&self) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());

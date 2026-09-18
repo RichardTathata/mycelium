@@ -193,9 +193,16 @@ The decisions that carry the boundary, each a checked thing rather than a senten
 `RemoteResolver` → `GatewayPool` → HTTP, the lock never held across the await). The PR 1 harness's
 `assert_never_merged` now runs **after a call has crossed** (`lib_tests.rs` →
 `a_federated_call_crosses_and_the_meshes_still_never_merge`), which is when it stops being trivially true: the
-membership and native-namespace legs of the release gate are met for the simplest topology. **What is still not
-built:** the *traces* leg of the gate, the choreography around it (sever every link and keep working locally,
-change permissions mid-partition, reconnect), a signed catalogue reply, TLS on the edge in the test (the edge is
-whatever the gateway serves — run it behind `gateway_tls`), and streaming (`tasks/sendSubscribe` under a
-credential is refused: federated calls are unary, §5). `examples/federated_domains.rs` still runs in one process
-and says so. Ledger: [history](history.md) → *item 2*.
+membership and native-namespace legs of the release gate are met for the simplest topology. **The gate's
+choreography (PR 9, 2026-09-18) — met in its in-process form:** every node under the enforced profile (§9: TLS,
+SWIM off) and each mesh under its own auto-generated CA; lose the only gateway (explicit `DeliveryUnknown`s,
+link `Down`), keep working locally, change the grant mid-partition, replace the gateway, reconnect (refused until
+discovery refreshes, and what it refreshes to is the changed grant), retire the dead gateway
+(`FederationClient::retire_gateway`), honour authority issued before the partition to its expiry and not past
+it; non-merger asserted from the membership tables, the `consensus/` namespace (keys and values) and the
+**connection tables** (`GossipAgent::connected_peers`, the traces leg) before, during and after; a node holding
+B's CA cannot join A (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`). **What is still not
+built:** the Docker two-mesh suite (process isolation and a real network severance are its claim, not this
+test's), a signed catalogue reply, SDK verbs, TLS on the edge in the test (run the edge behind `gateway_tls`),
+and streaming (`tasks/sendSubscribe` under a credential is refused: federated calls are unary, §5).
+`examples/federated_domains.rs` still runs in one process and says so. Ledger: [history](history.md) → *item 2*.

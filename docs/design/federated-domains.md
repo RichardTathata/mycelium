@@ -197,19 +197,31 @@ Per §5's sequence, and gated in that order:
 | 6 | partition / reconnect, revocation, rotation |
 | 7 | example, SDKs, diagnostics, docs |
 | **8** *(2026-09-18)* | the transport's first arm: `federation/edge.rs` (the credential as one header on `/a2a`; authenticate at the auth layer, authorise in the handler; `GET /federation/catalog`), `federation/client.rs` (link → resolver → pool → HTTP), and the two-mesh test that re-runs PR 1's never-merged assertions *after* a call has crossed |
-| 9 | the gate's choreography over that transport: sever every link and keep working locally, change permissions mid-partition, reconnect; the *traces* leg of the proof; a signed catalogue reply |
+| **9** *(2026-09-18)* | the gate's choreography over that transport, in one process under the enforced profile and two CAs (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`): lose the only gateway, sever every link, keep working locally, change the grant mid-partition, replace the gateway, reconnect; the *traces* leg from each node's connection table (`connected_peers`); `GatewayPool::retire` |
+| 10 | the Docker two-mesh suite (process isolation, real network severance); a signed catalogue reply; SDK verbs |
 
 **Release gate** (§5): the two-mesh demonstration — discover, invoke, lose a gateway, sever every link, keep
 working locally, change permissions mid-partition, reconnect — and prove **from membership tables, consensus
 state and traces** that the meshes never merged. Not from a narrative: from the three places that would show it
 if they had.
 
-**Where the gate stands after PR 8.** Two of the three places are checked with bytes crossing: the membership
-tables and the native namespaces (`lib_tests.rs` → `a_federated_call_crosses_and_the_meshes_still_never_merge`,
-which also plants a forged, a tampered, an ungranted and a revoked credential and counts that none reached the
-provider). *Discover* and *invoke* are done; *lose a gateway* is done on the consumer side (a silent gateway is
-`DeliveryUnknown` or a failover by repeatability, over real connection refusals). Not done: the traces leg, and
-the partition choreography. The gate is not claimed.
+**Where the gate stands after PR 9.** Met in its in-process form. The choreography runs over the PR 8
+transport with every node under the §9 profile and each mesh under its own auto-generated CA: discover,
+invoke, a consensus round in each mesh, lose the only gateway (explicit `DeliveryUnknown`s, discovery cannot
+refresh, the link is `Down`), keep working locally (gossip and consensus on both sides), change the grant while
+no link exists, bring up a replacement gateway, reconnect (refused until discovery refreshes, and the refreshed
+catalogue is the changed grant), retire the dead gateway, honour a credential issued before the partition to
+its expiry and refuse one past it. Non-merger is asserted **from three places** before, during and after: the
+membership tables (`peers`), the native and consensus namespaces (`cap/ grp/ sys/ consensus/`, keys *and*
+values, plus explicit `consensus_get` cross-checks of each mesh's slots), and the connection tables
+(`connected_peers` — where bytes actually went). A node holding B's CA cannot join A (a timing-bounded
+negative, with gw2's join as its positive control).
+
+**What "in-process" leaves open, stated so it is not mistaken for the whole.** Process isolation and a real
+network severance are the Docker two-mesh suite's claim (row 10); here the "link" is a gateway that is shut
+down, and the two meshes share an address space. The catalogue reply is unsigned. Streaming is refused rather
+than federated. The *traces* leg is each node's own connection table, not a packet capture — it is the record
+the transport keeps of whom it wrote to, which is what a trace would show if it were taken.
 
 ## Appendix — anchors verified at adoption (2026-09-17)
 

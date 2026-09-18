@@ -205,12 +205,18 @@ The example walks the whole lifecycle and prints what each step decided *and why
 
 ### What does not exist yet
 
-**The rest of the release gate.** PR 8 (2026-09-18) put the first bytes across: the two-mesh test in
-`src/lib_tests.rs` makes a federated call and then re-runs the PR 1 harness's never-merged assertions
-from the membership tables and the native namespaces. Still to build: the *traces* leg of that proof;
-the choreography around it (sever every link and keep working locally, change permissions
-mid-partition, reconnect); a signed catalogue reply; SDK verbs. The edge is plain HTTP in the test —
-in production it is whatever the gateway serves, so run it behind `gateway_tls`. Streaming under a
+**The release gate, and what of it is met.** PR 8 (2026-09-18) put the first bytes across; PR 9 (same day)
+ran the gate's whole choreography over them in one process — every node under the enforced profile,
+two meshes under two CAs, the only gateway lost and replaced, every link severed while both meshes kept
+gossiping and committing, the grant changed mid-partition and visible on reconnect, authority issued
+before the partition honoured to its expiry — with non-merger asserted from the membership tables, the
+consensus namespace and each node's connection table (`connected_peers`) before, during and after
+(`src/lib_tests.rs` → `the_release_gates_choreography_over_the_transport`). Two things to know when you
+run this for real: a replaced gateway should be **retired** (`FederationClient::retire_gateway`) — the
+pool keeps no health memory, so a dead gateway left listed costs every at-most-once call a
+`DeliveryUnknown`; and the edge is plain HTTP in the test — in production it is whatever the gateway
+serves, so run it behind `gateway_tls`. Still to build: the Docker two-mesh suite (process isolation and
+a real network severance are its claim); a signed catalogue reply; SDK verbs. Streaming under a
 credential is refused (federated calls are unary); `examples/federated_domains.rs` still runs the
 lifecycle in one process and says so. The invocation edge **is A2A** (D5) with domain-bound origin
 credentials — not a second call protocol, because two invocation edges with different auth models is
