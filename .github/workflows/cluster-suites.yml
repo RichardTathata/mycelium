@@ -33,6 +33,7 @@ on:
       - 'tests/overlay/**'
       - 'docker/**'
       - 'examples/three_node_demo.rs'
+      - 'examples/federation_node.rs'
       - '.github/workflows/cluster-suites.yml'
   pull_request:
     paths:
@@ -43,6 +44,7 @@ on:
       - 'tests/overlay/**'
       - 'docker/**'
       - 'examples/three_node_demo.rs'
+      - 'examples/federation_node.rs'
       - '.github/workflows/cluster-suites.yml'
   schedule:
     - cron: '0 5 * * *'   # nightly 05:00 UTC — catches drift even with no code change
@@ -73,3 +75,17 @@ jobs:
       #         direct route; verified `make test-overlay` 5/5 clean before this gate landed.
       - name: Overlay suite (make test-overlay)
         run: make test-overlay
+
+  federation:
+    name: Federation two-mesh suite (item 2's release gate, Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      # `make test-federation`: two meshes under two CAs, one container per node, the consumer
+      # disconnected from and reconnected to the edge network by the runner. This is the only
+      # place item 2's release gate is claimed with **process isolation and a real network
+      # severance** — the in-process choreography (`src/lib_tests.rs`) shares an address space
+      # and severs by stopping a gateway, and the design record says so.
+      - name: Federation suite (make test-federation)
+        run: make test-federation

@@ -103,6 +103,28 @@ pub struct FederationClient {
     state: Mutex<ClientState>,
 }
 
+/// How long a single attempt may take before the gateway counts as silent.
+///
+/// **This is a contract obligation, not a tuning knob.** PR 5 says a silent gateway yields
+/// `DeliveryUnknown` — and a client that waits forever cannot deliver that verdict. A partner whose
+/// network is *blackholed* rather than refusing (the interface is gone but a default route remains,
+/// which is what a real severance looks like) never sends a TCP reset, so without a bound the
+/// connect simply hangs. Found by the two-mesh Docker suite (item 2 PR 10b): with the edge network
+/// disconnected, calls through a gateway with no pooled connection hung instead of being refused.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The whole-request bound, for a partner that accepts a connection and then stops talking.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn http_client(connect: Duration, request: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .timeout(request)
+        .build()
+        // A builder failure here is a TLS-backend problem, not a per-call condition; the default
+        // client is still better than refusing to construct the whole client.
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 impl FederationClient {
     /// `slots_per_partner` is the fixed per-gateway quota (PR 5); `freshness` is how long a
     /// catalogue observation may be relied on (PR 3).
@@ -125,7 +147,7 @@ impl FederationClient {
             partner_key: None,
             endpoints,
             credential_lifetime: Duration::from_secs(60),
-            http: reqwest::Client::new(),
+            http: http_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
             state: Mutex::new(ClientState {
                 link: PartnerLink::new(partner),
                 pool,
@@ -146,6 +168,15 @@ impl FederationClient {
     /// forged, misaddressed or wrong-domain catalogue is refused and leaves the link `Down`.
     pub fn with_partner_key(mut self, key: [u8; 32]) -> Self {
         self.partner_key = Some(key);
+        self
+    }
+
+    /// Bound how long one attempt may take before the gateway counts as silent (defaults: 5 s to
+    /// connect, 30 s in total). See [`DEFAULT_CONNECT_TIMEOUT`] for why this is a contract
+    /// obligation rather than a tuning knob: a blackholed partner never refuses, and an unbounded
+    /// wait cannot produce the `DeliveryUnknown` the contract promises.
+    pub fn with_timeouts(mut self, connect: Duration, request: Duration) -> Self {
+        self.http = http_client(connect, request);
         self
     }
 

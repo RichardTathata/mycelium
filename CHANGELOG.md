@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — a blackholed federation gateway hung instead of reading as unknown (v3 item 2 PR 10b)
+
+- **`FederationClient` now bounds every HTTP attempt** (5 s to connect, 30 s in total;
+  `with_timeouts` to change them). A gateway that *refuses* fails fast, but one that is
+  **blackholed** — interface gone, default route still present, which is what a real network
+  severance looks like — sends nothing, and the unbounded client waited forever. Since a silent
+  gateway is contractually `DeliveryUnknown`, a client that never returns cannot deliver that
+  verdict. Found by the new two-mesh Docker suite; pinned by
+  `a_blackholed_gateway_is_unknown_within_a_bound_rather_than_hanging` (RFC 5737 TEST-NET-1).
+- The federation node config no longer sets `health_check_interval_secs` equal to
+  `reconnect_backoff_secs`, which `validate()` warns about on every node start.
+
+### Added — the two-mesh Docker suite; item 2's release gate met without a caveat (v3 item 2 PR 10b)
+
+- **`make test-federation`** (CI job `federation`) — item 2's release-gate choreography with **process
+  isolation** (one container per node) and a **real network severance** (`docker network disconnect`), the two
+  things the in-process test could not claim. `make test-federation-clean` tears down; `make federation-keys`
+  derives the suite's public keys from its fixed seeds.
+- **`examples/federation_node.rs`** — one binary, four roles (`member`, `gateway`, `probe`, `keys`) driven by
+  environment variables, plus a test-only `/fed-admin` surface (tables, propose, committed, kv, policy, revoke)
+  that every assertion reads instead of a log line. Requires `gateway`, `tls`, `a2a`, `cli`.
+- `docker/docker-compose.federation.yml`, `docker/Dockerfile.federation`,
+  `tests/integration/run_federation.sh`.
+
 ### Added — the signed catalogue reply (v3 item 2 PR 10a)
 
 - **`CatalogReply`** now carries `for_partner` (whom the list was filtered for), `issued_at_ms` and an optional

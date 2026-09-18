@@ -260,7 +260,9 @@ budgets, outcomes · PR6 partition/reconnect, revocation, rotation · PR7 exampl
 transport's first arm** (edge + client + the two-mesh test with bytes crossing — landed 2026-09-18; record §13) · **PR9
 the gate's choreography** (enforced profile, two CAs, lose/replace a gateway, sever, work locally, change the grant
 mid-partition, reconnect; the traces leg from the connection tables — landed 2026-09-18: **the gate is met in its
-in-process form**) · PR10a the signed catalogue reply (landed 2026-09-18) · PR10 the Docker two-mesh suite + SDK verbs. Release gate:
+in-process form**) · PR10a the signed catalogue reply · **PR10b the two-mesh Docker suite** (process isolation +
+`docker network disconnect`; `make test-federation`, CI job `federation` — landed 2026-09-18: **the release gate is
+met without a caveat**) · PR11 SDK verbs + a hostile network + more than two domains. Release gate:
 the two-mesh demonstration — discover, invoke, lose a gateway, sever every link, keep working locally, change permissions
 mid-partition, reconnect, and prove from membership tables, consensus state and traces that the meshes never merged.
 

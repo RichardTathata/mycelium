@@ -1,0 +1,21 @@
+# The two-mesh federation suite's runner (v3 item 2 PR 10b).
+#
+# The script is **baked in rather than bind-mounted**, unlike the older integration runner. A bind
+# mount of the repo silently yields an empty directory on any host whose checkout path is not in
+# Docker Desktop's file-sharing list — which is how this suite first failed, with the runner
+# exiting 127 on "No such file or directory". Copying it in makes the suite runnable from any
+# checkout and pins the script to the image that ran it.
+#
+# It lives here, beside its script, rather than in `docker/`, because the repo-root
+# `.dockerignore` excludes `tests/integration/` from that context on purpose (the node image must
+# not ship test files). The context for this image is this directory.
+#
+# `docker-cli` is here because the suite severs the federation link for real
+# (`docker network disconnect`) and starts the admission plant (`docker run`); the socket is
+# mounted at run time. The compose plugin is deliberately NOT installed — the runner names the
+# image and the volumes directly, so it needs no compose file.
+FROM alpine:3.19
+RUN apk add --no-cache bash curl jq docker-cli
+COPY run_federation.sh /run_federation.sh
+RUN chmod +x /run_federation.sh
+ENTRYPOINT ["/bin/bash", "/run_federation.sh"]

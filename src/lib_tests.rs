@@ -6534,6 +6534,67 @@ mod federation_transport {
         a0.shutdown().await;
     }
 
+    /// **A blackholed gateway is silent in bounded time** (item 2 PR 10b's finding). PR 5 promises
+    /// `DeliveryUnknown` for a gateway that goes silent, and a client that waits forever cannot
+    /// deliver that verdict. A *refusing* partner sends a TCP reset and fails fast; a **blackholed**
+    /// one — interface gone, default route still there, which is what a real severance looks like —
+    /// sends nothing at all. `192.0.2.1` is RFC 5737 TEST-NET-1, reserved and unroutable, so this
+    /// reproduces that shape without a network namespace.
+    ///
+    /// The assertion is the *bound*, not the error: on a host that answers `ENETUNREACH` the call
+    /// fails immediately and the bound still holds. Before this PR's default connect timeout it
+    /// hung instead — which is how the Docker suite found it.
+    #[tokio::test]
+    async fn a_blackholed_gateway_is_unknown_within_a_bound_rather_than_hanging() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(17);
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy::default(),
+        ));
+        let http_port = alloc_port();
+        let mut a = mesh(1, Some((http_port, edge))).await;
+        let a0 = Arc::new(a.remove(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _reg = a0.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&a0), Arc::clone(&calls));
+        let cap_key = format!("cap/{}/demo/whoami", a0.node_id());
+        poll_until(|| a0.kv().get(&cap_key).is_some(), 5_000).await;
+
+        // The blackhole is listed first, so it is the one the pool admits.
+        let client = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk, alpha.clone(),
+            vec![
+                GatewayEndpoint { id: "gw-blackhole".into(), base_url: "http://192.0.2.1:8300".into() },
+                GatewayEndpoint { id: "gw-live".into(), base_url: format!("http://127.0.0.1:{http_port}") },
+            ],
+            1, Duration::from_secs(30),
+        )
+        .with_timeouts(Duration::from_millis(300), Duration::from_secs(1));
+
+        // `connect` walks past the blackhole to the live gateway, bounded.
+        let started = Instant::now();
+        assert_eq!(client.connect().await.unwrap(), vec!["demo/whoami".to_string()]);
+        assert!(started.elapsed() < Duration::from_secs(10), "connect past a blackhole took {:?}", started.elapsed());
+
+        // At-most-once through the blackhole: unknown, named, and bounded.
+        let started = Instant::now();
+        match client.call("demo/whoami", "?", Repeatability::AtMostOnce).await {
+            Err(ClientError::Outcome(CallOutcome::DeliveryUnknown { attempted_via, .. })) => {
+                assert_eq!(attempted_via, vec!["gw-blackhole".to_string()])
+            }
+            other => panic!("a blackholed gateway must read as DeliveryUnknown, got {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "the verdict took {:?}", started.elapsed());
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing reached the provider through the blackhole");
+
+        a0.shutdown().await;
+    }
+
     // ── The release gate's choreography (item 2 PR 9) ─────────────────────────────────────
     //
     // The record's §13 gate, run over the PR 8 transport: discover, invoke, lose a gateway, sever
@@ -6556,10 +6617,12 @@ mod federation_transport {
         cfg.bind_port = port;
         cfg.bootstrap_peers = bootstrap;
         cfg.health_check_max_jitter_ms = 50;
-        // As the WS1 TLS test: peer registration happens on Ping receipt, so fast pings and a
-        // short reconnect backoff keep formation inside the poll window under TLS.
+        // Peer registration happens on Ping receipt, so formation under TLS needs fast pings.
+        // The interval stays above `reconnect_backoff_secs + 2`: at 1/1 (the WS1 TLS test's
+        // values) `validate()` warns on every start that a peer can be evicted mid-backoff and
+        // never reconnect — found while bringing up the Docker suite (item 2 PR 10b).
         cfg.reconnect_backoff_secs = 1;
-        cfg.health_check_interval_secs = 1;
+        cfg.health_check_interval_secs = 4;
         cfg.domain_profile = DomainProfile::Enforced;
         cfg.swim_failure_detector = false;
         cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.to_path_buf(), ..TlsConfig::default() });
@@ -6637,7 +6700,7 @@ mod federation_transport {
             b1.consensus().start_consensus_listener(ConsensusConfig::default()),
             b2.consensus().start_consensus_listener(ConsensusConfig::default()),
         ];
-        poll_until(|| a1.peers().len() == 2 && a2.peers().len() == 2 && gw1.peers().len() == 2 && b1.peers().len() == 1 && b2.peers().len() == 1, 8_000).await;
+        poll_until(|| a1.peers().len() == 2 && a2.peers().len() == 2 && gw1.peers().len() == 2 && b1.peers().len() == 1 && b2.peers().len() == 1, 25_000).await;
         assert_eq!((a1.peers().len(), b1.peers().len()), (2, 1), "both meshes formed under their own CA");
 
         // The provider lives on a1, not on a gateway: gateways route, and are replaceable.
@@ -6656,7 +6719,7 @@ mod federation_transport {
         let gateway_ready = |gw: &GossipAgent| {
             gw.kv().get(&cap_key).is_some() && gw.kv().get(&cap_key_secret).is_some() && gw.kv().get(&marker_key).is_some()
         };
-        poll_until(|| gateway_ready(&gw1), 8_000).await;
+        poll_until(|| gateway_ready(&gw1), 25_000).await;
         assert!(gateway_ready(&gw1), "the gateway learned the provider's capabilities and caller-context marker through its own mesh");
 
         let client = FederationClient::new(
@@ -6725,7 +6788,7 @@ mod federation_transport {
         // ── 7. Reconnect: the replacement gateway comes up in domain A. ──────────────────────
         let gw2 = enforced_node(pg2, &ca_a, vec![a1.node_id().clone(), a2.node_id().clone()], Some((http2, Arc::clone(&edge)))).await;
         listeners.push(gw2.consensus().start_consensus_listener(ConsensusConfig::default()));
-        poll_until(|| gw2.peers().len() == 2 && gateway_ready(&gw2), 8_000).await;
+        poll_until(|| gw2.peers().len() == 2 && gateway_ready(&gw2), 25_000).await;
         assert!(gateway_ready(&gw2), "the replacement gateway learned the provider through its mesh");
 
         // Reconnected is not ready: no call until discovery refreshes.

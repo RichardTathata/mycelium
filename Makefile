@@ -8,6 +8,15 @@ COMPOSE_LLM           = docker compose -f docker/docker-compose.yml
 COMPOSE_LLM_DEMO      = docker compose -f docker/docker-compose.llm-agent.yml
 COMPOSE_THREE_NODE    = docker compose -f docker/docker-compose.three-node-test.yml
 COMPOSE_OVERLAY       = docker compose -f tests/overlay/docker-compose.test.yml
+COMPOSE_FEDERATION    = docker compose -f docker/docker-compose.federation.yml
+
+# The two-mesh federation suite's fixed test material (item 2 PR 10b). Seeds are in the clear on
+# purpose: they are a fixture, not a secret. The public halves are derived — `make federation-keys`.
+FED_ALPHA_SEED       ?= 1111111111111111111111111111111111111111111111111111111111111111
+FED_BETA_SEED        ?= 2222222222222222222222222222222222222222222222222222222222222222
+FED_ALPHA_PUBLIC_KEY ?= d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
+FED_BETA_PUBLIC_KEY  ?= a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0
+FED_ENV               = ALPHA_PUBLIC_KEY=$(FED_ALPHA_PUBLIC_KEY) BETA_PUBLIC_KEY=$(FED_BETA_PUBLIC_KEY)
 
 .PHONY: build check check-full test test-clean test-scale test-scale-clean test-scale-resilience test-scale-resilience-clean test-scale-entries test-scale-entries-clean test-llm-demo test-llm-agent test-three-node test-overlay llm-agent-interactive help
 
@@ -186,6 +195,37 @@ check-full: check
 	cargo test  -p mycelium-core --features sim   # the seams actually route through the kernel
 	cargo test  -p mycelium-core          # the substrate suite (codec/framing/hlc/store/swim) + the wire back-compat gate
 	cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
+
+## test-federation — item 2's release gate with **process isolation and a real network severance**
+## (v3 item 2 PR 10b): two meshes under two CAs, one container per node, the consumer disconnected
+## from and reconnected to the edge network by the runner (`docker network disconnect/connect`).
+## The in-process choreography (`lib_tests.rs`) proves the same sequence but shares an address
+## space and severs by stopping a gateway — that caveat is what this suite removes.
+## The public keys below are DERIVED from the suite's fixed test seeds: `make federation-keys`.
+.PHONY: test-federation test-federation-clean federation-keys
+test-federation:
+	$(FED_ENV) $(COMPOSE_FEDERATION) down -v --remove-orphans 2>/dev/null || true
+	$(FED_ENV) $(COMPOSE_FEDERATION) up -d --build
+	@$(FED_ENV) $(COMPOSE_FEDERATION) logs -f runner & \
+	EXIT=$$(docker wait mycelium-fed-runner); \
+	if [ "$$EXIT" != "0" ]; then \
+	    echo "-- runner failed: node logs (last 100 lines each, for CI diagnosis) --"; \
+	    for c in alpha-a1 alpha-a2 alpha-gw1 alpha-gw2 beta-b1 beta-b2 beta-probe; do \
+	        echo "-- $$c"; docker logs --tail 100 mycelium-fed-$$c 2>&1 || true; \
+	    done; \
+	fi; \
+	$(FED_ENV) $(COMPOSE_FEDERATION) --profile plant down -v --remove-orphans 2>/dev/null || true; \
+	exit $$EXIT
+
+test-federation-clean:
+	$(FED_ENV) $(COMPOSE_FEDERATION) --profile plant down -v --remove-orphans
+
+## federation-keys — print the public halves of the suite's fixed seeds. They are pinned in this
+## file (FED_ALPHA_PUBLIC_KEY / FED_BETA_PUBLIC_KEY); a mismatch would surface as `BadSignature`,
+## which reads like a defect in the thing under test rather than a wrong fixture — so derive them.
+federation-keys:
+	@printf 'alpha %s\n' "$$(FED_ROLE=keys FED_SIGNING_SEED=$(FED_ALPHA_SEED) cargo run -q --example federation_node --features tls,a2a,cli)"
+	@printf 'beta  %s\n' "$$(FED_ROLE=keys FED_SIGNING_SEED=$(FED_BETA_SEED) cargo run -q --example federation_node --features tls,a2a,cli)"
 
 ## help
 help:

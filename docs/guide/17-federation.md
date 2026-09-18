@@ -216,10 +216,14 @@ consensus namespace and each node's connection table (`connected_peers`) before,
 run this for real: a replaced gateway should be **retired** (`FederationClient::retire_gateway`) — the
 pool keeps no health memory, so a dead gateway left listed costs every at-most-once call a
 `DeliveryUnknown`; and the edge is plain HTTP in the test — in production it is whatever the gateway
-serves, so run it behind `gateway_tls`. The catalogue is signed under the domain's key and bound to the
+serves, so run it behind `gateway_tls`. Every attempt is bounded (5 s to connect, 30 s in total;
+`with_timeouts` to change them), because a partner whose network is blackholed never refuses and an
+unbounded client could not report the `DeliveryUnknown` the contract promises. The catalogue is signed under the domain's key and bound to the
 partner it was issued to; a client given the partner's key (`with_partner_key`) refuses an unsigned,
-forged or misaddressed one and leaves the link down. Still to build: the Docker two-mesh suite (process
-isolation and a real network severance are its claim); SDK verbs. Streaming under a
+forged or misaddressed one and leaves the link down. PR 10b closed the gate's last caveat: the same
+choreography runs in Docker with one container per node and the link cut for real
+(`make test-federation`). Still to build: SDK verbs, a hostile network between domains, more than
+two domains. Streaming under a
 credential is refused (federated calls are unary); `examples/federated_domains.rs` still runs the
 lifecycle in one process and says so. The invocation edge **is A2A** (D5) with domain-bound origin
 credentials — not a second call protocol, because two invocation edges with different auth models is
