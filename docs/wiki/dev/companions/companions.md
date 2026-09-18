@@ -38,6 +38,11 @@ via wasm-host).
   document (superset of the A2A AgentCard), CRDT-assembled domain endpoint, schema
   migrations. PRs #44–#49, #83–#88. Domain positioning:
   [coordinator-free-recursion](../../domain/theory/coordinator-free-recursion.md).
+  **Knowledge-layer adapter (v3 item 3 PR 7, 2026-09-18):** `mycelium-agentfacts/src/knowledge.rs` —
+  a *verified* self-signed document becomes a knowledge **claim** issued by its signing **key** (not the
+  `node_id` string anyone can type). The kind is the point: `docs/design/knowledge-layer.md` §1's
+  resolution rules never count a claim as evidence, so the adapter makes AgentFacts legible to the layer
+  without making them more trusted. A tampered document yields no record at all.
 - **`mycelium-reason/`** — the **v3.0 LLM-authoring DX companion** (a *different axis* from the
   coordination crates above — see [pattern-coverage](../../domain/pattern-coverage.md) → the LLM-DX
   axis). Three Tier-3 wedges: ① **capability-routed inference** (`InferenceRouter`: resolve → drop
@@ -80,6 +85,13 @@ via wasm-host).
   gateway auth layer — fixed in core ([security](../security.md)). Coherence assessment (philosophy /
   strategy / architecture — compliant; the façade is an adapter over prompt skills, labelled so; the
   reservation default is a static knob): [.log/2026-09-04](../.log/2026-09-04-pair-imports.md).
+  **Knowledge-layer trace adapter (v3 item 3 PR 7, 2026-09-18, feature `knowledge`):**
+  `mycelium-reason/src/knowledge.rs` — a `TraceEvent` becomes a knowledge **observation** (a report, never
+  evidence), with `derived_from` links **only where the caller asserts them**; the batch form
+  `observations` is link-free *by construction* — it has no parameter through which derivation could be
+  supplied, so HLC adjacency can never be manufactured into causation (record §6). The adapter needed
+  `mycelium::hlc` public (it was `pub(crate)`; re-exported additively, since `mycelium-core` already commits
+  to it) — a companion handing out packed HLCs had no public way to read them.
 - **`mycelium-guardrails/`** — the **v3.0 structural-guardrails companion** (the second primary;
   *different axis* again — [pattern-coverage](../../domain/pattern-coverage.md) → Structural guardrails).
   *What an agent may do*, one tier-labelled `Policy` → `apply()` compiling to **Tier A** boundary

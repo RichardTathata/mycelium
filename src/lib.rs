@@ -223,9 +223,12 @@ pub mod knowledge;
 // Re-exported here so existing `crate::store::…`, `crate::signal::…`, `crate::config::…`,
 // `crate::CoreCtx`, etc. keep resolving unchanged across the crate boundary, and the
 // public `mycelium::{config, signal, error}` API surface is preserved.
-pub use mycelium_core::{config, error, signal};
+// `hlc` is public because companion crates hand out packed HLC timestamps (`TraceEvent.hlc`,
+// log keys) and need `hlc::physical_ms` to read them without copying the bit layout — it is
+// already `pub mod hlc` in `mycelium-core`, so this commits to nothing that crate does not.
+pub use mycelium_core::{config, error, hlc, signal};
 pub(crate) use mycelium_core::{
-    connection, framing, hlc, locality, node_id, persistence, seen, store, stream, tls, writer,
+    connection, framing, locality, node_id, persistence, seen, store, stream, tls, writer,
 };
 
 mod agent;

@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the knowledge layer's adapters (item 3 PR 7 — item 3 complete)
+
+- **The trace adapter** (`mycelium-reason`, new feature `knowledge`): a `TraceEvent` becomes a knowledge
+  **observation** — a report of what happened, which §1's record-type split keeps from ever counting as
+  evidence. §6's rule — *add `derived_from` explicitly, never infer it from HLC adjacency* — is **structural,
+  not a convention**: `observation` takes derivation as an argument the caller must assert, and the batch form
+  `observations` has no parameter through which links could be supplied, so it cannot invent any. Planting the
+  violation (chaining a run by HLC order) fails exactly the one test about it.
+- **The AgentFacts adapter** (`mycelium-agentfacts`): a self-signed document becomes a knowledge **claim** —
+  what a node says about itself — **after** its signature verifies; a tampered or key-swapped document yields no
+  record at all. The **issuer is the signing key**, not the `node_id` string anyone can type. The point is the
+  kind: a perfectly signed claim filed under a release with a `supports` link is *still* not evidence, because a
+  node cannot vouch for itself — and the kind, not the signature, is what enforces that. Swapping the kind
+  fails exactly the two tests about it.
+- **`mycelium::hlc` is now public** (additive). It was `pub(crate)`, which left a companion crate that hands
+  out packed HLC timestamps (`TraceEvent.hlc`, log keys) with no public way to read them short of copying the
+  bit layout. `mycelium-core` already had `pub mod hlc`, so this commits to nothing that crate did not.
+- Record-id determinism is pinned: the same JSON detail built in two key-insertion orders yields one id. Cargo
+  unions features across the graph, so a dependency enabling `serde_json/preserve_order` later would silently
+  break canonical bytes — that test is what would catch it.
+- Ten tests across the two crates, three claims verified non-vacuous by planted breakage. Item 3 (the knowledge
+  layer) is complete at PRs 1–7.
+
 ### Added — the knowledge layer's semantic gate and demonstration (item 3 PR 6 — the contract completes)
 
 - **The semantic gate is now a named, separately-runnable thing** (`make gate-knowledge`, and its own CI step),
