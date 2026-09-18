@@ -28,6 +28,8 @@
 //! profile a deployment lives in until its own traces show the rule is right, and it is a distinct
 //! [`Decision`] variant rather than a flag, so a caller cannot forget to tell them apart.
 
+pub mod ledger;
+
 use crate::ViewConfidence;
 
 /// What kind of action a governor is about to take. The class is what decides whether uncertainty

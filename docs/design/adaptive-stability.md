@@ -174,7 +174,7 @@ and it is hard because it is **local and durable**, not because it is global.
 |---|---|
 | **1** *(this record)* | the ADR; `rights/head/{holder}` reserved in the namespace table and `kv_ns` |
 | **2** ✓ | `src/control.rs` — `ControlSpec`; the **confidence predicate as a pure function, swept** over every action class × every way a view can be uncertain, taking the real `ViewConfidence`; the four profiles with `Observe` as a distinct `WouldHold` decision; the stable `ActionId`; spacing and settling as pure checks |
-| 3 | the **rights ledger**: the node-local journal on item 1's durability, `Right` with its five states, the bounded signed head, `admission.rejected` |
+| **3** ✓ | `src/control/ledger.rs` on `agent::journal` (the mechanism lifted out of the AE profile in PR 3a, ungated here) — `Right` with its five counted states, **persist-then-apply** (a record that did not reach disk allocates nothing), no method that takes a peer set (discovery loss cannot reach the ledger), `admission.rejected` as a journal record, a fail-closed open over an undecodable journal, and `RightsHead` over `serde_fixint` bytes with `tls`-gated verification |
 | 4 | the flow wired for the four owned actuators — reserve-before-act, settling, spacing — with the existing `gate` and cooldown kept as they are |
 | 5 | admission control at the companions' queues via depth (§6), the example, `docs/operations` runbook, the §6.6 ledger entry for any config struct that gains a field |
 | — | the combined-feedback harness is **item 6 PR 6** (D19), on PR 2's `ControlSpec` |

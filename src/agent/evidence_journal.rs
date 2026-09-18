@@ -20,10 +20,10 @@
 //! This module is the AE **profile** over the node-local journal, not the journal. The append-only
 //! file, the fsync, the bounded queue, the reader and its cursor moved to `super::journal`, because
 //! the rights ledger (`docs/design/adaptive-stability.md` §4) needs the same mechanism and a second
-//! journal beside the first is how guarantees drift. The mechanism keeps this module's feature gate
-//! until the ledger — its second user — lands and ungates it. Every public name this module exported
-//! before the split is still exported from here, unchanged; the AE journal records its queue under
-//! the replay stream `ae/journal`, exactly as before.
+//! journal beside the first is how guarantees drift. The mechanism is ungated — the ledger is its
+//! second user, in every build — while this profile keeps its gateway gate. Every public name this
+//! module exported before the split is still exported from here, unchanged; the AE journal records
+//! its queue under the replay stream `ae/journal`, exactly as before.
 //!
 //! # Why not the audit sink
 //!

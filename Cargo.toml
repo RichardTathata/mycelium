@@ -33,7 +33,7 @@ gateway = ["dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:futures-util",
 fuzz-internals = []
 # Enables mTLS on the gossip TCP port, keypair-backed node identity, and
 # consensus payload signing. Adds tokio-rustls, rcgen, and ed25519-dalek.
-tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:sha2"]
+tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap"]
 # Enables OTEL span export from SkillRunner (opentelemetry-otlp gRPC).
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 # Exposes a Prometheus /metrics endpoint on the gateway HTTP port.
@@ -50,7 +50,7 @@ llm = ["gateway"]
 # identity roles, gateway endpoint ACLs, tamper-evident audit trail. Implies
 # `gateway` (the auth/audit HTTP surface) + `tls` (signed identity + roles) and
 # pulls in `sha2` for the audit hash-chain (already in the tree via ed25519-dalek).
-compliance = ["mycelium-core/compliance", "gateway", "tls", "dep:sha2", "dep:jsonwebtoken"]
+compliance = ["mycelium-core/compliance", "gateway", "tls", "dep:jsonwebtoken"]
 # Exposes `test_util::alloc_port` (a bind-verified port allocator) for companion integration
 # tests. Test-only — no runtime deps, never enable in a production build.
 # Forwards core's replay seams (item 6). Off in every shipped build.
@@ -127,9 +127,11 @@ rand_core      = { version = "0.6",  features = ["getrandom"],         optional 
 # Lock-free atomic swap of the live TLS identity (hot cert rotation, WS5).
 arc-swap       = { version = "1",    optional = true }
 
-# Audit hash-chain (optional — enabled by the "compliance" feature). SHA-256 over
-# canonical record bytes; already present transitively via ed25519-dalek.
-sha2           = { version = "0.10", optional = true }
+# SHA-256 for the node-local journal's content hashes (`agent::journal`, ungated since item 4
+# PR 3 — the rights ledger needs it in every build), the audit hash-chain and the AE argument
+# digest. Unconditional: a minimal build gains one small pure-Rust crate, already in the tree for
+# every `tls` build via ed25519-dalek.
+sha2           = "0.10"
 # OIDC JWT validation for SSO (optional — enabled by the "compliance" feature).
 # Uses `ring` (already in the tree via rustls) for RS256/ES256 verification.
 jsonwebtoken   = { version = "9", optional = true }
