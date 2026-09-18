@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the award under the acceptor's mandate (v3 §6.9, CN3)
+
+- **`ContractNet::commit_award_under_mandate(award, acceptor, authority, now_ms)`** — the mandate must be
+  the acceptor's own (`MandateNotTheAcceptors { holder, acceptor }` by name otherwise), and the requirement's
+  `ResourceAuthority` must authorize `accept` for it now: a stale holder's award — minted under an epoch the
+  resource has moved past — is `CommitmentRefusal::Mandate(MandateRefusal::Superseded { installed, presented })`,
+  refused **before any write**; a passing check commits linearizably. Item 5 is present, so the negative case
+  runs in CI rather than being skipped; a deployment without mandates uses `commit_award_linearizable`.
+
 ### Added — the linearizable award and the double-award witness (v3 §6.9, CN2 — partial)
 
 - **`ContractNet::{plan_award, commit_award, commit_award_linearizable, award_linearizable}`** — the plain

@@ -42,10 +42,18 @@ and LWW keeps one silently — the crate's tests show it. Where two may race, us
 award**, and a round with no commit is `AwardUnknown` — a retry resolves it. Every reader sees the one
 award through `award_of`.
 
+## Under a mandate (CN3)
+
+`commit_award_under_mandate(award, &acceptor_mandate, &authority, now_ms)`: the mandate must be the
+acceptor's own, and the requirement's `ResourceAuthority` (`docs/design/scoped-mandates.md`) must authorize
+`accept` for it now. A stale holder — a mandate minted under an epoch the resource has moved past — is
+refused as `Superseded { installed, presented }` **before any write**; a passing check commits
+linearizably. A deployment without mandates uses `commit_award_linearizable` — a check not called, never one
+faked.
+
 ## What it does not do (yet)
 
 Replay an award under `mycelium-sim`: a whole-node recording diverges on task interleaving, which needs the
-kernel's scheduler seam; the crate pins that gap with a test that asserts the divergence. CN3 checks an
-award against the acceptor's mandate epoch (`docs/design/scoped-mandates.md`) where one exists. Participants
-are named, not authenticated, here: authority lives in the gateway's caller context and in mandates, not in
-this crate.
+kernel's scheduler seam; the crate pins that gap with a test that asserts the divergence. A mandate revoked
+*during* the award's round is not caught by the check, which runs before it. Participants are named, not
+authenticated, here: authority lives in the gateway's caller context and in mandates, not in this crate.

@@ -103,8 +103,9 @@ via wasm-host).
   (partial):** `commit_award_linearizable` — the award through a consensus round, so of two racing declarers
   exactly one commits and the other is `AlreadyAwarded` with the committed award — and the double-award witness
   as an explicit interleaving (the plain path lets both commit, LWW keeps one). The replay half is **pinned as a
-  gap**: a whole-node recording diverges on task interleaving, the scheduler seam's row. Not yet: CN3 (mandate
-  epoch at award).
+  gap**: a whole-node recording diverges on task interleaving, the scheduler seam's row. **CN3:**
+  `commit_award_under_mandate` — the acceptor's own mandate, checked against the requirement's
+  `ResourceAuthority` before any write; a stale holder is `Superseded`, another holder's mandate refused by name.
 - **`mycelium-effects/`** — the **v3 effects companion** (item 1 PR 5, 2026-09-18): the *destination-commit*
   receipt as a reference destination. The substrate provides three of item 1's four receipts and never the fourth,
   because only the caller's resource can say whether an effect happened there. `EffectDestination` commits the

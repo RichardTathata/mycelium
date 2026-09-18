@@ -35,6 +35,19 @@ compile time (`unknown` for the compiler: no build script). *Not built:* the min
 corpus has one entry — B and C are pure sweeps with no kernel trace. Log:
 [`.log/2026-09-18-item6-pr7-replay-corpus.md`](.log/2026-09-18-item6-pr7-replay-corpus.md).
 
+## v3 contracts axis — CN3: the award under the acceptor's mandate — 2026-09-18 (unreleased)
+
+`commit_award_under_mandate`: item 5's fence at the award. The mandate must be the acceptor's own — another
+holder's is refused by name — and the requirement's `ResourceAuthority` must authorize `accept` for it at its
+installed epoch, now: a stale holder's award, minted under an epoch the resource has moved past, is
+`Mandate(Superseded { installed, presented })`, and the check runs **before any write**, so a refused award leaves
+nothing behind. A passing check commits linearizably. The plan's "skipped, not faked, where item 5 is absent"
+needed no skip: item 5 is in this tree, the negative case runs in CI, and a deployment without mandates uses the
+mandate-free linearizable commit — a check not called rather than one faked. With CN1–CN3 the commitment
+companion's three steps are landed (CN2's replay half pinned as a gap); the CN-gate — §13.3's four-arm harness —
+is the research track's, not this session's. Log:
+[`.log/2026-09-18-cn3-award-under-mandate.md`](.log/2026-09-18-cn3-award-under-mandate.md).
+
 ## v3 contracts axis — CN2: the linearizable award, and a gap pinned — 2026-09-18 (unreleased, partial)
 
 `commit_award_linearizable`: the award through a consensus round on `cn/{req}/award` — of two declarers racing

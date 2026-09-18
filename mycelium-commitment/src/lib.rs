@@ -42,6 +42,7 @@
 //! caller (`now_ms`), so every decision here is pure in time and a harness can drive it.
 
 use bytes::Bytes;
+use mycelium::mandate::{Mandate, MandateRefusal, ResourceAuthority};
 use mycelium::{CommitError, CommitReceipt, ConsensusConfig, GossipAgent, OperationId, ReceiptError, WriteReceipt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -186,6 +187,12 @@ pub enum CommitmentRefusal {
     AwardUnknown { ballots_tried: u32 },
     /// A linearizable award's round was refused for a reason other than an existing award.
     NotCommitted(String),
+    /// The acceptor's mandate did not authorize the acceptance (CN3): a stale holder's award is
+    /// `Superseded { installed, presented }` — the resource has moved to a later epoch than the
+    /// one this mandate was minted under. Refused **before** any write.
+    Mandate(MandateRefusal),
+    /// The mandate presented is not the acceptor's own: it names another holder.
+    MandateNotTheAcceptors { holder: String, acceptor: String },
     /// A record in the medium did not decode.
     Encoding(String),
 }
@@ -202,6 +209,10 @@ impl std::fmt::Display for CommitmentRefusal {
                 "the award's round reached no commit after {ballots_tried} ballot(s) — it may or may not have committed; retry"
             ),
             Self::NotCommitted(e) => write!(f, "the award's round was refused: {e}"),
+            Self::Mandate(e) => write!(f, "the acceptor's mandate does not authorize the acceptance: {e}"),
+            Self::MandateNotTheAcceptors { holder, acceptor } => {
+                write!(f, "the mandate names {holder} as holder, but the acceptor is {acceptor}")
+            }
             Self::Encoding(e) => write!(f, "a record did not decode: {e}"),
         }
     }
@@ -368,6 +379,31 @@ impl ContractNet {
         now_ms: u64,
     ) -> Result<AwardedLinearizable, CommitmentRefusal> {
         let award = self.plan_award(requirement, rule, now_ms)?;
+        self.commit_award_linearizable(award).await
+    }
+
+    /// **Commit a planned award under the acceptor's mandate** (CN3): the mandate must be the
+    /// acceptor's own, and `authority` — the requirement's scope, at its installed epoch — must
+    /// authorize the operation `accept` for it *now*. A stale holder's award, minted under an epoch
+    /// the resource has moved past, is [`CommitmentRefusal::Mandate`] with
+    /// `MandateRefusal::Superseded { installed, presented }`. The check runs **before any write**;
+    /// a passing check commits linearizably. Where a deployment has no mandates, use
+    /// [`commit_award_linearizable`](Self::commit_award_linearizable) — this method is not a
+    /// mandate check that can be skipped, it is one that is either made or not called.
+    pub async fn commit_award_under_mandate(
+        &self,
+        award: Award,
+        acceptor: &Mandate,
+        authority: &ResourceAuthority,
+        now_ms: u64,
+    ) -> Result<AwardedLinearizable, CommitmentRefusal> {
+        if acceptor.holder.as_str() != award.participant {
+            return Err(CommitmentRefusal::MandateNotTheAcceptors {
+                holder: acceptor.holder.as_str().to_string(),
+                acceptor: award.participant,
+            });
+        }
+        authority.check(acceptor, "accept", now_ms).map_err(CommitmentRefusal::Mandate)?;
         self.commit_award_linearizable(award).await
     }
 
@@ -607,6 +643,61 @@ mod tests {
         assert!(msg.contains("replay diverged"), "the failure is a divergence, not something else: {msg}");
         assert!(msg.contains("jitter") || msg.contains("consensus/defer") || msg.contains("tick"),
             "and it is an interleaving of two tasks' seam requests, as predicted: {msg}");
+    }
+
+    fn mandate_for(holder: &str, epoch: u64) -> Mandate {
+        use mycelium::mandate::{PrincipalId, TermId};
+        Mandate {
+            holder: PrincipalId::new(holder).unwrap(),
+            established_by: PrincipalId::new("coop-board").unwrap(),
+            purpose: "drive pickups".into(),
+            scope: "redistribution/pickups".into(),
+            operations: vec!["accept".into()],
+            epoch,
+            term: TermId::new(format!("term-{epoch}")).unwrap(),
+            valid_from_ms: 0,
+            valid_until_ms: u64::MAX,
+        }
+    }
+
+    /// CN3 — the negative case: the acceptor's mandate is checked against the resource's installed
+    /// epoch **before** the award is written. A holder whose mandate was minted under epoch 1 is
+    /// refused once the resource has installed epoch 2 — `Superseded { installed: 2, presented: 1 }`
+    /// — and nothing was written; a mandate that is not the acceptor's own is refused by name; a
+    /// current mandate's award commits, linearizably.
+    #[tokio::test]
+    async fn a_stale_holders_award_is_refused_as_superseded_before_any_write() {
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let d = ContractNet::new(Arc::clone(&agent), "driver-a");
+        hub.announce("mandated", "2 crates", "before close", 100, 0);
+        d.offer("mandated", "4 km", 1);
+        let authority = ResourceAuthority::new("redistribution/pickups", 2);
+
+        let stale = mandate_for("driver-a", 1);
+        let plan = hub.plan_award("mandated", AwardRule::LowestParticipant, 10).unwrap();
+        match hub.commit_award_under_mandate(plan.clone(), &stale, &authority, 10).await {
+            Err(CommitmentRefusal::Mandate(MandateRefusal::Superseded { installed, presented })) => {
+                assert_eq!((installed, presented), (2, 1));
+            }
+            other => panic!("a stale holder must be refused as superseded, got {other:?}"),
+        }
+        assert!(hub.award_of("mandated").is_none(), "refused before any write");
+
+        let someone_elses = mandate_for("driver-b", 2);
+        match hub.commit_award_under_mandate(plan.clone(), &someone_elses, &authority, 10).await {
+            Err(CommitmentRefusal::MandateNotTheAcceptors { holder, acceptor }) => {
+                assert_eq!((holder.as_str(), acceptor.as_str()), ("driver-b", "driver-a"));
+            }
+            other => panic!("another holder's mandate must be refused by name, got {other:?}"),
+        }
+        assert!(hub.award_of("mandated").is_none(), "still nothing written");
+
+        let current = mandate_for("driver-a", 2);
+        let awarded = hub.commit_award_under_mandate(plan, &current, &authority, 10).await.expect("a current mandate commits");
+        assert_eq!(awarded.award.participant, "driver-a");
+        assert_eq!(hub.award_of("mandated").unwrap().participant, "driver-a");
+        agent.shutdown().await;
     }
 
     #[tokio::test]
