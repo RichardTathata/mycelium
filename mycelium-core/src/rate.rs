@@ -21,7 +21,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use bytes::Bytes;
 
@@ -62,8 +61,9 @@ pub fn throttled_sender_count(ctx: &CoreCtx) -> u64 {
 /// The decider loop: periodically aggregate `sys/rate/` evidence and reconcile the local throttle map.
 /// Spawned only when `rate_observation_enabled`.
 pub async fn run_rate_decider(ctx: Arc<CoreCtx>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-    let mut tick = tokio::time::interval(Duration::from_secs(2));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Through the timer seam (item 6). `Delay`, as before: a late decision shifts the schedule
+    // rather than bursting to catch up.
+    let mut tick = crate::sim_seam::interval_ms("rate/decide", 2_000, tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = tick.tick() => decide_once(&ctx),

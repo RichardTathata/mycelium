@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — every periodic loop ticks through the timer seam (item 6 follow-on)
+
+- The seven tickers #276 left unrouted now go through `sim_seam::interval_ms`: `kv-persist/{key}`,
+  `mesh/emit/{kind}`, `mesh/stale/{kind}`, `persistence/snapshot`, `rate/decide` (the one `Delay` loop),
+  `swim/probe` (its 1 ms floor kept) and `membership/tick`. Live behaviour is the same `tokio::time::interval`
+  with the same missed-tick setting; under `sim` each tick is a recorded decision. Seams baseline 185 → 178.
+- **`Ticker::reset_after_ms`** (both arms): the snapshot loop defers 30 s while the node is opaque for another
+  reason, and a deferral is a decision — under `sim` the next recorded tick carries the deferral as its
+  nominal wait (`tick(30000ms)`), so a trace shows where the loop chose to wait instead of a period that
+  never elapsed. Pinned by `a_deferred_tick_records_the_deferral_then_resumes_the_period`.
+
 ### Fixed — the seams check sees timer calls through a module alias (item 6 follow-on)
 
 - **`scripts/check-sim-seams.sh`** now counts `time::sleep|interval|timeout|Instant` in any file that imports
