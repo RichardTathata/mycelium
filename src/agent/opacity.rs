@@ -323,13 +323,25 @@ pub(crate) fn spaced_transition(
     spec: &ControlSpec,
     last_action_ms: Option<u64>,
     now_ms: u64,
-) -> OpacityTransition {
-    match proposed {
-        OpacityTransition::GoTransparent if !control::spacing_allows(spec, last_action_ms, now_ms) => {
-            OpacityTransition::Hold
-        }
-        other => other,
+    profile: Profile,
+) -> Spaced {
+    // ADR §7: under `Legacy` the contract is not consulted; under `Observe` it is evaluated and
+    // counted, holding nothing; the enforcing profiles hold.
+    let too_soon = proposed == OpacityTransition::GoTransparent
+        && profile != Profile::Legacy
+        && !control::spacing_allows(spec, last_action_ms, now_ms);
+    Spaced {
+        transition: if too_soon && profile.enforces() { OpacityTransition::Hold } else { proposed },
+        spaced: too_soon,
     }
+}
+
+/// What the release spacing decided: the transition to apply, and whether the proposed release
+/// fell inside the spacing — held under an enforcing profile, counted under `Observe`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Spaced {
+    pub transition: OpacityTransition,
+    pub spaced: bool,
 }
 
 /// Like [`manage_opacity_ctx`] but with a generic gate predicate (monomorphized, no vtable).
@@ -392,10 +404,11 @@ where
                     let gate_ok = gate.as_ref().map(|g| g(&state)).unwrap_or(true);
                     let now_ms = mycelium_core::sim_seam::mono_now_ns() / 1_000_000;
                     let proposed = opacity_transition(&state, gate_ok, hint.hysteresis);
-                    let transition = spaced_transition(proposed, &spec, last_action_ms, now_ms);
-                    if transition != proposed {
+                    let profile = Profile::from_u8(ctx.control_profile.load(std::sync::atomic::Ordering::Relaxed));
+                    let Spaced { transition, spaced } = spaced_transition(proposed, &spec, last_action_ms, now_ms, profile);
+                    if spaced {
                         ctx.opacity_releases_spaced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::debug!(kind = %kind, "opacity: release held by spacing");
+                        tracing::debug!(kind = %kind, held = profile.enforces(), "opacity: release inside the spacing");
                     }
                     match transition {
                         OpacityTransition::GoOpaque => {
@@ -439,10 +452,12 @@ mod tests {
     //    the deterministic authoritative gates for the veto/override + clear invariants that the
     //    integration tests (`test_manage_opacity_gate_…`) exercise through the flaky async path.
 
-    /// Item 4 PR 4b — the release is spaced, the shed never is.
+    /// Item 4 PR 4b — the release is spaced, the shed never is; and (ADR §7) the profile decides
+    /// whether "spaced" means held: `Legacy` does not consult the spacing, `Observe` counts and
+    /// proceeds, `EnforceLocal` holds.
     #[test]
     fn release_spacing_holds_the_release_and_never_the_shed() {
-        use super::{spaced_transition, OpacityTransition};
+        use super::{spaced_transition, OpacityTransition, Spaced};
         use crate::control::{ConfidenceBound, ControlSpec, Profile};
         let spec = ControlSpec {
             governor: "opacity".into(),
@@ -452,17 +467,25 @@ mod tests {
             bound: ConfidenceBound::default(),
             profile: Profile::Legacy,
         };
+        let enforce = Profile::EnforceLocal;
         // A release inside the spacing is held; at the spacing, and with no prior action, it proceeds.
-        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 500), OpacityTransition::Hold);
-        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 1_000), OpacityTransition::GoTransparent);
-        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, None, 1), OpacityTransition::GoTransparent);
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 500, enforce),
+            Spaced { transition: OpacityTransition::Hold, spaced: true });
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 1_000, enforce).transition, OpacityTransition::GoTransparent);
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, None, 1, enforce).transition, OpacityTransition::GoTransparent);
         // Protective shedding is never held, however recent the last action (the decisive rule).
-        assert_eq!(spaced_transition(OpacityTransition::GoOpaque, &spec, Some(499), 500), OpacityTransition::GoOpaque);
+        assert_eq!(spaced_transition(OpacityTransition::GoOpaque, &spec, Some(499), 500, enforce),
+            Spaced { transition: OpacityTransition::GoOpaque, spaced: false });
         // `Hold` is not an action.
-        assert_eq!(spaced_transition(OpacityTransition::Hold, &spec, Some(0), 1), OpacityTransition::Hold);
+        assert_eq!(spaced_transition(OpacityTransition::Hold, &spec, Some(0), 1, enforce).transition, OpacityTransition::Hold);
         // Spacing 0 disables it.
         let off = ControlSpec { spacing_ms: 0, ..spec.clone() };
-        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &off, Some(0), 0), OpacityTransition::GoTransparent);
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &off, Some(0), 0, enforce).transition, OpacityTransition::GoTransparent);
+        // The ladder: Legacy neither holds nor counts; Observe counts and proceeds.
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 500, Profile::Legacy),
+            Spaced { transition: OpacityTransition::GoTransparent, spaced: false });
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 500, Profile::Observe),
+            Spaced { transition: OpacityTransition::GoTransparent, spaced: true });
     }
 
     #[test]

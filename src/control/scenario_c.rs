@@ -44,7 +44,7 @@
 //! (tickers, KV, signals) is outside this sweep, which is exactly why it is deterministic.
 
 use crate::agent::membership_governor::{classify, decide as membership_decide, join_probability, leave_probability, MembershipAction};
-use crate::agent::opacity::{opacity_state_for, opacity_transition, spaced_transition, OpacityTransition};
+use crate::agent::opacity::{opacity_state_for, opacity_transition, spaced_transition, OpacityTransition, Spaced};
 use crate::agent::tuning_governor::{HotParam, TuningGovernor};
 use crate::control::{self, ActionClass, ActionId, ConfidenceBound, ControlSpec, Profile, SettleState};
 use crate::ViewConfidence;
@@ -156,6 +156,7 @@ fn advisor_recommendation(members: usize, fill: f32) -> u64 {
 /// Run one schedule and return what was observed after every step.
 pub fn run(schedule: &[Step], breakers: Breakers, profile: Profile) -> Vec<Observation> {
     let tuning = TuningGovernor::default();
+    tuning.set_control_profile(profile);
     tuning.set_control_timing(breakers.tuning_spacing_ms, breakers.tuning_settle_ms);
     let bound = ConfidenceBound { max_staleness_ms: 5_000, min_peers_heard: 1 };
     let opacity_spec = ControlSpec {
@@ -225,8 +226,8 @@ pub fn run(schedule: &[Step], breakers: Breakers, profile: Profile) -> Vec<Obser
                 // ── Opacity: the boundary decides from this node's own fill.
                 let state = opacity_state_for(opaque, fill, prev_fill, THRESHOLD);
                 let proposed = opacity_transition(&state, true, breakers.hysteresis);
-                let transition = spaced_transition(proposed, &opacity_spec, last_boundary_ms, now_ms);
-                if transition != proposed {
+                let Spaced { transition, spaced } = spaced_transition(proposed, &opacity_spec, last_boundary_ms, now_ms, profile);
+                if spaced {
                     actions.held += 1;
                 }
                 match transition {
@@ -456,10 +457,12 @@ mod tests {
         assert_eq!(schedules().len(), SWEEP_SIZE);
     }
 
+    /// Under the enforcing profiles — where the breakers act (ADR §7: `Legacy` does not consult
+    /// them, `Observe` only counts) — every schedule settles.
     #[test]
     fn with_the_breakers_on_the_three_loops_settle_under_every_schedule() {
         let (mut boundaries, mut knobs, mut memberships) = (0usize, 0usize, 0usize);
-        for profile in [Profile::Legacy, Profile::EnforceLocal] {
+        for profile in [Profile::EnforceLocal, Profile::EnforceAllocated] {
             for (n, schedule) in schedules().iter().enumerate() {
                 let obs = run(schedule, Breakers::on(), profile);
                 if let Some((i, v)) = first_violation(&obs, profile) {
@@ -476,13 +479,31 @@ mod tests {
         assert!(memberships > 0, "no membership action ever happened");
     }
 
+    /// The ladder's own witness (ADR §7): `Legacy` does not consult the contract, so the shipped
+    /// breakers do nothing there — with hysteresis alone the same schedules flap and chatter; and
+    /// `Observe` behaves like `Legacy` in the plant while **counting** every hold it did not make.
+    #[test]
+    fn under_legacy_the_breakers_are_not_consulted_and_under_observe_they_only_count() {
+        let legacy_violations: usize =
+            schedules().iter().map(|s| violations(&run(s, Breakers::on(), Profile::Legacy), Profile::Legacy).len()).sum();
+        assert!(legacy_violations > 0, "Legacy with the breakers configured must behave as if they were off");
+        let (mut observe_violations, mut observe_holds) = (0usize, 0usize);
+        for s in schedules() {
+            let obs = run(&s, Breakers::on(), Profile::Observe);
+            observe_violations += violations(&obs, Profile::Observe).len();
+            observe_holds += obs.iter().map(|o| o.actions.held as usize).sum::<usize>();
+        }
+        assert!(observe_violations > 0, "Observe holds nothing, so it oscillates like Legacy");
+        assert!(observe_holds > 0, "but it counts what it would have held");
+    }
+
     /// The witness: the same loops, the same schedules, nothing breaking them — at least one
     /// schedule must violate a stability objective, or the objectives are vacuous.
     #[test]
     fn without_the_breakers_at_least_one_schedule_does_not_settle() {
         let mut kinds = std::collections::BTreeMap::<&'static str, usize>::new();
         for schedule in schedules() {
-            for (_, v) in violations(&run(&schedule, Breakers::off(), Profile::Legacy), Profile::Legacy) {
+            for (_, v) in violations(&run(&schedule, Breakers::off(), Profile::EnforceLocal), Profile::EnforceLocal) {
                 let kind = match v {
                     Violation::ReleaseFlap { .. } => "release flap",
                     Violation::KnobChatter { .. } => "knob chatter",

@@ -15,6 +15,8 @@ impl GossipAgent {
     /// Set which promises the governors enforce. Takes effect on each governor's next pass.
     pub fn set_control_profile(&self, profile: Profile) {
         self.task_ctx.control_profile.store(profile.as_u8(), Ordering::Relaxed);
+        // The tuning governor keeps its own copy: its gate is a pure method with no context.
+        self.task_ctx.tuning_governor.set_control_profile(profile);
     }
 
     /// The profile in force. `Legacy` unless an operator opted in.

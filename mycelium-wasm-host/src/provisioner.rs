@@ -67,8 +67,12 @@ pub struct InstallRights {
     pub(crate) holder: PrincipalId,
     pub(crate) resource: String,
     signing_key: Option<ed25519_dalek::SigningKey>,
-    /// Tripwire: installs refused because the node held too few units (or the ledger was busy).
+    /// Tripwire: installs refused because the node held too few units (or the ledger was busy) —
+    /// under `EnforceAllocated`, the only profile that enforces a rights-backed bound (ADR §7).
     refusals: AtomicU64,
+    /// Tripwire: installs that **would** have been refused under `EnforceAllocated` and were admitted
+    /// because the node's profile does not enforce Tier C — the number to watch before opting in.
+    would_refuse: AtomicU64,
 }
 
 impl InstallRights {
@@ -210,6 +214,7 @@ impl Provisioner {
             resource: resource.into(),
             signing_key,
             refusals: AtomicU64::new(0),
+            would_refuse: AtomicU64::new(0),
         });
         let agent = Arc::clone(&self.agent);
         let publish = Arc::clone(&rights);
@@ -224,6 +229,13 @@ impl Provisioner {
     /// moment of admission). Never reset; an operator compares two readings.
     pub fn rights_refusals(&self) -> u64 {
         self.install_rights.as_ref().map_or(0, |r| r.refusals.load(Ordering::Relaxed))
+    }
+
+    /// Installs that would have been refused under `EnforceAllocated` and were admitted because the
+    /// node's profile does not enforce a rights-backed bound (ADR §7: shadow before enforcement).
+    /// The rejection is still recorded in the ledger. Never reset.
+    pub fn rights_would_refuse(&self) -> u64 {
+        self.install_rights.as_ref().map_or(0, |r| r.would_refuse.load(Ordering::Relaxed))
     }
 
     /// The **admission** step before an `Installing` reservation (item 4 PR 4c): does the node
@@ -243,8 +255,16 @@ impl Provisioner {
         if admitted {
             return true;
         }
-        rights.refusals.fetch_add(1, Ordering::Relaxed);
-        metrics::counter!("mycelium_artifact_installs_refused_by_rights_total").increment(1);
+        // The ledger says no. Whether that refuses the install is the node's profile (ADR §7): a
+        // rights-backed bound is Tier C, enforced only under `EnforceAllocated`; every other profile
+        // admits, counts what would have been refused, and still records the rejection.
+        let enforce = self.agent.control_profile() == mycelium::control::Profile::EnforceAllocated;
+        if enforce {
+            rights.refusals.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("mycelium_artifact_installs_refused_by_rights_total").increment(1);
+        } else {
+            rights.would_refuse.fetch_add(1, Ordering::Relaxed);
+        }
         let rights = Arc::clone(rights);
         let agent = Arc::clone(&self.agent);
         tokio::spawn(async move {
@@ -254,7 +274,7 @@ impl Provisioner {
             let _ = ledger.admit(&rights.holder, &rights.resource, requested).await;
             rights.publish_head(&agent, &ledger);
         });
-        false
+        !enforce
     }
 
     /// Register a runtime for an additional [`ArtifactKind`] (e.g. a blob/model runtime). A node
@@ -784,6 +804,7 @@ mod tests {
         catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id));
         let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
         prov.with_install_rights(rights_ledger("none"), principal("node-a"), "installs", None);
+        agent.set_control_profile(mycelium::control::Profile::EnforceAllocated);
 
         let _req = declare_and_await_demand(&agent, "text", "echo").await;
         assert_eq!(prov.provision_round(), 0, "no rights, no install");
@@ -800,6 +821,30 @@ mod tests {
         assert!(published.head.totals.is_empty(), "nothing held: {:?}", published.head.totals);
         assert!(!published.is_signed(), "no key was given, so the head is a claim without proof");
         assert!(!verify_published_head(&published, &[0u8; 32]), "unsigned never verifies");
+    }
+
+    /// ADR §7, shadow before enforcement: with no rights allocated and the node's profile left at
+    /// its default (`Legacy`), the install is **admitted**, the would-refuse tripwire counts it, and
+    /// the ledger still records the rejection — the number an operator watches before opting into
+    /// `EnforceAllocated`. `Observe` and `EnforceLocal` behave the same for a Tier C bound.
+    #[tokio::test]
+    async fn without_enforce_allocated_a_rights_shortfall_is_counted_and_recorded_but_admitted() {
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.with_install_rights(rights_ledger("shadow"), principal("node-s"), "installs", None);
+        assert_eq!(agent.control_profile(), mycelium::control::Profile::Legacy, "the default");
+
+        let _req = declare_and_await_demand(&agent, "text", "echo").await;
+        assert_eq!(prov.provision_round(), 1, "admitted under a non-enforcing profile");
+        assert_eq!((prov.rights_refusals(), prov.rights_would_refuse()), (0, 1));
+        let rights = Arc::clone(prov.install_rights.as_ref().unwrap());
+        wait_rejections(&rights, 1).await; // recorded all the same
+        wait_live(&prov, 1).await;
     }
 
     /// One unit allocated → one install proceeds, the second is refused; the head carries the
@@ -840,6 +885,7 @@ mod tests {
 
         let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
         prov.with_install_rights(ledger, principal("node-b"), "installs", Some(signing));
+        agent.set_control_profile(mycelium::control::Profile::EnforceAllocated);
 
         let _r1 = declare_and_await_demand(&agent, "text", "echo").await;
         let _r2 = declare_and_await_demand(&agent, "text", "echo2").await;

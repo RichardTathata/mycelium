@@ -48,6 +48,22 @@ compile time (`unknown` for the compiler: no build script). *Not built:* the min
 corpus has one entry — B and C are pure sweeps with no kernel trace. Log:
 [`.log/2026-09-18-item6-pr7-replay-corpus.md`](.log/2026-09-18-item6-pr7-replay-corpus.md).
 
+## v3 contracts axis — item 4 §7: the profile ladder through every governor, and the rollout runbook — 2026-09-18 (unreleased)
+
+The Phase E item "shadow-mode rollout documented" — and the wiring the document needed to be true. Writing
+`docs/operations/control-profiles.md` against the code showed §7 held for the membership governor only: 4b's
+spacing and settling and 4c's rights refusal acted under every profile, so "`Legacy` leaves today's governors
+untouched" and "`Observe` changes nothing but counts" were false for three of four. Now the tuning gate skips its
+contract under `Legacy`, counts under `Observe`, holds under the enforcing profiles (its own copy of the profile,
+fanned out by `set_control_profile`); the opacity release spacing answers *spaced or not* and the profile says
+whether that is a hold; the provisioner refuses only under `EnforceAllocated` — a rights-backed bound is Tier C —
+counting `rights_would_refuse` otherwise and still recording the rejection. **`Legacy` is the ladder's own
+witness:** scenario C's "settles" sweep runs under the enforcing profiles, and under `Legacy` the same breakers do
+nothing and the schedules flap; under `Observe` they flap while counting. 4b's defaults thereby move back to
+opt-in, which is what "untouched" meant. The counters keep their names across the ladder; `GovernorSnapshot.profile`
+says which reading they are. *Not done:* a gateway setter for the profile. Log:
+[`.log/2026-09-18-item4-control-profiles-rollout.md`](.log/2026-09-18-item4-control-profiles-rollout.md).
+
 ## v3 contracts axis — CN3: the award under the acceptor's mandate — 2026-09-18 (unreleased)
 
 `commit_award_under_mandate`: item 5's fence at the award. The mandate must be the acceptor's own — another

@@ -179,6 +179,15 @@ item 7's `gateway_caller_profile` and the AE slice's observe mode:
 **Rollback disables new enforcement admissions and deletes nothing**: a right already held is honoured until it
 is released, expires or is revoked, and the journal is never truncated by a profile change.
 
+> **Wired through every governor, 2026-09-18.** Writing the rollout runbook (`docs/operations/control-profiles.md`)
+> against the code showed this section was true for the membership governor only: 4b's spacing and settling and
+> 4c's rights refusal acted under every profile. Now the tuning gate skips its contract under `legacy`, counts
+> under `observe` and holds under the enforcing profiles; the opacity release spacing likewise; and the provisioner
+> refuses only under `enforce-allocated` — a rights-backed bound is Tier C — counting a would-refuse otherwise and
+> still recording the rejection. Scenario C runs its "settles" claim under the enforcing profiles and pins
+> `legacy` as the ladder's own witness. The counters keep their names across the ladder; `GovernorSnapshot.profile`
+> says which reading they are.
+
 ## 8. Detection, not prevention — except the ledger
 
 The substrate's law holds: Layer I is never taught a higher-layer rule, and every promise in §1 except one is
