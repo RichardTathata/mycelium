@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — replay scenario C, the interacting governors (item 6 PR 6)
+
+- **`src/control/scenario_c.rs`** (test-only): the combined-feedback harness of `adaptive-stability.md` §5 (D19)
+  — a schedule sweep (48 × 2 profiles) over the three governors' **shipped** pure decisions with their real
+  spacing, settling and hysteresis, coupled through a small plant. With the loop-breakers on every run settles;
+  with them off, schedules flap and chatter; a stale view holds routine scale-down under `EnforceLocal` and not
+  under `Legacy`. The objectives are numbers on *releases* (the shed is never held), knob changes, rest after the
+  last disturbance, and the decisive rule. **What it does not prove:** that hysteresis is load-bearing while the
+  release spacing is on (a plant removing it was not caught — the spacing alone bounds the release rate), and the
+  ADR's "oscillate together while each is stable alone". No shipped code changed; three `agent` submodules and the
+  opacity decision functions became crate-visible for the harness.
+
 ### Changed — every periodic loop ticks through the timer seam (item 6 follow-on)
 
 - The seven tickers #276 left unrouted now go through `sim_seam::interval_ms`: `kv-persist/{key}`,

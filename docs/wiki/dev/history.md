@@ -38,6 +38,21 @@ revocation or expiry while an install is live (the next round refuses; the live 
 Lock-order table row 37 (`InstallRights::ledger`, `try_lock` on the admission path, never held with `hosted`).
 Log: [`.log/2026-09-18-item4-pr4c-install-rights.md`](.log/2026-09-18-item4-pr4c-install-rights.md).
 
+## v3 contracts axis — item 6 PR 6: replay scenario C, the interacting governors — 2026-09-18 (unreleased)
+
+The combined-feedback harness (`docs/design/adaptive-stability.md` §5, D19: *replay stage 6, built once, reusing
+the governors' pure decision functions*), `src/control/scenario_c.rs`, test-only. A schedule sweep in scenario B's
+shape — 48 schedules × 2 profiles, invariants after every step, a witness, a size assertion — over the shipped
+decisions of all three governors with their real spacing, settling and hysteresis, coupled through a small plant.
+**With the breakers on every run settles; with them off, schedules flap and chatter; the decisive rule holds under
+`EnforceLocal` and not under `Legacy`.** Three findings on the way: the objective belongs on *releases* (a release
+re-shed 100 ms later is the decisive rule, not a flap); a first-only violation report masks (the witness said
+"no flap" while the same schedules chattered); and a plant that is not caught is a finding — removing the
+hysteresis in shipped code did not fail the sweep, because the 1 s release spacing alone bounds the release rate,
+so the sweep does not prove hysteresis is load-bearing. *Not shown:* loops oscillating together while each is
+stable alone. Phase E's "combined-feedback scenario green" is met in the bounded sense above. Log:
+[`.log/2026-09-18-item6-pr6-scenario-c.md`](.log/2026-09-18-item6-pr6-scenario-c.md).
+
 ## v3 contracts axis — item 1 PR 7: gateway/SDK receipt parity — 2026-09-18 (unreleased)
 
 The last PR of item 1 (`docs/design/contracts-receipts.md` §5, landed note). The two consensus-backed gateway
