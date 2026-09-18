@@ -629,8 +629,12 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
     // the health-check cadence with no task restart — preserving the immediate-first-tick + Skip
     // semantics. `0` ⇒ keep the static config value.
     let mut current_health_secs = hot.health_interval_secs(interval_secs);
-    let mut ticker = time::interval(Duration::from_secs(current_health_secs.max(1)));
-    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // Through the timer seam (item 6): the health cadence is a schedule a replay reproduces.
+    let mut ticker = mycelium_core::sim_seam::interval_ms(
+        "health/tick",
+        current_health_secs.max(1).saturating_mul(1000),
+        time::MissedTickBehavior::Skip,
+    );
     // With SWIM (M5 cutover) the forwarding set starts empty and is NOT seeded with the
     // bootstrap peers: liveness + discovery ride UDP probing/gossip, so the forwarding
     // fan-out is a pure uniform-random sample of the membership — no node permanently
@@ -661,8 +665,11 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
         let want_health_secs = hot.health_interval_secs(interval_secs);
         if want_health_secs != current_health_secs {
             current_health_secs = want_health_secs;
-            ticker = time::interval(Duration::from_secs(current_health_secs.max(1)));
-            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            ticker = mycelium_core::sim_seam::interval_ms(
+                "health/tick",
+                current_health_secs.max(1).saturating_mul(1000),
+                time::MissedTickBehavior::Skip,
+            );
             tracing::info!(secs = current_health_secs, "M10: health-check interval retuned live");
         }
         tokio::select! { biased;
@@ -993,8 +1000,12 @@ pub(super) async fn run_gc_task(ctx: GcContext) {
     live_entries.store(initial, Ordering::Relaxed);
 
     let gc_interval = Duration::from_secs(interval_secs.saturating_mul(10).max(60));
-    let mut ticker = time::interval(gc_interval);
-    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // Through the timer seam (item 6).
+    let mut ticker = mycelium_core::sim_seam::interval_ms(
+        "gc/tick",
+        gc_interval.as_millis() as u64,
+        time::MissedTickBehavior::Skip,
+    );
 
     loop {
         tokio::select! { biased;

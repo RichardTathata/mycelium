@@ -16,7 +16,6 @@ use crate::agent::TaskCtx;
 use crate::node_id::NodeId;
 use mycelium_core::kv_handle::KvHandle;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// A gossiped, evaporating, optionally node-targeted governance intent. The transport reads
 /// these three facets generically; everything else about the intent is the governor's business.
@@ -103,8 +102,13 @@ pub fn spawn_intent_reconciler<I, A, R>(
     ctx.spawn_task(async move {
         let mut rx = kv.subscribe_prefix(prefix);
         // Tick at TTL/2 so an evaporated intent is noticed within the window.
-        let mut tick = tokio::time::interval(Duration::from_millis((ttl_ms / 2).max(1)));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Through the timer seam (item 6), one stream per intent key: the tuning and membership
+        // reconcilers are two loops and must not share a stream.
+        let mut tick = mycelium_core::sim_seam::interval_ms(
+            format!("intent/{key}"),
+            (ttl_ms / 2).max(1),
+            tokio::time::MissedTickBehavior::Skip,
+        );
         loop {
             reconcile_intent::<I>(&kv, key, &me, ttl_ms, &apply, &revert);
             tokio::select! {

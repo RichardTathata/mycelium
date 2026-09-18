@@ -38,6 +38,14 @@
 #   Put test-only methods in a separate top-level `#[cfg(test)] impl` block; a baseline that moves
 #   when no site moved is the signal that someone did not.
 #
+#   `use tokio::time;` followed by `time::interval(…)` / `time::sleep(…)` is INVISIBLE to the
+#   `tokio::time::*` pattern — the same alias gap the `fs as <alias>` handling closes for the
+#   filesystem, not closed here. Found 2026-09-18 routing nine interval sites through the timer seam:
+#   the baseline moved for the four files that spell `tokio::time::interval` out and not for the three
+#   (`opacity.rs`, `emergent_groups.rs`, `tasks.rs`) that go through the alias, whose tickers this check
+#   had never counted. Closing it regenerates a baseline of pre-existing sites across the tree, so it
+#   is its own change; until then a `time::` call site is only as visible as its import line.
+#
 # EXEMPT
 #   `mycelium-sim/**` and `sim_seam.rs` (the seams themselves — §6 exempts the seam
 #   implementations, which is where these calls are supposed to live), test files, and each

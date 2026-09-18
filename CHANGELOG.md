@@ -76,6 +76,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `#[cfg(test)] impl` block, and the script's "what it cannot see" section records the rule: a baseline that
   moves when no site moved is the signal.
 
+### Added — the timer seam, second arm: periodic ticks (item 6 PR 3 tail)
+
+- **`sim_seam::interval_ms(stream, period_ms, missed) → Ticker`**, with `Ticker::tick()` a drop-in for
+  `tokio::time::Interval::tick`. Without `sim` it is the interval it replaced. Under a kernel, the recorded
+  decision is the **nominal schedule** — an immediate first tick, then one period each — so a replay ticks the
+  loop's written cadence rather than the wall's jitter, and **never wall-waits**. The stream is owned, built once,
+  so a loop that runs per kind gets a name per kind (stream identity per destination).
+- **A tick and a sleep are different requests** (`tick(30ms)` vs `sleep(30ms)`): the kernel's `Timer` choice now
+  carries the operation, so a trace can never replay a periodic loop from a one-off wait or the reverse — pinned
+  by a test that replays a recorded sleep as a tick and diverges.
+- Nine sites routed in `src/agent`: the cluster tuner, opacity (per kind), the emergent detectors, `gcap` reassert,
+  the intent reconciler (per key), the A2A sweep, the health ticker (both constructions) and GC. `membership_governor`
+  waits for the item 4 stack; `swim.rs` and `mycelium-core`'s four tickers are the next batch.
+- **A second blind spot in the forbidden-call check, found by the routing.** Its `tokio::time::*` pattern does not
+  see `time::interval` through a `use tokio::time` alias, so three of the nine sites had never been counted and the
+  baseline moved for only four files. The same alias gap the check's header already closes for `fs`; recorded there,
+  and its own change, since closing it regenerates a baseline of pre-existing sites across the tree.
+- Three seam tests (nominal schedule recorded; replay advances the clocks without waiting; sleep-as-tick diverges).
 
 ### Added — the adaptive-stability contract types (item 4 PR 2)
 

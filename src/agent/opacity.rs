@@ -338,8 +338,13 @@ where
         .unwrap_or((false, ctx.signal_handlers.fill_ratio(&kind)));
     let spawn_ctx = Arc::clone(&ctx);
     spawn_ctx.spawn_task(async move {
-        let mut ticker = time::interval(Duration::from_millis(100));
-        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        // Through the timer seam (item 6), one stream per kind — two loops on one stream would hand
+        // each other their ticks on replay.
+        let mut ticker = mycelium_core::sim_seam::interval_ms(
+            format!("opacity/{kind}/tick"),
+            100,
+            time::MissedTickBehavior::Skip,
+        );
         let mut prev_fill = init_fill;
         let mut is_opaque = init_is_opaque;
         loop {

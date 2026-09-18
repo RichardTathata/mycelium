@@ -120,7 +120,12 @@ pub(crate) struct A2aState {
 /// Call this once after creating the shared `tasks` map.
 pub(crate) fn spawn_cleanup(tasks: Arc<papaya::HashMap<String, A2aTask>>) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        // Through the timer seam (item 6). Tokio's default missed-tick behaviour, as before.
+        let mut interval = mycelium_core::sim_seam::interval_ms(
+            "a2a/sweep",
+            60_000,
+            tokio::time::MissedTickBehavior::Burst,
+        );
         loop {
             interval.tick().await;
             evict_stale_tasks(&tasks, Instant::now());

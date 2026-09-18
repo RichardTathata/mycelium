@@ -323,6 +323,15 @@ cannot explore**. Exploring 0 / exact / beyond is scenario replay, the plan's th
 kernel does not have; the seam, the kernel and the inventory say "the hook, not the exploration", and the test
 pins both halves. Log: [`.log/2026-09-18-item6-pr3-timer-seam.md`](.log/2026-09-18-item6-pr3-timer-seam.md).
 
+**The timer seam, second arm — intervals — 2026-09-18 (PR #276).** `sim_seam::interval_ms` → `Ticker::tick`,
+the inventory's §2.3 row 2. The recorded decision is the **nominal schedule** (an immediate first tick, then one
+period each), so a replay ticks the loop's written cadence and never wall-waits; a tick and a sleep are
+different requests. Nine `src/agent` sites routed with one stream per loop (per kind for opacity, per key for the
+intent reconciler). **Found on the way:** the forbidden-call check does not see `time::interval` through a
+`use tokio::time` alias — three of the nine had never been counted — the same alias gap its header already
+closes for `fs`; recorded there, and its own change. Log:
+[`.log/2026-09-18-item6-pr3-interval-seam.md`](.log/2026-09-18-item6-pr3-interval-seam.md).
+
 ## v3 contracts axis — AE-T: the seam records what it enforces — 2026-09-16 (unreleased, PR #224)
 
 Three gaps on the AE line, found by building the private exporter *against* the seam rather than by reviewing it:

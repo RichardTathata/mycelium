@@ -122,8 +122,12 @@ impl GossipAgent {
         let kv = KvHandle::from_core(Arc::clone(&core));
         let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
         self.task_ctx.spawn_task(async move {
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Through the timer seam (item 6): a replay ticks the same schedule without waiting.
+            let mut tick = mycelium_core::sim_seam::interval_ms(
+                "tuner/tick",
+                interval.as_millis() as u64,
+                tokio::time::MissedTickBehavior::Skip,
+            );
             loop {
                 tokio::select! {
                     _ = tick.tick() => {}
