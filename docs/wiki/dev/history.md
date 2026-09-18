@@ -35,6 +35,15 @@ status code — while replication and replay never refuse. Both are Tier B: self
 5. Example `examples/admission`, runbook `docs/operations/admission-control.md`, §6.6 names `BoardConfig`. Log:
 [`.log/2026-09-18-item4-pr5-admission-control.md`](.log/2026-09-18-item4-pr5-admission-control.md).
 
+## v3 contracts axis — item 6: the scheduler seam sized (a design note) — 2026-09-18 (unreleased)
+
+The inventory's coverage map claimed the kernel owns `select!` readiness; no site is routed, and CN2 measured the
+consequence. §3.1 now says what a `select!` wrapper could do (detect an interleaving change) and cannot (reproduce
+one), and what reproduction needs: the seams' replay arm advancing tokio's *paused* clock by the recorded wait
+instead of yielding — so tasks keep their relative order on a `current_thread` runtime — and a network seam for
+any node with peers. The first arm is gated by a test that already exists: CN2's pin flips when it lands. Log:
+[`.log/2026-09-18-item6-scheduler-seam-design-note.md`](.log/2026-09-18-item6-scheduler-seam-design-note.md).
+
 ## v3 contracts axis — item 6 PR 7: the replay corpus and its gate — 2026-09-18 (unreleased)
 
 The last PR of item 6's sequence. A checked-in bundle — scenario A, thirteen effects, at

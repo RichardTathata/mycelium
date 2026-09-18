@@ -198,11 +198,51 @@ still reproduce), and replayed from the bundle.
 
 | Mechanism | Owns | Explicitly does not cover |
 |---|---|---|
-| **`mycelium-sim` kernel** (PR 2–4) | clocks (W, M as two seams), the five RNG streams, timers, `select!` readiness, channel fullness, storage faults, external inputs; **divergence detection** on exact replay | CAS interleavings (C); real network timing; anything a Docker suite exists for |
+| **`mycelium-sim` kernel** (PR 2–4) | clocks (W, M as two seams), the five RNG streams, timers, ~~`select!` readiness~~ (*not yet — no site is routed, and §3.1 says what routing it would take*), channel fullness, storage faults, external inputs; **divergence detection** on exact replay | CAS interleavings (C); real network timing; anything a Docker suite exists for; **task interleaving on one node** (§3.1) |
 | **Loom** (`loom-spike`) | C — the atomic patterns: once-guard, unique-id, publish-then-observe; new patterns cited from real code | tokio-linked code (cannot compile under `--cfg loom`); protocol-level schedules |
 | **Fuzz** (`fuzz/`: `wire_decode`, `capability_decode`, `frame_apply`) | decoder robustness on adversarial bytes | semantics |
 | **Docker suites** (integration 13 scenarios, overlay S11–S13, scale) | real network partitions, restarts, multi-process timing at scale | determinism — they are evidence of behaviour under real timing, classified by the CI flake tier |
 | **Structural-poll rule** (`docs/wiki/dev/testing/testing.md`) | every multi-node test's readiness | — a rule, not a mechanism; the kernel removes the need for it inside the harness |
+
+### 3.1 The scheduler seam — a design note, not a design (2026-09-18)
+
+The row above listed `select!` readiness among what the kernel owns. It does not, and the gap was measured
+twice on 2026-09-18: a whole node recorded under the kernel — a started `GossipAgent` committing a
+linearizable award (CN2) — replays on the same identity and **diverges at seq 7**, the recording holding the
+membership governor's `rng jitter` draw where the replay holds the award round's `consensus/defer` timer. Two
+tasks, both routed through the seams, in a different order. A single task's effects replay (scenario A, the
+corpus); a node's do not. `mycelium-commitment` pins the divergence so the seam's arrival flips it into the claim.
+
+**What a `select!` wrapper can and cannot do.** Wrapping each of the 51 `select!` sites to *record which branch
+won* makes the trace richer and lets exact replay **detect** that an interleaving changed. It cannot
+**reproduce** one: the kernel supplies recorded *results* to requests the code makes, but which task makes the
+next request is the runtime's decision, and no result the kernel hands back changes that. A wrapper alone would
+turn every whole-node replay into a divergence report — true, and useless.
+
+**What reproduction needs.** Two things the plan's adapter list already names and this record had not sized:
+
+1. *A deterministic executor.* On a `current_thread` runtime with tokio's clock **paused**
+   (`tokio::time::pause`; `test-util` is already a dev-dependency), a wakeup's order is a function of the
+   recorded waits — *if the seams' replay arm advances the paused clock by the recorded duration instead of
+   yielding once*. Today `sleep_ms`/`tick` replay by `yield_now`, which is exactly what reorders the governor's
+   jitter against the round's defer: the recording waited, the replay did not. Advancing the paused clock keeps
+   every task's relative wait, and tokio's paused clock auto-advances when idle, so the replay still never
+   wall-waits. This is a change inside `sim_seam`'s replay arms, gated on the clock being paused; it needs no
+   wrapper at any `select!`.
+2. *A network seam.* A started node binds a listener and runs SWIM and gossip against real sockets; their
+   readiness is I/O, outside any executor. Whole-node replay therefore first means a node with **no peers** —
+   the listener bound, nothing arriving — which is what CN2's pinned test already is. Peers need the network
+   adapter the plan lists after storage, and that is a record of its own.
+
+**The first arm, and its gate.** (1) alone, then the pinned test is the gate: `a_whole_node_recording_of_a_
+linearizable_award_diverges_without_a_scheduler_seam` fails the day the replay arm advances the paused clock and
+the node's tasks keep their order — and is flipped into the claim. If it does not flip, the divergence that
+remains names the next seam. The `select!` wrapper is worth having *after* that, for divergence reports that
+name the branch; not before, when it would only name what cannot yet be reproduced.
+
+**What this note does not claim:** that (1) suffices — a recording taken on a multi-threaded runtime, or with
+real peers, has orderings no paused clock restores; those runs are the Docker suites' evidence, not the
+kernel's.
 
 **Order-sensitive consumers the kernel must schedule (from §2):** the 1 s convergence sleep in `distributed_lock`
 and its gateway twins (`http.rs:2395,2468,2702`) · ballot retry jitter · the reconnect backoff window (`writer.rs`)
