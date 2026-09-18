@@ -291,8 +291,10 @@ connect loop — the first draft probed too early and failed on `ConnectionRefus
 gateway test does not repeat it).
 
 **What it does not prove:** the traces leg of the release gate; anything about TLS (plain HTTP on loopback);
-policy change *mid-partition* (a revocation mid-session is exercised, a partition is not); the catalogue reply's
-integrity (unsigned in this arm).
+policy change *mid-partition* (a revocation mid-session is exercised, a partition is not). *(PR 10a added the
+signed catalogue: the first test's client requires alpha's key, and a client holding the wrong key is refused
+`BadSignature` before anything is relied on; the second test's unkeyed edge is refused `Unsigned` by a requiring
+client.)*
 
 ## The release gate's choreography (item 2 PR 9, 2026-09-18)
 
@@ -326,8 +328,9 @@ scan only recognises node ids, not foreign slots.
   the test now advertises both exports and the pre-call poll checks both.
 
 **What it does not prove:** process isolation and a real network severance (the Docker suite's claim: here the
-severed link is a shut-down gateway, and the meshes share an address space); the catalogue reply's integrity;
-anything under the `sim` kernel (the choreography is wall-clock, with structural polls); the rogue-CA plant is a
+severed link is a shut-down gateway, and the meshes share an address space); the catalogue's integrity in *this*
+test (its edge is unkeyed and its client does not require a signature — the signed path is covered in the two
+tests above); anything under the `sim` kernel (the choreography is wall-clock, with structural polls); the rogue-CA plant is a
 timing-bounded negative (1.5 s), with gw2's join as its positive control.
 
 ## Loom: permutation model-checking of the atomic patterns

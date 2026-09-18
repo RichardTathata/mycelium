@@ -29,7 +29,7 @@
 
 use super::call::FederatedCaller;
 use super::catalog::{CatalogObservation, RemoteResolver, ResolveFailure};
-use super::edge::{now_ms, CatalogReply, PresentedCall, CATALOG_EXPORT, CATALOG_PATH, HEADER_FEDERATED_CALL};
+use super::edge::{now_ms, CatalogRefusal, CatalogReply, PresentedCall, CATALOG_EXPORT, CATALOG_PATH, HEADER_FEDERATED_CALL};
 use super::gateway::{on_gateway_silent, CallOutcome, GatewayPool, Repeatability};
 use super::session::{LinkRefusal, LinkState, PartnerLink};
 use super::DomainId;
@@ -58,6 +58,9 @@ pub enum ClientError {
     Refused { status: u16, code: Option<i64>, message: String },
     /// A reply arrived but was not the shape of an A2A task.
     Transport(String),
+    /// The catalogue arrived but is not one this client will rely on: unsigned when a signature is
+    /// required, forged, for another domain, or filtered for someone else (item 2 PR 10a).
+    Catalogue(CatalogRefusal),
 }
 
 impl std::fmt::Display for ClientError {
@@ -68,6 +71,7 @@ impl std::fmt::Display for ClientError {
             Self::Outcome(o) => write!(f, "outcome: {o:?}"),
             Self::Refused { status, code, message } => write!(f, "refused ({status}, {code:?}): {message}"),
             Self::Transport(s) => write!(f, "transport: {s}"),
+            Self::Catalogue(r) => write!(f, "catalogue: {r}"),
         }
     }
 }
@@ -87,6 +91,10 @@ pub struct FederationClient {
     principal: String,
     signing_key: ed25519_dalek::SigningKey,
     partner: DomainId,
+    /// The partner's public key (its descriptor's `public_key`). Present: a catalogue is relied
+    /// on only if it verifies under it; absent: attributed to the gateway asked, as PR 3's
+    /// *observation*, and nothing more.
+    partner_key: Option<[u8; 32]>,
     endpoints: Vec<GatewayEndpoint>,
     credential_lifetime: Duration,
     http: reqwest::Client,
@@ -114,6 +122,7 @@ impl FederationClient {
             principal: principal.into(),
             signing_key,
             partner: partner.clone(),
+            partner_key: None,
             endpoints,
             credential_lifetime: Duration::from_secs(60),
             http: reqwest::Client::new(),
@@ -130,6 +139,13 @@ impl FederationClient {
     /// `CallPolicy::max_lifetime` or every call is `LifetimeTooLong`.
     pub fn with_credential_lifetime(mut self, lifetime: Duration) -> Self {
         self.credential_lifetime = lifetime;
+        self
+    }
+
+    /// Require every catalogue to be signed under the partner's key (item 2 PR 10a). An unsigned,
+    /// forged, misaddressed or wrong-domain catalogue is refused and leaves the link `Down`.
+    pub fn with_partner_key(mut self, key: [u8; 32]) -> Self {
+        self.partner_key = Some(key);
         self
     }
 
@@ -199,6 +215,12 @@ impl FederationClient {
             }
             let reply: CatalogReply =
                 serde_json::from_str(&body).map_err(|e| ClientError::Transport(format!("catalogue reply: {e}")))?;
+            if let Some(key) = &self.partner_key
+                && let Err(refusal) = reply.verify(&self.partner, &self.origin, key)
+            {
+                self.state.lock().unwrap_or_else(|e| e.into_inner()).link.disconnected();
+                return Err(ClientError::Catalogue(refusal));
+            }
             if reply.domain != self.partner {
                 let err = ClientError::Transport(format!(
                     "gateway {} answered for domain {}, expected {}",

@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the signed catalogue reply (v3 item 2 PR 10a)
+
+- **`CatalogReply`** now carries `for_partner` (whom the list was filtered for), `issued_at_ms` and an optional
+  `signature` — Ed25519 over a tagged canonical form (`TAG_CATALOG`) that covers the domain, the partner, the
+  revision, the time and the exports, so a reply cannot be replayed to another partner or answered by a gateway
+  without the domain's key. `CatalogReply::{canonical_bytes, signed, verify}`; `CatalogRefusal::{Unsigned,
+  BadSignature, WrongDomain, NotForUs}`.
+- **`FederationEdge::with_signing_key(key)`** signs every catalogue reply; `signs_catalogue()` reports it.
+- **`FederationClient::with_partner_key(key)`** requires a verified catalogue: unsigned, forged, wrong-domain or
+  misaddressed → `ClientError::Catalogue(refusal)` and the link stays `Down`. Without a key the catalogue is
+  relied on only as an observation attributed to the gateway asked (PR 3), as before. Freshness is unchanged:
+  the resolver's window, not the signature.
+- The JSON on `GET /federation/catalog` gained three fields; a PR 8 client reading it still works
+  (`signature` is optional on the wire).
+
 ### Added — the release gate's choreography over the transport (v3 item 2 PR 9)
 
 - **`GossipAgent::connected_peers()`** — the peers this node holds a *connection* to (the transport's own

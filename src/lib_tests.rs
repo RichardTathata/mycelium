@@ -6261,6 +6261,7 @@ mod federation_transport {
         let alpha = DomainId::new("alpha.example").unwrap();
         let beta = DomainId::new("beta.example").unwrap();
         let (beta_sk, beta_vk) = keypair(7);
+        let (alpha_sk, alpha_vk) = keypair(8);
 
         let edge = Arc::new(FederationEdge::new(
             alpha.clone(),
@@ -6268,7 +6269,7 @@ mod federation_transport {
             DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
             TrustBundle::trusting([(beta.clone(), beta_vk)]),
             CallPolicy::default(),
-        ));
+        ).with_signing_key(alpha_sk));
         let http_port = alloc_port();
         let mut a = mesh(2, Some((http_port, Arc::clone(&edge)))).await;
         let a0 = Arc::new(a.remove(0));
@@ -6293,7 +6294,18 @@ mod federation_transport {
             beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
             vec![GatewayEndpoint { id: "gw-a0".into(), base_url: format!("http://127.0.0.1:{http_port}") }],
             1, Duration::from_secs(30),
-        );
+        ).with_partner_key(alpha_vk);
+
+        // 0. A signed catalogue under the wrong key is refused before it is relied on, and the
+        //    link stays Down (item 2 PR 10a). The same edge, a client holding the wrong key.
+        let (_, wrong_vk) = keypair(9);
+        let misled = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
+            vec![GatewayEndpoint { id: "gw-a0".into(), base_url: format!("http://127.0.0.1:{http_port}") }],
+            1, Duration::from_secs(30),
+        ).with_partner_key(wrong_vk);
+        assert!(matches!(misled.connect().await, Err(ClientError::Catalogue(crate::federation::edge::CatalogRefusal::BadSignature))));
+        assert_eq!(misled.link_state(), LinkState::Down);
 
         // 1. Before discovery: refused locally, the link is Down. No HTTP.
         assert!(matches!(
@@ -6436,6 +6448,16 @@ mod federation_transport {
         let client = FederationClient::new(
             beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(), endpoints, 1, Duration::from_secs(30),
         );
+
+        // This edge has no signing key: a client that requires a signed catalogue refuses the
+        // unsigned one (item 2 PR 10a); the client below does not require one and proceeds.
+        let (_, some_vk) = keypair(12);
+        let requiring = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
+            vec![GatewayEndpoint { id: "gw-live".into(), base_url: format!("http://127.0.0.1:{http_port}") }],
+            1, Duration::from_secs(30),
+        ).with_partner_key(some_vk);
+        assert!(matches!(requiring.connect().await, Err(ClientError::Catalogue(crate::federation::edge::CatalogRefusal::Unsigned))));
 
         // connect tries the dead gateway, then the live one.
         assert_eq!(client.connect().await.unwrap(), vec!["demo/whoami".to_string()]);

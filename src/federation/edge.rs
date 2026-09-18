@@ -52,6 +52,10 @@ pub const CATALOG_EXPORT: &str = "federation.catalog";
 /// The route the provider serves its filtered catalogue on.
 pub const CATALOG_PATH: &str = "/federation/catalog";
 
+/// Domain-separation tag for a signed [`CatalogReply`]. Distinct from the descriptor, policy and
+/// call tags, so a catalogue signature can never authenticate another object type.
+pub const TAG_CATALOG: &str = "mycelium.federation/catalog/1";
+
 /// The wall clock in milliseconds, through the replay seam. Federation deadlines are wall-clock by
 /// design — see the module docs of [`call`](super::call) for why the monotonic reasoning stops at
 /// the domain edge.
@@ -126,13 +130,97 @@ impl PresentedCall {
     }
 }
 
-/// What the catalogue route answers: this domain's identity, the policy revision that filtered
-/// the list, and the exports the asking partner has been granted.
+/// What the catalogue route answers: this domain's identity, **whom the list was filtered for**,
+/// the policy revision that filtered it, when it was issued, and the exports that partner has
+/// been granted — signed under the domain's key when the edge has one (item 2 PR 10a).
+///
+/// The signature covers `for_partner`, so a reply issued to one partner cannot be replayed to
+/// another as its catalogue; and it covers `domain`, so a gateway cannot answer for a domain it
+/// does not hold the key of. Freshness is not the signature's job — the resolver's observation
+/// window (PR 3) decides how long a catalogue may be relied on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogReply {
     pub domain: DomainId,
+    pub for_partner: DomainId,
     pub policy_revision: u64,
+    pub issued_at_ms: u64,
     pub exports: Vec<String>,
+    /// Standard base64 of the Ed25519 signature over [`canonical_bytes`](Self::canonical_bytes),
+    /// or `None` from an edge with no signing key.
+    #[serde(default)]
+    pub signature: Option<String>,
+}
+
+/// Why a catalogue reply was not accepted by a client that requires a signed one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogRefusal {
+    /// The reply carries no signature and the client requires one.
+    Unsigned,
+    /// The signature does not verify under the partner's key (or is not decodable).
+    BadSignature,
+    /// The reply names a domain other than the partner asked.
+    WrongDomain { expected: DomainId, got: DomainId },
+    /// The reply was filtered for someone else.
+    NotForUs { expected: DomainId, got: DomainId },
+}
+
+impl std::fmt::Display for CatalogRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsigned => write!(f, "catalogue is unsigned and a signed one is required"),
+            Self::BadSignature => write!(f, "catalogue signature does not verify under the partner's key"),
+            Self::WrongDomain { expected, got } => write!(f, "catalogue is for domain {got}, expected {expected}"),
+            Self::NotForUs { expected, got } => write!(f, "catalogue was filtered for {got}, not for {expected}"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogRefusal {}
+
+impl CatalogReply {
+    /// Length-prefixed, tagged, in field order — the same shape as the descriptor and policy
+    /// forms in the parent module, and for the same reason: we own both ends.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        fn put_lp(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+        let mut out = Vec::new();
+        put_lp(&mut out, TAG_CATALOG.as_bytes());
+        put_lp(&mut out, self.domain.as_str().as_bytes());
+        put_lp(&mut out, self.for_partner.as_str().as_bytes());
+        out.extend_from_slice(&self.policy_revision.to_le_bytes());
+        out.extend_from_slice(&self.issued_at_ms.to_le_bytes());
+        out.extend_from_slice(&(self.exports.len() as u32).to_le_bytes());
+        for e in &self.exports {
+            put_lp(&mut out, e.as_bytes());
+        }
+        out
+    }
+
+    /// Sign under the domain's key.
+    pub fn signed(mut self, key: &ed25519_dalek::SigningKey) -> Self {
+        let sig = mycelium_core::tls::sign_bytes(key, &self.canonical_bytes());
+        self.signature = Some(base64::engine::general_purpose::STANDARD.encode(sig));
+        self
+    }
+
+    /// Is this the catalogue `partner` issued to `us`, signed under `partner_key`? Checks the
+    /// bindings before the signature so a refusal names the cheaper reason first.
+    pub fn verify(&self, partner: &DomainId, us: &DomainId, partner_key: &[u8; 32]) -> Result<(), CatalogRefusal> {
+        if &self.domain != partner {
+            return Err(CatalogRefusal::WrongDomain { expected: partner.clone(), got: self.domain.clone() });
+        }
+        if &self.for_partner != us {
+            return Err(CatalogRefusal::NotForUs { expected: us.clone(), got: self.for_partner.clone() });
+        }
+        let Some(sig) = &self.signature else { return Err(CatalogRefusal::Unsigned) };
+        let sig = base64::engine::general_purpose::STANDARD.decode(sig).map_err(|_| CatalogRefusal::BadSignature)?;
+        if !mycelium_core::tls::verify_bytes(partner_key, &self.canonical_bytes(), &sig) {
+            return Err(CatalogRefusal::BadSignature);
+        }
+        Ok(())
+    }
 }
 
 struct EdgeTrust {
@@ -151,6 +239,10 @@ pub struct FederationEdge {
     domain: DomainId,
     exports: Vec<String>,
     call_policy: CallPolicy,
+    /// The domain's signing key — the one whose public half partners hold in their trust bundles
+    /// (the descriptor's `public_key`). Present: catalogue replies are signed. Absent: unsigned,
+    /// which a partner that requires signatures refuses.
+    signing_key: Option<ed25519_dalek::SigningKey>,
     /// Lock-order row 38: leaf, µs read on every federated request, never held across an await.
     trust: RwLock<EdgeTrust>,
 }
@@ -167,8 +259,21 @@ impl FederationEdge {
             domain,
             exports: exports.into_iter().map(Into::into).collect(),
             call_policy,
+            signing_key: None,
             trust: RwLock::new(EdgeTrust { policy, bundle }),
         }
+    }
+
+    /// Sign catalogue replies under the domain's key (item 2 PR 10a). Partners verify against the
+    /// public key their trust bundle holds for this domain.
+    pub fn with_signing_key(mut self, key: ed25519_dalek::SigningKey) -> Self {
+        self.signing_key = Some(key);
+        self
+    }
+
+    /// Does this edge sign its catalogue replies?
+    pub fn signs_catalogue(&self) -> bool {
+        self.signing_key.is_some()
     }
 
     pub fn domain(&self) -> &DomainId {
@@ -249,10 +354,17 @@ impl FederationEdge {
         }
         let credential = self.authenticate(presented, now_ms)?;
         let trust = self.trust.read().unwrap_or_else(|e| e.into_inner());
-        Ok(CatalogReply {
+        let reply = CatalogReply {
             domain: self.domain.clone(),
+            for_partner: credential.origin_domain.clone(),
             policy_revision: trust.policy.revision,
+            issued_at_ms: now_ms,
             exports: filtered_catalog(&self.exports, &trust.policy, &credential.origin_domain),
+            signature: None,
+        };
+        Ok(match &self.signing_key {
+            Some(key) => reply.signed(key),
+            None => reply,
         })
     }
 }
@@ -370,6 +482,49 @@ mod tests {
         e.revoke(&beta);
         assert_eq!(e.catalog_for(&cat, now), Err(CallRefusal::UnknownDomain));
         assert_eq!(e.authorize(&call, "invoice.submit", now), Err(CallRefusal::UnknownDomain));
+    }
+
+    /// A signed catalogue verifies under the domain's key and is bound to the domain and the
+    /// partner it was filtered for; a changed export, another partner, another domain and the
+    /// wrong key are each refused for their own reason; an unkeyed edge answers unsigned, which a
+    /// requiring client refuses as `Unsigned` (item 2 PR 10a).
+    #[test]
+    fn a_signed_catalogue_is_bound_to_the_domain_and_the_asker() {
+        let (beta_sk, beta_vk) = keypair(7);
+        let (alpha_sk, alpha_vk) = keypair(8);
+        let (_, other_vk) = keypair(9);
+        let now = 1_789_000_000_000;
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let gamma = DomainId::new("gamma.example").unwrap();
+
+        let unkeyed = edge(beta_vk);
+        let reply = unkeyed.catalog_for(&presented(&beta_sk, CATALOG_EXPORT, now), now).unwrap();
+        assert_eq!(reply.signature, None);
+        assert_eq!(reply.for_partner, beta);
+        assert_eq!(reply.issued_at_ms, now);
+        assert_eq!(reply.verify(&alpha, &beta, &alpha_vk), Err(CatalogRefusal::Unsigned));
+
+        let keyed = edge(beta_vk).with_signing_key(alpha_sk);
+        assert!(keyed.signs_catalogue());
+        let reply = keyed.catalog_for(&presented(&beta_sk, CATALOG_EXPORT, now), now).unwrap();
+        assert!(reply.signature.is_some());
+        assert_eq!(reply.verify(&alpha, &beta, &alpha_vk), Ok(()));
+        assert_eq!(reply.verify(&alpha, &beta, &other_vk), Err(CatalogRefusal::BadSignature));
+        assert!(matches!(reply.verify(&gamma, &beta, &alpha_vk), Err(CatalogRefusal::WrongDomain { .. })));
+        assert!(matches!(reply.verify(&alpha, &gamma, &alpha_vk), Err(CatalogRefusal::NotForUs { .. })));
+
+        let mut tampered = reply.clone();
+        tampered.exports.push("ledger.audit".into());
+        assert_eq!(tampered.verify(&alpha, &beta, &alpha_vk), Err(CatalogRefusal::BadSignature));
+        let mut readdressed = reply.clone();
+        readdressed.for_partner = gamma.clone();
+        assert!(matches!(readdressed.verify(&alpha, &gamma, &alpha_vk), Err(CatalogRefusal::BadSignature)), "re-addressing a reply breaks its signature");
+
+        // The tag keeps a catalogue signature from authenticating anything else.
+        assert_ne!(TAG_CATALOG, super::super::TAG_DESCRIPTOR);
+        assert_ne!(TAG_CATALOG, super::super::TAG_POLICY);
+        assert_ne!(TAG_CATALOG, super::super::call::TAG_CALL);
     }
 
     /// A key the bundle does not trust signs a well-formed credential: refused as
