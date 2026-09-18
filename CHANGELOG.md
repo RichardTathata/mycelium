@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the timer seam, first arm: fixed sleeps, and the converge sleep routed (item 6 PR 3 tail)
+
+- **`sim_seam::sleep_ms(stream, ms)`** — the replay inventory's §2.3 row for *fixed sleeps inside protocol
+  logic whose duration is a correctness assumption*. Without `sim` it is `tokio::time::sleep`, nothing else. With
+  a kernel: `Record` really sleeps and writes down that the wait elapsed; **`Replay` never wall-waits** — the
+  recorded effective duration advances both simulated clocks (`Sources::advance_ms`, new; unlike a wall *jump*
+  the monotonic clock moves too) and the task yields once, so the await point stays and the wait goes. A
+  request that differs from the recording is a divergence printed with both sides.
+- **The 1 s "let the winning commit converge" sleep after `distributed_lock`'s optimistic commit is now
+  routed** as `lock/converge`, its twin in `elect_leader` as `elect/converge`, and the ballot defers as
+  `consensus/defer` / `consensus/suggest-defer`. `consensus_handle.rs` drops from 9 forbidden sites to 3 in the
+  seams baseline. The D4 audit could only *model* that path because this seam did not exist; it now can be
+  recorded.
+- **A boundary found by writing the test the other way first.** Because replay checks the request but supplies
+  the result, an edited `timer` line makes the replayed wait return `0` or `5000` — but in exact replay the
+  clock reads that follow are supplied from the trace too, so they still say what the recording said. **Exact
+  replay reproduces; it cannot explore.** Re-deriving those reads after an authored wait is *scenario replay*,
+  the inventory's third mode, which the two-mode kernel does not have. The test pins both halves so the
+  assertion changes deliberately when that mode lands, and the seam, kernel and inventory say "the hook, not the
+  exploration" rather than the claim I first wrote.
+- Four seam tests; the no-wall-wait and clock-advance properties each verified by planting their absence.
+
 ### Added — the knowledge layer's adapters (item 3 PR 7 — item 3 complete)
 
 - **The trace adapter** (`mycelium-reason`, new feature `knowledge`): a `TraceEvent` becomes a knowledge

@@ -22,7 +22,7 @@
 5 src/agent/capability_handle.rs
 2 src/agent/capability_ops.rs
 1 src/agent/cluster_tuner.rs
-9 src/agent/consensus_handle.rs
+3 src/agent/consensus_handle.rs
 2 src/agent/emergent_groups.rs
 2 src/agent/emergent.rs
 5 src/agent/evidence_journal.rs

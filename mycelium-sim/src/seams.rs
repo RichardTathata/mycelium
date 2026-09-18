@@ -85,6 +85,14 @@ impl Sources {
         self.wall_ms = self.wall_ms.saturating_add_signed(delta);
     }
 
+    /// Elapse `ms` of simulated time: **both** clocks move together, as they do when a process
+    /// actually waits. Contrast [`jump_wall_ms`](Self::jump_wall_ms), which moves only the wall
+    /// clock — a jump is not elapsed time, and the monotonic clock must never see one.
+    pub fn advance_ms(&mut self, ms: u64) {
+        self.wall_ms = self.wall_ms.saturating_add(ms);
+        self.mono_ns = self.mono_ns.saturating_add(ms.saturating_mul(1_000_000));
+    }
+
     /// A draw from `stream`. Streams are independent: adding a draw in one does not move another.
     fn rng(&mut self, stream: &str, counter: u64) -> u64 {
         // splitmix64 over (seed, stream hash, counter) — no dependency, and a stream's values do
@@ -253,6 +261,38 @@ impl<'k> Seams<'k> {
         observed: impl FnOnce() -> String,
     ) -> Result<String, Divergence> {
         self.kernel.decide(Some(&self.node), ChoiceKind::Chan, stream, request, observed)
+    }
+
+    /// A timer: a wait the production code asked for, and how much simulated time it took.
+    ///
+    /// The request is the wait asked for; the result is the **effective** elapsed time, which is
+    /// then applied to both simulated clocks — in both modes, because under a kernel the clocks are
+    /// [`Sources`] even while recording, and a wait that left them still would make the recording
+    /// disagree with the real sleep that just happened.
+    ///
+    /// Replay checks the request and *supplies* the result, so an edited `timer` line —
+    /// `sleep(1000ms)` → `0`, or → `5000` — makes the replayed wait return that duration. That is
+    /// the **hook** for exploring 0 / exact / beyond, not the exploration itself: in exact replay the
+    /// clock reads that follow are supplied from the trace too, so they still say what the recording
+    /// said. Re-deriving them after an authored wait is scenario replay, a mode this kernel does not
+    /// yet have. A result that does not parse is taken as the requested duration: the exact
+    /// schedule, the least surprising reading of a damaged line.
+    pub fn timer(
+        &mut self,
+        stream: &str,
+        requested_ms: u64,
+        observed: impl FnOnce() -> u64,
+    ) -> Result<u64, Divergence> {
+        let out = self.kernel.decide(
+            Some(&self.node),
+            ChoiceKind::Timer,
+            stream,
+            &format!("sleep({requested_ms}ms)"),
+            || observed().to_string(),
+        )?;
+        let effective = out.trim().parse().unwrap_or(requested_ms);
+        self.sources.advance_ms(effective);
+        Ok(effective)
     }
 
     /// An external input — a token verification, an LLM reply, an MCP response.
