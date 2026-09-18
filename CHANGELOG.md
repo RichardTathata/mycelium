@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — expiry and correction, with the dependency index (item 3 PR 5)
+
+- **A retraction now reaches what was derived from it**, rather than waiting to be noticed.
+  `DependencyIndex` inverts the `DerivedFrom` links (which point *upward*, from a record to its bases), so
+  `transitively_affected` answers "what does this retraction touch?" without rescanning every record.
+- **Withdrawing a basis is not withdrawing the conclusion** — the decision the module turns on. A `Retracts`
+  link is same-issuer only, but records by *other* issuers may have been derived from the withdrawn one. Those
+  become `Standing::BasisWithdrawn { basis, hops }` — **a fact about the record's support, not a verdict on the
+  record**. Issuer A withdrawing its observation gives A no standing to withdraw B's conclusion; B may stand by
+  it on other grounds. Collapsing the two would let any issuer silently invalidate anyone's conclusions by
+  retracting something they had cited, which is erasure wearing a correction's clothes.
+- **Nothing is deleted.** `standing` computes a view; the store's length is unchanged, pinned by a test, because
+  "a retraction reaches downstream records" is one short step from "a retraction deletes downstream records".
+- **Expiry needs no timer.** It is a pure function of the reader's `now_ms` and the record's own `at_ms` — there
+  is no wait to reproduce and nothing to schedule, so a replay gets it right without the clock seam being
+  involved at all.
+- Also: the **nearest** withdrawn basis is reported (the most actionable one); an **absent** basis is not
+  treated as a withdrawal (otherwise a partial replica looks like a wave of retractions); retraction is reported
+  ahead of expiry; and a forged/corrupted `DerivedFrom` cycle terminates — stated plainly as the only way a
+  cycle can arise, since a content-addressed id cannot honestly contain a link that depends on itself.
+- `KnowledgeStore::records()` added (additive) — an iterator over held records, explicitly unordered.
+- Eleven tests; the transitive reach and the `Retracted`/`BasisWithdrawn` split each verified non-vacuous by
+  breaking them.
+
 ### Added — evidence-aware resolution (item 3 PR 4)
 
 - **It wraps `resolve_for_caller`; it does not replace it.** The native gates (`is_fresh`, schema id) run first

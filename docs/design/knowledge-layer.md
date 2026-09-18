@@ -117,7 +117,8 @@ it would be invisible afterwards because the resulting graph would look identica
 | **1** *(this record)* | the ADR; `knowledge/` reserved in the namespace table and both front-door lists |
 | 2–3 | the typed records and the store — the **initial API release** |
 | **4** ✓ | **evidence-aware resolution** — `src/knowledge/resolution.rs`: `ReleaseId` (evidence binds to one release, length-prefixed so names cannot collide), `ReaderPolicy` (independence as a **configured control group**, evidence ageing on record timestamps), the four-outcome `Verdict`, and `filter_accepted` which *filters without reordering* so evidence decides eligibility and the router still decides choice |
-| 5–6 | expiry/correction, the demonstration (**the contract completes here**) |
+| **5** ✓ | **expiry and correction** — `src/knowledge/correction.rs`: a `DependencyIndex` inverting the `DerivedFrom` links so a retraction *reaches* what was built on it, `Standing` with the **`Retracted` / `BasisWithdrawn` split** (withdrawing a basis is not withdrawing the conclusion — issuer A has no standing to retract issuer B's record), and expiry as a pure function of the reader's clock, needing no timer at all |
+| 6 | the demonstration (**the contract completes here**) |
 | 7 | adapters |
 
 ## 8. Two gates, and they are not the same claim
