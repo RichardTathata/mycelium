@@ -2754,17 +2754,51 @@ async fn gw_cross_group_propose(
         crate::consensus::ConsensusConfig::default(),
     ).await;
 
-    match result {
-        // `persisted: false` = committed cluster-wide but not on this node's stable storage
-        // (see `ConsensusResult::Committed::persisted`) — additive field, `ok` unchanged.
-        crate::consensus::ConsensusResult::Committed { persisted, .. } =>
-            Json(json!({ "ok": true, "persisted": persisted })).into_response(),
-        crate::consensus::ConsensusResult::Timeout { ballots_tried, .. } =>
+    let persisted = committed_bool(&result);
+    match super::consensus_handle::receipt_from(result, &ctx.agent_ctx) {
+        Ok(receipt) => Json(commit_json(persisted, &receipt.local_durability)).into_response(),
+        Err(err) => commit_error_response(err),
+    }
+}
+
+/// The v2.4.2 `"persisted"` bool, read off the result **before** it becomes a receipt so the
+/// old field is exactly what it always was — the receipt is added beside it, never derived back
+/// into it (the regression floor pins `persisted`; PR 7 must not move that pin).
+#[cfg(feature = "consensus")]
+fn committed_bool(result: &crate::consensus::ConsensusResult) -> bool {
+    matches!(result, crate::consensus::ConsensusResult::Committed { persisted: true, .. })
+}
+
+/// The commit's JSON — HTTP parity with [`CommitReceipt`](crate::CommitReceipt) (item 1 PR 7,
+/// `docs/design/contracts-receipts.md` §5). `"persisted"` is unchanged; `"local_durability"` is
+/// [`LocalDurability::tag`](crate::LocalDurability::tag) beside it — the same four names the
+/// SDKs read — and `"local_durability_error"` is present **only** when the state is `failed`.
+/// JSON is additive-safe: a pre-2.8 client reads `persisted` and ignores the rest.
+#[cfg(feature = "consensus")]
+fn commit_json(persisted: bool, durability: &crate::LocalDurability) -> serde_json::Value {
+    let mut body = json!({ "ok": true, "persisted": persisted, "local_durability": durability.tag() });
+    if let Some(reason) = durability.failure_reason() {
+        body["local_durability_error"] = json!(reason);
+    }
+    body
+}
+
+/// A refused commit, in the statuses the two overlay verbs have always used: delivery unknown is
+/// `504` (the value *may* have committed elsewhere — the body says so), a lost or untried
+/// proposal is `409`.
+#[cfg(feature = "consensus")]
+fn commit_error_response(err: crate::CommitError) -> axum::response::Response {
+    use crate::CommitError;
+    match err {
+        CommitError::DeliveryUnknown { ballots_tried, .. } =>
             (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": format!("consensus timed out after {ballots_tried} ballot(s)") }))).into_response(),
-        crate::consensus::ConsensusResult::Superseded { .. } =>
+        CommitError::Superseded { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
-        crate::consensus::ConsensusResult::TopologyUnsatisfied { .. } =>
+        CommitError::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        // `CommitError` is `#[non_exhaustive]` in `mycelium-core`: a refusal this build does not
+        // name is still a refusal, and its `Display` says what it is.
+        other => (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": other.to_string() }))).into_response(),
     }
 }
 
@@ -2798,8 +2832,9 @@ async fn gw_overlay_consistent_set(
         crate::consensus::ConsensusConfig::default(),
     ).await;
 
-    match result {
-        crate::consensus::ConsensusResult::Committed { persisted, .. } => {
+    let persisted = committed_bool(&result);
+    match super::consensus_handle::receipt_from(result, &ctx.agent_ctx) {
+        Ok(receipt) => {
             let key_arc: Arc<str> = Arc::from(key.as_str());
             let update = crate::framing::make_gossip_update(
                 &ctx.agent_ctx.node_id, ctx.agent_ctx.default_ttl,
@@ -2813,14 +2848,9 @@ async fn gw_overlay_consistent_set(
                 crate::framing::ForwardHint::All,
                 &ctx.agent_ctx.kv_state.dropped_frames,
             );
-            Json(json!({ "ok": true, "persisted": persisted })).into_response()
+            Json(commit_json(persisted, &receipt.local_durability)).into_response()
         }
-        crate::consensus::ConsensusResult::Timeout { ballots_tried, .. } =>
-            (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": format!("consensus timed out after {ballots_tried} ballot(s)") }))).into_response(),
-        crate::consensus::ConsensusResult::Superseded { .. } =>
-            (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
-        crate::consensus::ConsensusResult::TopologyUnsatisfied { .. } =>
-            (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        Err(err) => commit_error_response(err),
     }
 }
 
@@ -3658,6 +3688,29 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     fn alloc_port() -> u16 { crate::test_util::alloc_port() }
+
+    /// Item 1 PR 7: the commit JSON carries the receipt's tag beside the old bool, and the error
+    /// field **only** for `failed` — the shape the live gateway test cannot induce.
+    #[cfg(feature = "consensus")]
+    #[test]
+    fn commit_json_renders_the_receipt_beside_persisted() {
+        use crate::LocalDurability;
+        let on_disk = super::commit_json(true, &LocalDurability::OnDisk);
+        assert_eq!(on_disk["persisted"], true);
+        assert_eq!(on_disk["local_durability"], "on_disk");
+        assert!(on_disk.get("local_durability_error").is_none());
+
+        // The collapse the field undoes: `persisted: true` with nothing promised.
+        let none = super::commit_json(true, &LocalDurability::NotConfigured);
+        assert_eq!(none["persisted"], true);
+        assert_eq!(none["local_durability"], "not_configured");
+
+        let failed = super::commit_json(false, &LocalDurability::Failed("no ack".into()));
+        assert_eq!(failed["persisted"], false);
+        assert_eq!(failed["local_durability"], "failed");
+        assert_eq!(failed["local_durability_error"], "no ack");
+        assert_eq!(failed["ok"], true, "a failed *durability* is still a committed value");
+    }
 
     #[tokio::test]
     async fn test_http_health_responds() {

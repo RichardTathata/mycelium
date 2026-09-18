@@ -141,7 +141,10 @@ What a write acknowledgement means is the one operator decision:
 In every mode: **consensus committed slots and leases are fsynced** (`append_sync` forces it) and
 the commit result carries `persisted` (gateway JSON `"persisted"`; `false` = committed
 cluster-wide but not on this node's disk — logged at `error`, repaired from peers by anti-entropy
-after a restart; treat a run of `false` as a disk or writer fault on that node). A snapshot merges
+after a restart; treat a run of `false` as a disk or writer fault on that node). Since v2.8.0 the
+JSON also carries `"local_durability"` (`on_disk` · `buffered` · `not_configured` · `failed`, with
+`"local_durability_error"` for the last): `"persisted": true` on a node **without** persistence
+means *nothing was promised*, and only `"on_disk"` says the slot is on that node's disk. A snapshot merges
 the on-disk WAL tail before truncating, so it never discards a record, and the snapshot rename is
 fsynced at the directory before the WAL is truncated, so a power loss cannot leave an old snapshot
 beside an emptied WAL; replay is last-writer-wins over every record. **Storage assumptions:** directory

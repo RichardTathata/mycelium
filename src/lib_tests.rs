@@ -5638,6 +5638,57 @@ async fn probe_gateway_auth_gates_the_wire() {
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
+/// Item 1 PR 7 — HTTP parity with the commit receipt: `POST /gateway/overlay/consistent/set`
+/// answers `"local_durability"` beside `"persisted"`, and the two say different things. A node
+/// **without** persistence reports `persisted: true` *and* `"not_configured"` — the collapse
+/// `persisted` folds into one `true`, undone beside it; a node with `Flush` persistence reports
+/// `persisted: true` *and* `"on_disk"`. No `"local_durability_error"` in either. What this does
+/// **not** show: the `failed` shape (a stopped WAL writer is not inducible from outside) — that
+/// rendering is pinned by `commit_json`'s unit test and `LocalDurability::tag`'s.
+#[cfg(all(feature = "gateway", feature = "consensus"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gateway_consistent_set_reports_local_durability_beside_persisted() {
+    let client = reqwest::Client::new();
+
+    for expected_tag in ["not_configured", "on_disk"] {
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let base = std::env::temp_dir().join(format!("myc-parity-{gossip_port}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.persistence = (expected_tag == "on_disk").then(|| PersistenceConfig {
+            base_path: base.clone(),
+            sync_mode: SyncMode::Flush,
+            snapshot_wal_threshold: 1_000_000,
+            snapshot_interval_secs: 3_600,
+        });
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg);
+        agent.start().await.expect("start");
+
+        let health = format!("http://127.0.0.1:{http_port}/health");
+        for _ in 0..40 {
+            if client.get(&health).send().await.is_ok_and(|r| r.status().is_success()) { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let set = format!("http://127.0.0.1:{http_port}/gateway/overlay/consistent/set");
+        let body: serde_json::Value = client.post(&set)
+            .json(&serde_json::json!({"key":"parity/k","value_b64":"dg=="}))
+            .send().await.unwrap().json().await.unwrap();
+
+        assert_eq!(body["ok"], true, "{expected_tag}: {body}");
+        // The old field, exactly as before: `true` on both nodes — which is the point.
+        assert_eq!(body["persisted"], true, "{expected_tag}: {body}");
+        assert_eq!(body["local_durability"], expected_tag, "{body}");
+        assert!(body.get("local_durability_error").is_none(),
+            "no error field unless the state is `failed`: {body}");
+
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+}
+
 /// Run-43 falsification probe (failure-mode legibility deep-dive): a rejected config must
 /// NAME the offending field — an operator staring at a failed start needs the knob, not a
 /// generic message.

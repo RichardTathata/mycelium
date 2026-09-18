@@ -65,10 +65,28 @@ export interface DemandStatus {
  * that node's WAL append failed (writer stopped / disk error — logged at error there; recovered
  * from peers by anti-entropy after a restart — treat a run of `false` as a disk fault on the node
  * you are talking to); `null` = the gateway predates v2.4.2 and did not report the field.
+ *
+ * `persisted` folds two states into `true` — *on disk* and *nothing was promised* (no persistence
+ * configured on that node). `localDurability` (v2.8.0, the receipt vocabulary of
+ * `docs/design/contracts-receipts.md`) separates them with the same names the Rust
+ * `LocalDurability` uses; `localDurabilityError` is set only for `"failed"`; both are `null` when
+ * the gateway predates v2.8.0.
  */
 export interface CommitResult {
   persisted: boolean | null;
+  localDurability: LocalDurability | null;
+  localDurabilityError: string | null;
 }
+
+/**
+ * The local-durability rung, as the gateway names it: `"on_disk"` (the forced fdatasync
+ * returned — the one state that establishes durability) · `"buffered"` (accepted by the WAL, not
+ * yet synced; never produced by a consensus commit, which forces the sync) · `"not_configured"`
+ * (no persistence on that node: nothing promised, nothing claimed) · `"failed"` (not
+ * established; see `localDurabilityError`). A newer gateway may add a name; it arrives as a
+ * string rather than being dropped.
+ */
+export type LocalDurability = "on_disk" | "buffered" | "not_configured" | "failed" | (string & {});
 
 export class LockGuard {
   /** Opaque guard ID used to release via HTTP. */

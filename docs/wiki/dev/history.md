@@ -22,6 +22,25 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 1 PR 7: gateway/SDK receipt parity — 2026-09-18 (unreleased)
+
+The last PR of item 1 (`docs/design/contracts-receipts.md` §5, landed note). The two consensus-backed gateway
+verbs — `POST /gateway/overlay/consistent/set` and `/gateway/consensus/cross_group_propose` — answer
+`"local_durability"` beside `"persisted"`, in the receipt's own names (`LocalDurability::tag`: `on_disk` ·
+`buffered` · `not_configured` · `failed`, with `"local_durability_error"` only for the last), and both SDKs read
+it (`mycelium-py` `CommitResult.local_durability` / `.on_disk`; `mycelium-ts` `CommitResult.localDurability` and
+the `LocalDurability` type; absent → `None` / `null`).
+
+**One mapping, not two.** The handlers now go through the same `receipt_from` as `cluster_propose_receipt`
+(made `pub(crate)`), so HTTP cannot drift from Rust; `"persisted"` is read off the `ConsensusResult` *before*
+it becomes a receipt, so the old field is exactly what it was and its regression-floor pin does not move. The
+live test shows the collapse undone — a node *without* persistence answers `persisted: true` **and**
+`"not_configured"`; one with `Flush` persistence answers `persisted: true` **and** `"on_disk"`. *Not shown
+live:* the `failed` shape (a stopped writer is not inducible from outside) — unit-pinned in `commit_json`'s
+test. A gate finding on the way: `mycelium-py/tests/test_commit_result.py` was node-free since 2026-09-05 and
+never in CI's explicit pytest list; it is now. Log:
+[`.log/2026-09-18-item1-pr7-gateway-sdk-parity.md`](.log/2026-09-18-item1-pr7-gateway-sdk-parity.md).
+
 ## v3 contracts axis — item 4 PR 1: the adaptive-stability ADR — 2026-09-18 (unreleased, PR #273; #270 was auto-closed by the stacked-PR trap)
 
 Record `docs/design/adaptive-stability.md`; reservations `rights/head/{holder}` (namespace table +

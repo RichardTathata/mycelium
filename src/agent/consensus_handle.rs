@@ -53,7 +53,7 @@ pub struct ConsensusHandle {
 /// The one judgement here: `persisted: true` on a node with **no persistence configured** means
 /// *nothing was promised*, not *on disk* — the collapse D24 names. The receipt separates them by
 /// reading the node's own configuration, which is the only place that distinction exists.
-fn receipt_from(
+pub(crate) fn receipt_from(
     result: ConsensusResult,
     ctx: &Arc<TaskCtx>,
 ) -> Result<crate::CommitReceipt, crate::CommitError> {

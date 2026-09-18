@@ -30,6 +30,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Three tests (the class mapping, the join/leave asymmetry, the profile's stored form round-trip); the live
   `test_membership_governor_converges_to_min` passes unchanged under the default.
 
+### Added — gateway/SDK receipt parity (item 1 PR 7)
+
+- **`"local_durability"` beside `"persisted"`** in the JSON of the two consensus-backed gateway
+  verbs (`overlay/consistent/set`, `cross_group_propose`): the commit receipt's `LocalDurability`,
+  named `on_disk` · `buffered` · `not_configured` · `failed` (`LocalDurability::tag`, pinned by a
+  test — a rename is a wire change), with `"local_durability_error"` present only for `failed`.
+  `"persisted"` is unchanged: it is read off the result *before* it becomes a receipt, so its
+  regression-floor pin does not move. Both handlers now go through the same `receipt_from` as
+  `cluster_propose_receipt`, so HTTP cannot drift from Rust. Additive: a pre-2.8 client reads
+  `persisted` and ignores the rest.
+- **SDKs:** `mycelium-py` `CommitResult.local_durability` / `.local_durability_error` / `.on_disk`;
+  `mycelium-ts` `CommitResult.localDurability` / `.localDurabilityError` and the `LocalDurability`
+  type. Absent fields (a pre-2.8 gateway) read as `None` / `null`; a stub-gateway test in each SDK
+  pins the four names and that `persisted` is untouched.
+- **CI:** `mycelium-py/tests/test_commit_result.py` joins the Python job's list — it has been
+  node-free since 2026-09-05 and never ran.
+
 ### Added — the rights ledger (item 4 PR 3)
 
 - **`mycelium::control::ledger`** — the ledger of allocated rights the ADR's §4 decided, on the node-local

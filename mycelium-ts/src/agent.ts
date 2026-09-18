@@ -19,9 +19,21 @@ function fromb64(s: string): Buffer {
   return Buffer.from(s, "base64");
 }
 
-/** Reads the gateway's `"persisted"` field; absent (pre-v2.4.2 node) → `null`. */
-function commitResult(data: { persisted?: boolean }): CommitResult {
-  return { persisted: typeof data.persisted === "boolean" ? data.persisted : null };
+/**
+ * Reads the gateway's `"persisted"` field (absent on a pre-v2.4.2 node → `null`) and, beside it,
+ * `"local_durability"` / `"local_durability_error"` (absent on a pre-v2.8.0 node → `null`).
+ */
+function commitResult(data: {
+  persisted?: boolean;
+  local_durability?: string;
+  local_durability_error?: string;
+}): CommitResult {
+  return {
+    persisted: typeof data.persisted === "boolean" ? data.persisted : null,
+    localDurability: typeof data.local_durability === "string" ? data.local_durability : null,
+    localDurabilityError:
+      typeof data.local_durability_error === "string" ? data.local_durability_error : null,
+  };
 }
 
 /**
