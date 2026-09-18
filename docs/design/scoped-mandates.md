@@ -197,6 +197,44 @@ unnamed exceptions is the thing that decays.
 directly is invisible to it; it does not parse Rust and cannot prove the fenced site is the one on the write
 path — only that the counts have not drifted.
 
+### 7.3 The partition table
+
+`src/mandate/partition.rs`. §6.3 states the policy in one sentence — *a disconnected curator may prepare
+proposals but cannot promise canonical acceptance without reaching the enforcing resource* — and this is that
+sentence made checkable.
+
+**It is not a second fence.** D4 was discharged with "no second fence", so the distinction has to be explicit: a
+fence is an enforcement point *at the resource*, and it decides what commits. This is neither. It is a
+**client-side refusal to promise**, and it cannot stop a curator that ignores it. `ResourceAuthority` remains
+the only thing that decides what commits. Without the table the failure is not a safety violation — the fence
+still refuses the write — it is a **lie to a submitter**: *"your content is accepted"*, said by someone whose
+authority may have been withdrawn ten minutes ago, with the refusal arriving only when the partition heals.
+
+**The table is derived, not chosen**, from an asymmetry that falls out of §4's three-way lifecycle split:
+
+- **Expiry is locally decidable** — `valid_until_ms` is *in* the mandate;
+- **revocation is not** — `PermissionWithdrawn` happens at the establishing authority, and a partitioned
+  curator cannot distinguish *"still mandated"* from *"revoked ten minutes ago"*.
+
+So: **an action may proceed while unreachable exactly when its correctness does not depend on the mandate still
+being current.** That is the payoff for keeping `RoleExpired` and `PermissionWithdrawn` apart — had they been
+one event, this distinction would be unstateable.
+
+| Action | Unreachable | Why |
+|---|---|---|
+| `ReadLocal` | **permitted** | asserts nothing about who may write |
+| `PrepareProposal` | **permitted** | an intention, not an acceptance; what it is *worth* is decided later, at the resource |
+| `ObserveOwnExpiry` | **permitted** | the window is in the mandate, and expiry only ever *narrows* what this curator claims |
+| `PromiseAcceptance` | refused | false the moment the mandate is not current |
+| `CommitCanonical` | refused | ditto |
+| `RenewOwnMandate` | refused | establishment needs the authority |
+| `HandOver` | refused | you cannot transfer what you cannot prove you hold |
+
+The rule and the table are **written twice, independently, and pinned against each other** — a change to either
+alone fails the test. Verified non-vacuous by inverting an entry. Six tests, including that the policy neither
+refuses everything (which would satisfy every safety statement and make a partitioned curator useless) nor
+permits everything.
+
 ## 8. The decisive test is replay scenario B
 
 Built once, in item 6, and covering: competing appointments · delayed holders · resource restart · expiry ·

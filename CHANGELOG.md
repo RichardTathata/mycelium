@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the partition table: what a disconnected curator may do (item 5)
+
+- **The policy sentence made checkable.** §6.3 says *a disconnected curator may prepare proposals but cannot
+  promise canonical acceptance without reaching the enforcing resource*. `mandate::partition` is that sentence
+  as a table, with `Reachability`, `CuratorAction` and `permitted`.
+- **It is not a second fence** — D4 was just discharged with "no second fence", so the distinction is explicit.
+  A fence is an enforcement point *at the resource* and decides what commits; this is a **client-side refusal to
+  promise**, and it cannot stop a curator that ignores it. Without it the failure is not a safety violation (the
+  fence still refuses the write) but a **lie to a submitter**, with the refusal arriving only when the partition
+  heals.
+- **The table is derived, not chosen.** The root asymmetry: **expiry is locally decidable** (`valid_until_ms` is
+  in the mandate) but **revocation is not** — a partitioned curator cannot distinguish "still mandated" from
+  "revoked ten minutes ago". So an action may proceed while unreachable exactly when its correctness does not
+  depend on the mandate still being current. This is the payoff for keeping `RoleExpired` and
+  `PermissionWithdrawn` apart: had they been one event, the distinction would be unstateable.
+- **The rule and the table are written twice, independently, and pinned against each other** — changing either
+  alone fails. Verified non-vacuous by inverting an entry. Six tests, including that the policy neither refuses
+  everything (which would satisfy every safety statement while making a partitioned curator useless) nor permits
+  everything.
+
 ### Added — the D4 audit: `LockService` under scenario B, with a verdict (item 5)
 
 - **D4 discharged: no second fence.** The audit (`mandate::lock_audit`) read `distributed_lock` rather than its
