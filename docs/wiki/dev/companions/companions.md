@@ -99,8 +99,12 @@ via wasm-host).
   (`append`, Ed25519-signed by whoever has standing; unsigned = unproven). One award per requirement — a second is
   *refused*, never overwritten; no offers is a visible state; nobody assigns another participant's obligation.
   The gallery entry `examples/redistribution_cn.rs` re-runs the redistribution workload the tuple-space and
-  blackboard examples run, so the three coordination models meet on one workload; CI job `commitment`. Not yet:
-  CN2 (replay + double-award witness), CN3 (mandate epoch at award).
+  blackboard examples run, so the three coordination models meet on one workload; CI job `commitment`. **CN2
+  (partial):** `commit_award_linearizable` — the award through a consensus round, so of two racing declarers
+  exactly one commits and the other is `AlreadyAwarded` with the committed award — and the double-award witness
+  as an explicit interleaving (the plain path lets both commit, LWW keeps one). The replay half is **pinned as a
+  gap**: a whole-node recording diverges on task interleaving, the scheduler seam's row. Not yet: CN3 (mandate
+  epoch at award).
 - **`mycelium-effects/`** — the **v3 effects companion** (item 1 PR 5, 2026-09-18): the *destination-commit*
   receipt as a reference destination. The substrate provides three of item 1's four receipts and never the fourth,
   because only the caller's resource can say whether an effect happened there. `EffectDestination` commits the

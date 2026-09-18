@@ -13,7 +13,7 @@ categories = ["asynchronous", "network-programming"]
 [dependencies]
 # Companion-crate contract: only Mycelium's PUBLIC API is used — no internal
 # access. This dependency line is itself the composability proof.
-mycelium = { path = "..", default-features = false }
+mycelium = { path = "..", default-features = false, features = ["consensus"] }
 
 bytes         = "1"
 ed25519-dalek = "2"
@@ -22,5 +22,8 @@ serde_json    = "1.0"
 tokio         = { version = "1.35", features = ["rt"] }
 
 [dev-dependencies]
-mycelium = { path = "..", default-features = false, features = ["test-util"] }
+# `sim`: the tests record a linearizable award under the replay kernel (CN2); `test-util`: the
+# bind-verified port allocator.
+mycelium = { path = "..", default-features = false, features = ["test-util", "sim"] }
+mycelium-sim = { path = "../mycelium-sim" }
 tokio = { version = "1.35", features = ["full"] }

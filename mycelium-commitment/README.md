@@ -33,9 +33,19 @@ is awarded once with a receipt, a second award is refused, every awardee reports
 operation, and a food-bank auditor — not the hub — signs the assessments. Exits 0 with
 `All assertions passed`.
 
+## Two declarers (CN2)
+
+`award` is for one declarer per requirement: between its plan and its commit another declarer may commit,
+and LWW keeps one silently — the crate's tests show it. Where two may race, use `award_linearizable`
+(or `plan_award` + `commit_award_linearizable`): the award goes through a consensus round on
+`cn/{requirement}/award`, exactly one commits, the other gets `AlreadyAwarded` **with the committed
+award**, and a round with no commit is `AwardUnknown` — a retry resolves it. Every reader sees the one
+award through `award_of`.
+
 ## What it does not do (yet)
 
-CN2 replays an award under `mycelium-sim` with a double-award witness; CN3 checks an award against the
-acceptor's mandate epoch (`docs/design/scoped-mandates.md`) where one exists. Participants are named,
-not authenticated, here: authority lives in the gateway's caller context and in mandates, not in this
-crate.
+Replay an award under `mycelium-sim`: a whole-node recording diverges on task interleaving, which needs the
+kernel's scheduler seam; the crate pins that gap with a test that asserts the divergence. CN3 checks an
+award against the acceptor's mandate epoch (`docs/design/scoped-mandates.md`) where one exists. Participants
+are named, not authenticated, here: authority lives in the gateway's caller context and in mandates, not in
+this crate.

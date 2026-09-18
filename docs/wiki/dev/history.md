@@ -35,6 +35,22 @@ compile time (`unknown` for the compiler: no build script). *Not built:* the min
 corpus has one entry — B and C are pure sweeps with no kernel trace. Log:
 [`.log/2026-09-18-item6-pr7-replay-corpus.md`](.log/2026-09-18-item6-pr7-replay-corpus.md).
 
+## v3 contracts axis — CN2: the linearizable award, and a gap pinned — 2026-09-18 (unreleased, partial)
+
+`commit_award_linearizable`: the award through a consensus round on `cn/{req}/award` — of two declarers racing
+exactly one commits and the other is `AlreadyAwarded` with the committed award; a round with no commit is
+`AwardUnknown`, never silence. The double-award witness is an **explicit interleaving** (the kernel has no
+scheduler seam): two declarers plan, then commit — the plain KV path lets both commit and LWW keeps one silently;
+the linearizable path refuses the second. **The replay half is not landed, and is pinned as a gap rather than
+skipped:** a whole-node recording of a linearizable award — same identity for both runs — diverges at seq 7,
+the recording holding the membership governor's `rng jitter` draw where the replay holds the round's
+`consensus/defer` timer. That interleaving is the scheduler's, the inventory's one unrouted row; a single
+task's effects replay (scenario A, the corpus) and a node's do not. The test asserts the divergence and names
+it, so the seam's arrival flips it into the claim. (A first attempt diverged earlier on a fresh port: the gossip
+shard hashes the key and the key carries the node id — a different node, not nondeterminism.) `mycelium`
+re-exports `sim_seam` under `sim` for companions. Log:
+[`.log/2026-09-18-cn2-linearizable-award.md`](.log/2026-09-18-cn2-linearizable-award.md).
+
 ## v3 contracts axis — CN1: the commitment companion — 2026-09-18 (unreleased)
 
 The third coordination model of the epoch (`docs/plans/v3-contracts-axis.md` §6.9, §13.2), built as the plan

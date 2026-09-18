@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the linearizable award and the double-award witness (v3 §6.9, CN2 — partial)
+
+- **`ContractNet::{plan_award, commit_award, commit_award_linearizable, award_linearizable}`** — the plain
+  award split into plan and commit, and a **linearizable** commit through a consensus round on the slot
+  `cn/{requirement}/award` (the plan's "a `group_propose` round where the award must be linearizable"):
+  of two declarers racing exactly one commits, the other is `AlreadyAwarded` **with the committed award**; a
+  round with no commit is `AwardUnknown { ballots_tried }` — the award may have committed elsewhere, a retry
+  resolves it. `award_of` reads the consensus slot before the KV head. `AwardedLinearizable { award, commit }`
+  carries item 1's `CommitReceipt`.
+- **The witness, as an explicit interleaving** (the kernel has no scheduler seam): two declarers plan, then
+  commit — the plain path lets both commit and LWW keeps one silently; the linearizable path refuses the
+  second. **Not landed, pinned as a gap:** the replay half. A whole-node recording of a linearizable award
+  diverges at the interleaving of the membership governor's jitter draw and the round's defer timer; the
+  test `a_whole_node_recording_of_a_linearizable_award_diverges_without_a_scheduler_seam` asserts the
+  divergence and names it, so the scheduler seam's arrival flips it into the claim.
+- **`mycelium::sim_seam`** re-exported under the `sim` feature, so a companion on the public API can record
+  and replay its own runs. `mycelium-commitment` now enables `mycelium/consensus`.
+
 ### Added — the commitment companion (v3 §6.9, CN1)
 
 - **`mycelium-commitment`** — the contract net as five records on the public API, a composition and not a
