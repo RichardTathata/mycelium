@@ -22,6 +22,22 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 4 PR 1: the adaptive-stability ADR — 2026-09-18 (unreleased, PR #270)
+
+Record `docs/design/adaptive-stability.md`; reservations `rights/head/{holder}` (namespace table +
+`kv_ns::RIGHTS_HEAD`). The record behind the governors, and the one D30 makes the resource-accounting slice wait
+on. **Three promises kept apart** — hard bounds · stability objectives · service objectives — each with a strength
+in the guardrails tiers (D17), and a hard bound is `HardPrevention` *only* with exclusive, durably accounted
+rights; otherwise it is a convergence target. **The decisive rule:** uncertainty holds speculation and routine
+scale-down, never protective shedding or rescue from zero — `ViewConfidence` per input, four action classes, a
+pure swept predicate at PR 2. **The ledger's shape decided:** rights cannot live in gossip KV (evaporation issues
+a right twice; LWW overwrites one); a node-local fsynced never-gossiped journal in the `EvidenceJournal`'s shape,
+heads only in the medium, native units, item 5's term identity, five states incl. `unknown`, persisted before
+acting, never reclaimed on discovery loss, `admission.rejected` first-class; exclusivity by allocation. One owner
+per actuator and per deficit, named; loop-breakers named (existing `gate`/cooldown kept, spacing/settling new,
+combined test = replay stage 6); depth signals consumed (D18); four profiles, shadow first. Log:
+[`.log/2026-09-18-item4-pr1-adaptive-stability-adr.md`](.log/2026-09-18-item4-pr1-adaptive-stability-adr.md).
+
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
 Record `docs/design/knowledge-layer.md` (PR 1, the ADR, #243, 2026-09-17); code `src/knowledge/` behind `tls`.

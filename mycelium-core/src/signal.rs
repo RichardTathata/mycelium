@@ -904,6 +904,14 @@ pub mod kv_ns {
     /// delivery hint, not a record.
     pub const LOG_WIKI: &str = "log/wiki/";
 
+    /// **Reserved** (v3 item 4, `docs/design/adaptive-stability.md` §4, §11).
+    ///
+    /// Key: `rights/head/{holder}`. Value: a bounded, signed **head** — a holder's claim of the
+    /// allocated rights it holds, checkable against the allocator's own journal. Heads only: the
+    /// ledger is node-local and never enters the medium, because a right that evaporated with its
+    /// holder's discovery entry would be issued twice. Nothing writes this prefix until item 4 PR 3.
+    pub const RIGHTS_HEAD: &str = "rights/head/";
+
     /// **Reserved** for the knowledge layer (v3 item 3 PR 1, `docs/design/knowledge-layer.md`).
     ///
     /// Key: `knowledge/head/{issuer}/{stream}`. Value: a bounded, signed **discovery head** — a
