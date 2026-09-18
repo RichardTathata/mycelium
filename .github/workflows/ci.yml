@@ -101,6 +101,10 @@ jobs:
       # an invariant nothing runs is a sentence. Foreign state never enters the gossip medium.
       - run: ./scripts/check-kv-namespaces.sh
       - run: ./scripts/check-wiki-mutation-fence.sh
+      # The knowledge layer's SEMANTIC gate (item 3) — a Phase D exit condition. Its own step so the
+      # exit condition is visible, rather than three tests inside a suite of hundreds. This is not
+      # the behavioural claim (§13, research track).
+      - run: make gate-knowledge
 
   embedded:
     name: Gateway-free build (no default features)

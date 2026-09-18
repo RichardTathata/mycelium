@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the knowledge layer's semantic gate and demonstration (item 3 PR 6 — the contract completes)
+
+- **The semantic gate is now a named, separately-runnable thing** (`make gate-knowledge`, and its own CI step),
+  because §8 calls it a Phase D exit condition and an exit condition buried among hundreds of tests is not
+  locatable. Three negative cases: misleading evidence cannot silently **erase** a conflicting observation,
+  cannot **refresh** expired evidence, cannot **confer** authority.
+- **Two positive controls, because all three negative cases are refusals.** The record names the trap — *"a
+  resolver that rejects everything looks safe while being useless"* — and all three would pass against a
+  resolver that refused unconditionally. Verified: making `classify` refuse everything leaves the three negative
+  cases green and fails **only** the positive control.
+- The erasure case is the sharp one: **fifty supporters do not bury one challenge.** The verdict is `Conflicted`,
+  the challenging record is still in the store, and it is still `Current` — §9's refusal of *"consensus over
+  truth"* made executable. There is no vote.
+- `examples/knowledge_layer.rs` runs the lifecycle end to end (claim → observation → assessments → resolution →
+  the same reader learning two labs share a funder → a challenge → retraction reaching what was built on it) and
+  **closes by printing what it does not demonstrate**: no transport, no signature checking, no reputation score,
+  no behavioural claim, and the disagreement is *not* resolved.
+
 ### Added — expiry and correction, with the dependency index (item 3 PR 5)
 
 - **A retraction now reaches what was derived from it**, rather than waiting to be noticed.

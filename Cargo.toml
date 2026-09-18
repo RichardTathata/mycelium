@@ -183,6 +183,12 @@ path              = "examples/federated_domains.rs"
 required-features = ["tls"]
 
 [[example]]
+name              = "knowledge_layer"
+path              = "examples/knowledge_layer.rs"
+# `knowledge` is behind `tls` — the record types verify Ed25519 signatures.
+required-features = ["tls"]
+
+[[example]]
 name              = "ops_console"
 path              = "examples/ops_console/main.rs"
 required-features = ["gateway"]
