@@ -49,6 +49,16 @@ Concretely, four action classes:
 | **Routine scale-down** | leave a group because it *looks* over `max` | **held** — the observation may be a partition, and a node that leaves on a partition makes it worse |
 | **Protective shed** | go opaque because *this node's* channel is full | **never held** — it reads local state, and local state is never uncertain |
 | **Rescue from zero** | join a group whose live count *reads as* 0 | **never held** — the cost of a wrong rescue is one extra member; the cost of a wrong hold is a group with nobody in it |
+| **Deficit fill** *(added PR 4a)* | join a group that reads below its **declared** `min` | **never held** — by cost a rescue, not speculation: a wrong fill on a stale undercount is one extra member; a wrong hold on a partition is a group stuck below a bound someone declared |
+
+> **Amendment, 2026-09-18 (PR 4a).** The table above was written with four classes. Wiring the first governor
+> showed that its own primary action — the membership governor's join below `min` — fitted none of them: it is
+> not speculation (the bound was declared, the deficit observed), and it is not rescue from zero by name. By
+> **cost** it is exactly rescue, and the rule is about cost, so a fifth class was added rather than the join
+> forced into `SpeculativeScaleUp` and held. The mapping from a membership decision to a class is a pure,
+> tested function (`membership_governor::classify`), so this reading is a fact in the suite and not a comment.
+> A **drain** — an operator's instruction carried by a fresh intent — is deliberately *no* class: the predicate
+> judges inferences from the fleet view, and a drain is not one.
 
 The asymmetry is not caution; it is the shape of the costs. Holding a protective shed on grounds of uncertainty
 is how a node with a full channel waits for peers it cannot hear to tell it whether it is allowed to protect
@@ -175,7 +185,9 @@ and it is hard because it is **local and durable**, not because it is global.
 | **1** *(this record)* | the ADR; `rights/head/{holder}` reserved in the namespace table and `kv_ns` |
 | **2** ✓ | `src/control.rs` — `ControlSpec`; the **confidence predicate as a pure function, swept** over every action class × every way a view can be uncertain, taking the real `ViewConfidence`; the four profiles with `Observe` as a distinct `WouldHold` decision; the stable `ActionId`; spacing and settling as pure checks |
 | **3** ✓ | `src/control/ledger.rs` on `agent::journal` (the mechanism lifted out of the AE profile in PR 3a, ungated here) — `Right` with its five counted states, **persist-then-apply** (a record that did not reach disk allocates nothing), no method that takes a peer set (discovery loss cannot reach the ledger), `admission.rejected` as a journal record, a fail-closed open over an undecodable journal, and `RightsHead` over `serde_fixint` bytes with `tls`-gated verification |
-| 4 | the flow wired for the four owned actuators — reserve-before-act, settling, spacing — with the existing `gate` and cooldown kept as they are |
+| **4a** ✓ | **the membership governor through the contract** — `classify` (pure, tested: join at 0 → rescue, join below `min` → deficit fill, leave over `max` → routine scale-down, drain → no class), the predicate per pass on `compute_view_confidence`, `SettleState` observed against the group's membership, the cooldown as `ControlSpec.spacing_ms` (unchanged in meaning), the node's profile as an atomic (`set_control_profile`, default `Legacy` — production behaviour unchanged until an operator opts in) and the `Observe` tripwire `control_would_hold_count`. Its `fastrand`/`Instant`/`sleep` sites routed through the seams: baseline 6 → 1 |
+| 4b | the tuning governor and the opacity gate — local-input governors, so spacing and settling only; the confidence predicate does not apply to a view that is this node's own |
+| 4c | the provisioner reserves against the rights ledger before an `Installing` transition, and publishes the head into `rights/head/{holder}` — the ledger's first live user, in `mycelium-wasm-host` |
 | 5 | admission control at the companions' queues via depth (§6), the example, `docs/operations` runbook, the §6.6 ledger entry for any config struct that gains a field |
 | — | the combined-feedback harness is **item 6 PR 6** (D19), on PR 2's `ControlSpec` |
 

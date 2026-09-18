@@ -48,15 +48,22 @@ pub enum ActionClass {
     /// Fill a hole that *reads as* empty — join a group whose live count is 0. The cost of a wrong
     /// rescue is one extra member; the cost of a wrong hold is a group with nobody in it.
     RescueFromZero,
+    /// Fill an observed deficit against a **declared** bound — join a group that reads below its
+    /// `min`. Added at PR 4a (ADR §2, dated amendment): the membership governor's own primary action
+    /// fitted none of the first four, and by cost it is a rescue, not speculation — a wrong fill on
+    /// a stale undercount costs one extra member; a wrong hold on a partition leaves a group stuck
+    /// below its bound.
+    DeficitFill,
 }
 
 /// Every class, for sweeps — a variant missing here shows up as a table that stopped covering the
 /// type.
-pub const ALL_CLASSES: [ActionClass; 4] = [
+pub const ALL_CLASSES: [ActionClass; 5] = [
     ActionClass::SpeculativeScaleUp,
     ActionClass::RoutineScaleDown,
     ActionClass::ProtectiveShed,
     ActionClass::RescueFromZero,
+    ActionClass::DeficitFill,
 ];
 
 /// **The rule.** May uncertainty about the fleet hold this class of action?
@@ -70,6 +77,9 @@ pub fn holds_on_uncertainty(class: ActionClass) -> bool {
         ActionClass::ProtectiveShed => false,
         // The asymmetric cost. Never.
         ActionClass::RescueFromZero => false,
+        // The same asymmetry: a wrong fill is one extra member; a wrong hold is a group stuck
+        // below a bound someone declared. Never.
+        ActionClass::DeficitFill => false,
     }
 }
 
@@ -153,6 +163,28 @@ impl Profile {
     /// Does this profile turn a hold into an actual hold?
     pub fn enforces(self) -> bool {
         matches!(self, Profile::EnforceLocal | Profile::EnforceAllocated)
+    }
+
+    /// The profile as the `u8` the node stores it as (an atomic, so a change needs no lock and
+    /// takes effect on a governor's next pass).
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Profile::Legacy => 0,
+            Profile::Observe => 1,
+            Profile::EnforceLocal => 2,
+            Profile::EnforceAllocated => 3,
+        }
+    }
+
+    /// From the stored `u8`. **An unknown value is `Legacy`** — the reading that touches nothing —
+    /// never an enforcing profile a bit-flip could switch on.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Profile::Observe,
+            2 => Profile::EnforceLocal,
+            3 => Profile::EnforceAllocated,
+            _ => Profile::Legacy,
+        }
     }
 }
 
@@ -329,6 +361,7 @@ mod tests {
             ActionClass::RoutineScaleDown => true,
             ActionClass::ProtectiveShed => false,
             ActionClass::RescueFromZero => false,
+            ActionClass::DeficitFill => false,
         }
     }
 
@@ -360,6 +393,11 @@ mod tests {
                     Decision::Proceed,
                     "a rescue from zero must never wait on the fleet ({why}, {profile:?})"
                 );
+                assert_eq!(
+                    decide(ActionClass::DeficitFill, &v, &bound(), profile),
+                    Decision::Proceed,
+                    "a fill against a declared bound must never wait on the fleet ({why}, {profile:?})"
+                );
                 assert!(
                     matches!(decide(ActionClass::SpeculativeScaleUp, &v, &bound(), profile), Decision::Held(_)),
                     "speculation is held under an uncertain view ({why}, {profile:?})"
@@ -370,6 +408,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The stored form round-trips, and an unknown value reads as `Legacy` — never as enforcing.
+    #[test]
+    fn the_profile_round_trips_through_its_stored_form_and_unknown_is_legacy() {
+        for p in [Profile::Legacy, Profile::Observe, Profile::EnforceLocal, Profile::EnforceAllocated] {
+            assert_eq!(Profile::from_u8(p.as_u8()), p);
+        }
+        assert_eq!(Profile::from_u8(200), Profile::Legacy, "a corrupt value touches nothing");
     }
 
     /// A certain view lets everything proceed — the rule holds on *uncertainty*, not on class.

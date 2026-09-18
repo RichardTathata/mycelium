@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the membership governor through the contract (item 4 PR 4a)
+
+- **`GossipAgent::set_control_profile` / `control_profile` / `control_would_hold_count`** — the node's profile
+  (`control::Profile`) as an atomic on the task context: no lock, no config-struct change. **Default `Legacy`:
+  production behaviour is unchanged until an operator opts in.** `Observe` records what an enforcing profile
+  would have held and holds nothing — the count is the number to watch before enforcing.
+- **The membership governor consults the confidence predicate per pass**, on the real `ViewConfidence`, through
+  a pure and tested `classify`: a join into an empty group is a rescue; a join below `min` is a **deficit
+  fill** — a fifth action class, added by dated amendment to the ADR because the governor's own primary action
+  fitted none of the four and by *cost* is a rescue, not speculation; a leave over `max` is routine scale-down,
+  the one class here uncertainty holds (the view may be a partition, and leaving on a partition makes it worse);
+  a drain is an operator's instruction and no class at all.
+- **Settling is observed, not timed:** a join or leave is pending until the group's membership reflects it, and
+  no new proposal is made on that group until then or until the settle timeout (two health-check intervals),
+  after which it is settled as `unknown`. The cooldown keeps its meaning exactly, as `ControlSpec.spacing_ms`.
+- The governor's own nondeterminism now goes through the seams — the roll from the `govern` stream, the jitter
+  from `jitter` and the timer seam, the cooldown on the monotonic seam — so a replay elects the same. Its seams
+  baseline drops **6 → 1** (`tokio::time::interval`, which has no seam arm yet).
+- Three tests (the class mapping, the join/leave asymmetry, the profile's stored form round-trip); the live
+  `test_membership_governor_converges_to_min` passes unchanged under the default.
+
 ### Added — the rights ledger (item 4 PR 3)
 
 - **`mycelium::control::ledger`** — the ledger of allocated rights the ADR's §4 decided, on the node-local
