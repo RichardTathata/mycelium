@@ -92,6 +92,16 @@ via wasm-host).
   supplied, so HLC adjacency can never be manufactured into causation (record §6). The adapter needed
   `mycelium::hlc` public (it was `pub(crate)`; re-exported additively, since `mycelium-core` already commits
   to it) — a companion handing out packed HLCs had no public way to read them.
+- **`mycelium-effects/`** — the **v3 effects companion** (item 1 PR 5, 2026-09-18): the *destination-commit*
+  receipt as a reference destination. The substrate provides three of item 1's four receipts and never the fourth,
+  because only the caller's resource can say whether an effect happened there. `EffectDestination` commits the
+  `operation_id` dedup row and the business change **in one transaction**; `SqliteDestination` is the reference
+  (`rusqlite` bundled, quarantined here — core carries no database), with `IMMEDIATE` transactions so racing
+  appliers serialise and exactly one is `Fresh`. Same id + different content is `Conflict`; a failed transaction
+  leaves no dedup row; a deadline overrun is `DeliveryUnknown`, never "nothing happened", and a retry resolves it as
+  `Replayed`. Justified where the exactly-once tracker overlay was declined (`docs/design/contracts-receipts.md`
+  §6): it sits *beyond* both companions, at the resource, and couples neither. The in-process half (the plan's §13
+  fiber runtime) is beyond v3.
 - **`mycelium-guardrails/`** — the **v3.0 structural-guardrails companion** (the second primary;
   *different axis* again — [pattern-coverage](../../domain/pattern-coverage.md) → Structural guardrails).
   *What an agent may do*, one tier-labelled `Policy` → `apply()` compiling to **Tier A** boundary

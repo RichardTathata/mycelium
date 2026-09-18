@@ -1,0 +1,29 @@
+[package]
+name = "mycelium-effects"
+version = "2.7.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
+description = "The effects companion for Mycelium (v3 contracts axis, item 1 PR 5): a transactional reference destination whose dedup row and business change commit together, yielding the destination-commit receipt — the one rung the substrate never provides on its own. Built entirely on Mycelium's public API."
+license = "AGPL-3.0-only"
+repository = "https://github.com/RichardEko/mycelium"
+keywords = ["exactly-once", "idempotency", "receipts", "multi-agent", "distributed-systems"]
+categories = ["database", "asynchronous"]
+
+[features]
+default = []
+
+[dependencies]
+# Companion-crate contract: only Mycelium's PUBLIC API is used — no internal
+# access. This dependency line is itself the composability proof.
+mycelium = { path = "..", default-features = false }
+
+# The reference destination. `bundled` compiles SQLite in, so CI and every developer get the same
+# engine and no system library is a hidden dependency. Quarantined to this crate: core carries no
+# database, and `-p` builds of the substrate never pay for it.
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio    = { version = "1.35", features = ["rt", "time"] }
+tracing  = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full"] }

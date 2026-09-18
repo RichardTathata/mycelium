@@ -163,6 +163,21 @@ jobs:
       # The community-microgrid worked example (rd shared / in competitive), Docker-free.
       - run: ./mycelium-blackboard/ci_smoke.sh
 
+  effects:
+    # v3 item 1 PR 5 — the effects companion: the SQLite reference destination whose dedup row and
+    # business change commit in one transaction (the destination-commit receipt). Public-API only;
+    # `rusqlite` is bundled and quarantined to this crate, so its own job.
+    name: Effects (v3 item 1 PR 5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci-retest.sh -p mycelium-effects
+      - run: cargo clippy -p mycelium-effects --all-targets -- -D warnings
+
   wiki:
     # Group-scoped LLM-curated wiki companion crate. Phase 1 = the data plane (Store trait +
     # FsStore), Mycelium-agnostic; the control plane (curator role + failover) is a later feature.

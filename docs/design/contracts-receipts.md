@@ -224,6 +224,12 @@ transaction boundary, the dedup row, and the receipt that says which one this at
 justified where the tracker overlay was not because it does not couple the two companions — it sits
 *beyond* both, at the resource that the caller already trusts (posture rule 3(ii)).
 
+> **Landed 2026-09-18 (PR 5, `mycelium-effects`).** `EffectDestination::apply` commits the dedup row and the
+> business change in one `IMMEDIATE` transaction and returns `DestinationCommit`; `SqliteDestination` is the
+> reference. The one addition to what this section anticipated: the effect's `content_hash` is §3's own
+> `content_hash(operation_id, payload, false)`, so the axis has one specified hash and not two. A deadline
+> overrun is `DeliveryUnknown` and the retry resolves it — the rule §4 states, tested end to end.
+
 ## 7. Mapping the existing at-least-once primitives into the vocabulary
 
 | Primitive | Today's ack | In the vocabulary |
