@@ -58,6 +58,8 @@ mod blob;
 mod http;
 #[cfg(feature = "ollama")]
 mod ollama;
+#[cfg(feature = "knowledge")]
+mod knowledge;
 mod resume;
 mod route;
 mod trace;
@@ -75,3 +77,5 @@ pub use resume::{ModelDependency, ResumeError, require_model};
 pub use route::{ModelProfile, ModelReg, serve_model};
 pub use route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig, llm_meta};
 pub use trace::{TraceEvent, TraceRecorder, narrate, replay};
+#[cfg(feature = "knowledge")]
+pub use knowledge::{TraceAdapterError, observation, observations};

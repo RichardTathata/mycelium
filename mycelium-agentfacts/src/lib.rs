@@ -25,10 +25,12 @@ use serde_json::{json, Value};
 
 mod crdt;
 mod http;
+mod knowledge;
 pub use crdt::{
     domain_facts, publish_field, read_verified_fields, NodeFacts, SignedField, FACTS_PREFIX,
 };
 pub use http::agent_facts_router;
+pub use knowledge::{ClaimError, claim, subject_for};
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)

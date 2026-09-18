@@ -22,6 +22,10 @@ llm = ["mycelium/llm"]
 gateway = ["mycelium/gateway", "dep:axum"]
 # Wedge ② tamper-evidence: anchor a trace's running hash into the WS2 audit chain.
 compliance = ["mycelium/compliance"]
+# The knowledge-layer trace adapter (v3 item 3 PR 7): a TraceEvent as an *observation* record,
+# with `derived_from` links only where the caller asserts them — never inferred from HLC order.
+# `mycelium::knowledge` sits behind `tls` (the record types verify Ed25519 signatures).
+knowledge = ["mycelium/tls"]
 # The Ollama collector: fills the `llm-meta` vocabulary (warm / vram_used_mb / family /
 # ctx_window / …) from a local daemon and keeps a served model's ad current
 # (`OllamaProbe`, `spawn_meta_refresher`). Serve-side only; the router stays engine-blind.

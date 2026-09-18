@@ -22,6 +22,30 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
+
+Record `docs/design/knowledge-layer.md` (PR 1, the ADR, 2026-09-17); code `src/knowledge/` behind `tls`.
+**PR 2 (#254)** the four typed records — claim · observation · **assessment** (judging is not recording) ·
+acceptance decision — with six link kinds and `RecordId { issuer, digest }` so a retraction is checkable
+without a fetch; **PR 3 (#255)** the store: heads in the gossip medium, records in an authorized store, so
+LWW moves a pointer and cannot erase a competing statement. **PR 4 (#264)** evidence-aware resolution
+(`resolution.rs`): wraps `resolve_for_caller` after the native gates; `ReleaseId` binds evidence to one
+release; independence is a **reader-configured control group**, never inferred; four outcomes with reasons;
+`filter_accepted` *filters and never reorders*, so evidence decides eligibility and the router decides choice.
+**PR 5 (#265)** expiry and correction (`correction.rs`): a `DependencyIndex` so a retraction *reaches* what was
+derived from it; **withdrawing a basis is not withdrawing the conclusion** — `BasisWithdrawn` is a fact about
+support, not a verdict, because issuer A has no standing to retract issuer B's record; nothing is deleted;
+expiry needs no timer. **PR 6 (#266)** the semantic gate (`gate.rs`, `make gate-knowledge`, its own CI step):
+misleading evidence cannot *erase* a conflicting observation (fifty supporters do not bury one challenge —
+there is no vote), cannot *refresh* expired evidence, cannot *confer* authority — plus two positive controls,
+because a refuse-everything resolver passes all three negatives (checked by planting it); the example
+`examples/knowledge_layer.rs` closes by listing what it does not show. **PR 7 (#267)** adapters: a
+`TraceEvent` as an **observation** with `derived_from` only where asserted (the batch form is link-free by
+construction — §6 made structural); a verified AgentFacts document as a **claim** issued by its signing key,
+which resolution can never count as evidence. `mycelium::hlc` made public (additive) on the way. **The
+behavioural claim — that evidence-aware selection picks better providers — is research-track (§13) and
+unmade.** Log: [`.log/2026-09-18-item3-knowledge-layer.md`](.log/2026-09-18-item3-knowledge-layer.md).
+
 ## v3 contracts axis — item 7 gateway caller identity — 2026-09-13 (unreleased, main)
 
 The first code item of the v3 queue (plan rev 1.10 §10.12.1; private WP1). `GatewayCaller` on every
