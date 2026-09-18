@@ -166,6 +166,15 @@ check:
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 
+## gate-knowledge — the knowledge layer's SEMANTIC gate (item 3, a Phase D exit condition).
+## Three negative cases — misleading evidence cannot erase a conflicting observation, cannot refresh
+## expired evidence, cannot confer authority — plus the positive controls that stop a
+## refuse-everything resolver from passing all three. This is NOT the behavioural claim (§13,
+## research track): it establishes that three things are impossible, not that selection improves.
+.PHONY: gate-knowledge
+gate-knowledge:
+	cargo test --lib --features tls,metrics,a2a,llm knowledge::gate -- --nocapture
+
 ## check-full — check + the test suites + the (slow, wasmtime-heavy) wasm-host clippy. Mirrors the
 ## CI gate set; run before a release or when you have touched wasm-host / a feature-conditional path.
 check-full: check
