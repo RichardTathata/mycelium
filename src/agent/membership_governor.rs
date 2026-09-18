@@ -316,8 +316,13 @@ impl GossipAgent {
         };
         self.task_ctx.spawn_task(async move {
             let mut rx = kv.subscribe_prefix(MEMBERSHIP_PREFIX);
-            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Through the timer seam (item 6): the governor's pass cadence is a recorded decision,
+            // like its jitter below.
+            let mut tick = mycelium_core::sim_seam::interval_ms(
+                "membership/tick",
+                interval_secs.saturating_mul(1000),
+                tokio::time::MissedTickBehavior::Skip,
+            );
             let mut groups: HashMap<String, GroupState> = HashMap::new();
             loop {
                 // Jitter each pass so nodes don't all roll against the same instantaneous view —

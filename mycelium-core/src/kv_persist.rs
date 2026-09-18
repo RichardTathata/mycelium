@@ -12,7 +12,7 @@ use crate::framing::{dispatch_gossip_send, dispatch_gossip_try_send, ForwardHint
 use crate::store::apply_and_notify;
 use bytes::Bytes;
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::watch, time};
+use tokio::sync::watch;
 
 /// Closure that produces the payload bytes for one tick of [`run_kv_persist_task`].
 pub type PersistPayloadFn = Arc<dyn Fn() -> Bytes + Send + Sync>;
@@ -37,8 +37,12 @@ pub async fn run_kv_persist_task(
     payload_fn:      PersistPayloadFn,
     on_tick:         Option<PersistOnTickFn>,
 ) {
-    let mut ticker = time::interval(interval);
-    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // Through the timer seam (item 6), one stream per persisted key.
+    let mut ticker = crate::sim_seam::interval_ms(
+        format!("kv-persist/{kv_key}"),
+        interval.as_millis() as u64,
+        tokio::time::MissedTickBehavior::Skip,
+    );
     let mut first_tick = true;
     loop {
         tokio::select! { biased;

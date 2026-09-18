@@ -193,8 +193,12 @@ impl MeshHandle {
         let kind: Arc<str>    = kind.into();
 
         self.ctx.spawn_task(async move {
-            let mut ticker = time::interval(interval);
-            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            // Through the timer seam (item 6), one stream per emitted kind.
+            let mut ticker = crate::sim_seam::interval_ms(
+                format!("mesh/emit/{kind}"),
+                interval.as_millis() as u64,
+                time::MissedTickBehavior::Skip,
+            );
             loop {
                 tokio::select! { biased;
                     _ = &mut cancel_rx                   => break,
@@ -311,8 +315,12 @@ impl MeshHandle {
         let check_interval     = (threshold / 4).max(Duration::from_millis(100));
 
         self.ctx.spawn_task(async move {
-            let mut ticker = time::interval(check_interval);
-            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            // Through the timer seam (item 6), one stream per watched kind.
+            let mut ticker = crate::sim_seam::interval_ms(
+                format!("mesh/stale/{kind}"),
+                check_interval.as_millis() as u64,
+                time::MissedTickBehavior::Skip,
+            );
             loop {
                 tokio::select! { biased;
                     _ = &mut cancel_rx               => break,

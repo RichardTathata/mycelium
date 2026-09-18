@@ -502,6 +502,12 @@ impl Ticker {
     pub async fn tick(&mut self) {
         self.inner.tick().await;
     }
+
+    /// Defer the next tick to `ms` from now; the period resumes after it.
+    #[inline]
+    pub fn reset_after_ms(&mut self, ms: u64) {
+        self.inner.reset_after(std::time::Duration::from_millis(ms));
+    }
 }
 
 /// A periodic tick, through the kernel.
@@ -511,6 +517,8 @@ pub struct Ticker {
     stream: String,
     period_ms: u64,
     first: bool,
+    /// A deferral requested by `reset_after_ms`: the next tick's nominal wait, once.
+    deferred_ms: Option<u64>,
 }
 
 /// A periodic tick, through the kernel. `stream` must be distinct per loop — two loops on one
@@ -523,18 +531,32 @@ pub fn interval_ms(
 ) -> Ticker {
     let mut inner = tokio::time::interval(std::time::Duration::from_millis(period_ms.max(1)));
     inner.set_missed_tick_behavior(missed);
-    Ticker { inner, stream: stream.into(), period_ms, first: true }
+    Ticker { inner, stream: stream.into(), period_ms, first: true, deferred_ms: None }
 }
 
 #[cfg(feature = "sim")]
 impl Ticker {
+    /// Defer the next tick to `ms` from now; the period resumes after it. A deferral is a
+    /// decision, so the next recorded tick carries `ms` as its nominal wait — a trace shows
+    /// `tick(30000ms)` where the loop chose to wait, not a period that never elapsed.
+    pub fn reset_after_ms(&mut self, ms: u64) {
+        self.inner.reset_after(std::time::Duration::from_millis(ms));
+        self.deferred_ms = Some(ms);
+        self.first = false;
+    }
+
     /// Wait for the next tick.
     ///
     /// `Record` really waits and writes down the nominal elapsed time (`0` for the first tick, one
-    /// period after). `Replay` does not wait: the recorded duration advances the simulated clocks
-    /// and the task yields once. A tick whose period differs from the recording is a divergence.
+    /// period after, or the deferral a `reset_after_ms` asked for). `Replay` does not wait: the
+    /// recorded duration advances the simulated clocks and the task yields once. A tick whose
+    /// period differs from the recording is a divergence.
     pub async fn tick(&mut self) {
-        let nominal = if self.first { 0 } else { self.period_ms };
+        let nominal = match self.deferred_ms.take() {
+            Some(ms) => ms,
+            None if self.first => 0,
+            None => self.period_ms,
+        };
         self.first = false;
         match installed::mode() {
             None => {
@@ -1263,6 +1285,23 @@ mod tests {
     /// **A sleep and a tick of the same length are different decisions.** A recorded sleep replayed
     /// as a tick diverges — the op is in the request — so a trace can never replay a periodic loop
     /// from a one-off wait, or the reverse.
+    /// A deferral is a decision: `reset_after_ms` makes the next recorded tick carry the deferral
+    /// as its nominal wait, so a trace shows where a loop chose to wait, and the period resumes
+    /// after it. Without this the snapshot loop's 30 s "defer while opaque" would replay as one
+    /// ordinary period.
+    #[tokio::test]
+    async fn a_deferred_tick_records_the_deferral_then_resumes_the_period() {
+        install_recording();
+        let mut t = interval_ms("t/snap", 20, tokio::time::MissedTickBehavior::Skip);
+        t.tick().await; // immediate: tick(0ms)
+        t.reset_after_ms(5);
+        t.tick().await; // the deferral: tick(5ms)
+        t.tick().await; // the period again: tick(20ms)
+        let text = installed::take().expect("installed").kernel.trace().to_text();
+        let pos = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s} not in trace:\n{text}"));
+        assert!(pos("tick(0ms)") < pos("tick(5ms)") && pos("tick(5ms)") < pos("tick(20ms)"), "{text}");
+    }
+
     #[test]
     fn a_sleep_replayed_as_a_tick_is_a_divergence() {
         install_recording();

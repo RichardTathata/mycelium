@@ -8,15 +8,13 @@
 2 mycelium-core/src/connection.rs
 3 mycelium-core/src/framing.rs
 3 mycelium-core/src/kv_handle.rs
-1 mycelium-core/src/kv_persist.rs
-10 mycelium-core/src/mesh_handle.rs
-8 mycelium-core/src/persistence.rs
-1 mycelium-core/src/rate.rs
+8 mycelium-core/src/mesh_handle.rs
+7 mycelium-core/src/persistence.rs
 2 mycelium-core/src/receipt.rs
 2 mycelium-core/src/schema_handle.rs
 11 mycelium-core/src/signal.rs
 2 mycelium-core/src/swim_membership.rs
-11 mycelium-core/src/swim.rs
+10 mycelium-core/src/swim.rs
 3 mycelium-core/src/writer.rs
 7 src/agent/a2a.rs
 2 src/agent/bulk.rs
@@ -32,7 +30,6 @@
 1 src/agent/kv_quorum_ext.rs
 7 src/agent/lifecycle.rs
 3 src/agent/lock_service.rs
-1 src/agent/membership_governor.rs
 2 src/agent/mod.rs
 2 src/agent/oidc.rs
 4 src/agent/opacity.rs

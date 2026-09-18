@@ -414,8 +414,12 @@ async fn wal_writer_task(
     let mut wal_entry_count: usize = 0;
 
     let interval = Duration::from_secs(snapshot_interval_secs);
-    let mut snap_timer = time::interval(interval);
-    snap_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // Through the timer seam (item 6): the snapshot cadence is a recorded decision.
+    let mut snap_timer = crate::sim_seam::interval_ms(
+        "persistence/snapshot",
+        interval.as_millis() as u64,
+        time::MissedTickBehavior::Skip,
+    );
     snap_timer.tick().await; // consume immediate first tick
 
     loop {
@@ -459,7 +463,7 @@ async fn wal_writer_task(
                 // snapshot opacity on top of existing load-based opacity. The
                 // opacity check is injected (Layer II policy); core stays neutral.
                 if defer_snapshot.as_ref().is_some_and(|f| f()) {
-                    snap_timer.reset_after(Duration::from_secs(30));
+                    snap_timer.reset_after_ms(30_000); // a recorded deferral, not a skipped period
                     continue;
                 }
                 let _ = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
