@@ -150,13 +150,18 @@ under one lock; 0.6.2 the façade omits the unknown token split instead of repor
 six enhancement plans reconciled into **one plan of record** — `docs/plans/v3-contracts-axis.md`, **rev 1.12**
 (posture · dependency graph · phases A–E with exit gates · decision register D1–D39 · §12 delivery surfaces:
 examples, dev/ops docs, decks, philosophy · §13 the composition hypothesis, *not* a v3 deliverable · §6.7 the RA
-resource-accounting slice); externals vendored under `docs/plans/external/`. Code so far: Phase 0 (durability) and
-RA0 (reason 0.6.2). **Rev 1.10 (2026-09-13) re-sequenced the queue — item 7 first**, then the **AE-T thin slice** (§6.8: evaluator + Cedar adapter
-at the gateway, signed `AuditSink` exporter, scenario 2 locally; a Phase B exit; *the wedge is the gateway, not the fleet*, §1.5);
-item 1 PR 1 (contract ADR, with `operation_id`/`attempt_id`) + the AE0 ADR in parallel; the **commitment companion**
-(contract net, §6.9, rev 1.11) directly after item 1 PR 2; item 6 PR 1
-(nondeterminism inventory) + the membership-cooldown explicit parameter alongside. **Item 7 landed
-2026-09-13** (`src/agent/gateway_caller.rs`: `GatewayCaller` on every gateway dispatch, `request_authorized`,
-`gateway_caller_profile`, `sys/caller-context/` marker, four negative cases + gate in CI; `rbac.md` §7). Delivery ledger:
+resource-accounting slice); externals vendored under `docs/plans/external/`. **State on 2026-09-18 (unreleased on
+`main`, all additive on 2.7.0):** item 7 (gateway caller identity) · item 8 (threat model rev 2) · AE-T (the
+evaluator seam, evidence journal) · **item 1 complete** (PRs 1–7: receipts, the effects companion `mycelium-effects`,
+the tuple-space consumer, gateway/SDK parity) · **item 2** PRs 1–7 (federated domains; *the transport is not built*)
+· **item 3 complete** (the knowledge layer, adapters) · **item 4 complete** (the adaptive-stability ADR, the control
+contract, the rights ledger on the node-local journal, the membership/tuning/opacity governors and the provisioner
+through the contract, admission control at the companions' queues, the §7 profile ladder through every governor with
+its rollout runbook) · **item 5** PRs 1–5 + D4 (scoped mandates; no second fence) · **item 6 complete** (PRs 1–7: the
+inventory, the `mycelium-sim` kernel, the seams — every periodic loop ticks through the timer seam — scenarios A/B/C,
+the checked-in replay corpus; *the scheduler seam is the one unrouted row, and a pinned gap*) · **CN1–CN3** (the
+commitment companion `mycelium-commitment`; CN2's replay half pinned as a gap). The plan's Phase E "shadow-mode
+rollout" is `docs/operations/control-profiles.md`. Still open publicly: the federation transport (item 2's release
+gate) and the scheduler seam; the 2.8.0 cut awaits the operator's word. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).
