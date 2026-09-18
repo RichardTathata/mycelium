@@ -212,6 +212,7 @@ pub(super) async fn run_http_server(
         .route("/govern/tuning",                  post(gw_govern_tuning))
         .route("/govern/timing",                  post(gw_govern_timing))
         .route("/govern/membership",              post(gw_govern_membership))
+        .route("/govern/profile",                 post(gw_govern_profile))
         // ── Legible Emergence Phase 2: the relational fleet snapshot (localize) ─
         .route("/fleet",                          get(gw_fleet_snapshot))
         // ── Legible Emergence Phase 3: the causal event ring (explain) ─────────
@@ -686,6 +687,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/govern/tuning"       => "govern:write",
         "/gateway/govern/timing"       => "govern:write",
         "/gateway/govern/membership"   => "govern:write",
+        "/gateway/govern/profile"      => "govern:write",
         // Legible Emergence Phase 2/3: the relational fleet snapshot + causal explain.
         "/gateway/fleet"               => "fleet:read",
         "/gateway/explain"             => "fleet:read",
@@ -1105,15 +1107,55 @@ async fn gw_govern_snapshot(State(ctx): State<Arc<HttpCtx>>) -> impl IntoRespons
                 "ceiling":        p.ceiling,
                 "ratchet":        format!("{:?}", p.ratchet).to_lowercase(),
                 "locally_pinned": p.locally_pinned,
+                "pending":        p.pending,
             })
         })
         .collect();
+    // Item 4 §7: the node's control profile and the tripwires an operator watches before stepping
+    // it (`docs/operations/control-profiles.md`). The counters keep their names across the ladder;
+    // `profile` says which reading they are.
+    let relaxed = std::sync::atomic::Ordering::Relaxed;
+    let control = json!({
+        "profile":                 crate::control::Profile::from_u8(ctx.agent_ctx.control_profile.load(relaxed)).name(),
+        "would_hold":              ctx.agent_ctx.control_would_hold.load(relaxed),
+        "opacity_releases_spaced": ctx.agent_ctx.opacity_releases_spaced.load(relaxed),
+        "tuning": {
+            "profile":          snap.profile.name(),
+            "held_by_spacing":  snap.held_by_spacing,
+            "held_by_settling": snap.held_by_settling,
+            "settled_unknown":  snap.settled_unknown,
+        },
+    });
     Json(json!({
         "node_id":      ctx.agent_ctx.node_id.to_string(),
         "auto_enabled": snap.auto_enabled,
         "params":       params,
+        "control":      control,
     }))
     .into_response()
+}
+
+/// `POST /gateway/govern/profile` — step **this node's** control profile along the ADR's ladder
+/// (§7: `legacy` · `observe` · `enforce-local` · `enforce-allocated`; the rollout is
+/// `docs/operations/control-profiles.md`). Body `{"profile": "observe"}`. Per node, like every
+/// govern route, and it takes effect on each governor's next pass. An unknown name is `400` and
+/// changes nothing — never read as `legacy`. Scope `govern:write`.
+async fn gw_govern_profile(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::control::Profile;
+    let Some(name) = body.get("profile").and_then(|v| v.as_str()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing 'profile'"}))).into_response();
+    };
+    let Some(profile) = Profile::parse(name) else {
+        let known: Vec<&str> = Profile::ALL.iter().map(|p| p.name()).collect();
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown profile '{name}'"), "known": known})))
+            .into_response();
+    };
+    let was = Profile::from_u8(ctx.agent_ctx.control_profile.load(std::sync::atomic::Ordering::Relaxed));
+    ctx.agent_ctx.set_control_profile(profile);
+    Json(json!({ "ok": true, "profile": profile.name(), "was": was.name() })).into_response()
 }
 
 /// `GET /gateway/fleet` — the Legible-Emergence Phase-2 **relational fleet snapshot**: the
@@ -5063,6 +5105,54 @@ mod tests {
         assert_eq!(snap["params"].as_array().unwrap().len(), 3);
 
         agent.shutdown().await;
+    }
+
+    /// Item 4 §7 over the gateway: `GET /gateway/govern` shows the node's profile and its
+    /// tripwires; `POST /gateway/govern/profile` steps the ladder, and the step reaches the tuning
+    /// governor's own copy (the fan-out) — read back through the same GET; an unknown name is
+    /// `400` and changes nothing.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn test_gateway_control_profile_round_trip() {
+        use axum::http::header::AUTHORIZATION;
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("t".into());
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        let snap: serde_json::Value = client.get(format!("{base}/gateway/govern"))
+            .header(AUTHORIZATION, "Bearer t").send().await.unwrap().json().await.unwrap();
+        assert_eq!(snap["control"]["profile"], "legacy", "the default: {snap}");
+        assert_eq!(snap["control"]["tuning"]["profile"], "legacy");
+        assert_eq!(snap["control"]["would_hold"], 0);
+
+        let r = client.post(format!("{base}/gateway/govern/profile"))
+            .header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"profile": "observe"})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!((body["profile"].as_str(), body["was"].as_str()), (Some("observe"), Some("legacy")));
+        assert_eq!(agent.control_profile(), crate::control::Profile::Observe, "the agent's reading");
+        assert_eq!(agent.tuning_governor().profile, crate::control::Profile::Observe, "and the fan-out");
+        let snap: serde_json::Value = client.get(format!("{base}/gateway/govern"))
+            .header(AUTHORIZATION, "Bearer t").send().await.unwrap().json().await.unwrap();
+        assert_eq!(snap["control"]["profile"], "observe");
+        assert_eq!(snap["control"]["tuning"]["profile"], "observe");
+
+        let r = client.post(format!("{base}/gateway/govern/profile"))
+            .header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"profile": "enforce_local"})).send().await.unwrap();
+        assert_eq!(r.status(), 400, "a misspelt name is refused");
+        assert_eq!(agent.control_profile(), crate::control::Profile::Observe, "and changes nothing");
+
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
     }
 
     /// WS-C governance scope gating (Track 3, compliance): `govern:read` reaches the

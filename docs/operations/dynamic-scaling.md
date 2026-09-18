@@ -66,11 +66,15 @@ tuning governor:
 ```bash
 curl -X POST http://node:8080/gateway/govern/tuning \
   -H "Authorization: Bearer $GOVERN_TOKEN" -d '{"writer_channel_depth":4096}'
-curl -s http://node:8080/gateway/govern        # this node's effective tuning snapshot
+curl -s http://node:8080/gateway/govern        # this node's effective tuning snapshot, and `.control`
+curl -X POST http://node:8080/gateway/govern/profile \
+  -H "Authorization: Bearer $GOVERN_TOKEN" -d '{"profile":"observe"}'   # step the control profile (§7 ladder)
 ```
 
 Each node clamps its *own* scalar (local-pin beats fleet intent), so a per-node
-override sticks. Full knob reference: [tuning.md](tuning.md).
+override sticks. Full knob reference: [tuning.md](tuning.md). The control profile — which promises
+the governors enforce, `legacy` → `observe` → `enforce-local` → `enforce-allocated` — is per node too;
+the rollout is [control-profiles.md](control-profiles.md).
 
 ## Auth
 

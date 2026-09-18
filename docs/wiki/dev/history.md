@@ -61,7 +61,9 @@ counting `rights_would_refuse` otherwise and still recording the rejection. **`L
 witness:** scenario C's "settles" sweep runs under the enforcing profiles, and under `Legacy` the same breakers do
 nothing and the schedules flap; under `Observe` they flap while counting. 4b's defaults thereby move back to
 opt-in, which is what "untouched" meant. The counters keep their names across the ladder; `GovernorSnapshot.profile`
-says which reading they are. *Not done:* a gateway setter for the profile. Log:
+says which reading they are. Over the gateway: `GET /gateway/govern` carries a `control` block (the profile and
+its tripwires) and `POST /gateway/govern/profile` steps the ladder by name (`govern:write`; an unknown name is
+`400`, never read as `legacy`) — the Ops Console's panel for this concept. Log:
 [`.log/2026-09-18-item4-control-profiles-rollout.md`](.log/2026-09-18-item4-control-profiles-rollout.md).
 
 ## v3 contracts axis — CN3: the award under the acceptor's mandate — 2026-09-18 (unreleased)

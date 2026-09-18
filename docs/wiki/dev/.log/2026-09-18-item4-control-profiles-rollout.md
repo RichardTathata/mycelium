@@ -33,10 +33,17 @@ profile, a rights-backed bound being Tier C — counting a would-refuse otherwis
 from `EnforceLocal` up. `Legacy`'s behaviour is again exactly pre-4b, which is what "today's governors,
 untouched" was always supposed to mean.
 
+### The gateway surface
+
+`GET /gateway/govern` gains a `control` block — the profile, `would_hold`, `opacity_releases_spaced`, the tuning
+counters with the profile they were taken under — and `POST /gateway/govern/profile` steps the ladder by name
+under `govern:write`. `Profile::{name, parse}` are the wire vocabulary, pinned; an unknown name is refused rather
+than read as `legacy`, because a typo must not step the ladder down. `TaskCtx::set_control_profile` is the one
+write path, so the agent's API and the route cannot drift.
+
 ### Not done
 
-A gateway setter for the profile (an Ops Console item); a per-governor profile (one per node is the record's
-choice).
+A per-governor profile (one per node is the record's choice).
 
 ### Pages touched
 

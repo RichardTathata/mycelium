@@ -7,16 +7,24 @@
 //! `Observe` records what an enforcing profile would have held and holds nothing; the count is the
 //! number an operator watches before turning enforcement on.
 
-use crate::agent::GossipAgent;
+use crate::agent::{GossipAgent, TaskCtx};
 use crate::control::Profile;
 use std::sync::atomic::Ordering;
+
+impl TaskCtx {
+    /// Store the profile and fan it out to the governor that keeps its own copy (the tuning
+    /// gate is a pure method with no context). The one write path — the agent's API and the
+    /// gateway's route both come here.
+    pub(crate) fn set_control_profile(&self, profile: Profile) {
+        self.control_profile.store(profile.as_u8(), Ordering::Relaxed);
+        self.tuning_governor.set_control_profile(profile);
+    }
+}
 
 impl GossipAgent {
     /// Set which promises the governors enforce. Takes effect on each governor's next pass.
     pub fn set_control_profile(&self, profile: Profile) {
-        self.task_ctx.control_profile.store(profile.as_u8(), Ordering::Relaxed);
-        // The tuning governor keeps its own copy: its gate is a pure method with no context.
-        self.task_ctx.tuning_governor.set_control_profile(profile);
+        self.task_ctx.set_control_profile(profile);
     }
 
     /// The profile in force. `Legacy` unless an operator opted in.

@@ -13,7 +13,20 @@ agent.set_control_profile(Profile::Observe);   // default: Profile::Legacy
 let p = agent.control_profile();
 ```
 
-There is no gateway route for it yet; a gateway-side setter is an Ops Console item, not a promise here.
+Over the gateway (scope `govern:write` to set, `govern:read` to read; per node, like every govern route):
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://node:8080/gateway/govern | jq .control
+#  { "profile": "legacy", "would_hold": 0, "opacity_releases_spaced": 0,
+#    "tuning": { "profile": "legacy", "held_by_spacing": 0, "held_by_settling": 0, "settled_unknown": 0 } }
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"profile":"observe"}' http://node:8080/gateway/govern/profile
+#  { "ok": true, "profile": "observe", "was": "legacy" }
+```
+
+The names are exactly `legacy` · `observe` · `enforce-local` · `enforce-allocated`; anything else is `400` and
+changes nothing — a typo never steps the ladder down. Scrape every node for the fleet picture: there is no
+central view.
 
 ## The ladder
 

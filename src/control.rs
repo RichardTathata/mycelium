@@ -190,6 +190,26 @@ impl Profile {
             _ => Profile::Legacy,
         }
     }
+
+    /// The ladder, in order of adoption.
+    pub const ALL: [Profile; 4] = [Profile::Legacy, Profile::Observe, Profile::EnforceLocal, Profile::EnforceAllocated];
+
+    /// The profile's name as the ADR (§7) and the gateway spell it: `legacy` · `observe` ·
+    /// `enforce-local` · `enforce-allocated`. Pinned by a test — a rename is a wire change.
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Legacy => "legacy",
+            Profile::Observe => "observe",
+            Profile::EnforceLocal => "enforce-local",
+            Profile::EnforceAllocated => "enforce-allocated",
+        }
+    }
+
+    /// The inverse of [`name`](Self::name); `None` for anything else — an unknown name is refused,
+    /// never read as `Legacy`, because a typo must not silently step the ladder down.
+    pub fn parse(name: &str) -> Option<Self> {
+        Profile::ALL.into_iter().find(|p| p.name() == name)
+    }
 }
 
 /// What the predicate decided.
@@ -328,6 +348,17 @@ pub fn may_propose(state: &SettleState, spec: &ControlSpec, now_ms: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gateway and the runbook spell the ladder with these four names; a rename is a wire change.
+    #[test]
+    fn the_profile_names_are_the_wire_vocabulary_and_round_trip() {
+        assert_eq!(Profile::ALL.map(Profile::name), ["legacy", "observe", "enforce-local", "enforce-allocated"]);
+        for p in Profile::ALL {
+            assert_eq!(Profile::parse(p.name()), Some(p));
+        }
+        assert_eq!(Profile::parse("Legacy"), None, "case is part of the name");
+        assert_eq!(Profile::parse("enforce_local"), None, "an unknown name is refused, never read as Legacy");
+    }
 
     fn view(peers_heard: usize, max_staleness_ms: u64, self_degraded: bool) -> ViewConfidence {
         ViewConfidence {

@@ -21,9 +21,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Provisioner::rights_would_refuse()`, and still records `admission.rejected` in the ledger.
 - **Scenario C** pins the ladder: the "settles" sweep runs under the enforcing profiles; under `Legacy` the same
   breakers do nothing and the schedules flap; under `Observe` they flap while counting every hold not made.
+- **Gateway:** `GET /gateway/govern` gains `control` — the node's profile and its tripwires (`would_hold`,
+  `opacity_releases_spaced`, the tuning counters with the profile they were taken under) — and each param's
+  `pending`; **`POST /gateway/govern/profile`** (`govern:write`) steps the ladder by name (`legacy` · `observe` ·
+  `enforce-local` · `enforce-allocated`, `Profile::{name, parse}`, pinned); an unknown name is `400` and changes
+  nothing. Per node, like every govern route.
 - **Runbook:** `docs/operations/control-profiles.md` — the ladder per governor, the tripwires to watch before
-  stepping up, rollback. **Upgrade note:** `GovernorSnapshot` gained `profile`; `opacity::spaced_transition`
-  (crate-private) now takes the profile and returns `Spaced`.
+  stepping up, rollback, the routes. **Upgrade note:** `GovernorSnapshot` gained `profile`;
+  `opacity::spaced_transition` (crate-private) now takes the profile and returns `Spaced`.
 
 ### Added — the award under the acceptor's mandate (v3 §6.9, CN3)
 
