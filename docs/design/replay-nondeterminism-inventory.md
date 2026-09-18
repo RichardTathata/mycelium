@@ -227,6 +227,17 @@ assertion that would fail if the assumption were false.
 
 A bundle is what a failing run leaves behind and what a reviewer replays. Its minimum content, from PR 2:
 
+> **The corpus, 2026-09-18 (item 6 PR 7).** The first checked-in bundle — scenario A, thirteen effects — lives at
+> `mycelium-core/tests/replay-corpus/scenario-a-wal-snapshot/`, recorded by `record_scenario_a_into_the_corpus`
+> (only under `MYCELIUM_RECORD_CORPUS=1`: re-recording is a deliberate act, reviewed as a diff of the text trace)
+> and gated by `the_checked_in_scenario_a_bundle_replays_here_and_matches_a_fresh_recording`, in every
+> `--features sim` run: the committed schedule must replay on the running machine without divergence, **and** a
+> fresh recording there must ask for the same effects in the same order — so a change in what the code does fails
+> the suite until the corpus is re-recorded on purpose. That second half is the claim this section makes and the
+> one-process round trip of PR 4 could not test. `build.json` carries what is honestly known at compile time
+> (`Build::current`: crate version, `GITHUB_SHA` under CI, arch-os; `unknown` for the compiler — no build script).
+> Not built: the minimiser, a replay binary; scenarios B and C are pure sweeps with no kernel trace to record.
+
 ```text
 bundle/
   build.json        # crate versions, git commit, features, target triple, rustc — build identity

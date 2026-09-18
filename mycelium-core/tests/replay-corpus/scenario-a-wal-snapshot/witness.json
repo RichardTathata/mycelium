@@ -1,0 +1,4 @@
+{
+  "assertion": "durability_tests::regression_snapshot_retains_wal_record_acked_before_local_apply",
+  "toggle": "persistence::WITNESS_SKIP_WAL_MERGE"
+}

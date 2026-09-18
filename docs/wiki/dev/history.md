@@ -22,6 +22,19 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 6 PR 7: the replay corpus and its gate — 2026-09-18 (unreleased)
+
+The last PR of item 6's sequence. A checked-in bundle — scenario A, thirteen effects, at
+`mycelium-core/tests/replay-corpus/scenario-a-wal-snapshot/` — and the gate that makes it mean something: in every
+`--features sim` run, the committed schedule must replay on the running machine without divergence **and** a fresh
+recording there must ask for the same effects in the same order, so a change in what the code does fails the
+suite until the corpus is re-recorded on purpose (`MYCELIUM_RECORD_CORPUS=1`, reviewed as a diff of the text
+trace). This is the claim D14 makes — *a bundle is a reproduction artefact* — tested across machines for the first
+time; PR 4's round trip proved the format in one process. `Build::current` records what is honestly known at
+compile time (`unknown` for the compiler: no build script). *Not built:* the minimiser and a replay binary; the
+corpus has one entry — B and C are pure sweeps with no kernel trace. Log:
+[`.log/2026-09-18-item6-pr7-replay-corpus.md`](.log/2026-09-18-item6-pr7-replay-corpus.md).
+
 ## v3 contracts axis — item 4 PR 4c: the provisioner against the rights ledger — 2026-09-18 (unreleased)
 
 The ledger's first live user (`docs/design/adaptive-stability.md` §9 row 4c), in `mycelium-wasm-host` on the
