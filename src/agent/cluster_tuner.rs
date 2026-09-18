@@ -81,6 +81,9 @@ fn apply_all(kv: &KvHandle, ctx: &Arc<TaskCtx>, policy: &ConfigPolicy) {
             HotParam::BulkHandlers =>
                 ctx.hot.max_concurrent_bulk_handlers.store(accepted as usize, Ordering::Relaxed),
         }
+        // The contract's act step (item 4 PR 4b): report what was applied, which starts the
+        // param's spacing and settle clocks. A policy-rejected value never reaches here.
+        ctx.tuning_governor.acted(hot_param, accepted);
         debug!(param, value = accepted, "ClusterTuner: applied recommendation");
     }
 }
@@ -121,6 +124,11 @@ impl GossipAgent {
         let core = Arc::clone(&self.task_ctx.core);
         let kv = KvHandle::from_core(Arc::clone(&core));
         let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
+        // The governor's contract timing (item 4 PR 4b), from the tuner's own cadence: a param
+        // changes at most every other tick, and an applied value that is not seen at the knob
+        // within two ticks settles as unknown. Set once here; the applier alone leaves both at 0.
+        let two_ticks = (interval.as_millis() as u64).saturating_mul(2);
+        self.task_ctx.tuning_governor.set_control_timing(two_ticks, two_ticks);
         self.task_ctx.spawn_task(async move {
             // Through the timer seam (item 6): a replay ticks the same schedule without waiting.
             let mut tick = mycelium_core::sim_seam::interval_ms(

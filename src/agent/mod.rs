@@ -445,6 +445,9 @@ pub(crate) struct TaskCtx {
     /// v3 item 4 tripwire: how many actions an enforcing profile *would* have held, counted under
     /// `Observe`. Detection, not prevention — the number an operator watches before enforcing.
     pub(crate) control_would_hold: Arc<AtomicU64>,
+    /// v3 item 4 PR 4b tripwire: boundary releases (`BOUNDARY_TRANSPARENT`) held by the opacity
+    /// gate's release spacing. A rising count is a boundary that would otherwise flap.
+    pub(crate) opacity_releases_spaced: Arc<AtomicU64>,
 
     /// Legible-Emergence Phase-1 gauge (P3): count of (node, kind) pairs whose opacity is currently
     /// **oscillating** (≥ threshold opaque/transparent toggles within the window — pheromone
@@ -897,6 +900,7 @@ impl GossipAgent {
             membership_flaps: Arc::new(AtomicU64::new(0)),
             control_profile: AtomicU8::new(0),
             control_would_hold: Arc::new(AtomicU64::new(0)),
+            opacity_releases_spaced: Arc::new(AtomicU64::new(0)),
             opacity_oscillations: Arc::new(AtomicU64::new(0)),
             cap_authz_violations: Arc::new(AtomicU64::new(0)),
             schema_mismatch: Arc::new(AtomicU64::new(0)),

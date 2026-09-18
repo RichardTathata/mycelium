@@ -27,4 +27,11 @@ impl GossipAgent {
     pub fn control_would_hold_count(&self) -> u64 {
         self.task_ctx.control_would_hold.load(Ordering::Relaxed)
     }
+
+    /// How many boundary releases the opacity gate held under its release spacing
+    /// (`OpacityHint::release_spacing_ms`, item 4 PR 4b). Never reset; a rising count is a
+    /// boundary that would otherwise flap.
+    pub fn opacity_releases_spaced(&self) -> u64 {
+        self.task_ctx.opacity_releases_spaced.load(Ordering::Relaxed)
+    }
 }

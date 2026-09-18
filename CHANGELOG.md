@@ -19,6 +19,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   planting: a `time::sleep` line fails the check at exactly +1 while a `std::time::Instant` type mention beside
   it adds nothing (the left guard, not `\b`), and commenting one alias site out reports as progress.
 
+### Added — the tuning governor and the opacity gate through the contract (item 4 PR 4b)
+
+- **Tuning governor:** `TuningGovernor::gate_at` / `acted_at` (pure in time) beside `gate` / `acted`
+  (through the replay clock seam), and `set_control_timing`. The **reconcile step is the knob's
+  readback**: an action is pending until a later `gate` sees the current value at what was applied
+  (consumed) or the settle timeout passes (settled as *unknown* — counted and warned); a recommendation
+  equal to the current value is not an action; a change inside `spacing_ms` of the last action is held
+  (`None`, like a disabled gate). `acted` is separate from `gate` on purpose — a value a `ConfigPolicy`
+  rejects runs no clock. `start_cluster_tuner` sets both timings to two ticks; both are `0` by default,
+  which is the old gate exactly. **Upgrade note:** `GovernorSnapshot` gained `held_by_spacing`,
+  `held_by_settling`, `settled_unknown` and `ParamSnapshot` gained `pending` — an exhaustive struct
+  literal of either breaks; construct through `snapshot()`.
+- **Opacity gate:** `OpacityHint.release_spacing_ms` (default `1_000`) — the minimum interval between
+  the previous boundary transition and a **release** (`BOUNDARY_TRANSPARENT`). Only the release is
+  spaced: going opaque is protective shedding, which the ADR's decisive rule says is never held, and the
+  full-channel override stands. No settle state: the loop's own input is the effect channel. Tripwire
+  `GossipAgent::opacity_releases_spaced`. **Upgrade note:** `OpacityHint` gained a field — an exhaustive
+  literal breaks; the documented `..Default::default()` pattern is unaffected.
+- ADR `docs/design/adaptive-stability.md` §9 row 4b marks the decisions.
+
 ### Added — the membership governor through the contract (item 4 PR 4a)
 
 - **`GossipAgent::set_control_profile` / `control_profile` / `control_would_hold_count`** — the node's profile
