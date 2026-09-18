@@ -201,8 +201,13 @@ discovery refreshes, and what it refreshes to is the changed grant), retire the 
 (`FederationClient::retire_gateway`), honour authority issued before the partition to its expiry and not past
 it; non-merger asserted from the membership tables, the `consensus/` namespace (keys and values) and the
 **connection tables** (`GossipAgent::connected_peers`, the traces leg) before, during and after; a node holding
-B's CA cannot join A (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`). **What is still not
+B's CA cannot join A (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`). **The catalogue
+reply is signed (PR 10a, 2026-09-18):** `CatalogReply` is signed under the domain's key over a tagged canonical
+form that covers the domain **and the partner it was filtered for**, so a reply cannot be replayed to another
+partner or answered by a gateway without the key; `FederationEdge::with_signing_key` signs,
+`FederationClient::with_partner_key` requires — an unsigned, forged, wrong-domain or misaddressed catalogue is
+`ClientError::Catalogue` and the link stays `Down`. Freshness stays the resolver's job. **What is still not
 built:** the Docker two-mesh suite (process isolation and a real network severance are its claim, not this
-test's), a signed catalogue reply, SDK verbs, TLS on the edge in the test (run the edge behind `gateway_tls`),
-and streaming (`tasks/sendSubscribe` under a credential is refused: federated calls are unary, §5).
+test's), SDK verbs, TLS on the edge in the test (run the edge behind `gateway_tls`), and streaming
+(`tasks/sendSubscribe` under a credential is refused: federated calls are unary, §5).
 `examples/federated_domains.rs` still runs in one process and says so. Ledger: [history](history.md) → *item 2*.

@@ -198,7 +198,8 @@ Per §5's sequence, and gated in that order:
 | 7 | example, SDKs, diagnostics, docs |
 | **8** *(2026-09-18)* | the transport's first arm: `federation/edge.rs` (the credential as one header on `/a2a`; authenticate at the auth layer, authorise in the handler; `GET /federation/catalog`), `federation/client.rs` (link → resolver → pool → HTTP), and the two-mesh test that re-runs PR 1's never-merged assertions *after* a call has crossed |
 | **9** *(2026-09-18)* | the gate's choreography over that transport, in one process under the enforced profile and two CAs (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`): lose the only gateway, sever every link, keep working locally, change the grant mid-partition, replace the gateway, reconnect; the *traces* leg from each node's connection table (`connected_peers`); `GatewayPool::retire` |
-| 10 | the Docker two-mesh suite (process isolation, real network severance); a signed catalogue reply; SDK verbs |
+| **10a** *(2026-09-18)* | the signed catalogue reply: `CatalogReply` carries the domain, **the partner it was filtered for**, the policy revision and an issue time under `TAG_CATALOG`; `FederationEdge::with_signing_key` signs, `FederationClient::with_partner_key` requires and verifies (unsigned, forged, wrong-domain or misaddressed → `ClientError::Catalogue`, link `Down`) |
+| 10 | the Docker two-mesh suite (process isolation, real network severance); SDK verbs |
 
 **Release gate** (§5): the two-mesh demonstration — discover, invoke, lose a gateway, sever every link, keep
 working locally, change permissions mid-partition, reconnect — and prove **from membership tables, consensus
@@ -219,8 +220,9 @@ negative, with gw2's join as its positive control).
 
 **What "in-process" leaves open, stated so it is not mistaken for the whole.** Process isolation and a real
 network severance are the Docker two-mesh suite's claim (row 10); here the "link" is a gateway that is shut
-down, and the two meshes share an address space. The catalogue reply is unsigned. Streaming is refused rather
-than federated. The *traces* leg is each node's own connection table, not a packet capture — it is the record
+down, and the two meshes share an address space. The catalogue reply is signed and bound to its asker when the
+edge holds the domain's key (10a); a client that does not hold the partner's key still relies on it only as an
+observation attributed to the gateway asked. Streaming is refused rather than federated. The *traces* leg is each node's own connection table, not a packet capture — it is the record
 the transport keeps of whom it wrote to, which is what a trace would show if it were taken.
 
 ## Appendix — anchors verified at adoption (2026-09-17)

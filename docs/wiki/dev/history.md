@@ -357,6 +357,21 @@ which gossips like the capability; an export needs a skill behind it. **Not clai
 real network severance (the Docker suite, PR 10), a signed catalogue reply, SDK verbs. Log:
 [`.log/2026-09-18-item2-pr9-gate-choreography.md`](.log/2026-09-18-item2-pr9-gate-choreography.md).
 
+## v3 contracts axis — item 2 PR 10a: the signed catalogue reply — 2026-09-18 (unreleased)
+
+Row 10's smallest part. A catalogue over plain HTTP was attributable only to the gateway asked (PR 3's
+*observation*); now `CatalogReply` carries **the partner it was filtered for**, an issue time and a signature
+under the domain's key over a tagged canonical form (`TAG_CATALOG`, the same length-prefixed shape as the
+descriptor and policy), so a reply cannot be replayed to another partner or minted by a gateway without the key.
+`FederationEdge::with_signing_key` signs; `FederationClient::with_partner_key` requires — unsigned, forged,
+wrong-domain or misaddressed is `ClientError::Catalogue` and the link stays `Down`. Bindings are checked before
+the signature so a refusal names the cheaper reason. Freshness deliberately stays the resolver's window: a
+signature says who issued a list, not how long to trust it. Plants: a client holding the wrong key is refused
+`BadSignature` before anything is relied on; a requiring client against an unkeyed edge is `Unsigned`; a
+re-addressed reply breaks its own signature. The wire gained three fields, `signature` optional, so a PR 8
+reader still parses. Remaining in row 10: the Docker two-mesh suite and SDK verbs. Log:
+[`.log/2026-09-18-item2-pr10a-signed-catalogue.md`](.log/2026-09-18-item2-pr10a-signed-catalogue.md).
+
 ## v3 contracts axis — item 5: scoped mandates, PRs 1–5 + D4 + two follow-ons — 2026-09-17/18 (unreleased, #244, #256–#259, #261–#263)
 
 Record `docs/design/scoped-mandates.md` (the ADR, #244; log

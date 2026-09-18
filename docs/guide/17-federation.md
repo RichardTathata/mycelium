@@ -176,7 +176,7 @@ let edge = Arc::new(FederationEdge::new(
     policy,                                  // who is granted what
     TrustBundle::trusting([(beta, beta_key)]),
     CallPolicy::default(),
-));
+).with_signing_key(alpha_signing_key));         // sign catalogues under alpha's key
 let agent = GossipAgent::new(id, cfg).with_a2a().with_federation_edge(edge); // before start()
 ```
 
@@ -185,7 +185,8 @@ Call one from another domain:
 ```rust
 let client = FederationClient::new(beta, "svc/billing", beta_signing_key, alpha,
     vec![GatewayEndpoint { id: "gw-1".into(), base_url: "https://alpha-gw-1:8443".into() }],
-    /* slots per partner */ 4, /* catalogue freshness */ Duration::from_secs(60));
+    /* slots per partner */ 4, /* catalogue freshness */ Duration::from_secs(60))
+    .with_partner_key(alpha_public_key); // require the catalogue to be alpha's, issued to us
 let granted = client.connect().await?;                       // the catalogue is the grant
 let reply = client.call("invoice.submit", text, Repeatability::AtMostOnce).await?;
 ```
@@ -215,8 +216,10 @@ consensus namespace and each node's connection table (`connected_peers`) before,
 run this for real: a replaced gateway should be **retired** (`FederationClient::retire_gateway`) — the
 pool keeps no health memory, so a dead gateway left listed costs every at-most-once call a
 `DeliveryUnknown`; and the edge is plain HTTP in the test — in production it is whatever the gateway
-serves, so run it behind `gateway_tls`. Still to build: the Docker two-mesh suite (process isolation and
-a real network severance are its claim); a signed catalogue reply; SDK verbs. Streaming under a
+serves, so run it behind `gateway_tls`. The catalogue is signed under the domain's key and bound to the
+partner it was issued to; a client given the partner's key (`with_partner_key`) refuses an unsigned,
+forged or misaddressed one and leaves the link down. Still to build: the Docker two-mesh suite (process
+isolation and a real network severance are its claim); SDK verbs. Streaming under a
 credential is refused (federated calls are unary); `examples/federated_domains.rs` still runs the
 lifecycle in one process and says so. The invocation edge **is A2A** (D5) with domain-bound origin
 credentials — not a second call protocol, because two invocation edges with different auth models is
