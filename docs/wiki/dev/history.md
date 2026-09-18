@@ -35,6 +35,21 @@ compile time (`unknown` for the compiler: no build script). *Not built:* the min
 corpus has one entry — B and C are pure sweeps with no kernel trace. Log:
 [`.log/2026-09-18-item6-pr7-replay-corpus.md`](.log/2026-09-18-item6-pr7-replay-corpus.md).
 
+## v3 contracts axis — CN1: the commitment companion — 2026-09-18 (unreleased)
+
+The third coordination model of the epoch (`docs/plans/v3-contracts-axis.md` §6.9, §13.2), built as the plan
+insists — a composition, not a subsystem: `mycelium-commitment`, five records with a mechanism each on the public
+API. Announce is a declarer-owned head (`cn/{req}`); offers an `append` stream; the award the tuple-space
+election's lowest-participant rule, written **with a receipt** under `cn/{req}/award` — *an award that is not a
+receipt is a KV write with a hopeful name* (D39); reports an `append` stream whose outcome may be *unknown*;
+assessments Ed25519-signed by whoever has standing, unsigned meaning unproven. **One award per requirement:** a
+second is refused (`AlreadyAwarded`), never written over — the local half of the rule; two declarers racing to the
+key is CN2's replay witness. `NoOffers` and a late offer are visible states, not retries; nobody assigns another
+participant's obligation. The gallery entry re-runs the redistribution workload the tuple-space and blackboard
+examples run (`examples/redistribution_cn.rs`, CI job `commitment`), so the three models meet on one workload.
+*Not done:* CN2, CN3; participants are named, not authenticated. Log:
+[`.log/2026-09-18-cn1-commitment-companion.md`](.log/2026-09-18-cn1-commitment-companion.md).
+
 ## v3 contracts axis — item 4 PR 4c: the provisioner against the rights ledger — 2026-09-18 (unreleased)
 
 The ledger's first live user (`docs/design/adaptive-stability.md` §9 row 4c), in `mycelium-wasm-host` on the

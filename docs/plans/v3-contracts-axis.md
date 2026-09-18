@@ -794,7 +794,7 @@ to the namespace-ownership table); the gossip KV carries heads and terms only.
 
 | Step | Depends on | Deliverable | Gate |
 |---|---|---|---|
-| **CN1** | 1·PR2 | `mycelium-commitment` companion on the public API: announce · offer · award (deterministic rule) · report · assess; `cn/` prefix registered | the redistribution example re-run as contract net, in CI; the award is a receipt |
+| **CN1** ✓ *(2026-09-18)* | 1·PR2 | `mycelium-commitment` companion on the public API: announce · offer · award (deterministic rule) · report · assess; `cn/` prefix registered. *Landed:* `ContractNet` over `kv().set` / `append` / `scan_log` / `set_with_receipt`; `AwardRule::LowestParticipant` (pure); a second award **refused** (`AlreadyAwarded`), never overwritten; `NoOffers` and a late offer are visible states; assessments Ed25519-signed with a caller's key, unsigned = unproven | the redistribution example re-run as contract net, in CI (`examples/redistribution_cn.rs`, the `commitment` job); the award is a receipt (`Awarded { award, receipt }`, `application == Applied`) |
 | **CN2** | CN1 · 6·PR2 kernel | the award replays; a double-award witness (award rule removed) fails under replay | witness fails, real rule passes |
 | **CN3** | CN1 · 5·PR1 where present | award checked against the acceptor's mandate epoch; a stale holder's award is `MandateSuperseded` | one negative case in CI; skipped, not faked, where item 5 is absent |
 | **CN-gate** | CN1–CN3 | Phase C exit; the gallery entry §13.3's four-arm harness runs on | §12 alignment gate as for every companion |

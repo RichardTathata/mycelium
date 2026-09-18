@@ -2225,6 +2225,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mycelium-commitment"
+version = "2.7.0"
+dependencies = [
+ "bytes",
+ "ed25519-dalek",
+ "mycelium",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mycelium-coop-examples"
 version = "0.1.0"
 dependencies = [
