@@ -141,6 +141,14 @@ impl KnowledgeStore {
         self.records.len()
     }
 
+    /// Every record held, in unspecified order.
+    ///
+    /// The order is a `HashMap`'s and must not be depended on — anything that needs a stable order
+    /// sorts by [`RecordId`], which is content-derived and therefore the same on every node.
+    pub fn records(&self) -> impl Iterator<Item = &KnowledgeRecord> {
+        self.records.values()
+    }
+
     /// Is the store empty?
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
