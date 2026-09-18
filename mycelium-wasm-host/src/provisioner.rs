@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use mycelium::control::ledger::{PublishedRightsHead, RightsLedger};
+use mycelium::mandate::PrincipalId;
 use mycelium::{CapFilter, CapValue, Capability, CapabilityReg, GossipAgent};
 
 use crate::artifact::{ArtifactId, ArtifactKind, ArtifactSource};
@@ -45,6 +47,52 @@ enum HostedState {
     /// Installed, advertised, serving. (Its real consumption — placed bytes on disk, activated
     /// memory — is visible to the probe directly, so no virtual accounting is kept.)
     Live(LiveHosted),
+}
+
+/// The provisioner's **install rights** (item 4 PR 4c, `docs/design/adaptive-stability.md` §4, §9):
+/// a hard bound on how many artifacts this node may have reserved-or-live at once, backed by the
+/// rights ledger rather than by a self-imposed budget. Each install consumes one unit of `resource`
+/// while it is `Installing` or `Live` — a unit in flight is as consumed as one serving — and an
+/// install is refused, and the refusal **recorded**, when the node holds too few. The ledger is the
+/// allocator's record; the provisioner never allocates to itself.
+///
+/// The head (`rights/head/{holder}`) is republished after every ledger event the provisioner
+/// causes, signed with `signing_key` when one was given — without a key the head goes out
+/// unsigned, and a reader must treat it as a claim without proof.
+pub struct InstallRights {
+    /// Shared with the tasks that record refusals and publish the head. Lock-order table row 37:
+    /// `try_lock` on the admission path (never blocking `provision_round`), `lock().await` in
+    /// spawned tasks; never held while `hosted` (row 21) is.
+    pub(crate) ledger: Arc<tokio::sync::Mutex<RightsLedger>>,
+    pub(crate) holder: PrincipalId,
+    pub(crate) resource: String,
+    signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Tripwire: installs refused because the node held too few units (or the ledger was busy).
+    refusals: AtomicU64,
+}
+
+impl InstallRights {
+    /// Publish the holder's current head into `rights/head/{holder}`, signed when a key is held.
+    fn publish_head(&self, agent: &GossipAgent, ledger: &RightsLedger) {
+        use ed25519_dalek::Signer;
+        let head = ledger.head(&self.holder);
+        let signature = self
+            .signing_key
+            .as_ref()
+            .map(|k| k.sign(&head.canonical_bytes()).to_bytes().to_vec())
+            .unwrap_or_default();
+        let key = format!("{}{}", mycelium::signal::kv_ns::RIGHTS_HEAD, self.holder);
+        let _ = agent.kv().set(key.as_str(), PublishedRightsHead { head, signature }.encode());
+    }
+}
+
+/// Verify a published head against the holder's Ed25519 public key. `false` for an unsigned
+/// head: unsigned means unproven, and a reader that wanted proof did not get it.
+pub fn verify_published_head(published: &PublishedRightsHead, key: &[u8; 32]) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(vk) = VerifyingKey::from_bytes(key) else { return false };
+    let Ok(sig) = Signature::from_slice(&published.signature) else { return false };
+    vk.verify(&published.head.canonical_bytes(), &sig).is_ok()
 }
 
 /// A capability this node has provisioned and is now hosting: the advertisement registration
@@ -108,6 +156,9 @@ pub struct Provisioner {
     /// registered for their kind or they exceed the install budget. Counts skip *events* (one
     /// per entry per round), not distinct entries.
     ineligible:   Arc<AtomicU64>,
+    /// The hard bound on concurrent installs, when an operator attached one (item 4 PR 4c).
+    /// `None` = the self-imposed budgets above are the only bounds, as before.
+    install_rights: Option<Arc<InstallRights>>,
 }
 
 impl Provisioner {
@@ -135,7 +186,75 @@ impl Provisioner {
             resource_policy: Some((Arc::new(SystemResourceProbe::new()), 0.8)),
             hosted: Arc::new(Mutex::new(HashMap::new())),
             ineligible: Arc::new(AtomicU64::new(0)),
+            install_rights: None,
         }
+    }
+
+    /// Bound concurrent installs by the rights this node **holds** in `ledger` for `resource`
+    /// (item 4 PR 4c): a round starts an install only while `reserved + live + 1 ≤ held units`,
+    /// and refuses — recording `admission.rejected` in the ledger — otherwise. The head is
+    /// published into `rights/head/{holder}` now and after every refusal, signed when
+    /// `signing_key` is given. The ledger is the allocator's record: allocate the node's rights
+    /// there before attaching it, or every install is refused (a refused install is not a
+    /// silent skip — see [`rights_refusals`](Self::rights_refusals)).
+    pub fn with_install_rights(
+        &mut self,
+        ledger: RightsLedger,
+        holder: PrincipalId,
+        resource: impl Into<String>,
+        signing_key: Option<ed25519_dalek::SigningKey>,
+    ) {
+        let rights = Arc::new(InstallRights {
+            ledger: Arc::new(tokio::sync::Mutex::new(ledger)),
+            holder,
+            resource: resource.into(),
+            signing_key,
+            refusals: AtomicU64::new(0),
+        });
+        let agent = Arc::clone(&self.agent);
+        let publish = Arc::clone(&rights);
+        tokio::spawn(async move {
+            let ledger = publish.ledger.lock().await;
+            publish.publish_head(&agent, &ledger);
+        });
+        self.install_rights = Some(rights);
+    }
+
+    /// Installs refused under the attached rights (too few units held, or the ledger busy at the
+    /// moment of admission). Never reset; an operator compares two readings.
+    pub fn rights_refusals(&self) -> u64 {
+        self.install_rights.as_ref().map_or(0, |r| r.refusals.load(Ordering::Relaxed))
+    }
+
+    /// The **admission** step before an `Installing` reservation (item 4 PR 4c): does the node
+    /// hold enough units for one more concurrent install? Reads the ledger's view under `try_lock`
+    /// — the admission path is `provision_round`, which is synchronous and must not block on a
+    /// journal write; a busy ledger is a refusal, not a wait. A refusal is counted here and
+    /// recorded in the ledger off-path (`admit` appends `admission.rejected`, then the head is
+    /// republished). No rights attached = admitted, as before.
+    fn admit_install(&self) -> bool {
+        let Some(rights) = self.install_rights.as_ref() else { return true };
+        let consumed = self.hosted.lock().unwrap().len() as u64;
+        let requested = consumed.saturating_add(1);
+        let admitted = match rights.ledger.try_lock() {
+            Ok(ledger) => ledger.may_admit(&rights.holder, &rights.resource, requested).is_ok(),
+            Err(_) => false,
+        };
+        if admitted {
+            return true;
+        }
+        rights.refusals.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("mycelium_artifact_installs_refused_by_rights_total").increment(1);
+        let rights = Arc::clone(rights);
+        let agent = Arc::clone(&self.agent);
+        tokio::spawn(async move {
+            let mut ledger = rights.ledger.lock().await;
+            // `admit` records the rejection (and only a rejection); a refusal because the ledger
+            // was busy is re-judged here against the live view.
+            let _ = ledger.admit(&rights.holder, &rights.resource, requested).await;
+            rights.publish_head(&agent, &ledger);
+        });
+        false
     }
 
     /// Register a runtime for an additional [`ArtifactKind`] (e.g. a blob/model runtime). A node
@@ -332,6 +451,18 @@ impl Provisioner {
 
         static INSTALL_SEQ: AtomicU64 = AtomicU64::new(0);
         let token = INSTALL_SEQ.fetch_add(1, Ordering::Relaxed);
+        // The contract's reserve step comes before the reservation it protects (persist-then-act
+        // in the ledger's terms): a node that holds too few install rights does not enter
+        // `Installing`. Reads and releases the ledger before `hosted` is taken (row 37 → row 21,
+        // never nested).
+        if self.is_hosted(&entry.artifact) {
+            return false;
+        }
+        if !self.admit_install() {
+            tracing::info!(ns = %entry.provides.namespace, name = %entry.provides.name,
+                "install refused: the node holds too few install rights");
+            return false;
+        }
         {
             let mut map = self.hosted.lock().unwrap();
             if map.contains_key(&entry.artifact) {
@@ -601,6 +732,135 @@ mod tests {
             prov.hosted_count(),
             prov.installing_count()
         );
+    }
+
+    // ── Item 4 PR 4c: the provisioner against the rights ledger ──────────────────────────────
+
+    fn rights_ledger(tag: &str) -> RightsLedger {
+        let dir = std::env::temp_dir().join(format!("myc-rights-{tag}-{}", alloc_port()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        RightsLedger::open(dir.join("rights.journal")).expect("ledger opens")
+    }
+
+    fn principal(s: &str) -> PrincipalId {
+        PrincipalId::new(s).unwrap()
+    }
+
+    async fn declare_and_await_demand(agent: &GossipAgent, ns: &str, name: &str) -> mycelium::RequirementHandle {
+        let req = agent
+            .capabilities()
+            .declare_requirement(CapFilter::new(ns, name), Duration::from_secs(30));
+        for _ in 0..40 {
+            if !agent.capabilities().demand(&CapFilter::new(ns, name)).demanding_nodes.is_empty() {
+                return req;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("requirement {ns}/{name} did not register as demand");
+    }
+
+    /// Structural poll: the rejection is recorded off the admission path, so it is awaited.
+    async fn wait_rejections(rights: &InstallRights, n: u64) {
+        for _ in 0..200 {
+            if rights.ledger.lock().await.view().rejections() == n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the ledger never recorded {n} rejection(s)");
+    }
+
+    /// No right allocated → the install is refused before any `Installing` reservation, the
+    /// refusal is counted on the provisioner and **recorded** in the ledger, and the published
+    /// head says the holder holds nothing.
+    #[tokio::test]
+    async fn an_install_is_refused_and_recorded_when_the_node_holds_no_rights() {
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.with_install_rights(rights_ledger("none"), principal("node-a"), "installs", None);
+
+        let _req = declare_and_await_demand(&agent, "text", "echo").await;
+        assert_eq!(prov.provision_round(), 0, "no rights, no install");
+        assert_eq!(prov.installing_count(), 0, "refused before the reservation, not after");
+        assert_eq!(prov.rights_refusals(), 1);
+
+        let rights = Arc::clone(prov.install_rights.as_ref().unwrap());
+        wait_rejections(&rights, 1).await;
+
+        let key = format!("{}node-a", mycelium::signal::kv_ns::RIGHTS_HEAD);
+        let published = PublishedRightsHead::decode(&agent.kv().get(&key).expect("head published"))
+            .expect("head decodes");
+        assert_eq!(published.head.holder, principal("node-a"));
+        assert!(published.head.totals.is_empty(), "nothing held: {:?}", published.head.totals);
+        assert!(!published.is_signed(), "no key was given, so the head is a claim without proof");
+        assert!(!verify_published_head(&published, &[0u8; 32]), "unsigned never verifies");
+    }
+
+    /// One unit allocated → one install proceeds, the second is refused; the head carries the
+    /// allocation and verifies under the holder's key. Rights bound *concurrency*, and a live
+    /// install is as consumed as one in flight.
+    #[tokio::test]
+    async fn installs_are_bounded_by_the_allocated_units_and_the_head_is_signed() {
+        use ed25519_dalek::SigningKey;
+        use mycelium::control::ledger::{Right, RightState};
+        use mycelium::mandate::TermId;
+
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let id_a = source.insert(ECHO_COMPONENT.to_vec());
+        // A second, different, valid component — whichever the round picks first installs, the
+        // other is refused; the test does not depend on the catalog's order.
+        let id_b = source.insert(include_bytes!("../tests/fixtures/unit_convert_component.wasm").to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id_a));
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo2"), id_b));
+
+        let mut ledger = rights_ledger("one");
+        ledger
+            .allocate(Right {
+                holder: principal("node-b"),
+                resource: "installs".into(),
+                units: 1,
+                allocated_by: principal("operator"),
+                term: TermId::new("t1").unwrap(),
+                state: RightState::Serving,
+                valid_until_ms: u64::MAX,
+            })
+            .await
+            .expect("allocated");
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let public = signing.verifying_key().to_bytes();
+
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.with_install_rights(ledger, principal("node-b"), "installs", Some(signing));
+
+        let _r1 = declare_and_await_demand(&agent, "text", "echo").await;
+        let _r2 = declare_and_await_demand(&agent, "text", "echo2").await;
+        assert_eq!(prov.provision_round(), 1, "one unit held: exactly one install starts");
+        assert_eq!(prov.rights_refusals(), 1, "the second was refused");
+        let rights = Arc::clone(prov.install_rights.as_ref().unwrap());
+        wait_rejections(&rights, 1).await;
+
+        let key = format!("{}node-b", mycelium::signal::kv_ns::RIGHTS_HEAD);
+        let published = PublishedRightsHead::decode(&agent.kv().get(&key).expect("head published"))
+            .expect("head decodes");
+        assert_eq!(published.head.totals, vec![("installs".to_string(), 1)]);
+        assert!(published.is_signed());
+        assert!(verify_published_head(&published, &public), "signed by the holder's key");
+        assert!(!verify_published_head(&published, &[9u8; 32]), "and by no other");
+
+        // A live install still consumes the unit: a later round refuses again rather than
+        // starting the second artifact once the first is serving.
+        wait_live(&prov, 1).await;
+        assert_eq!(prov.provision_round(), 0, "the one unit is consumed by the live install");
+        assert_eq!(prov.rights_refusals(), 2);
     }
 
     #[tokio::test]
