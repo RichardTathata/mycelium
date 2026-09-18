@@ -74,6 +74,22 @@ the four, and by cost it is a rescue. The governor's `fastrand`/`Instant`/`sleep
 (baseline 6 → 1). PR 4 split into 4a/4b/4c in the ADR's table. Log:
 [`.log/2026-09-18-item4-pr4a-membership-governor.md`](.log/2026-09-18-item4-pr4a-membership-governor.md).
 
+## v3 contracts axis — item 1 PR 5: the effects companion — 2026-09-18 (unreleased, PR #277)
+
+`mycelium-effects/` — the fourth receipt, *destination commit*, as a reference destination; the substrate never
+provides it (`docs/design/contracts-receipts.md` §2 rule 1). `EffectDestination::apply` commits the `operation_id`
+dedup row and the caller's business change **in one transaction** and returns
+`DestinationCommit { destination, dedup: Fresh | Replayed }`. `SqliteDestination` is the reference: `rusqlite`
+bundled and quarantined to the crate (its own CI job); `IMMEDIATE` transactions so racing appliers serialise at the
+database and exactly one is `Fresh`; the business change is a handler run *inside* the transaction, so a failure
+rolls back whatever it wrote and leaves **no dedup row** — a retry starts clean. Refusals say what is true
+afterwards: `Conflict` (same id, different content — the first version stands), `Failed` (nothing committed),
+`DeliveryUnknown` (the deadline passed; the apply is not cancelled and may still commit — the retry resolves it as
+`Replayed`). The effect's hash is the vocabulary's own `content_hash(operation_id, payload, false)`. Justified
+where the exactly-once tracker overlay was declined (§6): beyond both companions, at the resource, coupling
+neither. Seven tests; dedup and rollback-on-failure verified by planted absence. Log:
+[`.log/2026-09-18-item1-pr5-effects-companion.md`](.log/2026-09-18-item1-pr5-effects-companion.md).
+
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
 Record `docs/design/knowledge-layer.md` (PR 1, the ADR, #243, 2026-09-17); code `src/knowledge/` behind `tls`.

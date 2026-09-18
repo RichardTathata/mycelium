@@ -95,6 +95,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and its own change, since closing it regenerates a baseline of pre-existing sites across the tree.
 - Three seam tests (nominal schedule recorded; replay advances the clocks without waiting; sleep-as-tick diverges).
 
+### Added — the effects companion: the destination-commit receipt as a reference destination (item 1 PR 5)
+
+- **`mycelium-effects`**, a new companion crate on the public API. The substrate provides three of item 1's four
+  receipts and never the fourth — *destination commit* — because only the caller's resource can say whether an
+  effect happened there. This crate is that last rung made generic and inspectable: an `EffectDestination` whose
+  **dedup row (keyed by `operation_id`) and business change commit in one transaction**, answering with
+  `DestinationCommit { destination, dedup: Fresh | Replayed }`.
+- **`SqliteDestination`**, the reference destination (`rusqlite`, bundled and quarantined to this crate; core carries
+  no database). An `IMMEDIATE` transaction takes the write lock at `BEGIN`, so appliers racing on one operation
+  serialise at the database and exactly one is `Fresh`. The business change is the caller's handler, run *inside*
+  the transaction; if it fails, whatever it wrote goes with the rollback and **no dedup row is left**, so a retry
+  starts clean rather than finding a false `Replayed`.
+- **The vocabulary, as refusals that say what is true afterwards:** same `operation_id` with different content is
+  `Conflict` (the first version stands — a retry that changed its mind is not a retry); a failed transaction is
+  `Failed` (nothing committed); a deadline overrun is **`DeliveryUnknown`, never "nothing happened"** — the apply
+  is not cancelled and may commit after the caller stopped waiting, which is exactly the case the retry resolves as
+  `Replayed`. `apply_within` maps a timeout to it.
+- The effect's `content_hash` is the receipt vocabulary's own `content_hash(operation_id, payload, false)` — one
+  specified, golden-pinned hash for the axis, not a second one.
+- Seven tests; the dedup lookup and the rollback-on-failure each verified by planting their absence. The in-process
+  half — the local fiber runtime of the plan's §13 — is beyond v3 (D34) and not here.
+
 ### Added — the adaptive-stability contract types (item 4 PR 2)
 
 - **`mycelium::control`** — pure decisions only; no governor changes, no actuator touched, the rights ledger is
