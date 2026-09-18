@@ -44,6 +44,7 @@
 
 pub mod handover;
 pub mod lock_audit;
+pub mod partition;
 pub mod restart;
 pub mod scenario_b;
 
