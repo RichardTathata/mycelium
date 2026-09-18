@@ -116,7 +116,8 @@ it would be invisible afterwards because the resulting graph would look identica
 |---|---|
 | **1** *(this record)* | the ADR; `knowledge/` reserved in the namespace table and both front-door lists |
 | 2–3 | the typed records and the store — the **initial API release** |
-| 4–6 | evidence-aware resolution, expiry/correction, the demonstration (**the contract completes here**) |
+| **4** ✓ | **evidence-aware resolution** — `src/knowledge/resolution.rs`: `ReleaseId` (evidence binds to one release, length-prefixed so names cannot collide), `ReaderPolicy` (independence as a **configured control group**, evidence ageing on record timestamps), the four-outcome `Verdict`, and `filter_accepted` which *filters without reordering* so evidence decides eligibility and the router still decides choice |
+| 5–6 | expiry/correction, the demonstration (**the contract completes here**) |
 | 7 | adapters |
 
 ## 8. Two gates, and they are not the same claim
