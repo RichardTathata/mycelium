@@ -362,8 +362,12 @@ async fn run_group_membership_task(
     let mut cap_rx  = subscribe_prefix_on_kv(&ctx.kv_state, Arc::<str>::from("cap/"));
     let mut gcap_rx = subscribe_prefix_on_kv(&ctx.kv_state, Arc::<str>::from("gcap/"));
 
-    let mut ticker = time::interval(GCAP_REASSERT_INTERVAL);
-    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // Through the timer seam (item 6).
+    let mut ticker = mycelium_core::sim_seam::interval_ms(
+        "gcap/reassert",
+        GCAP_REASSERT_INTERVAL.as_millis() as u64,
+        time::MissedTickBehavior::Skip,
+    );
     ticker.tick().await; // Consume the immediate first tick — we just wrote.
 
     'main: loop {

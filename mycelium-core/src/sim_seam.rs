@@ -323,25 +323,26 @@ mod installed {
         mode()
     }
 
-    /// Write down that a wait of `requested_ms` elapsed, and advance the simulated clocks by it.
-    pub fn timer_record(stream: &str, requested_ms: u64) {
+    /// Write down that a wait (`op` = `sleep` or `tick`) of `requested_ms` elapsed, and advance the
+    /// simulated clocks by it.
+    pub fn timer_record(op: &'static str, stream: &str, requested_ms: u64) {
         CTX.with(|c| {
             let mut guard = c.borrow_mut();
             let Some(ctx) = guard.as_mut() else { return };
             let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
-            if let Err(d) = seams.timer(stream, requested_ms, || requested_ms) {
+            if let Err(d) = seams.timer(op, stream, requested_ms, || requested_ms) {
                 panic!("{d}");
             }
         });
     }
 
     /// The effective duration the recording gave this wait, applied to the simulated clocks.
-    pub fn timer_replay(stream: &str, requested_ms: u64) -> u64 {
+    pub fn timer_replay(op: &'static str, stream: &str, requested_ms: u64) -> u64 {
         CTX.with(|c| {
             let mut guard = c.borrow_mut();
             let Some(ctx) = guard.as_mut() else { return requested_ms };
             let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
-            match seams.timer(stream, requested_ms, || unreachable!(
+            match seams.timer(op, stream, requested_ms, || unreachable!(
                 "replay never produces a duration; it reads the recorded one"
             )) {
                 Ok(v) => v,
@@ -455,11 +456,98 @@ pub async fn sleep_ms(stream: &str, ms: u64) {
         None => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
         Some(mycelium_sim::Mode::Record) => {
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-            installed::timer_record(stream, ms);
+            installed::timer_record("sleep", stream, ms);
         }
         Some(mycelium_sim::Mode::Replay) => {
-            let _effective_ms = installed::timer_replay(stream, ms);
+            let _effective_ms = installed::timer_replay("sleep", stream, ms);
             tokio::task::yield_now().await;
+        }
+    }
+}
+
+// The second arm: periodic ticks (inventory §2.3, row 2 — "periodic loops → timer seam").
+//
+// What a replay reproduces is that *a tick fired*, and how much simulated time it stood for. The
+// nominal schedule is the decision: the first tick is immediate (tokio's contract, and every loop
+// here relies on it), every later one is one period. A delayed real tick under `Skip` is still one
+// tick, so the recording says one period — the kernel's world reads the schedule the loop was
+// written against, not the wall's jitter. The stream is owned, not `&'static`: a loop that runs per
+// kind needs a name per kind (stream identity per destination), built once at construction.
+
+/// A periodic tick, without the kernel — `tokio::time::interval` with the requested missed-tick
+/// behaviour, and nothing else.
+#[cfg(not(feature = "sim"))]
+pub struct Ticker {
+    inner: tokio::time::Interval,
+}
+
+/// A periodic tick, without the kernel.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn interval_ms(
+    _stream: impl Into<String>,
+    period_ms: u64,
+    missed: tokio::time::MissedTickBehavior,
+) -> Ticker {
+    // `interval` panics on a zero period; a caller that asked for one meant "as fast as possible".
+    let mut inner = tokio::time::interval(std::time::Duration::from_millis(period_ms.max(1)));
+    inner.set_missed_tick_behavior(missed);
+    Ticker { inner }
+}
+
+#[cfg(not(feature = "sim"))]
+impl Ticker {
+    /// Wait for the next tick.
+    #[inline]
+    pub async fn tick(&mut self) {
+        self.inner.tick().await;
+    }
+}
+
+/// A periodic tick, through the kernel.
+#[cfg(feature = "sim")]
+pub struct Ticker {
+    inner: tokio::time::Interval,
+    stream: String,
+    period_ms: u64,
+    first: bool,
+}
+
+/// A periodic tick, through the kernel. `stream` must be distinct per loop — two loops on one
+/// stream would hand each other their ticks on replay.
+#[cfg(feature = "sim")]
+pub fn interval_ms(
+    stream: impl Into<String>,
+    period_ms: u64,
+    missed: tokio::time::MissedTickBehavior,
+) -> Ticker {
+    let mut inner = tokio::time::interval(std::time::Duration::from_millis(period_ms.max(1)));
+    inner.set_missed_tick_behavior(missed);
+    Ticker { inner, stream: stream.into(), period_ms, first: true }
+}
+
+#[cfg(feature = "sim")]
+impl Ticker {
+    /// Wait for the next tick.
+    ///
+    /// `Record` really waits and writes down the nominal elapsed time (`0` for the first tick, one
+    /// period after). `Replay` does not wait: the recorded duration advances the simulated clocks
+    /// and the task yields once. A tick whose period differs from the recording is a divergence.
+    pub async fn tick(&mut self) {
+        let nominal = if self.first { 0 } else { self.period_ms };
+        self.first = false;
+        match installed::mode() {
+            None => {
+                self.inner.tick().await;
+            }
+            Some(mycelium_sim::Mode::Record) => {
+                self.inner.tick().await;
+                installed::timer_record("tick", &self.stream, nominal);
+            }
+            Some(mycelium_sim::Mode::Replay) => {
+                let _effective_ms = installed::timer_replay("tick", &self.stream, nominal);
+                tokio::task::yield_now().await;
+            }
         }
     }
 }
@@ -1080,7 +1168,7 @@ mod tests {
             }
             install_replaying(&schedule.to_text());
             let r1 = wall_now_ms();
-            let effective = installed::timer_replay("lock/converge", 20);
+            let effective = installed::timer_replay("sleep", "lock/converge", 20);
             let r2 = wall_now_ms();
             installed::take();
 
@@ -1098,12 +1186,12 @@ mod tests {
     #[test]
     fn a_sleep_that_differs_from_the_recording_is_a_divergence() {
         install_recording();
-        installed::timer_record("lock/converge", 20);
+        installed::timer_record("sleep", "lock/converge", 20);
         let text = installed::take().expect("installed").kernel.trace().to_text();
 
         install_replaying(&text);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            installed::timer_replay("lock/converge", 21)
+            installed::timer_replay("sleep", "lock/converge", 21)
         }));
         installed::take();
 
@@ -1115,6 +1203,83 @@ mod tests {
             msg.contains("sleep(20ms)") && msg.contains("sleep(21ms)"),
             "both sides are printed, so the reader sees what changed: {msg}"
         );
+    }
+
+    /// **A ticker records the nominal schedule**: an immediate first tick, then one period each —
+    /// and the simulated clocks advance by exactly that, so a loop replays against the schedule it
+    /// was written for.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_ticker_records_an_immediate_first_tick_then_one_period_each() {
+        install_recording();
+        let w1 = wall_now_ms();
+        let mut t = interval_ms("t/tick", 30, tokio::time::MissedTickBehavior::Skip);
+        t.tick().await;
+        t.tick().await;
+        t.tick().await;
+        let w2 = wall_now_ms();
+        let ctx = installed::take().expect("installed");
+
+        // The first tick is immediate (contributes nothing), the next two one period each, plus the
+        // read step.
+        assert_eq!(w2 - w1, 30 + 30 + 1, "first tick immediate, then one period each, plus the read step");
+        let ticks: Vec<&str> = ctx
+            .kernel
+            .trace()
+            .entries()
+            .iter()
+            .filter(|c| c.kind == mycelium_sim::trace::ChoiceKind::Timer)
+            .map(|c| c.request.as_str())
+            .collect();
+        assert_eq!(ticks, vec!["tick(0ms)", "tick(30ms)", "tick(30ms)"]);
+    }
+
+    /// **A replayed ticker does not wall-wait.** Two ticks of 150 ms took the recording ~150 ms;
+    /// the replay advances the clocks the same and spends no wall time waiting.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_replayed_ticker_advances_the_clocks_without_waiting() {
+        install_recording();
+        let w1 = wall_now_ms();
+        let mut t = interval_ms("t/tick", 150, tokio::time::MissedTickBehavior::Skip);
+        t.tick().await;
+        t.tick().await;
+        let w2 = wall_now_ms();
+        let text = installed::take().expect("installed").kernel.trace().to_text();
+        assert_eq!(w2 - w1, 151);
+
+        install_replaying(&text);
+        let started = std::time::Instant::now();
+        let r1 = wall_now_ms();
+        let mut t = interval_ms("t/tick", 150, tokio::time::MissedTickBehavior::Skip);
+        t.tick().await;
+        t.tick().await;
+        let r2 = wall_now_ms();
+        let took = started.elapsed();
+        installed::take();
+
+        assert_eq!(r2 - r1, 151, "the replay's clocks elapsed what the recording's did");
+        assert!(took < std::time::Duration::from_millis(100), "no wall wait: {took:?}");
+    }
+
+    /// **A sleep and a tick of the same length are different decisions.** A recorded sleep replayed
+    /// as a tick diverges — the op is in the request — so a trace can never replay a periodic loop
+    /// from a one-off wait, or the reverse.
+    #[test]
+    fn a_sleep_replayed_as_a_tick_is_a_divergence() {
+        install_recording();
+        installed::timer_record("sleep", "t/x", 20);
+        let text = installed::take().expect("installed").kernel.trace().to_text();
+
+        install_replaying(&text);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            installed::timer_replay("tick", "t/x", 20)
+        }));
+        installed::take();
+
+        let msg = match outcome {
+            Err(payload) => payload.downcast_ref::<String>().cloned().unwrap_or_default(),
+            Ok(v) => panic!("a tick was accepted for a recorded sleep and returned {v}"),
+        };
+        assert!(msg.contains("sleep(20ms)") && msg.contains("tick(20ms)"), "{msg}");
     }
 
     #[test]

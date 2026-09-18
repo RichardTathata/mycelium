@@ -277,8 +277,13 @@ impl<'k> Seams<'k> {
     /// said. Re-deriving them after an authored wait is scenario replay, a mode this kernel does not
     /// yet have. A result that does not parse is taken as the requested duration: the exact
     /// schedule, the least surprising reading of a damaged line.
+    ///
+    /// `op` names the kind of wait — `sleep` or `tick` — and is part of the request, so a recorded
+    /// sleep cannot be replayed as a tick of the same length: they are different decisions with the
+    /// same duration, and a trace that merged them would replay a periodic loop from a one-off wait.
     pub fn timer(
         &mut self,
+        op: &'static str,
         stream: &str,
         requested_ms: u64,
         observed: impl FnOnce() -> u64,
@@ -287,7 +292,7 @@ impl<'k> Seams<'k> {
             Some(&self.node),
             ChoiceKind::Timer,
             stream,
-            &format!("sleep({requested_ms}ms)"),
+            &format!("{op}({requested_ms}ms)"),
             || observed().to_string(),
         )?;
         let effective = out.trim().parse().unwrap_or(requested_ms);

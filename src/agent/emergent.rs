@@ -787,8 +787,12 @@ pub async fn run_emergent_detectors(
     ctx: Arc<TaskCtx>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut tick = tokio::time::interval(DETECTOR_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Through the timer seam (item 6): the detectors' cadence is a schedule a replay reproduces.
+    let mut tick = mycelium_core::sim_seam::interval_ms(
+        "emergent/detectors",
+        DETECTOR_INTERVAL.as_millis() as u64,
+        tokio::time::MissedTickBehavior::Skip,
+    );
     let mut conflict_streaks: HashMap<String, u32> = HashMap::new();
     let mut gap_streaks: HashMap<String, u32> = HashMap::new();
     // P3-explain: record a *significant event* whenever a detector's confirmed count changes
