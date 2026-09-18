@@ -12,11 +12,18 @@ categories = ["database", "asynchronous"]
 
 [features]
 default = []
+# The tuple-space consumer with effect recovery (item 1 PR 6): a worker that commits each item's
+# effect at a destination *before* acknowledging it, so a worker that dies between the two is
+# re-delivered and the second apply is `Replayed`. Optional so the crate's core — the destination
+# and the receipt — couples to neither companion.
+tuple-space = ["dep:mycelium-tuple-space", "dep:bytes"]
 
 [dependencies]
 # Companion-crate contract: only Mycelium's PUBLIC API is used — no internal
 # access. This dependency line is itself the composability proof.
 mycelium = { path = "..", default-features = false }
+mycelium-tuple-space = { path = "../mycelium-tuple-space", optional = true }
+bytes = { version = "1", optional = true }
 
 # The reference destination. `bundled` compiles SQLite in, so CI and every developer get the same
 # engine and no system library is a hidden dependency. Quarantined to this crate: core carries no
@@ -27,3 +34,6 @@ tracing  = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }
+# test-only: the bind-verified, process-unique port allocator for a live agent in the recovery test.
+mycelium = { path = "..", default-features = false, features = ["test-util"] }
+bytes = "1"

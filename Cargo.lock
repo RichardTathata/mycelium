@@ -2278,7 +2278,9 @@ dependencies = [
 name = "mycelium-effects"
 version = "2.7.0"
 dependencies = [
+ "bytes",
  "mycelium",
+ "mycelium-tuple-space",
  "rusqlite",
  "tokio",
  "tracing",

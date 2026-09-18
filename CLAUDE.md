@@ -88,8 +88,8 @@ cargo clippy --lib --no-default-features -- -D warnings   # catches the feature-
 ```
 
 Companion crates: `cargo test -p mycelium-tuple-space --features gateway`, same for
-`mycelium-blackboard` (+ clippy `--all-targets`); `cargo test -p mycelium-effects` (+ clippy; `rusqlite`
-bundled, quarantined to that crate). CI also gates `tsc --noEmit`, the AFN +
+`mycelium-blackboard` (+ clippy `--all-targets`); `cargo test -p mycelium-effects --features tuple-space`
+(+ clippy with and without the feature; `rusqlite` bundled, quarantined to that crate). CI also gates `tsc --noEmit`, the AFN +
 coop smokes, fuzz (non-PR), and `cargo audit`. **Never trust a memorised test count** — run
 the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
 `test-scale-entries` — read the wiki's

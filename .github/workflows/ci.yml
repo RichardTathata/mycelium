@@ -175,8 +175,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: ./scripts/ci-retest.sh -p mycelium-effects
+      - run: ./scripts/ci-retest.sh -p mycelium-effects --features tuple-space
       - run: cargo clippy -p mycelium-effects --all-targets -- -D warnings
+      - run: cargo clippy -p mycelium-effects --features tuple-space --all-targets -- -D warnings
 
   wiki:
     # Group-scoped LLM-curated wiki companion crate. Phase 1 = the data plane (Store trait +

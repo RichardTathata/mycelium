@@ -39,9 +39,13 @@
 //! Not the tuple space's `complete` (the pipeline's own receipt, which proves the item was
 //! acknowledged and the next stage queued — not that a business transaction happened), and not the
 //! *in-process* half — the local fiber runtime the plan's §13 describes — which is beyond v3 (D34).
-//! One reference destination, one vocabulary.
+//! One reference destination, one vocabulary. The `tuple-space` feature adds the consumer that
+//! composes the two ([`tuple_consumer`]): effect first, acknowledgement second, so the pipeline's
+//! receipt never stands in for the destination's.
 
 pub mod sqlite;
+#[cfg(feature = "tuple-space")]
+pub mod tuple_consumer;
 
 pub use mycelium::{AttemptId, DedupOutcome, DestinationCommit, OperationId, content_hash};
 pub use sqlite::SqliteDestination;

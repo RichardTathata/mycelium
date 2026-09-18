@@ -109,6 +109,14 @@ where the exactly-once tracker overlay was declined (§6): beyond both companion
 neither. Seven tests; dedup and rollback-on-failure verified by planted absence. Log:
 [`.log/2026-09-18-item1-pr5-effects-companion.md`](.log/2026-09-18-item1-pr5-effects-companion.md).
 
+**PR 6 (#278) — the tuple-space consumer with effect recovery** (`tuple_consumer`, feature `tuple-space`).
+`take` → commit the effect at the destination under `tuple/{ns}/{stage}/{id}` → *then* `ack`/`complete`. The
+tuple id survives lease expiry and a WAL restart, so a re-delivered item is a new attempt of the same operation
+and replays; a refused effect is **not** acknowledged and the item stays in flight (`Conflict` surfaced as the
+poison pill it is — dead-lettering is the caller's). Three live tests; the one that pins the *ordering* is the
+refused-effect-then-restart case, because the replay test alone would pass for a consumer that acked first.
+Log: [`.log/2026-09-18-item1-pr6-tuple-consumer.md`](.log/2026-09-18-item1-pr6-tuple-consumer.md).
+
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
 Record `docs/design/knowledge-layer.md` (PR 1, the ADR, #243, 2026-09-17); code `src/knowledge/` behind `tls`.

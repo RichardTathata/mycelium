@@ -101,7 +101,9 @@ via wasm-host).
   leaves no dedup row; a deadline overrun is `DeliveryUnknown`, never "nothing happened", and a retry resolves it as
   `Replayed`. Justified where the exactly-once tracker overlay was declined (`docs/design/contracts-receipts.md`
   §6): it sits *beyond* both companions, at the resource, and couples neither. The in-process half (the plan's §13
-  fiber runtime) is beyond v3.
+  fiber runtime) is beyond v3. **PR 6 (feature `tuple-space`):** `tuple_consumer` — `take`, commit the effect
+  under `tuple/{ns}/{stage}/{id}`, *then* `ack`/`complete`; a re-delivered item replays, a refused one stays in
+  flight. Optional, so the core couples to neither companion.
 - **`mycelium-guardrails/`** — the **v3.0 structural-guardrails companion** (the second primary;
   *different axis* again — [pattern-coverage](../../domain/pattern-coverage.md) → Structural guardrails).
   *What an agent may do*, one tier-labelled `Policy` → `apply()` compiling to **Tier A** boundary
