@@ -329,7 +329,9 @@ period each), so a replay ticks the loop's written cadence and never wall-waits;
 different requests. Nine `src/agent` sites routed with one stream per loop (per kind for opacity, per key for the
 intent reconciler). **Found on the way:** the forbidden-call check does not see `time::interval` through a
 `use tokio::time` alias — three of the nine had never been counted — the same alias gap its header already
-closes for `fs`; recorded there, and its own change. Log:
+closes for `fs`; recorded there, and its own change. *Closed the same day:* `alias_pattern` now counts
+`<alias>::sleep|interval|timeout|Instant` in any file that imports the module under any spelling, which admitted
+19 pre-existing sites in eight files (baseline 166 → 185) — the debt was always there, only uncounted. Log:
 [`.log/2026-09-18-item6-pr3-interval-seam.md`](.log/2026-09-18-item6-pr3-interval-seam.md).
 
 ## v3 contracts axis — AE-T: the seam records what it enforces — 2026-09-16 (unreleased, PR #224)

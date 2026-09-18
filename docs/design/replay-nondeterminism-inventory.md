@@ -319,7 +319,12 @@ invisible. **And a caution from building it:** the first version excluded *every
 `#[cfg(test)]`*, so a live `Instant::now` appended below a test module passed. Fixing it to skip each test item
 rather than the file's tail raised the count from 165 to 190 — twenty-five sites that a plausible-looking check had
 been silently ignoring. It was found by planting a site and checking the checker failed, which is the only way
-these are found.
+these are found. **A second one, 2026-09-18:** a file that imports the timer module (`use tokio::time;`, or
+`time` inside a grouped `use tokio::{…}`) and calls `time::sleep(…)` was invisible — the `fs as <alias>` gap over
+again, for the timer. Noticed because routing nine tickers moved the baseline for four files and not for the
+three that go through the alias; closed by counting `<alias>::sleep|interval|timeout|Instant` in any file with
+such an import, which admitted **19 pre-existing sites in eight files (166 → 185)**. The signal both times was
+the same: *a baseline that moves when no site moved, or fails to move when one did.*
 
 ## 7. What this record does not decide
 
