@@ -53,7 +53,7 @@ pub(crate) mod evidence_journal;
 #[cfg(feature = "gateway")]
 mod http;
 mod mcp;
-mod opacity;
+pub(crate) mod opacity;
 #[cfg(feature = "consensus")]
 mod consensus_ops;
 mod capability_ops;
@@ -68,9 +68,9 @@ mod bulk;
 mod mailbox;
 pub(crate) mod intent;
 mod cluster_tuner;
-mod tuning_governor;
+pub(crate) mod tuning_governor;
 pub(crate) mod timing_governor;
-mod membership_governor;
+pub(crate) mod membership_governor;
 /// v3 item 4 PR 4a — `set_control_profile` and its tripwire, on `GossipAgent`.
 mod control_profile;
 // The diagnostics module's *snapshot/view* surface (fleet snapshot, ViewConfidence, the `explain`

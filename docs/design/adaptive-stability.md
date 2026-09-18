@@ -148,6 +148,15 @@ Two of these already exist and are cited rather than rebuilt; the rest are `Cont
   stage 6* — reusing the governors' pure decision functions, not a bespoke rig. It is item 6 PR 6, and it is
   blocked on this record only in the sense that it needs the `ControlSpec` shape of PR 2.
 
+  > **Landed 2026-09-18 (item 6 PR 6, `src/control/scenario_c.rs`).** A schedule sweep over the three governors'
+  > shipped decisions, coupled through a small plant: with the breakers on every run settles; with them off,
+  > releases flap and the knob chatters; the decisive rule holds under `EnforceLocal`. Two corrections to this
+  > paragraph's own expectations, found by the sweep: the stability objective for the boundary is on
+  > **releases** — the shed is never held (§2), so a release followed by a re-shed is the rule, not a flap; and
+  > **hysteresis is not load-bearing while the release spacing is on** — removing it in shipped code did not fail
+  > the sweep, because a 1 s spacing alone bounds the release rate. The sentence above — *oscillate together while
+  > each is stable alone* — is **not demonstrated**: the witness removes every breaker at once.
+
 ## 6. The workload probe consumes depth (D18)
 
 Backlog is already measured where work queues: `TupleSpace::depth` (`mycelium-tuple-space/src/lib.rs:1330`),

@@ -276,7 +276,7 @@ pub(super) fn manage_opacity_ctx(
 /// the async emission was widened 3 s → 10 s → 30 s and still flaked twice). The invariant now lives
 /// on the pure path; the async path is a wiring smoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpacityTransition {
+pub(crate) enum OpacityTransition {
     /// Emit `BOUNDARY_OPAQUE` — the node starts shedding.
     GoOpaque,
     /// Emit `BOUNDARY_TRANSPARENT` — the node stops shedding.
@@ -288,7 +288,7 @@ enum OpacityTransition {
 /// **Pure** — the trend-adjusted [`OpacityState`] for a tick, given the current + previous fill and
 /// the already-`[0.4, 0.95]`-clamped threshold. A rising fill lowers the effective threshold
 /// (trend adaptation); a falling one does not.
-fn opacity_state_for(is_opaque: bool, fill_ratio: f32, prev_fill: f32, clamped_threshold: f32) -> OpacityState {
+pub(crate) fn opacity_state_for(is_opaque: bool, fill_ratio: f32, prev_fill: f32, clamped_threshold: f32) -> OpacityState {
     let trend = fill_ratio - prev_fill;
     let trend_factor = (trend.max(0.0) * 2.0).min(0.4);
     let eff = clamped_threshold * (1.0 - trend_factor);
@@ -299,7 +299,7 @@ fn opacity_state_for(is_opaque: bool, fill_ratio: f32, prev_fill: f32, clamped_t
 /// `fill_ratio >= 1.0` (an unconditional shed at a full channel); below full, a `false` gate holds
 /// the boundary transparent. Clearing requires fill to fall a full `hysteresis` below the effective
 /// threshold (anti-oscillation).
-fn opacity_transition(state: &OpacityState, gate_ok: bool, hysteresis: f32) -> OpacityTransition {
+pub(crate) fn opacity_transition(state: &OpacityState, gate_ok: bool, hysteresis: f32) -> OpacityTransition {
     if !state.is_opaque && state.fill_ratio >= state.effective_threshold {
         if gate_ok || state.fill_ratio >= 1.0 {
             OpacityTransition::GoOpaque
@@ -318,7 +318,7 @@ fn opacity_transition(state: &OpacityState, gate_ok: bool, hysteresis: f32) -> O
 /// held — a boundary that must shed sheds now, whatever it did a moment ago — and `Hold` is not an
 /// action. The release is what flaps (opaque → transparent → opaque on a fill that hovers); the
 /// hysteresis makes it rarer, the spacing bounds its rate outright.
-fn spaced_transition(
+pub(crate) fn spaced_transition(
     proposed: OpacityTransition,
     spec: &ControlSpec,
     last_action_ms: Option<u64>,

@@ -29,6 +29,10 @@
 //! [`Decision`] variant rather than a flag, so a caller cannot forget to tell them apart.
 
 pub mod ledger;
+/// Replay scenario C — the interacting-governors sweep (item 6 PR 6). A test harness, so it
+/// exists only in test builds; the governors' pure decisions it reuses are the shipped ones.
+#[cfg(test)]
+pub(crate) mod scenario_c;
 
 use crate::ViewConfidence;
 

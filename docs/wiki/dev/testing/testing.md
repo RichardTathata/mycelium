@@ -223,6 +223,29 @@ mandate still commits; the same state still snapshots identically). A gate that 
 system that does nothing — scenario B's `a_current_mandate_still_commits` and the knowledge gate's positive
 controls exist for exactly that reason. Ledger: [history](../history.md) → *item 6 PRs 4–5*.
 
+## Replay scenario C — the interacting governors (item 6 PR 6, 2026-09-18)
+
+`src/control/scenario_c.rs` (test-only): the combined-feedback harness `docs/design/adaptive-stability.md` §5
+promised as *replay stage 6, built once, reusing the governors' pure decision functions*. Same shape as B — a
+schedule sweep (48 schedules × 2 profiles) with the invariants asserted after every step, a witness, and a size
+assertion — over the **shipped** decisions: `TuningGovernor::gate_at`/`acted_at`, `opacity_state_for` →
+`opacity_transition` → `spaced_transition`, `membership_governor::{decide, classify}` under `control::decide`,
+with their real spacing, settling and hysteresis. What is *modelled* is the plant that couples them: this node's
+share of a fleet inbound, halved while opaque, minus what the writer drains; an advisor recommending a writer
+depth from group size and load. The objectives are numbers — two **releases** never closer than 300 ms, two
+knob changes never closer than 200 ms, at rest 15 ticks after the last disturbance, no routine scale-down on a
+stale view under an enforcing profile — so the witness (every breaker off) can violate them, and does: release
+flaps and knob chatter.
+
+**Three lessons.** *State the objective on what the breaker governs:* the first sweep said "any two transitions"
+and failed under the shipped breakers on a release re-shed 100 ms later — the decisive rule working, not a
+flap. *A first-only violation report masks:* the witness said "no flap" while the same schedules chattered.
+*A plant that is not caught is a finding:* removing the hysteresis in shipped code did **not** fail the sweep —
+the 1 s release spacing alone bounds the release rate, so a lost hysteresis only changes how often a proposal is
+held; recorded as what the sweep does not prove. The tuning plant (no spacing) was caught at once. **Not
+shown:** the ADR's sharper sentence — loops oscillating together while each is stable alone — the witness
+removes every breaker at once. Ledger: [history](../history.md) → *item 6 PR 6*.
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy
