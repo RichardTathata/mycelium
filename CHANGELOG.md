@@ -9,6 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the release gate's choreography over the transport (v3 item 2 PR 9)
+
+- **`GossipAgent::connected_peers()`** — the peers this node holds a *connection* to (the transport's own
+  record), beside `peers()` (what membership believes). Exists for the federation gate's *traces* leg.
+- **`GatewayPool::retire(id)`** / **`FederationClient::retire_gateway(id)`** — a replaced or dead gateway is
+  removed from the pool and never admitted again. The pool keeps no health memory by design (a silent gateway
+  is a per-call outcome), so without this an at-most-once call pays a dead gateway once per call.
+- **The two-mesh harness** (`lib_tests.rs`): `assert_never_merged` now scans `consensus/` too, over keys *and*
+  values, and adds a connection-table leg over `connected_peers()`; its non-vacuity control checks the new leg.
+- **Test:** `lib_tests::federation_transport::the_release_gates_choreography_over_the_transport` — every node
+  under the enforced domain profile (TLS, SWIM off), two meshes under two auto-generated CAs: discover, invoke,
+  consensus in each mesh, lose the only gateway (explicit `DeliveryUnknown`s, discovery cannot refresh, link
+  `Down`), keep working locally (gossip and consensus on both sides), change the grant mid-partition, bring up a
+  replacement gateway, reconnect (refused until discovery refreshes; the changed grant is what it sees), retire
+  the dead gateway, honour authority issued before the partition to its expiry and not past it, and assert
+  non-merger from the tables, the consensus namespace and the connection tables — before, during and after.
+  Plus a node holding B's CA that cannot join A. The gate's *in-process* form is met; the Docker two-mesh suite
+  and a signed catalogue reply remain (record §13).
+
 ### Added — the federation transport, first arm (v3 item 2 PR 8)
 
 - **`mycelium::federation::edge`** (`tls`): `PresentedCall` — the `FederatedCaller` and its signature as one

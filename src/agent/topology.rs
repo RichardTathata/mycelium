@@ -18,6 +18,15 @@ impl GossipAgent {
         self.peers.pin().iter().map(|(k, _)| k.clone()).collect()
     }
 
+    /// The peers this node currently holds a **connection** to — the transport's own record,
+    /// as opposed to [`peers`](Self::peers), which is what membership *believes*. The two agree
+    /// at steady state; the reason both exist is the federation release gate (item 2 PR 9),
+    /// which has to prove non-merger from *traces* as well as tables: a foreign node here is one
+    /// bytes actually flowed to, whatever the membership table says.
+    pub fn connected_peers(&self) -> Vec<crate::node_id::NodeId> {
+        self.peer_writers.pin().iter().map(|(k, _)| k.clone()).collect()
+    }
+
     /// Pin a **direct forwarding route** to `peer`.
     ///
     /// The forwarding target set de-pins non-active peers (the seed-scalability design), so an

@@ -335,6 +335,28 @@ locally, change permissions mid-partition, reconnect) are PR 9; the catalogue re
 the test's edge is plain HTTP (production: behind `gateway_tls`). Log:
 [`.log/2026-09-18-item2-pr8-federation-transport.md`](.log/2026-09-18-item2-pr8-federation-transport.md).
 
+## v3 contracts axis — item 2 PR 9: the release gate's choreography — 2026-09-18 (unreleased)
+
+**The gate is met in its in-process form.** `lib_tests::federation_transport::the_release_gates_choreography_over_the_transport`:
+every node under the enforced profile (§9: TLS, SWIM off), two meshes under two auto-generated CAs (two
+`auto_cert_dir`s), the provider on a plain node so the gateways are replaceable. Discover, invoke, a consensus
+round in each mesh; lose the only gateway — at-most-once and repeatable both `DeliveryUnknown` (the latter having
+tried every gateway: *unknown, not failed*), discovery cannot refresh, link `Down`; keep working locally —
+gossip and consensus on both sides; change the grant while no link exists; bring up the replacement gateway;
+reconnect — refused until discovery refreshes, and the refreshed catalogue *is* the changed grant; repeatable
+fails over past the dead gateway, at-most-once pays it once (**finding:** the pool keeps no health memory by
+PR 5's design, so retirement is explicit — `GatewayPool::retire` / `FederationClient::retire_gateway`, new);
+a credential issued before the partition is honoured, an expired one refused (*issued authority lasts only to
+its expiry*). **Three legs, before, during and after:** the membership tables; the `cap/ grp/ sys/ consensus/`
+namespaces over keys and values, plus explicit `consensus_get` cross-checks; and the **connection tables** —
+`GossipAgent::connected_peers` (new, the transport's own record beside `peers`, membership's belief) — the
+*traces* leg, with the harness's non-vacuity test extended to show a merged pair in that table. A rogue node
+holding B's CA cannot join A (timing-bounded; gw2's join is the positive control). **Three findings** recorded in
+testing.md: TLS formation needs fast pings; a secure gateway waits for the provider's caller-context marker,
+which gossips like the capability; an export needs a skill behind it. **Not claimed:** process isolation and a
+real network severance (the Docker suite, PR 10), a signed catalogue reply, SDK verbs. Log:
+[`.log/2026-09-18-item2-pr9-gate-choreography.md`](.log/2026-09-18-item2-pr9-gate-choreography.md).
+
 ## v3 contracts axis — item 5: scoped mandates, PRs 1–5 + D4 + two follow-ons — 2026-09-17/18 (unreleased, #244, #256–#259, #261–#263)
 
 Record `docs/design/scoped-mandates.md` (the ADR, #244; log

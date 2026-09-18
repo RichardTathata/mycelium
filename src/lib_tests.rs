@@ -366,23 +366,45 @@ fn assert_never_merged(a: &[&GossipAgent], b: &[&GossipAgent]) {
             }
         }
 
-        // 2. The native namespaces: no key naming a foreign node. Foreign state in `cap/`, `grp/`
-        //    or `sys/` is indistinguishable from local state once it is there.
+        // 2. The native namespaces and consensus state: no key *or value* naming a foreign node.
+        //    Foreign state in `cap/`, `grp/` or `sys/` is indistinguishable from local state once
+        //    it is there; a foreign node in `consensus/` (ballots, trust slices, committed
+        //    values) is one that voted (PR 9: the gate's *consensus state* leg).
         for (mine, theirs, label) in
             [(a, &b_ids, "A"), (b, &a_ids, "B")]
         {
             for node in mine {
-                for prefix in ["cap/", "grp/", "sys/"] {
-                    for (key, _) in node.kv().scan_prefix(prefix) {
+                for prefix in ["cap/", "grp/", "sys/", "consensus/"] {
+                    for (key, value) in node.kv().scan_prefix(prefix) {
+                        let value = String::from_utf8_lossy(&value);
                         for foreign in theirs {
                             assert!(
-                                !key.contains(foreign.as_str()),
+                                !key.contains(foreign.as_str()) && !value.contains(foreign.as_str()),
                                 "domain {label} node {} holds {key}, which names foreign node \
-                                 {foreign} — foreign state entered the medium",
+                                 {foreign} (in the key or the value) — foreign state entered the medium",
                                 node.node_id()
                             );
                         }
                     }
+                }
+            }
+        }
+
+        // 3. The transport's own record (PR 9: the gate's *traces* leg): every connection a node
+        //    holds is to a node of its own mesh. Distinct from leg 1 — membership is what a node
+        //    believes, `connected_peers` is where its bytes actually went.
+        for (mine, theirs, label) in
+            [(a, &b_ids, "A"), (b, &a_ids, "B")]
+        {
+            for node in mine {
+                let connected: Vec<String> = node.connected_peers().iter().map(|p| p.to_string()).collect();
+                for foreign in theirs {
+                    assert!(
+                        !connected.contains(foreign),
+                        "domain {label} node {} holds a connection to foreign node {foreign} — \
+                         bytes flowed between the meshes",
+                        node.node_id()
+                    );
                 }
             }
         }
@@ -421,6 +443,13 @@ async fn two_meshes_never_learn_each_other() {
     a.start().await.unwrap();
     b.start().await.unwrap();
     poll_until(|| !a.peers().is_empty() && !b.peers().is_empty(), 3_000).await;
+    // Positive control for leg 3 (PR 9): a merged pair shows up in the *connection* table too,
+    // so the traces leg is checking a record that a merge actually writes.
+    poll_until(|| a.connected_peers().contains(b.node_id()) || b.connected_peers().contains(a.node_id()), 3_000).await;
+    assert!(
+        a.connected_peers().contains(b.node_id()) || b.connected_peers().contains(a.node_id()),
+        "a merged pair must hold a connection between the halves, or leg 3 checks nothing"
+    );
 
     let merged = TwoMeshes { a: vec![a], b: vec![b] };
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -6481,5 +6510,256 @@ mod federation_transport {
 
         bare.shutdown().await;
         a0.shutdown().await;
+    }
+
+    // ── The release gate's choreography (item 2 PR 9) ─────────────────────────────────────
+    //
+    // The record's §13 gate, run over the PR 8 transport: discover, invoke, lose a gateway, sever
+    // every link, keep working locally, change permissions mid-partition, reconnect — and prove
+    // from membership tables, consensus state and traces that the meshes never merged. Every node
+    // runs the **enforced domain profile** (§9: TLS, SWIM off), and the two meshes have two
+    // different auto-generated CAs, which is what "independently admitted" reduces to in one
+    // process.
+
+    /// One enforced-profile node: TLS under `cert_dir` (a mesh shares one; two meshes never do),
+    /// SWIM off, bootstrapped to `bootstrap`, optionally a gateway with the A2A + federation edges.
+    async fn enforced_node(
+        port: u16,
+        cert_dir: &std::path::Path,
+        bootstrap: Vec<NodeId>,
+        gateway: Option<(u16, Arc<FederationEdge>)>,
+    ) -> GossipAgent {
+        let id = NodeId::new("127.0.0.1", port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = bootstrap;
+        cfg.health_check_max_jitter_ms = 50;
+        // As the WS1 TLS test: peer registration happens on Ping receipt, so fast pings and a
+        // short reconnect backoff keep formation inside the poll window under TLS.
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 1;
+        cfg.domain_profile = DomainProfile::Enforced;
+        cfg.swim_failure_detector = false;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.to_path_buf(), ..TlsConfig::default() });
+        let a = match gateway {
+            Some((http_port, edge)) => {
+                cfg.http_port = Some(http_port);
+                GossipAgent::new(id, cfg).with_a2a().with_federation_edge(edge)
+            }
+            None => GossipAgent::new(id, cfg),
+        };
+        a.start().await.unwrap();
+        a
+    }
+
+    async fn commits(node: &GossipAgent, slot: &str, value: &'static [u8]) {
+        match node.consensus().cluster_propose(slot, Bytes::from_static(value), ConsensusConfig::default()).await {
+            ConsensusResult::Committed { .. } => {}
+            other => panic!("{} could not commit {slot}: {other:?}", node.node_id()),
+        }
+    }
+
+    /// **The release gate, in one process.** What it proves and what it does not is spelled out in
+    /// `docs/design/federated-domains.md` §13 and the testing page; the short form: two meshes
+    /// under separate CA roots, a call crossing between them, one gateway lost and replaced, every
+    /// link severed and both meshes still serving locally (KV and consensus), a grant changed
+    /// while no link existed and visible on reconnect, authority already issued honoured to its
+    /// expiry and not past it, and non-merger asserted from the tables, the consensus namespace
+    /// and the connection tables — before, during and after.
+    #[tokio::test]
+    async fn the_release_gates_choreography_over_the_transport() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(13);
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami", "demo/secret"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy::default(),
+        ));
+
+        // Two CAs: one per mesh. Everything else about the meshes is symmetric.
+        let tag = alloc_port();
+        let ca_a = std::env::temp_dir().join(format!("fed9-{tag}-alpha"));
+        let ca_b = std::env::temp_dir().join(format!("fed9-{tag}-beta"));
+        let _ = std::fs::remove_dir_all(&ca_a);
+        let _ = std::fs::remove_dir_all(&ca_b);
+
+        // Domain A: a1 (the provider), a2, gw1 (gateway). gw2's ports are allocated now — it is
+        // the replacement that comes up on reconnect, and the client must know it from the start
+        // (≥ 2 replaceable gateways, §10).
+        let (pa1, pa2, pg1, pg2) = (alloc_port(), alloc_port(), alloc_port(), alloc_port());
+        let (http1, http2) = (alloc_port(), alloc_port());
+        let a_ids: Vec<NodeId> = [pa1, pa2, pg1].iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+        let others = |me: u16, all: &[NodeId]| -> Vec<NodeId> {
+            let me = NodeId::new("127.0.0.1", me).unwrap();
+            all.iter().filter(|n| **n != me).cloned().collect()
+        };
+        let a1 = Arc::new(enforced_node(pa1, &ca_a, others(pa1, &a_ids), None).await);
+        let a2 = enforced_node(pa2, &ca_a, others(pa2, &a_ids), None).await;
+        let gw1 = enforced_node(pg1, &ca_a, others(pg1, &a_ids), Some((http1, Arc::clone(&edge)))).await;
+
+        // Domain B: b1, b2.
+        let (pb1, pb2) = (alloc_port(), alloc_port());
+        let b_ids: Vec<NodeId> = [pb1, pb2].iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+        let b1 = enforced_node(pb1, &ca_b, others(pb1, &b_ids), None).await;
+        let b2 = enforced_node(pb2, &ca_b, others(pb2, &b_ids), None).await;
+
+        // Listeners on every node (consensus needs them everywhere), then a structural poll that
+        // each mesh formed — "they did not merge" is vacuous if nothing connected to anything.
+        let mut listeners = vec![
+            a1.consensus().start_consensus_listener(ConsensusConfig::default()),
+            a2.consensus().start_consensus_listener(ConsensusConfig::default()),
+            gw1.consensus().start_consensus_listener(ConsensusConfig::default()),
+            b1.consensus().start_consensus_listener(ConsensusConfig::default()),
+            b2.consensus().start_consensus_listener(ConsensusConfig::default()),
+        ];
+        poll_until(|| a1.peers().len() == 2 && a2.peers().len() == 2 && gw1.peers().len() == 2 && b1.peers().len() == 1 && b2.peers().len() == 1, 8_000).await;
+        assert_eq!((a1.peers().len(), b1.peers().len()), (2, 1), "both meshes formed under their own CA");
+
+        // The provider lives on a1, not on a gateway: gateways route, and are replaceable.
+        let calls = Arc::new(AtomicUsize::new(0));
+        // Both exported skills live on a1; the same responder answers either (it reports the
+        // principal it was told). `demo/secret` is exported but not yet granted to beta.
+        let _reg = a1.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        let _reg_secret = a1.capabilities().advertise_capability(
+            crate::capability::Capability::new("demo", "secret"), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&a1), Arc::clone(&calls));
+        let cap_key = format!("cap/{}/demo/whoami", a1.node_id());
+        let cap_key_secret = format!("cap/{}/demo/secret", a1.node_id());
+        // The gateway dispatches only to a provider whose caller-context marker it has seen
+        // (item 7's secure profile); the capabilities and the marker all reach it by gossip.
+        let marker_key = format!("sys/caller-context/{}", a1.node_id());
+        let gateway_ready = |gw: &GossipAgent| {
+            gw.kv().get(&cap_key).is_some() && gw.kv().get(&cap_key_secret).is_some() && gw.kv().get(&marker_key).is_some()
+        };
+        poll_until(|| gateway_ready(&gw1), 8_000).await;
+        assert!(gateway_ready(&gw1), "the gateway learned the provider's capabilities and caller-context marker through its own mesh");
+
+        let client = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
+            vec![
+                GatewayEndpoint { id: "gw-1".into(), base_url: format!("http://127.0.0.1:{http1}") },
+                GatewayEndpoint { id: "gw-2".into(), base_url: format!("http://127.0.0.1:{http2}") },
+            ],
+            2, Duration::from_secs(30),
+        );
+
+        // ── 1. Discover, invoke. ──────────────────────────────────────────────────────────────
+        assert_eq!(client.connect().await.unwrap(), vec!["demo/whoami".to_string()]);
+        let reply = client.call("demo/whoami", "?", Repeatability::Repeatable).await.expect("call via gw-1");
+        assert_eq!(reply, crate::federation_principal("beta.example", "svc/billing"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // ── 2. Consensus in each mesh, so the consensus-state leg has something to check. ─────
+        commits(&a1, "fed/alpha", b"alpha-1").await;
+        commits(&b1, "fed/beta", b"beta-1").await;
+        poll_until(|| gw1.consensus().consensus_get("fed/alpha").is_some() && b2.consensus().consensus_get("fed/beta").is_some(), 5_000).await;
+        for n in [&b1, &b2] {
+            assert!(n.consensus().consensus_get("fed/alpha").is_none(), "{} learned domain A's commit", n.node_id());
+        }
+        for n in [a1.as_ref(), &a2, &gw1] {
+            assert!(n.consensus().consensus_get("fed/beta").is_none(), "{} learned domain B's commit", n.node_id());
+        }
+
+        // ── 3. Never merged, at steady state with bytes crossing. ─────────────────────────────
+        assert_never_merged(&[a1.as_ref(), &a2, &gw1], &[&b1, &b2]);
+
+        // ── 4. Lose the gateway — with one gateway up, that severs every link. ────────────────
+        listeners.remove(2);
+        gw1.shutdown().await;
+        match client.call("demo/whoami", "?", Repeatability::AtMostOnce).await {
+            Err(ClientError::Outcome(CallOutcome::DeliveryUnknown { attempted_via, .. })) => assert_eq!(attempted_via, vec!["gw-1".to_string()]),
+            other => panic!("at-most-once through a lost gateway must be DeliveryUnknown, got {other:?}"),
+        }
+        match client.call("demo/whoami", "?", Repeatability::Repeatable).await {
+            Err(ClientError::Outcome(CallOutcome::DeliveryUnknown { attempted_via, reason })) => {
+                assert_eq!(attempted_via, vec!["gw-1".to_string(), "gw-2".to_string()]);
+                assert!(reason.contains("no further gateway available"), "{reason}");
+            }
+            other => panic!("repeatable with every gateway silent must still be Unknown, not failed, got {other:?}"),
+        }
+        assert!(client.connect().await.is_err(), "discovery cannot refresh with no gateway");
+        assert_eq!(client.link_state(), LinkState::Down);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "nothing reached the provider through a lost gateway");
+
+        // ── 5. Keep working locally, on both sides. ───────────────────────────────────────────
+        let _ = a1.kv().set("local/alpha", Bytes::from_static(b"still here"));
+        let _ = b1.kv().set("local/beta", Bytes::from_static(b"still here"));
+        poll_until(|| a2.kv().get("local/alpha").is_some() && b2.kv().get("local/beta").is_some(), 5_000).await;
+        assert!(a2.kv().get("local/alpha").is_some() && b2.kv().get("local/beta").is_some(), "gossip within each mesh continues with no link");
+        commits(&a2, "fed/alpha-partitioned", b"alpha-2").await;
+        commits(&b2, "fed/beta-partitioned", b"beta-2").await;
+
+        // ── 6. Change permissions mid-partition; note authority already issued. ──────────────
+        edge.set_policy(DomainPolicy {
+            domain: alpha.clone(),
+            revision: 2,
+            grants: vec![(beta.clone(), "demo/whoami".into()), (beta.clone(), "demo/secret".into())],
+        });
+        let issued_before_reconnect = cred(&beta, "demo/whoami", &beta_sk);
+
+        // ── 7. Reconnect: the replacement gateway comes up in domain A. ──────────────────────
+        let gw2 = enforced_node(pg2, &ca_a, vec![a1.node_id().clone(), a2.node_id().clone()], Some((http2, Arc::clone(&edge)))).await;
+        listeners.push(gw2.consensus().start_consensus_listener(ConsensusConfig::default()));
+        poll_until(|| gw2.peers().len() == 2 && gateway_ready(&gw2), 8_000).await;
+        assert!(gateway_ready(&gw2), "the replacement gateway learned the provider through its mesh");
+
+        // Reconnected is not ready: no call until discovery refreshes.
+        assert!(matches!(client.call("demo/whoami", "?", Repeatability::Repeatable).await, Err(ClientError::Link(LinkRefusal::Down { .. }))));
+        let exports = client.connect().await.expect("catalogue via gw-2");
+        assert_eq!(exports, vec!["demo/whoami".to_string(), "demo/secret".to_string()], "the grant changed mid-partition is what discovery now sees");
+        assert_eq!(client.link_state(), LinkState::Ready);
+
+        // The newly granted export works — repeatable fails over past the dead gw-1 …
+        let reply = client.call("demo/secret", "?", Repeatability::Repeatable).await.expect("call via gw-2");
+        assert_eq!(reply, crate::federation_principal("beta.example", "svc/billing"));
+        // … but at-most-once pays the dead gateway once per call, because the pool keeps no health
+        // memory (PR 5, by design). Retiring the replaced gateway is the operator's move (§10).
+        assert!(matches!(client.call("demo/secret", "?", Repeatability::AtMostOnce).await, Err(ClientError::Outcome(CallOutcome::DeliveryUnknown { .. }))));
+        assert!(client.retire_gateway("gw-1"));
+        assert!(client.call("demo/secret", "?", Repeatability::AtMostOnce).await.is_ok());
+
+        // Authority issued before the partition is honoured to its expiry and not past it.
+        let raw = reqwest::Client::new();
+        let a2a2 = format!("http://127.0.0.1:{http2}/a2a");
+        let r = raw.post(&a2a2).header(HEADER_FEDERATED_CALL, issued_before_reconnect.to_header_value()).json(&task_body("demo/whoami")).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert!(v.get("error").is_none(), "a credential issued before the partition, still inside its lifetime, is accepted: {v}");
+        let now = now_ms();
+        let expired = PresentedCall::sign(
+            &FederatedCaller { origin_domain: beta.clone(), principal: "svc/billing".into(), export: "demo/whoami".into(), issued_at_ms: now - 120_000, expires_at_ms: now - 60_000 },
+            &beta_sk,
+        );
+        let r = raw.post(&a2a2).header(HEADER_FEDERATED_CALL, expired.to_header_value()).json(&task_body("demo/whoami")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "issued authority lasts only to its stated expiry — nothing is silently extended");
+
+        // ── 8. Never merged, after the whole cycle — tables, consensus namespace, connections. ─
+        commits(&a1, "fed/alpha-after", b"alpha-3").await;
+        poll_until(|| gw2.consensus().consensus_get("fed/alpha-after").is_some(), 5_000).await;
+        assert_never_merged(&[a1.as_ref(), &a2, &gw2], &[&b1, &b2]);
+        for n in [&b1, &b2] {
+            assert!(n.consensus().consensus_get("fed/alpha-after").is_none() && n.consensus().consensus_get("fed/alpha").is_none());
+        }
+        assert_eq!(gw2.peers().len(), 2, "the replacement gateway peers with its own mesh only");
+
+        // ── 9. A plant on admission itself: a node holding B's CA cannot join A. ─────────────
+        // Timing-bounded negative (it asserts something did *not* happen within a window), kept
+        // because the two-CA claim is the one this whole test rests on; the positive control is
+        // step 0 — gw2, holding A's CA, joined A above.
+        let rogue = enforced_node(alloc_port(), &ca_b, vec![a1.node_id().clone()], None).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(rogue.peers().is_empty(), "a node admitted by B's CA joined A's mesh: {:?}", rogue.peers());
+        assert!(!a1.peers().contains(rogue.node_id()) && !a1.connected_peers().contains(rogue.node_id()));
+
+        drop(listeners);
+        rogue.shutdown().await;
+        for n in [&a2, &gw2, &b1, &b2] {
+            n.shutdown().await;
+        }
+        a1.shutdown().await;
+        let _ = std::fs::remove_dir_all(&ca_a);
+        let _ = std::fs::remove_dir_all(&ca_b);
     }
 }

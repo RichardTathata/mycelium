@@ -146,6 +146,20 @@ impl GatewayPool {
 
     /// In-flight calls for `partner` on `gateway_id` — for diagnostics and for the tests that pin
     /// the isolation property.
+    /// Retire a gateway: it is never admitted again, for any partner (item 2 PR 9). The operator's
+    /// half of *replaceable gateways* (§10) — a gateway that has been replaced is removed, not
+    /// remembered as slow. Returns whether it was in the pool.
+    ///
+    /// Without this, a dead gateway that stays listed is tried first by every call that reaches
+    /// it: repeatable calls pay one refused connection before failing over, and at-most-once calls
+    /// are `DeliveryUnknown` every time. The pool keeps no health memory by design (PR 5: a silent
+    /// gateway is a per-call outcome, not a state), so removal is explicit.
+    pub fn retire(&mut self, gateway_id: &str) -> bool {
+        let before = self.gateways.len();
+        self.gateways.retain(|g| g.id != gateway_id);
+        self.gateways.len() != before
+    }
+
     pub fn in_flight(&self, gateway_id: &str, partner: &DomainId) -> usize {
         self.gateways
             .iter()
@@ -206,6 +220,22 @@ mod tests {
 
     fn pool() -> GatewayPool {
         GatewayPool::new(["gw-1", "gw-2"], 2)
+    }
+
+    /// A retired gateway is never admitted again, for any partner; its slots go with it; a
+    /// release for it is harmless; retiring twice says so (item 2 PR 9).
+    #[test]
+    fn a_retired_gateway_is_never_admitted_again() {
+        let mut p = pool();
+        let beta = did("beta.example");
+        assert_eq!(p.admit(&beta, &[]).unwrap(), "gw-1");
+        assert!(p.retire("gw-1"));
+        assert!(!p.retire("gw-1"));
+        p.release("gw-1", &beta);
+        assert_eq!(p.admit(&beta, &[]).unwrap(), "gw-2");
+        assert_eq!(p.admit(&beta, &[]).unwrap(), "gw-2");
+        assert!(matches!(p.admit(&beta, &[]), Err(CallOutcome::NoCapacity { .. })));
+        assert_eq!(p.len(), 1);
     }
 
     // ── budgets ──────────────────────────────────────────────────────────────────────────────

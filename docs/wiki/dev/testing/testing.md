@@ -294,6 +294,42 @@ gateway test does not repeat it).
 policy change *mid-partition* (a revocation mid-session is exercised, a partition is not); the catalogue reply's
 integrity (unsigned in this arm).
 
+## The release gate's choreography (item 2 PR 9, 2026-09-18)
+
+`lib_tests::federation_transport::the_release_gates_choreography_over_the_transport`, same features as above.
+Every node runs the **enforced domain profile** (`DomainProfile::Enforced`: TLS, SWIM off) and the two meshes
+use two different `auto_cert_dir`s, so two auto-generated CAs — which is what "independently admitted" reduces
+to in one process. The provider lives on a plain node; the gateways only route, which is what makes one
+replaceable. Steps: discover, invoke, a consensus round in each mesh, lose the only gateway, keep working
+locally (gossip and consensus on both sides), change the grant mid-partition, bring up the replacement
+gateway (its ports allocated up front — the client must know ≥ 2 gateways from the start), reconnect, retire
+the dead gateway, present a credential issued before the partition and an expired one, then the harness's
+three legs (below), then a rogue node holding B's CA bootstrapped at A.
+
+The harness (`assert_never_merged`, now a free function over `&[&GossipAgent]`) has **three legs**: the
+membership tables; the `cap/ grp/ sys/ consensus/` namespaces over keys *and* values; and the **connection
+tables** (`GossipAgent::connected_peers`, the transport's own record of whom it wrote to — the *traces* leg).
+Its non-vacuity test (a deliberately merged pair must fail) now also checks the merged pair shows up in the
+connection table, so leg 3 is checking a record a merge actually writes. The choreography adds explicit
+`consensus_get` cross-checks of each mesh's slots on the other mesh's nodes, because the generic namespace
+scan only recognises node ids, not foreign slots.
+
+**Three things this test taught, so the next gateway test does not relearn them:**
+- **TLS formation needs fast pings.** Peer registration happens on Ping receipt; under TLS with default
+  intervals the meshes did not form inside an 8 s poll. `reconnect_backoff_secs = 1` and
+  `health_check_interval_secs = 1`, as the WS1 TLS test sets them.
+- **A secure-profile gateway dispatches only to a provider whose `sys/caller-context` marker it has seen**
+  (item 7), and the marker reaches it by gossip like the capability does. Poll for both before the first call;
+  the first draft polled only for the capability and got `-32021`.
+- **An export needs a skill behind it.** A grant added mid-partition is only callable if the provider
+  advertises that skill; the gateway answers `-32001 skill not found` otherwise. Not a federation refusal —
+  the test now advertises both exports and the pre-call poll checks both.
+
+**What it does not prove:** process isolation and a real network severance (the Docker suite's claim: here the
+severed link is a shut-down gateway, and the meshes share an address space); the catalogue reply's integrity;
+anything under the `sim` kernel (the choreography is wall-clock, with structural polls); the rogue-CA plant is a
+timing-bounded negative (1.5 s), with gw2's join as its positive control.
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy
