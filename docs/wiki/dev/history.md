@@ -22,6 +22,22 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — item 4 PR 4c: the provisioner against the rights ledger — 2026-09-18 (unreleased)
+
+The ledger's first live user (`docs/design/adaptive-stability.md` §9 row 4c), in `mycelium-wasm-host` on the
+public API only. `Provisioner::with_install_rights(ledger, holder, resource, signing_key)`: before an
+`Installing` reservation the round asks the ledger whether the node holds units for one more concurrent install
+(**a unit in flight is as consumed as one serving**), and refuses otherwise — counted on the provisioner and
+**recorded** in the ledger as `admission.rejected`, off the synchronous admission path, because
+`provision_round` must not block on a journal write; a busy ledger is a refusal, not a wait. The head goes into
+`rights/head/{holder}` as `PublishedRightsHead { head, signature }` on attach and after every refusal; unsigned
+means unproven (`verify_published_head` is `false` for it). **Decided:** the provisioner never allocates to
+itself — an unallocated node is refused every install, visibly; per-install rights and state transitions on the
+right are not modelled, consumption is the provisioner's own count against the units held. *Not shown:*
+revocation or expiry while an install is live (the next round refuses; the live install is not torn down).
+Lock-order table row 37 (`InstallRights::ledger`, `try_lock` on the admission path, never held with `hosted`).
+Log: [`.log/2026-09-18-item4-pr4c-install-rights.md`](.log/2026-09-18-item4-pr4c-install-rights.md).
+
 ## v3 contracts axis — item 1 PR 7: gateway/SDK receipt parity — 2026-09-18 (unreleased)
 
 The last PR of item 1 (`docs/design/contracts-receipts.md` §5, landed note). The two consensus-backed gateway

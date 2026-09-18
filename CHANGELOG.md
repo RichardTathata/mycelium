@@ -20,6 +20,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nominal wait (`tick(30000ms)`), so a trace shows where the loop chose to wait instead of a period that
   never elapsed. Pinned by `a_deferred_tick_records_the_deferral_then_resumes_the_period`.
 
+### Added — the provisioner against the rights ledger (item 4 PR 4c)
+
+- **`Provisioner::with_install_rights(ledger, holder, resource, signing_key)`** (`mycelium-wasm-host`, on
+  the public API only): the ledger's first live user. Before an `Installing` reservation the round asks
+  `may_admit(holder, resource, reserved + live + 1)` — a unit in flight is as consumed as one serving — and
+  refuses otherwise: counted (`rights_refusals`, metric
+  `mycelium_artifact_installs_refused_by_rights_total`) and **recorded** in the ledger as
+  `admission.rejected`, off the synchronous admission path. A busy ledger is a refusal, not a wait.
+- **`rights/head/{holder}`** is published on attach and after every refusal as
+  **`control::ledger::PublishedRightsHead { head, signature }`** (new, `serde_fixint`, `encode`/`decode`/
+  `is_signed`), signed with an operator-supplied Ed25519 key; `mycelium_wasm_host::verify_published_head`
+  says `false` for an unsigned head — unsigned means unproven.
+- The provisioner never allocates to itself: an unallocated node is refused every install, visibly. Without
+  `with_install_rights` nothing changes. Lock-order table row 37.
+
 ### Fixed — the seams check sees timer calls through a module alias (item 6 follow-on)
 
 - **`scripts/check-sim-seams.sh`** now counts `time::sleep|interval|timeout|Instant` in any file that imports

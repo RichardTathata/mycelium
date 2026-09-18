@@ -310,6 +310,36 @@ impl RightsHead {
     }
 }
 
+/// What actually enters the medium at `rights/head/{holder}` (item 4 PR 4c): the head and the
+/// holder's Ed25519 signature over [`RightsHead::canonical_bytes`] — **empty when the holder had no
+/// signing key**, in which case the head is a claim without proof and a reader must say so rather
+/// than treat absence as validity. Encoded with `serde_fixint`, the byte layer under every other
+/// signed document here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedRightsHead {
+    /// The claim.
+    pub head: RightsHead,
+    /// The signature over `head.canonical_bytes()`, or empty.
+    pub signature: Vec<u8>,
+}
+
+impl PublishedRightsHead {
+    /// The bytes written to the medium.
+    pub fn encode(&self) -> Vec<u8> {
+        serde_fixint::to_vec(self).unwrap_or_default()
+    }
+
+    /// Decode what a reader found at `rights/head/{holder}`; `None` on any malformation.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        serde_fixint::from_slice(bytes).ok()
+    }
+
+    /// Whether the holder signed at all. `false` means *unproven*, not *forged*.
+    pub fn is_signed(&self) -> bool {
+        !self.signature.is_empty()
+    }
+}
+
 /// The ledger: a journal and the view folded from it. **Single-owner** (`&mut self`); how it is
 /// shared between a governor and its actuator is PR 4's question, and this type adds no lock.
 pub struct RightsLedger {

@@ -54,7 +54,7 @@ pub use librarian::{
     LIBRARIAN_NS,
 };
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
-pub use provisioner::{Provisioner, SupervisionPolicy};
+pub use provisioner::{verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use resources::{ResourceProbe, SystemResourceProbe};
 pub use runtime::{
     cap_invoke_kind, ArtifactRuntime, BlobRuntime, InstallError, Installed, ProgressFn,
