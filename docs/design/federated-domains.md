@@ -196,11 +196,20 @@ Per §5's sequence, and gated in that order:
 | 5 | two-gateway operation, budgets, outcomes |
 | 6 | partition / reconnect, revocation, rotation |
 | 7 | example, SDKs, diagnostics, docs |
+| **8** *(2026-09-18)* | the transport's first arm: `federation/edge.rs` (the credential as one header on `/a2a`; authenticate at the auth layer, authorise in the handler; `GET /federation/catalog`), `federation/client.rs` (link → resolver → pool → HTTP), and the two-mesh test that re-runs PR 1's never-merged assertions *after* a call has crossed |
+| 9 | the gate's choreography over that transport: sever every link and keep working locally, change permissions mid-partition, reconnect; the *traces* leg of the proof; a signed catalogue reply |
 
 **Release gate** (§5): the two-mesh demonstration — discover, invoke, lose a gateway, sever every link, keep
 working locally, change permissions mid-partition, reconnect — and prove **from membership tables, consensus
 state and traces** that the meshes never merged. Not from a narrative: from the three places that would show it
 if they had.
+
+**Where the gate stands after PR 8.** Two of the three places are checked with bytes crossing: the membership
+tables and the native namespaces (`lib_tests.rs` → `a_federated_call_crosses_and_the_meshes_still_never_merge`,
+which also plants a forged, a tampered, an ungranted and a revoked credential and counts that none reached the
+provider). *Discover* and *invoke* are done; *lose a gateway* is done on the consumer side (a silent gateway is
+`DeliveryUnknown` or a failover by repeatability, over real connection refusals). Not done: the traces leg, and
+the partition choreography. The gate is not claimed.
 
 ## Appendix — anchors verified at adoption (2026-09-17)
 

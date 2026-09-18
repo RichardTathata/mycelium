@@ -9,6 +9,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the federation transport, first arm (v3 item 2 PR 8)
+
+- **`mycelium::federation::edge`** (`tls`): `PresentedCall` — the `FederatedCaller` and its signature as one
+  JSON header (`x-mycelium-federation-call`) on an ordinary A2A `tasks/send`; `FederationEdge` — this domain's
+  identity, exports, policy and trust bundle, with `authenticate` (signature, lifetime, expiry, skew; binds
+  nothing), `authorize` (the export binding and the policy grant) and `catalog_for` (the *filtered* list under
+  the reserved export `federation.catalog`); `set_policy` / `revoke` take effect on the next request.
+  `GossipAgent::with_federation_edge(edge)` (`gateway` + `tls`, before `start()`) serves
+  `GET /federation/catalog` and admits federated credentials on `/a2a`.
+- **`mycelium::federation::client`** (`gateway` + `tls`): `FederationClient` — `connect` fetches the catalogue
+  and brings the `PartnerLink` to `Ready`; `call(export, text, repeatability)` runs link → resolver → pool →
+  HTTP and returns the task's text, with every refusal one the contract already names (`ClientError::{Link,
+  Resolve, Outcome, Refused, Transport}`); a silent gateway is `DeliveryUnknown` for at-most-once and a failover
+  for repeatable; `disconnect` / `revoke` on this side.
+- **`verify_federated_credential`** (`federation::call`): the identity-only half of `verify_federated_call`,
+  for a verifier that learns *who* before it learns *what*.
+- **`federation_principal(origin, principal)`** → `federation:{origin}/{principal}`, what a provider's
+  `authorized_callers` sees for a federated caller.
+- **Gateway:** a presented federation credential that fails is refused (400 malformed, 401 untrusted / expired /
+  no edge attached), never anonymised; a bearer and a credential on one request is a 400;
+  `tasks/sendSubscribe` under a credential is `-32003` (federated calls are unary); an authenticated-but-refused
+  export is `-32003` with the refusal's reason. The anonymous and bearer paths on `/a2a` are unchanged.
+- **Test:** `lib_tests::federation_transport` — two meshes, a call that crosses, eight plants refused with no
+  dispatch, revocation mid-session, then the PR 1 never-merged assertions *after* bytes crossed. The release
+  gate's traces leg and partition choreography are not claimed (record §13).
+- **`mycelium_core::sim_seam::mono_instant()`** — an `Instant` to *store* (a public field whose age is read
+  through `mono_elapsed`), constructed by the seam so the static seams check has no `Instant::now` to count
+  outside it. Identical in both arms by design.
+
 ### Changed — the control profile reaches every governor; the shadow-mode rollout runbook (item 4 §7)
 
 - **`Legacy` is again exactly the pre-4b behaviour.** The tuning gate's spacing and settling and the opacity

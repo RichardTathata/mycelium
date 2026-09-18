@@ -211,7 +211,8 @@ pub mod capability;
 pub mod capability_config;
 pub mod mesh_manifest;
 /// Federation identity and policy objects (v3 item 2 — `docs/design/federated-domains.md`).
-/// Types and canonical signing bytes only: no transport, no discovery, no `federation/` KV prefix.
+/// The contract (types, canonical signing bytes) and, under `tls`, the transport's first arm (`edge`,
+/// `client`, item 2 PR 8); no `federation/` KV prefix.
 pub mod federation;
 /// The scoped-mandate contract (v3 item 5 — `docs/design/scoped-mandates.md`).
 /// The contract and the epoch check; the enforcement point inside a resource is a later PR.
@@ -253,7 +254,7 @@ pub use agent::{
     MeshEvent, RpcError, RpcRequest, RpcRequestRx, ScatterError, ScatterResult, SystemStats,
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
     CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,
-    legacy_token_principal, named_token_principal, node_principal, oidc_principal, positional_token_principal,
+    federation_principal, legacy_token_principal, named_token_principal, node_principal, oidc_principal, positional_token_principal,
     AckResult, CapabilitiesHandle, LogEntry,
     KvHandle, KvQuorumExt, MeshHandle, QuorumError, ServiceHandle, ShardError,
     SchemaError, SchemaHandle, SchemaPublishResult,

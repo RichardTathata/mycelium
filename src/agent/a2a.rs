@@ -294,6 +294,8 @@ async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse 
 async fn handle_tasks_send(
     state:  &A2aState,
     caller: Option<&ResolvedPrincipal>,
+    #[cfg(feature = "tls")]
+    federated: Option<&super::federation_http::FederatedIdentity>,
     id:     Option<Value>,
     params: &Value,
 ) -> Value {
@@ -305,6 +307,19 @@ async fn handle_tasks_send(
         .or_else(|| params.get("skill_id"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    // Item 2 PR 8: a federated caller was authenticated at the auth layer; the export it named is
+    // authorised here, now that the body has said which skill it is asking for. The credential
+    // binds *what*, not only *who* — a credential for one export refused for another (PR 4).
+    #[cfg(feature = "tls")]
+    if let Some(federated) = federated {
+        let Some(edge) = state.task_ctx.federation_edge.get() else {
+            return jsonrpc_error(id, -32003, "federation is not enabled at this gateway");
+        };
+        if let Err(refusal) = edge.authorize(&federated.presented, skill_id, crate::federation::edge::now_ms()) {
+            return jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}"));
+        }
+    }
     let message  = params.get("message").cloned().unwrap_or(Value::Null);
     let text     = text_from_message(&message);
 
@@ -507,15 +522,26 @@ pub(crate) async fn tasks_send_subscribe(
 pub(crate) async fn a2a_jsonrpc_full(
     State(state): State<A2aState>,
     caller:       Option<Extension<ResolvedPrincipal>>,
+    #[cfg(feature = "tls")]
+    federated:    Option<Extension<super::federation_http::FederatedIdentity>>,
     Json(body):   Json<Value>,
 ) -> axum::response::Response {
     // Item 7: inserted by the gateway's `/a2a` optional-auth layer (a bearer's principal, or
     // `anonymous`); a handler reached without it (a bare router in a unit test) dispatches with
     // no context and is refused by the secure profile.
     let caller = caller.map(|Extension(c)| c);
+    #[cfg(feature = "tls")]
+    let federated = federated.map(|Extension(f)| f);
     let id     = body.get("id").cloned();
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let params = body.get("params").cloned().unwrap_or(Value::Null);
+
+    // Item 2 PR 8: federated calls are unary (§5's "authenticated unary calls"). Streaming would
+    // need the credential re-checked per event; that is a revision of D5, not a silent extension.
+    #[cfg(feature = "tls")]
+    if federated.is_some() && method == "tasks/sendSubscribe" {
+        return Json(jsonrpc_error(id, -32003, "federated calls are unary: use tasks/send")).into_response();
+    }
 
     if method == "tasks/sendSubscribe" {
         let task_id  = params.get("id")
@@ -532,7 +558,14 @@ pub(crate) async fn a2a_jsonrpc_full(
     }
 
     let result: Value = match method.as_str() {
-        "tasks/send"   => handle_tasks_send(&state, caller.as_ref(), id.clone(), &params).await,
+        "tasks/send"   => handle_tasks_send(
+            &state,
+            caller.as_ref(),
+            #[cfg(feature = "tls")]
+            federated.as_ref(),
+            id.clone(),
+            &params,
+        ).await,
         "tasks/get"    => handle_tasks_get(&state, id.clone(), &params),
         "tasks/cancel" => handle_tasks_cancel(&state, id.clone(), &params),
         _              => jsonrpc_error(id, -32601, "method not found"),

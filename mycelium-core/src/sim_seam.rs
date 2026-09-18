@@ -137,6 +137,21 @@ pub fn mono_elapsed(at: &std::time::Instant) -> std::time::Duration {
     ))
 }
 
+/// An `Instant` to *store* — the kernel-owned replacement for `Instant::now()` at a site that keeps
+/// a real `Instant` in a public field (a `CatalogObservation::observed_at`, a peer's last-seen).
+///
+/// Deliberately identical in both arms: per [`mono_elapsed`], **what a replay must reproduce is
+/// the decision, not the representation** — the instant itself is never compared or read except
+/// through `mono_elapsed` / `mono_before` / `mono_span`, which are where the kernel supplies the
+/// interval. This function exists so the construction site is the seam's, not the caller's: the
+/// static check (`scripts/check-sim-seams.sh`) then sees no `Instant::now` outside this file, and
+/// the invariant *every read of an instant's age goes through the seam* is the one a reviewer has
+/// to check, at the read sites, rather than a count of constructions.
+#[inline]
+pub fn mono_instant() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// Has `a` not yet reached `b`? — the kernel-owned replacement for `a < b` on two `Instant`s.
 ///
 /// # Why a comparison needs a seam at all

@@ -166,7 +166,16 @@ apart (record §3): admission into a mesh · trust in a partner domain's identit
 The decisions that carry the boundary, each a checked thing rather than a sentence:
 
 - **D5 — the invocation edge *is* A2A.** No second protocol; `FederatedCaller` / `verify_federated_call`
-  (`federation/call.rs`) sign and verify the existing call shape.
+  (`federation/call.rs`) sign and verify the existing call shape. **On the wire (PR 8, 2026-09-18):** the
+  credential rides on an ordinary `tasks/send` to `/a2a` in the `x-mycelium-federation-call` header
+  (`federation/edge.rs`, `PresentedCall`). The gateway **authenticates at the auth layer and authorises in the
+  handler** — `FederationEdge::authenticate` (signature, lifetime, expiry, skew; binds nothing) before the body
+  is read, `FederationEdge::authorize` (the export binding and the policy grant) once the body has named the
+  skill. The provider is told `federation:{origin}/{principal}`, never the gateway. Two rules the HTTP layer adds
+  (`src/agent/federation_http.rs`): a presented credential that fails is **refused, never anonymised** (a revoked
+  partner must not become an anonymous caller), and a bearer plus a credential on one request is a 400.
+  Discovery is `GET /federation/catalog` under a credential for the reserved export `federation.catalog`, and
+  the reply is the *filtered* list — the grant, not the export list.
 - **D6 — reuse the cryptography, never the trust.** OIDC's primitives are borrowed; its issuers are not trusted.
   A `TrustBundle` (`federation.rs`) **decides which key** may sign a partner's descriptor or policy, so a
   self-signed descriptor is not authorised by being internally consistent. Rotation and revocation are first-class.
@@ -179,7 +188,14 @@ The decisions that carry the boundary, each a checked thing rather than a senten
 - **A gateway that goes silent is handled** (`GatewayPool`, `on_gateway_silent`); a `PartnerLink` has a
   `Refreshing` state because *reconnected is not ready*; revocation mid-partition is a first-class transition.
 
-**What is not built:** the transport. The two-mesh harness is scaffolding, `examples/federated_domains.rs`
-says so when it runs, and the record's release gate — *prove from membership tables, consensus state and traces
-that the meshes never merged* — cannot be met until there is a transport to sever. Ledger:
-[history](history.md) → *item 2*.
+**The transport's first arm is built (PR 8, 2026-09-18):** `federation/edge.rs` (provider side, attached with
+`GossipAgent::with_federation_edge`) and `federation/client.rs` (`FederationClient`: `PartnerLink` →
+`RemoteResolver` → `GatewayPool` → HTTP, the lock never held across the await). The PR 1 harness's
+`assert_never_merged` now runs **after a call has crossed** (`lib_tests.rs` →
+`a_federated_call_crosses_and_the_meshes_still_never_merge`), which is when it stops being trivially true: the
+membership and native-namespace legs of the release gate are met for the simplest topology. **What is still not
+built:** the *traces* leg of the gate, the choreography around it (sever every link and keep working locally,
+change permissions mid-partition, reconnect), a signed catalogue reply, TLS on the edge in the test (the edge is
+whatever the gateway serves — run it behind `gateway_tls`), and streaming (`tasks/sendSubscribe` under a
+credential is refused: federated calls are unary, §5). `examples/federated_domains.rs` still runs in one process
+and says so. Ledger: [history](history.md) → *item 2*.

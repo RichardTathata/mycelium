@@ -297,6 +297,35 @@ and the guide. **Not done, stated plainly:** the federation transport. The recor
 membership tables, consensus state and traces that the meshes never merged*) is not met, because there is no
 transport to sever. Wiki: [security](security.md) → *Federated domains*.
 
+## v3 contracts axis — item 2 PR 8: the federation transport, first arm — 2026-09-18 (unreleased)
+
+The sentence every item 2 page ended on — *no bytes cross a network* — retired for the simplest topology.
+`src/federation/edge.rs` (provider side): the credential's wire form `PresentedCall` (one JSON header,
+`x-mycelium-federation-call`, on an ordinary `tasks/send` to `/a2a` — D5 kept: no second protocol),
+`FederationEdge` attached with `GossipAgent::with_federation_edge`, and `GET /federation/catalog` under a
+credential for the reserved export `federation.catalog`, answering the *filtered* list. **Authenticate at the
+auth layer, authorise in the handler:** the header is read before the body, so `verify_federated_credential`
+(new in `call.rs`: signature, lifetime, expiry, skew — binds nothing) runs in the gateway's optional-auth layer
+and `verify_federated_call` (export binding + grant) runs once the body has named the skill. The provider is
+told `federation:{origin}/{principal}` (`federation_principal`, re-exported). Two rules the HTTP layer owns
+(`src/agent/federation_http.rs`): **present-and-refused is a refusal, never anonymous** — otherwise a revoked
+partner would quietly become an anonymous A2A caller — and two identities on one request is a 400.
+`src/federation/client.rs` (consumer side): `FederationClient` sequences `PartnerLink` → `RemoteResolver` →
+`GatewayPool` → HTTP, two microsecond critical sections around the await (lock-order rows 38–39); a silent
+gateway goes through `on_gateway_silent`, so at-most-once is `DeliveryUnknown` and repeatable fails over — over
+real connection refusals. **The test** (`lib_tests.rs::federation_transport`): two meshes, domain A's first node
+a gateway with the A2A and federation edges; B discovers (`["demo/whoami"]`, not the ungranted `demo/secret`),
+calls, and the provider answers with B's principal; eight plants at the gateway (wrong-export credential,
+ungranted, forged key, tampered field, malformed header, bearer+credential, streaming, call-credential-for-the-
+catalogue) each refused **with no dispatch** (a counter on the provider); revocation at the edge mid-session
+refuses the next call at the auth layer; then the PR 1 harness's `assert_never_merged` — lifted to a free
+function over borrowed nodes — runs *after* bytes crossed. Streaming under a credential is refused: federated
+calls are unary (§5), and extending D5 to `tasks/sendSubscribe` is a revision, not a silent extension. **Not
+claimed:** the release gate. Its traces leg and its partition choreography (sever every link, keep working
+locally, change permissions mid-partition, reconnect) are PR 9; the catalogue reply is unsigned in this arm;
+the test's edge is plain HTTP (production: behind `gateway_tls`). Log:
+[`.log/2026-09-18-item2-pr8-federation-transport.md`](.log/2026-09-18-item2-pr8-federation-transport.md).
+
 ## v3 contracts axis — item 5: scoped mandates, PRs 1–5 + D4 + two follow-ons — 2026-09-17/18 (unreleased, #244, #256–#259, #261–#263)
 
 Record `docs/design/scoped-mandates.md` (the ADR, #244; log

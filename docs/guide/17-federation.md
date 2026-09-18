@@ -155,7 +155,7 @@ bundles stay bilateral operator configuration.
 
 ### What exists today
 
-`mycelium::federation` — the contract, with no transport yet:
+`mycelium::federation` — the contract, and the first arm of its transport:
 
 | Module | What it decides |
 |---|---|
@@ -164,6 +164,36 @@ bundles stay bilateral operator configuration.
 | `federation::call` | the credential bound to *this call*, and the provider adapter that preserves `origin` |
 | `federation::gateway` | per-partner budgets, failover only for repeatable exports, `DeliveryUnknown` |
 | `federation::session` | the partition/reconnect state machine — work refused until discovery refreshes |
+| `federation::edge` (`tls`) | the provider side of the transport: the credential's wire form (`PresentedCall`, one header on `/a2a`), `FederationEdge` — authenticate at the auth layer, authorise in the handler — and the filtered catalogue on `GET /federation/catalog` |
+| `federation::client` (`gateway` + `tls`) | the consumer side: `FederationClient` drives link → resolver → pool → HTTP, and turns a silent gateway into `DeliveryUnknown` or a failover by repeatability |
+
+Serve federated calls from a node:
+
+```rust
+let edge = Arc::new(FederationEdge::new(
+    alpha,                                   // this domain
+    ["invoice.submit", "invoice.status"],    // exports = A2A skill ids
+    policy,                                  // who is granted what
+    TrustBundle::trusting([(beta, beta_key)]),
+    CallPolicy::default(),
+));
+let agent = GossipAgent::new(id, cfg).with_a2a().with_federation_edge(edge); // before start()
+```
+
+Call one from another domain:
+
+```rust
+let client = FederationClient::new(beta, "svc/billing", beta_signing_key, alpha,
+    vec![GatewayEndpoint { id: "gw-1".into(), base_url: "https://alpha-gw-1:8443".into() }],
+    /* slots per partner */ 4, /* catalogue freshness */ Duration::from_secs(60));
+let granted = client.connect().await?;                       // the catalogue is the grant
+let reply = client.call("invoice.submit", text, Repeatability::AtMostOnce).await?;
+```
+
+A call before `connect` is refused with no HTTP (`Link(Down)`); an export the catalogue never named is
+refused with no HTTP (`Resolve`); a credential the partner does not trust, or one minted for another
+export, is refused *at the partner's gateway* with no dispatch. The provider is handed
+`federation:beta.example/svc/billing` — never "the gateway".
 
 Run it:
 
@@ -175,10 +205,16 @@ The example walks the whole lifecycle and prints what each step decided *and why
 
 ### What does not exist yet
 
-**No federation transport.** No bytes cross a network; PRs 1–6 built the contract and PR 7 shows it
-working in one process. The invocation edge, when it arrives, **is A2A** (D5) with domain-bound
-origin credentials — not a second call protocol, because two invocation edges with different auth
-models is the drift v2.4.1 and v2.4.2 were spent removing.
+**The rest of the release gate.** PR 8 (2026-09-18) put the first bytes across: the two-mesh test in
+`src/lib_tests.rs` makes a federated call and then re-runs the PR 1 harness's never-merged assertions
+from the membership tables and the native namespaces. Still to build: the *traces* leg of that proof;
+the choreography around it (sever every link and keep working locally, change permissions
+mid-partition, reconnect); a signed catalogue reply; SDK verbs. The edge is plain HTTP in the test —
+in production it is whatever the gateway serves, so run it behind `gateway_tls`. Streaming under a
+credential is refused (federated calls are unary); `examples/federated_domains.rs` still runs the
+lifecycle in one process and says so. The invocation edge **is A2A** (D5) with domain-bound origin
+credentials — not a second call protocol, because two invocation edges with different auth models is
+the drift v2.4.1 and v2.4.2 were spent removing.
 
 **The release gate is not met.** The record asks for a two-mesh demonstration that proves *from
 membership tables, consensus state and traces* that the meshes never merged. `two_meshes_never_learn_each_other`

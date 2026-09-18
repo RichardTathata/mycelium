@@ -173,6 +173,44 @@ impl FederatedCaller {
 /// 4. **when** — is it inside a window we will honour, by our clock and our ceiling?
 /// 5. **may they** — does our policy grant it?
 ///
+/// Authentication only: the credential is signed by the partner's trusted key and is inside its
+/// lifetime (item 2 PR 8). **This proves who asked and nothing else** — it binds no export and
+/// consults no policy. It exists because the transport learns *who* before it learns *what*: the
+/// gateway's auth layer reads the credential from a header while the export is still in the
+/// request body, so it authenticates here and defers to [`verify_federated_call`] once it has the
+/// requested export in hand. An identity that passes this and is then used for an export it does
+/// not name is refused there, not admitted here.
+///
+/// The checks and their order are the same ones [`verify_federated_call`] runs, minus the export
+/// binding and the policy grant; the refusals mean the same thing.
+#[cfg(feature = "tls")]
+pub fn verify_federated_credential(
+    credential: &FederatedCaller,
+    signature: &[u8],
+    bundle: &TrustBundle,
+    call_policy: &CallPolicy,
+    now_ms: u64,
+) -> Result<(), CallRefusal> {
+    let Some(key) = bundle.key_for(&credential.origin_domain) else {
+        return Err(CallRefusal::UnknownDomain);
+    };
+    if !mycelium_core::tls::verify_bytes(key, &credential.canonical_bytes(), signature) {
+        return Err(CallRefusal::BadSignature);
+    }
+    let claimed = credential.claimed_lifetime();
+    if claimed > call_policy.max_lifetime {
+        return Err(CallRefusal::LifetimeTooLong { claimed, max: call_policy.max_lifetime });
+    }
+    if now_ms > credential.expires_at_ms {
+        return Err(CallRefusal::Expired { expires_at_ms: credential.expires_at_ms, now_ms });
+    }
+    let skew = call_policy.skew_tolerance.as_millis() as u64;
+    if credential.issued_at_ms > now_ms.saturating_add(skew) {
+        return Err(CallRefusal::NotYetValid { issued_at_ms: credential.issued_at_ms, now_ms });
+    }
+    Ok(())
+}
+
 /// Authentication strictly before authorisation, and both strictly before the call. A partner that
 /// authenticates has proved who it is and nothing else; step 5 is where this domain decides.
 #[cfg(feature = "tls")]
