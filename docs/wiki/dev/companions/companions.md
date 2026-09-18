@@ -92,6 +92,15 @@ via wasm-host).
   supplied, so HLC adjacency can never be manufactured into causation (record §6). The adapter needed
   `mycelium::hlc` public (it was `pub(crate)`; re-exported additively, since `mycelium-core` already commits
   to it) — a companion handing out packed HLCs had no public way to read them.
+- **`mycelium-commitment/`** — the **v3 commitment companion** (§6.9 CN1, 2026-09-18): the contract net as
+  five records, each with a mechanism the substrate already has — announce (a declarer-owned head `cn/{req}`),
+  offer (`append`), award (the tuple-space election's lowest-participant rule, written with `set_with_receipt`
+  under `cn/{req}/award` — **a receipt, never a KV write alone**), report (`append`; outcome or *unknown*), assess
+  (`append`, Ed25519-signed by whoever has standing; unsigned = unproven). One award per requirement — a second is
+  *refused*, never overwritten; no offers is a visible state; nobody assigns another participant's obligation.
+  The gallery entry `examples/redistribution_cn.rs` re-runs the redistribution workload the tuple-space and
+  blackboard examples run, so the three coordination models meet on one workload; CI job `commitment`. Not yet:
+  CN2 (replay + double-award witness), CN3 (mandate epoch at award).
 - **`mycelium-effects/`** — the **v3 effects companion** (item 1 PR 5, 2026-09-18): the *destination-commit*
   receipt as a reference destination. The substrate provides three of item 1's four receipts and never the fourth,
   because only the caller's resource can say whether an effect happened there. `EffectDestination` commits the

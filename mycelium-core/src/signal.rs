@@ -911,6 +911,12 @@ pub mod kv_ns {
     /// delivery hint, not a record.
     pub const LOG_WIKI: &str = "log/wiki/";
 
+    /// The commitment companion's prefix (v3 §6.9, `mycelium-commitment`): `cn/{requirement}` is the
+    /// announcement head and `cn/{requirement}/award` the one award, written with a receipt; offers,
+    /// reports and assessments are `append` streams under `log/cn/{requirement}/…`. The medium
+    /// carries heads and terms only.
+    pub const CN: &str = "cn/";
+
     /// **Reserved** (v3 item 4, `docs/design/adaptive-stability.md` §4, §11).
     ///
     /// Key: `rights/head/{holder}`. Value: a bounded, signed **head** — a holder's claim of the

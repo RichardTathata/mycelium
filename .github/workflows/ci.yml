@@ -179,6 +179,21 @@ jobs:
       - run: cargo clippy -p mycelium-effects --all-targets -- -D warnings
       - run: cargo clippy -p mycelium-effects --features tuple-space --all-targets -- -D warnings
 
+  commitment:
+    # v3 §6.9 CN1 — the commitment companion: the contract net as five records on the public API.
+    # Its gallery entry re-runs the redistribution workload as a contract net and is the CN1 gate.
+    name: Commitment companion (v3 CN1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci-retest.sh -p mycelium-commitment
+      - run: cargo clippy -p mycelium-commitment --all-targets -- -D warnings
+      - run: cargo run -p mycelium-commitment --example redistribution_cn
+
   wiki:
     # Group-scoped LLM-curated wiki companion crate. Phase 1 = the data plane (Store trait +
     # FsStore), Mycelium-agnostic; the control plane (curator role + failover) is a later feature.

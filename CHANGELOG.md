@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the commitment companion (v3 §6.9, CN1)
+
+- **`mycelium-commitment`** — the contract net as five records on the public API, a composition and not a
+  subsystem: `ContractNet::{announce, offer, award, report, assess}` over `kv().set` / `append` / `scan_log` /
+  `set_with_receipt`. The award is chosen by `AwardRule::LowestParticipant` (the tuple-space election's rule,
+  pure) and written **with a receipt** under `cn/{requirement}/award` (`Awarded { award, receipt }`); a second
+  award is refused (`AlreadyAwarded`), never overwritten; `NoOffers` and a late offer are visible states;
+  assessments are Ed25519-signed with a caller's key and `verify_assessment` is `false` for an unsigned one.
+  `kv_ns::CN` (`cn/`) registered in the namespace table. Gallery: `examples/redistribution_cn.rs` — the
+  redistribution workload as a contract net — in CI (`commitment` job). Not yet: CN2 (replay, double-award
+  witness), CN3 (mandate epoch at award).
+
 ### Added — replay scenario C, the interacting governors (item 6 PR 6)
 
 - **`src/control/scenario_c.rs`** (test-only): the combined-feedback harness of `adaptive-stability.md` §5 (D19)
