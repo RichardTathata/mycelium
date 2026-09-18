@@ -637,6 +637,50 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v2.8.0 release — 2026-09-18 (tag `v2.8.0`)
+
+**The v3 contracts axis, in one MINOR** — the largest since 2.0, and all of it additive. Wire **v12**
+(`PREV = 11`) unchanged; on-disk format unchanged; the rolling upgrade holds. Plan of record:
+`docs/plans/v3-contracts-axis.md` rev 1.12.
+
+**Why one tag and not eight.** The axis was sequenced so each item's first PRs were usable on their own, but
+the items constrain each other — item 6's seams are what let item 4's governors be replayed, item 1's receipt
+vocabulary is what items 2 and 5 hand back, item 7's caller identity is what item 2 carries across a domain
+edge. Tagging them separately would have shipped a vocabulary before the things that speak it. What a consumer
+picks up here is one coherent surface, and the CHANGELOG's `[2.8.0]` section is its map.
+
+**The item that finished hardest, and what finished it.** Item 2's release gate asks for a *two-mesh
+demonstration* proving from membership tables, consensus state and traces that the meshes never merged. For
+most of the axis that gate could not be met at all: PRs 1–7 built the contract and every page ended on the
+sentence *no bytes cross a network*. PR 8 built the transport, PR 9 ran the whole choreography in one process
+and **said plainly what that left open** (a shared address space; a "severance" that was a shut-down gateway),
+PR 10a signed the catalogue and bound it to its asker, and PR 10b removed the caveats with a Docker suite —
+one container per node, the link cut with `docker network disconnect`. That suite immediately found a real
+defect: a *blackholed* partner (interface gone, default route still present) never refuses, so the unbounded
+client hung instead of returning, and a client that never returns cannot deliver the `DeliveryUnknown` the
+contract promises. **The in-process test could not have found it** — its severance refuses, and a refusal
+fails fast. That is the argument for the gate being written the way it was.
+
+**Three new crates.** `mycelium-sim` (the replay kernel, gated in `make check` and CI from its first commit),
+`mycelium-effects` (the external-effect adapter and its destination-commit receipt), `mycelium-commitment`
+(the contract net as five records — announce, offer, award, report, assess).
+
+**What is knowingly unfinished, and stays unfinished in this tag.** The scheduler seam's first arm, pinned by
+CN2's whole-node replay divergence rather than papered over. Item 2's row 11 (SDK verbs, TLS on the federation
+edge itself, a hostile network, more than two domains). V1, the nightly scale runner. The private RA slice
+beyond RA0. Each is named in the plan rather than implied by silence.
+
+**The upgrade notes** are all one class: a struct gained a field, so an exhaustive struct literal breaks and
+nothing else does — `GossipConfig.domain_profile`, `GovernorSnapshot` (four fields) and `ParamSnapshot`
+(`pending`), `OpacityHint.release_spacing_ms`, `BoardConfig.high_watermark` and `BoardStats.rejected`. Reading
+and matching on fields is unaffected, as is the documented `..Default::default()` pattern.
+
+**Release gates.** `make check` clean on the bumped tree; the three library suites re-run on it (654 tls /
+704 compliance / 480 gateway-only); the two-mesh Docker suite green (40 checks) both locally and as the CI
+`federation` job. Bumped to 2.8.0: root, core, agentfacts, blackboard, commitment, effects, sim, tuple-space,
+wasm-host, wiki; `mycelium-reason` stays on its own track (0.6.2). Log:
+[`.log/2026-09-18-v2.8.0-release.md`](.log/2026-09-18-v2.8.0-release.md).
+
 ## v2.7.0 release — 2026-09-16 (tag `v2.7.0`)
 
 A small **MINOR**, and the second defect this day found the same way: **by building a consumer against the

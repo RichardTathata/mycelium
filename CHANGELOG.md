@@ -9,6 +9,53 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.8.0] — 2026-09-18
+
+**The v3 contracts axis.** The largest MINOR since 2.0 — eight numbered items and three new
+companion crates, all of it additive. Wire **v12** (`PREV = 11`) **unchanged**; the on-disk format
+is unchanged; a backwards-compatible rolling upgrade.
+
+What shipped, one line each:
+
+- **Contracts (item 1).** An acknowledgement names its rung and nothing above it: typed durability
+  receipts, stable operation identity, a required local sync, the exact-identity ack, the
+  persisted-by-peer protocol, and one complete external-effect adapter with a destination-commit
+  receipt.
+- **Federated domains (item 2).** A domain is one independently admitted mesh; federation carries
+  *exported services* across an authenticated edge and never joins the transports. **Its release
+  gate is met:** two meshes in separate processes, the link cut at the network layer, non-merger
+  proved from membership tables, consensus state and connection tables.
+- **Knowledge layer (item 3).** Claim, observation, assessment and acceptance as attributable
+  records, with reader-specific acceptance and a semantic gate that pins what evidence *cannot* do.
+- **Adaptive stability (item 4).** One admission contract for every governor, strict budgets as
+  allocated rights, admission control reported at the companions' queues, and a shadow-first
+  profile ladder an operator can watch before enforcing.
+- **Scoped mandates (item 5).** Authority checked by the protected resource, never inferred from a
+  role advertisement; the fence sits inside the store's own transaction.
+- **Deterministic replay (item 6).** Production decision logic under controlled time, RNG, channels
+  and storage; a checked-in corpus replayed in CI; a static check that keeps new nondeterminism
+  outside the seams.
+- **Gateway caller identity (item 7)** — a provider sees the client principal, never the gateway
+  node — and **threat model revision 2 (item 8)**.
+- New crates: **`mycelium-sim`** (the replay kernel), **`mycelium-effects`** (the external-effect
+  adapter), **`mycelium-commitment`** (the contract net as five records).
+
+**The upgrade notes.** Every one is the same class: a struct gained a field, which breaks an
+*exhaustive struct literal* and nothing else. Reading and matching on fields is unaffected, and the
+documented `..Default::default()` pattern is unaffected.
+
+- `GossipConfig` gained `domain_profile`.
+- `GovernorSnapshot` gained `profile`, `held_by_spacing`, `held_by_settling` and `settled_unknown`;
+  `ParamSnapshot` gained `pending`.
+- `OpacityHint` gained `release_spacing_ms`.
+- `BoardConfig` gained `high_watermark`; `BoardStats` gained `rejected`.
+
+**One behavioural change worth stating on its own.** A federated call against a gateway whose
+network is *blackholed* — interface gone, default route still present — now returns
+`DeliveryUnknown` within a bound (5 s to connect, 30 s in total, `FederationClient::with_timeouts`)
+instead of waiting indefinitely. A silent gateway is contractually an unknown delivery, and a
+client that never returns cannot deliver that verdict.
+
 ### Fixed — a blackholed federation gateway hung instead of reading as unknown (v3 item 2 PR 10b)
 
 - **`FederationClient` now bounds every HTTP attempt** (5 s to connect, 30 s in total;
