@@ -45,6 +45,16 @@ the rule `holds_on_uncertainty`, written twice (rule and hand table) and pinned;
 a flag; `ControlSpec`, a stable `ActionId`, and spacing/settling as pure checks. Both decisive properties verified
 by planting their inversion. Log: [`.log/2026-09-18-item4-pr2-control-contract.md`](.log/2026-09-18-item4-pr2-control-contract.md).
 
+**PR 3a (#272) — the journal split, a pure move.** The AE evidence journal's mechanism lifted to
+`agent::journal` with `EvidenceJournal` a thin profile over it; every public name unchanged, the replay stream
+still `ae/journal` (pinned). Gated on its first user's features until the ledger — its second, ungated user —
+lands in PR 3: the first cut ungated it early and the no-default-features clippy failed on every item, the
+dead-code trap doing its job. **Found on the way: the forbidden-call check's skip swallows the rest of an
+enclosing block when `#[cfg(test)]` sits on an inner item** — a test-only method inside `impl Journal` hid
+`append`'s timeout and the baseline dropped 5 → 4 for a file whose sites had not changed. Test-only helpers now
+live in a top-level `#[cfg(test)] impl`; the script's header records the rule. Log:
+[`.log/2026-09-18-item4-pr3a-journal-split.md`](.log/2026-09-18-item4-pr3a-journal-split.md).
+
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
 Record `docs/design/knowledge-layer.md` (PR 1, the ADR, #243, 2026-09-17); code `src/knowledge/` behind `tls`.
