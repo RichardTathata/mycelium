@@ -202,6 +202,33 @@ a mirror would misrepresent erasure; the projection step stays delete-the-mirror
 2026-08-16 Novus-i2 assessment: the store-as-truth erasure story was architecturally right but had
 no store-level verb — "erase in the store" meant reaching around the trait.
 
+## The mandate fence — authority checked inside the store's own transaction (v3 item 5, 2026-09-17/18)
+
+`mycelium-wiki/src/mandate_fence.rs`, wired into `git_store.rs`; record `docs/design/scoped-mandates.md` §5,
+§7.2. The curator's write entitlement used to be an `is_curator: AtomicBool` — an inference, and the thing item
+5 indicts: **CAS is not authorization.** The store's section/manifest CAS defeats stale *content*; a former
+curator who re-reads fresh content passes it. So every canonical mutation now checks the current mandate **in
+the same atomic step** as the content:
+
+- **Locally**, `update_ref_stdin` emits one `update-ref --stdin` transaction — `start` / `verify
+  refs/mycelium/mandate/{group} <expected>` / `update` / `prepare` / `commit` — so the mandate check is part of
+  the content commit, not an earlier read. Two separately successful CAS operations can never interleave.
+- **On the shared remote**, `push_args` adds `--atomic` and `--force-with-lease=refs/mycelium/mandate/{group}:<expected>`
+  on **every** push, including content-only ones, so the check rides the same remote ref transaction. A remote that
+  does not honour atomic pushes is not a strict-profile remote; the write is refused, never downgraded.
+- A stale mandate is `MandateSuperseded`, **never `Conflict`** — `Conflict` is the retry loop's input, and the
+  loop would launder a revocation (`src/mandate.rs`).
+- **`FsStore` is out of scope for the strict profile**: its mutator `Mutex` serialises one process, not several.
+  Declared, not implied.
+
+**"Every mutation path protected" is a gate, not a sentence.** `GitStore` funnels content writes through one
+chokepoint (`commit_files`), which is what makes it true; `scripts/check-wiki-mutation-fence.sh` (`make check`,
+CI) is what makes it *stay* true — a new `update-ref` site without a fence fails, and so does a lost fence site.
+**Two sites are named exempt** (§7.2): `refresh`, which adopts the already-fenced remote head; and `publish`'s
+splice retry, which moves the **local** ref without re-verifying — the push is fenced so the remote is
+protected, but a revocation landing mid-retry is observed locally only when the push fails. **Untested:** the
+remote's pre-receive hook. Ledger: [history](../history.md) → *item 5*.
+
 ## Gates
 
 `cargo test -p mycelium-wiki` (data plane) · `--features control-plane` (curator + `tests/failover.rs`)

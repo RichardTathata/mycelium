@@ -196,6 +196,33 @@ a correctness assumption (the 1 s convergence wait after a lock commit first amo
 and bundle shape (D14: exact reproduction with divergence detection from PR 2), and moves the static forbidden-call
 check to PR 3 (D12). A new nondeterminism site on a covered path is admitted only by editing that inventory.
 
+## Replay scenarios A and B (item 6 PRs 4–5, 2026-09-17)
+
+The inventory above named what must be reproducible; these are the first two things reproduced with it.
+
+**Scenario A — the WAL/snapshot race** (`mycelium-core/src/persistence.rs`, PR #241). A controlled schedule
+with a `cfg(test)` **merge-removed witness** (`MergeRemoved`, RAII) that *must* fail — the Phase A exit gate.
+Replaying it found three bugs in the harness itself and one in the product: replay suppressed writes, so a run
+could not read its own; effect requests embedded absolute paths, so no bundle replayed elsewhere; an injected
+fault did not prevent the effect because the seam acted before deciding (now `kernel_fs` + `planned_fs`: decide,
+then act); and **a snapshot's bytes depended on papaya iteration order** — two nodes with identical logical
+state wrote byte-different files. The fix is a canonical sort by key; the test that pins it is
+`a_snapshot_is_byte_identical_for_the_same_state_whatever_order_it_was_built_in`.
+
+**Scenario B — scoped mandates** (`src/mandate/scenario_b.rs`, PR #260). The decisive test of
+`docs/design/scoped-mandates.md` §8, built as a **schedule sweep** rather than five hand-written cases: the
+invariant (*nothing authorized only under a superseded epoch commits*) is asserted after **every step of every
+schedule**. The case a hand-written test omits is the one the ADR singles out — revocation with **no**
+subsequent write — so the sweep includes idle schedules that knock only much later. It also asserts its own
+size, so it cannot quietly shrink.
+
+**The discipline both established, worth reusing: verify a gate by breaking the thing it guards, in both
+directions.** Every gate here was checked by planting the failure it exists to catch (a resource that ignores
+its installed epoch; a byte-order dependence) *and* by confirming the honest case still passes (a current
+mandate still commits; the same state still snapshots identically). A gate that only refuses is satisfied by a
+system that does nothing — scenario B's `a_current_mandate_still_commits` and the knowledge gate's positive
+controls exist for exactly that reason. Ledger: [history](../history.md) → *item 6 PRs 4–5*.
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy
