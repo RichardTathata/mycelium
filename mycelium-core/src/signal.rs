@@ -748,6 +748,12 @@ pub struct OpacityHint {
     /// Useful for carrying application-defined context (e.g. a reason string or
     /// estimated drain time in milliseconds). Default: empty.
     pub payload:    bytes::Bytes,
+    /// Minimum interval between the previous boundary transition and a **release**
+    /// (`BOUNDARY_TRANSPARENT`), in milliseconds — the control contract's spacing for this
+    /// actuator (v2.8.0, `docs/design/adaptive-stability.md` §9 row 4b). Only the release is
+    /// spaced: going opaque is protective shedding and is never held. `0` disables it.
+    /// Default: `1_000` (ten governor ticks).
+    pub release_spacing_ms: u64,
 }
 
 impl Default for OpacityHint {
@@ -756,6 +762,7 @@ impl Default for OpacityHint {
             threshold:  0.75,
             hysteresis: 0.20,
             payload:    bytes::Bytes::new(),
+            release_spacing_ms: 1_000,
         }
     }
 }

@@ -21,9 +21,11 @@
 //! [`ClusterTuner`]: crate::agent::cluster_tuner
 
 use crate::agent::GossipAgent;
+use crate::control::{self, ActionId, ConfidenceBound, ControlSpec, Profile, SettleState};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use tracing::warn;
 
 /// KV key carrying the cluster-wide (fleet) governance intent.
 pub const GOVERN_FLEET_KEY: &str = "sys/govern/fleet";
@@ -34,6 +36,10 @@ pub const GOVERN_INTENT_TTL_MS: u64 = 5 * 60 * 1000;
 
 const NO_FLOOR: u64 = 0;
 const NO_CEIL: u64 = u64::MAX;
+/// No action is pending on the param (the contract's `SettleState::Idle`).
+const NO_PENDING: u64 = u64::MAX;
+/// The param has never been acted on (no spacing to honour).
+const NO_ACTION_MS: u64 = u64::MAX;
 
 /// Which hot-tunable param a governance directive targets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -90,6 +96,18 @@ struct ParamGov {
     ratchet: AtomicU8,
     /// The node took local control of this param → fleet intents are ignored for it.
     local_set: AtomicBool,
+    // ── The contract's per-actuator state (item 4 PR 4b), as atomics: no lock, no lock-order
+    //    row. One caller per actuator is the ADR's own rule (§3, one owner per knob), so two
+    //    interleaved `gate`/`acted` calls on one param are a design error, not a race to guard.
+    /// When the last action was taken (`NO_ACTION_MS` = never) — the spacing clock.
+    last_action_ms: AtomicU64,
+    /// The value the last action applied and the knob has not yet been seen at
+    /// (`NO_PENDING` = settled) — the reconcile step's expectation.
+    pending_value: AtomicU64,
+    /// When that action was taken — the settle clock.
+    pending_since_ms: AtomicU64,
+    /// Action sequence, for a stable `ActionId`.
+    seq: AtomicU64,
 }
 
 impl Default for ParamGov {
@@ -99,6 +117,10 @@ impl Default for ParamGov {
             ceiling: AtomicU64::new(NO_CEIL),
             ratchet: AtomicU8::new(0),
             local_set: AtomicBool::new(false),
+            last_action_ms: AtomicU64::new(NO_ACTION_MS),
+            pending_value: AtomicU64::new(NO_PENDING),
+            pending_since_ms: AtomicU64::new(0),
+            seq: AtomicU64::new(0),
         }
     }
 }
@@ -124,6 +146,19 @@ pub struct TuningGovernor {
     inbound: ParamGov,
     writer: ParamGov,
     bulk: ParamGov,
+    // ── The contract's timing (item 4 PR 4b). Both `0` by default — the old gate exactly — and
+    //    set by `start_cluster_tuner` from its own interval, so a governor that is never started
+    //    through the tuner behaves as it always did.
+    /// Minimum interval between two actions on one param.
+    spacing_ms: AtomicU64,
+    /// How long an action may stay unobserved before it settles as `unknown`. `0` = no settling.
+    settle_timeout_ms: AtomicU64,
+    /// Recommendations held because the param was acted on too recently.
+    held_spacing: AtomicU64,
+    /// Recommendations held because the last action had not yet been seen at the knob.
+    held_settling: AtomicU64,
+    /// Actions that were never seen at the knob inside the settle timeout.
+    settled_unknown: AtomicU64,
 }
 
 impl Default for TuningGovernor {
@@ -134,6 +169,11 @@ impl Default for TuningGovernor {
             inbound: ParamGov::default(),
             writer: ParamGov::default(),
             bulk: ParamGov::default(),
+            spacing_ms: AtomicU64::new(0),
+            settle_timeout_ms: AtomicU64::new(0),
+            held_spacing: AtomicU64::new(0),
+            held_settling: AtomicU64::new(0),
+            settled_unknown: AtomicU64::new(0),
         }
     }
 }
@@ -148,8 +188,25 @@ impl TuningGovernor {
     }
 
     /// Gate an auto-tuner recommendation `rec` for `param` given the currently-applied
-    /// `cur`. Returns the value to apply, or `None` to skip (tuning disabled).
+    /// `cur`. Returns the value to apply, or `None` to skip — tuning disabled, or (item 4 PR 4b)
+    /// the param **held** by the contract: acted on too recently (spacing), or its last action
+    /// not yet seen at the knob (settling). Reads the clock through the replay seam; see
+    /// [`gate_at`](Self::gate_at) for the pure form. A caller that applies the value reports it
+    /// with [`acted`](Self::acted), which is what starts the spacing and settle clocks.
     pub fn gate(&self, param: HotParam, rec: u64, cur: u64) -> Option<u64> {
+        self.gate_at(param, rec, cur, mycelium_core::sim_seam::mono_now_ns() / 1_000_000)
+    }
+
+    /// [`gate`](Self::gate) at an explicit `now_ms` — the whole decision, pure in time.
+    ///
+    /// Order: the management intent first (disabled / floor / ceiling / ratchet — unchanged),
+    /// then the contract. **Reconcile:** if an action is pending and `cur` reads back at its
+    /// value, it is *consumed*; if it does not and the settle timeout has not passed, the
+    /// recommendation is held; past the timeout it settles as *unknown* (counted, warned) and
+    /// the governor proceeds. **Not an action:** a value equal to `cur` changes nothing and is
+    /// returned without touching either clock. **Spacing:** a change inside `spacing_ms` of the
+    /// last action is held. With both timings at `0` this is the old gate.
+    pub fn gate_at(&self, param: HotParam, rec: u64, cur: u64, now_ms: u64) -> Option<u64> {
         if !self.auto_enabled.load(Ordering::Relaxed) {
             return None;
         }
@@ -162,7 +219,80 @@ impl TuningGovernor {
             Ratchet::Down => v = v.min(cur), // never auto-increase
             Ratchet::Off => {}
         }
+
+        let spec = self.spec_for(param);
+        // Reconcile the last action against what the knob reads back.
+        let pending = p.pending_value.load(Ordering::Relaxed);
+        if pending != NO_PENDING && spec.settle_timeout_ms > 0 {
+            if cur == pending {
+                p.pending_value.store(NO_PENDING, Ordering::Relaxed); // consumed
+            } else {
+                let state = SettleState::Pending {
+                    id: ActionId { governor: spec.governor.clone(), actuator: spec.actuator.clone(), seq: p.seq.load(Ordering::Relaxed) },
+                    since_ms: p.pending_since_ms.load(Ordering::Relaxed),
+                };
+                match control::may_propose(&state, &spec, now_ms) {
+                    Err(_) => {
+                        self.held_settling.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
+                    Ok(()) => {
+                        p.pending_value.store(NO_PENDING, Ordering::Relaxed);
+                        self.settled_unknown.fetch_add(1, Ordering::Relaxed);
+                        warn!(param = param.key(), applied = pending, reads = cur,
+                            "tuning: last action never seen at the knob inside the settle timeout — settled as unknown");
+                    }
+                }
+            }
+        }
+        if v == cur {
+            return Some(v); // not an action
+        }
+        let last = p.last_action_ms.load(Ordering::Relaxed);
+        if !control::spacing_allows(&spec, (last != NO_ACTION_MS).then_some(last), now_ms) {
+            self.held_spacing.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         Some(v)
+    }
+
+    /// The caller applied `value` to `param`'s knob: start the spacing and settle clocks. Through
+    /// the replay seam; see [`acted_at`](Self::acted_at).
+    pub fn acted(&self, param: HotParam, value: u64) {
+        self.acted_at(param, value, mycelium_core::sim_seam::mono_now_ns() / 1_000_000)
+    }
+
+    /// [`acted`](Self::acted) at an explicit `now_ms`. Separate from the gate on purpose: a value
+    /// the gate returned but a policy then rejected was **not** an action, and must not consume
+    /// spacing or leave a phantom to settle.
+    pub fn acted_at(&self, param: HotParam, value: u64, now_ms: u64) {
+        let p = self.p(param);
+        p.seq.fetch_add(1, Ordering::Relaxed);
+        p.last_action_ms.store(now_ms, Ordering::Relaxed);
+        p.pending_value.store(value, Ordering::Relaxed);
+        p.pending_since_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// Set the contract's timing for every param: the minimum interval between two actions on
+    /// one param, and how long an action may go unseen at the knob before it settles as unknown.
+    /// `0` disables the respective mechanism. `start_cluster_tuner` sets both to twice its
+    /// interval.
+    pub fn set_control_timing(&self, spacing_ms: u64, settle_timeout_ms: u64) {
+        self.spacing_ms.store(spacing_ms, Ordering::Relaxed);
+        self.settle_timeout_ms.store(settle_timeout_ms, Ordering::Relaxed);
+    }
+
+    /// The param's `ControlSpec`: one actuator per param, this governor's timing, no confidence
+    /// bound — the view is this node's own knob, which is never uncertain (ADR §9, 4b).
+    fn spec_for(&self, param: HotParam) -> ControlSpec {
+        ControlSpec {
+            governor: "tuning".into(),
+            actuator: param.key().into(),
+            spacing_ms: self.spacing_ms.load(Ordering::Relaxed),
+            settle_timeout_ms: self.settle_timeout_ms.load(Ordering::Relaxed),
+            bound: ConfidenceBound::default(),
+            profile: Profile::Legacy,
+        }
     }
 
     // ── Local intent (sovereign; marks the field locally pinned) ──────────────
@@ -270,26 +400,41 @@ impl TuningGovernor {
             let p = self.p(param);
             let floor = p.floor.load(Ordering::Relaxed);
             let ceil = p.ceiling.load(Ordering::Relaxed);
+            let pending = p.pending_value.load(Ordering::Relaxed);
             ParamSnapshot {
                 param,
                 floor: (floor != NO_FLOOR).then_some(floor),
                 ceiling: (ceil != NO_CEIL).then_some(ceil),
                 ratchet: Ratchet::from_u8(p.ratchet.load(Ordering::Relaxed)),
                 locally_pinned: p.local_set.load(Ordering::Relaxed),
+                pending: (pending != NO_PENDING).then_some(pending),
             }
         };
         GovernorSnapshot {
             auto_enabled: self.auto_enabled.load(Ordering::Relaxed),
             params: HotParam::all().map(snap),
+            held_by_spacing: self.held_spacing.load(Ordering::Relaxed),
+            held_by_settling: self.held_settling.load(Ordering::Relaxed),
+            settled_unknown: self.settled_unknown.load(Ordering::Relaxed),
         }
     }
 }
 
 /// Snapshot of the governor's effective state (`GossipAgent::tuning_governor`).
+///
+/// *v2.8.0:* gained the three contract counters (item 4 PR 4b); an exhaustive struct literal of
+/// this type breaks — construct through `snapshot()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GovernorSnapshot {
     pub auto_enabled: bool,
     pub params: [ParamSnapshot; 3],
+    /// Recommendations held because the param was acted on inside the spacing interval.
+    pub held_by_spacing: u64,
+    /// Recommendations held because the last action had not yet been seen at the knob.
+    pub held_by_settling: u64,
+    /// Actions that were never seen at the knob inside the settle timeout — each one a knob
+    /// that did not take the value it was given, or a caller that did not report what it applied.
+    pub settled_unknown: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,6 +444,8 @@ pub struct ParamSnapshot {
     pub ceiling: Option<u64>,
     pub ratchet: Ratchet,
     pub locally_pinned: bool,
+    /// The value the last action applied, until the knob is seen at it (v2.8.0).
+    pub pending: Option<u64>,
 }
 
 // ── Fleet intent (gossiped) ─────────────────────────────────────────────────────
@@ -419,6 +566,83 @@ impl GossipAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The contract at the gate (item 4 PR 4b): spacing and settling, pure in time. The view
+    //    is this node's own knob, so there is no confidence predicate here — only the two clocks.
+
+    fn writer(s: &GovernorSnapshot) -> &ParamSnapshot {
+        s.params.iter().find(|p| p.param == HotParam::WriterDepth).unwrap()
+    }
+
+    #[test]
+    fn without_timing_the_gate_is_the_old_gate() {
+        let g = TuningGovernor::default();
+        g.acted_at(HotParam::WriterDepth, 4096, 0);
+        // Right after an action, a different value on a knob that has not read back: with both
+        // timings at 0 nothing is spaced, nothing settles, nothing is counted — the old behaviour.
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 1), Some(5000));
+        let s = g.snapshot();
+        assert_eq!((s.held_by_spacing, s.held_by_settling, s.settled_unknown), (0, 0, 0));
+    }
+
+    #[test]
+    fn spacing_holds_a_second_change_inside_the_interval() {
+        let g = TuningGovernor::default();
+        g.set_control_timing(1_000, 0);
+        g.acted_at(HotParam::WriterDepth, 4096, 0);
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 4096, 500), None, "inside the interval");
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 4096, 1_000), Some(5000), "at the interval");
+        assert_eq!(g.snapshot().held_by_spacing, 1);
+    }
+
+    #[test]
+    fn a_recommendation_equal_to_current_is_not_an_action() {
+        let g = TuningGovernor::default();
+        g.set_control_timing(1_000, 1_000);
+        g.acted_at(HotParam::WriterDepth, 4096, 0);
+        // Same value, knob already there: returned, and neither clock is consulted.
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 4096, 4096, 10), Some(4096));
+        let s = g.snapshot();
+        assert_eq!((s.held_by_spacing, s.held_by_settling), (0, 0));
+    }
+
+    #[test]
+    fn settling_holds_until_the_knob_reads_back() {
+        let g = TuningGovernor::default();
+        g.set_control_timing(0, 1_000);
+        g.acted_at(HotParam::WriterDepth, 4096, 0);
+        assert_eq!(writer(&g.snapshot()).pending, Some(4096), "the action is pending");
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 100), None, "the knob still reads the old value");
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 4096, 200), Some(5000), "seen at the knob: consumed");
+        let s = g.snapshot();
+        assert_eq!(s.held_by_settling, 1);
+        assert_eq!(writer(&s).pending, None);
+    }
+
+    #[test]
+    fn an_unobserved_action_settles_as_unknown_past_the_timeout() {
+        let g = TuningGovernor::default();
+        g.set_control_timing(0, 1_000);
+        g.acted_at(HotParam::WriterDepth, 4096, 0);
+        // Past the timeout the knob never read back: the governor proceeds, and says so.
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 1_500), Some(5000));
+        let s = g.snapshot();
+        assert_eq!((s.settled_unknown, s.held_by_settling), (1, 0));
+        assert_eq!(writer(&s).pending, None);
+    }
+
+    #[test]
+    fn a_policy_rejected_value_leaves_no_clock_running() {
+        // `gate` returned a value the policy then refused: nothing was applied, `acted` is not
+        // called, and the next recommendation is neither spaced nor held by a phantom action.
+        let g = TuningGovernor::default();
+        g.set_control_timing(1_000, 1_000);
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 5000, 1024, 0), Some(5000));
+        assert_eq!(g.gate_at(HotParam::WriterDepth, 6000, 1024, 1), Some(6000));
+        let s = g.snapshot();
+        assert_eq!((s.held_by_spacing, s.held_by_settling), (0, 0));
+        assert_eq!(writer(&s).pending, None);
+    }
 
     #[test]
     fn gate_default_is_enabled_and_unconstrained() {

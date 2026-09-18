@@ -41,6 +41,21 @@ test. A gate finding on the way: `mycelium-py/tests/test_commit_result.py` was n
 never in CI's explicit pytest list; it is now. Log:
 [`.log/2026-09-18-item1-pr7-gateway-sdk-parity.md`](.log/2026-09-18-item1-pr7-gateway-sdk-parity.md).
 
+## v3 contracts axis — item 4 PR 4b: the two local-input governors through the contract — 2026-09-18 (unreleased)
+
+The tuning governor and the opacity gate (`docs/design/adaptive-stability.md` §9 row 4b): spacing and settling
+only — the confidence predicate does not apply to a view that is this node's own. **Tuning** (`gate_at` /
+`acted_at`, pure in time): the reconcile step is the *knob's readback* — the tuner already passes `cur`, so an
+action is pending until a later gate sees the knob at the applied value, or the settle timeout passes and it
+settles as *unknown* (counted, warned); a value equal to `cur` is not an action; a change inside the spacing is
+held. `acted` is separate from `gate` so a policy-rejected value runs no clock. Timing comes from
+`start_cluster_tuner` (two ticks each); both `0` by default, which is the old gate. **Opacity:** only the
+**release** is spaced (`OpacityHint.release_spacing_ms`, 1 s) — going opaque is protective shedding and the
+decisive rule says it is never held; no settle state, because the loop's own input is the effect channel.
+Tripwires: the three snapshot counters and `opacity_releases_spaced`. *Not shown:* the tuner loop end to end and
+the combined behaviour (PR 6). Log:
+[`.log/2026-09-18-item4-pr4b-local-governors.md`](.log/2026-09-18-item4-pr4b-local-governors.md).
+
 ## v3 contracts axis — item 4 PR 1: the adaptive-stability ADR — 2026-09-18 (unreleased, PR #273; #270 was auto-closed by the stacked-PR trap)
 
 Record `docs/design/adaptive-stability.md`; reservations `rights/head/{holder}` (namespace table +

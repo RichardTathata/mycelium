@@ -13,6 +13,7 @@ use tokio::time;
 
 use super::{GossipAgent, TaskCtx};
 use super::helpers::{emit_signal, kv_get, kv_scan_prefix};
+use crate::control::{self, ConfidenceBound, ControlSpec, Profile};
 
 impl GossipAgent {
     /// Returns all peer load states newer than `max_age`, sorted highest-fill first.
@@ -312,6 +313,25 @@ fn opacity_transition(state: &OpacityState, gate_ok: bool, hysteresis: f32) -> O
     }
 }
 
+/// **Pure** — the control contract's spacing over a proposed transition (item 4 PR 4b). Only the
+/// **release** is spaced: `GoOpaque` is protective shedding, which the decisive rule says is never
+/// held — a boundary that must shed sheds now, whatever it did a moment ago — and `Hold` is not an
+/// action. The release is what flaps (opaque → transparent → opaque on a fill that hovers); the
+/// hysteresis makes it rarer, the spacing bounds its rate outright.
+fn spaced_transition(
+    proposed: OpacityTransition,
+    spec: &ControlSpec,
+    last_action_ms: Option<u64>,
+    now_ms: u64,
+) -> OpacityTransition {
+    match proposed {
+        OpacityTransition::GoTransparent if !control::spacing_allows(spec, last_action_ms, now_ms) => {
+            OpacityTransition::Hold
+        }
+        other => other,
+    }
+}
+
 /// Like [`manage_opacity_ctx`] but with a generic gate predicate (monomorphized, no vtable).
 pub(super) fn manage_opacity_gated_ctx<F>(
     ctx:  &Arc<TaskCtx>,
@@ -347,6 +367,19 @@ where
         );
         let mut prev_fill = init_fill;
         let mut is_opaque = init_is_opaque;
+        // The boundary's contract (item 4 PR 4b): one actuator per kind, spacing from the hint,
+        // no settle timeout and no confidence bound — the loop's own input *is* the effect
+        // channel, so every tick re-reads the effect before proposing, and the fill is this
+        // node's own view. Settling is therefore the next tick, not a state to time out.
+        let spec = ControlSpec {
+            governor: "opacity".into(),
+            actuator: format!("boundary/{kind}"),
+            spacing_ms: hint.release_spacing_ms,
+            settle_timeout_ms: 0,
+            bound: ConfidenceBound::default(),
+            profile: Profile::Legacy,
+        };
+        let mut last_action_ms: Option<u64> = None;
         loop {
             tokio::select! { biased;
                 _ = &mut cancel_rx               => break,
@@ -357,8 +390,16 @@ where
                     let state = opacity_state_for(is_opaque, fill_ratio, prev_fill, clamped_threshold);
                     prev_fill = fill_ratio;
                     let gate_ok = gate.as_ref().map(|g| g(&state)).unwrap_or(true);
-                    match opacity_transition(&state, gate_ok, hint.hysteresis) {
+                    let now_ms = mycelium_core::sim_seam::mono_now_ns() / 1_000_000;
+                    let proposed = opacity_transition(&state, gate_ok, hint.hysteresis);
+                    let transition = spaced_transition(proposed, &spec, last_action_ms, now_ms);
+                    if transition != proposed {
+                        ctx.opacity_releases_spaced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::debug!(kind = %kind, "opacity: release held by spacing");
+                    }
+                    match transition {
                         OpacityTransition::GoOpaque => {
+                            last_action_ms = Some(now_ms);
                             emit_signal(&ctx, Arc::from(crate::signal::signal_kind::BOUNDARY_OPAQUE), scope.clone(), hint.payload.clone());
                             is_opaque = true;
                             let written_at_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
@@ -367,6 +408,7 @@ where
                             dispatch_gossip_try_send(&ctx.gossip_txs, WireMessage::Data(upd), ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames);
                         }
                         OpacityTransition::GoTransparent => {
+                            last_action_ms = Some(now_ms);
                             emit_signal(&ctx, Arc::from(crate::signal::signal_kind::BOUNDARY_TRANSPARENT), scope.clone(), Bytes::new());
                             is_opaque = false;
                             let upd = make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::clone(&load_key), Bytes::new(), true, &ctx.hlc);
@@ -396,6 +438,32 @@ mod tests {
     // ── The opacity decision, tested purely (no async governor, no ticker, no timeout). These are
     //    the deterministic authoritative gates for the veto/override + clear invariants that the
     //    integration tests (`test_manage_opacity_gate_…`) exercise through the flaky async path.
+
+    /// Item 4 PR 4b — the release is spaced, the shed never is.
+    #[test]
+    fn release_spacing_holds_the_release_and_never_the_shed() {
+        use super::{spaced_transition, OpacityTransition};
+        use crate::control::{ConfidenceBound, ControlSpec, Profile};
+        let spec = ControlSpec {
+            governor: "opacity".into(),
+            actuator: "boundary/k".into(),
+            spacing_ms: 1_000,
+            settle_timeout_ms: 0,
+            bound: ConfidenceBound::default(),
+            profile: Profile::Legacy,
+        };
+        // A release inside the spacing is held; at the spacing, and with no prior action, it proceeds.
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 500), OpacityTransition::Hold);
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, Some(0), 1_000), OpacityTransition::GoTransparent);
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &spec, None, 1), OpacityTransition::GoTransparent);
+        // Protective shedding is never held, however recent the last action (the decisive rule).
+        assert_eq!(spaced_transition(OpacityTransition::GoOpaque, &spec, Some(499), 500), OpacityTransition::GoOpaque);
+        // `Hold` is not an action.
+        assert_eq!(spaced_transition(OpacityTransition::Hold, &spec, Some(0), 1), OpacityTransition::Hold);
+        // Spacing 0 disables it.
+        let off = ControlSpec { spacing_ms: 0, ..spec.clone() };
+        assert_eq!(spaced_transition(OpacityTransition::GoTransparent, &off, Some(0), 0), OpacityTransition::GoTransparent);
+    }
 
     #[test]
     fn opacity_gate_vetoes_below_full_then_the_library_overrides_at_full() {
