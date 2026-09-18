@@ -314,8 +314,40 @@ mod installed {
     }
 
     /// Which mode the installed kernel is in, or `None` when there is no kernel.
-    pub fn chan_mode() -> Option<mycelium_sim::Mode> {
+    pub fn mode() -> Option<mycelium_sim::Mode> {
         CTX.with(|c| c.borrow().as_ref().map(|ctx| ctx.kernel.mode()))
+    }
+
+    /// The channel seam's name for [`mode`].
+    pub fn chan_mode() -> Option<mycelium_sim::Mode> {
+        mode()
+    }
+
+    /// Write down that a wait of `requested_ms` elapsed, and advance the simulated clocks by it.
+    pub fn timer_record(stream: &str, requested_ms: u64) {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(ctx) = guard.as_mut() else { return };
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            if let Err(d) = seams.timer(stream, requested_ms, || requested_ms) {
+                panic!("{d}");
+            }
+        });
+    }
+
+    /// The effective duration the recording gave this wait, applied to the simulated clocks.
+    pub fn timer_replay(stream: &str, requested_ms: u64) -> u64 {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(ctx) = guard.as_mut() else { return requested_ms };
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            match seams.timer(stream, requested_ms, || unreachable!(
+                "replay never produces a duration; it reads the recorded one"
+            )) {
+                Ok(v) => v,
+                Err(d) => panic!("{d}"),
+            }
+        })
     }
 
     /// Write down what a bounded send actually did.
@@ -382,6 +414,54 @@ pub fn wall_now_ms() -> u64 {
 #[inline]
 pub fn mono_now_ns() -> u64 {
     installed::with_seams(real_mono_now_ns, |s| s.mono_now_ns())
+}
+
+// ── Timers ───────────────────────────────────────────────────────────────────────────────────
+//
+// Inventory §2.3: a fixed sleep inside protocol logic is *a schedule the kernel must explore* —
+// 0, exact, and longer than the sleep. The one whose duration is a correctness assumption is the
+// 1 s "let the winning commit converge" after `distributed_lock`'s optimistic commit; the D4 audit
+// could only *model* that path, because this seam did not exist to replay it.
+//
+// What a replay reproduces is the decision — "this wait elapsed, and time is now later by D" —
+// not the waiting. So a replayed sleep never wall-waits: the kernel supplies D, the simulated
+// clocks advance by D, and the task yields once so the await point that was there is still there.
+//
+// What this seam does NOT yet give is the exploration itself. An authored D is honoured by the
+// timer, but in exact replay the clock reads that follow are supplied from the trace as well, so
+// they still say what the recording said. Re-deriving them is scenario replay — the inventory's
+// third mode — and the kernel has two. The test that pins this boundary was first written as the
+// claim, and failed; it now asserts both halves.
+
+/// Sleep, without the kernel — the call this seam replaced.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub async fn sleep_ms(_stream: &str, ms: u64) {
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// Sleep, through the kernel.
+///
+/// `Record` really sleeps — the production code runs for real, and unseamed timers elsewhere still
+/// see real time pass — and writes down that the wait elapsed. `Replay` does not sleep: the recorded
+/// effective duration advances the simulated clocks, and the task yields once — the await point
+/// stays, the wall wait goes. A request that differs from the recording is a divergence.
+///
+/// One thread per simulated node, the module's standing assumption: the kernel is a thread-local,
+/// and a sleep that resumed on another thread would find no kernel there.
+#[cfg(feature = "sim")]
+pub async fn sleep_ms(stream: &str, ms: u64) {
+    match installed::mode() {
+        None => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+        Some(mycelium_sim::Mode::Record) => {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            installed::timer_record(stream, ms);
+        }
+        Some(mycelium_sim::Mode::Replay) => {
+            let _effective_ms = installed::timer_replay(stream, ms);
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 // ── Randomness ───────────────────────────────────────────────────────────────────────────────
@@ -900,6 +980,141 @@ mod tests {
             node:    "n1".into(),
             offsets: Default::default(),
         });
+    }
+
+    fn install_replaying(text: &str) {
+        let trace = mycelium_sim::trace::Trace::parse(text).expect("the trace round-trips");
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(trace),
+            sources: Sources::seeded(9, 1_789_000_000_000),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+    }
+
+    /// **A recorded sleep advances simulated time by its duration** — in `Record` too, because
+    /// under a kernel the clocks are `Sources`, and a wait that left them still would make the
+    /// recording disagree with the real sleep that just happened.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_recorded_sleep_advances_simulated_time_by_its_duration() {
+        install_recording();
+        let w1 = wall_now_ms();
+        let m1 = mono_now_ns();
+        sleep_ms("t/converge", 20).await;
+        let w2 = wall_now_ms();
+        let m2 = mono_now_ns();
+        let ctx = installed::take().expect("installed");
+
+        // Each read steps its clock once; the sleep adds 20 ms between the reads.
+        assert_eq!(w2 - w1, 20 + 1, "the wall clock elapsed the sleep, plus its own read step");
+        assert_eq!(m2 - m1, 20_000_000 + 1_000_000, "and so did the monotonic clock");
+        let timer = ctx
+            .kernel
+            .trace()
+            .entries()
+            .iter()
+            .find(|c| c.kind == mycelium_sim::trace::ChoiceKind::Timer)
+            .expect("a timer choice was written down");
+        assert_eq!(timer.request, "sleep(20ms)");
+        assert_eq!(timer.result, "20", "the recording's effective duration is the one asked for");
+    }
+
+    /// **A replayed sleep does not wall-wait.** The recording waited; the replay advances the
+    /// simulated clocks by the recorded duration and yields once. This is what makes a 1 s
+    /// converge sleep replayable in microseconds — and the property that would silently vanish if
+    /// replay ever called the real timer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_replayed_sleep_advances_the_clocks_without_waiting() {
+        install_recording();
+        let w1 = wall_now_ms();
+        sleep_ms("t/converge", 150).await;
+        let w2 = wall_now_ms();
+        let text = installed::take().expect("installed").kernel.trace().to_text();
+        assert_eq!(w2 - w1, 151);
+
+        install_replaying(&text);
+        let started = std::time::Instant::now();
+        let r1 = wall_now_ms();
+        sleep_ms("t/converge", 150).await;
+        let r2 = wall_now_ms();
+        let took = started.elapsed();
+        installed::take();
+
+        assert_eq!(r2 - r1, 151, "the replay's clocks elapsed exactly what the recording's did");
+        assert!(
+            took < std::time::Duration::from_millis(100),
+            "but no wall time was spent waiting: {took:?}"
+        );
+    }
+
+    /// **An authored timer result is honoured by the timer — and recorded clock reads still
+    /// replay as recorded.** Both halves are pinned on purpose.
+    ///
+    /// The kernel checks a replay's *request* and supplies the recorded *result*, so editing a
+    /// timer line to `0` or `5000` makes the replayed wait return that duration. What it does
+    /// **not** do is change the clock reads recorded *after* the wait: in exact replay those are
+    /// supplied from the trace too, so a read that followed a 20 ms sleep still says 20 ms later.
+    ///
+    /// That is the two-mode kernel's boundary, found by writing this test the other way first:
+    /// **exact replay reproduces; it cannot explore.** Exploring 0 / exact / beyond means
+    /// re-deriving the reads that follow an authored wait, which is *scenario replay* — the third
+    /// mode the inventory names and the kernel does not yet have. When it lands, the second
+    /// assertion here changes deliberately.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_authored_result_is_honoured_by_the_timer_but_recorded_reads_still_replay() {
+        install_recording();
+        let _ = wall_now_ms();
+        sleep_ms("lock/converge", 20).await;
+        let _ = wall_now_ms();
+        let text = installed::take().expect("installed").kernel.trace().to_text();
+        let recorded = mycelium_sim::trace::Trace::parse(&text).expect("the trace round-trips");
+
+        for authored in [0u64, 20, 5000] {
+            let mut schedule = mycelium_sim::trace::Trace::new();
+            for c in recorded.entries() {
+                let mut c = c.clone();
+                if c.kind == mycelium_sim::trace::ChoiceKind::Timer {
+                    c.result = authored.to_string();
+                }
+                schedule.push(c);
+            }
+            install_replaying(&schedule.to_text());
+            let r1 = wall_now_ms();
+            let effective = installed::timer_replay("lock/converge", 20);
+            let r2 = wall_now_ms();
+            installed::take();
+
+            assert_eq!(effective, authored, "the timer returns the authored duration");
+            assert_eq!(
+                r2 - r1,
+                21,
+                "but a recorded read is replayed, not re-derived: exact replay cannot explore"
+            );
+        }
+    }
+
+    /// A sleep that asks for a different duration than the recording is a **divergence**, printed
+    /// with both sides — not a silently re-timed wait.
+    #[test]
+    fn a_sleep_that_differs_from_the_recording_is_a_divergence() {
+        install_recording();
+        installed::timer_record("lock/converge", 20);
+        let text = installed::take().expect("installed").kernel.trace().to_text();
+
+        install_replaying(&text);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            installed::timer_replay("lock/converge", 21)
+        }));
+        installed::take();
+
+        let msg = match outcome {
+            Err(payload) => payload.downcast_ref::<String>().cloned().unwrap_or_default(),
+            Ok(v) => panic!("the replay accepted a different duration and returned {v}"),
+        };
+        assert!(
+            msg.contains("sleep(20ms)") && msg.contains("sleep(21ms)"),
+            "both sides are printed, so the reader sees what changed: {msg}"
+        );
     }
 
     #[test]

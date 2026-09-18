@@ -192,12 +192,12 @@ impl ConsensusHandle {
         let local_opacity = effective_opacity_ctx(&self.ctx, consensus_kind::PROPOSE);
         if local_opacity > 0.0 && config.ballot_retry_jitter_ms > 0 {
             let defer_ms = (local_opacity * config.ballot_retry_jitter_ms as f32 * 2.0) as u64;
-            tokio::time::sleep(Duration::from_millis(defer_ms)).await;
+            mycelium_core::sim_seam::sleep_ms("consensus/defer", defer_ms).await;
         }
         if config.use_suggest_leader && config.ballot_retry_jitter_ms > 0 {
             let suggested = suggest_leader_ctx(&self.ctx, group, consensus_kind::PROPOSE, self.signal_window());
             if suggested != self.ctx.node_id {
-                tokio::time::sleep(Duration::from_millis(config.ballot_retry_jitter_ms)).await;
+                mycelium_core::sim_seam::sleep_ms("consensus/suggest-defer", config.ballot_retry_jitter_ms).await;
             }
         }
         let roster_ttl = Duration::from_secs(self.ctx.config.health_check_interval_secs);
@@ -294,7 +294,7 @@ impl ConsensusHandle {
         let local_opacity = effective_opacity_ctx(&self.ctx, consensus_kind::PROPOSE);
         if local_opacity > 0.0 && config.ballot_retry_jitter_ms > 0 {
             let defer_ms = (local_opacity * config.ballot_retry_jitter_ms as f32 * 2.0) as u64;
-            tokio::time::sleep(Duration::from_millis(defer_ms)).await;
+            mycelium_core::sim_seam::sleep_ms("consensus/defer", defer_ms).await;
         }
         if config.use_suggest_leader && config.ballot_retry_jitter_ms > 0 {
             let my_fill = local_opacity;
@@ -303,7 +303,7 @@ impl ConsensusHandle {
                 .filter(|(_, k, _)| k.as_ref() == consensus_kind::PROPOSE)
                 .all(|(_, _, s)| s.fill_ratio >= my_fill);
             if !is_lightest {
-                tokio::time::sleep(Duration::from_millis(config.ballot_retry_jitter_ms)).await;
+                mycelium_core::sim_seam::sleep_ms("consensus/suggest-defer", config.ballot_retry_jitter_ms).await;
             }
         }
         let n_nodes = (self.ctx.peers.len() + 1).max(1);
@@ -518,7 +518,11 @@ impl ConsensusHandle {
                 // LWW-resolved by HLC, so let the winning commit converge, then read the
                 // authoritative converged value; only the node whose value survived holds the
                 // lock. Losers get `Superseded` and never receive a guard.
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                //
+                // The duration of this wait is a correctness assumption (replay inventory §2.3),
+                // so it goes through the timer seam: a replay can run it at 0, exactly 1 s, or
+                // longer, and the D4 audit's model of this path can become a replay of it.
+                mycelium_core::sim_seam::sleep_ms("lock/converge", 1000).await;
                 match crate::consensus::live_committed_with_hlc(
                         &self.ctx.kv_state, &slot, crate::consensus::causal_now_ms(&self.ctx.hlc)) {
                     // Fencing token is the commit's HLC, not the ballot: the HLC is monotonic
@@ -565,7 +569,7 @@ impl ConsensusHandle {
                 // election (both nodes reported themselves leader). Mirror `distributed_lock`: let
                 // the winning commit converge (the committed key is HLC-LWW resolved), then return
                 // the converged leader — which may not be this node (audit 2026-07-15).
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                mycelium_core::sim_seam::sleep_ms("elect/converge", 1000).await;
                 leader_from_slot(self).ok_or(ConsistencyError::Superseded)
             }
             ConsensusResult::Superseded { .. } =>

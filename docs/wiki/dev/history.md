@@ -259,6 +259,18 @@ Deliberately outside the seam, with the reason in the inventory rather than as d
 are per-request and cannot be full, one of them in a detached task whose scheduling the kernel exists to remove.
 Wiki: [dev](dev.md), `.log/` entries dated 2026-09-17.
 
+**The timer seam, first arm — 2026-09-18 (PR #269).** `sim_seam::sleep_ms`: the inventory's §2.3 row for
+*fixed sleeps whose duration is a correctness assumption*, headed by the 1 s "let the winning commit converge"
+after `distributed_lock`'s commit — the path the D4 audit could only model. `Record` sleeps and records that the
+wait elapsed; **`Replay` never wall-waits** — the recorded effective duration advances both simulated clocks
+(`Sources::advance_ms`; both, unlike a wall *jump*) and the task yields once. Routed: `lock/converge`,
+`elect/converge`, `consensus/defer`, `consensus/suggest-defer`; `consensus_handle.rs` in the baseline 9 → 3.
+**A boundary found by writing the test the other way first:** an authored timer result is honoured by the
+timer, but in exact replay the clock reads that follow are replayed too — so **exact replay reproduces; it
+cannot explore**. Exploring 0 / exact / beyond is scenario replay, the plan's third mode, which the two-mode
+kernel does not have; the seam, the kernel and the inventory say "the hook, not the exploration", and the test
+pins both halves. Log: [`.log/2026-09-18-item6-pr3-timer-seam.md`](.log/2026-09-18-item6-pr3-timer-seam.md).
+
 ## v3 contracts axis — AE-T: the seam records what it enforces — 2026-09-16 (unreleased, PR #224)
 
 Three gaps on the AE line, found by building the private exporter *against* the seam rather than by reviewing it:
