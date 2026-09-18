@@ -1,0 +1,13 @@
+1	n1	wall	-	now_ms()	1789000000000
+2	n1	wall	-	now_ms()	1789000000001
+3	n1	wall	-	now_ms()	1789000000002
+4	n1	fs	wal.bin	write_all d=sha256:813b8a4509d18698 len=33 sync=false off=0	Ok(33)
+5	n1	fs	wal.bin	sync_data d=sha256:e3b0c44298fc1c14 len=0 sync=true off=33	Ok(0)
+6	n1	wall	-	now_ms()	1789000000003
+7	n1	fs	wal.bin#tail	read d=sha256:813b8a4509d18698 len=33 sync=false off=0	Ok(33)
+8	n1	fs	snapshot.tmp	write d=sha256:509ddcdea8008b83 len=142 sync=false off=0	Ok(142)
+9	n1	fs	snapshot.tmp	sync_data d=sha256:e3b0c44298fc1c14 len=0 sync=true off=142	Ok(0)
+10	n1	fs	snapshot.bin	rename d=sha256:a4401a4c27b71640 len=26 sync=false off=0	Ok(26)
+11	n1	fs	dir	sync_dir d=sha256:e3b0c44298fc1c14 len=0 sync=true off=0	Ok(0)
+12	n1	fs	wal.bin#truncate	sync_data d=sha256:e3b0c44298fc1c14 len=0 sync=true off=0	Ok(0)
+13	n1	wall	-	now_ms()	1789000000004

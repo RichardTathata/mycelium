@@ -246,6 +246,22 @@ held; recorded as what the sweep does not prove. The tuning plant (no spacing) w
 shown:** the ADR's sharper sentence — loops oscillating together while each is stable alone — the witness
 removes every breaker at once. Ledger: [history](../history.md) → *item 6 PR 6*.
 
+## The replay corpus (item 6 PR 7, 2026-09-18)
+
+`mycelium-core/tests/replay-corpus/<name>/` holds checked-in bundles; the first is scenario A (thirteen
+effects). Two tests in `persistence.rs`'s `durability_tests` own it. **The recorder**,
+`record_scenario_a_into_the_corpus`, runs only under `MYCELIUM_RECORD_CORPUS=1` and rewrites the entry from a
+fresh recording — the same code records the same bytes, so a re-record is reviewed as a diff of `choices.trace`,
+the way the seams baseline is regenerated on purpose. **The gate**,
+`the_checked_in_scenario_a_bundle_replays_here_and_matches_a_fresh_recording`, runs in every `--features sim`
+suite (CI's `mycelium-core --features sim` job): the committed schedule must replay on *this* machine without
+divergence, the bundle must still name the witness toggle this build knows, and a fresh recording must ask for
+the same effects in the same order. That last check is what makes the corpus a gate rather than a souvenir: a
+new effect or changed bytes in the snapshot path fails the suite, with the differing line printed from both
+sides, until someone re-records deliberately. Verified by tampering one content hash in the committed trace (the
+gate fails on that effect) and re-recording (identical bytes). Not built: the minimiser and a replay binary. Log:
+[`.log/2026-09-18-item6-pr7-replay-corpus.md`](../.log/2026-09-18-item6-pr7-replay-corpus.md).
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy

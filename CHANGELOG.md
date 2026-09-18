@@ -21,6 +21,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ADR's "oscillate together while each is stable alone". No shipped code changed; three `agent` submodules and the
   opacity decision functions became crate-visible for the harness.
 
+### Added — the replay corpus and its gate (item 6 PR 7)
+
+- **`mycelium-core/tests/replay-corpus/scenario-a-wal-snapshot/`** — the first checked-in failure bundle
+  (scenario A, thirteen effects), recorded by `record_scenario_a_into_the_corpus` under
+  `MYCELIUM_RECORD_CORPUS=1` and gated by
+  `the_checked_in_scenario_a_bundle_replays_here_and_matches_a_fresh_recording` in every `--features sim` run:
+  the committed schedule replays on the running machine without divergence, the witness toggle is still the one
+  this build knows, and a fresh recording asks for the same effects in the same order. A change in the snapshot
+  path's effects fails the suite until the corpus is re-recorded on purpose.
+- **`mycelium_sim::bundle::Build::current(features)`** — the build identity as honestly known at compile time
+  (crate version, `GITHUB_SHA` under CI, arch-os; `unknown` for the compiler).
+- Not built: the minimiser and a replay binary.
+
 ### Changed — every periodic loop ticks through the timer seam (item 6 follow-on)
 
 - The seven tickers #276 left unrouted now go through `sim_seam::interval_ms`: `kv-persist/{key}`,

@@ -212,8 +212,11 @@ right first target); `tasks.rs` ~6 `fastrand` + ~6 timers; `connection.rs` ~9 `I
 
 **Sequence.** PR1 nondeterminism inventory + coverage map + trace schema *(done 2026-09-13)* · PR2 event kernel + clock/RNG interfaces +
 record/replay *(done 2026-09-16 — `mycelium-sim`; the gate is the same-length/different-content divergence test, and the crate was gated in `make check` and CI from its first commit)* · PR3 storage/channel adapters + WAL writer seams **+ the static forbidden-call check** · PR4 WAL/snapshot
-scenario + fault sweep + witness · PR5 handover (on item 5's real code) · PR6 interacting governors · PR7 CI corpus +
-tooling.
+scenario + fault sweep + witness · PR5 handover (on item 5's real code) · PR6 interacting governors *(done 2026-09-18 —
+`src/control/scenario_c.rs`, a schedule sweep over the three governors' shipped decisions; what it does not prove is in
+the ADR's §5 note)* · PR7 CI corpus + tooling *(done 2026-09-18 — the checked-in scenario A bundle and its gate, which
+replays it on the running machine and compares a fresh recording effect for effect; the recorder is the tooling, the
+minimiser is not built)*.
 
 **⚠ Divergences.**
 - **Inventory additions.** Papaya `compute` CAS retries (the wiki's recurring race family) cannot be represented by a

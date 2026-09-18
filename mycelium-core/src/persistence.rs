@@ -1284,6 +1284,80 @@ mod durability_tests {
         std::fs::remove_dir_all(&bdir).ok();
     }
 
+    // ── The replay corpus (item 6 PR 7) ──────────────────────────────────────────────────────
+
+    /// Where the checked-in corpus lives: `mycelium-core/tests/replay-corpus/<name>/`.
+    #[cfg(feature = "sim")]
+    fn corpus_dir(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("replay-corpus").join(name)
+    }
+    #[cfg(feature = "sim")]
+    const SCENARIO_A_BUNDLE: &str = "scenario-a-wal-snapshot";
+
+    /// **The recorder.** Re-records scenario A into the corpus when `MYCELIUM_RECORD_CORPUS=1`;
+    /// otherwise it does nothing and says so. Re-recording is a deliberate act, reviewed in the
+    /// diff of `choices.trace`, the way the seams baseline is regenerated on purpose.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn record_scenario_a_into_the_corpus() {
+        if std::env::var_os("MYCELIUM_RECORD_CORPUS").is_none() {
+            eprintln!("MYCELIUM_RECORD_CORPUS not set — not re-recording the corpus");
+            return;
+        }
+        use mycelium_sim::{bundle::Build, Bundle, Kernel};
+        let (trace, recorded) = race_run("corpus-rec", Kernel::recording()).await;
+        recorded.expect("the recording must succeed");
+        let mut bundle = Bundle::new(trace).witnessed_by(
+            "durability_tests::regression_snapshot_retains_wal_record_acked_before_local_apply",
+            Some(WITNESS_SKIP_WAL_MERGE_TOGGLE.to_string()),
+        );
+        bundle.build = Build::current(&["sim"]);
+        bundle.config.insert("n1".into(), "node=127.0.0.1:1 sources=seeded(1, 1789000000000)".into());
+        let dir = corpus_dir(SCENARIO_A_BUNDLE);
+        std::fs::remove_dir_all(&dir).ok();
+        bundle.write(&dir).expect("write the corpus bundle");
+        eprintln!("corpus re-recorded at {}", dir.display());
+    }
+
+    /// **The corpus gate.** The checked-in scenario A bundle — recorded on one machine, committed
+    /// — replays *here* without divergence, and a fresh recording asks for the same effects in the
+    /// same order as the one on disk. The second half is the stronger claim: a change to what the
+    /// code does (a new effect, changed bytes) fails this gate until the corpus is re-recorded on
+    /// purpose, the way a new nondeterministic site fails the seams baseline. The bundle must also
+    /// still name its witness, so a renamed toggle is caught here and not in a reviewer's hands.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn the_checked_in_scenario_a_bundle_replays_here_and_matches_a_fresh_recording() {
+        use mycelium_sim::{Bundle, Kernel};
+        let dir = corpus_dir(SCENARIO_A_BUNDLE);
+        let bundle = Bundle::read(&dir)
+            .unwrap_or_else(|e| panic!("corpus bundle at {}: {e:?}", dir.display()));
+        assert_eq!(
+            bundle.witness.as_ref().and_then(|w| w.toggle.as_deref()),
+            Some(WITNESS_SKIP_WAL_MERGE_TOGGLE),
+            "the corpus bundle must name the witness toggle this build knows"
+        );
+        assert!(bundle.trace.len() >= 8, "a corpus entry with fewer than 8 effects is not scenario A");
+
+        // Exact replay of the checked-in schedule: every effect is checked against the recording.
+        let (_t, replayed) = race_run("corpus-rep", Kernel::replaying(bundle.trace.clone())).await;
+        replayed.expect("the checked-in schedule must replay here without diverging");
+
+        // And a fresh recording must ask for the same things, in the same order.
+        let (fresh, recorded) = race_run("corpus-fresh", Kernel::recording()).await;
+        recorded.expect("the fresh recording must succeed");
+        assert_eq!(fresh.len(), bundle.trace.len(), "a different number of effects than the corpus records");
+        for (i, (a, b)) in fresh.entries().iter().zip(bundle.trace.entries()).enumerate() {
+            assert!(
+                a.same_request(b),
+                "effect {i} differs from the corpus:\n  fresh:  {}\n  corpus: {}\n\
+                 re-record with MYCELIUM_RECORD_CORPUS=1 if the change is intended",
+                a.to_line(),
+                b.to_line()
+            );
+        }
+    }
+
     /// **The fault sweep.** A failure at *any* storage effect in the run must not lose a record
     /// that was acknowledged.
     ///

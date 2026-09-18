@@ -1,0 +1,7 @@
+{
+  "commit": "unknown",
+  "features": "sim",
+  "rustc": "unknown",
+  "target": "aarch64-macos",
+  "version": "2.7.0"
+}

@@ -60,6 +60,24 @@ pub struct Build {
     pub rustc: String,
 }
 
+impl Build {
+    /// This build's identity, as far as it is honestly known at compile time: the crate version,
+    /// the commit when the build ran under GitHub Actions (`GITHUB_SHA` is in the compiler's
+    /// environment there; `unknown` elsewhere), the architecture and OS, and the features the
+    /// caller names. The compiler version is not known without a build script, and is not
+    /// guessed. A corpus entry (item 6 PR 7) carries this so a reviewer can tell an exact replay
+    /// from a scenario replay.
+    pub fn current(features: &[&str]) -> Self {
+        Self {
+            commit:   option_env!("GITHUB_SHA").unwrap_or("unknown").to_string(),
+            version:  env!("CARGO_PKG_VERSION").to_string(),
+            features: features.iter().map(|f| f.to_string()).collect(),
+            target:   format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+            rustc:    "unknown".to_string(),
+        }
+    }
+}
+
 /// A recorded run, complete enough to reproduce exactly.
 #[derive(Clone, Debug, Default)]
 pub struct Bundle {
