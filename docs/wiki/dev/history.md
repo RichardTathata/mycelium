@@ -64,6 +64,16 @@ over an undecodable journal; `RightsHead` over `serde_fixint` bytes, `tls`-gated
 reconcile and publishing the head are PR 4. Log:
 [`.log/2026-09-18-item4-pr3-rights-ledger.md`](.log/2026-09-18-item4-pr3-rights-ledger.md).
 
+**PR 4a (#275) — the membership governor through the contract.** The first shipped governor wired to the
+predicate: a pure `classify` (join at 0 → rescue, join below `min` → **deficit fill**, leave over `max` → routine
+scale-down, drain → no class), the predicate per pass on the real `ViewConfidence`, settling observed against the
+group's membership, the cooldown as spacing unchanged in meaning; the node's profile as an atomic
+(`set_control_profile`, default `Legacy` — nothing changes until an operator opts in) with the `Observe`
+tripwire. **The ADR gained a fifth class by dated amendment**: the governor's own primary action fitted none of
+the four, and by cost it is a rescue. The governor's `fastrand`/`Instant`/`sleep` sites routed through the seams
+(baseline 6 → 1). PR 4 split into 4a/4b/4c in the ADR's table. Log:
+[`.log/2026-09-18-item4-pr4a-membership-governor.md`](.log/2026-09-18-item4-pr4a-membership-governor.md).
+
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
 Record `docs/design/knowledge-layer.md` (PR 1, the ADR, #243, 2026-09-17); code `src/knowledge/` behind `tls`.

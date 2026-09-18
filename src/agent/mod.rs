@@ -71,6 +71,8 @@ mod cluster_tuner;
 mod tuning_governor;
 pub(crate) mod timing_governor;
 mod membership_governor;
+/// v3 item 4 PR 4a — `set_control_profile` and its tripwire, on `GossipAgent`.
+mod control_profile;
 // The diagnostics module's *snapshot/view* surface (fleet snapshot, ViewConfidence, the `explain`
 // reader) is consumed only by the `gateway` HTTP handlers and the `metrics` emitter; its detectors
 // are used unconditionally by the loop. In a build with neither feature (e.g. `--no-default-features`
@@ -434,6 +436,15 @@ pub(crate) struct TaskCtx {
     /// currently **flapping** (≥ threshold join/leave transitions within the flap window). Set by
     /// the detector loop; `0` unless `emergent_detectors_enabled`. Relaxed — diagnostic; on `/stats`.
     pub(crate) membership_flaps: Arc<AtomicU64>,
+
+    /// v3 item 4 — the node's control profile (`control::Profile::as_u8`; `0` is `Legacy`, the
+    /// default, under which no governor consults the confidence predicate). Set by
+    /// `set_control_profile`, read by each governor once per pass. Relaxed: a change takes effect on
+    /// the next pass, which is the granularity an operator can observe anyway.
+    pub(crate) control_profile: AtomicU8,
+    /// v3 item 4 tripwire: how many actions an enforcing profile *would* have held, counted under
+    /// `Observe`. Detection, not prevention — the number an operator watches before enforcing.
+    pub(crate) control_would_hold: Arc<AtomicU64>,
 
     /// Legible-Emergence Phase-1 gauge (P3): count of (node, kind) pairs whose opacity is currently
     /// **oscillating** (≥ threshold opaque/transparent toggles within the window — pheromone
@@ -884,6 +895,8 @@ impl GossipAgent {
             governed_group_conflicts: Arc::new(AtomicU64::new(0)),
             capability_coverage_gaps: Arc::new(AtomicU64::new(0)),
             membership_flaps: Arc::new(AtomicU64::new(0)),
+            control_profile: AtomicU8::new(0),
+            control_would_hold: Arc::new(AtomicU64::new(0)),
             opacity_oscillations: Arc::new(AtomicU64::new(0)),
             cap_authz_violations: Arc::new(AtomicU64::new(0)),
             schema_mismatch: Arc::new(AtomicU64::new(0)),

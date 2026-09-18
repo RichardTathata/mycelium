@@ -32,7 +32,7 @@
 1 src/agent/kv_quorum_ext.rs
 6 src/agent/lifecycle.rs
 3 src/agent/lock_service.rs
-6 src/agent/membership_governor.rs
+1 src/agent/membership_governor.rs
 2 src/agent/mod.rs
 2 src/agent/oidc.rs
 4 src/agent/opacity.rs

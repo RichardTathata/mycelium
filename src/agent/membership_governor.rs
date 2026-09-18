@@ -18,9 +18,11 @@ use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
 use crate::node_id::NodeId;
 use mycelium_core::kv_handle::KvHandle;
 use serde::{Deserialize, Serialize};
+use crate::control::{self, ActionClass, ActionId, ConfidenceBound, ControlSpec, Decision, Profile, SettleState};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::debug;
 
 use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn, scan_prefix_kv};
@@ -145,17 +147,60 @@ pub(super) fn group_members(kv_state: &crate::store::KvState, group: &str) -> Ha
 }
 
 /// One convergence pass over every governed group on this node.
-fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, cooldown: Duration, last_action: &mut HashMap<String, Instant>) {
+/// One governed group's control state — the actuator's spacing and settling (item 4 PR 4a).
+struct GroupState {
+    /// When this node last acted on the group, on the monotonic seam. The cooldown, as spacing.
+    last_action_ms: Option<u64>,
+    /// Whether the last action has been observed to take effect.
+    settle: SettleState,
+    /// What the pending action was: `Some(true)` a join, `Some(false)` a leave. Observed when the
+    /// group's membership reflects it.
+    pending_join: Option<bool>,
+    /// The governor's own sequence for this actuator — the stable action id.
+    seq: u64,
+}
+
+/// **Which class of action a membership decision is** — pure, so the mapping is a tested fact
+/// rather than a comment (adaptive-stability §2, and the PR 4a amendment that added `DeficitFill`).
+///
+/// - a join into an *empty* group is a rescue from zero;
+/// - a join into a group below its declared `min` is a deficit fill — by cost a rescue, not
+///   speculation: a wrong fill is one extra member, a wrong hold is a group stuck below its bound;
+/// - a leave because the group reads *over* `max` is routine scale-down, the one class here that
+///   uncertainty holds, because the observation may be a partition and leaving on a partition makes
+///   it worse;
+/// - a **drain** is an operator's instruction carried by a fresh intent, not an inference from the
+///   fleet view, so the confidence predicate has nothing to say about it: `None`;
+/// - a hold is not an action.
+pub fn classify(action: &MembershipAction, n: usize, is_drain: bool) -> Option<ActionClass> {
+    match action {
+        MembershipAction::Join if n == 0 => Some(ActionClass::RescueFromZero),
+        MembershipAction::Join => Some(ActionClass::DeficitFill),
+        MembershipAction::Leave if is_drain => None,
+        MembershipAction::Leave => Some(ActionClass::RoutineScaleDown),
+        MembershipAction::Hold => None,
+    }
+}
+
+fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut HashMap<String, GroupState>) {
     let me = &ctx.node_id;
     let my_load = mycelium_core::framing::gossip_shard_fill(&ctx.gossip_txs) as f64;
+    // One reading per pass: the monotonic seam, in milliseconds — spacing and settling are
+    // intervals, never wall time.
+    let now_ms = mycelium_core::sim_seam::mono_now_ns() / 1_000_000;
+    // The node's profile, read once per pass. `Legacy` — the default — consults nothing.
+    let profile = Profile::from_u8(ctx.control_profile.load(Ordering::Relaxed));
     for (key, _) in scan_prefix_kv(&ctx.kv_state, MEMBERSHIP_PREFIX) {
         let Some(intent) =
             super::intent::read_fresh_intent::<MembershipIntent>(kv, &key, me, MEMBERSHIP_INTENT_TTL_MS)
         else { continue };
         let group = intent.group.as_str();
-        if last_action.get(group).is_some_and(|t| t.elapsed() < cooldown) {
-            continue; // recently acted — damp flap
-        }
+        let state = groups.entry(group.to_string()).or_insert_with(|| GroupState {
+            last_action_ms: None,
+            settle: SettleState::Idle,
+            pending_join: None,
+            seq: 0,
+        });
         // The group's filter (for eligibility) comes from its CapabilityGroupDef.
         let Some(def) = kv.get(&format!("cap-group/{group}")).and_then(|b| CapabilityGroupDef::decode(&b))
         else { continue };
@@ -164,6 +209,26 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, cooldown: Duration, last_action: 
         let members = group_members(&ctx.kv_state, group);
         let n = members.len();
         let am_member = members.contains(me);
+
+        // Settling: the last action is observed once the membership reflects it.
+        if state.pending_join == Some(am_member) {
+            state.settle = SettleState::Idle;
+            state.pending_join = None;
+        }
+        // Spacing — the cooldown, unchanged in meaning — then settling: no proposal on an actuator
+        // whose last action is unobserved and inside the settle timeout. Past it, settled as unknown.
+        if !control::spacing_allows(spec, state.last_action_ms, now_ms) {
+            continue; // recently acted — damp flap
+        }
+        if control::may_propose(&state.settle, spec, now_ms).is_err() {
+            continue;
+        }
+        if matches!(state.settle, SettleState::Pending { .. }) {
+            debug!(group, "membership: last action unobserved past the settle timeout — settled as unknown");
+            state.settle = SettleState::Idle;
+            state.pending_join = None;
+        }
+
         let am_eligible = eligible.contains(me);
         let is_drain = intent.drain.iter().any(|d| d == me);
         let eligible_non_members = eligible.difference(&members).count();
@@ -175,19 +240,42 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, cooldown: Duration, last_action: 
         };
         let leave_p = intent.max.map_or(0.0, |mx| leave_probability(n, mx, members.len(), my_load));
 
-        match decide(am_member, is_drain, join_p, leave_p, fastrand::f64()) {
-            MembershipAction::Join => {
-                debug!(group, n, min = intent.min, "membership: self-electing to JOIN");
-                super::emergent_groups::emit_membership(ctx, me, &Arc::from(group), false);
-                last_action.insert(group.to_string(), Instant::now());
-            }
-            MembershipAction::Leave => {
-                debug!(group, n, ?intent.max, "membership: self-electing to LEAVE");
-                super::emergent_groups::emit_membership(ctx, me, &Arc::from(group), true);
-                last_action.insert(group.to_string(), Instant::now());
-            }
-            MembershipAction::Hold => {}
+        // The roll comes from the `govern` stream (inventory §2.2), so a replay rolls the same.
+        let roll = f64::from(mycelium_core::sim_seam::rng_f32("govern"));
+        let action = decide(am_member, is_drain, join_p, leave_p, roll);
+        if matches!(action, MembershipAction::Hold) {
+            continue;
         }
+
+        // The confidence predicate, per input: this decision rests on the fleet view, so the fleet
+        // view's confidence is what may hold it. Under `Legacy` nothing is consulted.
+        if let Some(class) = classify(&action, n, is_drain) {
+            let view = super::emergent::compute_view_confidence(ctx);
+            match control::decide(class, &view, &spec.bound, profile) {
+                Decision::Proceed => {}
+                Decision::WouldHold(why) => {
+                    ctx.control_would_hold.fetch_add(1, Ordering::Relaxed);
+                    debug!(group, ?class, ?why, "membership: observe profile — an enforcing profile would have held this");
+                }
+                Decision::Held(why) => {
+                    debug!(group, ?class, ?why, "membership: held on uncertainty");
+                    continue;
+                }
+            }
+        }
+
+        let leaving = matches!(action, MembershipAction::Leave);
+        state.seq += 1;
+        let id = ActionId { governor: spec.governor.clone(), actuator: group.to_string(), seq: state.seq };
+        if leaving {
+            debug!(group, n, ?intent.max, %id, "membership: self-electing to LEAVE");
+        } else {
+            debug!(group, n, min = intent.min, %id, "membership: self-electing to JOIN");
+        }
+        super::emergent_groups::emit_membership(ctx, me, &Arc::from(group), leaving);
+        state.last_action_ms = Some(now_ms);
+        state.settle = SettleState::Pending { id, since_ms: now_ms };
+        state.pending_join = Some(!leaving);
     }
 }
 
@@ -215,15 +303,28 @@ impl GossipAgent {
         // historical 3 × health-check interval. Read once here: live timing intents do not alter it.
         let cooldown = self.config.membership_cooldown();
         debug_assert!(cooldown >= Duration::from_secs(1));
+        // The governor's contract (item 4 PR 4a): one actuator — a group's membership — with the
+        // cooldown as its spacing and two health-check intervals as its settle timeout. The profile
+        // field is the value the spec was built under; the live profile is the node's, read per pass.
+        let spec = ControlSpec {
+            governor: "membership".into(),
+            actuator: "group-membership".into(),
+            spacing_ms: cooldown.as_millis() as u64,
+            settle_timeout_ms: interval_secs.saturating_mul(2).saturating_mul(1000),
+            bound: ConfidenceBound::default(),
+            profile: Profile::Legacy,
+        };
         self.task_ctx.spawn_task(async move {
             let mut rx = kv.subscribe_prefix(MEMBERSHIP_PREFIX);
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_action: HashMap<String, Instant> = HashMap::new();
+            let mut groups: HashMap<String, GroupState> = HashMap::new();
             loop {
-                // Jitter each pass so nodes don't all roll against the same instantaneous view.
-                tokio::time::sleep(Duration::from_millis(fastrand::u64(0..250))).await;
-                converge(&ctx, &kv, cooldown, &mut last_action);
+                // Jitter each pass so nodes don't all roll against the same instantaneous view —
+                // from the `jitter` stream and through the timer seam, so a replay jitters the same.
+                let jitter_ms = mycelium_core::sim_seam::rng_u64_below("jitter", 250);
+                mycelium_core::sim_seam::sleep_ms("membership/jitter", jitter_ms).await;
+                converge(&ctx, &kv, &spec, &mut groups);
                 tokio::select! {
                     r = rx.changed() => { if r.is_err() { break; } }
                     _ = tick.tick() => {}
@@ -237,6 +338,31 @@ impl GossipAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The class mapping is a tested fact** (item 4 PR 4a). A join into an empty group is a
+    /// rescue; a join below `min` is a deficit fill; a leave over `max` is routine scale-down — the
+    /// one class here that uncertainty holds; a drain is an instruction, not an inference.
+    #[test]
+    fn a_membership_decision_classifies_by_cost_not_by_verb() {
+        assert_eq!(classify(&MembershipAction::Join, 0, false), Some(ActionClass::RescueFromZero));
+        assert_eq!(classify(&MembershipAction::Join, 2, false), Some(ActionClass::DeficitFill));
+        assert_eq!(classify(&MembershipAction::Leave, 9, false), Some(ActionClass::RoutineScaleDown));
+        assert_eq!(classify(&MembershipAction::Leave, 9, true), None, "a drain is an operator's instruction");
+        assert_eq!(classify(&MembershipAction::Hold, 3, false), None);
+    }
+
+    /// The classes a join maps to are the ones uncertainty never holds; the class a leave maps to
+    /// is the one it does. That asymmetry is the ADR's, and this pins that the governor lands on the
+    /// right side of it for each verb.
+    #[test]
+    fn joins_are_never_held_and_an_over_max_leave_is() {
+        for n in [0usize, 1, 5] {
+            let class = classify(&MembershipAction::Join, n, false).expect("a join is an action");
+            assert!(!control::holds_on_uncertainty(class), "a join at n={n} must never wait on the fleet");
+        }
+        let leave = classify(&MembershipAction::Leave, 9, false).expect("a leave is an action");
+        assert!(control::holds_on_uncertainty(leave), "a leave on a possibly-partitioned view is held");
+    }
 
     /// WP5 pin: the cooldown is an explicit config parameter. Unset ⇒ the historical
     /// `DEFAULT_MEMBERSHIP_COOLDOWN_TICKS × health_check_interval_secs`; set ⇒ exactly that, never below 1 s.
