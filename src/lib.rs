@@ -215,6 +215,10 @@ pub mod federation;
 /// The scoped-mandate contract (v3 item 5 — `docs/design/scoped-mandates.md`).
 /// The contract and the epoch check; the enforcement point inside a resource is a later PR.
 pub mod mandate;
+/// The adaptive-stability contract (v3 item 4 — `docs/design/adaptive-stability.md`).
+/// Action classes, the confidence predicate, profiles, `ControlSpec`, spacing and settling —
+/// pure decisions only; no governor is changed and the rights ledger is a later PR.
+pub mod control;
 /// Typed knowledge records (v3 item 3 — `docs/design/knowledge-layer.md`).
 /// Records and links only: no store, no resolution, no gossip.
 #[cfg(feature = "tls")]

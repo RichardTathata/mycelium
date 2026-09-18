@@ -38,6 +38,13 @@ per actuator and per deficit, named; loop-breakers named (existing `gate`/cooldo
 combined test = replay stage 6); depth signals consumed (D18); four profiles, shadow first. Log:
 [`.log/2026-09-18-item4-pr1-adaptive-stability-adr.md`](.log/2026-09-18-item4-pr1-adaptive-stability-adr.md).
 
+**PR 2 (#271) — the contract types, `src/control.rs`.** Pure decisions, no governor changed. `ActionClass` ×
+the rule `holds_on_uncertainty`, written twice (rule and hand table) and pinned; `decide` over the real, public
+`ViewConfidence` with a named `Uncertainty` — **an isolated node is uncertain, not fresh**, so WP5's
+`staleness_known` is now consequential; four profiles with `Observe` as a distinct `WouldHold` decision rather than
+a flag; `ControlSpec`, a stable `ActionId`, and spacing/settling as pure checks. Both decisive properties verified
+by planting their inversion. Log: [`.log/2026-09-18-item4-pr2-control-contract.md`](.log/2026-09-18-item4-pr2-control-contract.md).
+
 ## v3 contracts axis — item 3: the knowledge layer, complete — 2026-09-18 (unreleased, PRs #254–#255, #264–#267)
 
 Record `docs/design/knowledge-layer.md` (PR 1, the ADR, #243, 2026-09-17); code `src/knowledge/` behind `tls`.

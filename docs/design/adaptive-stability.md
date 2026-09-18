@@ -173,7 +173,7 @@ and it is hard because it is **local and durable**, not because it is global.
 | PR | Contents |
 |---|---|
 | **1** *(this record)* | the ADR; `rights/head/{holder}` reserved in the namespace table and `kv_ns` |
-| 2 | `ControlSpec`; the **confidence predicate as a pure function, swept** (every action class × every confidence state — the partition-table shape); the four profiles; the stable action id |
+| **2** ✓ | `src/control.rs` — `ControlSpec`; the **confidence predicate as a pure function, swept** over every action class × every way a view can be uncertain, taking the real `ViewConfidence`; the four profiles with `Observe` as a distinct `WouldHold` decision; the stable `ActionId`; spacing and settling as pure checks |
 | 3 | the **rights ledger**: the node-local journal on item 1's durability, `Right` with its five states, the bounded signed head, `admission.rejected` |
 | 4 | the flow wired for the four owned actuators — reserve-before-act, settling, spacing — with the existing `gate` and cooldown kept as they are |
 | 5 | admission control at the companions' queues via depth (§6), the example, `docs/operations` runbook, the §6.6 ledger entry for any config struct that gains a field |
