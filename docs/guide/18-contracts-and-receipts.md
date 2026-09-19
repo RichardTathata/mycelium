@@ -9,9 +9,10 @@ vocabulary in code, and the design record
 
 Two questions this chapter answers:
 
-- **"My write returned `true`. What did I just learn?"** That the update was applied on *this node*,
-  now. Not that it reached disk, not that any peer has it, not that it will survive a restart. `true`
-  names no rung, which is exactly why the receipt verbs exist.
+- **"My write returned `true`. What did I just learn?"** That it was queued for gossip. Not that it
+  reached disk, not that any peer has it, not that it will survive a restart. Worse, `false` does not
+  mean the write did not happen: the local store may have been updated with a full gossip channel and
+  anti-entropy still to come. The bool names no rung, which is exactly why the receipt verbs exist.
 - **"The call timed out. Did it happen?"** Nobody knows, and the API says so rather than guessing.
   A timeout comes back as `DeliveryUnknown`, never as a failure, because a failure is a claim about
   the world that a timeout does not support.
@@ -90,7 +91,9 @@ receipt about it ambiguous.
 ## Writing, four ways
 
 ```rust
-// 1. No receipt. Returns bool: applied here, now. Names no rung.
+// 1. No receipt. The bool says the update was QUEUED FOR GOSSIP — and `false` is
+//    ambiguous: the local store may still have been updated (a full channel, with
+//    anti-entropy to follow) or the write may have been rejected outright as oversized.
 agent.kv().set("depot/plan", bytes.clone());
 
 // 2. A receipt, reporting whatever rung was actually reached.

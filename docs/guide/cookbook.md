@@ -242,8 +242,9 @@ LWW is the default ([00 · Concepts](00-concepts.md): consensus vs LWW vs rendez
 
 ### How do I know whether my write actually reached disk?
 
-Ask for a receipt. `set` returns a bool that means *applied here, now* and names no
-rung; `kv().set_with_receipt(&op, key, value)` reports whichever rung was reached,
+Ask for a receipt. `set` returns a bool that means *queued for gossip* and names no
+rung — and its `false` is ambiguous, since the local store may have been updated
+anyway. `kv().set_with_receipt(&op, key, value)` reports whichever rung was reached,
 and `kv().set_requiring_sync(&op, key, value)` **refuses** rather than applying a
 write it cannot sync. `Buffered` is not a softer `OnDisk` — it survives a process
 crash and is lost to a power cut. Demo:
