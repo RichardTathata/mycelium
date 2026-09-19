@@ -603,17 +603,20 @@ mod tests {
     /// `try_send`: the shard a key maps to hashes the key, and the key carries the node id. Not
     /// nondeterminism — a different node. Both runs now share one identity.)
     #[tokio::test]
-    async fn a_whole_node_recording_of_a_linearizable_award_diverges_without_a_scheduler_seam() {
+    async fn a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam() {
         use mycelium::sim_seam::{install, take, SimContext};
         use mycelium_sim::{Kernel, Sources, Trace};
 
-        async fn run(kernel: Kernel, port: u16) -> (Trace, Award) {
+        async fn run(kernel: Kernel, port: u16, paused: bool) -> (Trace, Award) {
             install(SimContext {
                 kernel,
                 sources: Sources::seeded(7, 1_789_000_000_000),
                 node: "n1".into(),
                 offsets: Default::default(),
             });
+            if paused {
+                mycelium::sim_seam::pause_clock_for_replay();
+            }
             let agent = Arc::new(GossipAgent::new(
                 NodeId::new("127.0.0.1", port).unwrap(),
                 GossipConfig { bind_port: port, ..Default::default() },
@@ -630,19 +633,25 @@ mod tests {
         }
 
         let port = mycelium::test_util::alloc_port();
-        let (trace, recorded) = run(Kernel::recording(), port).await;
+        let (trace, recorded) = run(Kernel::recording(), port, false).await;
         assert!(trace.len() > 6, "the round touched the seams: {} entries", trace.len());
         assert_eq!(recorded.participant, "driver-a");
 
-        // The replay runs on the same thread (current-thread runtime), so the installed kernel is
-        // the one it sees; a divergence panics inside `run`, which the join reports.
-        let outcome = tokio::spawn(run(Kernel::replaying(trace), port)).await;
-        take(); // whatever state the panicked run left installed
-        let err = outcome.expect_err("without a scheduler seam a whole-node replay diverges — if this passed, flip this test into the claim");
+        // The claim. The replay runs on the same thread (current-thread runtime), so the installed
+        // kernel is the one it sees; a divergence panics inside `run`, which the join reports.
+        let armed = tokio::spawn(run(Kernel::replaying(trace.clone()), port, true)).await;
+        take();
+        mycelium::sim_seam::resume_clock_after_replay();
+        let (_, replayed) = armed.expect("the whole node's tasks keep their recorded order under the scheduler seam");
+        assert_eq!(replayed.participant, recorded.participant, "and the award replays to the same acceptor");
+
+        // The plant: the identical trace, the identical node, the arm disarmed. It must still
+        // diverge — otherwise the claim above is about luck rather than about the seam.
+        let unarmed = tokio::spawn(run(Kernel::replaying(trace), port, false)).await;
+        take();
+        let err = unarmed.expect_err("without the paused clock a whole-node replay still diverges");
         let msg = err.into_panic().downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(msg.contains("replay diverged"), "the failure is a divergence, not something else: {msg}");
-        assert!(msg.contains("jitter") || msg.contains("consensus/defer") || msg.contains("tick"),
-            "and it is an interleaving of two tasks' seam requests, as predicted: {msg}");
     }
 
     fn mandate_for(holder: &str, epoch: u64) -> Mandate {

@@ -397,6 +397,34 @@ federation rather than about a race with gossip.
 domain's CA, as the enforced profile requires; the gateways' HTTP is plain inside the compose
 network); a hostile network between domains; more than two domains; anything under the `sim` kernel.
 
+## The scheduler seam's first arm (item 6, 2026-09-19)
+
+`mycelium_core::sim_seam::pause_clock_for_replay` (paired with `resume_clock_after_replay`) makes a replayed
+wait *ordering information* again: taken on tokio's paused clock, so it costs no wall time but still orders
+this task against every other waiting task. Before it, every replayed wait collapsed to one `yield_now`, and a
+whole node's tasks resumed in whatever order the runtime chose.
+
+Two tests, at two scales, and the pair is the point:
+
+- **The unit** (`sim_seam::tests`): two tasks, 50 ms spawned *before* 10 ms, so spawn order and completion
+  order disagree. Armed, the replay reproduces the recorded order; unarmed
+  (`without_the_paused_clock_the_same_two_waits_diverge`), the same trace diverges. This is the test that
+  found the real blocker — see below.
+- **The whole node** (`mycelium-commitment`): a started `GossipAgent` committing a linearizable award,
+  recorded and replayed on the same identity. This was a **pin on a gap** for a day; it is now the claim
+  (`a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam`), with the unarmed replay
+  kept beside it as the plant.
+
+**What actually blocked it, recorded because the design note guessed wrong.** Pausing the clock alone did not
+flip the pin. `Record` wrote its trace entry *after* the wait and `Replay` checked its request *before* it, so
+a recording's order was the order waits **completed** while a replay's was the order tasks **entered** them —
+different whenever two waits overlap, which is the only case the arm exists for. The seam now checks in at the
+same point in both modes.
+
+**What it does not cover:** a multi-threaded runtime (tokio's clock control refuses one), real peers (the
+network seam is still unbuilt), and two tasks that are both runnable at the same instant with no wait between
+them — a paused clock orders waits, it does not choose between ready tasks.
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy

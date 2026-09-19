@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the scheduler seam's first arm; a whole node now replays (v3 item 6)
+
+- **`mycelium_core::sim_seam::pause_clock_for_replay`** (with `resume_clock_after_replay`) — under `sim`,
+  arms the replay arms to take each recorded wait on tokio's **paused clock** instead of collapsing it to one
+  `yield_now`. A wait becomes ordering information again: no wall time is spent, but a task's wait still orders
+  it against every other waiting task. Requires a `current_thread` runtime; the `sim` feature now pulls in
+  `tokio/test-util` for the clock control, and is off in every shipped build.
+- **A whole-node recording now replays.** `mycelium-commitment`'s day-old pin on the gap is the claim:
+  `a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam`, with the unarmed replay of
+  the same trace kept beside it as the plant.
+- **Fixed on the way, and it was the real blocker:** `Record` wrote its trace entry *after* a wait while
+  `Replay` checked its request *before* one, so a recording's order was the order waits **completed** and a
+  replay's was the order tasks **entered** them. Those differ whenever two waits overlap — the only case the
+  arm exists for. Both modes now check in at the same point. Pausing the clock alone did **not** flip the pin.
+
 ## [2.8.0] — 2026-09-18
 
 **The v3 contracts axis.** The largest MINOR since 2.0 — eight numbered items and three new

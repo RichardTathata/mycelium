@@ -227,6 +227,10 @@ mod installed {
 
     thread_local! {
         static CTX: RefCell<Option<SimContext>> = const { RefCell::new(None) };
+        /// Set by [`super::pause_clock_for_replay`]: this thread's replay may honour each recorded
+        /// wait on tokio's paused clock instead of yielding once. See that function for why the
+        /// two facts are set together rather than separately.
+        static CLOCK_PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     /// Install a kernel for this thread. Replaces any previous one and returns it.
@@ -234,9 +238,21 @@ mod installed {
         CTX.with(|c| c.borrow_mut().replace(ctx))
     }
 
-    /// Remove and return this thread's kernel — how a test reads the trace back.
+    /// Remove and return this thread's kernel — how a test reads the trace back. Also disarms the
+    /// paused-clock replay: the kernel and the clock discipline arrive together and leave together,
+    /// so a later test on this thread cannot inherit half of it.
     pub fn take() -> Option<SimContext> {
+        set_clock_paused(false);
         CTX.with(|c| c.borrow_mut().take())
+    }
+
+    pub fn set_clock_paused(paused: bool) {
+        CLOCK_PAUSED.with(|p| p.set(paused));
+    }
+
+    /// May a replayed wait advance tokio's paused clock on this thread?
+    pub fn clock_paused() -> bool {
+        CLOCK_PAUSED.with(|p| p.get())
     }
 
     /// Put a storage effect through the kernel, and return the outcome the kernel decides.
@@ -456,12 +472,64 @@ pub async fn sleep_ms(_stream: &str, ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
+/// Arm the **scheduler seam's first arm** (item 6, 2026-09-19): pause tokio's clock and let every
+/// replayed wait on this thread be taken *on that clock* instead of collapsing to one yield.
+///
+/// # Why this exists
+///
+/// A single task's effects replay without it; a whole node's do not. Two tasks that both wait —
+/// the membership governor's jitter and a consensus round's defer — resume in whatever order the
+/// runtime picks, because the kernel supplies *results* to requests the code makes and never
+/// decides which task makes the next request. Yielding once discards the one fact that ordered
+/// them: how long each was waiting. On a paused clock a wait is ordering information again, and
+/// tokio advances to the nearest deadline when the runtime is idle, so the replay still never
+/// spends wall time.
+///
+/// # Why one call and not two
+///
+/// The pause and the arming must agree. Pausing without arming leaves replays yielding while the
+/// clock stands still — every wait collapses to the same instant, which is worse than not pausing.
+/// Arming without pausing makes each replayed wait a *real* one, and a replay that sleeps for the
+/// recorded durations is just a slow rerun. Neither half is useful alone, so neither is offered
+/// alone.
+///
+/// # What it requires, and what it does not fix
+///
+/// A `current_thread` runtime (tokio's clock control panics on a multi-threaded one), and a
+/// recording taken on one. Anything whose order came from *outside* the executor — real peers, real
+/// sockets — is untouched: that is the network seam, and it is a record of its own
+/// (`docs/design/replay-nondeterminism-inventory.md` §3.1).
+#[cfg(feature = "sim")]
+pub fn pause_clock_for_replay() {
+    tokio::time::pause();
+    installed::set_clock_paused(true);
+}
+
+/// Undo [`pause_clock_for_replay`] — resume tokio's clock and disarm the replay arms.
+///
+/// Paired with it, and for one situation: a test that replays the same trace **twice** on one
+/// runtime — once armed, to show the recorded interleaving is reproduced, and once unarmed, to show
+/// that it is the arm doing it. Without a resume the second run inherits a paused clock it did not
+/// ask for, and the plant would be measuring something else.
+///
+/// Call it only after a [`pause_clock_for_replay`] on the same runtime: tokio's `resume` panics on
+/// a clock that is already running. (Taking the kernel disarms the replay arms but cannot resume
+/// the clock, which belongs to the runtime rather than to the thread's kernel — so this is
+/// deliberately a separate call and not part of `take`.)
+#[cfg(feature = "sim")]
+pub fn resume_clock_after_replay() {
+    installed::set_clock_paused(false);
+    tokio::time::resume();
+}
+
 /// Sleep, through the kernel.
 ///
 /// `Record` really sleeps — the production code runs for real, and unseamed timers elsewhere still
-/// see real time pass — and writes down that the wait elapsed. `Replay` does not sleep: the recorded
-/// effective duration advances the simulated clocks, and the task yields once — the await point
-/// stays, the wall wait goes. A request that differs from the recording is a divergence.
+/// see real time pass — and writes down that the wait elapsed. `Replay` does not spend wall time:
+/// the recorded effective duration advances the simulated clocks, and then either the task yields
+/// once (the await point stays, the wall wait goes) or — with [`pause_clock_for_replay`] armed —
+/// the wait is *taken on tokio's paused clock*, which keeps this task's wait ordered against every
+/// other task's. A request that differs from the recording is a divergence.
 ///
 /// One thread per simulated node, the module's standing assumption: the kernel is a thread-local,
 /// and a sleep that resumed on another thread would find no kernel there.
@@ -473,10 +541,36 @@ pub async fn sleep_ms(stream: &str, ms: u64) {
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
             installed::timer_record("sleep", stream, ms);
         }
-        Some(mycelium_sim::Mode::Replay) => {
-            let _effective_ms = installed::timer_replay("sleep", stream, ms);
-            tokio::task::yield_now().await;
-        }
+        Some(mycelium_sim::Mode::Replay) => replay_timer("sleep", stream, ms).await,
+    }
+}
+
+/// How a replayed wait is taken.
+///
+/// **Unarmed** (every replay before the scheduler seam's first arm): check the request against the
+/// trace, then yield once. The await point survives, the wall wait goes, and the order of requests
+/// is the order tasks *entered* their waits.
+///
+/// **Armed** ([`pause_clock_for_replay`]): take the wait on the paused clock first, then check. The
+/// order matters and the two arms must agree on what it is — and `Record` writes its entry *after*
+/// the wait, so a recording's order is the order waits **completed**. Checking on entry would order
+/// the replay by when each task started waiting instead, which is a different sequence whenever two
+/// waits overlap: exactly the case this arm exists for. (Found by its own test: the 50 ms task,
+/// spawned first, checked in first on replay while the recording had the 10 ms task first.)
+///
+/// The wait taken is the **nominal** duration the caller asked for, not the kernel's effective one,
+/// because the effective value is only knowable by consuming the trace entry — which is the check
+/// itself. In an exact replay the code requests what it requested when recording, so the ordering
+/// is reproduced; a kernel that *rewrote* a duration is authoring a different schedule, and that is
+/// scenario replay rather than exact replay.
+#[cfg(feature = "sim")]
+async fn replay_timer(op: &'static str, stream: &str, nominal_ms: u64) {
+    if installed::clock_paused() {
+        tokio::time::sleep(std::time::Duration::from_millis(nominal_ms)).await;
+        let _effective_ms = installed::timer_replay(op, stream, nominal_ms);
+    } else {
+        let _effective_ms = installed::timer_replay(op, stream, nominal_ms);
+        tokio::task::yield_now().await;
     }
 }
 
@@ -581,10 +675,7 @@ impl Ticker {
                 self.inner.tick().await;
                 installed::timer_record("tick", &self.stream, nominal);
             }
-            Some(mycelium_sim::Mode::Replay) => {
-                let _effective_ms = installed::timer_replay("tick", &self.stream, nominal);
-                tokio::task::yield_now().await;
-            }
+            Some(mycelium_sim::Mode::Replay) => replay_timer("tick", &self.stream, nominal).await,
         }
     }
 }
@@ -1105,6 +1196,63 @@ mod tests {
             node:    "n1".into(),
             offsets: Default::default(),
         });
+    }
+
+    /// Two tasks whose waits differ, spawned longest-first so spawn order and completion order
+    /// disagree. The trace records a wait when it *completes*, so the recording's order is the
+    /// short wait then the long one.
+    async fn two_waits() {
+        let slow = tokio::spawn(async { sleep_ms("slow", 50).await });
+        let fast = tokio::spawn(async { sleep_ms("fast", 10).await });
+        for h in [slow, fast] {
+            if let Err(e) = h.await {
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
+    }
+
+    fn install_replaying_trace(trace: mycelium_sim::trace::Trace) {
+        installed::install(SimContext {
+            kernel:  Kernel::replaying(trace),
+            sources: Sources::seeded(9, 1_789_000_000_000),
+            node:    "n1".into(),
+            offsets: Default::default(),
+        });
+    }
+
+    /// **The scheduler seam's first arm** (inventory §3.1): with tokio's clock paused, a replayed
+    /// wait is *ordering information* again. Two tasks spawned longest-first complete shortest-first
+    /// in the recording; the replay reproduces that order instead of resuming them in spawn order.
+    ///
+    /// The plant is the sibling test below: the same trace, the same replay, without the pause —
+    /// which diverges. Without that pair this test would pass on a replay that had simply kept
+    /// spawn order and happened to agree.
+    #[tokio::test]
+    async fn a_paused_clock_replays_two_waits_in_the_recorded_order() {
+        install_recording();
+        two_waits().await;
+        let trace = installed::take().expect("installed").kernel.trace().clone();
+        assert!(trace.len() >= 2, "both waits were recorded: {}", trace.len());
+
+        install_replaying_trace(trace);
+        pause_clock_for_replay();
+        two_waits().await;
+        installed::take();
+    }
+
+    /// The plant for the test above: the identical replay with the clock left running collapses
+    /// every wait to one yield, so the tasks resume in spawn order — long first — and the second
+    /// request diverges from the recording. This is what every whole-node replay did before the
+    /// first arm existed.
+    #[tokio::test]
+    #[should_panic(expected = "replay diverged")]
+    async fn without_the_paused_clock_the_same_two_waits_diverge() {
+        install_recording();
+        two_waits().await;
+        let trace = installed::take().expect("installed").kernel.trace().clone();
+
+        install_replaying_trace(trace);
+        two_waits().await;
     }
 
     fn install_replaying(text: &str) {

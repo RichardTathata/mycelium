@@ -25,7 +25,10 @@ compliance = ["tls"]
 # Routes the nondeterministic reads the coverage map assigns to the kernel through
 # `sim_seam`, so a run can be recorded and replayed (item 6). Off in every shipped build:
 # without it `sim_seam` compiles to the calls it replaced and the substrate pays nothing.
-sim = ["dep:mycelium-sim"]
+# `tokio/test-util` is the clock control the replay arms need: the scheduler seam's first arm takes
+# each recorded wait on a paused clock so two tasks keep their relative order (item 6, §3.1 of the
+# nondeterminism inventory). `sim` is off in every shipped build, so this never reaches one.
+sim = ["dep:mycelium-sim", "tokio/test-util"]
 # Exposes a handful of `#[cfg(test)]` helpers (N_GOSSIP_SHARDS, store_hash, …) to
 # dependent crates' test builds — `#[cfg(test)]` items are invisible across a crate
 # boundary. Enabled by the full crate's dev-dependency; never in a normal build.

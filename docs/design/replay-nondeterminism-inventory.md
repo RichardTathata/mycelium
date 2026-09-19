@@ -199,7 +199,7 @@ still reproduce), and replayed from the bundle.
 
 | Mechanism | Owns | Explicitly does not cover |
 |---|---|---|
-| **`mycelium-sim` kernel** (PR 2–4) | clocks (W, M as two seams), the five RNG streams, timers, ~~`select!` readiness~~ (*not yet — no site is routed, and §3.1 says what routing it would take*), channel fullness, storage faults, external inputs; **divergence detection** on exact replay | CAS interleavings (C); real network timing; anything a Docker suite exists for; **task interleaving on one node** (§3.1) |
+| **`mycelium-sim` kernel** (PR 2–4) | clocks (W, M as two seams), the five RNG streams, timers, ~~`select!` readiness~~ (*not yet — no site is routed, and §3.1 says what routing it would take*), channel fullness, storage faults, external inputs; **divergence detection** on exact replay; **task interleaving on one node**, where the order comes from seamed waits on a `current_thread` runtime (§3.1.1, armed by `pause_clock_for_replay`) | CAS interleavings (C); real network timing; anything a Docker suite exists for; a **multi-threaded** runtime; **two tasks runnable at the same instant** with no wait between them (§3.1.1) |
 | **Loom** (`loom-spike`) | C — the atomic patterns: once-guard, unique-id, publish-then-observe; new patterns cited from real code | tokio-linked code (cannot compile under `--cfg loom`); protocol-level schedules |
 | **Fuzz** (`fuzz/`: `wire_decode`, `capability_decode`, `frame_apply`) | decoder robustness on adversarial bytes | semantics |
 | **Docker suites** (integration 13 scenarios, overlay S11–S13, scale) | real network partitions, restarts, multi-process timing at scale | determinism — they are evidence of behaviour under real timing, classified by the CI flake tier |
@@ -244,6 +244,36 @@ name the branch; not before, when it would only name what cannot yet be reproduc
 **What this note does not claim:** that (1) suffices — a recording taken on a multi-threaded runtime, or with
 real peers, has orderings no paused clock restores; those runs are the Docker suites' evidence, not the
 kernel's.
+
+### 3.1.1 The first arm, built — and the thing the note had wrong (2026-09-19)
+
+**The pin flipped.** `mycelium_core::sim_seam::pause_clock_for_replay` arms the replay arms to take each wait
+on tokio's paused clock; with it, the whole-node recording of a linearizable award **replays without
+divergence**, and `mycelium-commitment`'s pin is now the claim
+(`a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam`, with the unarmed replay of
+the same trace kept beside it as the plant). `resume_clock_after_replay` is the pair, so that plant starts from
+the clock discipline the recording had.
+
+**What the note had wrong, and it is worth stating plainly.** Pausing the clock *alone* did not flip the pin —
+the first build of (1) left the divergence exactly where it was, at seq 7. The blocker was an asymmetry this
+record had not noticed: **`Record` wrote its trace entry *after* the wait, and `Replay` checked its request
+*before* it.** So a recording's order was the order waits **completed** while a replay's was the order tasks
+**entered** them, and those differ whenever two waits overlap — which is the only case the arm exists for. The
+seam now checks in at the same point in both modes, and the paused clock does the rest. The measurement that
+found it is a two-task unit test (50 ms spawned before 10 ms, so spawn order and completion order disagree),
+not the whole-node run, which is the argument for having both.
+
+**A second consequence, recorded for the next arm.** The replayed wait is the caller's **nominal** duration, not
+the kernel's effective one: the effective value is only knowable by consuming the trace entry, which *is* the
+check. In an exact replay the code asks for what it asked for, so the ordering is reproduced; a kernel that
+rewrites a duration is authoring a different schedule, which is scenario replay and a different mode.
+
+**What is now owned, and what still is not.** Owned: task interleaving on **one** node, on a `current_thread`
+runtime, for a node whose orderings come from seamed waits. Not owned, unchanged: a multi-threaded runtime;
+real peers (the network seam, still a record of its own); and any interleaving decided by two tasks that are
+*both runnable at the same instant* with no wait between them — the paused clock orders waits, it does not
+choose between two ready tasks. The `select!` wrapper is now worth having, per the note above, for divergence
+reports that name the branch.
 
 **Order-sensitive consumers the kernel must schedule (from §2):** the 1 s convergence sleep in `distributed_lock`
 and its gateway twins (`http.rs:2395,2468,2702`) · ballot retry jitter · the reconnect backoff window (`writer.rs`)
