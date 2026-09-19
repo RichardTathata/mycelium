@@ -154,6 +154,20 @@ shape; with M13 you can now scale out keyed synthesizers instead.
 > (Linda's `in`), with non-destructive shared `read` (`rd`) for the agents that
 > only observe. Lanes route by position; the blackboard routes by content.
 
+> **And when the worker knows something the dispatcher does not, negotiate.** The
+> third coordination model is the **contract net**: a requirement is announced,
+> participants *offer*, and one is awarded — see
+> [24 · Commitments](24-commitments.md). Reach for it when the offer carries
+> information the announcer lacks (capacity, cost, suitability), and not merely to
+> make a queue feel deliberate: it costs a round trip and a deadline the other two
+> do not.
+>
+> | Model | Routes by | One workload, three ways |
+> |---|---|---|
+> | tuple space | **position** | the next free worker takes the next collection run |
+> | blackboard | **content** | a depot claims the runs whose cargo matches what it can carry |
+> | contract net | **negotiation** | depots bid on a run; the one that says it is cheapest is awarded |
+
 ---
 
 ## 9 · Bridge an MCP tool by *also* advertising a `tool/` capability
