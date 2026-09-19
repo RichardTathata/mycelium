@@ -521,6 +521,27 @@ pub(crate) enum Frame {
     Malformed(&'static str),
 }
 
+/// Does a **client-supplied** payload carry a caller-context frame where one would be read?
+///
+/// An RPC payload is `[8-byte nonce][frame][application bytes]`, so a client that controls every
+/// byte of a raw emission can prepend its own envelope. The gateway emits those bytes verbatim with
+/// itself as the sender, so `via` matches by construction and the envelope verifies as this node's.
+/// The pre-existing `CallerError::Missing` guard only catches *bare* bytes; a client that supplies a
+/// frame walked straight past it.
+///
+/// Raw-emission routes call this and refuse. A legitimate caller context is constructed by the auth
+/// layer and never by a request body.
+/// Found by the Phase-C adversarial audit (items 1+2+7).
+///
+/// Gated: the raw-emission routes it guards exist only with the gateway. (A minimal build has no
+/// route through which a client could supply bytes at all.)
+#[cfg(any(feature = "gateway", test))]
+pub(crate) fn carries_caller_frame(payload: &[u8]) -> bool {
+    let start = 8; // past the RPC nonce
+    payload.len() >= start + FRAME_MAGIC_PREFIX.len()
+        && payload[start..start + FRAME_MAGIC_PREFIX.len()] == FRAME_MAGIC_PREFIX
+}
+
 /// Classify a nonce-stripped RPC payload (see [`Frame`]).
 pub(crate) fn split_frame(after_nonce: &Bytes) -> Frame {
     let prefix = FRAME_MAGIC_PREFIX.len();
@@ -667,6 +688,13 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
 pub(crate) fn request_principal(ctx: &TaskCtx, req: &RpcRequest) -> Result<RequestPrincipal, CallerError> {
     Ok(match verify(ctx, req)? {
         // A verified self envelope (`node:{via}`, via == sender) is the sending node's own action.
+        //
+        // NOTE (Phase-C audit): requiring `CallerAttestation::Signed` here was tried and reverted —
+        // on a mesh with no `tls` identity a node's own self envelope is legitimately unsigned, and
+        // refusing it broke `a_promising_node_is_never_the_bare_sender`. The impersonation route the
+        // audit found is closed where it actually opens: a client can no longer *supply* a frame,
+        // because the raw-emission routes refuse a payload carrying one
+        // (`carries_caller_frame`). This mapping is only reachable from a peer node's own frame.
         Some(c) if c.principal == node_principal(&c.via) => RequestPrincipal::Node(c.via),
         Some(c) => RequestPrincipal::Client(c),
         None => RequestPrincipal::Node(req.sender().clone()),
@@ -720,6 +748,28 @@ mod tests {
     use super::*;
     use crate::{GossipAgent, GossipConfig, NodeId};
     use bytes::Bytes;
+
+    /// **A client-supplied caller-context frame is detected where one would be read.**
+    ///
+    /// A raw emission carries the client's bytes verbatim with the gateway as sender, so a frame the
+    /// client prepended verifies as the gateway's own envelope. The pre-existing guard only caught
+    /// *bare* bytes. Phase-C audit finding.
+    #[test]
+    fn a_client_supplied_caller_frame_is_detected() {
+        // 8-byte nonce, then the frame magic — exactly where `split_frame` looks.
+        let mut forged = vec![0u8; 8];
+        forged.extend_from_slice(&FRAME_MAGIC_PREFIX);
+        forged.extend_from_slice(b"{\"v\":1}");
+        assert!(carries_caller_frame(&forged), "a prepended envelope must be refused, not emitted");
+
+        // Ordinary payloads are untouched: bare bytes, and bytes that merely contain the magic
+        // somewhere that is not the frame position.
+        assert!(!carries_caller_frame(&[0u8; 8]));
+        assert!(!carries_caller_frame(b"a short body"));
+        let mut elsewhere = vec![0u8; 20];
+        elsewhere.extend_from_slice(&FRAME_MAGIC_PREFIX);
+        assert!(!carries_caller_frame(&elsewhere), "the magic only counts at the frame position");
+    }
 
     fn agent(tls: bool) -> Arc<GossipAgent> {
         let port = crate::test_util::alloc_port();

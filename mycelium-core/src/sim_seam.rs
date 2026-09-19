@@ -912,7 +912,18 @@ fn verdict_of<T>(r: Result<(), tokio::sync::mpsc::error::TrySendError<T>>) -> Ch
 // a power loss". That needs the three-layer model (process memory · page cache · durable ·
 // directory metadata) and the fault injection in PR 4. Said here rather than left to be assumed.
 
-/// `write_all`, recorded.
+/// `write_all` **followed by `flush`**, recorded as one effect.
+///
+/// The flush is load-bearing, not tidiness. `tokio::fs::File::write_all` copies into an in-process
+/// buffer and queues the real syscall on a blocking thread, returning `Ok` **before it runs**. Worse,
+/// `File::sync_data` completes that in-flight write and then *discards* its error (it is stashed in
+/// the file's `last_write_err` and surfaces on the **next** write), so a `write_all` + `sync_data`
+/// pair returns `Ok` for a record that failed with `ENOSPC` — and the durability receipt built on
+/// that pair claimed `OnDisk` for bytes that never reached the disk.
+///
+/// Flushing here makes the error surface against **the record that caused it**, which is what a
+/// receipt naming a rung requires. `do_snapshot` already flushed for the same reason before reading
+/// the tail back; the receipt path did not.
 #[cfg(not(feature = "sim"))]
 #[inline]
 pub async fn fs_write_all(
@@ -921,7 +932,8 @@ pub async fn fs_write_all(
     bytes: &[u8],
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt as _;
-    file.write_all(bytes).await
+    file.write_all(bytes).await?;
+    file.flush().await
 }
 
 /// `write_all`, through the kernel.
@@ -939,7 +951,11 @@ pub async fn fs_write_all(
     if let Some(decided) = installed::planned_fs(name, "write_all", bytes, false) {
         return match decided {
             Ok(()) => {
-                let res = file.write_all(bytes).await;
+                let res = async {
+                    file.write_all(bytes).await?;
+                    file.flush().await
+                }
+                .await;
                 assert!(
                     res.is_ok(),
                     "replay diverged at {name}/write_all: the recording succeeded, the replay got {res:?}"
@@ -949,7 +965,12 @@ pub async fn fs_write_all(
             Err(e) => Err(std::io::Error::other(e)),
         };
     }
-    let res = file.write_all(bytes).await;
+    // One effect = a *completed* write. See the non-`sim` arm for why the flush is load-bearing.
+    let res = async {
+        file.write_all(bytes).await?;
+        file.flush().await
+    }
+    .await;
     installed::kernel_fs(
         name,
         "write_all",
@@ -1889,9 +1910,9 @@ mod tests {
     /// replaying against a file that was never created: a real write would fail, a replayed one
     /// cannot.
     #[tokio::test]
-    async fn a_replayed_write_does_not_touch_the_disk() {
+    async fn a_replayed_write_reperforms_the_effect_it_recorded() {
         install_recording();
-        let path = tmp("noio");
+        let path = tmp("replay-write");
         let mut f = open(&path).await;
         fs_write_all(&mut f, "wal.bin", b"payload").await.expect("write");
         let ctx = installed::take().expect("installed");
@@ -1903,9 +1924,10 @@ mod tests {
             node:    "n1".into(),
             offsets: Default::default(),
         });
-        // A file opened read-only: a genuine `write_all` would return EBADF.
-        let mut ro = tokio::fs::File::open(&path).await.expect("reopen read-only");
-        fs_write_all(&mut ro, "wal.bin", b"payload").await.expect("the replay does not write");
+        // A recorded **success** re-performs the effect — the module doc's "the effect happens in
+        // both modes". Only a recorded *failure* skips it, which is what makes a fault sweep honest.
+        let mut again = open(&path).await;
+        fs_write_all(&mut again, "wal.bin", b"payload").await.expect("the replay re-performs it");
         installed::take();
     }
 
@@ -1993,5 +2015,46 @@ mod tests {
         });
         wall_now_ms(); // matches the one recorded read
         wall_now_ms(); // one more than was recorded — diverges
+    }
+}
+
+/// The production arm's own gate. Deliberately **not** under `sim`: this pins what a shipped build
+/// does, and the `sim` arm's recorder returns `Ok` when no kernel is installed, which would hide it.
+#[cfg(all(test, not(feature = "sim")))]
+mod production_arm_tests {
+    use super::*;
+
+    /// **A queued write that fails is reported by the write that caused it.**
+    ///
+    /// `tokio::fs::File::write_all` returns `Ok` before the syscall runs, and `File::sync_data`
+    /// completes the in-flight write and then **discards its error** (stashing it to surface on the
+    /// *next* write). So `write_all` + `sync_data` both answered `Ok` for a record that failed, and
+    /// the durability receipt built on that pair claimed `OnDisk` for bytes that never reached disk
+    /// — with the error then blaming the following record. Found by the Phase-C adversarial audit.
+    ///
+    /// A read-only handle makes the queued write fail at the syscall, the same shape as `ENOSPC` on
+    /// a full disk and deterministic. Before the fix this returned `Ok`.
+    #[tokio::test]
+    async fn a_queued_write_that_fails_is_reported_by_the_write_that_caused_it() {
+        let dir = std::env::temp_dir().join(format!("sim-seam-queued-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("wal.bin");
+        std::fs::write(&path, b"").expect("create");
+
+        let mut read_only = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .await
+            .expect("open read-only");
+
+        let res = fs_write_all(&mut read_only, "wal.bin", b"a record that cannot be written").await;
+        assert!(
+            res.is_err(),
+            "a write that cannot reach the file must not answer Ok — a durability receipt is built \
+             on exactly this answer, and reported OnDisk when it lied"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

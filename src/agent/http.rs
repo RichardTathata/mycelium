@@ -1818,6 +1818,16 @@ async fn gw_signal_emit(
         Bytes::new()
     };
 
+    // A raw emission carries the client's bytes verbatim with *this node* as the sender, so a
+    // client-supplied caller-context frame would verify as this gateway's own envelope. The frame is
+    // constructed by the auth layer and never by a request body: refuse rather than emit.
+    // Found by the Phase-C adversarial audit (items 1+2+7).
+    if super::gateway_caller::carries_caller_frame(&payload) {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "payload carries a caller-context frame; that context is constructed by the gateway, not supplied"
+        }))).into_response();
+    }
+
     // Same code path as GossipAgent::emit — local delivery + gossip fan-out
     let ok = super::helpers::emit_signal(&ctx.agent_ctx, kind, scope, payload);
     Json(json!({ "ok": ok })).into_response()
@@ -3493,6 +3503,15 @@ async fn gw_shard_emit(
     } else {
         Bytes::new()
     };
+
+    // As for `/gateway/signal/emit`: a client-supplied caller-context frame would verify as this
+    // gateway's own envelope, because the raw emission carries the bytes verbatim with this node as
+    // the sender. Found by the Phase-C adversarial audit (items 1+2+7).
+    if super::gateway_caller::carries_caller_frame(&payload) {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "payload carries a caller-context frame; that context is constructed by the gateway, not supplied"
+        }))).into_response();
+    }
 
     let filter    = CapFilter::new(ns.as_str(), name.as_str());
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);

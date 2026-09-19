@@ -154,6 +154,19 @@ impl std::error::Error for RpcError {}
 /// Used by callers that hold an `Arc<TaskCtx>` rather than a full `GossipAgent`
 /// (e.g. MCP task functions). [`ServiceHandle::rpc_respond`] delegates here.
 pub(crate) fn rpc_respond_ctx(ctx: &TaskCtx, request: &RpcRequest, result: impl Into<Bytes>) {
+    // `Bytes::slice` **asserts** `end <= len`, so an under-length payload panicked here — and the
+    // panic was remotely reachable through item 7's own refusal path: a 0–7 byte signal on a kind a
+    // provider serves fails `verify` with `Missing`, and the refusal branch in `RpcRequestRx::recv`
+    // answers by calling this, killing the provider's serve task for good. A correlation nonce we
+    // never received cannot be echoed, so there is nothing to answer to: drop it rather than die.
+    // Found by the Phase-C adversarial audit (items 1+2+7).
+    if request.0.payload.len() < 8 {
+        tracing::warn!(
+            kind = %request.kind(), sender = %request.sender(), len = request.0.payload.len(),
+            "rpc_respond: payload is shorter than the 8-byte correlation nonce; dropping the reply"
+        );
+        return;
+    }
     let nonce_bytes = request.0.payload.slice(..8);
     let result_bytes: Bytes = result.into();
     let mut buf = BytesMut::with_capacity(8 + result_bytes.len());
