@@ -239,3 +239,63 @@ provider publishes its marker, then switch to `secure`. `legacy` is a `3.0.0` re
 **Deployments to re-check:** any provider allowlist that named the *gateway node* to admit HTTP clients.
 That listing was the impersonation; replace it with the clients' principals.
 
+## 8. The action evaluator — authorising *what* a verified caller may do
+
+Section 7 establishes **who** is asking. This is the separate question of whether *this* operation on
+*this* resource is allowed, checked as a preflight before dispatch. Developer view:
+[guide 20](../guide/20-authorising-actions.md); decision record
+[`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md).
+
+**Three attachments, and a node is misconfigured without all three.**
+
+| Attach | If you don't |
+|---|---|
+| an `ActionEvaluator` | nothing is evaluated; the gateway is inert, exactly as before |
+| an `EvidenceJournal` | **the node enforces and records nothing**, and warns at attach time. Treat that warning as a failed deployment |
+| the deployed `policy.revision` | the stale-policy check **has nothing to compare against and never fires** — so a gateway running a superseded policy is undetectable, which is the condition the check exists for |
+
+Set the revision to the same string your **deployment report** carries. The report is attributable
+testimony about activation — policy digest, enforcement points, activation and effective times,
+issuer, route coverage — and it is **never proof of coverage**. Missing, conflicting or stale reports
+are explicit rather than assumed away.
+
+### What the three verdicts do at the gateway
+
+- **`Permit`** — dispatch proceeds, and the permit is recorded. Recording only refusals would leave
+  the interesting half invisible: an evidence stream that omits its permits cannot support any
+  statement about what an agent was *allowed* to do.
+- **`Deny`** — refused as `-32030` `action_denied`. The policy establishes the refusal.
+- **`Indeterminate`** — refused as `-32031` `authority_not_established`. **Never treated as permit.**
+  Nothing says the action is forbidden; only that nothing says it is allowed.
+
+**`Indeterminate` is also what an evaluator *error* produces**, along with an unsupported policy
+clause, an unmapped operation, a stale revision and an expired envelope. A `Decision` carrying
+evaluation errors alongside a `Permit` verdict is a contradiction, and the seam resolves it to
+`Indeterminate` rather than letting it through. Operationally: **a rising
+`authority_not_established` is a policy or deployment problem**, not an attack — a stale revision, an
+operation outside your reviewed catalogue, or a declared argument callers are not sending.
+
+### The refusal that surprises people
+
+`-32032` `evidence_not_recorded` refuses the action **even when the policy permitted it**, because
+the decision could not be written down. Enforcement without attribution is an unlogged gate, so
+refusing is the honest failure mode — and it is visible rather than silent.
+
+Which failure you get is the **evidence profile**:
+
+| Profile | When evidence cannot be recorded |
+|---|---|
+| `Strict` | the dispatch is refused. Enforcement and attribution stand or fall together |
+| `Lenient` | the dispatch proceeds, and the evidence records that it was produced under a profile that does not gate — weaker, and **legible as weaker** |
+
+Alert on `mycelium_ae_preflight_refusals_total{reason="evidence_not_recorded"}`. It is a storage or
+journal fault presenting as an authorisation outage, and it will not look like one in a dashboard of
+denials.
+
+### What a gateway check does and does not promise
+
+It is **self-imposed prevention for the routes this gateway fronts, and nothing for routes it does
+not**. Only a check inside the resource's own effect boundary earns hard prevention. The evidence
+says so itself: `coverage.complete: false` names the routes the enforcement point cannot see. **Never
+read silence as an all-clear.**
+

@@ -385,6 +385,21 @@ impl From<Verdict> for DecisionKind {
     }
 }
 
+impl DecisionKind {
+    /// The stable label, **identical to the serialised form**, for metrics.
+    ///
+    /// One vocabulary: a reader correlating `mycelium_ae_decisions_total{verdict=…}` with an
+    /// evidence document must not have to translate. Pinned by a test, because renaming one is a
+    /// dashboard break for every operator *and* a wire change for every consumer.
+    pub fn label(self) -> &'static str {
+        match self {
+            DecisionKind::Permit => "permit",
+            DecisionKind::Deny => "deny",
+            DecisionKind::Indeterminate => "indeterminate",
+        }
+    }
+}
+
 /// Whether the operation was bound to a reviewed business activity, on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -404,6 +419,17 @@ impl From<MappingStatus> for MappingKind {
             MappingStatus::Ambiguous => MappingKind::Ambiguous,
             // Unknown to us => not bound to a reviewed activity => not a business operation.
             _ => MappingKind::Unmapped,
+        }
+    }
+}
+
+impl MappingKind {
+    /// The stable label, identical to the serialised form. See [`DecisionKind::label`].
+    pub fn label(self) -> &'static str {
+        match self {
+            MappingKind::Mapped => "mapped",
+            MappingKind::Unmapped => "unmapped",
+            MappingKind::Ambiguous => "ambiguous",
         }
     }
 }
@@ -1114,6 +1140,41 @@ mod tests {
 
     fn node() -> NodeId {
         NodeId::new("127.0.0.1", 9000).unwrap()
+    }
+
+    /// A metric label and the evidence document's wire form are **the same string**, so nobody has
+    /// to translate between a dashboard and a record — and neither can drift without the other.
+    ///
+    /// The literals are asserted too. Deriving the expected value from the same function the code
+    /// uses would make this test pass through any rename, which is precisely what it exists to stop:
+    /// a rename here breaks every operator's dashboard *and* every consumer's parser.
+    #[test]
+    fn decision_and_mapping_labels_are_the_wire_form_and_are_stable() {
+        for kind in [DecisionKind::Permit, DecisionKind::Deny, DecisionKind::Indeterminate] {
+            let wire = serde_json::to_string(&kind).expect("serialises");
+            assert_eq!(wire, format!("\"{}\"", kind.label()), "label must equal the wire form");
+        }
+        for kind in [MappingKind::Mapped, MappingKind::Unmapped, MappingKind::Ambiguous] {
+            let wire = serde_json::to_string(&kind).expect("serialises");
+            assert_eq!(wire, format!("\"{}\"", kind.label()), "label must equal the wire form");
+        }
+
+        assert_eq!(DecisionKind::Permit.label(), "permit");
+        assert_eq!(DecisionKind::Deny.label(), "deny");
+        assert_eq!(DecisionKind::Indeterminate.label(), "indeterminate");
+        assert_eq!(MappingKind::Mapped.label(), "mapped");
+        assert_eq!(MappingKind::Unmapped.label(), "unmapped");
+        assert_eq!(MappingKind::Ambiguous.label(), "ambiguous");
+    }
+
+    /// An unknown verdict counts as `indeterminate`, never as `permit`. The counter inherits the
+    /// seam's own rule rather than restating it, so a future variant cannot widen what a dashboard
+    /// reports as permitted.
+    #[test]
+    fn an_unknown_verdict_counts_as_indeterminate() {
+        assert_eq!(DecisionKind::from(Verdict::Permit).label(), "permit");
+        assert_eq!(DecisionKind::from(Verdict::Deny).label(), "deny");
+        assert_eq!(DecisionKind::from(Verdict::Indeterminate).label(), "indeterminate");
     }
 
     /// The tests' stand-in for the gateway's digest, so the fixtures run in every build; the

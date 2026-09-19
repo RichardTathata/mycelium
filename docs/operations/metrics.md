@@ -116,6 +116,24 @@ the HTTP snapshot. See [dynamic-scaling.md](dynamic-scaling.md).
 | `mycelium_governor_ratchet` | gauge | `param` | ratchet direction/state (encoded `u8`) | — |
 | `mycelium_governor_locally_pinned` | gauge | `param` | `1` if this param is locally pinned (a local pin wins over fleet intent) | a pinned param won't follow a `/gateway/govern` intent — expected, but explains "why didn't it move" |
 
+## Contracts axis — receipts, control envelope, authorisation
+
+The v3 contracts axis' counters. Every label here is a **closed set**; none is labelled by principal,
+operation, resource or group. Narrative and alerting guidance:
+[observability.md](observability.md#the-contracts-axis--five-counters).
+
+| Metric | Type | Labels | Meaning | Watch for / alert |
+|---|---|---|---|---|
+| `mycelium_kv_receipts_total` | counter | `local_durability` ∈ `on_disk` · `buffered` · `not_configured` · `failed` | the durability rung a receipt-returning write actually reached | a large `buffered` share under `Async` is *expected* — decide deliberately that it is what you want. Any `failed` is a disk or writer fault |
+| `mycelium_ae_decisions_total` | counter | `verdict` ∈ `permit` · `deny` · `indeterminate`; `mapping` ∈ `mapped` · `unmapped` · `ambiguous` | **every** authorisation decision at the gateway, permits included | the denominator for a denial *rate*. **`permit` with `unmapped` should always be zero** — non-zero is a defect, not a policy question |
+| `mycelium_ae_preflight_refusals_total` | counter | `reason` ∈ `action_denied` · `authority_not_established` · `evidence_not_recorded` | authorisation refusals, by kind | page on `evidence_not_recorded`: the action was refused *although permitted*, because it could not be recorded. Rising `authority_not_established` is usually a stale policy revision or an unmapped operation |
+| `mycelium_control_decisions_total` | counter | `decision` ∈ `proceed` · `held` · `would-hold`; `class` ∈ the five action classes | the control envelope, per class | under `observe`, `would-hold` is the number you watch before stepping the profile ladder up ([control-profiles.md](control-profiles.md)) |
+| `mycelium_gateway_caller_refusals_total` | counter | `reason` | a gateway caller context that failed verification | never a fall-back to running the call as the node — any sustained rate is a misconfigured or outdated provider |
+
+**Label stability is pinned by tests.** The decision and mapping labels are asserted to equal the
+evidence document's serialised form, so a dashboard and an evidence record use the same strings and
+neither can drift alone. A rename breaks both at once, which is the intent.
+
 ## Artifact library
 
 Install lifecycle + librarian metrics for the durable artifact library, emitted by

@@ -134,7 +134,7 @@ What a write acknowledgement means is the one operator decision:
 
 | `sync_mode` | Meaning of an acked write | Cost |
 |---|---|---|
-| `Flush` | the write returns after the record's `fdatasync`; a stopped WAL writer or disk error is **logged at `warn`** — plain `set`/`set_async` do not surface it (their `bool` is the gossip-queue result; a per-write durability receipt is the v3.0 contracts plan's first item). Consensus commits and leases *do* surface it via `persisted` | ~1 ms/write on SSD |
+| `Flush` | the write returns after the record's `fdatasync`; a stopped WAL writer or disk error is **logged at `warn`** — plain `set`/`set_async` do not surface it (their `bool` is the gossip-queue result). Consensus commits and leases *do* surface it via `persisted`, and **since v2.5.0 any write can ask for a receipt** — see below | ~1 ms/write on SSD |
 | `Async` (default) | OS-buffered; the last few writes can be lost on power failure | none |
 | `Os` | no explicit sync — development only | none |
 
@@ -153,6 +153,36 @@ drive's write cache (`F_FULLFSYNC` would), so a laptop's power-loss durability i
 every sync in the WAL, not only this one — development only. Tune `snapshot_interval_secs` / `snapshot_wal_threshold` so replay time is
 bounded; the snapshot pass raises the node's opacity for its duration. Since v2.4.2
 (`CHANGELOG § [2.4.2]`); the invariants are canon in `mycelium-core/src/persistence.rs`.
+
+### Choosing a sync mode with the receipt contract in hand
+
+Since v2.5.0 the sync mode is no longer the *only* lever, because a caller can ask per write what it
+actually got. That changes the operator decision: you are choosing the **default** each write reports,
+not the ceiling.
+
+| A write made with | Reports | Costs you |
+|---|---|---|
+| `set` | a bool meaning *queued for gossip*. **`false` is ambiguous** — the local store may still have been updated | nothing |
+| `set_with_receipt` | whichever rung was actually reached under this node's `sync_mode` | one receipt allocation |
+| `set_requiring_sync` | `OnDisk`, or it **refuses** | an `fdatasync` per write, whatever the mode |
+
+The middle row is where `Async` bites. Under `Async` a receipt honestly reports **`Buffered`**: the
+record survives a process crash and is **lost to a power failure** until the next sync or snapshot.
+That is a different claim from `OnDisk`, not a weaker one, and a caller that needs the stronger claim
+has to ask.
+
+**`set_requiring_sync` is the one place the substrate prevents rather than detects.** When durability
+cannot be established it applies nothing and gossips nothing, so no reader, subscriber or peer sees
+the value from that call. Read the limit precisely: it does *not* promise the value can never appear
+here, because the log writes before it syncs and a later replay may restore bytes from a failed sync.
+
+**Operator consequence.** You do not need `Flush` cluster-wide to get durable writes for the few
+operations that need them. Leave the default and let those callers use `set_requiring_sync`; reach for
+`Flush` when *most* writes need the guarantee and you would rather pay it once in configuration.
+
+A timeout on any of these is `DeliveryUnknown`, never a failure. Do not page on it as an error and do
+not retry an at-most-once operation on the strength of it. Full contract:
+[guide 18 · Contracts & receipts](../guide/18-contracts-and-receipts.md).
 
 ## Rolling upgrades
 
