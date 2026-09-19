@@ -637,6 +637,31 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v3 contracts axis — item 4's decisive demonstration; §12.1's gallery complete — 2026-09-19 (unreleased)
+
+`examples/control_envelope_viz.rs` + `.html` (`:8096`, `--features metrics`). **This completes the plan's §12.1
+gallery** — one decisive demonstration per item, which §12 makes a gate on phase exits rather than decoration.
+
+**The design problem.** §12.1 asks for allocated rights and budgets under load, enforce-allocated versus
+advisory, and the combined-feedback scenario. The three real governors are **crate-private loops fed by a live
+cluster** — an example cannot drive them, and one that pretended to would be showing its own scaffolding. What
+is public is the contract all three call (`decide`, `spacing_allows`, `may_propose`, `ConfidenceBound`,
+`Profile`, `RightsLedger`), so the dashboard drives that, under a load generator, and says so on screen.
+
+**The shape that makes it watchable.** The same proposal stream runs past the envelope under **all four
+profiles at once**, as four columns — one run producing `legacy` 12 proceeded / 0 held, `observe` 12 proceeded /
+6 would-hold / 0 held, and both enforcing rungs 6 proceeded / 6 held. That is the whole argument for
+shadow-first in one picture: `observe` and `legacy` take the *same* actions, and the difference is a number an
+operator reads before deciding. Stepping to `enforce-allocated` consumes the granted budget and then refuses —
+`granted 8 · admitted 8 · refused 3 · recorded_rejections 3` — with the rejections **in the ledger**, because a
+refusal nobody wrote down is indistinguishable from work nobody asked for.
+
+**Not shown, on screen as well as in the record:** the combined-feedback scenario is replay **scenario C**,
+whose claim is about *every* interleaving in a sweep; a dashboard shows one, so it would be a weaker thing
+wearing the same name. Browser showcases run continuously and are built rather than run in CI, as the examples
+index already says; the four CLI demonstrations are the ones CI runs. Log:
+[`.log/2026-09-19-item4-control-envelope.md`](.log/2026-09-19-item4-control-envelope.md).
+
 ## v3 contracts axis — item 5's decisive demonstration, and the defect it found — 2026-09-19 (unreleased)
 
 `mycelium-wiki/examples/curator_handover.rs` (feature `git-store`, run in CI): a council curator appointed as a
