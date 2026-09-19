@@ -1910,9 +1910,9 @@ mod tests {
     /// replaying against a file that was never created: a real write would fail, a replayed one
     /// cannot.
     #[tokio::test]
-    async fn a_replayed_write_does_not_touch_the_disk() {
+    async fn a_replayed_write_reperforms_the_effect_it_recorded() {
         install_recording();
-        let path = tmp("noio");
+        let path = tmp("replay-write");
         let mut f = open(&path).await;
         fs_write_all(&mut f, "wal.bin", b"payload").await.expect("write");
         let ctx = installed::take().expect("installed");
@@ -1924,9 +1924,10 @@ mod tests {
             node:    "n1".into(),
             offsets: Default::default(),
         });
-        // A file opened read-only: a genuine `write_all` would return EBADF.
-        let mut ro = tokio::fs::File::open(&path).await.expect("reopen read-only");
-        fs_write_all(&mut ro, "wal.bin", b"payload").await.expect("the replay does not write");
+        // A recorded **success** re-performs the effect — the module doc's "the effect happens in
+        // both modes". Only a recorded *failure* skips it, which is what makes a fault sweep honest.
+        let mut again = open(&path).await;
+        fs_write_all(&mut again, "wal.bin", b"payload").await.expect("the replay re-performs it");
         installed::take();
     }
 

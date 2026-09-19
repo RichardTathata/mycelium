@@ -47,6 +47,14 @@ no API change. Upgrade in place.
   killing the provider's serve task permanently. A nonce never received cannot be echoed, so the
   reply is dropped with a warning.
 
+- **A replay test was passing because of the durability defect.** `a_replayed_write_does_not_touch_the_disk`
+  asserted that a replayed write performs no I/O, and opened a read-only file to prove it. The replay
+  path *does* re-perform a recorded success — the module's own "the effect happens in both modes";
+  only a recorded **failure** skips it, which is what makes a fault sweep honest. The write was
+  failing with `EBADF` every run and the swallowed error hid it. Corrected and renamed
+  (`a_replayed_write_reperforms_the_effect_it_recorded`); found only because fixing the swallow made
+  it fail in CI.
+
 ### Operator notes
 
 - **No action required to adopt the fixes** — no configuration, no API change, no wire change.
