@@ -9,6 +9,65 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.1] — 2026-09-19
+
+**A security PATCH from the axis' own Phase-C adversarial self-audit.** §12.6 asks for a five-pass
+adversarial audit at Phase C exit over items **1 + 2 + 7 together**, because those three compose into
+the first *composed* guarantee this plan makes. It found four defects in shipped code. All four are
+fixed; three carry a new gate. Wire **v12** (`PREV = 11`) **unchanged**; on-disk format unchanged;
+no API change. Upgrade in place.
+
+### Fixed
+
+- **A durability receipt reported `on_disk` for a write that had failed.** `tokio::fs::File::write_all`
+  copies into an in-process buffer and queues the real syscall, returning `Ok` **before it runs**;
+  `File::sync_data` then completes that in-flight write and **discards its error** (stashed to
+  surface on the *next* write) before syncing the descriptor, which succeeds. So the pair answered
+  `Ok` for a record that failed with `ENOSPC`, the receipt claimed the strongest rung in the
+  vocabulary, and the error went on to blame the following record. `set_requiring_sync` was worst
+  affected: its contract is *durable or nothing*, and it returned `OnDisk`, then applied **and**
+  gossiped. A completed write is now the unit of the write seam, so a failure is reported by the
+  record that caused it. (`do_snapshot` already flushed for exactly this reason before reading the
+  tail back; the receipt path did not.)
+- **A federated partner could read or cancel any caller's tasks.** A credential binds **one export**,
+  and only `tasks/send` authorised against it. `tasks/get` and `tasks/cancel` took no caller and no
+  export, looking up any task by id — and ids are caller-supplied on `tasks/send`, so they are
+  enumerable. A partner granted a single export could read any task's completed artifact, **including
+  a native in-domain caller's**, or destroy it. Both are now refused for federated callers, as
+  `tasks/sendSubscribe` already was.
+- **A client could supply its own caller-context frame.** The raw-emission routes
+  (`/gateway/signal/emit`, `/gateway/shard/emit`) carry a client's bytes verbatim with *this node* as
+  the sender, so a frame the client prepended verified as the gateway's own envelope — `via` matched
+  by construction. The existing guard caught only **bare** bytes. On a node with no `tls` identity the
+  signature branch does not run at all, so nothing else stood between a client and an arbitrary
+  principal. Both routes now refuse a payload carrying a frame where one would be read.
+- **A remote panic in item 7's own refusal path.** `Bytes::slice` asserts, so an under-length payload
+  panicked where an RPC reply echoes the 8-byte correlation nonce — reachable because a short signal
+  on a served kind fails verification and the refusal branch answers by calling into that slice,
+  killing the provider's serve task permanently. A nonce never received cannot be echoed, so the
+  reply is dropped with a warning.
+
+### Operator notes
+
+- **No action required to adopt the fixes** — no configuration, no API change, no wire change.
+- **A node running `SyncMode::Flush` or using `set_requiring_sync` may now see failures it did not
+  see before.** That is the point: those writes were failing already and being reported as durable.
+  A rising `mycelium_kv_receipts_total{local_durability="failed"}` after upgrading is the fault
+  becoming visible, not a new fault.
+- **A federated partner calling `tasks/get` or `tasks/cancel` now receives `-32004`.** No in-tree
+  client does this; the federation client only issues `tasks/send`.
+
+### Known and not fixed in this patch
+
+The audit's other findings are recorded rather than closed, and none is a privilege boundary:
+signed catalogue replies carry no expiry or nonce, so a reply from a withdrawn grant can be replayed
+into a stale *view* (the provider re-authorises at call time, so it ends in a refusal, not an
+invocation); key **rotation** is unreachable on the call path, so a partner mid-rotation is refused
+as `BadSignature`; the per-partner budget is enforced consumer-side only; `Buffered`'s "survives a
+process crash" and `persisted_by`'s "this exact content" are stronger than the primitives beneath
+them. Each is tracked for the next release.
+
+
 ## [2.9.0] — 2026-09-19
 
 **The axis proves itself.** A MINOR whose headline is not new capability but new *evidence*: a whole
