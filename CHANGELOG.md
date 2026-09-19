@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the receipt ladder, item 1's decisive demonstration (v3 §12.1)
+
+- **`examples/receipt_ladder.rs`** — the same write made four ways, so the rungs are visible rather
+  than described: `set` (a bool that names no rung) · `set_with_receipt` with no persistence
+  (`NotConfigured`) · `set_requiring_sync` on that node (**refused**, carrying whether persistence
+  was configured at all) · `set_with_receipt` on a buffered node (`Buffered`) ·
+  `set_requiring_sync` there (`OnDisk`) · `set_with_replica_sync` (rung 3). Then it shuts the peer
+  down — the peer that cannot answer is **unknown**, never failed — and reopens the persisted
+  node's data directory to show what replayed. It closes by naming what it does *not* establish,
+  including that its clean shutdown stages neither of the failures `Buffered` declines to survive.
+- **CI now runs the decisive demonstrations** (`receipt_ladder`, `knowledge_layer`,
+  `federated_domains`) instead of only building them: building proves the API still compiles,
+  running proves the demonstration still demonstrates. Gallery rows added for all three.
+
 ### Added — the scheduler seam's first arm; a whole node now replays (v3 item 6)
 
 - **`mycelium_core::sim_seam::pause_clock_for_replay`** (with `resume_clock_after_replay`) — under `sim`,

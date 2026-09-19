@@ -27,6 +27,14 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   and serves it, another resolves it *by name* and calls it over RPC — broker-less discovery in one
   file) → `llm_agent` (the richer, LLM-driven capability version). The README front-door leads with
   `hello_mesh`; guide chapters 01–02 explain them. Added #142/#143.
+- **The v3 contracts axis' decisive demonstrations** (plan §12.1) — one per item, each a single
+  file that walks its item's lifecycle and **ends by printing what it did not demonstrate**:
+  `receipt_ladder` (the same write four ways — `set` · `set_with_receipt` · `set_requiring_sync` ·
+  `set_with_replica_sync` — then a peer shut down and the store reopened, so `unknown` and
+  `Buffered` are shown rather than described), `knowledge_layer`, `federated_domains`. Since
+  2026-09-19 CI **runs** all three rather than only building them: building proves the API still
+  compiles, running proves the demonstration still demonstrates. Still owed by §12.1: item 4's
+  control-envelope viz, item 5's curator handover, item 6's replay-a-bundle CLI.
 - **Food-Rescue Co-op suite** (`examples/coop/`, workspace member
   `mycelium-coop-examples`): **fourteen** demos (twelve CI + two manual real-model) composed in one constructive world (depot
   nodes rescuing surplus food, no dispatcher) — mailbox_llm · stigmergy · elastic_intent ·
