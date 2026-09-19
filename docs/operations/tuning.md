@@ -519,6 +519,14 @@ seconds, raise `propagation_window_secs` rather than relying on this multiplier.
 | Warn log `Write to X failed` | occasional on restart | persistent — peer unreachable |
 | Warn log `Gossip shard N full` | none | writer_channel_depth or gossip_channel_capacity too small |
 | Warn log `bulk_serve: handler concurrency limit reached` | none | active_bulk_handlers at ceiling — incoming bulk signals being dropped |
+| `mycelium_kv_receipts_total{local_durability}` | the split you intended | a large `buffered` share you did **not** intend — under `Async` that is *survives a crash, lost to a power cut*. Any `failed` is a disk or writer fault |
+| `mycelium_control_decisions_total{decision="would-hold"}` | near 0 once you have stepped up | high while on `observe` means an enforcing profile would be holding a lot — read *which* `class` before stepping up |
+| `mycelium_ae_decisions_total{verdict="permit",mapping="unmapped"}` | **always 0** | non-zero is a defect, not a policy question: an unmapped operation cannot be permitted |
+| `mycelium_ae_preflight_refusals_total{reason="evidence_not_recorded"}` | 0 | any rate — an action was refused *although permitted*, because it could not be recorded. A journal or disk fault wearing an authorisation costume |
+
+The contracts-axis series above are `metrics`-gated and documented in
+[metrics.md](metrics.md); the profile ladder they qualify is
+[control-profiles.md](control-profiles.md).
 
 ---
 
