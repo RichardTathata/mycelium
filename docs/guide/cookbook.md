@@ -308,6 +308,16 @@ group with nobody in it. Demo:
 [22 · Stability & control](22-stability-and-control.md). Rollout:
 [operations/control-profiles.md](../operations/control-profiles.md).
 
+### How do I let agents disagree without one erasing the other?
+
+Use the knowledge layer rather than a plain key. Heads live in the gossip medium
+and records in an authorised store, so a later write cannot overwrite a competing
+statement, and `Challenges` links are *meant* to cross issuers. Only **assessments**
+count as evidence — a claim is what someone said about themselves — and a
+self-assessment does not count at all. When support and challenge are both current
+the verdict is `Conflicted`, which the layer hands you rather than resolving.
+Chapter: [23 · Knowledge](23-knowledge.md).
+
 ### How do I shed load / signal "I'm busy"?
 
 Write your own `sys/load/` pheromone (or run an opacity governor); `resolve`
