@@ -43,6 +43,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`receipt_ladder`](../docs/design/contracts-receipts.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`replay_a_bundle`](../docs/design/replay-nondeterminism-inventory.md) | · | · | · | · | Adv | CLI | · | · | · |
 | [`curator_handover`](../docs/design/scoped-mandates.md) | · | · | · | · | Adv | CLI | · | · | · |
+| [`control_envelope_viz`](../docs/design/adaptive-stability.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | |
@@ -102,6 +103,7 @@ links to its walkthrough README.
 |---|:--:|---|
 | [`microgrid_viz`](../mycelium-blackboard/examples/README.md) | `:8091` | `cargo run -p mycelium-blackboard --example microgrid_viz --features gateway,metrics` |
 | [`stigmergy_viz`](coop/README.md) | `:8092` | `cargo run -p mycelium-coop-examples --bin stigmergy_viz --features metrics` |
+| [`control_envelope_viz`](../docs/design/adaptive-stability.md) | `:8096` | `cargo run --example control_envelope_viz --features metrics` |
 | [`redistribution_viz`](../mycelium-tuple-space/examples/README.md) | `:8093` | `cargo run -p mycelium-tuple-space --example redistribution_viz --features gateway,metrics` |
 | [`llm_council_viz`](coop/README.md) | `:8094` | `cargo run -p mycelium-coop-examples --bin llm_council_viz --features metrics` |
 | [`provisioning_viz`](coop/README.md) ★ | `:8097` | `cargo run -p mycelium-coop-examples --features wasm,metrics --bin provisioning_viz` |

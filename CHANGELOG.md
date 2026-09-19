@@ -9,6 +9,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — the control envelope, item 4's decisive demonstration (v3 §12.1 — the axis' gallery is complete)
+
+- **`examples/control_envelope_viz.rs`** (+ `.html`, port `:8096`, `--features metrics`) — the same
+  proposal stream run past `control::decide` under **all four profiles at once**, in four live
+  columns: `legacy` proceeds (the predicate is never consulted), `observe` counts a would-hold *and
+  proceeds anyway*, `enforce-local` holds with the refusal naming what was missing
+  (`TooFewHeard { heard, required }`), and `enforce-allocated` additionally refuses over the
+  allocated budget — with the rejection **recorded** in the `RightsLedger`, never silent. The ladder
+  is steppable from the page, which is the operator judgement the shadow-mode runbook describes.
+  Every branch is a shipped function (`decide`, `spacing_allows`, `may_propose`, `RightsLedger`)
+  driven by a load generator rather than a re-implementation. Follows the UI-example contract
+  (gateway + metrics, Ops Console link, concepts box); like every browser showcase it runs
+  continuously and is built, not run, in CI.
+- **This completes §12.1's gallery**: item 1's receipt ladder, item 3's knowledge layer, item 2's
+  federated domains, item 5's curator handover, item 6's replay-a-bundle, and item 4's control
+  envelope.
+
 ### Fixed — a revoked curator was told to retry (v3 item 5, `mycelium-wiki`)
 
 - **The mandate fence now names its own refusal.** A write whose appointment had moved failed the

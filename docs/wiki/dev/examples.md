@@ -42,8 +42,13 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   `git-store`) is item 5's — an appointment as a git ref, a re-appointment mid-stream, and the
   replaced curator's write refused **as a revocation** with nothing written. Building it found the
   fence reporting that refusal as a retryable conflict, which is the opposite advice; the fence's own
-  tests check the transaction *text*, so this was its first end-to-end exercise. Still owed by
-  §12.1: item 4's control-envelope viz.
+  tests check the transaction *text*, so this was its first end-to-end exercise. `control_envelope_viz`
+  (`:8096`) is item 4's and **completes the set**: the same proposal stream past the control contract
+  under all four profiles at once, so `observe` and `legacy` are visibly taking the *same* actions
+  while one of them counts — the argument for shadow-first in one picture — and stepping to
+  `enforce-allocated` spends the granted budget and then refuses, with the rejections recorded in the
+  ledger. Being a browser showcase it runs continuously and is built rather than run in CI; the four
+  CLI demonstrations are the ones CI runs.
 - **Food-Rescue Co-op suite** (`examples/coop/`, workspace member
   `mycelium-coop-examples`): **fourteen** demos (twelve CI + two manual real-model) composed in one constructive world (depot
   nodes rescuing surplus food, no dispatcher) — mailbox_llm · stigmergy · elastic_intent ·

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Control envelope — advice, then refusal</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #263040; --ink: #e6edf3; --dim: #8b949e;
+    --ok: #3fb950; --warn: #d29922; --held: #f85149; --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+           padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  .sub { color: var(--dim); font-size: 13px; }
+  .opsbtn { margin-left: auto; color: var(--accent); text-decoration: none; border: 1px solid var(--line);
+            padding: 4px 10px; border-radius: 6px; font-size: 12px; }
+  .opsbtn:hover { border-color: var(--accent); }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px; max-width: 1180px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .panel h2 { font-size: 13px; margin: 0 0 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
+  .wide { grid-column: 1 / -1; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  tr.live td { background: rgba(88,166,255,.08); }
+  tr.live td:first-child::after { content: " ← in force"; color: var(--accent); font-size: 11px; }
+  .ladder { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+  .rung { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: transparent;
+          color: var(--ink); cursor: pointer; font: inherit; font-size: 13px; }
+  .rung:hover { border-color: var(--accent); }
+  .rung.on { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+  ul.feed { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  ul.feed li { padding: 3px 0; border-bottom: 1px solid rgba(38,48,64,.5); }
+  .held { color: var(--held); }
+  .would { color: var(--warn); }
+  .ok { color: var(--ok); }
+  .bar { height: 10px; border-radius: 5px; background: #21262d; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--ok); }
+  .depot { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+  .depot .nm { width: 78px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); }
+  .dot.uncertain { background: var(--warn); }
+  .note { color: var(--dim); font-size: 12.5px; margin-top: 10px; }
+  .concepts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .concept { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; }
+  .concept b { color: var(--accent); font-weight: 600; }
+  .concept .tag { display: inline-block; min-width: 18px; text-align: center; margin-right: 6px;
+                  border-radius: 4px; background: #21262d; color: var(--dim); font-size: 11px; }
+  code { background: #21262d; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Control envelope</h1>
+  <span class="sub">the same load, one rung at a time — advice, then refusal</span>
+  __OPS_CONSOLE_LINK__
+</header>
+
+<main>
+  <section class="panel wide">
+    <h2>The profile ladder — step it and watch the columns</h2>
+    <div class="ladder" id="ladder"></div>
+    <p class="note">
+      Every column is the <em>same</em> proposal stream through the <em>same</em> shipped functions
+      (<code>control::decide</code>, <code>spacing_allows</code>, <code>may_propose</code>) — only the
+      profile differs. The rung in force is the one whose actions actually happen; the others are
+      counted in shadow, which is precisely what <code>observe</code> is for.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>What each rung does with this load</h2>
+    <table>
+      <thead><tr><th>profile</th><th>proceeded</th><th>would hold</th><th>held</th><th>spacing</th><th>settling</th></tr></thead>
+      <tbody id="cols"></tbody>
+    </table>
+    <p class="note">
+      <span class="would">would hold</span> is advice: the action still happened. <span class="held">held</span>
+      is refusal: it did not. Same inputs, same code — the difference is the operator's choice.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Allocated budget</h2>
+    <div class="bar"><i id="budgetbar" style="width:0%"></i></div>
+    <p class="note" id="budget"></p>
+    <p class="note">
+      Under <code>enforce-allocated</code> an action that passed the predicate still has to be inside
+      its budget. A refusal over budget is <strong>recorded</strong>, never silent — a rejection
+      nobody wrote down is indistinguishable from work nobody asked for.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Depot views</h2>
+    <div id="depots"></div>
+    <p class="note">
+      Amber means this depot's view is <em>uncertain</em> by the declared bound — too few peers heard
+      inside the window. A speculative scale-up is the class that holds on uncertainty: acting on a
+      guess spends rights on a guess.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Decisions, newest first</h2>
+    <ul class="feed" id="feed"></ul>
+  </section>
+
+  <section class="panel wide">
+    <h2>What you're seeing</h2>
+    <div class="concepts" id="concepts"></div>
+    <p class="note">
+      <strong>Not shown:</strong> the combined-feedback scenario — three real governors interacting on
+      one node — which is replay <em>scenario C</em>, a schedule sweep over their shipped decisions.
+      Its claim is about <em>every</em> interleaving in the sweep; a live dashboard shows one. Nor are
+      the real membership / tuning / opacity loops driven here: they are crate-private and fed by a
+      live cluster. What this drives is the contract all three call.
+    </p>
+  </section>
+</main>
+
+<script>
+const CONCEPTS = __CONCEPTS__;
+const RUNGS = ["legacy", "observe", "enforce-local", "enforce-allocated"];
+
+document.getElementById("concepts").innerHTML = CONCEPTS.map(c =>
+  `<span class="concept"><span class="tag">${c.tag}</span><b>${c.name}</b> — ${c.gloss}</span>`
+).join("");
+
+const ladder = document.getElementById("ladder");
+ladder.innerHTML = RUNGS.map(r => `<button class="rung" data-p="${r}">${r}</button>`).join("");
+ladder.addEventListener("click", e => {
+  const p = e.target.getAttribute("data-p");
+  if (p) fetch(`/profile/${p}`).then(tick);
+});
+
+function classify(line) {
+  if (line.includes("HELD") || line.includes("REFUSED")) return "held";
+  if (line.includes("WOULD")) return "would";
+  if (line.includes("proceed")) return "ok";
+  return "";
+}
+
+async function tick() {
+  let s;
+  try { s = await (await fetch("/state")).json(); } catch { return; }
+
+  for (const b of ladder.children) b.classList.toggle("on", b.getAttribute("data-p") === s.profile);
+
+  document.getElementById("cols").innerHTML = s.columns.map(c => `
+    <tr class="${c.profile === s.profile ? "live" : ""}">
+      <td>${c.profile}</td><td>${c.proceeded}</td>
+      <td class="${c.would_hold ? "would" : ""}">${c.would_hold}</td>
+      <td class="${c.held ? "held" : ""}">${c.held}</td>
+      <td>${c.spacing}</td><td>${c.settling}</td>
+    </tr>`).join("");
+
+  const r = s.rights;
+  const used = Math.min(r.admitted, r.granted);
+  document.getElementById("budgetbar").style.width = `${(used / Math.max(r.granted, 1)) * 100}%`;
+  document.getElementById("budget").textContent =
+    `${r.granted} units granted · ${r.held} held · ${r.admitted} admitted · ${r.refused} refused · ${r.recorded_rejections} rejections recorded in the ledger`;
+
+  document.getElementById("depots").innerHTML = s.depots.map(d => `
+    <div class="depot">
+      <span class="dot ${d.uncertain ? "uncertain" : ""}"></span>
+      <span class="nm">${d.name}</span>
+      <span class="sub">${d.peers_heard} of 5 peers heard</span>
+    </div>`).join("");
+
+  document.getElementById("feed").innerHTML =
+    s.recent.map(l => `<li class="${classify(l)}">${l}</li>`).join("");
+}
+
+tick();
+setInterval(tick, 700);
+</script>
+</body>
+</html>
