@@ -14,6 +14,11 @@ via wasm-host).
 > weaker consistency not availability) — is
 > [design/coordination-approaches.md](../../../design/coordination-approaches.md).
 
+- **[onboarding-checklist.md](onboarding-checklist.md)** — **what a new companion owes before it
+  counts as landed**: a feature line, a CI job, Docker membership where it makes a cross-node claim,
+  an operator row, a page here, a runnable demonstration, an SDK verb where it has a route. Carries
+  the dated sweep; a companion missing a row is a lint finding, and *"not applicable"* is a valid
+  answer only when it is written down.
 - **[tuple-space.md](tuple-space.md)** — `mycelium-tuple-space/`: pull-based pipeline buffer
   (Linda-style lanes). The load-bearing artifact for Paper 2a's pull-vs-push argument.
 - **[blackboard.md](blackboard.md)** — `mycelium-blackboard/`: content-routed shared working
