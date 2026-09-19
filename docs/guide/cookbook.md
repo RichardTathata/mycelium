@@ -281,6 +281,15 @@ prevention for the routes this gateway fronts and **nothing** for routes it does
 not, which is why the evidence carries `coverage.complete: false` naming them.
 Chapter: [20 · Authorising actions](20-authorising-actions.md).
 
+### How do I stop a replaced role-holder's in-flight work?
+
+Install a later **epoch** at the resource. Everything authorised only under the old
+one is terminal there, however the holder retries, reconnects or restarts. The
+check lives inside the resource's own atomic boundary, not in a watcher. Crucially
+the refusal is `MandateSuperseded`, **not** a conflict — classify it as a conflict
+and the retry loop launders the revocation, telling a replaced holder to re-read
+and re-apply forever. Chapter: [21 · Mandates](21-mandates.md).
+
 ### How do I scale the cluster up/down dynamically?
 
 Publish a membership or tuning intent over `/gateway/govern`; nodes self-elect.
