@@ -296,6 +296,18 @@ Publish a membership or tuning intent over `/gateway/govern`; nodes self-elect.
 Operator guide: [operations/dynamic-scaling.md](../operations/dynamic-scaling.md).
 Demo: [`elastic_intent`](../../examples/coop/src/bin/elastic_intent.rs).
 
+### How do I stop governors thrashing on a stale view?
+
+Put the control predicate in front of the action and give the node a profile. Start
+at `Observe`, which acts exactly as before and **records** what an enforcing
+profile would have held, then step up once the traces show the rule is right. Note
+that holding is not always the safe choice: a rescue from zero and a deficit fill
+deliberately **do not** hold on uncertainty, because a wrong hold there leaves a
+group with nobody in it. Demo:
+[`control_envelope_viz`](../../examples/control_envelope_viz.rs). Chapter:
+[22 · Stability & control](22-stability-and-control.md). Rollout:
+[operations/control-profiles.md](../operations/control-profiles.md).
+
 ### How do I shed load / signal "I'm busy"?
 
 Write your own `sys/load/` pheromone (or run an opacity governor); `resolve`
