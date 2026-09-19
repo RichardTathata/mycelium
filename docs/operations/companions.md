@@ -4,12 +4,18 @@
 > [building-on-mycelium §5](../guide/building-on-mycelium.md#5-start-from-a-template-not-a-blank-file)
 > and the [FAQ](../guide/faq.md). This runbook is about *running one in production*.
 
-The three companions — `mycelium-tuple-space`, `mycelium-blackboard`, `mycelium-wiki` — build only on
-Mycelium's public API, but each has an operational surface the core-cluster runbooks don't cover.
-[Production-readiness §7](production-readiness.md#7--the-companions-you-actually-use) is the go-live
-gate; this is the detail behind it.
+Every companion builds only on Mycelium's public API, but each has an operational surface the
+core-cluster runbooks don't cover. [Production-readiness §7](production-readiness.md#7--the-companions-you-actually-use)
+is the go-live gate; this is the detail behind it.
 
-**The shared shape** (true of all three):
+**Four have a stateful serving role** — `mycelium-tuple-space`, `mycelium-blackboard`,
+`mycelium-wiki`, `mycelium-reason` — and the shared shape below is about those. The rest have a
+thinner surface and are covered in [§Companions with a thinner surface](#companions-with-a-thinner-surface);
+one, `mycelium-sim`, has **no production surface at all, by design**, and that is recorded rather than
+left blank. The obligations every companion owes are the
+[onboarding checklist](../wiki/dev/companions/onboarding-checklist.md).
+
+**The shared shape** (true of the four stateful ones):
 
 - **Failover is the capability ring, not consensus.** Each serving role advertises a capability
   (`{ns}.primary` / `.curator`); a watcher promotes when that capability *evaporates*. Lowest-node-id
@@ -188,6 +194,80 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
 - **Position.** PAIR-class GPU planes place the GPU work; Mycelium is the agent plane — stackable,
   not competing (`docs/plans/mycelium-reason.md`, 2026-09-04 addendum; Dev chapter
   [15 · Reasoning and LangGraph](../guide/15-reasoning-and-langgraph.md)).
+
+## Companions with a thinner surface
+
+Six more companions ship. None has a stateful serving role, so none needs the failover and WAL
+material above — but *"no failover story"* is a fact an operator should read rather than infer from
+an absent section.
+
+### mycelium-agentfacts — the public discovery document
+
+- **What it serves.** Two routes deliberately **outside** the `/gateway` scope wall:
+  `/.well-known/agent-facts.json` (this node's own signed facts) and
+  `/.well-known/agent-facts/domain.json` (the gossiped multi-author board). Public and
+  cryptographically verified is the point; token-gating them would defeat it.
+- **It runs dark until mounted.** Nothing is published until you mount the router **before**
+  `start()`. There is no "accidentally exposed" state.
+- **Needs a `tls` identity.** The facts are self-certified, so the signing key *is* the node's Ed25519
+  identity. Without one the route answers **`503`** — the node is up but has nothing to self-certify.
+  A 503 here is a configuration answer, not a fault.
+- **Observe.** Fetch the routes. No metrics.
+- **The federation runbook** is [federation.md](federation.md); this crate is only the *public
+  discovery* half of chapter 17.
+
+### mycelium-commitment — the contract net
+
+- **State lives in the medium.** A `cn/` KV head per requirement plus append-only log streams for
+  offers, reports and assessments. No local store, no WAL, nothing to fail over.
+- **The award is receipt-bearing.** Written with `set_with_receipt` under a stable operation
+  identity, so its durability is whatever the receipt says and a retry is recognisable. One award per
+  requirement; a second is refused and the first is never overwritten.
+- **An unknown award is not "no award".** A linearizable round that reached no commit answers
+  `AwardUnknown`; retry, and it resolves as `AlreadyAwarded` or a fresh commit.
+- **Retention is yours.** The log streams grow with traffic. Nothing prunes them for you.
+- **Observe.** The KV heads and streams directly. No metrics.
+
+### mycelium-effects — the transactional destination
+
+- **It owns one SQLite file** and one table, `effects_dedup`, keyed by the caller's operation
+  identity. Back it up like any database of record: it is the only thing that can say whether an
+  effect happened.
+- **The durability that matters is SQLite's.** The dedup row and the business change commit in **one
+  transaction**; a failure rolls both back, which is what makes a later retry `Fresh` rather than a
+  false `Replayed`. Do not add a dedup write outside that transaction.
+- **A deadline overrun does not cancel the apply.** `apply_within` returns `DeliveryUnknown` and the
+  work may still land. The resolution is a retry under the same identity, never a second identity.
+- **Observe.** `committed_count()`. No metrics.
+- **See it:** `cargo run -p mycelium-effects --example destination_commit`.
+
+### mycelium-guardrails — the structural gate
+
+- **Tier-C needs `compliance`.** The invoke gate seals every blocked call into this node's signed,
+  hash-chained audit trail, so its operational story is the audit runbook's: see
+  [audit.md §7](audit.md).
+- **Per-node, by design.** Absence of a denial in one provider's chain is not proof of absence
+  elsewhere. Only *guarded* capabilities that reach the gate seal denials.
+- **Observe.** `mycelium_guardrails_*` ([metrics.md](metrics.md)).
+
+### mycelium-wasm-host — artifact install
+
+- **Installs are node-local and eligibility-gated.** A node skips an artifact it cannot host; the skip
+  is counted with its reason rather than logged and lost.
+- **Observe.** `mycelium_artifact_*` ([metrics.md](metrics.md)) — watch
+  `installs_started` ≫ `completed + failed` for installs wedged mid-flight, and
+  `ineligible_skips_total{reason}` for a fleet asking a node to host what it cannot.
+- **The runbook** is [artifacts.md](artifacts.md).
+
+### mycelium-sim — no production surface, deliberately
+
+**There is nothing to operate.** The replay harness routes through a seam that is **off in every
+shipped build**: without the `sim` feature the seam's body is the call it replaced, with no
+indirection and no kernel. A production node does not link it.
+
+What an operator *may* do is **capture a bundle** from a build that has the feature on — a deliberate
+act with a cost, not a flag left set. The redaction rules and the witness check are in
+[diagnostics.md §Capturing a replay bundle](diagnostics.md).
 
 ## See also
 
