@@ -382,6 +382,14 @@ pub async fn kv_set_with_receipt(
 
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_writes_total").increment(1);
+    // The rung actually reached, by its own stable tag. Without this the durability *distribution*
+    // is invisible in aggregate: a receipt reports per response, and an operator running `Async`
+    // has no way to see how much of their traffic is settling at `buffered` rather than `on_disk`.
+    // `tag()` is the vocabulary the gateway JSON and both SDKs already share, so there is one set
+    // of names, and it is a closed set of four.
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_kv_receipts_total", "local_durability" => local_durability.tag())
+        .increment(1);
     let tls = ctx.tls.get().map(Arc::as_ref);
     let msg = make_kv_wire_msg(update, ctx.node_id.id_hash(), tls);
     let queued = dispatch_gossip_send(&ctx.gossip_txs, msg, ctx.node_id.id_hash(), ForwardHint::All).await;
@@ -454,6 +462,12 @@ pub async fn kv_set_requiring_sync(
 
     #[cfg(feature = "metrics")]
     metrics::counter!("gossip_kv_writes_total").increment(1);
+    // Always `on_disk` here — this path returns a receipt only after the sync returned. The two
+    // refusals above never reach it, which is the point: a required-sync write that did not
+    // establish durability applied nothing, so there is no receipt to count.
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_kv_receipts_total", "local_durability" => LocalDurability::OnDisk.tag())
+        .increment(1);
     let tls = ctx.tls.get().map(Arc::as_ref);
     let msg = make_kv_wire_msg(update, ctx.node_id.id_hash(), tls);
     let queued = dispatch_gossip_send(&ctx.gossip_txs, msg, ctx.node_id.id_hash(), ForwardHint::All).await;

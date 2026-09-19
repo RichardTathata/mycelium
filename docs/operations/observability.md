@@ -170,34 +170,50 @@ live management UI (a mesh view + KV inspector) on their gateway port — the qu
 into a running cluster. SkillRunner exposes `/mgmt` (the audit + skill dashboard); see
 [guide 05 · Skills](../guide/05-skills.md).
 
-## What the contracts axis exposes today, and what it does not
+## The contracts axis — five counters
 
-Two counters, both `metrics`-gated, both labelled by **reason** rather than by principal or
-operation. That label choice is the cardinality rule: a reason is a small closed set, a principal is
-not. Do not add a label whose value space grows with your traffic.
+All `metrics`-gated. Every label below is a **small closed set**: verdicts, reasons, classes and
+durability states. Nothing is labelled by principal, operation, resource or group, whose value spaces
+grow with your traffic. That is the cardinality rule, and it is why these are safe to graph directly.
 
 | Metric | Labels | Read it as |
 |---|---|---|
-| `mycelium_ae_preflight_refusals_total` | `reason` ∈ `action_denied` · `authority_not_established` · `evidence_not_recorded` | authorisation refusals at the gateway, by *kind* |
+| `mycelium_ae_decisions_total` | `verdict` ∈ `permit` · `deny` · `indeterminate`; `mapping` ∈ `mapped` · `unmapped` · `ambiguous` | **every** authorisation decision at the gateway, permits included |
+| `mycelium_ae_preflight_refusals_total` | `reason` ∈ `action_denied` · `authority_not_established` · `evidence_not_recorded` | the refusals, by *kind* |
+| `mycelium_control_decisions_total` | `decision` ∈ `proceed` · `held` · `would-hold`; `class` ∈ the five action classes | the control envelope: what the predicate did, and to which class of action |
+| `mycelium_kv_receipts_total` | `local_durability` ∈ `on_disk` · `buffered` · `not_configured` · `failed` | the durability rung writes actually reached |
 | `mycelium_gateway_caller_refusals_total` | `reason` | a caller context that failed verification — **never** a fall-back to running the call as the node |
 
-**`evidence_not_recorded` is the one to alert on.** It means the action was refused *even though the
-policy permitted it*, because the decision could not be recorded. That is a storage or journal fault
-presenting as an authorisation outage, and it will not look like one in a dashboard of denials.
-A rising `authority_not_established` is usually a policy or deployment problem: a stale revision, an
-unmapped operation, or a declared argument the caller is not sending.
+**The decision counter is the denominator.** Refusals alone give you a numerator: ten denials could
+be ten out of ten requests or ten out of ten million, and an alert on denial *volume* fires on
+traffic growth. Divide by `mycelium_ae_decisions_total` for a rate that means something.
 
-**Exposed as JSON rather than as metrics.** The governance snapshot
-(`GET /gateway/govern`) carries this node's `control.profile` and a **`would_hold` counter** — the
-number of actions an enforcing profile *would* have held while running in `observe`. That counter is
-the whole point of the observe rung, and it is the number you watch before stepping the ladder up.
-See [control-profiles.md](control-profiles.md). Receipt states are likewise per-response JSON
-(`local_durability`: `on_disk` · `buffered` · `not_configured` · `failed`), not aggregated.
+Its labels are the **evidence document's own vocabulary**, so a reader correlating a dashboard with a
+record never has to translate. A test asserts the label and the serialised form are the same string,
+because a rename would break both at once.
 
-**Not exposed at all today**, so do not build panels expecting them: per-rung receipt counters,
-durability-state distribution, per-verdict decision counts (permit / deny / indeterminate /
-unmapped — only *refusals* are counted, and only by reason), and evidence freshness or export lag.
-If you need a rate for any of these, you are counting it yourself at the caller.
+**`permit` with `mapping="unmapped"` should always be zero.** An unmapped or ambiguous operation
+cannot be permitted, so a non-zero series there is a defect, not a policy question. Worth an alert.
+
+**`evidence_not_recorded` is the one to page on.** The action was refused *even though the policy
+permitted it*, because the decision could not be written down. That is a storage or journal fault
+wearing an authorisation costume, and it will not look like one in a dashboard of denials. A rising
+`authority_not_established` is usually a policy or deployment problem instead: a stale revision, an
+operation outside the reviewed catalogue, or a declared argument callers are not sending.
+
+**`would-hold` is counted as itself, never folded into `proceed`.** Under the `observe` profile the
+action *does* go ahead, and this count is the number you watch before stepping the ladder up. Folding
+it in would erase the only signal the observe rung produces. See
+[control-profiles.md](control-profiles.md).
+
+**`buffered` is not a degraded `on_disk`.** Under the default `Async` sync mode a receipt honestly
+reports `buffered`: survives a process crash, **lost to a power failure**. Graph the split and decide
+deliberately whether that proportion is what you intended.
+See [deployment.md §Choosing a sync mode](deployment.md).
+
+**Still not exposed:** evidence freshness and export lag. Those measure how far an exporter has
+fallen behind the evidence journal, and there is no exporter in the public tree to be behind — the
+gauge would measure nothing. It lands with the exporter, not before it.
 
 ## Logs & tracing
 

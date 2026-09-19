@@ -251,7 +251,20 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
         // view's confidence is what may hold it. Under `Legacy` nothing is consulted.
         if let Some(class) = classify(&action, n, is_drain) {
             let view = super::emergent::compute_view_confidence(ctx);
-            match control::decide(class, &view, &spec.bound, profile) {
+            let decision = control::decide(class, &view, &spec.bound, profile);
+            // The control envelope, by class. `would-hold` is counted as itself: under `observe`
+            // it is the number an operator watches before stepping the ladder up, and folding it
+            // into `proceed` would hide exactly what the rung exists to show. Both labels are
+            // closed sets (3 × 5); the actuator is deliberately not a label, since group names
+            // are operator-chosen and unbounded.
+            #[cfg(feature = "metrics")]
+            metrics::counter!(
+                "mycelium_control_decisions_total",
+                "decision" => decision.label(),
+                "class" => class.label(),
+            )
+            .increment(1);
+            match decision {
                 Decision::Proceed => {}
                 Decision::WouldHold(why) => {
                     ctx.control_would_hold.fetch_add(1, Ordering::Relaxed);

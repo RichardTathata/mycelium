@@ -70,6 +70,20 @@ pub const ALL_CLASSES: [ActionClass; 5] = [
     ActionClass::DeficitFill,
 ];
 
+impl ActionClass {
+    /// The class's stable name, for metric labels and logs. Pinned by a test: a rename is a
+    /// dashboard break for every operator watching the control envelope.
+    pub fn label(self) -> &'static str {
+        match self {
+            ActionClass::SpeculativeScaleUp => "speculative-scale-up",
+            ActionClass::RoutineScaleDown => "routine-scale-down",
+            ActionClass::ProtectiveShed => "protective-shed",
+            ActionClass::RescueFromZero => "rescue-from-zero",
+            ActionClass::DeficitFill => "deficit-fill",
+        }
+    }
+}
+
 /// **The rule.** May uncertainty about the fleet hold this class of action?
 pub fn holds_on_uncertainty(class: ActionClass) -> bool {
     match class {
@@ -229,6 +243,18 @@ impl Decision {
     pub fn proceeds(&self) -> bool {
         !matches!(self, Decision::Held(_))
     }
+
+    /// The decision's stable name, for metric labels: `proceed` · `held` · `would-hold`. Pinned by
+    /// a test. **`would-hold` is its own label, never folded into `proceed`** — the whole purpose
+    /// of the observe rung is that this count is visible, and a metric that hid it would defeat the
+    /// reason the variant is distinct in the first place.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Decision::Proceed => "proceed",
+            Decision::Held(_) => "held",
+            Decision::WouldHold(_) => "would-hold",
+        }
+    }
 }
 
 /// **The predicate.** May an action of `class` proceed on `view`, under `bound` and `profile`?
@@ -348,6 +374,39 @@ pub fn may_propose(state: &SettleState, spec: &ControlSpec, now_ms: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The control envelope's metric labels. A rename is a dashboard break for every operator, so
+    /// the literals are asserted rather than derived.
+    #[test]
+    fn the_control_labels_are_stable_and_distinct() {
+        assert_eq!(Decision::Proceed.label(), "proceed");
+        assert_eq!(Decision::Held(Uncertainty::SelfDegraded).label(), "held");
+        assert_eq!(Decision::WouldHold(Uncertainty::SelfDegraded).label(), "would-hold");
+
+        // The load-bearing one: a would-hold must never share a label with a proceed. Under
+        // `observe` the action *does* go ahead, and folding the two together would erase the only
+        // number that tells an operator whether it is safe to step the ladder up.
+        assert_ne!(
+            Decision::WouldHold(Uncertainty::SelfDegraded).label(),
+            Decision::Proceed.label(),
+            "would-hold is counted as itself, or the observe rung reports nothing"
+        );
+
+        assert_eq!(
+            ALL_CLASSES.map(ActionClass::label),
+            [
+                "speculative-scale-up",
+                "routine-scale-down",
+                "protective-shed",
+                "rescue-from-zero",
+                "deficit-fill",
+            ]
+        );
+        let mut seen: Vec<&str> = ALL_CLASSES.iter().map(|c| c.label()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), ALL_CLASSES.len(), "two classes sharing a label would merge series");
+    }
 
     /// The gateway and the runbook spell the ladder with these four names; a rename is a wire change.
     #[test]

@@ -2059,6 +2059,20 @@ pub(crate) async fn ae_preflight(
         Err(refusal) => (refusal.decision().clone(), ae::Execution::None),
     };
 
+    // Every decision, permits included — the refusal counter below has no denominator on its own,
+    // so a denial *rate* is not computable from it and an alert on denial volume fires on traffic
+    // growth. Labels are the evidence document's own vocabulary (`DecisionKind`/`MappingKind`), so
+    // a reader never has to translate between a dashboard and a record. Both label sets are small
+    // closed sets: nothing here is labelled by principal, operation or resource, whose value spaces
+    // grow with traffic.
+    #[cfg(feature = "metrics")]
+    {
+        let verdict = ae::DecisionKind::from(decision.verdict).label();
+        let mapping = ae::MappingKind::from(envelope.mapping.status).label();
+        metrics::counter!("mycelium_ae_decisions_total", "verdict" => verdict, "mapping" => mapping)
+            .increment(1);
+    }
+
     let evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
     if let Err(e) = ae_record(ctx, &evidence).await {
         warn!(actor = %envelope.actor, %operation, %resource,
