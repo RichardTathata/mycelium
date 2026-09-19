@@ -637,6 +637,32 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v3 contracts axis — item 6: the scheduler seam's first arm — 2026-09-19 (unreleased)
+
+The last unbuilt piece of the public axis, and the pin it was gated on **flipped**.
+`mycelium_core::sim_seam::pause_clock_for_replay` (paired with `resume_clock_after_replay`) takes each recorded
+wait on tokio's paused clock instead of collapsing it to one `yield_now`, so a wait is ordering information
+again: no wall time, but a task's wait still orders it against every other waiting task. With it, the whole-node
+recording of a linearizable award replays without divergence, and `mycelium-commitment`'s day-old pin is the
+claim (`a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam`), with the unarmed
+replay of the same trace kept beside it as the plant. CN2 is complete.
+
+**The finding, and it is the reason to build rather than reason.** The design note (§3.1) predicted the paused
+clock would restore the interleaving; built exactly that, and the pin **did not flip** — the divergence stayed
+at seq 7. The real blocker was an asymmetry nobody had noticed: `Record` wrote its trace entry **after** a wait
+while `Replay` checked its request **before** one, so a recording's order was the order waits *completed* and a
+replay's was the order tasks *entered* them. Those differ exactly when waits overlap, which is the only case the
+arm exists for. Both modes now check in at the same point. A two-task unit test (50 ms spawned before 10 ms, so
+spawn order and completion order disagree) is what made it legible; the whole-node run could only say *seq 7
+differs*. Both tests are kept, for localisation and for the claim respectively. A second consequence is recorded
+in the seam's rustdoc: the replayed wait is the caller's **nominal** duration, because the effective one is only
+knowable by consuming the trace entry, which is the check itself.
+
+**Now owned:** task interleaving on one node, `current_thread`, where the order comes from seamed waits.
+**Still not:** a multi-threaded runtime, real peers (the network seam), and two tasks runnable at the same
+instant with no wait between them. Log:
+[`.log/2026-09-19-item6-scheduler-seam-first-arm.md`](.log/2026-09-19-item6-scheduler-seam-first-arm.md).
+
 ## v2.8.0 release — 2026-09-18 (tag `v2.8.0`)
 
 **The v3 contracts axis, in one MINOR** — the largest since 2.0, and all of it additive. Wire **v12**
