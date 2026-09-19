@@ -637,6 +637,30 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v3 contracts axis — item 1's decisive demonstration: the receipt ladder — 2026-09-19 (unreleased)
+
+The plan's §12 is an **alignment gate**, not decoration: no phase exit is declared while its lines are open, and
+one line is a decisive demonstration per item. `examples/receipt_ladder.rs` is item 1's. The same write, four
+ways, side by side — `set` (a bool naming no rung) · `set_with_receipt` with no persistence (`NotConfigured`) ·
+`set_requiring_sync` there (**refused**, and the refusal carries whether persistence was configured at all,
+which separates a misconfigured node from a failed disk) · `set_with_receipt` on a buffered node (`Buffered`) ·
+`set_requiring_sync` there (`OnDisk`) · `set_with_replica_sync` (rung 3, somebody else's word). Then the peer is
+shut down and the next write reports it **unknown, never failed**, and the persisted node's directory is
+reopened so what replayed is read back rather than asserted. Every rung already had tests; what no test gave was
+the *contrast*, which is the ladder's whole point: `Buffered` is not a weaker `OnDisk`, it is a different fact.
+
+**The overclaim caught on the way.** The first draft called the reopen "a real process crash" and said it showed
+`Buffered` surviving one. It does not — the shutdown is **clean**, so the bytes had every chance to reach the
+file, and surviving that shows the WAL replaying, not durability under failure. Both failures `Buffered` declines
+to survive, a kill and power loss, are outside one cooperating process. The example now says so in its header and
+at the step. Weaker than the draft claimed, and accurate.
+
+**CI now runs the decisive demonstrations** (`receipt_ladder`, `knowledge_layer`, `federated_domains`) rather
+than only building them: building proves the API still compiles, running proves the demonstration still
+demonstrates. Gallery rows added for all three. Still owed by §12.1: item 4's control-envelope viz, item 5's
+curator handover, item 6's replay-a-bundle CLI. Log:
+[`.log/2026-09-19-item1-receipt-ladder.md`](.log/2026-09-19-item1-receipt-ladder.md).
+
 ## v3 contracts axis — item 6: the scheduler seam's first arm — 2026-09-19 (unreleased)
 
 The last unbuilt piece of the public axis, and the pin it was gated on **flipped**.

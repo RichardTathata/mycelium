@@ -62,6 +62,13 @@ jobs:
       # examples-free CI let a stale include_str! path hide behind cargo's
       # incremental cache for weeks (mesh_demo manifests/ → presets/ rename).
       - run: cargo build --examples --features tls,metrics,a2a,llm
+      # The v3 axis' **decisive demonstrations** (plan §12.1) are *run*, not just built. Building
+      # them proves the API still compiles; running them proves the demonstration still
+      # demonstrates — which is the thing the gallery is a gate on. They are self-contained, take
+      # seconds, and exit non-zero if a step panics.
+      - run: cargo run --example receipt_ladder
+      - run: cargo run --example knowledge_layer --features tls
+      - run: cargo run --example federated_domains --features tls
 
   clippy:
     name: Clippy
