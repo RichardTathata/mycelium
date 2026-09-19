@@ -26,7 +26,7 @@ RPC, **no registry and no configured addresses**.
 | **New here** — is this for me? which primitive? which demo? why-not-X? | the **[FAQ](docs/guide/faq.md)** — your map, and the intended first read |
 | **Wanting to see it run** — which demo? | the **[examples](examples/README.md)** — the capability matrix: every runnable example fingerprinted by layer + facet (level · surface · LLM · audit · metrics), each linking to its run-doc |
 | **Building a use case *on* Mycelium** | [Building on Mycelium](docs/guide/building-on-mycelium.md) — the integrator contract (dependency, public-API rule, reserved KV prefixes, a copyable `CLAUDE.md`) |
-| **Wanting the guided depth** | the **[developer guide](docs/guide/README.md)** — 17 chapters, each with a runnable example |
+| **Wanting the guided depth** | the **[developer guide](docs/guide/README.md)** — 25 chapters, each with a runnable example |
 
 > The rest of this page is a **short orientation** — what the system is and a
 > layers-at-a-glance table. Every deep dive lives one link away in the
