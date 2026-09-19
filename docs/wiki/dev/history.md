@@ -637,6 +637,30 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v3 contracts axis — hysteresis is load-bearing; the sweep gets a per-breaker plant — 2026-09-19 (unreleased)
+
+Scenario C had recorded, the day before, that *hysteresis is not load-bearing while the release spacing is on*.
+That sentence stood as an open question against a shipped mechanism, so it was **measured**, and it was wrong —
+an artefact of schedule coverage.
+
+Three measurements. **(1)** Removing hysteresis alone changed *nothing*: 40 boundary transitions with and
+without, across all 48 schedules, zero differing. **(2)** Yet the band *is* visited — 124 of 282 opaque ticks —
+so the proposals differ while the outcomes do not, meaning something downstream swallows the difference. **(3)**
+What swallows it: the per-tick fill step reaches **0.575**, nearly three times the 0.200 band, so the fill steps
+clean over it; and every schedule drops inbound to 100‰ before the quiet tail, so a *persistent* hover never
+coexists with the window where *at rest* is judged. Hold the hover instead — a lone member, since a three-member
+group drains faster than any share it can receive — and at 400‰ the shipped breakers give **one** transition
+where removing hysteresis alone gives **twelve**.
+
+Shipped: `Breakers::without_hysteresis()`, a **per-breaker** plant (`Breakers::off()` removes everything at once
+and can never name which breaker did the work); `hover_schedules()`, kept separate because the main sweep's
+contract is *the disturbance ends, then the loops settle* and these never end theirs; and three tests — the
+comparative claim, the plant, and one asserting the release spacing does *not* fire here, since if it did the
+two breakers would overlap. **The bound, also measured:** hysteresis damps a hover, it does not settle one — at
+350‰ it takes 15 transitions to 11. A first draft asserted rest, failed, and that is where the bound came from.
+The ADR §5 note is struck through and corrected rather than quietly edited. Log:
+[`.log/2026-09-19-hysteresis-is-load-bearing.md`](.log/2026-09-19-hysteresis-is-load-bearing.md).
+
 ## v3 contracts axis — item 4's decisive demonstration; §12.1's gallery complete — 2026-09-19 (unreleased)
 
 `examples/control_envelope_viz.rs` + `.html` (`:8096`, `--features metrics`). **This completes the plan's §12.1

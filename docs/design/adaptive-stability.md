@@ -153,9 +153,24 @@ Two of these already exist and are cited rather than rebuilt; the rest are `Cont
   > releases flap and the knob chatters; the decisive rule holds under `EnforceLocal`. Two corrections to this
   > paragraph's own expectations, found by the sweep: the stability objective for the boundary is on
   > **releases** — the shed is never held (§2), so a release followed by a re-shed is the rule, not a flap; and
-  > **hysteresis is not load-bearing while the release spacing is on** — removing it in shipped code did not fail
-  > the sweep, because a 1 s spacing alone bounds the release rate. The sentence above — *oscillate together while
-  > each is stable alone* — is **not demonstrated**: the witness removes every breaker at once.
+  > ~~hysteresis is not load-bearing while the release spacing is on~~ — **corrected 2026-09-19, by measuring it.**
+  > That reading was an artefact of *schedule coverage*, not a property of the mechanism. Two facts, both measured:
+  > every schedule in the sweep ends by dropping inbound to 100‰ before the quiet tail, so a hover never coexists
+  > with the window where *at rest* is judged; and in the schedules that do cross the band, the per-tick fill step
+  > reaches **0.575 — nearly three times the 0.200 band** — so the fill steps clean over it and the release spacing
+  > swallows whatever the two rules propose differently. Hold the hover instead (a lone member at 350–400‰, where
+  > the fill drifts rather than jumps) and hysteresis is plainly load-bearing: at 400‰ the shipped breakers produce
+  > **one** boundary transition where removing hysteresis *alone* produces **twelve**. Gated by
+  > `hysteresis_damps_a_persistent_hover_and_is_not_redundant` with `Breakers::without_hysteresis`, a per-breaker
+  > plant — `Breakers::off` removes everything at once and so can never name which breaker did the work.
+  >
+  > **What hysteresis does *not* promise, also measured:** it damps a hover, it does not settle one. At 350‰ it
+  > takes the boundary from 15 transitions to 11 — a real reduction, not rest. Whether the damping reaches rest
+  > depends on where the load sits relative to what the node drains, which is a property of the workload rather
+  > than of the breaker. A first draft of the gate asserted rest and failed, which is how that bound was found.
+  >
+  > The sentence above — *oscillate together while each is stable alone* — is still **not demonstrated**: the
+  > all-breakers witness removes every breaker at once.
 
 ## 6. The workload probe consumes depth (D18)
 
