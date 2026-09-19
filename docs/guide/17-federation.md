@@ -1,6 +1,33 @@
-# 17 — Federation: cross-domain discovery with self-certified AgentFacts
+# 17 — Federation: public discovery and federated domains
 
-## Concept
+Federation is **two edges**, and conflating them is the mistake this chapter exists to prevent.
+
+| | **Public discovery** (part 1) | **Federated domains** (part 2) |
+|---|---|---|
+| Question | *what does this domain say about itself?* | *who may invoke what, between partners?* |
+| Who may read | **anyone** — un-gated by design | one named partner, per grant |
+| Trust | the **fetcher's** decision, from a self-signed document | **bilateral**, from a trust bundle you populate deliberately |
+| Shape | one well-known document | a credential bound to *this call*, and a filtered catalogue |
+| Crate surface | `mycelium-agentfacts` | `mycelium::federation` |
+
+The boundary between them is a decision, not an accident:
+
+> **Public discovery is what a domain says about itself, verifiable by any fetcher. Federation is
+> who may invoke what, between partners.**
+
+So federation adds **no second well-known document**, no registry and no trust-registry service. A
+`DomainDescriptor`'s public subset is serialised as an AgentFacts profile through the existing
+serialiser — they are one model, not two.
+
+Operators run part 2 from [operations/federation.md](../operations/federation.md).
+
+---
+
+## Part 1 · Public discovery — AgentFacts
+
+*Un-gated by design: anyone may pull this, and trust is theirs to decide.*
+
+### Concept
 
 Two **separate domains** — separate clusters, separate auto-CAs, they do **not** peer — still need
 to discover each other's capabilities. A2A (chapter 08) is *call-me* interop between agents already
@@ -27,7 +54,7 @@ sequenceDiagram
     Note over B: a tampered copy fails verify() — detection, not prevention
 ```
 
-## Serve your facts (mount the edge)
+### Serve your facts (mount the edge)
 
 The edge runs **dark** — nothing is published until you mount the router and start the node. Mount
 it **before** `start`, and give it the facets the substrate doesn't itself know (your public edge
@@ -59,7 +86,7 @@ meant to be publicly fetchable and cryptographically verified, never token-gated
 > self-certify) — not a silent empty doc. The identity is auto-generated on first start (chapter
 > 09); you don't touch a CA toolchain.
 
-## Pull and verify another domain
+### Pull and verify another domain
 
 The fetcher needs nothing from you but the URL. It reconstructs the signed document and checks the
 signature against the **embedded** public key — the whole point: no issuer to consult.
@@ -90,7 +117,7 @@ forged.document["jurisdiction"] = serde_json::json!("forged-zone");
 assert!(!forged.verify());   // the signature no longer covers the document
 ```
 
-## The trust model — self-certified, no issuer authority
+### The trust model — self-certified, no issuer authority
 
 - **The signature is the node's identity.** The document embeds the Ed25519 `identity_pubkey`; a
   fetcher verifies against *that*. There is no CA, no registry, no issuer to trust — trust is the
@@ -102,7 +129,7 @@ assert!(!forged.verify());   // the signature no longer covers the document
   and verify inclusion proofs against the live `/gateway/transparency` endpoint — still no new trust
   authority. The substrate-shaped facts stay independent of the feature (pass it in, or don't).
 
-## The multi-author domain board
+### The multi-author domain board
 
 `/.well-known/agent-facts.json` is one node's view. `/.well-known/agent-facts/domain.json` is the
 **converged CRDT board**: every node PUSHes per-field-signed facts intra-domain, they gossip, and
@@ -120,7 +147,7 @@ let board  = domain_facts(&agent, 30_000);                              // every
 Each field is verified with `verify_any(&pubkeys)` against the domain's known identity keys, so a
 forged or stale field simply doesn't appear on the board.
 
-## Run it
+### Run it
 
 The two-domain demo runs the whole arc — advertise → pull → verify → route → tamper-fails — with
 two clusters that never peer:
@@ -129,29 +156,15 @@ two clusters that never peer:
 cargo run -p mycelium-coop-examples --bin federation_facts
 ```
 
-## Where next
+## Part 2 · Federated domains — who may invoke what
 
-- [00 · Concepts](00-concepts.md#why-a2a--mcp--agentfacts-are-not-the-same-thing) — the A2A vs MCP
-  vs AgentFacts distinction (native mesh call vs external tool call vs cross-domain discovery).
-- [08 · A2A interop](08-a2a-interop.md) — the *call-me* side (LangChain / AutoGen on the mesh).
-- [09 · Security](09-security.md) — the Ed25519 node identity that does the self-certifying.
-- Operators: [observability → Viewing AgentFacts](../operations/observability.md#viewing-agentfacts)
-  — pulling and inspecting the served documents from the ops side.
+*Bilateral, credentialed and policy-revisioned. Nothing here is public, and nothing is discovered.*
 
----
-
-## The other half: who may *invoke* what (v3 item 2)
-
-Everything above is the **discover-me** edge: AgentFacts, self-certified, pulled by anyone, and
-deliberately un-gated. `docs/design/federated-domains.md` adds the **invoke** edge beside it, and
-the boundary between them is a decision (D25), not an accident:
-
-> **NANDA is what a domain says about itself, verifiable by any fetcher. Federation is who may
-> invoke what, between partners.**
-
-So federation does **not** add a second well-known document, a registry or a trust-registry service.
-A `DomainDescriptor`'s public subset is an AgentFacts profile through the existing serializer; trust
-bundles stay bilateral operator configuration.
+Part 1 was the **discover-me** edge. This is the **invoke** edge, and the one invariant to carry
+into it is that **federation never joins the transports**: a partner's node never enters your
+membership, your native `cap/` `grp/` `sys/` `consensus/` namespaces, your anti-entropy state or a
+quorum. That is why there is deliberately no `federation/` key prefix, and a sweep in CI enforces its
+absence. Design record: [`design/federated-domains.md`](../design/federated-domains.md).
 
 ### What exists today
 
@@ -204,7 +217,7 @@ cargo run --example federated_domains --features tls
 
 The example walks the whole lifecycle and prints what each step decided *and why*.
 
-### What does not exist yet
+### The release gate, and what is still to build
 
 **The release gate, and what of it is met.** PR 8 (2026-09-18) put the first bytes across; PR 9 (same day)
 ran the gate's whole choreography over them in one process — every node under the enforced profile,
@@ -229,7 +242,25 @@ lifecycle in one process and says so. The invocation edge **is A2A** (D5) with d
 credentials — not a second call protocol, because two invocation edges with different auth models is
 the drift v2.4.1 and v2.4.2 were spent removing.
 
-**The release gate is not met.** The record asks for a two-mesh demonstration that proves *from
-membership tables, consensus state and traces* that the meshes never merged. `two_meshes_never_learn_each_other`
-is the harness for it and currently proves the easy half — two meshes that share no bootstrap peer
-stay separate. It becomes the real test once there is an edge for them to leak across.
+---
+
+## Where next
+
+**Part 1 — public discovery**
+
+- [00 · Concepts](00-concepts.md#why-a2a--mcp--agentfacts-are-not-the-same-thing) — the A2A vs MCP
+  vs AgentFacts distinction (native mesh call vs external tool call vs cross-domain discovery).
+- [08 · A2A interop](08-a2a-interop.md) — the *call-me* side (LangChain / AutoGen on the mesh).
+- [09 · Security](09-security.md) — the Ed25519 node identity that does the self-certifying.
+- Operators: [observability → Viewing AgentFacts](../operations/observability.md#viewing-agentfacts).
+
+**Part 2 — federated domains**
+
+- [operations/federation.md](../operations/federation.md) — the runbook: standing a partner up,
+  overlapping key rotation, revoking **both** halves, and reading a refusal.
+- [`design/federated-domains.md`](../design/federated-domains.md) — what a domain is, the three
+  trust relationships kept apart, and the four things federation refuses to become.
+- [18 · Contracts & receipts](18-contracts-and-receipts.md) — why a silent gateway is
+  `DeliveryUnknown` rather than a failure, and what an at-most-once call may not do about it.
+- [20 · Authorising actions](20-authorising-actions.md) — federation preserves the origin principal;
+  deciding what that principal may *do* is a separate question.
