@@ -785,6 +785,45 @@ knowable by consuming the trace entry, which is the check itself.
 instant with no wait between them. Log:
 [`.log/2026-09-19-item6-scheduler-seam-first-arm.md`](.log/2026-09-19-item6-scheduler-seam-first-arm.md).
 
+## v2.9.0 release — 2026-09-19 (tag `v2.9.0`)
+
+**The axis proving itself.** A MINOR whose headline is not new capability but new *evidence*. Wire **v12**
+(`PREV = 11`) unchanged; on-disk format unchanged; the rolling upgrade holds.
+
+**What it contains.** The **scheduler seam's first arm** — the last unbuilt piece of the public axis — so a
+whole-node recording of a linearizable award now replays without divergence and CN2 is complete. **§12.1's
+demonstration gallery complete**: one decisive demonstration per item, each ending by naming what it does not
+establish, with the four CLI ones *run* in CI rather than only built. And a recorded doubt resolved by
+measurement: hysteresis **is** load-bearing, the earlier reading was schedule coverage, and the sweep gained a
+per-breaker plant plus the measured bound (it damps a hover, it does not settle one).
+
+**The part worth remembering.** Two of the six demonstrations **found real defects** — which is the argument
+for §12 being a gate rather than decoration, made by the gate itself:
+
+- A **revoked wiki curator was told to "re-read and retry"**, advice that refuses forever. The fence was
+  checking correctly and describing it wrongly, and only a consumer could notice. Its own tests check the
+  transaction *text*; the demonstration was its first end-to-end exercise.
+- A **federated call against a blackholed gateway hung** instead of returning `DeliveryUnknown` within a bound.
+  A refusing partner fails fast; a blackholed one sends nothing. The in-process test could not have found it —
+  its severance is a shut-down gateway, which refuses.
+
+**Three overclaims of my own were caught before shipping**, and each correction made the artefact weaker and
+accurate: a clean shutdown described as a crash; a trace's divergence lines said to name the record they
+concern when the trace carries only a digest; and a hysteresis gate that asserted *rest* when the measurement
+only supports *damping*.
+
+**The one upgrade note.** A `mycelium-wiki` write refused by the mandate fence returns `WikiError::Io` carrying
+`MandateRevoked` instead of `WikiError::Conflict`. Retry logic keyed on `Conflict` stops retrying that case —
+the point of the change — but it is a change in what a caller sees. A genuine lost CAS race still returns
+`Conflict`, and a store with no fence configured is unaffected byte for byte.
+
+**Release gates.** `make check` clean on the bumped tree; the three library suites re-run on it; core with and
+without `sim`; the sim, commitment and wiki suites; the wire back-compat gate
+(`read_frame_accepts_prev_wire_version`) green, with the constants verified identical to `v2.8.0` by diff
+rather than from memory. Bumped to 2.9.0: root, core, agentfacts, blackboard, commitment, effects, sim,
+tuple-space, wasm-host, wiki; `mycelium-reason` stays on its own track. Log:
+[`.log/2026-09-19-v2.9.0-release.md`](.log/2026-09-19-v2.9.0-release.md).
+
 ## v2.8.0 release — 2026-09-18 (tag `v2.8.0`)
 
 **The v3 contracts axis, in one MINOR** — the largest since 2.0, and all of it additive. Wire **v12**

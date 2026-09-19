@@ -9,6 +9,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.0] — 2026-09-19
+
+**The axis proves itself.** A MINOR whose headline is not new capability but new *evidence*: a whole
+node now replays deterministically, every item of the v3 axis has a runnable demonstration, and two
+of those demonstrations found real defects on the way in. Wire **v12** (`PREV = 11`) **unchanged**;
+on-disk format unchanged; a backwards-compatible rolling upgrade.
+
+- **The scheduler seam's first arm** (item 6) — the last unbuilt piece of the public axis. A
+  replayed wait is taken on tokio's paused clock rather than collapsed to one yield, so a task's
+  wait orders it against every other waiting task. With it a whole-node recording of a linearizable
+  award **replays without divergence**, and the commitment companion's CN2 rung is complete. The
+  design note predicted the mechanism and missed the blocker: `Record` wrote its trace entry *after*
+  a wait while `Replay` checked *before* one, so a recording's order was the order waits **completed**
+  and a replay's the order tasks **entered** them. Both now check in at the same point.
+- **§12.1's gallery is complete** — one decisive demonstration per item, each ending by naming what
+  it does *not* establish: the receipt ladder (1), federated domains (2), the knowledge layer (3),
+  the control envelope (4), the curator handover (5), replay a bundle (6). CI **runs** the four CLI
+  ones rather than only building them: building proves the API compiles, running proves the
+  demonstration still demonstrates.
+- **Two defects the demonstrations found, both fixed and pinned with plants:** a revoked wiki curator
+  was told to *"re-read and retry"* — advice that refuses forever — and is now refused by name; and a
+  federated call against a blackholed gateway hung instead of returning `DeliveryUnknown` within a
+  bound.
+- **A recorded doubt resolved by measuring it:** scenario C had said hysteresis was not load-bearing
+  while the release spacing was on. It is — the earlier reading was schedule coverage. The sweep
+  gained a per-breaker plant, and the measured *bound* (hysteresis damps a hover, it does not settle
+  one) is recorded with it.
+
+**The upgrade note**, and there is one. A `mycelium-wiki` write refused by the **mandate fence** now
+returns `WikiError::Io` carrying `MandateRevoked` instead of `WikiError::Conflict`. Retry logic keyed
+on `Conflict` will no longer retry that case — which is the point, since a replaced curator retrying
+refuses forever — but it *is* a change in what a caller sees. A genuine lost compare-and-swap race
+still returns `Conflict`. Stores with no mandate fence configured are unaffected, byte for byte.
+
+### Added
+
+- `mycelium_core::sim_seam::{pause_clock_for_replay, resume_clock_after_replay}` and `mono_instant`
+  (feature `sim`, off in every shipped build; `sim` now also enables `tokio/test-util`).
+- `mycelium_wiki::{MandateRevoked, WikiError::mandate_revoked, WikiError::as_mandate_revoked}`.
+- Examples: `receipt_ladder`, `control_envelope_viz` (+ `.html`), `mycelium-sim`'s
+  `replay_a_bundle`, `mycelium-wiki`'s `curator_handover`.
+
 ### Changed — hysteresis is load-bearing after all; the sweep now has a per-breaker plant (v3 item 4)
 
 - Scenario C had recorded that **hysteresis was not load-bearing** while the release spacing was on. Measuring
