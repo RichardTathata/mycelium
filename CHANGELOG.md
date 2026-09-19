@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — a revoked curator was told to retry (v3 item 5, `mycelium-wiki`)
+
+- **The mandate fence now names its own refusal.** A write whose appointment had moved failed the
+  git ref transaction and was reported as `WikiError::Conflict` — *"compare-and-swap version
+  conflict (re-read and retry)"* — which is the opposite of the right advice: a replaced curator
+  who retries will refuse forever. `WikiError::mandate_revoked` / `as_mandate_revoked` carry
+  `MandateRevoked { refname, expected, found }` inside `WikiError::Io`, the same additive shape as
+  `GateRefusal`, so no downstream match breaks. A genuine lost CAS race still reports `Conflict`,
+  which still *is* a retry signal.
+- Found by building item 5's decisive demonstration — the first end-to-end exercise of the fence,
+  whose existing tests check the transaction *text*. Pinned by
+  `a_moved_appointment_is_refused_as_a_revocation_and_writes_nothing` and its plant
+  `a_stale_version_under_a_valid_appointment_is_still_a_conflict`.
+
+### Added — the curator handover, item 5's decisive demonstration (v3 §12.1)
+
+- **`mycelium-wiki/examples/curator_handover.rs`** (feature `git-store`, run in CI) — a council's
+  curator appointed as a git ref, writing under it, the council re-appointing mid-stream, the
+  replaced curator's next write **refused as a revocation with nothing written** (content and
+  `HEAD` shown unchanged either side), the new curator writing, and the git log showing both names:
+  authority moved, history did not.
+
 ### Added — replay a bundle, item 6's decisive demonstration (v3 §12.1)
 
 - **`mycelium-sim/examples/replay_a_bundle.rs`** — a depot's surplus-food sweep recorded through the

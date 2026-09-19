@@ -38,8 +38,12 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   then replayed against a deliberately broken version so the kernel names the exact effect that
   changed, then green again with the fix. Its bug is the *example's own*: injecting one into the
   library is a `cfg(test)` affordance and stays there, because a binary able to disable a
-  durability fix would be a data-loss switch. Still owed by §12.1: item 4's control-envelope viz
-  and item 5's curator handover.
+  durability fix would be a data-loss switch. `curator_handover` (`mycelium-wiki/examples/`, feature
+  `git-store`) is item 5's — an appointment as a git ref, a re-appointment mid-stream, and the
+  replaced curator's write refused **as a revocation** with nothing written. Building it found the
+  fence reporting that refusal as a retryable conflict, which is the opposite advice; the fence's own
+  tests check the transaction *text*, so this was its first end-to-end exercise. Still owed by
+  §12.1: item 4's control-envelope viz.
 - **Food-Rescue Co-op suite** (`examples/coop/`, workspace member
   `mycelium-coop-examples`): **fourteen** demos (twelve CI + two manual real-model) composed in one constructive world (depot
   nodes rescuing surplus food, no dispatcher) — mailbox_llm · stigmergy · elastic_intent ·

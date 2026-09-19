@@ -637,6 +637,32 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v3 contracts axis — item 5's decisive demonstration, and the defect it found — 2026-09-19 (unreleased)
+
+`mycelium-wiki/examples/curator_handover.rs` (feature `git-store`, run in CI): a council curator appointed as a
+git ref, writing under it, the council re-appointing mid-stream, the replaced curator's next write refused with
+content and `HEAD` shown unchanged either side, the new curator writing, and the git log carrying both names —
+authority moved, history did not.
+
+**The defect, and why §12 is a gate rather than decoration.** The fence puts the appointment check inside the
+write's own git transaction — verify the mandate ref, update the content ref, both or neither — and that part
+worked. But a failed transaction returned `RefMoved`, reported as `WikiError::Conflict`: *"compare-and-swap
+version conflict (re-read and retry)"*. So **a curator who had been replaced was told to retry**, and retrying
+refuses forever. A conflict and a revocation have opposite remedies; item 5's own record says a refusal naming
+something else invites a fix that does not help, which is why `ResourceAuthority::check` is ordered epoch-first.
+The store was checking correctly and describing it wrongly — the kind of thing only a consumer notices. Fixed
+with `WikiError::mandate_revoked` / `as_mandate_revoked` carrying `MandateRevoked { refname, expected, found }`
+inside `WikiError::Io`, the same additive shape as `GateRefusal`; a genuine lost CAS race still reports
+`Conflict`, pinned by a plant so this is not "every failure now says revoked".
+
+**Why nobody had seen it:** the fence's tests check the transaction **text**, never running it against real git.
+The demonstration was its first end-to-end exercise and surfaced this in minutes. *A mechanism tested only at the
+string level is a mechanism whose reported behaviour is untested.* Two API-shape lessons the example paid for
+are in the log: the store is manifest-last (a section with no manifest entry is invisible to `read` — the
+torn-write guarantee working), and `write_section` is a compare-and-swap, so the example must read the version
+token first or a CAS conflict masquerades as the fence refusal. Log:
+[`.log/2026-09-19-item5-curator-handover.md`](.log/2026-09-19-item5-curator-handover.md).
+
 ## v3 contracts axis — item 6's decisive demonstration: replay a bundle — 2026-09-19 (unreleased)
 
 `mycelium-sim/examples/replay_a_bundle.rs`, run in CI. A depot's surplus-food sweep recorded through the

@@ -42,6 +42,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | **The v3 contracts axis** — one decisive demonstration per item; each *runs* in CI, not just builds. `replay_a_bundle` is all-· by construction: the replay kernel is not a layer | | | | | | | | | |
 | [`receipt_ladder`](../docs/design/contracts-receipts.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`replay_a_bundle`](../docs/design/replay-nondeterminism-inventory.md) | · | · | · | · | Adv | CLI | · | · | · |
+| [`curator_handover`](../docs/design/scoped-mandates.md) | · | · | · | · | Adv | CLI | · | · | · |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | |

@@ -117,6 +117,45 @@ impl std::fmt::Display for GateRefusal {
 }
 impl std::error::Error for GateRefusal {}
 
+/// A write refused by the **mandate fence** (v3 item 5): the appointment this writer was
+/// configured with is no longer the one the resource holds.
+///
+/// Distinct from [`WikiError::Conflict`] because the remedy is the opposite. A conflict says
+/// *another writer got there first* — re-read and re-apply, and you will land. A revoked mandate
+/// says *you are no longer the curator* — re-applying will refuse forever, and the right response
+/// is to stop writing and find out who holds the appointment now. Item 5's record is explicit that
+/// a refusal naming the wrong thing invites a fix that does not help; before this existed, a
+/// revoked curator was told to "re-read and retry".
+///
+/// Carried inside [`WikiError::Io`] like [`GateRefusal`], so adding it breaks no downstream match.
+#[derive(Debug)]
+pub struct MandateRevoked {
+    /// The ref that carries the appointment, e.g. `refs/mycelium/mandate/norfolk`.
+    pub refname: String,
+    /// What this writer was configured to expect.
+    pub expected: String,
+    /// What the resource actually holds now — `None` if the ref is gone entirely.
+    pub found: Option<String>,
+}
+
+impl std::fmt::Display for MandateRevoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.found {
+            Some(found) => write!(
+                f,
+                "write refused by the mandate fence: {} holds {found}, this writer was appointed under {}",
+                self.refname, self.expected
+            ),
+            None => write!(
+                f,
+                "write refused by the mandate fence: {} does not exist; this writer was appointed under {}",
+                self.refname, self.expected
+            ),
+        }
+    }
+}
+impl std::error::Error for MandateRevoked {}
+
 impl WikiError {
     /// A gate refusal carrying the validator's findings. **Not a retry signal**: unlike
     /// [`Conflict`](WikiError::Conflict), re-applying the same content will refuse again — the
@@ -130,6 +169,23 @@ impl WikiError {
     pub fn as_gate_refusal(&self) -> Option<&str> {
         match self {
             WikiError::Io(e) => e.get_ref().and_then(|r| r.downcast_ref::<GateRefusal>()).map(|g| g.0.as_str()),
+            _ => None,
+        }
+    }
+
+    /// A mandate-fence refusal. **Not a retry signal**, and the difference from
+    /// [`Conflict`](WikiError::Conflict) is the whole point — see [`MandateRevoked`].
+    pub fn mandate_revoked(refname: impl Into<String>, expected: impl Into<String>, found: Option<String>) -> Self {
+        WikiError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            MandateRevoked { refname: refname.into(), expected: expected.into(), found },
+        ))
+    }
+
+    /// The fence details, when this error is a [`mandate_revoked`](WikiError::mandate_revoked).
+    pub fn as_mandate_revoked(&self) -> Option<&MandateRevoked> {
+        match self {
+            WikiError::Io(e) => e.get_ref().and_then(|r| r.downcast_ref::<MandateRevoked>()),
             _ => None,
         }
     }

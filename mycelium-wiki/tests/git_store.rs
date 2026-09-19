@@ -842,3 +842,129 @@ fn concurrent_erase_and_batch_write_serialise_through_the_ref_cas() {
     assert_eq!(s.read("roster").unwrap(), None);
     assert!(!s.list_pages().unwrap().contains(&"roster".to_string()));
 }
+
+// ── The mandate fence names its own refusal (v3 item 5, 2026-09-19) ─────────────────────────
+//
+// The fence's unit tests check the *transaction text*; these are its first end-to-end exercise,
+// and they exist because building item 5's demonstration found the fence reporting a revoked
+// appointment as `Conflict` — which tells a curator who has been replaced to "re-read and retry",
+// advice that will refuse forever. A conflict and a revocation have opposite remedies, so the
+// store must tell them apart.
+
+fn fenced(dir: &Path, expected: &str, author: &str) -> GitStore {
+    GitStore::open(GitStoreConfig {
+        dir: dir.to_path_buf(),
+        subdir: "councils/testville".into(),
+        message_prefix: "wiki(testville)".into(),
+        author_name: author.into(),
+        mandate: Some(mycelium_wiki::mandate_fence::MandateFence {
+            refname: "refs/mycelium/mandate/testville".into(),
+            expected: expected.into(),
+        }),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+fn plain_store(dir: &Path) -> GitStore {
+    GitStore::open(GitStoreConfig {
+        dir: dir.to_path_buf(),
+        subdir: "councils/testville".into(),
+        message_prefix: "wiki(testville)".into(),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn set_appointment(dir: &Path, oid: &str) {
+    std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["update-ref", "refs/mycelium/mandate/testville", oid])
+        .status()
+        .unwrap();
+}
+
+fn section_version(s: &GitStore, page: &str, id: &str) -> Option<u64> {
+    s.read_versioned(page).unwrap().and_then(|p| p.sections.get(id).map(|(v, _)| *v))
+}
+
+fn minutes(body: &str) -> Section {
+    Section {
+        id: "minutes".into(),
+        heading: "Minutes".into(),
+        body: body.into(),
+        attributes: BTreeMap::new(),
+    }
+}
+
+/// A writer whose appointment moved is refused **as a revocation**, not as a conflict — and
+/// nothing is written. The plant is the sibling test: a genuine CAS race still reports `Conflict`,
+/// so this is not "every failure now says revoked".
+#[test]
+fn a_moved_appointment_is_refused_as_a_revocation_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    plain_store(dir.path())
+        .write_page("minutes", &[minutes("formed")], &BTreeMap::new())
+        .unwrap();
+
+    let appointment = git_out(dir.path(), &["rev-parse", "HEAD"]);
+    set_appointment(dir.path(), &appointment);
+
+    // Appointed: the write lands.
+    let curator = fenced(dir.path(), &appointment, "Curator A");
+    let v = section_version(&curator, "minutes", "minutes");
+    curator.write_section("minutes", &minutes("agreed"), v).expect("the appointed curator writes");
+
+    // The appointment moves. The curator's store still expects the old one.
+    let moved = git_out(dir.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(moved, appointment, "the re-appointment must actually change the ref");
+    set_appointment(dir.path(), &moved);
+
+    let before = curator.read("minutes").unwrap();
+    let head_before = git_out(dir.path(), &["rev-parse", "HEAD"]);
+    let v = section_version(&curator, "minutes", "minutes");
+    let err = curator
+        .write_section("minutes", &minutes("sell the hall"), v)
+        .expect_err("a revoked curator must be refused");
+
+    let revoked = err.as_mandate_revoked().expect("refused as a revocation, not as a conflict");
+    assert_eq!(revoked.refname, "refs/mycelium/mandate/testville");
+    assert_eq!(revoked.expected, appointment);
+    assert_eq!(revoked.found.as_deref(), Some(moved.as_str()));
+    assert!(!matches!(err, WikiError::Conflict), "a revocation is not a retry signal");
+
+    // And nothing was written: the whole transaction aborted.
+    assert_eq!(curator.read("minutes").unwrap(), before, "content unchanged");
+    assert_eq!(git_out(dir.path(), &["rev-parse", "HEAD"]), head_before, "no commit landed");
+}
+
+/// The plant. A genuine compare-and-swap race — a stale version token, with the appointment
+/// untouched — still reports `Conflict`, which *is* a retry signal. Without this, the test above
+/// would pass on a store that had simply renamed every failure.
+#[test]
+fn a_stale_version_under_a_valid_appointment_is_still_a_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    plain_store(dir.path())
+        .write_page("minutes", &[minutes("formed")], &BTreeMap::new())
+        .unwrap();
+
+    let appointment = git_out(dir.path(), &["rev-parse", "HEAD"]);
+    set_appointment(dir.path(), &appointment);
+
+    let curator = fenced(dir.path(), &appointment, "Curator A");
+    let stale = section_version(&curator, "minutes", "minutes");
+    // A write lands first, moving the section's version token.
+    curator.write_section("minutes", &minutes("first"), stale).expect("the first write lands");
+
+    // The appointment is untouched; only the version token is stale.
+    let err = curator
+        .write_section("minutes", &minutes("second"), stale)
+        .expect_err("a stale version must be refused");
+    assert!(err.as_mandate_revoked().is_none(), "the appointment is valid — this is not a revocation");
+    assert!(matches!(err, WikiError::Conflict), "a lost CAS race is a retry signal: {err}");
+}
