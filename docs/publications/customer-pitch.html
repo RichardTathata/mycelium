@@ -250,8 +250,26 @@
 </div>
 
 <!-- 06 Value 1: sovereignty -->
+<!-- 06a Value 1: the wedge — enforce remits where agents act -->
+<div class="slide" id="csWedge">
+  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 1 of 4</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-body">
+    <div class="slide-title good">Enforce your remits <em>where the agents actually act.</em></div>
+    <div class="slide-sub">Put a gateway in front of the tools and endpoints your agents already call. Every dispatch is checked against your policy <strong>before</strong> it runs, and every decision is recorded with the reason — including the ones that said yes.</div>
+    <div class="cols3">
+      <div class="card card-accent-green"><div class="card-title">Three answers, not two</div><div class="card-body">Permit, deny, and <strong>indeterminate</strong> — authority could not be <em>established</em>. Nothing says the action is forbidden, only that nothing says it is allowed. A system with only yes and no has to guess, and it guesses in the permissive direction.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Attribution, or no action</div><div class="card-body">Under the strict profile a decision that cannot be <em>recorded</em> refuses the action — even one the policy permitted. Enforcement without attribution is an unlogged gate, not governance.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Coverage is a field</div><div class="card-body">The evidence names the routes the enforcement point does <em>not</em> see. An auditor is never invited to read silence as an all-clear — which is the failure mode of every dashboard that only shows what it caught.</div></div>
+    </div>
+    <div class="callout callout-orange">
+      <strong>Stated precisely:</strong> this is self-imposed prevention <em>for the routes this gateway fronts</em>, and nothing for routes it does not. Only a check inside the resource itself is stronger. The enforcement point, the three verdicts, the evidence journal and a reference policy engine ship in the substrate today; production policy adapters and the evidence exporter are the commercial layer.
+    </div>
+  </div>
+</div>
+
+<!-- 07 Value 1: sovereignty -->
 <div class="slide" id="cs6">
-  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 1 of 3</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 2 of 4</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">Your data <em>never leaves your control.</em></div>
     <div class="slide-sub">There is no central custodian — by construction, not by policy. Each node holds its own state. Identity is self-certified (no central authority issues it). Across organisations or borders, domains <strong>federate as sovereign peers</strong> — each self-certifies, none surrenders custody.</div>
@@ -268,7 +286,7 @@
 
 <!-- 07 Value 2: no SPOF / capture -->
 <div class="slide" id="cs7">
-  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 2 of 3</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 3 of 4</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">Nothing to take down, <em>subpoena, or saturate.</em></div>
     <div class="slide-sub">Kill any node and the fleet self-heals — capabilities re-advertise, work re-routes, a standby promotes itself. There is no privileged component to fail, compromise, coerce, or overload.</div>
@@ -283,7 +301,7 @@
 
 <!-- 08 Value 3: every pattern -->
 <div class="slide" id="cs8">
-  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 3 of 3</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 4 of 4</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">Every way agents need to interact. <em>One fabric.</em></div>
     <div class="slide-sub">Most platforms give you one shape — a remote call wearing a prompt, brokered through the middle. Real coordination is richer than that. Mycelium offers the whole repertoire on one substrate, so you are never locked into the wrong pattern for your problem.</div>
@@ -352,15 +370,15 @@
     <div class="cols3">
       <div class="card card-accent-green">
         <div class="card-title">✓ Built</div>
-        <div class="card-body" style="line-height:1.75;">Three-layer substrate. Security &amp; compliance: authenticated identity (CA-anchored, proof-chained rotation) with revocation, role-based access, OIDC single sign-on, tamper-evident audit with SIEM export, native gateway TLS, data-at-rest encryption, live key rotation, GDPR crypto-shred erasure. Durable curated knowledge canon — group-scoped, optionally <strong>git-backed</strong>, so history is the audit trail; agents, pipelines, and humans co-edit one record. Sovereign federation. Coordinator-free fleet diagnosis (detect → localize → explain → intervene, no central collector). Polyglot SDKs (Rust · Python · TypeScript). Feature-complete v2.</div>
+        <div class="card-body" style="line-height:1.75;">Three-layer substrate. Security &amp; compliance: authenticated identity (CA-anchored, proof-chained rotation) with revocation, role-based access, OIDC single sign-on, tamper-evident audit with SIEM export, native gateway TLS, data-at-rest encryption, live key rotation, GDPR crypto-shred erasure. Durable curated knowledge canon — group-scoped, optionally <strong>git-backed</strong>, so history is the audit trail; agents, pipelines, and humans co-edit one record. Sovereign federation — now with its <strong>transport</strong>: two independently admitted meshes exchanging explicitly exported services, proven not to merge with the link cut at the network layer. <strong>Typed durability receipts</strong> (an acknowledgement names what it proves; a timeout is <em>unknown</em>, never a failure). <strong>Deterministic replay</strong> of a whole node from a recorded run. <strong>Gateway authorisation with attributable evidence</strong> (enforcement point, three verdicts, evidence journal, reference policy engine). Scoped mandates. Coordinator-free fleet diagnosis (detect → localize → explain → intervene, no central collector). Polyglot SDKs (Rust · Python · TypeScript). Feature-complete v2.</div>
       </div>
       <div class="card card-accent-blue">
         <div class="card-title">✓ Demonstrated</div>
-        <div class="card-body" style="line-height:1.75;">100-node cluster formation, gossip propagation, automatic failover and recovery, state convergence — under a test suite that runs on every change, including the multi-container cross-node scenarios now <strong>CI-gated with no retries</strong>: a real regression turns the gate red, and every fix leaves a permanent gate behind it.</div>
+        <div class="card-body" style="line-height:1.75;">100-node cluster formation, gossip propagation, automatic failover and recovery, state convergence — under a test suite that runs on every change, including the multi-container cross-node scenarios now <strong>CI-gated with no retries</strong>: a real regression turns the gate red, and every fix leaves a permanent gate behind it. Each capability above ships with a <strong>runnable demonstration that names what it does not establish</strong> — two of which found real defects before release.</div>
       </div>
       <div class="card card-accent-orange">
         <div class="card-title">→ Honest next</div>
-        <div class="card-body" style="line-height:1.75;">Sustained real-network and load validation. The measured "federate-at-N" threshold. <strong>No third-party production deployment yet</strong> — that is the gap a design partnership closes.</div>
+        <div class="card-body" style="line-height:1.75;">Sustained real-network and load validation — the nightly scale runner is not yet operating, so that criterion is unmet rather than passed. The measured "federate-at-N" threshold. Production policy adapters and the evidence exporter for the governance wedge. Transport security on the federation edge itself, and more than two domains. <strong>No third-party production deployment yet</strong> — that is the gap a design partnership closes.</div>
       </div>
     </div>
     <div class="callout callout-blue">We are looking for <strong>design partners</strong>, not selling shrink-wrap at 10,000 nodes. The honesty is deliberate — it is the same discipline that produced the architecture.</div>
