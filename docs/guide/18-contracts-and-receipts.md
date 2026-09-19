@@ -234,4 +234,4 @@ building a client, match on these rather than on prose.
 | the vocabulary in code, with every variant's doc comment | [`mycelium-core/src/receipt.rs`](../../mycelium-core/src/receipt.rs) |
 | what the error types mean across the whole library | [error-handling.md](error-handling.md) |
 | who the caller is, as distinct from which operation this is | [09-security.md](09-security.md) |
-| replaying a recorded run to see the same receipts again | the [`mycelium-sim`](../../mycelium-sim/) crate and `cargo run -p mycelium-sim --example replay_a_bundle` |
+| replaying a recorded run to see the same receipts again | [19 · Replay & simulation](19-replay-and-simulation.md) |
