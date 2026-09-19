@@ -22,6 +22,36 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — §12.2: the seven how-to chapters and the axis vocabulary — 2026-09-19 (unreleased)
+
+§12.2 ties each how-to chapter to **its item's release gate** and the concept vocabulary to **its item's ADR**.
+Every one of those gates had passed in v2.8.0/v2.9.0, so this was debt already incurred, and S2's phase-exit
+condition (no gap in the matrix) makes it a Phase C item rather than a tidy-up. Shipped as PRs #304, #305, #306,
+#311: **chapters 18 contracts & receipts · 19 replay & simulation · 20 authorising actions at the gateway ·
+21 mandates · 22 stability & control · 23 knowledge · 24 commitments**, plus eight concept-pair paragraphs and ten
+glossary rows in `00-concepts.md`, `ReceiptError` in the error taxonomy (it was absent entirely), six cookbook
+recipes, and chapter 14's one-workload comparison of the three coordination models.
+
+**The axis's thesis got written down for the first time:** *refusals are typed by what the caller should do next*
+— a refusal a retry loop would consume is a different type from one it would not (`MandateSuperseded` ≠ `Conflict`,
+`Indeterminate` ≠ `Deny`, `InsufficientEvidence` ≠ `Rejected`, `DeliveryUnknown` ≠ "nothing happened").
+
+**Seven drift defects, found by checking prose against code**, six of them pre-existing: `00-concepts.md` gave
+rung 1 as two variants (four in code) and omitted `Buffered` from rung 2 entirely; it still said the receipt types
+*would land*; the guide index called federation "contract only, no transport yet" (shipped v2.8.0); `CLAUDE.md`
+listed the federation transport and scheduler seam as open and lacked §12.2's seam rule. The seventh was **mine**:
+chapter 18's first draft said the bool from `set` means "applied here, now" — the code says *queued for gossip*,
+and its `false` is ambiguous. Writing from memory also produced three wrong signatures and missed
+`retry_with_receipt`; from chapter 19 onward every name was verified **before** writing, which caught two errors in
+my own research notes (`Stale` not `TooStale`; `Divergence` is a struct).
+
+**A process correction mid-flight.** Chapters 21–24 were first opened as four *stacked* PRs (#307–#310), meaning
+five full CI runs for Markdown-only changes with four competing for runners. Collapsed into one (#311), the four
+closed. Batching, not stacking, for docs.
+**The honest gap:** nothing in CI enforces any of this. `/doc-coverage` and `/wiki-lint` are operator-run skills,
+not gates, and six pre-existing corrections after two releases is what silent drift looks like. Log:
+[`.log/2026-09-19-section-12-2-guide-chapters.md`](.log/2026-09-19-section-12-2-guide-chapters.md).
+
 ## v3 contracts axis — item 4 PR 5: admission control at the companions' queues, reported — 2026-09-18 (unreleased)
 
 The last row of item 4's table (`docs/design/adaptive-stability.md` §9). The tuple space's watermark already
