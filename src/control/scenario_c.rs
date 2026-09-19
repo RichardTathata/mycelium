@@ -98,6 +98,15 @@ impl Breakers {
     pub fn off() -> Self {
         Self { tuning_spacing_ms: 0, tuning_settle_ms: 0, release_spacing_ms: 0, hysteresis: 0.0, membership_spacing_ms: 0 }
     }
+
+    /// Production's shape with **only** the opacity hysteresis removed — a per-breaker plant.
+    ///
+    /// [`off`](Self::off) removes every breaker at once, which shows that *some* breaker is
+    /// load-bearing and cannot say which. This one names hysteresis, and the pair of tests that use
+    /// it is what turned a recorded doubt into a gate (see `hover_schedules`).
+    pub fn without_hysteresis() -> Self {
+        Self { hysteresis: 0.0, ..Self::on() }
+    }
 }
 
 /// One step a schedule can take.
@@ -451,6 +460,97 @@ mod tests {
 
     /// inbound patterns × churn patterns × partitions × seeds.
     const SWEEP_SIZE: usize = 4 * 3 * 2 * 2;
+
+
+    // ── Is hysteresis load-bearing? (2026-09-19) ──────────────────────────────────────────────
+    //
+    // The first sweep recorded that it was not: removing hysteresis from shipped code failed
+    // nothing, "because a 1 s spacing alone bounds the release rate". Measuring it properly showed
+    // that conclusion was an artefact of **schedule coverage**, not a property of the mechanism.
+    //
+    // Two facts, both measured. (1) Every schedule in `schedules()` ends by dropping inbound to
+    // 100‰ before the quiet tail, so a hover never coexists with the window where *at rest* is
+    // judged. (2) In the schedules that do pass through the band, the per-tick fill step reaches
+    // 0.575 — nearly **three times** the 0.200 band — so the fill jumps clean over it and the
+    // release spacing swallows whatever difference the two rules propose.
+    //
+    // Hold the hover instead, with a lone member carrying it, and the difference is stark: at 400‰
+    // the shipped breakers produce **one** boundary transition where removing hysteresis alone
+    // produces **twelve**.
+
+    /// A lone member carrying a load that sits *inside* the hysteresis band, held to the end of the
+    /// run. A three-member group drains faster than any share it can receive, so the band only
+    /// exists once churn leaves this node carrying the load alone; 350–400‰ is where the fill
+    /// drifts slowly across the threshold instead of stepping over it.
+    ///
+    /// Deliberately **not** added to `schedules()`: that sweep's contract is *the disturbance ends,
+    /// then the loops settle*, and these schedules never end their disturbance. They ask a
+    /// different question — what happens under a load that simply persists.
+    fn hover_schedules() -> Vec<Vec<Step>> {
+        let mut all = Vec::new();
+        for permille in [350u32, 400] {
+            for seed in [1u64, 2] {
+                let mut s = vec![Step::Churn(-2), Step::Inbound(permille)];
+                s.extend(rolls(seed, MAIN_TICKS + TAIL_TICKS).into_iter().map(|roll| Step::Tick { roll_permille: roll }));
+                all.push(s);
+            }
+        }
+        all
+    }
+
+    /// **The claim, stated as what was measured and no more: hysteresis is load-bearing.** Under a
+    /// load that persists inside the band, removing it — and nothing else — leaves the boundary
+    /// moving *more*, on every schedule, and on the sharpest one by an order of magnitude.
+    ///
+    /// **What it does not promise, and the measurement is explicit about this:** hysteresis does
+    /// not bring an arbitrary hover to *rest*. At 350‰ it takes the boundary from 15 transitions to
+    /// 11 — a real reduction, not a settling. At 400‰ it takes 12 to 1. The mechanism damps
+    /// oscillation; whether that damping reaches rest depends on where the load sits relative to
+    /// what the node drains, which is a property of the workload rather than of the breaker. An
+    /// earlier draft of this test asserted rest and failed here, which is how the bound was found.
+    #[test]
+    fn hysteresis_damps_a_persistent_hover_and_is_not_redundant() {
+        let mut best_ratio = 0.0f32;
+        for (n, schedule) in hover_schedules().iter().enumerate() {
+            let with = run(schedule, Breakers::on(), Profile::EnforceLocal);
+            let without = run(schedule, Breakers::without_hysteresis(), Profile::EnforceLocal);
+            let a = with.iter().filter(|o| o.actions.boundary.is_some()).count();
+            let b = without.iter().filter(|o| o.actions.boundary.is_some()).count();
+            assert!(
+                a <= b,
+                "hover schedule {n}: removing hysteresis alone *reduced* boundary movement \
+                 ({a} with, {b} without) — hysteresis is supposed to damp, not excite"
+            );
+            if a > 0 {
+                best_ratio = best_ratio.max(b as f32 / a as f32);
+            }
+        }
+        assert!(
+            best_ratio >= 8.0,
+            "on its sharpest schedule, removing hysteresis alone should multiply boundary movement \
+             several-fold; the best ratio was {best_ratio:.1}×, so this plant no longer bites and \
+             the claim that hysteresis is load-bearing needs re-measuring"
+        );
+    }
+
+    /// And the spacing is *not* a substitute: with hysteresis removed the releases still honour
+    /// the 1 s spacing, so the gap-based objectives stay green while the boundary oscillates.
+    /// That is precisely why the earlier sweep saw nothing — its objectives are all gap-based.
+    #[test]
+    fn the_release_spacing_does_not_catch_what_hysteresis_catches() {
+        for schedule in hover_schedules().iter() {
+            let obs = run(schedule, Breakers::without_hysteresis(), Profile::EnforceLocal);
+            let flaps: Vec<_> = violations(&obs, Profile::EnforceLocal)
+                .into_iter()
+                .filter(|(_, v)| matches!(v, Violation::ReleaseFlap { .. }))
+                .collect();
+            assert!(
+                flaps.is_empty(),
+                "the spacing objective fired without hysteresis ({flaps:?}) — if it now catches this, \
+                 the two breakers overlap and this record's reasoning needs revisiting"
+            );
+        }
+    }
 
     #[test]
     fn the_sweep_asserts_its_own_size() {

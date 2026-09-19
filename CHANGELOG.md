@@ -9,6 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — hysteresis is load-bearing after all; the sweep now has a per-breaker plant (v3 item 4)
+
+- Scenario C had recorded that **hysteresis was not load-bearing** while the release spacing was on. Measuring
+  it showed that was an artefact of *schedule coverage*: every schedule ends by dropping inbound before the
+  quiet tail, so a persistent hover never coexists with the window where *at rest* is judged, and in the
+  schedules that do cross the band the per-tick fill step (0.575) is nearly three times the band (0.200), so
+  the fill steps over it. Hold the hover — a lone member at 400‰ — and the shipped breakers give **one**
+  boundary transition where removing hysteresis *alone* gives **twelve**.
+- **`Breakers::without_hysteresis()`** — a per-breaker plant. `Breakers::off()` removes every breaker at once
+  and so can never name which one did the work.
+- Three new tests: the comparative claim, the plant, and one asserting the release spacing does **not** fire on
+  these schedules — because if it did, the two breakers would overlap and the reasoning would need revisiting.
+- **The bound, also measured and now recorded:** hysteresis *damps* a hover, it does not *settle* one. At 350‰
+  it takes 15 transitions to 11. A first draft of the gate asserted rest, failed, and that is where the bound
+  came from. The ADR's §5 note is corrected rather than quietly edited.
+
 ### Added — the control envelope, item 4's decisive demonstration (v3 §12.1 — the axis' gallery is complete)
 
 - **`examples/control_envelope_viz.rs`** (+ `.html`, port `:8096`, `--features metrics`) — the same
