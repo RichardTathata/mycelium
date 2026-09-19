@@ -260,6 +260,17 @@ variant meaning "nothing happened" because no verb can establish that. Retry wit
 original clock stamp. Chapter:
 [18 · Contracts & receipts](18-contracts-and-receipts.md).
 
+### How do I reproduce a failure that only happens sometimes?
+
+Record it, don't re-seed it. A **bundle** captures what the production code asked
+for and what it received, plus the build that produced it and the assertion that
+failed. Replaying against a *changed* build then tells you where it first departed,
+which is the question you actually have. Check `can_prove_its_failure()` before
+trusting a green replay — a bundle with no witness replays a run in which nothing
+went wrong. Demo:
+[`replay_a_bundle`](../../mycelium-sim/examples/replay_a_bundle.rs). Chapter:
+[19 · Replay & simulation](19-replay-and-simulation.md).
+
 ### How do I scale the cluster up/down dynamically?
 
 Publish a membership or tuning intent over `/gateway/govern`; nodes self-elect.
