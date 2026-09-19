@@ -22,6 +22,49 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — §12.3–§12.6: the delivery surfaces, and the drift they exposed — 2026-09-19 (unreleased)
+
+Where §12.2 wrote what did not exist, this stretch mostly **corrected what did**: the axis shipped in
+v2.8.0/v2.9.0 and the surfaces around it never moved. PRs #313–#321. Shipped: the **federation
+runbook** (`docs/operations/federation.md`), §12.3's rows across eight runbooks and the
+shared-responsibility matrix, both **decks**, the **front door** (root README, plans index,
+philosophy), chapter 17's restructure into its two edges, and the **companion onboarding checklist**.
+
+**The one code change, and not because the plan said so.** §12.3 told the runbook to document receipt,
+control-envelope and per-verdict decision counters; going to write those rows, the metric names **did
+not exist**, and rev 1.12 says of its own additions *"delivery surfaces only; no engineering change"*.
+The real gap sat underneath: the evidence journal records permits *and* refusals (deliberately — *"an
+evidence stream that omits its permits cannot support any statement about what an agent was allowed to
+do"*), while the **metrics plane counted refusals only**, leaving a dashboard with a numerator and no
+denominator. Three counters built on that reasoning — `mycelium_ae_decisions_total{verdict,mapping}`
+(the denominator; `permit`+`unmapped` should always be zero, so non-zero is a defect),
+`mycelium_control_decisions_total{decision,class}` (`would-hold` counted as itself, never folded into
+`proceed`), `mycelium_kv_receipts_total{local_durability}`. Labels are the evidence document's own
+vocabulary, asserted equal to its serialised form. Evidence freshness deliberately **not** built: there
+is no exporter in the public tree to be behind.
+
+**Ten drift findings**, every one from reading prose against the thing it describes. Receipt rung 1
+given as two variants (four in code); `Buffered` omitted from rung 2; the receipt types described as
+not yet landed; federation called transport-less after v2.8.0; `CLAUDE.md` listing two closed gaps as
+open and missing the seam rule; `deployment.md` calling the per-write receipt a future plan item; the
+root README mentioning receipts and federation **zero** times; the plans index six items behind; the
+guide sized at 17 chapters (25); `philosophy.md` asking for *"these three questions"* above five. And
+**chapter 17 contradicted itself** — one paragraph said the gate's last caveat was closed, the next
+said the gate was not met. One finding was mine: chapter 18's first draft mis-stated what `kv().set`'s
+bool proves.
+
+**§12.5 was already done** — Property 8, litmus tests 4 and 5, and epistemic symmetry extended to
+evidence all existed; only the question count was stale. Recorded so nobody redoes it.
+
+**The companion checklist found four gaps and closed all four**, including `mycelium-effects` having no
+runnable demonstration anywhere — closed by `destination_commit.rs`, which is a gate (planting the
+dedup row so it survives a failed business change fails it by name). `mycelium-sim`'s missing operator
+row closed *by stating the absence is deliberate*.
+
+**The honest gap, unchanged:** nothing in CI enforces doc-vs-code accuracy; the three lints are
+operator-run. Log:
+[`.log/2026-09-19-section-12-3-to-12-6-delivery-surfaces.md`](.log/2026-09-19-section-12-3-to-12-6-delivery-surfaces.md).
+
 ## v3 contracts axis — §12.2: the seven how-to chapters and the axis vocabulary — 2026-09-19 (unreleased)
 
 §12.2 ties each how-to chapter to **its item's release gate** and the concept vocabulary to **its item's ADR**.
