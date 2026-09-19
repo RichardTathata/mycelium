@@ -281,11 +281,42 @@ prevention for the routes this gateway fronts and **nothing** for routes it does
 not, which is why the evidence carries `coverage.complete: false` naming them.
 Chapter: [20 · Authorising actions](20-authorising-actions.md).
 
+### How do I stop a replaced role-holder's in-flight work?
+
+Install a later **epoch** at the resource. Everything authorised only under the old
+one is terminal there, however the holder retries, reconnects or restarts. The
+check lives inside the resource's own atomic boundary, not in a watcher. Crucially
+the refusal is `MandateSuperseded`, **not** a conflict — classify it as a conflict
+and the retry loop launders the revocation, telling a replaced holder to re-read
+and re-apply forever. Chapter: [21 · Mandates](21-mandates.md).
+
 ### How do I scale the cluster up/down dynamically?
 
 Publish a membership or tuning intent over `/gateway/govern`; nodes self-elect.
 Operator guide: [operations/dynamic-scaling.md](../operations/dynamic-scaling.md).
 Demo: [`elastic_intent`](../../examples/coop/src/bin/elastic_intent.rs).
+
+### How do I stop governors thrashing on a stale view?
+
+Put the control predicate in front of the action and give the node a profile. Start
+at `Observe`, which acts exactly as before and **records** what an enforcing
+profile would have held, then step up once the traces show the rule is right. Note
+that holding is not always the safe choice: a rescue from zero and a deficit fill
+deliberately **do not** hold on uncertainty, because a wrong hold there leaves a
+group with nobody in it. Demo:
+[`control_envelope_viz`](../../examples/control_envelope_viz.rs). Chapter:
+[22 · Stability & control](22-stability-and-control.md). Rollout:
+[operations/control-profiles.md](../operations/control-profiles.md).
+
+### How do I let agents disagree without one erasing the other?
+
+Use the knowledge layer rather than a plain key. Heads live in the gossip medium
+and records in an authorised store, so a later write cannot overwrite a competing
+statement, and `Challenges` links are *meant* to cross issuers. Only **assessments**
+count as evidence — a claim is what someone said about themselves — and a
+self-assessment does not count at all. When support and challenge are both current
+the verdict is `Conflicted`, which the layer hands you rather than resolving.
+Chapter: [23 · Knowledge](23-knowledge.md).
 
 ### How do I shed load / signal "I'm busy"?
 
