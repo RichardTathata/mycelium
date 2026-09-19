@@ -26,7 +26,7 @@ RPC, **no registry and no configured addresses**.
 | **New here** — is this for me? which primitive? which demo? why-not-X? | the **[FAQ](docs/guide/faq.md)** — your map, and the intended first read |
 | **Wanting to see it run** — which demo? | the **[examples](examples/README.md)** — the capability matrix: every runnable example fingerprinted by layer + facet (level · surface · LLM · audit · metrics), each linking to its run-doc |
 | **Building a use case *on* Mycelium** | [Building on Mycelium](docs/guide/building-on-mycelium.md) — the integrator contract (dependency, public-API rule, reserved KV prefixes, a copyable `CLAUDE.md`) |
-| **Wanting the guided depth** | the **[developer guide](docs/guide/README.md)** — 17 chapters, each with a runnable example |
+| **Wanting the guided depth** | the **[developer guide](docs/guide/README.md)** — 25 chapters, each with a runnable example |
 
 > The rest of this page is a **short orientation** — what the system is and a
 > layers-at-a-glance table. Every deep dive lives one link away in the
@@ -122,7 +122,14 @@ reference (API surface, observability, design notes) — one home per fact.
 | **Capabilities** | Discovery by *what a node does*: advertise/resolve, schema registry, requirements & demand pressure, emergent groups, locality | [ch. 02](docs/guide/02-capabilities.md) |
 | **Service layer** | RPC, bulk transfer, scatter-gather, actor mailboxes — on the mesh, no broker | [cookbook](docs/guide/cookbook.md#reference--the-service-layer-rpc-bulk-scatter-gather-mailbox) |
 | **Skills & prompt skills** | LLM agents as mesh nodes (TOML manifests, composition) + LLM-backed capabilities in KV | [ch. 05](docs/guide/05-skills.md) |
-| **Companions** | `mycelium-tuple-space` (pull pipeline by lane *position*) · `mycelium-blackboard` (claims by *content* predicate) · `mycelium-reason` (fleet inference routing with local reservations + failover, an **OpenAI-compatible endpoint on every node**, fleet-reasoning traces, model-following resume) | crate docs ([tuple-space](mycelium-tuple-space/) · [blackboard](mycelium-blackboard/) · [reason](mycelium-reason/)) · [ch. 15](docs/guide/15-reasoning-and-langgraph.md)) |
+| **Contracts & receipts** | What an acknowledgement *proves*, by rung: applied here · on this node's disk · persisted by named peers · committed at a destination. A timeout is `DeliveryUnknown`, never a failure; a required-sync write **refuses** rather than applying an undurable one | [ch. 18](docs/guide/18-contracts-and-receipts.md) |
+| **Deterministic replay** | A recorded run as a file you can re-run — because a seed is only reproducible while the code is unchanged, which is when nobody needs it. A replay tells you *where* a changed build first departed | [ch. 19](docs/guide/19-replay-and-simulation.md) · [`mycelium-sim`](mycelium-sim/) |
+| **Authorisation at the gateway** | A preflight before dispatch with your own policy engine: permit / deny / **indeterminate**, an evidence journal, and coverage stated as a field rather than implied by silence | [ch. 20](docs/guide/20-authorising-actions.md) |
+| **Scoped mandates** | Is the caller still the one who was appointed? An installed epoch is terminal for work authorised under an earlier one, checked inside the resource's own atomic boundary | [ch. 21](docs/guide/21-mandates.md) |
+| **Adaptive stability** | Deciding when *not* to act on an uncertain view, and budgets backed by durably accounted rights rather than soft state that evaporates | [ch. 22](docs/guide/22-stability-and-control.md) |
+| **Knowledge** | Keeping disagreement instead of resolving it: claims, observations and *judgements with authors* — where a self-assessment does not count as evidence | [ch. 23](docs/guide/23-knowledge.md) |
+| **Federated domains** | Two independently admitted meshes exchanging *explicitly exported services* — and never joining their transports | [ch. 17](docs/guide/17-federation.md) · [runbook](docs/operations/federation.md) |
+| **Companions** | `mycelium-tuple-space` (pull pipeline by lane *position*) · `mycelium-blackboard` (claims by *content* predicate) · `mycelium-commitment` (the contract net — negotiate, then award) · `mycelium-reason` (fleet inference routing with local reservations + failover, an **OpenAI-compatible endpoint on every node**, fleet-reasoning traces, model-following resume) · `mycelium-effects`, `mycelium-sim`, `mycelium-wiki` | crate docs ([tuple-space](mycelium-tuple-space/) · [blackboard](mycelium-blackboard/) · [commitment](mycelium-commitment/) · [reason](mycelium-reason/)) · [ch. 15](docs/guide/15-reasoning-and-langgraph.md) · [ch. 24](docs/guide/24-commitments.md) |
 
 ## Security
 
