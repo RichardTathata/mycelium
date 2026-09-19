@@ -1,6 +1,6 @@
 [package]
 name = "mycelium-wiki"
-version = "2.8.0"
+version = "2.9.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
@@ -83,14 +83,14 @@ required-features = ["gateway"]
 name = "git_mirror"
 required-features = ["git-mirror"]
 
-# Phase 5 — the worked example: import documents, then chat grounded in the wiki. One template for both
-# use cases (UC1 org twin / UC2 council). Needs `llm` for the LLM backend abstraction.
 # Item 5's decisive demonstration (v3 plan §12.1): the curator handover, with the mandate fence
 # inside the store's own git transaction. Needs the git store and nothing else.
 [[example]]
 name = "curator_handover"
 required-features = ["git-store"]
 
+# Phase 5 — the worked example: import documents, then chat grounded in the wiki. One template for both
+# use cases (UC1 org twin / UC2 council). Needs `llm` for the LLM backend abstraction.
 [[example]]
 name = "wiki_chat"
 required-features = ["llm"]
