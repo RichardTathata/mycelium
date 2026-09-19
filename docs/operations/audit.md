@@ -227,3 +227,43 @@ underlying chain with §3 before citing any denial.
 
 *Code: `mycelium-guardrails/src/verify.rs` (`prove_denials`, `narrate_proof`),
 `mycelium-guardrails/src/guard.rs` (the sealing gate).*
+
+## 8. Mandate lifecycle — three endings, recorded apart
+
+An appointment can end three ways, and they are **separate events** on purpose:
+
+| Event | Says |
+|---|---|
+| `RoleExpired { term, at_ms }` | the term reached the end of its window |
+| `PermissionWithdrawn { term, by, at_ms }` | the establishing authority took it away — and **who** |
+| `OutstandingOperationsInvalidated { epoch, at_ms }` | work authorised under an older epoch is void |
+
+**A term that ran out is not a term that was taken away.** Folding them into one "ended" event
+destroys the distinction an auditor most often needs, and only the second carries an actor.
+
+When a fenced write is refused because the holder was replaced, the error is
+`MandateRevoked { refname, expected, found }` inside an I/O error — **not a conflict**. If your
+tooling classifies it as a conflict it will advise the holder to re-read and retry, which refuses
+forever. See [guide 21 · Mandates](../guide/21-mandates.md).
+
+## 9. Evidence export — what a gap looks like to the consumer
+
+Authorisation evidence does **not** live in this gossiped chain. Every decision and execution goes
+to a **node-local evidence journal**, fsynced and never gossiped; only a hash-bearing reference
+enters the tamper-evident chain. That is deliberate: the chain reaches every node and the evidence
+is not for every node. A reader cross-checks what was exported against what the chain attests.
+
+Three things an operator has to get right:
+
+- **Attach a journal, or the node records nothing.** A node with an action evaluator and no journal
+  enforces and records nothing. It warns at attach time; treat that warning as a failed deployment.
+- **The profile decides what a recording failure does.** `Strict` refuses the dispatch when evidence
+  cannot be recorded — enforcement and attribution stand or fall together. `Lenient` proceeds and the
+  evidence says it was produced under a profile that does not gate: weaker, and **legible as weaker**.
+- **A gap is visible in the cursor, not inferred from silence.** Exporters read the journal through a
+  durable cursor. A re-read after a lost cursor re-sends the same record ids with byte-identical
+  bodies, which is why each record carries its **own event time** rather than its read time. A
+  consumer that receives the same id with a different body must refuse it.
+
+Coverage travels with the evidence as a field. `coverage.complete: false` names the routes the
+enforcement point does not see. **Never read silence as an all-clear.**

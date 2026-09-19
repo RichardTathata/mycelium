@@ -170,6 +170,35 @@ live management UI (a mesh view + KV inspector) on their gateway port — the qu
 into a running cluster. SkillRunner exposes `/mgmt` (the audit + skill dashboard); see
 [guide 05 · Skills](../guide/05-skills.md).
 
+## What the contracts axis exposes today, and what it does not
+
+Two counters, both `metrics`-gated, both labelled by **reason** rather than by principal or
+operation. That label choice is the cardinality rule: a reason is a small closed set, a principal is
+not. Do not add a label whose value space grows with your traffic.
+
+| Metric | Labels | Read it as |
+|---|---|---|
+| `mycelium_ae_preflight_refusals_total` | `reason` ∈ `action_denied` · `authority_not_established` · `evidence_not_recorded` | authorisation refusals at the gateway, by *kind* |
+| `mycelium_gateway_caller_refusals_total` | `reason` | a caller context that failed verification — **never** a fall-back to running the call as the node |
+
+**`evidence_not_recorded` is the one to alert on.** It means the action was refused *even though the
+policy permitted it*, because the decision could not be recorded. That is a storage or journal fault
+presenting as an authorisation outage, and it will not look like one in a dashboard of denials.
+A rising `authority_not_established` is usually a policy or deployment problem: a stale revision, an
+unmapped operation, or a declared argument the caller is not sending.
+
+**Exposed as JSON rather than as metrics.** The governance snapshot
+(`GET /gateway/govern`) carries this node's `control.profile` and a **`would_hold` counter** — the
+number of actions an enforcing profile *would* have held while running in `observe`. That counter is
+the whole point of the observe rung, and it is the number you watch before stepping the ladder up.
+See [control-profiles.md](control-profiles.md). Receipt states are likewise per-response JSON
+(`local_durability`: `on_disk` · `buffered` · `not_configured` · `failed`), not aggregated.
+
+**Not exposed at all today**, so do not build panels expecting them: per-rung receipt counters,
+durability-state distribution, per-verdict decision counts (permit / deny / indeterminate /
+unmapped — only *refusals* are counted, and only by reason), and evidence freshness or export lag.
+If you need a rate for any of these, you are counting it yourself at the caller.
+
 ## Logs & tracing
 
 Mycelium uses `tracing`. Set `RUST_LOG=mycelium=info` (or `debug`). Build with

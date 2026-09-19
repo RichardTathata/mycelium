@@ -51,6 +51,17 @@ this page is the index + the gate.
 - ☐ **Restart rehearsed** — single-node WAL replay **and** full-cluster cold restart (anti-entropy
   recovery) both verified in staging. A restarted node re-bootstraps with no rejoin ceremony.
 - ☐ **Snapshot cadence** (`snapshot_interval_secs`) tuned so replay time is bounded.
+- ☐ **The writes that must be durable ask for it.** Under the default `Async` a receipt honestly
+  reports `buffered` — survives a process crash, **lost to a power failure**. Audit the handful of
+  operations whose loss you could not accept and make them `set_requiring_sync`, which **refuses**
+  rather than applying an undurable write. You do not need `Flush` cluster-wide to get this.
+  → [deployment.md §Choosing a sync mode](deployment.md), [guide 18](../guide/18-contracts-and-receipts.md)
+- ☐ **No alert treats `DeliveryUnknown` as a failure.** It means the operation's fate is *unknown*,
+  never that it did not happen. Paging on it as an error trains operators to retry at-most-once work,
+  which is the one thing the vocabulary exists to prevent.
+- ☐ **The golden on-disk fixtures replay in your pipeline**, not only in ours. `tests/fixtures/persistence/`
+  is the regression floor for what an acknowledgement means; if you fork or vendor, a PR that changes
+  an ack's meaning changes a pin, in the open. Run them as part of your own acceptance.
 - ☐ **Backup covers the identity** — the data dir (WAL + snapshot) *and* `auto_cert_dir` are
   backed up; restore = put the dirs back + restart (WAL replays, mesh re-syncs the rest). The
   identity dir is the one part that can't be regenerated. → [deployment.md §Backup & restore](deployment.md#backup--restore)

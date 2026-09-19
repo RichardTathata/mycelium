@@ -259,6 +259,44 @@ diagnosis** (`fleet_snapshot()` / `fleet_diagnosis()`, `/gateway/fleet` / `/gate
 whether or not the loop runs; the flap/oscillation counters simply read 0 without it. Enable the loop
 in production so `explain` has history and the temporal detectors (flap/oscillation) fire.
 
+## Capturing a replay bundle from production
+
+The three verbs above tell you what the fleet is doing *now*. When a failure depends on timing and
+you need it again later, capture a **bundle** — see [guide 19](../guide/19-replay-and-simulation.md)
+for what one is and why a seed is not a substitute.
+
+A bundle is a directory with a fixed layout:
+
+```text
+bundle/
+  build.json        # crate versions, commit, features, target, rustc
+  config.json       # every config field per node, SECRETS REPLACED BY PLACEHOLDERS
+  initial/          # disk images per node, or the fixture ids they came from
+  inputs/           # every external input, in arrival order, REDACTED
+  choices.trace     # the ordered choice log — the reproduction itself
+  witness.json      # the assertion that failed, and the toggle that makes it fail again
+```
+
+**Two operational rules, and neither is optional.**
+
+**A bundle travels.** It goes to whoever is debugging, which may be outside the team that captured
+it. `config.json` carries every field with bearer credentials and keys replaced by stable
+placeholders, and `inputs/` is redacted — tokens, key sets, and model or tool responses. The threat
+model's §6 governs what may not be redacted at all, which is a **protected-artefact class**: if a
+reproduction genuinely needs it, the bundle does not leave the boundary that holds it.
+
+> A bundle carrying a signing key is an incident, not an artefact.
+
+**Check the witness before you trust a green replay.** `can_prove_its_failure()` is the call. A
+bundle with no witness replays a run in which nothing went wrong, and reproducing that proves only
+that the harness works. In the witness, a `null` toggle means *the failure needs no toggle* — it does
+**not** mean nobody checked.
+
+**Capture is not on by default, and does not ship enabled.** The seam routes through the kernel only
+under the `sim` feature, which is off in every shipped build; without it the seam's body is the call
+it replaced. Capturing from a production process therefore means running a build that has it on, and
+that is a deliberate act with a cost, not a flag you leave set.
+
 ## See it: the induce-and-diagnose demo
 
 `cargo run -p mycelium-coop-examples --bin diagnostics` stands up a two-depot mesh, induces a
