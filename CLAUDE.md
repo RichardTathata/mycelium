@@ -169,9 +169,15 @@ the checked-in replay corpus; **the scheduler seam landed in v2.9.0**, so the la
 **CN1–CN3 complete** (the commitment companion `mycelium-commitment`; CN2's replay half closed with the seam).
 The plan's Phase E "shadow-mode rollout" is `docs/operations/control-profiles.md`. **Both public gaps are shut:**
 the federation transport shipped in v2.8.0 (item 2's release gate met, in-process then over a two-mesh Docker
-suite) and the scheduler seam in v2.9.0. What is still open publicly is **§12's delivery surfaces** — the guide
-chapters, the operations runbook, the deck and philosophy passes — plus item 2's row 11 (SDK verbs, TLS on the
-federation edge itself, a hostile network, more than two domains), and **V1, the nightly scale runner, whose
-self-hosted box is offline so the job queues silently and the criterion has never been met**. Delivery ledger:
+suite) and the scheduler seam in v2.9.0. **§12.2's seven how-to chapters shipped 2026-09-19** (#304/#305/#306/#311 — guide 18 contracts & receipts ·
+19 replay & simulation · 20 authorising actions · 21 mandates · 22 stability & control · 23 knowledge ·
+24 commitments, plus the axis vocabulary in `00-concepts.md`, `ReceiptError` in the error taxonomy, and chapter
+14's three-coordination-model comparison). **Nothing in CI enforces doc-vs-code accuracy** — `/doc-coverage` and
+`/wiki-lint` are operator-run, and that pass found six pre-existing drift defects. Still open publicly: §12.2's
+**chapter 17 restructure** (public discovery vs federated domains), the SDK narrative, the wiki page per new
+mechanism; **§12.3's operations runbook**; §12.4–12.6 (decks, philosophy, the Phase-C adversarial self-audit over
+items 1+2+7); item 2's row 11 (SDK verbs, TLS on the federation edge itself, a hostile network, more than two
+domains); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues silently and the
+criterion has never been met**. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).
