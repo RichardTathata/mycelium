@@ -873,6 +873,32 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
   </div>
 </div>
 
+<!-- V4 The contracts axis (v3) -->
+<div class="slide" id="sV4">
+  <div class="slide-top"><span class="eyebrow"><span class="eyebrow-accent">v3</span> · Contracts</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-body">
+    <div class="slide-title">An answer that <em>means what it says.</em></div>
+    <div class="slide-sub">A coordinator-free substrate cannot afford answers that read stronger than they are — there is no coordinator to ask. The second epoch makes every acknowledgement name exactly what it established, and gives you a way to check it later.</div>
+    <div class="cols3">
+      <div class="card card-accent-green">
+        <div class="card-title">Receipts — the honest ack <span style="opacity:.7;font-weight:400;">(shipped, v2.5.0–v2.8.0)</span></div>
+        <div class="card-body">Four rungs, never conflated: applied here · this operation on this node's disk · persisted by <em>named</em> peers · committed at a destination with its dedup result. Nothing infers a higher rung from a lower one, and <strong>a timeout is <code>DeliveryUnknown</code></strong> — the rungs established, then an explicit unknown. There is deliberately no variant meaning "nothing happened", because no verb can establish that.</div>
+      </div>
+      <div class="card card-accent-blue">
+        <div class="card-title">Replay — the verification engine <span style="opacity:.7;font-weight:400;">(shipped, v2.8.0–v2.9.0)</span></div>
+        <div class="card-body">A seed is not a durable reproduction artefact: it reproduces a run only while the code is unchanged, which is exactly when nobody needs it. The kernel records <em>what the code asked for and what it received</em>, so a replay against a changed build tells you <strong>where it first departed</strong>. A whole node replays without divergence.</div>
+      </div>
+      <div class="card card-accent-orange">
+        <div class="card-title">Domains are not NANDA <span style="opacity:.7;font-weight:400;">(shipped, v2.8.0)</span></div>
+        <div class="card-body">Public discovery is what a domain <em>says about itself</em>, verifiable by any fetcher. Federation is <em>who may invoke what</em>, between named partners. Two edges, one model — and federation <strong>never joins the transports</strong>: a partner never enters your membership, namespaces, anti-entropy or a quorum.</div>
+      </div>
+    </div>
+    <div class="callout callout-orange" style="margin-top:10px;font-size:12px;">
+      <strong>Labelled honestly.</strong> Every claim on this slide is <em>shipped under a tag</em> and carries a runnable demonstration that names what it does <em>not</em> establish — two of which found real defects before release. The gateway authorisation seam, its evidence journal and a reference policy engine also ship; <strong>production policy adapters and the evidence exporter are the commercial layer and are not claimed here</strong>.
+    </div>
+  </div>
+</div>
+
 <!-- 08 Where It Fits -->
 <div class="slide" id="s8">
   <div class="slide-top"><span class="eyebrow">The Stack</span><span class="slide-num">09 / 25</span></div>
