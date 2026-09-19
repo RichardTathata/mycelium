@@ -20,12 +20,19 @@ record, not duplicates of those.
 > non-engineering item is a **research experiment** (three-arm work distribution, for Paper 1).
 >
 > **v3.0 — the contracts axis (adopted plan, 2026-09-05):** [`v3-contracts-axis.md`](v3-contracts-axis.md) —
-> six items (typed contracts · deterministic replay · federated domains · knowledge layer · adaptive stability ·
-> scoped mandates), one dependency graph, phase gates, and a decision register of every departure from the
-> external review's six plans, which are vendored unmodified under [`external/`](external/). Code so far
-> (2026-09-13): item 7 gateway caller identity (PR #208); item 1 PR 1 (#209) and the AE0 ADR (#210); item 8's threat
-> model revision (#211); WP5's cooldown parameter; and item 6 PR 1 — the
-> [nondeterminism inventory](../design/replay-nondeterminism-inventory.md).
+> eight items (typed contracts · federated domains · knowledge layer · adaptive stability · scoped mandates ·
+> deterministic replay · gateway caller identity · threat model), plus the authorisation seam and the commitment
+> companion, with one dependency graph, phase gates, and a decision register of every departure from the external
+> review's six plans, which are vendored unmodified under [`external/`](external/).
+>
+> **Shipped in two releases.** **v2.8.0** (2026-09-18) carried the axis itself — all eight items, the largest MINOR
+> since 2.0 and entirely additive. **v2.9.0** (2026-09-19) carried the *evidence* that it holds: a whole node
+> replaying deterministically, and a runnable decisive demonstration per item, two of which found real defects.
+> Since then §12's delivery surfaces have landed — the seven how-to guide chapters (18–24), the axis vocabulary,
+> the [federation runbook](../operations/federation.md), and the contracts-axis metrics.
+>
+> **Still open:** the deck and philosophy passes, the companion onboarding checklist, the **Phase-C adversarial
+> self-audit** over items 1 + 2 + 7, and the private RA/AE slices (a separate repository — see §8).
 >
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).

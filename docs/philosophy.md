@@ -131,7 +131,9 @@ Each row passes the litmus tests the same way the tuple space did: the substrate
 
 *Evaluation Criteria*
 
-Any significant proposed addition must be able to answer these three questions cleanly. If the answers require contortion, the proposal is probably wrong at the architectural level regardless of how useful it sounds.
+Any significant proposed addition must be able to answer these five questions cleanly. If the answers require contortion, the proposal is probably wrong at the architectural level regardless of how useful it sounds.
+
+The first three ask *where a thing belongs*; the last two, added with the v3 contracts axis, ask *what it is allowed to claim* — because a proposal can sit in exactly the right layer and still over-state what it proves.
 
 1. **Substrate or higher-order concern?** Does this belong in Layer I (KV replication) or Layer II (signal mesh), or is it a higher-order pattern that should be built *using* those layers? If it is higher-order, it must use the substrate rather than modify it.
    *Fail: modifies signal propagation or KV replication*
