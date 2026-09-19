@@ -56,14 +56,18 @@ explaining how to run something nobody runs in production.
 | `mycelium-wasm-host` | ✅ | ✅ | n/a | ⚠️ | ✅ | ✅ coop `catalog` | n/a |
 | `mycelium-commitment` | ✅ | ✅ | n/a | ⚠️ | ⚠️ | ✅ `redistribution_cn` | n/a |
 | `mycelium-sim` | ✅ | ✅ | n/a | **n/a, by design** | ⚠️ | ✅ `replay_a_bundle` | n/a |
-| `mycelium-effects` | ✅ | ✅ | n/a | ⚠️ | ⚠️ | **⚠️ none anywhere** | n/a |
+| `mycelium-effects` | ✅ | ✅ | n/a | ⚠️ | ⚠️ | ✅ `destination_commit` *(written to close this finding)* | n/a |
 
 **⚠️ = open finding. n/a = the condition does not apply, stated rather than left blank.**
 
-Six companions have no row in the operations runbook, three have no maintainer page here, and
-**`mycelium-effects` has no runnable demonstration at all** — not in its own crate, not in the root
-examples, not in the co-op suite. That last one is the sharpest finding, because row 6 is the row
-that has historically caught real defects.
+Six companions have no row in the operations runbook, and three have no maintainer page here.
+
+**The sharpest finding is already closed.** `mycelium-effects` had no runnable demonstration at all —
+not in its own crate, not in the root examples, not in the co-op suite — which mattered because row 6
+is the row that has historically caught real defects. `mycelium-effects/examples/destination_commit.rs`
+was written to close it, and it is a gate rather than a display: planting the dedup row so it survives
+a failed business change makes it fail with *"a rolled-back attempt left no dedup row"*, reporting a
+replay for an effect that never happened.
 
 `mycelium-sim`'s row 4 is **closed** the moment its absence is recorded as deliberate rather than
 left blank, which is what this table now does. That is the whole mechanism: the checklist does not
