@@ -94,15 +94,20 @@ prove something different — `kv().set` proves *queued for gossip*, the depreca
 **nothing a caller can obtain** (§1a of the contracts record — its replacement `set_with_replica_sync`
 asks peers instead and names them), `Committed { persisted }` folds *fsynced* and *never promised*
 into one `true`. A **receipt** names its rung on the ladder and nothing above it:
-**local application** (`Applied` / `Superseded`) · **local sync** (this exact operation crossed
-this node's persistence barrier: `OnDisk` / `Failed` / `NotConfigured`) · **replica sync** (named
-peers persisted this exact operation) · **destination commit** (an external destination
-committed the business change and its dedup result in one transaction). Every operation carries
-a caller-minted **`operation_id`** (stable across retries and worker replacement) and an
+**local application** (`Applied` / `AlreadyCurrent` / `Superseded` / `Refused` — four, because the
+store's "nothing changed" covers three different truths) · **local sync** (this exact operation
+crossed this node's persistence barrier: `OnDisk` / `Buffered` / `Failed` / `NotConfigured`) ·
+**replica sync** (named peers persisted this exact operation; peers that were asked and did not
+answer are **unknown**, not "did not persist") · **destination commit** (an external destination
+committed the business change and its dedup result in one transaction — the only rung that
+establishes an exactly-once effect, and the only one the substrate never provides on its own).
+`Buffered` is the one to read carefully: it survives a process crash and is lost to a power
+failure, so it is a *different* claim from `OnDisk` rather than a weaker one. Every operation
+carries a caller-minted **`operation_id`** (stable across retries and worker replacement) and an
 **`attempt_id`**; same id + different content is a `Conflict`; a timeout returns the rungs that
-were established plus **`DeliveryUnknown`** — never "nothing happened". The contract:
-[`design/contracts-receipts.md`](../design/contracts-receipts.md); the receipt types land with
-the plan's item 1 PRs 2–4.
+were established plus **`DeliveryUnknown`** — never "nothing happened". → [18 · Contracts &
+receipts](18-contracts-and-receipts.md), [`design/contracts-receipts.md`](../design/contracts-receipts.md),
+[`receipt_ladder`](../../examples/receipt_ladder.rs).
 
 **Signal vs. KV entry.** A **Signal** (Layer II) is an *ephemeral* scoped event
 — miss it and it's gone. A **KV entry** (Layer I) is *durable* state that
@@ -213,11 +218,107 @@ their nodes "depots" / "agents" for the story — same thing.
 rogue write is *applied* per LWW but **flagged** by a tripwire counter
 (`commit_conflicts`, `sys_namespace_violations` on `/stats`) — **detection, not
 prevention**. Commitments are promise-strength, the only honest strength a
-coordinator-free system can offer. → [`consensus`](../../examples/coop/src/bin/consensus.rs)
+coordinator-free system can offer. The axis names three tiers (`Strength`):
+**hard prevention** (the provider rejects it), **self-imposed prevention** (a boundary drops it),
+**self-imposed transition** (a state change). Every module states its own, and the load-bearing
+rule is that a *hard bound* is hard prevention **only when backed by exclusive, durably accounted
+rights** — without those it is not a hard bound however it is labelled. A gateway that checks
+before dispatching is self-imposed prevention for the routes it fronts and **nothing at all** for
+routes it does not. → [16 · Guardrails](16-guardrails.md),
+[`consensus`](../../examples/coop/src/bin/consensus.rs)
 (an empty bloc can't be coerced), [`federation_facts`](../../examples/coop/src/bin/federation_facts.rs)
 (a tampered document fails verification at read).
 
 ---
+
+**Mandate vs. term vs. epoch (item 5).** A **mandate** is one appointment: who may do what, under
+whose authority, for how long (`Mandate`, with an *enumerated* `operations` list — absence is
+denial, there is no wildcard). The **term** (`TermId`) identifies *which appointment this is*; the
+**epoch** (`u64`) *orders authority*. Collapsing them would make "same holder, reappointed after a
+gap" indistinguishable from "never lapsed". A resource installs an epoch and never goes backwards,
+so once it acknowledges epoch 2, nothing authorised only under epoch 1 can commit there — however
+the holder retries, reconnects or restarts. The refusals are typed on purpose: a superseded mandate
+is `MandateSuperseded`, **never `Conflict`**, because `Conflict` is a retry loop's input and the
+retry loop would launder the revocation. → [`curator_handover`](../../mycelium-wiki/examples/curator_handover.rs),
+[`design/scoped-mandates.md`](../design/scoped-mandates.md).
+
+**Allocated right vs. soft state (item 4).** Everything a governor reads from discovery is soft
+state that **evaporates** when its owner goes quiet. That is the right shape for an *observation*
+and the wrong shape for a *right*: an allocation that vanished with its holder would be issued
+twice. So a **right** (`Right`: holder, resource, `units` in resource-native units — never money,
+term, state) lives in a node-local, append-only, **fsynced journal that is never gossiped**; only a
+bounded signed `RightsHead` leaves the node. Three rules: *persisted before acting*, *never
+reclaimed because an owner vanished from discovery*, and *a rejected admission is a first-class
+recorded outcome* — because a rejection nobody recorded is a silence, and a silence is
+indistinguishable from work nobody asked for. Every state counts against the budget, including
+`Unknown`. → [`control_envelope_viz`](../../examples/control_envelope_viz.rs),
+[`design/adaptive-stability.md`](../design/adaptive-stability.md).
+
+**Federated domain vs. public discovery (item 2).** A **domain** is one independently admitted
+gossip mesh, owning its own membership, replication, policy and electorate. Admission is the per-node
+certificate trust root, **not a name** — `cluster_name` stays a cosmetic label. Federation connects
+*explicitly exported services* between meshes and **never joins the transports**: a foreign node
+never enters membership, the native namespaces, anti-entropy or a quorum. That is the whole
+invariant, and it is why there is deliberately no `federation/` key prefix. Against that,
+**AgentFacts** is *unilateral public discovery* — a self-certified document anyone may fetch, where
+trust is the reader's decision and nothing is granted. They are one model, not two: a domain
+descriptor's public subset is serialised as an AgentFacts profile through the existing serialiser,
+so there is no second well-known document. → [17 · Federation](17-federation.md),
+[`federated_domains`](../../examples/federated_domains.rs).
+
+**Announcement · offer · award · report · assessment (the contract net).** Five records, one
+mechanism each. The **award** is the one to understand: it is a *receipt-bearing operation*, never a
+key-value write alone, so a retry is recognisable and its durability is exactly what the receipt
+says. One award per requirement — a second is **refused**, never written over the first. The award
+also names the offer it accepted, which is the mechanical form of *no component assigns another
+participant's obligation*. A participant's `Outcome` is `Fulfilled` / `Failed` / **`Unknown`**, the
+same honesty as item 1's receipts. And an unsigned **assessment** verifies as `false` — *unproven*,
+not forged. → [`redistribution_cn`](../../mycelium-commitment/examples/redistribution_cn.rs).
+
+**Deny vs. indeterminate (the authorisation seam).** An **action envelope** is who is asking to do
+what, to which resource, with which arguments — assembled only by the enforcement point, from facts
+it verified. The evaluator returns `Permit`, `Deny` or `Indeterminate`, and **`Indeterminate` is
+never `Permit`**. `Deny` says the policy establishes that this action is refused. `Indeterminate`
+says authority could *not be established*: nothing says the action is forbidden, only that nothing
+says it is allowed. A declared argument missing from a request must produce `Indeterminate`, never a
+guess. Separately, **coverage is a field, not a hope**: the evidence names the routes the enforcement
+point does not see, rather than leaving a reader to infer an all-clear from silence.
+
+**Exact replay vs. scenario replay (item 6).** A **seed is not a durable reproduction artefact** —
+a run reproduced by re-seeding is reproducible only while the code is unchanged, which is exactly
+when nobody needs it. A **bundle** instead records what the production code *asked for* and what it
+*received*, so a replay checks each request against the recording and tells you **where** a changed
+build first departed. Replaying against the pinned build is an **exact** replay; replaying against a
+different commit is a **scenario** replay, a weaker claim, and the bundle records the build so the
+difference is visible rather than assumed. A bundle also carries a **witness** — the assertion that
+failed — because a bundle without one replays a run in which nothing went wrong, which proves only
+that the harness works. → `cargo run -p mycelium-sim --example replay_a_bundle`.
+
+**Claim vs. observation vs. assessment vs. acceptance (item 3).** A **claim** is an issuer asserting
+something. An **observation** is an issuer reporting what it saw. An **assessment** is a *judgement*,
+with an author. An **acceptance decision** is a reader deciding what to do. The kind is part of the
+signed bytes, so an observation's signature can never authenticate an assessment. Only assessments
+count as evidence, and **a self-assessment does not count**, which is why the first two kinds are
+split from the third at all. The reader's verdict has four outcomes, and
+`InsufficientEvidence` ("we do not know") is deliberately distinct from `Rejected` ("we looked, and
+it is bad"). Disagreement is preserved rather than resolved: `Challenges` links across issuers are
+the point. → [`design/knowledge-layer.md`](../design/knowledge-layer.md).
+
+**The gateway caller vs. the gateway node (item 7).** When a request arrives over the gateway, the
+provider is handed a **`GatewayCaller`** — the verified *client* principal, issuer-qualified
+(`oidc:{issuer}/{subject}`, `token:{issuer}/{name}`), not the gateway's own node identity, and never
+the credential itself. Authorisation judges that client: **listing the gateway node does not admit
+its clients**. A context that fails verification is a denial, never a fall-back to running the call
+as the node. → [09 · Security](09-security.md), [`operations/rbac.md`](../operations/rbac.md).
+
+**Refusals are typed by what you should do next.** This is the axis's actual thesis, and it shows up
+in nearly every error type above. A refusal a retry loop would consume is a *different type* from
+one it would not. `MandateSuperseded` is not `Conflict`, or the retry loop launders a revocation.
+A bad signature is not a policy gap, or the operator edits the wrong file. `Indeterminate` is not
+`Deny`. `InsufficientEvidence` is not `Rejected`. A durability `Failed` does not mean the record is
+absent. `DeliveryUnknown` does not mean nothing happened — and there is deliberately **no** variant
+that means that, because no verb on that path can establish it. When you add an error variant here,
+the question to answer is not "what went wrong" but "what should the caller do differently".
 
 ## Layers at a glance
 
@@ -257,6 +358,14 @@ coordinator-free system can offer. → [`consensus`](../../examples/coop/src/bin
 | Receipt | native | what an ack proves, by rung: local application · local sync · replica sync · destination commit (contracts axis item 1) | `design/contracts-receipts.md` |
 | `operation_id` / `attempt_id` | native | caller-minted identity of an operation (stable across retries) and of each attempt; the key of every receipt | `design/contracts-receipts.md` |
 | `DeliveryUnknown` | native | a timeout's honest answer: the rungs established so far, then *unknown* — never a negative | `design/contracts-receipts.md` |
+| `Buffered` | native | a durability rung: survives a process crash, lost to a power failure. A *different* claim from `OnDisk`, not a weaker one | `receipt_ladder` |
+| Mandate / term / epoch | native | one appointment (enumerated operations, no wildcard) · which appointment this is · what orders authority; an installed epoch never goes backwards | `curator_handover` |
+| Allocated right | native | exclusive units in a node-local fsynced journal, never gossiped and never reclaimed because a holder went quiet (contracts axis item 4) | `design/adaptive-stability.md` |
+| Domain | native | one independently admitted mesh; federation exports *services* between domains and never joins the transports | `federated_domains` |
+| Award | native | the contract net's accepted offer — a receipt-bearing operation, one per requirement, a second is refused | `redistribution_cn` |
+| `Indeterminate` | native | authority could not be **established** — never a permit, and never the same as a deny | `design/action-envelope-ae0.md` |
+| Bundle | native | a recorded run: what production asked for and received, plus the build and the witness that failed | `replay_a_bundle` |
+| Claim / observation / assessment | native | an assertion · a report · a *judgement with an author*. Only assessments count as evidence, and not one's own | `design/knowledge-layer.md` |
 | Gateway caller | native | the client principal a provider sees behind a gateway call (`GatewayCaller`, item 7) | `docs/operations/rbac.md` §7 |
 | Action envelope | native | who is asking to do what, to which resource, with which arguments — assembled only by the enforcement point from verified facts (AE0) | `design/action-envelope-ae0.md` |
 | Evaluator · permit / deny / indeterminate | native | a replaceable, deterministic decision over an envelope + authority facts; indeterminate is never permit; the secure profile refuses on it | `design/action-envelope-ae0.md` |
