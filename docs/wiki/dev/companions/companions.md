@@ -14,6 +14,14 @@ via wasm-host).
 > weaker consistency not availability) — is
 > [design/coordination-approaches.md](../../../design/coordination-approaches.md).
 
+- **[commitment.md](commitment.md)** — `mycelium-commitment/`: the **contract net**, the third
+  coordination model (routes by *negotiation*). Why an award is a receipt-bearing operation, and why
+  a pure award rule lets an award be checked rather than trusted.
+- **[effects.md](effects.md)** — `mycelium-effects/`: the **transactional destination** — item 1's
+  fourth receipt rung, the one the substrate never provides, because only a resource can say whether
+  an effect happened there.
+- **[sim.md](sim.md)** — `mycelium-sim/`: the **replay harness**. The companion with *no production
+  surface*, deliberately: a shipped node does not link it.
 - **[onboarding-checklist.md](onboarding-checklist.md)** — **what a new companion owes before it
   counts as landed**: a feature line, a CI job, Docker membership where it makes a cross-node claim,
   an operator row, a page here, a runnable demonstration, an SDK verb where it has a route. Carries

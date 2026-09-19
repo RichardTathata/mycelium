@@ -54,9 +54,9 @@ explaining how to run something nobody runs in production.
 | `mycelium-agentfacts` | ✅ | ✅ | ✅ `test-federation` | ✅ | ✅ | ✅ coop `federation_facts` | n/a |
 | `mycelium-guardrails` | ✅ | ✅ | n/a | ✅ | ✅ | ✅ `guardrail_wedge` | n/a |
 | `mycelium-wasm-host` | ✅ | ✅ | n/a | ✅ | ✅ | ✅ coop `catalog` | n/a |
-| `mycelium-commitment` | ✅ | ✅ | n/a | ✅ | ⚠️ | ✅ `redistribution_cn` | n/a |
-| `mycelium-sim` | ✅ | ✅ | n/a | **n/a, by design** | ⚠️ | ✅ `replay_a_bundle` | n/a |
-| `mycelium-effects` | ✅ | ✅ | n/a | ✅ | ⚠️ | ✅ `destination_commit` *(written to close this finding)* | n/a |
+| `mycelium-commitment` | ✅ | ✅ | n/a | ✅ | ✅ | ✅ `redistribution_cn` | n/a |
+| `mycelium-sim` | ✅ | ✅ | n/a | **n/a, by design** | ✅ | ✅ `replay_a_bundle` | n/a |
+| `mycelium-effects` | ✅ | ✅ | n/a | ✅ | ✅ | ✅ `destination_commit` *(written to close this finding)* | n/a |
 
 **⚠️ = open finding. n/a = the condition does not apply, stated rather than left blank.**
 
@@ -64,7 +64,9 @@ explaining how to run something nobody runs in production.
 real operational surface, and `mycelium-sim` with the *deliberate absence* recorded as such. The
 runbook's opening no longer says *"the three companions"* while documenting more.
 
-**Three still have no maintainer page here**: `mycelium-commitment`, `mycelium-effects`, `mycelium-sim`.
+**Every finding this sweep opened is now closed.** The three missing maintainer pages
+([commitment](commitment.md), [effects](effects.md), [sim](sim.md)) were written, and the table above is
+the record of a checklist that found real gaps and was then used to shut them rather than to file them.
 
 **The sharpest finding is already closed.** `mycelium-effects` had no runnable demonstration at all —
 not in its own crate, not in the root examples, not in the co-op suite — which mattered because row 6
