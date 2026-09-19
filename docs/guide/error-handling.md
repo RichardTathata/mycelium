@@ -14,6 +14,7 @@ catch-all error to discover what went wrong.
 | [`ConsistencyError`](#consistencyerror) | `ConsensusHandle::consistent_set`, `distributed_lock`, `elect_leader` | Yes — retry |
 | [`RpcError`](#rpcerror) | `ServiceHandle::rpc_call` | Yes — retry / call another peer |
 | [`QuorumError`](#quorumerror) | `KvHandle::set_with_min_acks` | Yes — retransmit when peers rejoin |
+| [`ReceiptError`](#receipterror) | `KvHandle::set_with_receipt`, `set_requiring_sync`, `retry_with_receipt`, `GossipAgent::set_with_replica_sync` | Depends on variant — and one variant is *neither* |
 | [`ScatterError`](#scattererror) | `ServiceHandle::scatter_gather` | Yes — retry or reduce `min_ok` |
 | [`SchemaError`](#schemaerror) | `SchemaHandle::publish_schema`, `seed_schemas_from_dir` | Depends on variant |
 | [`BulkError`](#bulkerror) | `ServiceHandle::bulk_call` | Yes — retry |
@@ -123,6 +124,43 @@ substrate does not carry (`docs/design/contracts-receipts.md` §1a); `acks_recei
 replacement `GossipAgent::set_with_replica_sync` asks each peer instead and returns a receipt rather
 than an error, with peers that did not answer reported as **unknown**. Either way, do not treat a
 timeout as evidence the value was not written, and do not retry the write on the strength of it.
+
+---
+
+## `ReceiptError`
+
+```rust
+#[non_exhaustive]
+pub enum ReceiptError {
+    Conflict { operation_id, expected, found },   // same identity, different content
+    DeliveryUnknown { established, awaiting },    // the fate is unknown, not negative
+    Rejected(String),                             // refused before anything was applied
+    DurabilityNotEstablished { persistence_configured, reason },
+}
+```
+
+**When you see it:** the receipt-returning writes. Full treatment in
+[18 · Contracts & receipts](18-contracts-and-receipts.md).
+
+**Note what is not here.** There is no variant meaning *nothing happened*, deliberately: no verb on
+this path can establish that. This is the one error type in the library where the absence of a
+variant is part of the contract.
+
+**Recoverability, variant by variant:**
+
+- **`Conflict`** — not recoverable by retrying. The same operation identity was reused with different
+  content, and nothing was written. Either you have an identity-minting bug, or this is genuinely a
+  new operation and needs a new identity.
+- **`DeliveryUnknown`** — **neither recoverable nor a failure.** `established` carries the receipt as
+  far as it got, and `awaiting` names what the caller was still waiting for. Retry only if the
+  operation is idempotent under its own identity, which is what the identity is for. Never report it
+  to a user as a failure.
+- **`Rejected`** — recoverable once the request is fixed. This *is* a clean negative, because it is a
+  statement about the request rather than about the world.
+- **`DurabilityNotEstablished`** — the required-sync write applied nothing and gossiped nothing, so no
+  reader, subscriber or peer saw the value from that call. `persistence_configured` distinguishes
+  *this node was never able to* from *the attempt failed*. It does **not** promise the value can never
+  appear here: the log writes before it syncs, so a later replay may restore bytes from a failed sync.
 
 ---
 

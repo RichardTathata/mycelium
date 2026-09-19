@@ -126,6 +126,12 @@ the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
   regression floor (`floor_*` tests + the golden on-disk fixtures under `tests/fixtures/persistence/`,
   replayed in CI); a PR changes an ack's meaning by changing a pin, in the open —
   [contracts-receipts ADR](docs/design/contracts-receipts.md).
+- **No direct clock, RNG or filesystem access in production logic** — every one goes through
+  `mycelium_core::sim_seam` (`wall_now_ms`, `mono_instant`, the timer seam every periodic loop ticks
+  through), or a recording cannot replay deterministically. `scripts/check-sim-seams.sh` (in `make check`)
+  holds a baseline of the permitted call sites in `scripts/sim-seams-baseline.txt`; a
+  new one fails the gate until it is routed or the baseline is updated in the open. Off in every
+  shipped build (feature `sim`) — [`mycelium-core/src/sim_seam.rs`](mycelium-core/src/sim_seam.rs).
 - Ports via `test_util::alloc_port`; env-var tests hold `config::tests::env_test_lock()`.
 
 ## Active work
@@ -159,9 +165,13 @@ contract, the rights ledger on the node-local journal, the membership/tuning/opa
 through the contract, admission control at the companions' queues, the §7 profile ladder through every governor with
 its rollout runbook) · **item 5** PRs 1–5 + D4 (scoped mandates; no second fence) · **item 6 complete** (PRs 1–7: the
 inventory, the `mycelium-sim` kernel, the seams — every periodic loop ticks through the timer seam — scenarios A/B/C,
-the checked-in replay corpus; *the scheduler seam is the one unrouted row, and a pinned gap*) · **CN1–CN3** (the
-commitment companion `mycelium-commitment`; CN2's replay half pinned as a gap). The plan's Phase E "shadow-mode
-rollout" is `docs/operations/control-profiles.md`. Still open publicly: the federation transport (item 2's release
-gate) and the scheduler seam; the 2.8.0 cut awaits the operator's word. Delivery ledger:
+the checked-in replay corpus; **the scheduler seam landed in v2.9.0**, so the last unrouted row is closed) ·
+**CN1–CN3 complete** (the commitment companion `mycelium-commitment`; CN2's replay half closed with the seam).
+The plan's Phase E "shadow-mode rollout" is `docs/operations/control-profiles.md`. **Both public gaps are shut:**
+the federation transport shipped in v2.8.0 (item 2's release gate met, in-process then over a two-mesh Docker
+suite) and the scheduler seam in v2.9.0. What is still open publicly is **§12's delivery surfaces** — the guide
+chapters, the operations runbook, the deck and philosophy passes — plus item 2's row 11 (SDK verbs, TLS on the
+federation edge itself, a hostile network, more than two domains), and **V1, the nightly scale runner, whose
+self-hosted box is offline so the job queues silently and the criterion has never been met**. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

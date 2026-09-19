@@ -240,6 +240,25 @@ with optional leased (decaying) commitments. Demo:
 [04 · Consensus](04-consensus.md). For *soft* state, don't reach for consensus —
 LWW is the default ([00 · Concepts](00-concepts.md): consensus vs LWW vs rendezvous).
 
+### How do I know whether my write actually reached disk?
+
+Ask for a receipt. `set` returns a bool that means *applied here, now* and names no
+rung; `kv().set_with_receipt(&op, key, value)` reports whichever rung was reached,
+and `kv().set_requiring_sync(&op, key, value)` **refuses** rather than applying a
+write it cannot sync. `Buffered` is not a softer `OnDisk` — it survives a process
+crash and is lost to a power cut. Demo:
+[`receipt_ladder`](../../examples/receipt_ladder.rs). Chapter:
+[18 · Contracts & receipts](18-contracts-and-receipts.md).
+
+### How do I tell "it failed" from "I don't know"?
+
+You don't have to — the API refuses to conflate them. A deadline with no answer is
+`DeliveryUnknown`, carrying the rungs that *were* established, and there is no
+variant meaning "nothing happened" because no verb can establish that. Retry with
+`retry_with_receipt`, never by calling the write again, so the operation keeps its
+original clock stamp. Chapter:
+[18 · Contracts & receipts](18-contracts-and-receipts.md).
+
 ### How do I scale the cluster up/down dynamically?
 
 Publish a membership or tuning intent over `/gateway/govern`; nodes self-elect.
