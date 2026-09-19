@@ -46,6 +46,9 @@ jobs:
       # has already paid for once. Its own gate is the same-length/different-content
       # divergence test — a harness that passes that unchanged is only re-seeding.
       - run: ./scripts/ci-retest.sh -p mycelium-sim
+      # Item 6's decisive demonstration (plan §12.1), run rather than only built — see the
+      # receipt-ladder step below for why the gallery is gated on running.
+      - run: cargo run -p mycelium-sim --example replay_a_bundle
       # And the seams under `sim`: without this the routed path is never built in CI, and
       # `sim_seam` would be a module that compiles only on the author's machine.
       - run: ./scripts/ci-retest.sh -p mycelium-core --features sim

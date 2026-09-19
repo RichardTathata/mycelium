@@ -32,9 +32,14 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   `receipt_ladder` (the same write four ways — `set` · `set_with_receipt` · `set_requiring_sync` ·
   `set_with_replica_sync` — then a peer shut down and the store reopened, so `unknown` and
   `Buffered` are shown rather than described), `knowledge_layer`, `federated_domains`. Since
-  2026-09-19 CI **runs** all three rather than only building them: building proves the API still
-  compiles, running proves the demonstration still demonstrates. Still owed by §12.1: item 4's
-  control-envelope viz, item 5's curator handover, item 6's replay-a-bundle CLI.
+  2026-09-19 CI **runs** them rather than only building them: building proves the API still
+  compiles, running proves the demonstration still demonstrates. `replay_a_bundle`
+  (`mycelium-sim/examples/`) is item 6's — a recorded sweep written as a bundle, replayed clean,
+  then replayed against a deliberately broken version so the kernel names the exact effect that
+  changed, then green again with the fix. Its bug is the *example's own*: injecting one into the
+  library is a `cfg(test)` affordance and stays there, because a binary able to disable a
+  durability fix would be a data-loss switch. Still owed by §12.1: item 4's control-envelope viz
+  and item 5's curator handover.
 - **Food-Rescue Co-op suite** (`examples/coop/`, workspace member
   `mycelium-coop-examples`): **fourteen** demos (twelve CI + two manual real-model) composed in one constructive world (depot
   nodes rescuing surplus food, no dispatcher) — mailbox_llm · stigmergy · elastic_intent ·

@@ -39,8 +39,9 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`three_arm_workdist`](../docs/plans/three_arm_workdist.md) | ● | · | · | ● | Adv | CLI | · | · | · |
 | [`three_node_demo`](chat/README.md) ★ | ● | ● | ● | ● | Adv | Web | real | · | · |
 | [`ops_console`](ops_console/README.md) † | ○ | ○ | ○ | ○ | Adv | Web | · | · | · |
-| **The v3 contracts axis** — one decisive demonstration per item; each *runs* in CI, not just builds | | | | | | | | | |
+| **The v3 contracts axis** — one decisive demonstration per item; each *runs* in CI, not just builds. `replay_a_bundle` is all-· by construction: the replay kernel is not a layer | | | | | | | | | |
 | [`receipt_ladder`](../docs/design/contracts-receipts.md) | ● | · | · | · | Adv | CLI | · | · | · |
+| [`replay_a_bundle`](../docs/design/replay-nondeterminism-inventory.md) | · | · | · | · | Adv | CLI | · | · | · |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | |

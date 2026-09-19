@@ -1109,7 +1109,7 @@ template, constructive domain, CI-run):*
 | Item | Demonstration | Kind |
 |------|---------------|------|
 | 1 Contracts ✓ *(2026-09-19)* | the **receipt ladder**: the same write under `none` / `local` / `required-sync` / peer-persisted, then a peer crash — which receipts survive, which were only claims | CLI + Docker (crash) |
-| 6 Replay | **replay a bundle**: the WAL/snapshot race captured as a bundle, replayed to the failing witness, then the fix replayed green | CLI (`mycelium-sim`) |
+| 6 Replay ✓ *(2026-09-19)* | **replay a bundle**: the WAL/snapshot race captured as a bundle, replayed to the failing witness, then the fix replayed green | CLI (`mycelium-sim`) |
 | 2 Domains | **two meshes, one exported service**: discovery without merging, a call across the edge, a partition, a revoked gateway — as a `*_viz` browser example so the boundary is *visible* | browser + Docker |
 | 3 Knowledge | in the coop world: "which pantry is really open" — claim, observation, assessment, and two readers with different acceptance policies resolving differently from the same evidence | CLI |
 | 4 Stability | the **control-envelope viz**: allocated rights and budgets under load, the `enforce-allocated` profile versus advisory, and the combined-feedback scenario | browser |
