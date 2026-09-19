@@ -637,6 +637,29 @@ never run in CI — the make-check-vs-CI-green family, one layer down at the *fe
 throughout. Wiki: [dev](dev.md) §AE,
 [`.log/2026-09-16-ae-gateway-records-what-it-enforces.md`](.log/2026-09-16-ae-gateway-records-what-it-enforces.md).
 
+## v3 contracts axis — item 6's decisive demonstration: replay a bundle — 2026-09-19 (unreleased)
+
+`mycelium-sim/examples/replay_a_bundle.rs`, run in CI. A depot's surplus-food sweep recorded through the
+kernel, written as a bundle, read back and replayed clean; then the **same bundle** against a version that
+drops the grace window a depot allows a late van, which diverges at seq 4 with the recorded effect printed
+beside the replayed one; then the fix, green. A bug stops being *"it failed on the third run yesterday"* and
+becomes *"effect 4 differs, here is what changed"*.
+
+**Why the example owns its own bug.** §12.1 asks for the WAL/snapshot race replayed to its failing witness. A
+binary cannot do that, and should not be able to: reproducing that failure means setting
+`persistence::WITNESS_SKIP_WAL_MERGE`, which **removes the WAL-tail merge**, and exposing it outside `cfg(test)`
+would put a data-loss switch in a shipped binary — worse to own than the demonstration is good. The example
+therefore injects its own fault and points at
+`the_checked_in_scenario_a_bundle_replays_here_and_matches_a_fresh_recording` for the real one.
+
+**The distinction it ends on.** A bug whose effects reach a seam is caught as a **divergence** and localised to
+one effect; a bug whose effects never reach a seam replays *perfectly* and is caught by the bundle's **witness**
+assertion instead. That is why a bundle names a witness, and why one with an unknown witness cannot prove its
+own fix. **An overclaim caught in review of my own draft:** the trace records a sha256 *digest* of a payload,
+not the payload, so the divergence lines localise the effect but cannot name the offer — a trace is a log of
+decisions, not a copy of the data. The example now says *the trace localises; the code names*. Log:
+[`.log/2026-09-19-item6-replay-a-bundle.md`](.log/2026-09-19-item6-replay-a-bundle.md).
+
 ## v3 contracts axis — item 1's decisive demonstration: the receipt ladder — 2026-09-19 (unreleased)
 
 The plan's §12 is an **alignment gate**, not decoration: no phase exit is declared while its lines are open, and

@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — replay a bundle, item 6's decisive demonstration (v3 §12.1)
+
+- **`mycelium-sim/examples/replay_a_bundle.rs`** — a depot's surplus-food sweep recorded through the
+  kernel, written as a bundle, read back and replayed; then the same bundle replayed against a
+  deliberately broken version, which **diverges at the exact effect that changed**, and against the
+  fixed one, which replays green. It ends by naming the *other* shape of failure — a bug whose
+  effects never reach a seam, which replays perfectly and is caught by the bundle's witness
+  assertion instead — and by saying why the real WAL/snapshot race is replayed by the corpus gate
+  rather than by a binary: reproducing it means removing the WAL-tail merge, and that switch is
+  `cfg(test)` on purpose, because a binary that could disable a durability fix would be a data-loss
+  switch. Run in CI.
+
 ### Added — the receipt ladder, item 1's decisive demonstration (v3 §12.1)
 
 - **`examples/receipt_ladder.rs`** — the same write made four ways, so the rungs are visible rather
