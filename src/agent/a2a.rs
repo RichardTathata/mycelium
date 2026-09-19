@@ -543,6 +543,23 @@ pub(crate) async fn a2a_jsonrpc_full(
         return Json(jsonrpc_error(id, -32003, "federated calls are unary: use tasks/send")).into_response();
     }
 
+    // A credential binds **one export**, and only `tasks/send` authorises against it
+    // (`FederationEdge::authorize`). `tasks/get` and `tasks/cancel` carry no export and take no
+    // caller, so a partner granted one export could read any task's completed artifact — including a
+    // *native* caller's — or cancel it, by naming its id. Task ids are caller-supplied on
+    // `tasks/send`, so they are enumerable. Refused here for the same reason streaming is: binding
+    // them to an export is a revision of D5, not a silent extension.
+    // Found by the Phase-C adversarial audit (items 1+2+7).
+    #[cfg(feature = "tls")]
+    if federated.is_some() && (method == "tasks/get" || method == "tasks/cancel") {
+        return Json(jsonrpc_error(
+            id,
+            -32004,
+            "a federated credential binds one export: tasks/get and tasks/cancel are not federated",
+        ))
+        .into_response();
+    }
+
     if method == "tasks/sendSubscribe" {
         let task_id  = params.get("id")
             .and_then(|v| v.as_str())

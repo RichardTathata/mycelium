@@ -6342,6 +6342,28 @@ mod federation_transport {
         let v: serde_json::Value = r.json().await.unwrap();
         assert_eq!(v["error"]["code"], -32003, "{v}");
         assert!(v["error"]["message"].as_str().unwrap().contains("authorises"), "{v}");
+        // 5a-bis. **A credential binds ONE export, and only `tasks/send` authorises against it.**
+        // `tasks/get` and `tasks/cancel` take no caller and no export, so before the Phase-C
+        // adversarial audit a partner granted one export could read any task's completed artifact —
+        // including a *native* caller's — or cancel it, by naming its id. Ids are caller-supplied on
+        // `tasks/send`, so they are enumerable. Both are refused for federated callers, as
+        // `tasks/sendSubscribe` already was.
+        for method in ["tasks/get", "tasks/cancel"] {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": {"id": "some-other-callers-task"},
+            });
+            let r = raw.post(&a2a)
+                .header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+                .json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            let v: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(v["error"]["code"], -32004, "{method} must be refused for a federated caller: {v}");
+            assert!(
+                v["error"]["message"].as_str().unwrap().contains("binds one export"),
+                "the refusal must name the reason: {v}"
+            );
+        }
+
         // 5b. Named and signed, but not granted: NotPermitted, -32003.
         let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/secret", &beta_sk).to_header_value())
             .json(&task_body("demo/secret")).send().await.unwrap();
