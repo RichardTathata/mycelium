@@ -271,6 +271,16 @@ went wrong. Demo:
 [`replay_a_bundle`](../../mycelium-sim/examples/replay_a_bundle.rs). Chapter:
 [19 · Replay & simulation](19-replay-and-simulation.md).
 
+### How do I authorise tool calls without rewriting my fleet?
+
+Attach an evaluator at the gateway and it runs as a **preflight before dispatch**.
+Attach an evidence journal too, or the node enforces and records nothing (it warns
+at attach time). Set the deployed policy revision, or the stale-policy check has
+nothing to compare against and never fires. The honest limit: this is self-imposed
+prevention for the routes this gateway fronts and **nothing** for routes it does
+not, which is why the evidence carries `coverage.complete: false` naming them.
+Chapter: [20 · Authorising actions](20-authorising-actions.md).
+
 ### How do I scale the cluster up/down dynamically?
 
 Publish a membership or tuning intent over `/gateway/govern`; nodes self-elect.
