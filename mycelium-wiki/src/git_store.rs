@@ -677,6 +677,21 @@ impl GitStore {
             );
             let (_, ok) = self.git_raw(&["update-ref", "--stdin"], Some(txn.as_bytes()))?;
             if !ok {
+                // Which ref lost? The transaction fails as one unit, so "it failed" alone would be
+                // reported as a compare-and-swap conflict — and that tells a *revoked curator* to
+                // "re-read and retry", which will refuse forever. The two conditions have opposite
+                // remedies, so name them apart: ask the fence's ref what it holds now.
+                // (Found 2026-09-19 while building item 5's demonstration, which is the first
+                // end-to-end exercise of this fence: its unit tests check the transaction *text*.)
+                if let Some(fence) = self.cfg.mandate.as_ref() {
+                    let found = match self.git_raw(&["rev-parse", "--verify", "--quiet", &fence.refname], None) {
+                        Ok((out, true)) => Some(String::from_utf8_lossy(&out).trim().to_string()),
+                        _ => None,
+                    };
+                    if found.as_deref() != Some(fence.expected.as_str()) {
+                        return Err(WikiError::mandate_revoked(&fence.refname, &fence.expected, found));
+                    }
+                }
                 return Ok(CommitOutcome::RefMoved);
             }
             // Sync the worktree copies (temp + rename — atomic, never torn) so direct readers and
