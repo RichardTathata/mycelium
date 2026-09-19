@@ -58,6 +58,50 @@ providers over `max` (scale down). This is the autonomic loop in the
 [`catalog`](../../examples/coop/src/bin/catalog.rs) demos —
 [operations/artifacts.md](artifacts.md).
 
+## Budgets that are actually enforceable (allocated rights)
+
+Everything above converges on *soft* state: a membership intent evaporates, a capability
+advertisement goes stale, a provider that goes quiet disappears from discovery. That is the right
+shape for an **observation**, and the wrong shape for a **right**.
+
+> An allocation that vanished with its holder would be **issued twice**.
+
+So when a governor must not exceed a ceiling, the ceiling is backed by a **right** in a node-local,
+append-only, fsynced journal that is **never gossiped**. Only a bounded, signed head leaves the node.
+
+Three rules an operator should know, because each shows up as a refusal:
+
+- **Persisted before acting.** A right that did not reach disk means *nothing happened*, and the
+  refusal carries the journal's own reason — including *unknown*, which is a different claim from
+  failure.
+- **Never reclaimed because an owner vanished from discovery.** Going quiet is not releasing. If you
+  need the units back, release, expire or revoke them explicitly.
+- **A rejected admission is a recorded outcome**, written *before* the refusal returns. A rejection
+  nobody recorded is a silence, and a silence is indistinguishable from work nobody asked for.
+
+Units are **resource-native** — never money. A bound expressed in money depends on a rate card the
+node does not hold, at a time it cannot pin, which makes it a bound the node cannot enforce.
+
+**Every state counts against the budget**, including `Unknown` — which is what the ledger says after
+a crash mid-transition or a reconcile that timed out. It is a state, not a zero.
+
+### Which rung of enforcement you are on
+
+Only the top profile ties a ceiling to allocated rights. Below it a bound is self-imposed, and the
+runbook for stepping up is [control-profiles.md](control-profiles.md):
+
+| Profile | What a bound means |
+|---|---|
+| `legacy` | the predicate is not consulted at all |
+| `observe` | holds are **recorded**, nothing is held — watch `would-hold` before stepping up |
+| `enforce-local` | budgets on this node's own actuators; **not** a hard bound |
+| `enforce-allocated` | ceilings backed by allocated rights |
+
+A hard bound is hard prevention **only when backed by exclusive, durably accounted rights**. Without
+those it is not a hard bound however it is labelled. Watch
+`mycelium_control_decisions_total{decision,class}` ([metrics.md](metrics.md)) to see what the
+envelope is actually doing before and after a step.
+
 ## Live tuning (config, not size)
 
 The same intent transport tunes config scalars without a restart — the WS-C
