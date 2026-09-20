@@ -84,7 +84,7 @@ them were not relied on for what their own code claimed. One finding changes a p
 
 ### Added
 
-- **Fuzz targets for the parsers the axis put on a trust edge** (§12.6) — eight of them, across the
+- **Fuzz targets for the parsers the axis put on a trust edge** (§12.6) — nine of them, across the
   three surfaces §12.6 names: the caller-context frame **and the envelope behind it**, the presented
   federation credential, the catalogue reply, the descriptor/policy pair, the trust bundle, the
   replay trace, and the replay bundle's other readers (the recorded outcome codec and the
@@ -94,6 +94,12 @@ them were not relied on for what their own code claimed. One finding changes a p
   signatures cover bytes rebuilt from the parsed fields. They run in the nightly `cargo-fuzz` job
   and, as mutation passes over valid seeds, in the in-suite mini-fuzz on every PR — which is how
   the `DomainId` gap above was found.
+- **A fuzz target for `serde_fixint`**, the hand-rolled byte layer under the rights ledger's signed
+  documents, over the two types that reach it from outside the process — an unsigned on-disk
+  `LedgerEvent` and a peer-writable `PublishedRightsHead`. Kept although a 20,000-case mutation sweep
+  found nothing, because that sweep is far weaker than coverage-guided fuzzing and because a
+  hand-rolled binary decoder reading bytes off disk is the shape behind the unbounded-allocation
+  decode DoS that sat uncaught through M2 Run-20.
 
 ### Changed — API
 
@@ -122,14 +128,6 @@ reads as a set of vulnerabilities, and these are not:
   `award()` picks a winner from them without either type being signed. `serde_json` underneath, so
   the exposure is **semantic, not memory safety**: a peer can publish an offer, which is what an open
   contract net is for, and what is missing is provenance rather than a decoder bound.
-
-### Added
-
-- **A fuzz target for `serde_fixint`**, the hand-rolled byte layer under the rights ledger's signed
-  documents, over the two types that reach it from outside the process. Kept despite the sweep above
-  finding nothing, because that sweep is far weaker than coverage-guided fuzzing and because a
-  hand-rolled binary decoder reading bytes off disk is the shape behind the unbounded-allocation
-  decode DoS that sat uncaught through M2 Run-20.
 
 ### Still open from the audit — neither is a patch
 
