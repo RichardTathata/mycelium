@@ -22,6 +22,50 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — §12.6 complete: the deprecation ledger gets an adopter — 2026-09-20 (unreleased)
+
+§12.6's last deliverable, and the one that had quietly not been done at all. PR #333.
+
+**The requirement.** *"Every §6.6 ledger entry ships with a `CHANGELOG` migration note and a guide
+paragraph the day it is deprecated, not the day it is removed — the ledger is a promise to adopters,
+and the migration text is how the promise is kept."*
+
+**The audit of the seven entries.** `system_propose` had been `#[deprecated]` in code since
+2026-07-15 and appeared in `CHANGELOG.md` **zero times** — two months overdue. `cluster_name`
+appeared zero times too, never announced at all. `persisted: bool` had field-addition notes but
+nothing saying it was on the removal ledger. There was **no `### Deprecated` section in any
+release**, and **no migration, upgrade or deprecation page anywhere in `docs/`**. Four of seven had
+no guide paragraph: `BoardConfig` appears nowhere under `docs/guide/`, and the gateway legacy
+profile's only migration prose lived in `operations/rbac.md`.
+
+**The structural gap.** The ledger had no adopter-facing home. The plan's §6.6 table is
+authoritative but is a planning document, and `ROADMAP.md` — which the plan says *maintains* the
+ledger — carried one stale parenthetical naming five of seven, still listing the inferred `>=` ack
+as open (resolved 2026-09-15) and predating the `BoardConfig`/`GossipConfig` entries entirely.
+
+**[`docs/guide/deprecations.md`](../../guide/deprecations.md)** is that home: per entry, the
+replacement, a concrete before/after, and — stated plainly — **whether the compiler will warn you**.
+Mostly it will not: **only 2 of the 7 entries carry `#[deprecated]`**, so the page is the whole
+notice for the rest.
+
+**A drift defect it corrected.** `building-on-mycelium.md` told adopters *"the old is
+`#[deprecated]`"*. The code does not keep that promise, so an adopter trusting that sentence was
+waiting for a build warning that never arrives. Corrected to what the code does.
+
+**The entry worth reading is `cluster_name`.** It never provided isolation, so anyone who used it to
+keep deployments apart **does not have the separation they believe they have** — two nodes with
+different `cluster_name`s that can reach each other and pass CA admission will gossip. The mechanism
+that does separate is a federated domain.
+
+**Known and not fixed:** the four unmarked deprecations. Adding `#[deprecated]` is an API-surface
+change (internal call sites need `#[allow(deprecated)]` under `-D warnings`), so it is named rather
+than folded into a documentation PR.
+
+With this, **§12.6 is complete** — front door, companion checklist, the Phase-C adversarial
+self-audit, nine trust-edge fuzz targets, migration notes. The analysis series keeps running and the
+research track stays an explicit candidate rather than a commitment. Log:
+[`.log/2026-09-20-measuring-the-risk-list.md`](.log/2026-09-20-measuring-the-risk-list.md).
+
 ## v3 contracts axis — measuring the trust-edge risk list — 2026-09-20 (unreleased)
 
 The four parsers §12.6's sweep named and did not cover: one fixed, three measured. PRs #330, #331.
