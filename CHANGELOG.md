@@ -9,11 +9,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-**Three more Phase-C audit findings closed, and two more found by the work that was meant only to
-gate them.** v2.9.1 named the first three as *known and not fixed*. The other two came out of
-§12.6's trust-edge fuzz targets: writing down what each parser is relied on for showed that two of
-them were not relied on for what their own code claimed. One finding changes a public type, so
-**the next release is a MINOR, not a PATCH**.
+## [2.10.0] — 2026-09-20
+
+**The axis auditing itself, and §12.6 closed.** Wire **v12** unchanged.
+
+Three more Phase-C audit findings closed — v2.9.1 named them as *known and not fixed* — and **five
+more defects found by the gates built to prevent them**, which is the release's actual shape: every
+new defect here was found by §12.6's own work rather than reported from outside. The trust-edge fuzz
+targets found two (a wire `DomainId` bypassing its own validating constructor; a replay bundle
+silently corrupting fields). Auditing the coverage of those targets found two more in the journal
+reader. And writing AE1's private half against the public seam found the fifth, which no in-crate
+test could have seen.
+
+§12.6 is complete: the front door, the companion onboarding checklist, the Phase-C adversarial
+self-audit, **nine trust-edge fuzz targets**, and migration notes per deprecation — now an
+adopter-facing page, [`docs/guide/deprecations.md`](docs/guide/deprecations.md).
+
+**The upgrade notes.** One is a compile change; two are things to read before you upgrade:
+
+- **`CatalogRefusal`** gains `StaleRevision { seen, offered }` and is now `#[non_exhaustive]`, so an exhaustive `match` needs a `_` arm. Nothing else changes.
+- Two **deprecations announced late and now written down**: `system_propose` (deprecated in code
+  since 2.1.0, never in this changelog until now) and **reading isolation into `cluster_name`**,
+  which never provided any. If you relied on `cluster_name` to keep deployments apart, **you do not
+  have that separation** — two nodes with different names that can reach each other and pass
+  admission will gossip. The mechanism that separates is a federated domain. Neither is removed;
+  both are on the `3.0.0` ledger with a migration on the new page.
 
 ### Fixed
 
