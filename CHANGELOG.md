@@ -71,9 +71,15 @@ The audit's other findings are recorded rather than closed, and none is a privil
 signed catalogue replies carry no expiry or nonce, so a reply from a withdrawn grant can be replayed
 into a stale *view* (the provider re-authorises at call time, so it ends in a refusal, not an
 invocation); key **rotation** is unreachable on the call path, so a partner mid-rotation is refused
-as `BadSignature`; the per-partner budget is enforced consumer-side only; `Buffered`'s "survives a
-process crash" and `persisted_by`'s "this exact content" are stronger than the primitives beneath
-them. Each is tracked for the next release.
+as `BadSignature`; the per-partner budget is enforced consumer-side only; and `persisted_by`'s "this exact content" is
+stronger than the primitive beneath it. Each is tracked for the next release.
+
+> **Post-release correction (2026-09-20).** This section originally also listed `Buffered`'s
+> *"survives a process crash"* as an open over-claim. It is **not** open: the same flush that fixed
+> the `on_disk` defect closes it. `poll_flush` awaits the in-flight operation and returns the write's
+> real result, so once `fs_write_all` returns `Ok` the syscall has run and the bytes are in the OS
+> page cache — which is exactly what `Buffered` claims. The release notes under-sold their own fix;
+> the tag message carries the original wording and is left as the historical record.
 
 
 ## [2.9.0] — 2026-09-19
