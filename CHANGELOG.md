@@ -9,6 +9,52 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Three more Phase-C audit findings closed.** v2.9.1 named these as *known and not fixed*; they are
+fixed here. One of them changes a public type, so **the next release is a MINOR, not a PATCH**.
+
+### Fixed
+
+- **The replica-sync rung stopped claiming what a dropped append broke.** The rung rested on *the
+  store holds it, therefore its record was appended*. The inbound path applies a received update and
+  **then** appends, and in `Async`/`Os` that append is a `try_send` which drops on a full queue and
+  still answers `Ok` — with both call sites discarding the verdict. So a peer under write-ahead-log
+  backpressure held a value with **no log record**, answered `Persisted`, and the origin's receipt
+  named it as holding the record across a crash. `WalHandle` now counts skipped appends
+  (`dropped_appends()`), and a node that has skipped any declines the rung rather than claiming it —
+  it cannot tell whether *this* record was the one it dropped, and per-entry tracking is what the
+  contracts record declined (§1a). **A node that never drops is unaffected.**
+- **A key rotation's overlap now reaches the call path.** `TrustBundle::rotate` is deliberately
+  overlapping so a partner can move to the new key at its own pace, but both verifiers consulted
+  `key_for` — the *current* key only — and `acceptable_keys` was called from nowhere in production.
+  A partner still signing with the retiring key was refused as **`BadSignature`**, the refusal this
+  module reserves for *someone is forging*. A partner doing exactly what the rotation design tells it
+  to do was reported to the operator as an attacker.
+- **A catalogue revision never goes backwards.** `DomainPolicy::revision` documents itself as
+  monotonic — *a consumer that has seen a higher revision must not accept a lower one* — and the rule
+  was implemented nowhere. A signed reply carries no expiry and no nonce, so one captured while an
+  export was granted still verified after the grant was withdrawn, and the withdrawn export
+  reappeared in the client's view. Bounded: the catalogue confers **visibility, not authority**, and
+  the provider re-authorises at call time, so a replay ended in a refusal rather than an
+  unauthorised call.
+
+### Changed — API
+
+- **`CatalogRefusal` gains `StaleRevision { seen, offered }` and is now `#[non_exhaustive]`.** A
+  downstream exhaustive `match` needs a `_` arm. Reusing the existing transport error would have
+  avoided the change and would have been the refusal-conflation this module forbids: a stale view is
+  not a broken connection, and an operator told the wrong one looks in the wrong place.
+
+### Still open from the audit — neither is a patch
+
+- **The per-partner budget is enforced consumer-side only.** `GatewayPool` lives in the *client*; the
+  edge has no slot accounting, so a partner that does not run the honest client can consume another
+  partner's share of a provider's gateway. A design gap.
+- **The composed guarantee still has no gate.** *A durable, attributed, cross-domain effect* is
+  proved leg by leg and nowhere as a whole — the receipt tests and federation tests have zero
+  overlap. Underneath: a receipt carries **no principal**, the evidence journal carries **no
+  durability rung**, and a receipt is **never persisted**. Closing it means deciding whether a receipt
+  should be *recorded* rather than merely returned.
+
 ## [2.9.1] — 2026-09-19
 
 **A security PATCH from the axis' own Phase-C adversarial self-audit.** §12.6 asks for a five-pass
