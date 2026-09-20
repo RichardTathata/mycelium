@@ -191,10 +191,19 @@ pub fn verify_federated_credential(
     call_policy: &CallPolicy,
     now_ms: u64,
 ) -> Result<(), CallRefusal> {
-    let Some(key) = bundle.key_for(&credential.origin_domain) else {
+    // Every key acceptable *now*, not just the current one. A rotation is deliberately overlapping —
+    // both keys verify for a bounded window so a partner can move to the new one at its own pace —
+    // and consulting only `key_for` made that window unreachable on the call path: a partner still
+    // signing with the retiring key was refused as `BadSignature`, which this module's own rule says
+    // must mean *someone is forging*. Accusing a partner of forgery for doing exactly what the
+    // rotation design tells it to do sends the operator to the wrong file.
+    // Found by the Phase-C adversarial audit (items 1+2+7).
+    let keys = bundle.acceptable_keys(&credential.origin_domain, now_ms);
+    if keys.is_empty() {
         return Err(CallRefusal::UnknownDomain);
-    };
-    if !mycelium_core::tls::verify_bytes(key, &credential.canonical_bytes(), signature) {
+    }
+    let bytes = credential.canonical_bytes();
+    if !keys.iter().any(|k| mycelium_core::tls::verify_bytes(k, &bytes, signature)) {
         return Err(CallRefusal::BadSignature);
     }
     let claimed = credential.claimed_lifetime();
@@ -225,12 +234,16 @@ pub fn verify_federated_call(
     now_ms: u64,
 ) -> Result<AcceptedCall, CallRefusal> {
     // 1. who — the bundle decides which key, never the credential.
-    let Some(key) = bundle.key_for(&credential.origin_domain) else {
+    // See `verify_federated_credential`: the rotation overlap is honoured here too, so the two
+    // entry points cannot disagree about which keys are acceptable.
+    let keys = bundle.acceptable_keys(&credential.origin_domain, now_ms);
+    if keys.is_empty() {
         return Err(CallRefusal::UnknownDomain);
-    };
+    }
 
     // 2. authentic
-    if !mycelium_core::tls::verify_bytes(key, &credential.canonical_bytes(), signature) {
+    let bytes = credential.canonical_bytes();
+    if !keys.iter().any(|k| mycelium_core::tls::verify_bytes(k, &bytes, signature)) {
         return Err(CallRefusal::BadSignature);
     }
 
@@ -360,6 +373,42 @@ mod tests {
             assert_eq!(accepted.origin_domain, did("beta.example"));
             assert_eq!(accepted.principal, "svc/billing", "the partner's principal, verbatim");
             assert_eq!(accepted.policy_revision, 7, "which rules permitted it, answerable afterwards");
+        }
+
+        /// **A rotation's overlap actually reaches the call path, and closes when it should.**
+        ///
+        /// `TrustBundle::rotate` is deliberately overlapping: both keys verify for a bounded window,
+        /// so a partner can move to the new key at its own pace. The verifiers consulted only
+        /// `key_for` — the *current* key — so the window was unreachable and a partner still signing
+        /// with the retiring key was refused as `BadSignature`, which this module's own rule reserves
+        /// for *someone is forging*. Accusing a correct partner of forgery sends the operator to the
+        /// wrong file. Phase-C audit finding.
+        #[test]
+        fn a_retiring_key_verifies_inside_its_window_and_not_after() {
+            let c = cred();
+            let (old_pk, sig_with_old) = signed(&c);
+
+            // The operator rotates to a new key, with the old one acceptable until NOW + 5_000.
+            let new_pk = SigningKey::from_bytes(&[12u8; 32]).verifying_key().to_bytes();
+            let mut bundle = bundle_for(&c.origin_domain, old_pk);
+            bundle.rotate(&c.origin_domain, new_pk, NOW + 5_000);
+
+            // Inside the window: the partner has not moved yet, and is accepted.
+            check(&c, &sig_with_old, "invoice.submit", &bundle, NOW + 1_000)
+                .expect("a retiring key must verify inside its own overlap window");
+
+            // After it: refused — the window is a bound, not a suggestion.
+            let after = check(&c, &sig_with_old, "invoice.submit", &bundle, NOW + 6_000);
+            assert!(
+                matches!(after, Err(CallRefusal::BadSignature)),
+                "past the window the retiring key is no longer acceptable, got {after:?}"
+            );
+
+            // And the new key works throughout — the rotation's whole point.
+            let new_sk = SigningKey::from_bytes(&[12u8; 32]);
+            let sig_with_new = mycelium_core::tls::sign_bytes(&new_sk, &c.canonical_bytes()).to_vec();
+            check(&c, &sig_with_new, "invoice.submit", &bundle, NOW + 6_000)
+                .expect("the new key verifies after the overlap closes");
         }
 
         /// **The confused deputy, one boundary out.** A credential for one export must not invoke
