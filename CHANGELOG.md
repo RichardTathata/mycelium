@@ -101,6 +101,39 @@ them were not relied on for what their own code claimed. One finding changes a p
   hand-rolled binary decoder reading bytes off disk is the shape behind the unbounded-allocation
   decode DoS that sat uncaught through M2 Run-20.
 
+### Deprecated
+
+**The `3.0.0` removal ledger now has an adopter-facing page:**
+[`docs/guide/deprecations.md`](docs/guide/deprecations.md) — what is on the way out, what replaces
+it, and, per entry, whether the compiler will tell you. **Nothing listed there is removed on 2.x.**
+
+§12.6 of the plan requires that every ledger entry ship a migration note *the day it is deprecated,
+not the day it is removed*. An audit found three entries that had never been announced in this file
+at all, two of them for months. They are announced here rather than quietly backdated:
+
+- **`system_propose` is deprecated in favour of `cluster_propose`** — `#[deprecated(since = "2.1.0")]`
+  in code since 2026-07-15, and never mentioned in this changelog until now. Identical behaviour, and
+  the gateway still accepts `"system"` on the wire; the rename makes the consensus verb match its
+  scope (`SignalScope::Cluster`). Unrelated despite the name: `system_stats()` is node-local runtime
+  state, not a scope.
+- **Reading isolation into `cluster_name` is deprecated.** It never provided any. A cluster is
+  emergent from network reachability — peer exchange plus CA admission — so two nodes with different
+  `cluster_name`s that can reach each other *will* gossip. Deployments that must not merge need a
+  **federated domain** (`DomainId`, a trust bundle, per-partner authorisation). `cluster_name` keeps
+  working as a display label; what is deprecated is treating it as a boundary.
+- **`ConsensusResult::Committed { persisted: bool }` is superseded by the receipt verbs**
+  (`cluster_propose_receipt` / `group_propose_receipt`). A `bool` cannot separate *"the bytes are on
+  disk"* from *"the write was queued and nothing is promised"* — `false` means durability was **not
+  established**, never "absent from the WAL". The field keeps working; a receipt names its rung and
+  nothing above it.
+
+**Known and not fixed:** only two of the seven ledger entries carry a `#[deprecated]` attribute, so
+for the rest the page and this section are the whole notice. `docs/guide/building-on-mycelium.md`
+claimed the old surface is always `#[deprecated]`; that claim is corrected to what the code actually
+does. Adding the missing attributes is an API-surface change with its own blast radius (internal call
+sites would need `#[allow(deprecated)]` under `-D warnings`) and is left to a separate change rather
+than folded in here.
+
 ### Changed — API
 
 - **`CatalogRefusal` gains `StaleRevision { seen, offered }` and is now `#[non_exhaustive]`.** A

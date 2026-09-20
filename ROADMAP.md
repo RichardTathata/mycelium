@@ -3092,8 +3092,10 @@ export-and-invoke edge; AgentFacts stays the public discovery edge; no second we
 **Cross-cutting (rev 1.2):** the **parity gate** (a gateway change ships with SDKs + operator docs in the same PR) ·
 the **public surface as code** (one routing-defined list, tested against `rbac.md`) · **verification
 infrastructure** owned here (the nightly scale runner; on-disk golden fixtures in CI) · the **`3.0.0` removal
-ledger** (plan §6.6: `system_propose`, cosmetic `cluster_name`, the inferred `>=` ack, `persisted: bool`,
-node-as-caller dispatch) · the research track cross-linked (replay = reproducible experiments; the combined-feedback
+ledger** (authoritative table: plan §6.6, seven entries; the adopter-facing half with a migration per entry is
+`docs/guide/deprecations.md`. The five named in this rev-1.2 paragraph were a point-in-time subset and are no
+longer the whole list: the inferred `>=` ack was **resolved 2026-09-15**, and `BoardConfig` and `GossipConfig`
+not being `#[non_exhaustive]` were added afterwards) · the research track cross-linked (replay = reproducible experiments; the combined-feedback
 scenario = a Paper 1 case study).
 
 **Delivery surfaces (rev 1.4, plan §12):** the axis is not code alone. **Examples** — every ack-showing example
