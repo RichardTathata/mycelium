@@ -531,6 +531,13 @@ impl MappingKind {
 /// *nothing ran, and this point can say so*. A refusal is `None`; a permitted dispatch whose
 /// result this gateway did not watch is `Attempted`, which is the honest answer, because the
 /// gateway hands the call to a provider and does not observe what the provider then does.
+///
+/// **`#[non_exhaustive]` for the same reason as [`RecordKind`], and more urgently.** This is the
+/// vocabulary AE0 §5 expects to grow first: `not_dispatched` is proposed to the evidence consumer
+/// as its contract-1.2 addition (handover seam 2). Marking it before that lands makes the addition
+/// additive. A downstream exhaustive `match` needs a `_` arm — and that arm must fail **safe**: an
+/// execution this reader does not recognise is *we did not look*, never *nothing ran*.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Execution {
@@ -551,6 +558,18 @@ pub enum Execution {
 /// One dispatch produces more than one: what was *decided*, and then what became of it. Keeping
 /// them as separate records rather than mutating one is the point — evidence is append-only, and a
 /// record that could be revised in place could be revised after someone read it.
+///
+/// **`#[non_exhaustive]`, and the two variants here are not the whole list.** AE0 §5 names six
+/// records — *requested*, *decided*, *blocked*, *execution attempted*, *execution
+/// completed/failed/unknown*, *outcome observed*. Two are shipped because two are what AE-T needed,
+/// and the rest arrive when the evidence consumer's contract can receive them (`not_dispatched` is
+/// proposed as its contract-1.2 addition, handover seam 2). Minting them here first would put a
+/// distinction in our records that nothing downstream could read.
+///
+/// So the growth is *expected*, and the attribute is here before it happens rather than after: one
+/// announced break instead of a series of unannounced ones, which is the §6.6 ledger's own
+/// reasoning for the config structs. A downstream exhaustive `match` needs a `_` arm.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordKind {

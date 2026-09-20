@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — API
+
+- **`RecordKind` is now `#[non_exhaustive]`.** A downstream exhaustive `match` needs a `_` arm.
+  The two variants it ships are not the whole list: AE0 §5 names six records, and two exist because
+  two are what AE-T needed. The rest wait on the evidence consumer's contract 1.2
+  (`not_dispatched`, handover seam 2) — minting them first would put a distinction in our records
+  that nothing downstream could read.
+
+  So the attribute lands **before** the variants rather than with them: one announced break instead
+  of a series of unannounced ones, which is the §6.6 ledger's own reasoning for the config structs.
+  It is a ledger row, with a migration on
+  [`docs/guide/deprecations.md`](docs/guide/deprecations.md).
+
 ## [2.10.0] — 2026-09-20
 
 **The axis auditing itself, and §12.6 closed.** Wire **v12** unchanged.
