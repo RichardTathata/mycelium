@@ -107,3 +107,10 @@ path             = "fuzz_targets/replay_bundle.rs"
 test             = false
 doc              = false
 bench            = false
+
+[[bin]]
+name             = "fixint_decode"
+path             = "fuzz_targets/fixint_decode.rs"
+test             = false
+doc              = false
+bench            = false

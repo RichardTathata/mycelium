@@ -3591,6 +3591,7 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
         let _ = crate::fuzz_internals::caller_envelope_decode(&buf);
         let _ = crate::fuzz_internals::federation_objects_parse(&buf);
         let _ = crate::fuzz_internals::trust_bundle_parse(&buf);
+        let _ = crate::fuzz_internals::fixint_decode(&buf);
         #[cfg(feature = "tls")]
         {
             let _ = crate::fuzz_internals::presented_call_parse(&buf);
@@ -3651,6 +3652,37 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
                 let mut m = valid_policy.to_vec();
                 m[i] ^= 1 << bit;
                 let _ = crate::fuzz_internals::federation_objects_parse(&m);
+                cases += 1;
+            }
+        }
+    }
+
+    // And a VALID `serde_fixint` encoding. Noise dies on the first length prefix -- a sweep of
+    // 40k random inputs decoded *nothing* -- so only mutation reaches this decoder's interior.
+    {
+        use crate::control::ledger::PublishedRightsHead;
+        let head = PublishedRightsHead {
+            head:      crate::control::ledger::RightsHead {
+                holder: crate::mandate::PrincipalId::new("depot-dispatcher").expect("a valid principal"),
+                seq:    7,
+                totals: vec![("pallet-slots".to_string(), 12), ("chiller-hours".to_string(), 4)],
+            },
+            signature: vec![1, 2, 3, 4],
+        };
+        let valid = mycelium_core::serde_fixint::to_vec(&head).expect("encode a rights head");
+        assert!(
+            crate::fuzz_internals::fixint_decode(&valid),
+            "the seed must decode, or the fixint layer is never reached",
+        );
+        for cut in 0..valid.len() {
+            let _ = crate::fuzz_internals::fixint_decode(&valid[..cut]);
+            cases += 1;
+        }
+        for i in 0..valid.len() {
+            for bit in 0..8 {
+                let mut m = valid.clone();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::fixint_decode(&m);
                 cases += 1;
             }
         }

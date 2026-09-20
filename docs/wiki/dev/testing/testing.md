@@ -120,12 +120,29 @@ Three lessons, each paid for:
   `write → read` fidelity is what found `mycelium-sim`'s bundle codec dropping a newline-bearing field.
 - **A seed that does not reach the layer tests nothing.** The first `caller_envelope` seed was merely
   frame-shaped, so every envelope assertion was unreachable; the case count was identical before and
-  after adding a whole layer. The mini-fuzz now **asserts its own seed's reachability** before mutating it.
+  after adding a whole layer. The same trap caught a `serde_fixint` sweep from the other direction:
+  40,000 *random* inputs produced **zero successful decodes**, because noise dies on the first length
+  prefix — so "0 panics" measured nothing at all until the sweep mutated a *valid* encoding instead
+  (3,808 decodes, 0 panics). **Noise tests the entry check; only mutation tests the decoder.** Every
+  mini-fuzz seed now **asserts its own reachability** before being mutated.
+- **A test whose name outruns what it can detect is worse than no test.** The journal's allocation
+  bound has no failing test: `vec![0u8; want]` goes through `alloc_zeroed`, which the OS satisfies
+  with lazy zero pages, so a 4 GiB request succeeds instantly, the next `read_exact` fails, and the
+  outcome is *identical* with or without the bound. Deleting the bound was tried; every assertion
+  still passed. The rule was extracted into a `record_fits` predicate that **is** falsifiable, the
+  behavioural test was renamed to what it shows, and the limit is written in its doc comment. Gating
+  the allocation itself would need a counting `#[global_allocator]` across the whole test binary —
+  rejected as disproportionate, worth revisiting if the family recurs.
 
-**Not covered, and named rather than omitted:** `agent/journal.rs:332` (a `u32` length from the file
-straight into a `vec`, bound checked *after* the read and never for the first record),
-`control/ledger.rs:333`/`:362` (peer-writable gossip and unsigned on-disk records through the hand-rolled
-`serde_fixint`), `mycelium-commitment/src/lib.rs:482` (unsigned offers/awards that `award()` picks from).
+**The four the sweep named, and what measuring them showed.** An unqualified list of "unfuzzed
+parsers" reads as a list of vulnerabilities; this one overstated the risk, so each was measured:
+
+| Parser | Outcome |
+|---|---|
+| `agent/journal.rs` framing | **Real, fixed.** A `u32` length straight into a `vec` (bound checked *after* the read, never for the first record), and `count_records` counting a torn tail because **a seek past EOF succeeds** — so it disagreed with `read_journal_from` about how many records exist, and it drives the next append's seq. |
+| `control/ledger.rs:333` | Reserved surface — returns `Option`, cannot panic, every caller is a `#[test]`. |
+| `control/ledger.rs:362` + `serde_fixint` | Live, and **survives**: 20k mutations, 3,808 decodes, 0 panics. The unchecked `remaining()` subtraction is unreachable — reads check length first. Fuzz-targeted anyway, because a hand-rolled binary decoder on disk is the M2 Run-20 shape. |
+| `mycelium-commitment/src/lib.rs:482` | `serde_json`, memory-safe. The gap is **provenance, not a decoder bound**: `Offer`/`Award` are unsigned and `award()` picks from them. A design question for an open contract net, still open. |
 
 **Wire back-compat gate.** `codec::tests::decode_wire_v11_agrees_with_v12_on_every_shared_variant`
 proves the current decoder reads a **PREV-version (v11)** frame for every shared `WireMessage` variant

@@ -500,6 +500,41 @@ pub mod fuzz_internals {
         }
     }
 
+    /// The hand-rolled fixed-int codec, on the two objects that reach it from outside the process:
+    /// a `LedgerEvent` read back from the rights ledger on disk, and a `PublishedRightsHead` read
+    /// from `rights/head/{holder}` in the gossip medium.
+    ///
+    /// §12.6's sweep flagged this as an unfuzzed decoder on a live path, and a 20k-case mutation
+    /// sweep found **no panic** — `serde_fixint` checks its remaining length before every read, so
+    /// the unchecked subtraction in `remaining()` is not reachable. This target exists because that
+    /// sweep is far weaker than coverage-guided fuzzing, and because a hand-rolled binary decoder
+    /// reading bytes off disk is precisely the shape behind the unbounded-allocation decode DoS
+    /// that sat uncaught through M2 Run-20.
+    ///
+    /// The invariant is round-trip stability rather than byte equality: `from_slice` deliberately
+    /// tolerates trailing bytes, so re-encoding need not reproduce the input.
+    pub fn fixint_decode(data: &[u8]) -> bool {
+        use crate::control::ledger::{LedgerEvent, PublishedRightsHead};
+        use mycelium_core::serde_fixint;
+
+        let mut decoded = false;
+        if let Ok(event) = serde_fixint::from_slice::<LedgerEvent>(data) {
+            let re = serde_fixint::to_vec(&event).expect("a decoded event must re-encode");
+            let again = serde_fixint::from_slice::<LedgerEvent>(&re)
+                .expect("a re-encoded event must decode");
+            assert_eq!(event, again, "a ledger event did not survive its own round trip");
+            decoded = true;
+        }
+        if let Ok(head) = serde_fixint::from_slice::<PublishedRightsHead>(data) {
+            let re = serde_fixint::to_vec(&head).expect("a decoded head must re-encode");
+            let again = serde_fixint::from_slice::<PublishedRightsHead>(&re)
+                .expect("a re-encoded head must decode");
+            assert_eq!(head, again, "a rights head did not survive its own round trip");
+            decoded = true;
+        }
+        decoded
+    }
+
     /// A trust bundle, as an operator's configuration is read into the process.
     ///
     /// §12.6 names trust bundles as a trust-edge parser and they are the weakest edge of the four:

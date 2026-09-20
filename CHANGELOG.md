@@ -102,19 +102,34 @@ them were not relied on for what their own code claimed. One finding changes a p
   avoided the change and would have been the refusal-conflation this module forbids: a stale view is
   not a broken connection, and an operator told the wrong one looks in the wrong place.
 
-### Known and not fixed — further trust-edge parsers
+### Measured, not fixed — the remaining trust-edge parsers
 
-A coverage sweep for the above found four more parsers that read externally-supplied bytes before
-anything is verified. **The journal's framing, which was the most serious, is fixed above.** The
-remaining three are **named here rather than quietly left out**, and each is a different subsystem
-from the ones fixed above rather than the same parser one layer deeper:
+The coverage sweep behind the fuzz targets named four further parsers that read externally-supplied
+bytes before anything is verified. The journal's framing was the serious one and is **fixed above**.
+The other three were then **measured rather than left as a list of worries**, and each turns out to
+be weaker than the list implied — recorded here because an unqualified list of "unfuzzed parsers"
+reads as a set of vulnerabilities, and these are not:
 
-- `src/control/ledger.rs:333` — `PublishedRightsHead::decode` reads gossip bytes (`rights/head/{holder}`,
-  writable by any peer) through the hand-rolled `serde_fixint`, before `verify_published_head`.
-- `src/control/ledger.rs:362` — `RightsLedger::open` decodes every on-disk `LedgerEvent`, which
-  carries no signature at all; its own doc states the invariant a target would assert.
+- `src/control/ledger.rs:333` — `PublishedRightsHead::decode` returns `Option` and cannot panic, and
+  its only callers today are inside `#[test]` functions. It is a **reserved surface**: a trust edge
+  when a production reader exists, not one now.
+- `src/control/ledger.rs:362` — `RightsLedger::open` is live and decodes unsigned on-disk
+  `LedgerEvent`s through the hand-rolled `serde_fixint`. A 20,000-case mutation sweep over a valid
+  encoding produced **3,808 successful decodes and no panic**: the decoder checks its remaining
+  length before every read, so the unchecked subtraction in `remaining()` is not reachable from
+  these types. It now has a fuzz target regardless — see below.
 - `mycelium-commitment/src/lib.rs:482` — offers and awards are decoded from the gossip log and
-  `award()` picks a winner from them; `Offer` and `Award` carry no signature.
+  `award()` picks a winner from them without either type being signed. `serde_json` underneath, so
+  the exposure is **semantic, not memory safety**: a peer can publish an offer, which is what an open
+  contract net is for, and what is missing is provenance rather than a decoder bound.
+
+### Added
+
+- **A fuzz target for `serde_fixint`**, the hand-rolled byte layer under the rights ledger's signed
+  documents, over the two types that reach it from outside the process. Kept despite the sweep above
+  finding nothing, because that sweep is far weaker than coverage-guided fuzzing and because a
+  hand-rolled binary decoder reading bytes off disk is the shape behind the unbounded-allocation
+  decode DoS that sat uncaught through M2 Run-20.
 
 ### Still open from the audit — neither is a patch
 
