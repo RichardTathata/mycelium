@@ -126,7 +126,7 @@ pub fn federation_principal(origin_domain: &str, principal: &str) -> String {
 #[cfg(feature = "tls")]
 const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";
 /// Upper bound on an envelope: a principal, a node id, a few scopes.
-const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -415,6 +415,7 @@ fn refused(reason: &'static str) {
 // ── Wire envelope ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzz-internals", derive(Debug, PartialEq))]
 struct Envelope {
     v: u8,
     /// principal
@@ -563,6 +564,44 @@ pub(crate) fn split_frame(after_nonce: &Bytes) -> Frame {
         return Frame::Malformed("envelope truncated");
     }
     Frame::Framed { envelope: after_nonce.slice(hdr..hdr + len), app: after_nonce.slice(hdr + len..) }
+}
+
+/// Fuzz hook (§12.6): drive the caller-context **envelope** decode exactly as [`verify`] does, up
+/// to but not including the signature check.
+///
+/// [`split_frame`] only classifies; everything that actually reads the client's envelope happens
+/// after it and **before** `verify_bytes` — the JSON decode, the `via` node id, and the two base64
+/// fields. Fuzzing the classification alone stops one layer short of the bytes an attacker shapes.
+///
+/// The invariant asserted is **signing-field stability**: the verifier rebuilds the signed message
+/// from these parsed fields, so an envelope that parses one way and re-renders another would have
+/// one credential verified and a different one acted on.
+#[cfg(feature = "fuzz-internals")]
+pub(crate) fn fuzz_envelope_decode(after_nonce: &Bytes) -> bool {
+    let Frame::Framed { envelope, .. } = split_frame(after_nonce) else { return false };
+    let Ok(env) = serde_json::from_slice::<Envelope>(&envelope) else { return false };
+
+    let rendered = serde_json::to_vec(&env).expect("a parsed envelope must re-render");
+    let again: Envelope =
+        serde_json::from_slice(&rendered).expect("a rendered envelope must re-parse");
+    assert_eq!(env, again, "an envelope did not survive its own round trip");
+
+    // A `via` that is not a node id is a refusal, never a panic.
+    let _ = env.via.parse::<NodeId>();
+
+    // Drive both credential fields exactly as `verify` does. There is no assertion here on
+    // purpose: that a fixed-size `try_into` refuses a wrong length is a property of the standard
+    // library, and asserting it would dress a tautology up as a gate. What this buys is **coverage**
+    // -- the base64 decoders run on attacker-shaped input under the fuzzer's instrumentation.
+    {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let _: Option<[u8; 32]> =
+            env.k.as_deref().and_then(|k| b64.decode(k).ok()).and_then(|v| v.try_into().ok());
+        let _: Option<[u8; 64]> =
+            env.sig.as_deref().and_then(|s| b64.decode(s).ok()).and_then(|v| v.try_into().ok());
+    }
+    true
 }
 
 #[cfg(feature = "tls")]

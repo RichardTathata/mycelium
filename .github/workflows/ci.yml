@@ -59,7 +59,10 @@ jobs:
       # compile and be able to permit, deny and be undecided. `--lib` would never catch a
       # `#[non_exhaustive]` constructor hole, which is how one shipped into review (2026-09-15).
       - run: cargo test --test ae_external_adapter --features tls,a2a
-      - run: cargo test --lib --features fuzz-internals mini_fuzz_decoders_survive_adversarial_bytes
+      # `tls` as well as `fuzz-internals`: two of the trust-edge parsers (the presented
+      # credential, the catalogue reply) live behind it, so without it they are not
+      # compiled and the mini-fuzz would silently cover two of four.
+      - run: cargo test --lib --features fuzz-internals,tls mini_fuzz_decoders_survive_adversarial_bytes
       - run: ./scripts/ci-retest.sh -p mycelium-tuple-space --features gateway
       # Examples are the documented contract for the guide chapters; an
       # examples-free CI let a stale include_str! path hide behind cargo's
@@ -496,6 +499,17 @@ jobs:
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu wire_decode -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu capability_decode -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu frame_apply -- -max_total_time=120
+      # Trust-edge parsers (§12.6): every parser the v3 axis added that reads partner- or
+      # client-controlled bytes before they have been verified. Each asserts the invariant
+      # it is relied on for, so a wrong-but-well-formed parse fails the run, not just a crash.
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu caller_frame -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu presented_call -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu catalog_reply -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu federation_objects -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu trust_bundle -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_trace -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu caller_envelope -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_bundle -- -max_total_time=120
 
   loom:
     # Permutation model-checking of the lock-free/atomic patterns (the

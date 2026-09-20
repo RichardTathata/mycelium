@@ -97,6 +97,36 @@ build: `store::prop_tests::fuzz_apply_observe_tick_never_panics`,
 only added in pass 5, after a fifth audit pass found the un-fuzzed `rate.rs` overflow) — the Robustness
 dimension in `ratings.md` stays at its floor until a pass validates the sweep by finding nothing.
 
+**Trust-edge fuzz gate (§12.6, 2026-09-20).** A parser sits on a **trust edge** when it reads bytes a
+partner, a client or an operator controls *before anything about them has been verified*. Eight targets
+cover the v3 axis' three such surfaces — `caller_frame` and `caller_envelope` (`src/agent/gateway_caller.rs`),
+`presented_call` / `catalog_reply` / `federation_objects` / `trust_bundle` (`src/federation*`), and
+`replay_trace` / `replay_bundle` (`mycelium-sim`). Nightly `cargo-fuzz`, plus mutation passes over valid
+seeds in the in-suite `mini_fuzz_decoders_survive_adversarial_bytes` on every PR (that line needs
+`--features fuzz-internals,tls`, or two of the eight are not compiled and the pass silently covers six).
+
+The discipline that distinguishes this from the gate above: **assert the invariant the parser is relied
+on for, not that it survived.** A crash is the easy case; a wrong-but-well-formed parse is the one that
+ships. Byte conservation for the frame (no input byte lost or invented, whichever way it is classified),
+signing-field stability for the objects whose signatures cover bytes rebuilt from the parsed fields.
+Three lessons, each paid for:
+
+- **A derived `Deserialize` on a validating newtype validates nothing.** `DomainId::new` enforces
+  `[a-z0-9.-]` and 253 bytes; the derive wrote the inner field directly, so the rule held only for
+  *constructed* ids while most are *parsed* from partner bytes. Same shape in `PrincipalId` / `TermId`.
+  **Check every newtype whose constructor validates: the wire path needs a manual `Deserialize`.**
+- **`parse → write → parse` is the weak invariant.** A stably-lossy reader reproduces its own mangling,
+  so that round trip passes over already-corrupted text. Start from the **value**, not the text:
+  `write → read` fidelity is what found `mycelium-sim`'s bundle codec dropping a newline-bearing field.
+- **A seed that does not reach the layer tests nothing.** The first `caller_envelope` seed was merely
+  frame-shaped, so every envelope assertion was unreachable; the case count was identical before and
+  after adding a whole layer. The mini-fuzz now **asserts its own seed's reachability** before mutating it.
+
+**Not covered, and named rather than omitted:** `agent/journal.rs:332` (a `u32` length from the file
+straight into a `vec`, bound checked *after* the read and never for the first record),
+`control/ledger.rs:333`/`:362` (peer-writable gossip and unsigned on-disk records through the hand-rolled
+`serde_fixint`), `mycelium-commitment/src/lib.rs:482` (unsigned offers/awards that `award()` picks from).
+
 **Wire back-compat gate.** `codec::tests::decode_wire_v11_agrees_with_v12_on_every_shared_variant`
 proves the current decoder reads a **PREV-version (v11)** frame for every shared `WireMessage` variant
 — the rolling-upgrade contract (`StateRequest`'s deliberate Merkle-digest change is covered separately

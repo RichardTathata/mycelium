@@ -132,6 +132,27 @@ pub enum FsOutcome {
 }
 
 impl FsOutcome {
+    /// Fuzz hook (§12.6): the recorded-outcome codec, round-tripped.
+    ///
+    /// `Trace::parse` takes a choice's result as the **verbatim remainder of the line** and does not
+    /// interpret it, so the trace target does not reach this second parse. It matters on
+    /// `Trace::parse`'s own terms: its rule is that a line which does not parse is an error rather
+    /// than a skip, because a hole replays as a different run. A misparse here is swallowed by an
+    /// `unwrap_or` at the call site and the replayed code is told the write **failed** when the
+    /// recording said it succeeded — a silent divergence, which is the failure this crate exists to
+    /// prevent.
+    #[doc(hidden)]
+    pub fn fuzz_roundtrip(text: &str) -> bool {
+        let Some(decoded) = Self::decode(text) else { return false };
+        let again = Self::decode(&decoded.encode());
+        assert_eq!(
+            Some(&decoded),
+            again.as_ref(),
+            "a recorded outcome did not survive its own round trip",
+        );
+        true
+    }
+
     fn encode(&self) -> String {
         match self {
             FsOutcome::Ok(n) => format!("Ok({n})"),

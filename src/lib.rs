@@ -410,6 +410,158 @@ pub mod fuzz_internals {
             _ => false,
         }
     }
+
+    // ── Trust-edge parsers (§12.6) ────────────────────────────────────────────
+    //
+    // A parser sits on a **trust edge** when it reads bytes a partner or a client controls, before
+    // anything about them has been verified. The axis added four such parsers, and the Phase-C
+    // adversarial audit reached three of its four defects through exactly this kind of input — so
+    // these join the input-fuzz gate rather than a list of things that ought to be fuzzed.
+    //
+    // Each entry point asserts the **invariant the parser is relied on for**, not merely that it
+    // does not panic. A parser that returns a wrong-but-well-formed answer is the failure that
+    // matters here; a crash is the easy case.
+
+    /// The caller-context frame: the first thing read off an RPC payload, before any signature
+    /// check, on bytes a gateway client may control.
+    ///
+    /// The invariant is **byte conservation**. Whatever the classification, every input byte is
+    /// accounted for exactly once and none is invented: a client must not be able to shape a
+    /// payload so that bytes it wrote as envelope reappear as application input, or the reverse.
+    /// That is the smuggling property the raw-emission guard depends on.
+    pub fn caller_frame_classify(data: &[u8]) -> bool {
+        use crate::agent::gateway_caller::{split_frame, Frame, MAX_ENVELOPE_BYTES};
+        let bytes = bytes::Bytes::copy_from_slice(data);
+        match split_frame(&bytes) {
+            Frame::Framed { envelope, app } => {
+                // 5-byte magic + 2-byte length, then the envelope, then the rest.
+                const HDR: usize = 7;
+                assert!(envelope.len() <= MAX_ENVELOPE_BYTES, "envelope exceeded its own bound");
+                assert_eq!(
+                    HDR + envelope.len() + app.len(),
+                    data.len(),
+                    "framing lost or invented bytes"
+                );
+                true
+            }
+            Frame::Unframed(rest) => {
+                assert_eq!(rest.as_ref(), data, "an unframed payload was altered in passing");
+                false
+            }
+            Frame::Malformed(_) => false,
+        }
+    }
+
+    /// The caller-context **envelope**, one layer past the frame: the JSON, the `via` node id and
+    /// the two base64 credential fields, all read before the signature is checked.
+    pub fn caller_envelope_decode(data: &[u8]) -> bool {
+        crate::agent::gateway_caller::fuzz_envelope_decode(&bytes::Bytes::copy_from_slice(data))
+    }
+
+    /// A presented federation credential's wire form — one header value on `/a2a`, entirely
+    /// partner-controlled and parsed *before* the credential is authenticated.
+    ///
+    /// The invariant is **parse stability**: the verifier rebuilds the canonical signing bytes from
+    /// the parsed fields, so a value that parses one way and re-renders another would verify a
+    /// different credential from the one presented.
+    #[cfg(feature = "tls")]
+    pub fn presented_call_parse(data: &[u8]) -> bool {
+        use crate::federation::edge::PresentedCall;
+        let Ok(text) = std::str::from_utf8(data) else { return false };
+        match PresentedCall::from_header_value(Some(text)) {
+            Ok(Some(call)) => {
+                let again = PresentedCall::from_header_value(Some(&call.to_header_value()));
+                assert_eq!(Ok(Some(call)), again, "a credential did not survive its own round trip");
+                true
+            }
+            // `None` is unreachable with `Some(_)` in, and a malformed header is the expected
+            // outcome for most inputs — what must not happen is it being read as *absent*.
+            Ok(None) => unreachable!("a present header parsed as absent"),
+            Err(_) => false,
+        }
+    }
+
+    /// A signed catalogue reply, as a client parses it off the wire before verifying it. Same
+    /// stability invariant, and it bites harder here: the signature covers bytes derived from the
+    /// parsed fields.
+    #[cfg(feature = "tls")]
+    pub fn catalog_reply_parse(data: &[u8]) -> bool {
+        use crate::federation::edge::CatalogReply;
+        let Ok(text) = std::str::from_utf8(data) else { return false };
+        match serde_json::from_str::<CatalogReply>(text) {
+            Ok(reply) => {
+                let rendered = serde_json::to_string(&reply).expect("a parsed reply must re-render");
+                let again: CatalogReply =
+                    serde_json::from_str(&rendered).expect("a rendered reply must re-parse");
+                assert_eq!(reply, again, "a catalogue reply did not survive its own round trip");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A trust bundle, as an operator's configuration is read into the process.
+    ///
+    /// §12.6 names trust bundles as a trust-edge parser and they are the weakest edge of the four:
+    /// a bundle is **bilateral operator configuration**, with no registry and deliberately no way
+    /// for a third party to add an entry. It is fuzzed anyway, because it is the object that decides
+    /// which keys are acceptable at all — a misparse here is not a refused call, it is the wrong
+    /// answer to *who do we trust*. Every partner id it carries must satisfy `DomainId::new`.
+    pub fn trust_bundle_parse(data: &[u8]) -> bool {
+        use crate::federation::TrustBundle;
+        let Ok(text) = std::str::from_utf8(data) else { return false };
+        match serde_json::from_str::<TrustBundle>(text) {
+            Ok(bundle) => {
+                for p in &bundle.partners {
+                    assert!(
+                        crate::federation::DomainId::new(p.domain.as_str()).is_ok(),
+                        "a bundle parsed a partner id no constructor would make",
+                    );
+                }
+                let rendered = serde_json::to_string(&bundle).expect("a parsed bundle must re-render");
+                let again: TrustBundle =
+                    serde_json::from_str(&rendered).expect("a rendered bundle must re-parse");
+                assert_eq!(bundle, again, "a trust bundle did not survive its own round trip");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The two signed objects an operator ingests from a partner: a domain descriptor and a domain
+    /// policy. Both are parsed before their signatures are checked, and both carry a field a later
+    /// decision is keyed on — `exports` and `revision`.
+    pub fn federation_objects_parse(data: &[u8]) -> bool {
+        use crate::federation::{DomainDescriptor, DomainPolicy};
+        let Ok(text) = std::str::from_utf8(data) else { return false };
+        // A parsed id must satisfy its own constructor. Deleting `DomainId`'s validating
+        // `Deserialize` fails this within seconds of fuzzing, which is how the gap was found.
+        fn well_formed(id: &crate::federation::DomainId) -> bool {
+            crate::federation::DomainId::new(id.as_str()).is_ok()
+        }
+
+        let mut parsed = false;
+        if let Ok(d) = serde_json::from_str::<DomainDescriptor>(text) {
+            assert!(well_formed(&d.domain), "a descriptor parsed an id no constructor would make");
+            let rendered = serde_json::to_string(&d).expect("a parsed descriptor must re-render");
+            let again: DomainDescriptor =
+                serde_json::from_str(&rendered).expect("a rendered descriptor must re-parse");
+            assert_eq!(d, again, "a descriptor did not survive its own round trip");
+            parsed = true;
+        }
+        if let Ok(p) = serde_json::from_str::<DomainPolicy>(text) {
+            assert!(well_formed(&p.domain), "a policy parsed an id no constructor would make");
+            for (partner, _) in &p.grants {
+                assert!(well_formed(partner), "a grant parsed an id no constructor would make");
+            }
+            let rendered = serde_json::to_string(&p).expect("a parsed policy must re-render");
+            let again: DomainPolicy =
+                serde_json::from_str(&rendered).expect("a rendered policy must re-parse");
+            assert_eq!(p, again, "a policy did not survive its own round trip");
+            parsed = true;
+        }
+        parsed
+    }
 }
 
 /// test-only: a bind-verified, process-unique loopback port allocator for companion

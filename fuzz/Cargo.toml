@@ -17,7 +17,15 @@ libfuzzer-sys = "0.4"
 [dependencies.mycelium]
 path = ".."
 default-features = false
-features = ["fuzz-internals"]
+# `tls` because two of the trust-edge parsers (the presented credential, the catalogue reply) live
+# behind it — the federation edge is a tls-only surface, so a default-features-off build has no
+# edge to fuzz. Nothing else here needs it.
+features = ["fuzz-internals", "tls"]
+
+# The replay trace parser is public API of the sim crate, so its target needs no
+# `fuzz_internals` hook — it calls `Trace::parse` the way a replay does.
+[dependencies.mycelium-sim]
+path = "../mycelium-sim"
 
 # Each fuzz_target is its own binary. `cargo fuzz init` writes the same layout.
 [[bin]]
@@ -37,6 +45,65 @@ bench            = false
 [[bin]]
 name             = "frame_apply"
 path             = "fuzz_targets/frame_apply.rs"
+test             = false
+doc              = false
+bench            = false
+
+# Trust-edge parsers (§12.6): every parser the axis added that reads partner- or
+# client-controlled bytes before they have been verified.
+
+[[bin]]
+name             = "caller_frame"
+path             = "fuzz_targets/caller_frame.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "presented_call"
+path             = "fuzz_targets/presented_call.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "catalog_reply"
+path             = "fuzz_targets/catalog_reply.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "federation_objects"
+path             = "fuzz_targets/federation_objects.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "trust_bundle"
+path             = "fuzz_targets/trust_bundle.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "replay_trace"
+path             = "fuzz_targets/replay_trace.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "caller_envelope"
+path             = "fuzz_targets/caller_envelope.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "replay_bundle"
+path             = "fuzz_targets/replay_bundle.rs"
 test             = false
 doc              = false
 bench            = false

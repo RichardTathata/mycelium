@@ -52,8 +52,19 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// A principal — a holder, or an authority that establishes one. Opaque here.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct PrincipalId(Arc<str>);
+
+/// Deserialization goes through [`PrincipalId::new`], so the rule the constructor states holds for a
+/// parsed value too. A derived `Deserialize` on a newtype validates nothing, which let an empty
+/// a principal arrive from a store or a peer that no constructor would produce — and an empty
+/// identifier is the one value that compares equal to a default and names nobody.
+impl<'de> Deserialize<'de> for PrincipalId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Self::new(&raw).ok_or_else(|| serde::de::Error::custom("PrincipalId must not be empty"))
+    }
+}
 
 impl PrincipalId {
     /// Wrap a principal name; empty is refused.
@@ -77,8 +88,19 @@ impl std::fmt::Display for PrincipalId {
 ///
 /// Two terms held by the same principal are two appointments. A term id makes "reappointed after a
 /// gap" a fact the system can state, rather than something a reader infers from a holder name.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct TermId(Arc<str>);
+
+/// Deserialization goes through [`TermId::new`], so the rule the constructor states holds for a
+/// parsed value too. A derived `Deserialize` on a newtype validates nothing, which let an empty
+/// a term id arrive from a store or a peer that no constructor would produce — and an empty
+/// identifier is the one value that compares equal to a default and names nobody.
+impl<'de> Deserialize<'de> for TermId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Self::new(&raw).ok_or_else(|| serde::de::Error::custom("TermId must not be empty"))
+    }
+}
 
 impl TermId {
     /// Wrap a term id; empty is refused.
