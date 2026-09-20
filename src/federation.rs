@@ -58,8 +58,31 @@ pub const TAG_POLICY: &str = "mycelium.federation/policy/1";
 ///
 /// A domain is one independently admitted gossip mesh (§1 of the record). `DomainId` names it;
 /// `cluster_name` remains a cosmetic label with no isolation meaning and is **not** this.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct DomainId(Arc<str>);
+
+/// Deserialization goes through [`DomainId::new`], so the charset and length rules hold for a
+/// value that arrived over the wire and not merely for one built in process.
+///
+/// A derived `Deserialize` on a newtype writes the inner field directly and validates nothing,
+/// which made the invariant above true only of ids this process constructed — and **most `DomainId`s
+/// are parsed, not constructed**: the origin on a presented credential, the two domains on a
+/// catalogue reply, the subject of a descriptor, the partners in a policy's grants. Each is read
+/// from partner-controlled bytes *before* anything about them is verified.
+///
+/// This does not forge authority — an id that no trust bundle holds a key for is refused whatever
+/// its spelling. What it prevented is narrower and worth stating exactly: `Depot` and `depot` are
+/// one domain to an operator reading an evidence record and two to a `HashMap`; an id carrying `/`
+/// makes [`federation_principal`](crate::agent::federation_principal)'s
+/// `federation:{domain}/{principal}` ambiguous about where the domain ends; an id carrying a
+/// newline reaches a log line before it is authenticated; and an unbounded id reaches all three
+/// with no 253-byte cap. Found by the §12.6 trust-edge fuzz work.
+impl<'de> Deserialize<'de> for DomainId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Self::new(&raw).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Why a candidate string is not a usable `DomainId`.
 #[derive(Debug, Clone, PartialEq, Eq)]

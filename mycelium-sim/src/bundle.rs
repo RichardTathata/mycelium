@@ -233,6 +233,68 @@ fn json_object(fields: &BTreeMap<String, String>) -> String {
     format!("{{\n{}\n}}\n", body.join(",\n"))
 }
 
+/// Fuzz hook (§12.6): **write-then-read fidelity** — what [`json_object`] writes, [`parse_object`]
+/// must read back unchanged.
+///
+/// This is the invariant that matters, and it is strictly stronger than round-tripping arbitrary
+/// *text*: `parse_object` is lossy in a stable way, so `parse → write → parse` holds even where a
+/// field was already mangled. Starting from the map catches exactly what the text form hides. Two
+/// defects were found this way and fixed in [`quote`] / [`unquote`].
+#[doc(hidden)]
+pub fn fuzz_write_read(m: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    parse_object(&json_object(m))
+}
+
+/// Fuzz entry point: build an object out of the fuzzer's bytes and assert it survives a write and
+/// a read. Keys and values are taken as alternating newline-separated chunks, so the fuzzer
+/// controls both sides of every pair.
+#[doc(hidden)]
+pub fn fuzz_object_fidelity(text: &str) -> bool {
+    let mut m = BTreeMap::new();
+    let mut chunks = text.split('\u{1}');
+    while let (Some(k), Some(v)) = (chunks.next(), chunks.next()) {
+        // An empty key is not representable in the flat form and `parse_object` drops it by
+        // design, so it is out of scope for a fidelity claim.
+        if !k.is_empty() {
+            m.insert(k.to_string(), v.to_string());
+        }
+    }
+    if m.is_empty() {
+        return false;
+    }
+    let back = fuzz_write_read(&m);
+    assert_eq!(m, back, "a bundle object did not survive being written and read back");
+    true
+}
+
+/// Fuzz hook (§12.6): the bundle's hand-rolled JSON reader, round-tripped against its writer.
+///
+/// A reproduction bundle is the artefact that travels with a bug report, so in practice these are
+/// third-party bytes. `Bundle::read` parses `build.json`, `config.json` and `witness.json` with
+/// this reader and never verifies anything. The stake is `Build.commit` and `Build.version` — the
+/// fields a replay uses to decide it is replaying against the same binary.
+///
+/// The invariant is that what [`json_object`] writes, this reads back unchanged.
+#[doc(hidden)]
+pub fn fuzz_object_roundtrip(text: &str) -> bool {
+    let parsed = parse_object(text);
+    if parsed.is_empty() {
+        return false;
+    }
+    let reparsed = parse_object(&json_object(&parsed));
+    assert_eq!(parsed, reparsed, "a bundle object did not survive its own round trip");
+    true
+}
+
+/// Fuzz hook (§12.6): as [`fuzz_object_roundtrip`], for the `build.json` reader.
+#[doc(hidden)]
+pub fn fuzz_build_roundtrip(text: &str) -> bool {
+    let build = parse_build(text);
+    let reparsed = parse_build(&json_object(&build_fields(&build)));
+    assert_eq!(build, reparsed, "a build record did not survive its own round trip");
+    true
+}
+
 fn parse_object(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
@@ -250,12 +312,65 @@ fn business_separator() -> &'static str {
     "\": \""
 }
 
+/// Escape one field for the flat object form.
+///
+/// Newlines are escaped because the reader is **line-oriented** — `parse_object` iterates
+/// `text.lines()`, so a literal newline in a value truncated it at the newline and silently dropped
+/// the rest. A `witness.assertion` is free text, so this was reachable: a replay would check a
+/// shorter, weaker assertion than the one recorded and report success. Found by the §12.6
+/// trust-edge fuzz work.
 fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
+/// The inverse of [`quote`].
+///
+/// Strips **exactly one** surrounding quote rather than `trim_matches('"')`, which stripped every
+/// trailing quote — so a value ending in an escaped quote came back with the quote gone and its
+/// backslash left behind (`he said "hi"` read back as `he said "hi\`). Unescaping is a single
+/// left-to-right pass rather than two chained `replace`s, which decoded `\\"` as an escaped quote
+/// instead of a backslash followed by a quote.
 fn unquote(s: &str) -> String {
-    s.trim_matches('"').replace("\\\"", "\"").replace("\\\\", "\\")
+    // At most one quote from each end, stripped independently: `parse_object` splits a line in
+    // the middle of the pair, so a key arrives with only its opening quote and a value with only
+    // its closing one. `trim_matches` removed every trailing quote, which is how a value ending in
+    // an escaped quote lost it.
+    let inner = s.strip_prefix('"').unwrap_or(s);
+    let inner = inner.strip_suffix('"').unwrap_or(inner);
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            // An escape this writer never emits is kept verbatim rather than swallowed: a byte
+            // dropped here is a field that reads back shorter than it was written.
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -355,5 +470,68 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         assert!(Bundle::read(&dir).is_err(), "no trace is not the same as no decisions");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+
+#[cfg(test)]
+mod fidelity_tests {
+    use super::*;
+
+    /// What the bundle writer writes, the bundle reader reads back — including the two shapes that
+    /// used to be silently corrupted.
+    ///
+    /// Both were found by the §12.6 trust-edge fuzz work. They matter because a bundle is the
+    /// artefact that travels with a bug report: `Build.commit` decides whether a replay is against
+    /// the same binary at all, and `witness.assertion` is the free text a replay checks. A field
+    /// that reads back shorter than it was written makes a replay check something weaker than what
+    /// was recorded and then report success — a silent divergence, in the crate whose whole purpose
+    /// is to make divergence loud.
+    ///
+    /// What this does NOT prove: nothing here says the flat form is a correct JSON encoder. It is
+    /// deliberately not one — it is a format two functions in this file agree on, and this pins
+    /// that agreement.
+    #[test]
+    fn a_bundle_field_survives_being_written_and_read_back() {
+        let cases: &[(&str, &str)] = &[
+            ("commit", "abc123"),
+            // The `trim_matches('"')` defect: a value ending in an escaped quote came back as
+            // `he said "hi\` — quote gone, its backslash left behind.
+            ("quote", "he said \"hi\""),
+            ("trail", "v\""),
+            ("lead", "\"v"),
+            // The line-oriented defect: a value containing a newline was truncated at it and the
+            // rest was dropped without a word.
+            ("newline", "a\nb"),
+            ("carriage", "a\rb"),
+            ("assertion", "the depot never double-books a pallet\nand never holds one past its window"),
+            ("colon", "a: b"),
+            ("sep", "a\": \"b"),
+            ("backslash", "a\\b"),
+            ("escaped", "a\\\"b"),
+            ("empty", ""),
+        ];
+        for (k, v) in cases {
+            let mut m = BTreeMap::new();
+            m.insert((*k).to_string(), (*v).to_string());
+            assert_eq!(
+                m,
+                fuzz_write_read(&m),
+                "field {k:?} did not survive being written and read back",
+            );
+        }
+    }
+
+    /// The same claim for a whole `Build`, which is the record a replay checks its binary against.
+    #[test]
+    fn a_build_record_survives_being_written_and_read_back() {
+        let b = Build {
+            commit:   "deadbeef".into(),
+            version:  "2.9.1".into(),
+            features: vec!["sim".into(), "tls".into()],
+            target:   "aarch64-apple-darwin".into(),
+            rustc:    "rustc 1.88.0 (\"stable\")".into(),
+        };
+        assert_eq!(b, parse_build(&json_object(&build_fields(&b))));
     }
 }

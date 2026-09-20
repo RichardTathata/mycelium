@@ -9,8 +9,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-**Three more Phase-C audit findings closed.** v2.9.1 named these as *known and not fixed*; they are
-fixed here. One of them changes a public type, so **the next release is a MINOR, not a PATCH**.
+**Three more Phase-C audit findings closed, and two more found by the work that was meant only to
+gate them.** v2.9.1 named the first three as *known and not fixed*. The other two came out of
+§12.6's trust-edge fuzz targets: writing down what each parser is relied on for showed that two of
+them were not relied on for what their own code claimed. One finding changes a public type, so
+**the next release is a MINOR, not a PATCH**.
 
 ### Fixed
 
@@ -36,6 +39,46 @@ fixed here. One of them changes a public type, so **the next release is a MINOR,
   reappeared in the client's view. Bounded: the catalogue confers **visibility, not authority**, and
   the provider re-authorises at call time, so a replay ended in a refusal rather than an
   unauthorised call.
+- **A `DomainId` from the wire now obeys its own constructor.** `DomainId::new` refuses anything
+  outside `[a-z0-9.-]` and anything over 253 bytes, and the type says why: two ids differing only in
+  case are *one domain to a human and two to a `HashMap`, and the place that difference would
+  surface is a trust decision*. A derived `Deserialize` on a newtype writes the inner field and
+  validates nothing — so that rule held only for ids this process **constructed**, while most
+  `DomainId`s are **parsed**: the origin on a presented credential, both domains on a catalogue
+  reply, a descriptor's subject, a policy's grants. Each is read from partner-controlled bytes
+  before anything about them has been verified. Bounded, and worth stating exactly: this **could not
+  forge authority** — an id no trust bundle holds a key for is refused whatever its spelling. What it
+  admitted was `Depot` and `depot` as two entries an operator reads as one; an id carrying `/`, which
+  makes `federation:{domain}/{principal}` ambiguous about where the domain ends; an id carrying a
+  newline, which reaches a log line before it is authenticated; and an id of unbounded length, which
+  reaches all three. `PrincipalId` and `TermId` had the same gap against their own non-empty rule and
+  are fixed with it.
+
+- **A replay bundle's fields survive being written and read back.** `mycelium-sim`'s flat object
+  form is written by `quote` and read by `unquote`, and the pair disagreed in two ways. `unquote`
+  used `trim_matches('"')`, which strips **every** trailing quote rather than the one delimiter — so
+  a value ending in an escaped quote came back with the quote gone and its backslash left behind
+  (`he said "hi"` read back as `he said "hi\`). And `quote` never escaped newlines although the
+  reader is line-oriented (`parse_object` iterates `text.lines()`), so a value containing a newline
+  was **truncated at it and the rest dropped without a word**. `witness.assertion` is free text, so
+  this was reachable: a replay would check a shorter, weaker assertion than the one recorded and
+  then report success — a silent divergence, in the crate whose whole purpose is to make divergence
+  loud. Both are fixed, and the fidelity claim is now pinned by a test and asserted by the fuzz
+  target. **Bundles already on disk read back unchanged** — the escape is new on the write side and
+  the reader is strictly more faithful than before.
+
+### Added
+
+- **Fuzz targets for the parsers the axis put on a trust edge** (§12.6) — eight of them, across the
+  three surfaces §12.6 names: the caller-context frame **and the envelope behind it**, the presented
+  federation credential, the catalogue reply, the descriptor/policy pair, the trust bundle, the
+  replay trace, and the replay bundle's other readers (the recorded outcome codec and the
+  hand-rolled `build.json`/`config.json` parser). Each asserts **the invariant the parser is relied
+  on for** rather than merely surviving — byte conservation for the frame (no input byte lost or
+  invented, whichever way it is classified), and round-trip stability for the parsed objects, whose
+  signatures cover bytes rebuilt from the parsed fields. They run in the nightly `cargo-fuzz` job
+  and, as mutation passes over valid seeds, in the in-suite mini-fuzz on every PR — which is how
+  the `DomainId` gap above was found.
 
 ### Changed — API
 
@@ -43,6 +86,22 @@ fixed here. One of them changes a public type, so **the next release is a MINOR,
   downstream exhaustive `match` needs a `_` arm. Reusing the existing transport error would have
   avoided the change and would have been the refusal-conflation this module forbids: a stale view is
   not a broken connection, and an operator told the wrong one looks in the wrong place.
+
+### Known and not fixed — further trust-edge parsers
+
+A coverage sweep for the above found four more parsers that read externally-supplied bytes before
+anything is verified. They are **named here rather than quietly left out**, and each is a different
+subsystem from the ones fixed above rather than the same parser one layer deeper:
+
+- `src/agent/journal.rs:332` — the journal's length-prefix framing takes a `u32` straight from the
+  file into `vec![0u8; want]`, and the `max_bytes` bound is checked *after* the read and by design
+  never for the first record. Under both the evidence journal and the rights ledger.
+- `src/control/ledger.rs:333` — `PublishedRightsHead::decode` reads gossip bytes (`rights/head/{holder}`,
+  writable by any peer) through the hand-rolled `serde_fixint`, before `verify_published_head`.
+- `src/control/ledger.rs:362` — `RightsLedger::open` decodes every on-disk `LedgerEvent`, which
+  carries no signature at all; its own doc states the invariant a target would assert.
+- `mycelium-commitment/src/lib.rs:482` — offers and awards are decoded from the gossip log and
+  `award()` picks a winner from them; `Offer` and `Award` carry no signature.
 
 ### Still open from the audit — neither is a patch
 

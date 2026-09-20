@@ -3583,7 +3583,91 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
         let _ = crate::fuzz_internals::capability_decode(&buf);
         let _ = crate::fuzz_internals::cap_filter_decode(&buf);
         let _ = crate::fuzz_internals::locality_path_decode(&buf);
+        // Trust-edge parsers (§12.6): bytes a partner or a client controls, parsed before
+        // anything about them is verified. These assert their invariant rather than merely
+        // surviving -- byte conservation for the frame, round-trip stability and a well-formed
+        // `DomainId` for the federation objects.
+        let _ = crate::fuzz_internals::caller_frame_classify(&buf);
+        let _ = crate::fuzz_internals::caller_envelope_decode(&buf);
+        let _ = crate::fuzz_internals::federation_objects_parse(&buf);
+        let _ = crate::fuzz_internals::trust_bundle_parse(&buf);
+        #[cfg(feature = "tls")]
+        {
+            let _ = crate::fuzz_internals::presented_call_parse(&buf);
+            let _ = crate::fuzz_internals::catalog_reply_parse(&buf);
+        }
         cases += 1;
+    }
+
+    // Mutations of a VALID caller-context frame. Noise almost never produces the 5-byte magic, so
+    // the interesting region -- length fields, boundary arithmetic -- is only reachable by
+    // mutating a well-formed one. This is the same reasoning as the valid-frame pass below.
+    {
+        // A real `Envelope`: v/p/via/s/t, with the two optional base64 credential fields. A seed
+        // that is merely frame-shaped would never get past `serde_json`, so the envelope layer's
+        // assertions would never run and the pass would silently test only the framing.
+        let envelope = br#"{"v":1,"p":"token:node-1/dispatch","via":"127.0.0.1:7001","s":["kv:write"],"t":1700000000000,"k":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","sig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
+        let mut valid_frame = vec![0x00, b'G', b'W', b'C', 1];
+        valid_frame.extend_from_slice(&(envelope.len() as u16).to_be_bytes());
+        valid_frame.extend_from_slice(envelope);
+        valid_frame.extend_from_slice(b"application-bytes");
+
+        // The seed must actually reach both layers, or the mutation pass below silently tests
+        // only the framing. A gate that has quietly stopped exercising what it names is worse
+        // than no gate, so this is asserted rather than assumed.
+        assert!(
+            crate::fuzz_internals::caller_frame_classify(&valid_frame),
+            "the seed must classify as a framed payload",
+        );
+        assert!(
+            crate::fuzz_internals::caller_envelope_decode(&valid_frame),
+            "the seed must decode as an envelope, or the envelope layer is never reached",
+        );
+
+        for cut in 0..valid_frame.len() {
+            let _ = crate::fuzz_internals::caller_frame_classify(&valid_frame[..cut]);
+            let _ = crate::fuzz_internals::caller_envelope_decode(&valid_frame[..cut]);
+            cases += 1;
+        }
+        for i in 0..valid_frame.len() {
+            for bit in 0..8 {
+                let mut m = valid_frame.clone();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::caller_frame_classify(&m);
+                // The envelope layer is only reachable through a frame that still carries the
+                // magic, so it is mutation and not noise that gets there at all.
+                let _ = crate::fuzz_internals::caller_envelope_decode(&m);
+                cases += 1;
+            }
+        }
+    }
+
+    // Mutations of a VALID federation policy: the same argument, for a text parser. A byte flipped
+    // inside the domain string is how an id that no constructor would produce reaches the parser.
+    {
+        let valid_policy = br#"{"domain":"depot.example","revision":7,"grants":[["kitchen.example","dispatch"]]}"#;
+        for i in 0..valid_policy.len() {
+            for bit in 0..8 {
+                let mut m = valid_policy.to_vec();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::federation_objects_parse(&m);
+                cases += 1;
+            }
+        }
+    }
+
+    // And a VALID trust bundle. This is the object that decides which keys are acceptable at all,
+    // so a misparse is not a refused call -- it is the wrong answer to *who do we trust*.
+    {
+        let valid_bundle = br#"{"partners":[{"domain":"kitchen.example","key":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31],"retiring":null,"revoked":false}]}"#;
+        for i in 0..valid_bundle.len() {
+            for bit in 0..8 {
+                let mut m = valid_bundle.to_vec();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::trust_bundle_parse(&m);
+                cases += 1;
+            }
+        }
     }
     // Truncations of a valid frame at every offset.
     for cut in 0..valid.len() {
@@ -6900,4 +6984,74 @@ mod federation_transport {
         let _ = std::fs::remove_dir_all(&ca_a);
         let _ = std::fs::remove_dir_all(&ca_b);
     }
+}
+
+
+/// A `DomainId` that arrives over the wire obeys the same rules as one built in process.
+///
+/// `DomainId::new` refuses anything outside `[a-z0-9.-]` and anything over 253 bytes, and the
+/// type's own documentation gives the reason: two ids differing only in case are one domain to a
+/// human and two to a `HashMap`, and the place that difference surfaces is a trust decision. A
+/// derived `Deserialize` writes the inner field and checks nothing, so that rule held only for
+/// constructed values -- while **most** `DomainId`s are parsed, from partner-controlled bytes,
+/// before anything about them has been verified.
+///
+/// What this does NOT prove: nothing here shows an unvalidated id could forge authority. It could
+/// not -- an id no trust bundle holds a key for is refused whatever its spelling. This pins the
+/// narrower claim, which is that the type means on the wire what it says it means.
+/// Found by the §12.6 trust-edge fuzz work.
+#[test]
+fn a_domain_id_from_the_wire_obeys_its_own_constructor() {
+    use crate::federation::DomainId;
+
+    // The exact values the constructor refuses, refused identically when parsed.
+    for bad in ["UPPER", "mixed.Case", "has space", "sl/ash", "new\nline", "under_score", ""] {
+        assert!(DomainId::new(bad).is_err(), "constructor must refuse {bad:?}");
+        let json = serde_json::to_string(bad).expect("encode");
+        assert!(
+            serde_json::from_str::<DomainId>(&json).is_err(),
+            "the wire must refuse {bad:?} too -- the constructor's rule is not optional",
+        );
+    }
+
+    // The length cap holds on the wire as well.
+    let over = "a".repeat(254);
+    assert!(DomainId::new(&over).is_err(), "constructor must refuse a 254-byte id");
+    let json = serde_json::to_string(&over).expect("encode");
+    assert!(
+        serde_json::from_str::<DomainId>(&json).is_err(),
+        "the wire must enforce the 253-byte cap",
+    );
+
+    // And a legitimate id still round-trips unchanged -- the rule is validation, not rejection.
+    let good = DomainId::new("depot.example").expect("a valid id");
+    let encoded = serde_json::to_string(&good).expect("encode");
+    assert_eq!(encoded, "\"depot.example\"", "the wire form is the bare id, unchanged");
+    let back: DomainId = serde_json::from_str(&encoded).expect("a valid id must still parse");
+    assert_eq!(good, back, "a valid id must survive its own round trip");
+}
+
+/// The same gap, on the two mandate newtypes: `new` refuses an empty id and the derived
+/// `Deserialize` did not. An empty identifier is the one value that names nobody while comparing
+/// equal to itself, so it is worth not admitting from a store or a peer.
+#[test]
+fn a_mandate_identifier_from_the_wire_is_never_empty() {
+    use crate::mandate::{PrincipalId, TermId};
+
+    assert!(PrincipalId::new("").is_none(), "constructor must refuse an empty principal");
+    assert!(TermId::new("").is_none(), "constructor must refuse an empty term id");
+    assert!(
+        serde_json::from_str::<PrincipalId>("\"\"").is_err(),
+        "the wire must refuse an empty principal too",
+    );
+    assert!(
+        serde_json::from_str::<TermId>("\"\"").is_err(),
+        "the wire must refuse an empty term id too",
+    );
+
+    // Non-empty still round-trips.
+    let p = PrincipalId::new("dispatcher").expect("valid");
+    let back: PrincipalId = serde_json::from_str(&serde_json::to_string(&p).expect("encode"))
+        .expect("a valid principal must still parse");
+    assert_eq!(p, back);
 }
