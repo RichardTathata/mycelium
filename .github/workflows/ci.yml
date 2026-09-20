@@ -510,6 +510,7 @@ jobs:
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_trace -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu caller_envelope -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_bundle -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fixint_decode -- -max_total_time=120
 
   loom:
     # Permutation model-checking of the lock-free/atomic patterns (the
