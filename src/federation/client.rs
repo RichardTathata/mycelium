@@ -83,6 +83,10 @@ struct ClientState {
     pool: GatewayPool,
     resolver: RemoteResolver,
     last_catalogue: Option<Vec<String>>,
+    /// The highest policy revision accepted from this partner. `DomainPolicy::revision` is
+    /// documented as monotonic; this is what makes that rule true of a *consumer* rather than only
+    /// of the producer. See [`CatalogRefusal::StaleRevision`].
+    highest_revision: Option<u64>,
 }
 
 /// One domain's client for one partner. See the module docs for the sequence.
@@ -153,6 +157,7 @@ impl FederationClient {
                 pool,
                 resolver: RemoteResolver::new(freshness),
                 last_catalogue: None,
+                highest_revision: None,
             }),
         }
     }
@@ -261,6 +266,22 @@ impl FederationClient {
                 return Err(err);
             }
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+            // A signed reply carries no expiry and no nonce, so an old one still verifies. The
+            // revision is what orders them, and the rule is the consumer's to keep: never accept a
+            // lower one than it has already accepted. Checked *after* the signature and the domain,
+            // so a replay is reported as a replay rather than as whichever check came first.
+            if let Some(seen) = s.highest_revision
+                && reply.policy_revision < seen
+            {
+                s.link.disconnected();
+                return Err(ClientError::Catalogue(CatalogRefusal::StaleRevision {
+                    seen,
+                    offered: reply.policy_revision,
+                }));
+            }
+            s.highest_revision = Some(reply.policy_revision.max(s.highest_revision.unwrap_or(0)));
+
             s.link.connected();
             s.resolver.observe(CatalogObservation {
                 partner: self.partner.clone(),

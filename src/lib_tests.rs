@@ -6819,6 +6819,37 @@ mod federation_transport {
         assert_eq!(exports, vec!["demo/whoami".to_string(), "demo/secret".to_string()], "the grant changed mid-partition is what discovery now sees");
         assert_eq!(client.link_state(), LinkState::Ready);
 
+        // 7a. A revision never goes backwards, even signed. A catalogue reply carries no expiry
+        // and no nonce, so a captured one still verifies after the operator moves on.
+        // `DomainPolicy::revision` is documented as monotonic — a consumer that has seen a higher
+        // revision must not accept a lower one — and that rule was stated and implemented nowhere:
+        // a reply from a revision that granted an export replayed into a fresh observation, and the
+        // withdrawn export reappeared in the client's view. Phase-C audit finding. Rolling the edge
+        // back to revision 1 stands in for the replay.
+        edge.set_policy(DomainPolicy {
+            domain: alpha.clone(),
+            revision: 1,
+            grants: vec![(beta.clone(), "demo/whoami".into()), (beta.clone(), "demo/secret".into())],
+        });
+        let rolled_back = client.connect().await;
+        assert!(
+            matches!(
+                rolled_back,
+                Err(ClientError::Catalogue(crate::federation::edge::CatalogRefusal::StaleRevision {
+                    seen: 2,
+                    offered: 1,
+                }))
+            ),
+            "an older revision must be refused as stale, got {rolled_back:?}"
+        );
+        // Restore, and the client accepts it again — the rule is monotonicity, not one-shot.
+        edge.set_policy(DomainPolicy {
+            domain: alpha.clone(),
+            revision: 2,
+            grants: vec![(beta.clone(), "demo/whoami".into()), (beta.clone(), "demo/secret".into())],
+        });
+        client.connect().await.expect("the current revision is accepted again");
+
         // The newly granted export works — repeatable fails over past the dead gw-1 …
         let reply = client.call("demo/secret", "?", Repeatability::Repeatable).await.expect("call via gw-2");
         assert_eq!(reply, crate::federation_principal("beta.example", "svc/billing"));
