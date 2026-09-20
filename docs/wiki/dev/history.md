@@ -22,6 +22,52 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.10.0 release — 2026-09-20 (tag `v2.10.0`) — the axis auditing itself, and §12.6 closed
+
+Wire **v12** unchanged. Ten workspace crates on the shared train move to 2.10.0.
+
+**The shape of this release is that every new defect in it was found by the gates built to prevent
+them** — none was reported from outside. Three Phase-C audit findings v2.9.1 had named were closed,
+and five more surfaced:
+
+| Found by | Defect |
+|---|---|
+| §12.6's trust-edge fuzz targets | a wire `DomainId` bypassing its own validating constructor |
+| the same | a replay bundle silently corrupting fields (a newline truncated a witness assertion) |
+| auditing those targets' coverage | `count_records` counting a torn tail — a seek past EOF succeeds |
+| the same | an unbounded allocation from a raw `u32` length prefix |
+| writing AE1's private half against the public seam | the mandate types public but unreachable from another crate |
+
+The last is the one no in-crate test could have caught: `MandateBinding` and `MandateState` were
+public types on a public field and absent from the crate's `pub use`, so a **replaceable** evaluator
+— the premise the whole AE seam rests on — could receive a mandate and had no way to name it. The
+external-adapter test that exists for exactly this premise did not use mandates. It does now.
+
+**§12.6 complete:** the front door, the companion onboarding checklist, the Phase-C adversarial
+self-audit, **nine trust-edge fuzz targets**, and migration notes per deprecation — the last now an
+adopter-facing page, `docs/guide/deprecations.md`, because the ledger had no home an adopter would
+find and three of its seven entries had never been announced at all.
+
+**AE1** (Phase C): the action envelope binds a scoped mandate, and a refused one denies **before**
+policy runs. Ordering is the whole point — evaluating after the allow-list lets a matching allowance
+turn a refusal into a permit, which for `Superseded` is exactly the laundering item 5 forbids. The
+plant is vivid: disable the fence and a permit-everything Cedar policy answers
+`verdict: Permit, reason: "a policy allows this action"` for a superseded mandate.
+
+**Upgrade notes**, all one class — an exhaustive `match` needs a `_` arm:
+
+- `CatalogRefusal` gains `StaleRevision { seen, offered }` and is `#[non_exhaustive]`.
+- Two deprecations **announced late and now written down**: `system_propose` (deprecated in code
+  since 2.1.0 and never in the changelog), and **reading isolation into `cluster_name`**, which
+  never provided any. An adopter relying on it to keep deployments apart **does not have that
+  separation**; the mechanism that does is a federated domain. Neither is removed.
+
+**A release-process defect found while cutting this.** `RELEASING.md` step 4 hard-coded seven crate
+paths; the axis had added three more, so following it literally would have left
+`mycelium-commitment`, `mycelium-effects` and `mycelium-sim` on 2.9.1 while its `expect 7` check
+passed. The step now derives the list from the tree. Same family as the session's other findings: a
+green step that had quietly stopped covering what it named.
+
 ## v3 contracts axis — §12.6 complete: the deprecation ledger gets an adopter — 2026-09-20 (unreleased)
 
 §12.6's last deliverable, and the one that had quietly not been done at all. PR #333.

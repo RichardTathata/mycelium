@@ -26,8 +26,14 @@ The claim every release makes — *"backwards-compatible rolling upgrade"* — i
 **deterministic gate**; run it every release:
 
 ```bash
-cargo test -p mycelium-core rolling prev_wire_version   # the rolling_upgrade_* + prev_wire_version_* tests
+# Two commands, not one: `cargo test` takes a SINGLE filter, so the old one-liner
+# (`cargo test -p mycelium-core rolling prev_wire_version`) errored with
+# "unexpected argument" and had never run — found cutting 2.10.0.
+cargo test -p mycelium-core rolling             # 3 rolling_upgrade_* tests
+cargo test -p mycelium-core prev_wire_version   # 2 prev_wire_version_* / read_frame tests
 ```
+Expect **3** and **2**. If either prints `0 passed`, the filter has drifted from the test names —
+list them with `-- --list` before trusting a green run.
 These prove, against real `PREV_WIRE_VERSION`-encoded bytes: `read_frame` accepts both versions
 within the window (and rejects older), a `PREV`-version KV write **decodes and converges** into a
 current store, forwarding **re-encodes at `WIRE_VERSION`**, and the v(prev)↔v(cur) KV round-trip is
@@ -56,18 +62,29 @@ target/debug/mycelium --port 8092 --http-port 9092 --peers 127.0.0.1:8091 &     
 ## 4. Bump versions
 
 Bump every workspace crate currently on the shared train (2.x) — **not** the independently-versioned
-companions (`mycelium-reason`, `mycelium-guardrails` on their own `0.x` track):
+companions (`mycelium-reason`, `mycelium-guardrails` on their own `0.x` track).
+
+**Derive the list, never hard-code it.** This step used to name seven crates explicitly; the v3 axis
+added `mycelium-commitment`, `mycelium-effects` and `mycelium-sim`, and the hard-coded loop would
+have left all three on the old version while the `expect 7` check passed — a green release step that
+had stopped covering what it named (found cutting 2.10.0). Ask the tree instead:
 
 ```bash
-# the 7 shared crates: (root) mycelium · mycelium-core · mycelium-agentfacts ·
-#   mycelium-blackboard · mycelium-tuple-space · mycelium-wasm-host · mycelium-wiki
-for f in Cargo.toml mycelium-{agentfacts,blackboard,core,tuple-space,wasm-host,wiki}/Cargo.toml; do
-  perl -i -pe 's/^version = "OLD"/version = "NEW"/' "$f"
+OLD=2.9.1; NEW=2.10.0
+# every crate on the shared train, derived
+mapfile -t TRAIN < <(grep -rln "^version = \"$OLD\"" --include=Cargo.toml . | grep -v '^./target')
+printf '%s\n' "${TRAIN[@]}"                      # eyeball it: 10 at 2.10.0
+for f in "${TRAIN[@]}"; do
+  perl -i -pe "s/^version = \"$OLD\"/version = \"$NEW\"/" "$f"
 done
-cargo metadata --format-version 1 >/dev/null    # refresh Cargo.lock
-grep -c 'version = "NEW"' Cargo.lock             # expect 7
+cargo metadata --format-version 1 >/dev/null     # refresh Cargo.lock
+grep -c "version = \"$NEW\"" Cargo.lock          # expect ${#TRAIN[@]}
 ```
-Verify no inter-crate `version = "OLD"` dep specs remain (`grep -rn '"OLD"' --include=Cargo.toml`).
+Then verify nothing is left behind — a remaining hit is an inter-crate dep spec that must move too:
+
+```bash
+grep -rn "\"$OLD\"" --include=Cargo.toml . | grep -v '^./target'   # expect no output
+```
 
 ## 5. CHANGELOG
 
