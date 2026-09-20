@@ -22,6 +22,46 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — §12.6's trust-edge fuzz gate, and the two defects it found — 2026-09-20 (unreleased)
+
+§12.6's last requirement: *fuzz targets for every new parser on a trust edge (trust bundles, the edge
+protocol frames, replay bundle decoding)*. Eight shipped, across all three surfaces. PR #329.
+
+**The discipline, and why it differs from the older input-fuzz gate.** That gate says *no panic on
+untrusted arithmetic*. This one says **assert the invariant the parser is relied on for** — byte
+conservation for the caller-context frame, signing-field and round-trip stability for every object
+whose signature covers bytes rebuilt from the parsed fields. A crash is the easy case; a
+wrong-but-well-formed parse is the one that ships.
+
+**A `DomainId` from the wire did not obey its own constructor.** `new` enforces `[a-z0-9.-]` and 253
+bytes, and the type documents why — *two ids differing only in case are one domain to a human and two
+to a `HashMap`, and the place that difference surfaces is a trust decision.* A derived `Deserialize`
+on a newtype validates nothing, so the rule held only for **constructed** ids while most are
+**parsed** from partner bytes before verification. It **could not forge authority**; what it admitted
+was `Depot`/`depot` read as one domain, a `/` making `federation:{domain}/{principal}` ambiguous, a
+newline reaching a pre-authentication log line, and unbounded length. `PrincipalId`/`TermId` shared
+the gap. **The general rule now recorded: a newtype whose constructor validates needs a manual
+`Deserialize`.**
+
+**`mycelium-sim`'s bundle codec lost fields.** `unquote`'s `trim_matches('"')` stripped every trailing
+quote rather than the delimiter, and `quote` never escaped newlines although the reader is
+line-oriented — so a newline-bearing value was truncated and the rest dropped silently.
+`witness.assertion` is free text, so a replay would check a weaker assertion than the one recorded and
+report success: a silent divergence, in the crate built to make divergence loud. Bundles already on
+disk read back unchanged.
+
+**Two of the eight exist because the first pass stopped a layer short** — `split_frame` only
+classifies, while the envelope JSON, the `via` id and both base64 fields are read before
+`verify_bytes`; and `Trace::parse` takes a result as the verbatim line remainder, so
+`FsOutcome::decode` is a second parse it never reaches. **And the first bundle invariant was the wrong
+one**: `parse → write → parse` passes over already-mangled text, because a stably-lossy reader
+reproduces its own mangling.
+
+**Four trust-edge parsers remain unfuzzed and are named rather than omitted:** the journal's
+length-prefix framing (`agent/journal.rs:332`), `PublishedRightsHead::decode` and `RightsLedger::open`
+(`control/ledger.rs`), and the commitment companion's unsigned offer/award decoding. Log:
+[`.log/2026-09-20-trust-edge-fuzz-gate.md`](.log/2026-09-20-trust-edge-fuzz-gate.md).
+
 ## v3 contracts axis — three more audit findings closed — 2026-09-20 (unreleased)
 
 The findings v2.9.1 named as *known and not fixed*, now fixed. PRs #325–#327. One changes a public
