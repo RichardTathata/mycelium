@@ -187,6 +187,11 @@ is the whole notice for the rest; `mycelium-commitment`'s unsigned `Offer`/`Awar
 the two audit findings that need a decision rather than a patch (the consumer-side-only per-partner budget, and
 **the composition finding** — a receipt carries no principal, the evidence journal no durability rung, and a
 receipt is never persisted); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
-silently and the criterion has never been met**. Delivery ledger:
+silently and the criterion has never been met**. **Phase state (2026-09-20, after v2.10.0).** **Phase C is closed** — AE1 was its last gate and
+landed with the release. **Phase A has one gate still open and it is not a code gate:** V1, above.
+**Phase D's remaining work is entirely in the private repo** — RA4, AE2 and AE3; the public side of
+D (items 3·4·5·6) shipped in 2.8.0/2.9.0. **Phase E** is RA5–RA6 and AE4, plus the
+combined-feedback scenario. So a session looking for public work should look at the open list above
+or §13's recorded questions, not at a phase gate. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

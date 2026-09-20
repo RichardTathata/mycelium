@@ -125,6 +125,15 @@ Three lessons, each paid for:
   prefix — so "0 panics" measured nothing at all until the sweep mutated a *valid* encoding instead
   (3,808 decodes, 0 panics). **Noise tests the entry check; only mutation tests the decoder.** Every
   mini-fuzz seed now **asserts its own reachability** before being mutated.
+- **A public type is not public until it is re-exported, and only an out-of-crate test can tell you.**
+  AE1 added `MandateBinding` / `MandateState` as public types on a public field of `ActionEnvelope`
+  and left them out of the crate's `pub use`. Every in-crate test passed — in-crate code resolves
+  them through the module path — while an evaluator in another crate could *receive* a mandate and
+  had no way to name it, which breaks the seam's whole premise that the evaluator is **replaceable**.
+  `tests/ae_external_adapter.rs` exists for exactly this and did not catch it, because its foreign
+  adapter never used a mandate. **When a seam's promise is "another crate can implement this", the
+  test that proves it must exercise every new surface**, or it certifies the surfaces it happens to
+  touch and nothing else. Deleting the `pub use` now fails it with `unresolved imports`.
 - **A test whose name outruns what it can detect is worse than no test.** The journal's allocation
   bound has no failing test: `vec![0u8; want]` goes through `alloc_zeroed`, which the OS satisfies
   with lazy zero pages, so a 4 GiB request succeeds instantly, the next `read_exact` fails, and the
