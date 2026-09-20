@@ -124,6 +124,15 @@ pub enum WalMsg {
 pub struct WalHandle {
     tx:        mpsc::Sender<WalMsg>,
     sync_mode: SyncMode,
+    /// Appends this node **skipped** because the writer's queue was full.
+    ///
+    /// In `Async`/`Os` an append is a `try_send` that drops on a full queue and still answers `Ok`.
+    /// That is a deliberate throughput choice, but it breaks an implication the *replica-sync* rung
+    /// rested on: *the store holds it, therefore its record was appended*. A peer under backpressure
+    /// holds the value with no WAL record, and would answer `Persisted` for a record replay could
+    /// never restore. Counting the drops is what lets that peer decline the claim instead.
+    /// Found by the Phase-C adversarial audit (items 1+2+7).
+    dropped_appends: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The writer task has exited (channel closed) — nothing awaited on it can be a
@@ -144,11 +153,11 @@ impl WalHandle {
             SyncMode::Async | SyncMode::Os => {
 // The WAL channel: a full queue here *skips an append*, which is why the inventory calls
                 // it out by name. Recorded, so a replay drops the same record.
-                let _ = crate::sim_seam::chan_try_send(
+                self.note_verdict(crate::sim_seam::chan_try_send(
                     WAL_CHAN,
                     &self.tx,
                     WalMsg::Append { entry, ack: None, force_sync: false },
-                );
+                ));
                 Ok(())
             }
         }
@@ -159,11 +168,27 @@ impl WalHandle {
     /// consistent with `GossipAgent::set`'s existing try_send semantics.
     pub fn append_try(&self, entry: SyncEntry) {
 // The WAL channel — see the note above.
-        let _ = crate::sim_seam::chan_try_send(
+        self.note_verdict(crate::sim_seam::chan_try_send(
             WAL_CHAN,
             &self.tx,
             WalMsg::Append { entry, ack: None, force_sync: false },
-        );
+        ));
+    }
+
+    /// Record a fire-and-forget append's verdict. Anything other than a clean send means the record
+    /// never reached the writer.
+    fn note_verdict(&self, verdict: crate::sim_seam::ChanVerdict) {
+        if !matches!(verdict, crate::sim_seam::ChanVerdict::Sent) {
+            self.dropped_appends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// How many appends this node skipped because the writer's queue was full.
+    ///
+    /// **Non-zero means this node cannot establish the replica-sync rung for any record**: it cannot
+    /// tell whether the record you are asking about was the one it dropped. See the field's doc.
+    pub fn dropped_appends(&self) -> u64 {
+        self.dropped_appends.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Append and await `fdatasync` **regardless of `sync_mode`** — the record is on
@@ -227,7 +252,7 @@ impl WalHandle {
     /// Test-only constructor over a raw channel (writer-death probes).
     #[cfg(test)]
     pub(crate) fn from_parts(tx: mpsc::Sender<WalMsg>, sync_mode: SyncMode) -> Self {
-        Self { tx, sync_mode }
+        Self { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) }
     }
 
     #[allow(dead_code)]
@@ -373,7 +398,7 @@ pub fn spawn_wal_writer(
 ) -> WalHandle {
     let channel_depth = (snapshot_wal_threshold * 4).max(1024);
     let (tx, rx) = mpsc::channel::<WalMsg>(channel_depth);
-    let handle = WalHandle { tx, sync_mode };
+    let handle = WalHandle { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) };
 
     tokio::spawn(wal_writer_task(
         rx,
@@ -914,6 +939,34 @@ mod durability_tests {
     use crate::store::KvState;
     use bytes::Bytes;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// **A skipped append is counted, so the node can decline a rung it cannot establish.**
+    ///
+    /// In `Async`/`Os` an append is a `try_send` that drops on a full queue — or a departed writer —
+    /// and still answers `Ok`. That is a deliberate throughput choice, but the *replica-sync* rung
+    /// rested on the implication *the store holds it, therefore its record was appended*, which the
+    /// drop breaks: a peer held the value with no record and answered `Persisted` for something
+    /// replay could never restore. Both verdicts were discarded with `let _ =`, so the drop was
+    /// invisible. Phase-C audit finding.
+    #[tokio::test]
+    async fn a_skipped_append_is_counted_rather_than_silently_discarded() {
+        // A writer that has gone away is a real drop path (`ChanVerdict::Closed`), not a contrivance.
+        let (tx, rx) = mpsc::channel::<WalMsg>(4);
+        drop(rx);
+        let handle = WalHandle::from_parts(tx, SyncMode::Async);
+
+        assert_eq!(handle.dropped_appends(), 0, "a fresh handle has skipped nothing");
+
+        handle.append_try(entry("k", b"v", 7, false));
+        assert_eq!(handle.dropped_appends(), 1, "append_try must count what it drops");
+
+        handle.append(entry("k", b"v", 8, false)).await.expect("Async append answers Ok by design");
+        assert_eq!(
+            handle.dropped_appends(), 2,
+            "append answers Ok in Async even when the record never reached the writer — which is \
+             exactly why the drop has to be counted rather than inferred from the return value"
+        );
+    }
 
     fn unique_dir(tag: &str) -> std::path::PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);

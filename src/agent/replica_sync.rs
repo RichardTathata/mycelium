@@ -24,9 +24,18 @@
 //!   answering is sound without the node knowing when any particular record reached disk.
 //!
 //! **What an answer establishes, exactly.** [`Answer::Persisted`] from peer P means: at the moment
-//! P answered, P's store held this key at this exact HLC stamp with this exact content, and P's WAL
-//! `fdatasync` returned `Ok` — so P holds the record across its own crash and restart, because
-//! replay restores it. It does **not** mean P will hold it forever: a later write supersedes it
+//! P answered, P's store held this key at this exact HLC stamp with this exact content, P had
+//! **skipped no WAL append**, and P's WAL `fdatasync` returned `Ok` — so P holds the record across
+//! its own crash and restart, because replay restores it.
+//!
+//! The middle clause is not decoration. The rung rested on an implication — *the store holds it,
+//! therefore its record was appended* — that the inbound path breaks: a received update is applied
+//! to the store and **then** appended, and in `Async`/`Os` that append is a `try_send` which drops
+//! on a full queue and still answers `Ok`. A peer under write-ahead-log backpressure held the value
+//! with no record and answered `Persisted` for something replay could never restore. It now declines
+//! the claim instead, because it cannot tell whether *this* record was the one it dropped — and
+//! per-entry durability tracking is exactly what the contracts record declined (§1a).
+//! Found by the Phase-C adversarial audit (items 1+2+7). It does **not** mean P will hold it forever: a later write supersedes it
 //! like any other value. That is the *replica sync* rung and nothing above it — no destination
 //! commit, no claim about any other peer (`docs/design/contracts-receipts.md` §2.1).
 //!
@@ -154,10 +163,26 @@ pub(crate) async fn answer(ctx: &TaskCtx, q: &Query) -> Answer {
     }
     match ctx.wal.get() {
         None => Answer::NotConfigured,
-        Some(wal) => match wal.sync().await {
-            Ok(()) => Answer::Persisted,
-            Err(_) => Answer::Failed,
-        },
+        Some(wal) => {
+            // The rung rested on an implication: *the store holds it, therefore its record was
+            // appended*. On the inbound path that is false — `connection.rs` applies to the store
+            // and **then** appends, and in `Async`/`Os` the append is a `try_send` that drops on a
+            // full queue and still answers `Ok`. A peer under backpressure therefore held the value
+            // with no WAL record and answered `Persisted` for something replay could never restore.
+            //
+            // This node cannot tell whether *this* record was the one it dropped — per-entry
+            // durability tracking is what the record declined (§1a) — so once it has dropped any
+            // append it stops claiming the rung rather than claiming it wrongly. The origin reads
+            // that as `Failed`: durability not established here, which is exactly true.
+            // Found by the Phase-C adversarial audit (items 1+2+7).
+            if wal.dropped_appends() > 0 {
+                return Answer::Failed;
+            }
+            match wal.sync().await {
+                Ok(()) => Answer::Persisted,
+                Err(_) => Answer::Failed,
+            }
+        }
     }
 }
 
