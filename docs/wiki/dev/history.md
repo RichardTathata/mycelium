@@ -22,6 +22,36 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — measuring the trust-edge risk list — 2026-09-20 (unreleased)
+
+The four parsers §12.6's sweep named and did not cover: one fixed, three measured. PRs #330, #331.
+
+**The journal reader stopped trusting a length prefix (#330).** Two defects in the same four bytes.
+`count_records` decided a record was complete by seeking past it and checking the seek returned `Ok`
+— but **seeking past the end of a file is legal and succeeds**, so a torn tail counted as a record.
+It drives the next append's sequence number while `read_journal_from` stops *at* the torn record, so
+the two disagreed and the next append took a seq no reader would hand out — a hole on the
+evidence-journal path that exists for compliance export. And a `u32` length prefix went straight
+into `vec![0u8; want]`, so one flipped bit asked for up to 4 GiB before anything checked the file
+could supply it.
+
+**The rest of the list was measured, not left as a worry (#331).** An unqualified list of "unfuzzed
+parsers" reads as a list of vulnerabilities, and this one overstated the risk:
+`PublishedRightsHead::decode` cannot panic and has only `#[test]` callers — a reserved surface;
+`serde_fixint` under `RightsLedger::open` is live but **survived** 20k mutations (3,808 decodes, no
+panic, the unchecked `remaining()` subtraction unreachable); `mycelium-commitment` uses `serde_json`,
+so its gap is **provenance rather than a decoder bound** and stays open. `serde_fixint` got a fuzz
+target regardless, because a hand-rolled binary decoder reading off disk is the M2 Run-20 shape.
+
+**Two tests proved less than their names, and both tells were numbers that did not move.** The
+journal's allocation bound has **no failing test** — deleting it left every assertion passing,
+because `alloc_zeroed` is satisfied with lazy zero pages and the outcome is identical either way; the
+rule was extracted into a falsifiable `record_fits` predicate and the limit written into the test's
+doc comment. And a first `serde_fixint` sweep of 40,000 *random* inputs produced **zero successful
+decodes**, so "0 panics" measured nothing until it mutated a valid encoding instead. Every mini-fuzz
+seed now asserts its own reachability. Log:
+[`.log/2026-09-20-measuring-the-risk-list.md`](.log/2026-09-20-measuring-the-risk-list.md).
+
 ## v3 contracts axis — §12.6's trust-edge fuzz gate, and the two defects it found — 2026-09-20 (unreleased)
 
 §12.6's last requirement: *fuzz targets for every new parser on a trust edge (trust bundles, the edge
