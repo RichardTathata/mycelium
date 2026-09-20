@@ -101,6 +101,26 @@ them were not relied on for what their own code claimed. One finding changes a p
   hand-rolled binary decoder reading bytes off disk is the shape behind the unbounded-allocation
   decode DoS that sat uncaught through M2 Run-20.
 
+### Added
+
+- **The action envelope binds a scoped mandate (AE1).** `ActionEnvelope` gains
+  `mandate: Option<MandateBinding>` — *which* appointment (`holder`, `term`, `scope`, `epoch`) and
+  what the enforcement point established about it (`Established` · `Refused(MandateRefusal)` ·
+  `Unknown`). Before this, a rule naming `mandate` could only be declared as a fact the evaluator
+  **cannot** establish, so every mandate clause answered `Indeterminate` by construction.
+  `Rule::requiring_mandate(scope)` now decides it.
+
+  **A refused mandate is a fence, not a policy input:** it denies before any rule is consulted,
+  carrying item 5's own refusal by name. Evaluating it after the allow-list would let a matching
+  allowance turn a refusal into a permit — for `Superseded`, exactly the laundering item 5 refuses
+  to allow (which is why it is not a `Conflict`). Three answers stay apart because an operator told
+  the wrong one fixes the wrong thing: *claims none* and *could not check* are `Indeterminate`
+  (AE0 §9 — absence is never a denial), while *checked and refused* is `Deny`.
+
+  Additive: `ActionEnvelope` has been `#[non_exhaustive]` from birth. The gateway passes `None` —
+  it is a route-level preflight with no fence to consult, so a mandated rule reads it as authority
+  not established. Resource-side enforcement is AE2.
+
 ### Deprecated
 
 **The `3.0.0` removal ledger now has an adopter-facing page:**

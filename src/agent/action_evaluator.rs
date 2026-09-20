@@ -33,6 +33,7 @@
 //! fixtures in this module's `tests` (AE0 §9). *Strength:* `SelfImposedPrevention` for the routes
 //! this gateway fronts — never `HardPrevention`, which only a resource fence earns.
 
+use crate::mandate::{MandateRefusal, PrincipalId, TermId};
 use crate::node_id::NodeId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -135,6 +136,87 @@ pub struct ActionEnvelope {
     pub issued_at_ms: u64,
     /// The envelope's validity horizon (ms). A decision consumed after it is expired.
     pub not_after_ms: u64,
+    /// The **scoped mandate** this action claims to act under, and what the enforcement point
+    /// established about it (item 5 — AE1).
+    ///
+    /// `None` means the action claims no mandate, which is not the same as claiming one that
+    /// failed: see [`MandateState`]. Assembled by the enforcement point from a mandate it read and
+    /// checked itself — a caller-supplied epoch is a claim, never authority.
+    pub mandate: Option<MandateBinding>,
+}
+
+/// The mandate an action claims, and the enforcement point's finding about it (AE1).
+///
+/// The identity travels beside the finding because evidence has to answer *which appointment* was
+/// relied on, not merely whether something passed. `term` is which appointment; `epoch` orders
+/// authority; they are deliberately separate (see [`crate::mandate`]).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MandateBinding {
+    /// Who holds the mandate.
+    pub holder: PrincipalId,
+    /// **Which** appointment — not the same thing as the epoch.
+    pub term: TermId,
+    /// What it covers.
+    pub scope: String,
+    /// The epoch presented. Orders authority; monotonic per scope.
+    pub epoch: u64,
+    /// What the enforcement point established.
+    pub state: MandateState,
+}
+
+impl MandateBinding {
+    /// A binding the enforcement point checked and found good.
+    pub fn established(
+        holder: PrincipalId,
+        term: TermId,
+        scope: impl Into<String>,
+        epoch: u64,
+    ) -> Self {
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Established }
+    }
+
+    /// A binding the enforcement point checked and the fence refused.
+    pub fn refused(
+        holder: PrincipalId,
+        term: TermId,
+        scope: impl Into<String>,
+        epoch: u64,
+        refusal: MandateRefusal,
+    ) -> Self {
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Refused(refusal) }
+    }
+
+    /// A binding the enforcement point could **not** check — authority not established.
+    pub fn unknown(
+        holder: PrincipalId,
+        term: TermId,
+        scope: impl Into<String>,
+        epoch: u64,
+        why: impl Into<String>,
+    ) -> Self {
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Unknown(why.into()) }
+    }
+}
+
+/// What the enforcement point established about a claimed mandate.
+///
+/// The three are kept apart because they are three different answers and conflating any two loses
+/// the difference an operator needs: *it holds*, *it was refused and here is why*, and *we could
+/// not find out*. The third is *not* the second — AE0 §9's rule that absence of a fact is never a
+/// denial applies here exactly as it does to an incomplete allow-list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MandateState {
+    /// Checked against the resource's installed epoch and found good.
+    Established,
+    /// Checked and refused, carrying item 5's own refusal rather than a second vocabulary.
+    ///
+    /// **This is a fence, not a policy input.** A refused mandate denies the action whatever the
+    /// policy says, because a policy that could permit it would launder the refusal — which is the
+    /// same reason [`MandateRefusal::Superseded`] is not a `Conflict`.
+    Refused(MandateRefusal),
+    /// The fence could not be consulted. Authority is **not established**, which is not a denial.
+    Unknown(String),
 }
 
 impl ActionEnvelope {
@@ -166,6 +248,7 @@ impl ActionEnvelope {
                 expected_policy_revision: None,
                 issued_at_ms: 0,
                 not_after_ms: 60_000,
+                mandate: None,
             },
         }
     }
@@ -214,6 +297,14 @@ impl ActionEnvelopeBuilder {
         self.inner.expected_policy_revision = Some(revision.into());
         self
     }
+    /// Bind the **scoped mandate** this action claims, with what the enforcement point
+    /// established about it (AE1). Never call this with a caller-supplied epoch: the point of the
+    /// binding is that the enforcement point read the mandate and checked it.
+    pub fn mandate(mut self, binding: MandateBinding) -> Self {
+        self.inner.mandate = Some(binding);
+        self
+    }
+
     /// Issued-at and not-after, in HLC physical milliseconds.
     pub fn validity(mut self, issued_at_ms: u64, not_after_ms: u64) -> Self {
         self.inner.issued_at_ms = issued_at_ms;
@@ -935,6 +1026,12 @@ pub struct Rule {
     pub requires_scopes: Vec<String>,
     /// Facts the rule needs that this evaluator cannot establish (e.g. `mandate`, `budget`).
     pub requires_facts: Vec<String>,
+    /// The **scope** a live mandate must cover for this rule to apply (AE1).
+    ///
+    /// Before AE1 a mandate could only be named in [`Rule::requires_facts`], i.e. as a fact this
+    /// evaluator *cannot* establish — so every mandate clause decided `Indeterminate`. The envelope
+    /// now carries the enforcement point's finding, so the clause can actually be decided.
+    pub requires_mandate: Option<String>,
     /// Argument values the rule tests, by name — the reference evaluator compares for equality;
     /// a real adapter (Cedar) evaluates richer predicates over the same
     /// [`ActionEnvelope::selected_arguments`]. A named value the request did not carry is *not
@@ -951,6 +1048,7 @@ impl Rule {
             resource: resource.into(),
             requires_scopes: Vec::new(),
             requires_facts: Vec::new(),
+            requires_mandate: None,
             requires_values: Vec::new(),
         }
     }
@@ -967,6 +1065,13 @@ impl Rule {
         self
     }
 
+    /// Require a live mandate covering `scope`. A missing or uncheckable mandate is *not
+    /// established* (`Indeterminate`); a **refused** one denies before this rule is reached.
+    pub fn requiring_mandate(mut self, scope: impl Into<String>) -> Self {
+        self.requires_mandate = Some(scope.into());
+        self
+    }
+
     /// Require a named argument to equal `value`. Absent from the request ⇒ *not established*.
     pub fn requiring_value(mut self, name: impl Into<String>, value: serde_json::Value) -> Self {
         self.requires_values.push((name.into(), value));
@@ -975,7 +1080,16 @@ impl Rule {
 
     fn matches(&self, env: &ActionEnvelope) -> bool {
         let any = |pat: &str, v: &str| pat == "*" || pat == v;
-        any(&self.actor, &env.actor)
+        // A rule scoped to a mandate is about *that* scope: a binding for another scope is a
+        // different appointment, so the rule simply does not apply. (A binding the fence refused
+        // never reaches here — see `evaluate`.)
+        let mandate_scope_matches = match (&self.requires_mandate, &env.mandate) {
+            (None, _) => true,
+            (Some(want), Some(b)) => &b.scope == want,
+            (Some(_), None) => true, // no binding at all ⇒ let `unestablished` report it
+        };
+        mandate_scope_matches
+            && any(&self.actor, &env.actor)
             && any(&self.operation, &env.operation)
             && any(&self.resource, &env.resource)
             && self.requires_scopes.iter().all(|s| env.scopes.iter().any(|h| h == s))
@@ -1059,6 +1173,21 @@ impl ActionEvaluator for ReferenceEvaluator {
                     }
                 })
                 .collect();
+            // A mandate the rule needs but the enforcement point could not establish. `Refused`
+            // never lands here: it is a fence and has already denied, above.
+            if let Some(scope) = &r.requires_mandate {
+                match &env.mandate {
+                    None => missing.push(format!("mandate not established: scope {scope}")),
+                    Some(b) => {
+                        if let MandateState::Unknown(why) = &b.state {
+                            missing.push(format!(
+                                "mandate not established: scope {scope} (term {}, epoch {}): {why}",
+                                b.term, b.epoch
+                            ));
+                        }
+                    }
+                }
+            }
             // A declared value the request did not carry is equally unestablished.
             for (name, _) in &r.requires_values {
                 if !env.selected_arguments.contains_key(name) {
@@ -1067,6 +1196,30 @@ impl ActionEvaluator for ReferenceEvaluator {
             }
             missing
         };
+
+        // ---- The mandate fence, before policy ----------------------------------------------
+        //
+        // A mandate the enforcement point checked and the fence **refused** is not a fact policy
+        // weighs; it is a boundary policy cannot open. Running this after the allow-list would let
+        // a matching allowance turn a refusal into a permit — and for `Superseded` that is exactly
+        // the laundering item 5 refuses to allow (which is why it is not a `Conflict`). The refusal
+        // travels by name, because an operator told the wrong reason fixes the wrong thing.
+        let refused = env.mandate.as_ref().and_then(|b| match &b.state {
+            MandateState::Refused(refusal) => Some((b, refusal)),
+            _ => None,
+        });
+        if let Some((b, refusal)) = refused {
+            return Decision {
+                verdict: Verdict::Deny,
+                checked: vec![format!(
+                    "mandate holder={} term={} scope={} epoch={}",
+                    b.holder, b.term, b.scope, b.epoch
+                )],
+                reason: format!("the mandate fence refused this action: {refusal}"),
+                policy_revision: rev,
+                errors: Vec::new(),
+            };
+        }
 
         if let Some(p) = self.prohibitions.iter().find(|r| r.matches(env)) {
             let missing = unestablished(p);
@@ -1101,11 +1254,22 @@ impl ActionEvaluator for ReferenceEvaluator {
             }
             return Decision {
                 verdict: Verdict::Permit,
-                checked: vec![
-                    format!("allowance actor={} operation={} resource={}", a.actor, a.operation, a.resource),
-                    format!("scopes {:?}", a.requires_scopes),
-                    format!("values {:?}", a.requires_values.iter().map(|(n, _)| n).collect::<Vec<_>>()),
-                ],
+                checked: {
+                    let mut c = vec![
+                        format!("allowance actor={} operation={} resource={}", a.actor, a.operation, a.resource),
+                        format!("scopes {:?}", a.requires_scopes),
+                        format!("values {:?}", a.requires_values.iter().map(|(n, _)| n).collect::<Vec<_>>()),
+                    ];
+                    // Evidence has to answer *which appointment* was relied on, not merely that
+                    // one was: `term` is which appointment, `epoch` orders authority.
+                    if let (Some(scope), Some(b)) = (&a.requires_mandate, &env.mandate) {
+                        c.push(format!(
+                            "mandate scope={scope} holder={} term={} epoch={}",
+                            b.holder, b.term, b.epoch
+                        ));
+                    }
+                    c
+                },
                 reason: "an allowance matches this action".into(),
                 policy_revision: rev,
                 errors: Vec::new(),
@@ -1200,6 +1364,219 @@ mod tests {
             .expected_policy_revision("rev-1")
             .validity(1_000, 61_000)
             .build()
+    }
+
+
+    // ── AE1: the authenticated action envelope binds a scoped mandate ───────────────────────────
+    //
+    // AE-T decided at the gateway with no mandate in the picture: a rule naming `mandate` was a
+    // fact the evaluator *could not establish*, so every such clause answered `Indeterminate`.
+    // AE1 puts the enforcement point's finding in the envelope so the clause can be decided, and
+    // the interesting half is what must NOT become a permit.
+
+    fn principal(name: &str) -> crate::mandate::PrincipalId {
+        crate::mandate::PrincipalId::new(name).expect("a valid principal")
+    }
+    fn term(name: &str) -> crate::mandate::TermId {
+        crate::mandate::TermId::new(name).expect("a valid term")
+    }
+
+    /// `depot` holds a live mandate over `depot-ops` enumerating this operation.
+    fn with_mandate(state: MandateState, epoch: u64) -> ActionEnvelope {
+        ActionEnvelope::builder("oidc:idp/dispatcher", node(), "tools/call", "tool:reroute@node-1")
+            .identities("op-1", "op-1/1")
+            .scopes(["mcp:invoke"])
+            .arguments_digest(digest_of(b"{}"))
+            .mapping(ActionMapping::mapped("cat-procurement", "7"))
+            .validity(1_000, 61_000)
+            .mandate(MandateBinding {
+                holder: principal("depot-dispatcher"),
+                term:   term("term-2026-q3"),
+                scope:  "depot-ops".to_string(),
+                epoch,
+                state,
+            })
+            .build()
+    }
+
+    fn mandated_allowance() -> ReferenceEvaluator {
+        ReferenceEvaluator::new("rev-1").allow(
+            Rule::new("oidc:idp/dispatcher", "tools/call", "tool:reroute@node-1")
+                .requiring_scopes(["mcp:invoke"])
+                .requiring_mandate("depot-ops"),
+        )
+    }
+
+    /// The decisive AE1 case: a **superseded** mandate cannot be laundered into a permit by a
+    /// policy that would otherwise allow the action.
+    ///
+    /// The allowance below matches the actor, the operation, the resource and the scopes — it is
+    /// exactly the rule that permits this call every other day. The mandate fence runs first, so
+    /// the answer is `Deny` and it carries the refusal's own name. Item 5 refuses to let
+    /// `Superseded` become a `Conflict` because a retry loop would launder a revocation; the same
+    /// reasoning forbids a policy engine laundering it, which is why the fence is not a policy
+    /// input.
+    ///
+    /// What this does NOT prove: nothing here shows the gateway *has* a fence to consult. It does
+    /// not — it binds no mandate (see `http.rs`), so this path is reached by a resource-side
+    /// enforcement point, which is AE2.
+    #[test]
+    fn a_superseded_mandate_is_denied_even_where_policy_would_allow() {
+        let refusal = MandateRefusal::Superseded { installed: 9, presented: 7 };
+        let env = with_mandate(MandateState::Refused(refusal), 7);
+
+        // Sanity: the very same action with a live mandate is permitted, so the deny below is
+        // about the mandate and nothing else.
+        let permitted = mandated_allowance().evaluate(&with_mandate(MandateState::Established, 9));
+        assert_eq!(permitted.verdict, Verdict::Permit, "the allowance must permit a live mandate");
+        assert!(
+            permitted.checked.iter().any(|c| c.contains("term=term-2026-q3") && c.contains("epoch=9")),
+            "evidence must name WHICH appointment was relied on, got {:?}",
+            permitted.checked,
+        );
+
+        let d = mandated_allowance().evaluate(&env);
+        assert_eq!(d.verdict, Verdict::Deny, "a superseded mandate must not be permitted");
+        assert!(
+            d.reason.contains("superseded") || d.reason.contains("Superseded"),
+            "the refusal must travel by name, got {:?}",
+            d.reason,
+        );
+        assert!(
+            d.reason.contains('9') && d.reason.contains('7'),
+            "and name both epochs, so the operator fixes the right thing: {:?}",
+            d.reason,
+        );
+    }
+
+    /// The other three fence refusals deny too, each by its own name.
+    #[test]
+    fn every_mandate_refusal_denies_by_its_own_name() {
+        let cases = [
+            (MandateRefusal::NotEnumerated { operation: "tools/call".into() }, "enumerate"),
+            (MandateRefusal::OutOfWindow { now_ms: 5_000, valid_until_ms: 4_000 }, "window"),
+            (MandateRefusal::WrongScope { resource: "depot-ops".into(), mandate: "kitchen-ops".into() }, "scope"),
+        ];
+        for (refusal, needle) in cases {
+            let d = mandated_allowance().evaluate(&with_mandate(MandateState::Refused(refusal.clone()), 9));
+            assert_eq!(d.verdict, Verdict::Deny, "{refusal:?} must deny");
+            assert!(
+                d.reason.to_lowercase().contains(needle),
+                "{refusal:?} must be reported as itself; got {:?}",
+                d.reason,
+            );
+        }
+    }
+
+    /// **Missing facts.** A mandate the enforcement point could not check is *authority not
+    /// established* — `Indeterminate`, never `Deny`.
+    ///
+    /// This is AE0 §9's rule applied to item 5: an absent fact is not a finding of wrongdoing, and
+    /// evidence that recorded it as a denial would read as drift that never happened.
+    #[test]
+    fn a_mandate_that_could_not_be_checked_is_indeterminate_not_denied() {
+        let env = with_mandate(MandateState::Unknown("the fence was unreachable".into()), 9);
+        let d = mandated_allowance().evaluate(&env);
+        assert_eq!(
+            d.verdict,
+            Verdict::Indeterminate,
+            "an uncheckable mandate is not established; it is not a denial",
+        );
+        assert!(
+            d.errors.iter().any(|e| e.contains("mandate not established") && e.contains("unreachable")),
+            "and the reason it could not be established must survive: {:?}",
+            d.errors,
+        );
+        assert!(
+            d.errors.iter().any(|e| e.contains("term-2026-q3")),
+            "naming the appointment, so an operator knows which one to look at: {:?}",
+            d.errors,
+        );
+    }
+
+    /// An action claiming **no** mandate against a rule that needs one is likewise indeterminate —
+    /// and is a different record from one whose mandate failed.
+    #[test]
+    fn claiming_no_mandate_is_not_the_same_record_as_a_failed_one() {
+        let no_claim = ActionEnvelope::builder("oidc:idp/dispatcher", node(), "tools/call", "tool:reroute@node-1")
+            .identities("op-1", "op-1/1")
+            .scopes(["mcp:invoke"])
+            .arguments_digest(digest_of(b"{}"))
+            .mapping(ActionMapping::mapped("cat-procurement", "7"))
+            .validity(1_000, 61_000)
+            .build();
+        let absent = mandated_allowance().evaluate(&no_claim);
+        assert_eq!(absent.verdict, Verdict::Indeterminate);
+
+        let failed = mandated_allowance()
+            .evaluate(&with_mandate(MandateState::Refused(MandateRefusal::Superseded { installed: 9, presented: 7 }), 7));
+        assert_eq!(failed.verdict, Verdict::Deny);
+
+        assert_ne!(
+            absent.verdict, failed.verdict,
+            "claims none and claimed-one-that-failed must not collapse into one answer",
+        );
+    }
+
+    /// **Impersonation.** A mandate binding is about its holder, but the *actor* is item 7's
+    /// verified principal — a caller cannot reach another principal's allowance by presenting that
+    /// principal's mandate, because the rule still matches on actor.
+    #[test]
+    fn a_mandate_does_not_carry_another_principals_authority() {
+        let impostor = ActionEnvelope::builder("oidc:idp/intruder", node(), "tools/call", "tool:reroute@node-1")
+            .identities("op-1", "op-1/1")
+            .scopes(["mcp:invoke"])
+            .arguments_digest(digest_of(b"{}"))
+            .mapping(ActionMapping::mapped("cat-procurement", "7"))
+            .validity(1_000, 61_000)
+            .mandate(MandateBinding::established(
+                principal("depot-dispatcher"),
+                term("term-2026-q3"),
+                "depot-ops",
+                9,
+            ))
+            .build();
+        let d = mandated_allowance().evaluate(&impostor);
+        assert_eq!(
+            d.verdict,
+            Verdict::Indeterminate,
+            "holding someone else's mandate must not match their allowance",
+        );
+    }
+
+    /// A mandate for a **different scope** does not satisfy a rule scoped elsewhere: it is a
+    /// different appointment, so the rule does not apply and authority is not established.
+    #[test]
+    fn a_mandate_for_another_scope_does_not_satisfy_the_rule() {
+        let elsewhere = ActionEnvelope::builder("oidc:idp/dispatcher", node(), "tools/call", "tool:reroute@node-1")
+            .identities("op-1", "op-1/1")
+            .scopes(["mcp:invoke"])
+            .arguments_digest(digest_of(b"{}"))
+            .mapping(ActionMapping::mapped("cat-procurement", "7"))
+            .validity(1_000, 61_000)
+            .mandate(MandateBinding::established(
+                principal("depot-dispatcher"),
+                term("term-2026-q3"),
+                "kitchen-ops",
+                9,
+            ))
+            .build();
+        let d = mandated_allowance().evaluate(&elsewhere);
+        assert_eq!(d.verdict, Verdict::Indeterminate);
+    }
+
+    /// A **prohibition** is not softened by a live mandate: holding an appointment is not licence
+    /// to do a thing the policy forbids.
+    #[test]
+    fn a_live_mandate_does_not_override_a_prohibition() {
+        let e = ReferenceEvaluator::new("rev-1")
+            .prohibit(Rule::new("*", "tools/call", "tool:reroute@node-1"))
+            .allow(
+                Rule::new("oidc:idp/dispatcher", "tools/call", "tool:reroute@node-1")
+                    .requiring_mandate("depot-ops"),
+            );
+        let d = e.evaluate(&with_mandate(MandateState::Established, 9));
+        assert_eq!(d.verdict, Verdict::Deny, "a prohibition still wins over a mandated allowance");
     }
 
     fn evaluator(e: ReferenceEvaluator) -> Arc<dyn ActionEvaluator> {

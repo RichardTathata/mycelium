@@ -2054,6 +2054,12 @@ pub(crate) async fn ae_preflight(
         expected_policy_revision: ctx.deployed_policy_revision.load_full().map(|r| (*r).clone()),
         issued_at_ms: now_ms,
         not_after_ms: now_ms.saturating_add(60_000),
+        // AE1: the gateway is a route-level preflight and holds no mandate fence of its own, so it
+        // binds no mandate. `None` is *claims none*, which is not *claimed one and it failed* — a
+        // rule that requires a mandate therefore reads this as **authority not established** and
+        // answers `Indeterminate`, never a denial. Resource-side enforcement, where a fence exists
+        // to consult, is AE2.
+        mandate: None,
     };
 
     // Decide, then record, *then* dispatch. Both outcomes are sealed: a permit with no record of

@@ -69,6 +69,7 @@ pub struct ActionEnvelope {
     mapping: ActionMapping,
     expected_policy_revision: Option<String>,
     issued_at_ms, not_after_ms,
+    mandate: Option<MandateBinding>, // chapter 21's appointment, and what was established
 }
 ```
 
@@ -81,7 +82,40 @@ partner"* from a hash. So declared argument names cross in the clear, and only d
 the policy declared but the request did not carry is **absent**, and absence must produce
 `Indeterminate`.
 
-Defaults are fail-closed: no scopes, a zero digest, an `unmapped` mapping.
+Defaults are fail-closed: no scopes, a zero digest, an `unmapped` mapping, no mandate.
+
+## The mandate a decision rests on
+
+A rule can require that the caller be acting under a live [mandate](21-mandates.md):
+
+```rust
+Rule::new("oidc:idp/dispatcher", "tools/call", "tool:reroute@depot")
+    .requiring_mandate("depot-ops")
+```
+
+The envelope carries *which* appointment — holder, `term`, `scope`, `epoch` — and what the
+enforcement point **established** about it, which is three answers and not two:
+
+| `MandateState` | Verdict | Reading |
+|---|---|---|
+| `Established` | the rule can permit | checked against the resource's installed epoch |
+| `Refused(MandateRefusal)` | **`Deny`**, by name | checked, and the fence said no |
+| `Unknown(why)` | `Indeterminate` | the fence could not be consulted |
+
+`None` — the action claims no mandate at all — is also `Indeterminate` against a rule that needs
+one. *We did not find out* is not *we looked and it is bad*, and an operator told the wrong one
+fixes the wrong thing.
+
+**A refused mandate denies before the policy runs.** It is a boundary the policy cannot open, not a
+fact the policy weighs. If the allow-list ran first, a rule that legitimately permits this call
+every other day would turn a refusal into a permit — and for
+[`Superseded`](21-mandates.md) that is the same laundering chapter 21 describes when it explains why
+a superseded mandate is not a `Conflict`. A retry loop must not be able to launder a revocation, and
+neither must a policy engine.
+
+**The gateway binds no mandate.** It is a route-level preflight and holds no fence to consult, so it
+passes `None` and a mandated rule reads that as authority not established. Enforcement at the
+resource, where a fence exists, is a later and stronger claim than this chapter makes.
 
 ---
 
