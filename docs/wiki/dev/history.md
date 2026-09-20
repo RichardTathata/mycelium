@@ -22,6 +22,35 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — three more audit findings closed — 2026-09-20 (unreleased)
+
+The findings v2.9.1 named as *known and not fixed*, now fixed. PRs #325–#327. One changes a public
+type, so **the next release is a MINOR**.
+
+**Replica sync stopped claiming what a dropped append broke.** The rung rested on *the store holds
+it, therefore its record was appended*; the inbound path applies and **then** appends, and in
+`Async`/`Os` that append is a `try_send` which drops on a full queue, answers `Ok`, and had its
+verdict discarded at both call sites. A peer under backpressure held a value with no log record and
+answered `Persisted`. `WalHandle` now counts skipped appends and a node that has skipped any declines
+the rung — it cannot tell which record it dropped, and per-entry tracking is what §1a declined.
+
+**A rotation's overlap reaches the call path.** `acceptable_keys` existed, honoured the window, and
+was called from **nowhere in production**; both verifiers used `key_for`. A partner mid-rotation was
+refused as `BadSignature` — the refusal reserved for *someone is forging*. The gate asserts three
+legs, because a fix that only widened acceptance would be worse than the bug.
+
+**A catalogue revision never goes backwards.** The monotonicity rule was documented on the field and
+implemented nowhere; a signed reply carries no expiry or nonce, so a captured one re-granted a
+withdrawn export in the client's *view*. `CatalogRefusal` gains `StaleRevision` and becomes
+`#[non_exhaustive]` — conflating it into the transport error would have been the refusal-conflation
+this module forbids.
+
+**Two remain, and neither is a patch.** The per-partner budget is enforced consumer-side only (the
+edge has no slot accounting). And **the composed guarantee still has no gate** — a receipt carries no
+principal, the evidence journal no durability rung, and a receipt is never persisted, so closing it
+means deciding whether a receipt should be *recorded* rather than merely returned. Log:
+[`.log/2026-09-20-phase-c-adversarial-self-audit.md`](.log/2026-09-20-phase-c-adversarial-self-audit.md).
+
 ## v2.9.1 release — 2026-09-20 (tag `v2.9.1`) — the Phase-C adversarial self-audit and its findings
 
 §12.6's adversarial self-audit at Phase C exit, over **items 1 + 2 + 7 together** because those three
