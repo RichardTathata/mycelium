@@ -152,6 +152,10 @@ pub struct CatalogReply {
 }
 
 /// Why a catalogue reply was not accepted by a client that requires a signed one.
+///
+/// `#[non_exhaustive]`: a later rung may find another way a reply is unacceptable, and a consumer
+/// that matched exhaustively would then fail to compile on an upgrade that only *added* a refusal.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogRefusal {
     /// The reply carries no signature and the client requires one.
@@ -162,11 +166,35 @@ pub enum CatalogRefusal {
     WrongDomain { expected: DomainId, got: DomainId },
     /// The reply was filtered for someone else.
     NotForUs { expected: DomainId, got: DomainId },
+    /// The reply carries an **older** policy revision than one this client has already seen.
+    ///
+    /// `DomainPolicy::revision` is documented as monotonic — *a consumer that has seen a higher
+    /// revision must not accept a lower one* — and that rule was stated and implemented nowhere. A
+    /// signed reply carries no expiry and no nonce, so a reply captured under revision 3 (which
+    /// granted an export) still verifies after the operator withdraws that grant at revision 4.
+    /// Replayed, it became a fresh observation and the withdrawn export reappeared in the client's
+    /// view. Found by the Phase-C adversarial audit (items 1+2+7).
+    ///
+    /// **Bounded, and worth saying:** the catalogue confers *visibility*, not authority. The
+    /// provider re-authorises at call time against its live policy, so a replay ended in a refusal
+    /// at the edge rather than an unauthorised invocation. The damage was a client acting on a view
+    /// of the partner it was told it would never have.
+    StaleRevision {
+        /// The highest revision this client has accepted from this partner.
+        seen: u64,
+        /// What the replayed reply offered.
+        offered: u64,
+    },
 }
 
 impl std::fmt::Display for CatalogRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::StaleRevision { seen, offered } => write!(
+                f,
+                "catalogue offers policy revision {offered} but revision {seen} has already been \
+                 accepted; a revision never goes backwards"
+            ),
             Self::Unsigned => write!(f, "catalogue is unsigned and a signed one is required"),
             Self::BadSignature => write!(f, "catalogue signature does not verify under the partner's key"),
             Self::WrongDomain { expected, got } => write!(f, "catalogue is for domain {got}, expected {expected}"),
