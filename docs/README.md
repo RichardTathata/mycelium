@@ -19,6 +19,7 @@ across the tree, deliberately at the root rather than filed under one area.
 | Doc | The stance it anchors |
 |---|---|
 | [`philosophy.md`](philosophy.md) | **Purpose** — what Mycelium *is* and why (the coordinator-free thesis). The authoritative definition of intent. |
+| [`sovereignty.md`](sovereignty.md) | **Positioning** — the coordinator-free thesis one level up: the sovereignty of an *organisation* against a *platform*. Philosophy's four Failure Modes transposed, federation as the mechanism, and why sovereignty and legibility are one argument. §4 is the case against. |
 | [`threat-model.md`](threat-model.md) | **Security posture** — the crown-jewel blast-radius model: what an attacker gains at each trust boundary, the mitigations, the residual risk an operator owns. A standing posture (updated as the system evolves), not a point-in-time decision. |
 
 ## The seven areas
@@ -41,6 +42,7 @@ across the tree, deliberately at the root rather than filed under one area.
 - *"How do I deploy / monitor / scale / secure a cluster?"* → [`operations/`](operations/).
 - *"Why was X designed this way (and not Y)?"* → [`design/`](design/) (decisions) + [`plans/`](plans/) (the execution record's reasoning).
 - *"What's the security blast radius?"* → [`threat-model.md`](threat-model.md).
+- *"Why run our own fleet rather than a platform's?"* → [`sovereignty.md`](sovereignty.md).
 - *"How do I use feature Z?"* → [`reference/`](reference/) (+ the relevant guide chapter).
 - *"What's the research basis / is it sound?"* → [`publications/`](publications/) + [`analysis/`](analysis/).
 - *"What's the current reconciled state of X?" (agent onboarding)* → [`wiki/`](wiki/wiki.md).
