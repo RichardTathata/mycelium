@@ -28,9 +28,14 @@ the notice.
 | 5 | node-as-caller gateway dispatch (`GatewayCallerProfile::Legacy`) | 2.5.0 | `GatewayCaller` (item 7) | No — a `warn!` at startup |
 | 6 | `BoardConfig` not `#[non_exhaustive]` | 2.8.0 | `..Default::default()` | No — it breaks at 3.0.0 |
 | 7 | `GossipConfig` (and sibling config structs) not `#[non_exhaustive]` | — | `..Default::default()` | No — it breaks at 3.0.0 |
+| 8 | exhaustive `match` on `RecordKind` | 2.10.0 | add a `_` arm | **Yes** — `#[non_exhaustive]` from 2.10.0 |
+| 9 | exhaustive `match` on `Execution` | 2.10.0 | add a `_` arm that reads as **unknown**, not as *nothing ran* | **Yes** — `#[non_exhaustive]` from 2.10.0 |
 
 Entries 6 and 7 are the inverse of the usual case: nothing is deprecated *today*, but a future
 `#[non_exhaustive]` will break one specific pattern, so the pattern is worth abandoning now.
+**Entry 8 is that same case already done**: `RecordKind` was marked `#[non_exhaustive]` in 2.10.0
+*before* AE0 §5's remaining record kinds arrive, so their arrival costs nothing. Add the `_` arm
+once; that is the whole of it.
 
 ---
 
