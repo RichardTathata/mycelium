@@ -143,9 +143,12 @@ inherits the contract without reading everything:
 - **One compatibility rule, Rust's definition.** The substrate ships compatible additions on the
   2.x line: a public field or type never changes shape. When a verb's answer gains meaning (the
   contracts axis: a typed receipt beside today's `bool` / `persisted`), the new representation is
-  added *beside* the old, the old is `#[deprecated]`, and removal waits for the `3.0.0` ledger
-  (`docs/plans/v3-contracts-axis.md` §6.6). Read the deprecation, adopt the new field, keep
-  compiling. The contract itself: `docs/design/contracts-receipts.md`.
+  added *beside* the old and removal waits for the `3.0.0` ledger. Read the entry, adopt the
+  replacement, keep compiling. **Do not rely on the compiler to tell you**: only some of the ledger
+  is marked `#[deprecated]`, so the notice is [the deprecations page](deprecations.md) rather than a
+  build warning — read it before an upgrade. The contract itself:
+  `docs/design/contracts-receipts.md`; the authoritative ledger,
+  `docs/plans/v3-contracts-axis.md` §6.6.
 - Always `shutdown()` the agent + any companion handle (background loops won't stop on
   drop). KV writes are size-gated (chunk large values). Consistency is opt-in — default
   to eventually-consistent kv(); use consensus() only where linearisability is required.
