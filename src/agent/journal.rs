@@ -231,6 +231,7 @@ impl Journal {
 fn count_records(path: &Path) -> std::io::Result<u64> {
     use std::io::{Read as _, Seek as _};
     let mut f = std::fs::File::open(path)?;
+    let file_len = f.metadata()?.len();
     let mut n = 0u64;
     let mut len = [0u8; 4];
     loop {
@@ -242,7 +243,14 @@ fn count_records(path: &Path) -> std::io::Result<u64> {
         let want = u32::from_le_bytes(len) as i64;
         // A truncated tail is where a crash landed: stop counting there rather than failing to
         // open, so a node with a half-written record still starts and still appends after it.
-        if f.seek(std::io::SeekFrom::Current(want)).is_err() {
+        //
+        // The landing position is checked, not merely the seek's `Ok`: **seeking past the end of a
+        // file is legal and succeeds**, so a torn tail whose length prefix outruns the file was
+        // counted as a complete record. `count_records` drives the next append's sequence number
+        // while `read_journal_from` stops *at* the torn record, so the two disagreed about how many
+        // records exist and the next append took a seq number that no reader would ever hand out.
+        let Ok(landed) = f.seek(std::io::SeekFrom::Current(want)) else { break };
+        if landed > file_len {
             break;
         }
         n += 1;
@@ -314,6 +322,7 @@ pub fn read_journal_from(
         }
         Err(e) => return Err(e),
     };
+    let file_len = f.metadata()?.len();
     f.seek(std::io::SeekFrom::Start(cursor.offset))?;
 
     let mut page = JournalPage { entries: Vec::new(), next: cursor, more: false };
@@ -330,6 +339,19 @@ pub fn read_journal_from(
             Err(e) => return Err(e),
         }
         let want = u32::from_le_bytes(len) as usize;
+        // A record cannot be longer than the bytes that remain. The writer appends a length and
+        // then exactly that many bytes, so a length the file cannot satisfy is a torn or corrupt
+        // tail rather than a record to make room for.
+        //
+        // Checking this **before** the allocation is the whole point. `read_exact` below would
+        // fail on such a record anyway — but only after `vec![0u8; want]` had already reserved and
+        // zeroed `want` bytes, and `want` is four bytes wide: a single flipped bit in a length
+        // prefix asks for up to 4 GiB. The journal is node-local, so this is corruption and disk
+        // error rather than an attacker, and a corrupt journal should be *reported* by the reader
+        // that finds it, not resolved by the allocator. Found by the §12.6 trust-edge fuzz work.
+        if !record_fits(want, page.next.offset, file_len) {
+            break;
+        }
         let mut buf = vec![0u8; want];
         if f.read_exact(&mut buf).is_err() {
             // Truncated tail. Leave the cursor before it; the record is not lost, it is not
@@ -354,6 +376,23 @@ pub fn read_journal_from(
         });
     }
     Ok(page)
+}
+
+/// Can a record of `want` bytes actually be in this file, given that its length prefix started at
+/// `prefix_offset`?
+///
+/// The writer appends a 4-byte length and then exactly that many bytes, so a length the file cannot
+/// satisfy is a torn or corrupt tail rather than a record. Consulting this **before** allocating is
+/// the whole point: `read_exact` would fail on such a record anyway, but only after
+/// `vec![0u8; want]` had reserved and zeroed `want` bytes, and `want` is four bytes wide — a single
+/// flipped bit in a length prefix asks for up to 4 GiB.
+///
+/// The journal is node-local, so this is corruption and disk error rather than an attacker. A
+/// corrupt journal should be reported by the reader that finds it, not resolved by the allocator.
+/// Found by the §12.6 trust-edge fuzz work.
+fn record_fits(want: usize, prefix_offset: u64, file_len: u64) -> bool {
+    let record_start = prefix_offset.saturating_add(4);
+    want as u64 <= file_len.saturating_sub(record_start)
 }
 
 /// Read every record back, in order. **An exporter should prefer [`read_journal_from`]** — this
@@ -577,5 +616,140 @@ mod tests {
 
         let j = Journal::open(&path, "test/journal").unwrap();
         assert!(j.append(b"after".to_vec()).await.is_ok());
+    }
+}
+
+
+#[cfg(test)]
+mod torn_tail_tests {
+    use super::*;
+
+    /// Build a journal: `good` as a complete record, then a length prefix claiming `claims` bytes
+    /// with nothing behind it — the shape a crash mid-append leaves, and the shape a single flipped
+    /// bit in a length prefix produces.
+    fn journal_with_torn_tail(dir: &std::path::Path, claims: u32) -> std::path::PathBuf {
+        let path = dir.join("journal.log");
+        let good = b"the-one-complete-record";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(good.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(good);
+        bytes.extend_from_slice(&claims.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("write the journal");
+        path
+    }
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("mycelium-journal-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&d).expect("create temp dir");
+        d
+    }
+
+    /// The two readers agree about how many records a torn journal holds.
+    ///
+    /// `count_records` decided a record was complete by seeking past it and checking only that the
+    /// seek returned `Ok` — but **seeking past the end of a file is legal and succeeds**, so a torn
+    /// tail whose length prefix outran the file counted as a record. `read_journal_from` stops *at*
+    /// the torn record, so the two disagreed: the next append took a sequence number one higher
+    /// than any reader would ever hand out, and a cursor-based exporter reading the journal would
+    /// see that seq go missing.
+    ///
+    /// What this does NOT prove: nothing here says the torn record is recoverable. It is not, and
+    /// it should not be — the point is that both readers call it what it is.
+    #[test]
+    fn a_torn_tail_is_not_counted_as_a_record() {
+        let dir = tmpdir("torn");
+        let path = journal_with_torn_tail(&dir, 256 * 1024 * 1024);
+
+        let page = read_journal_from(&path, JournalCursor::default(), 4096, usize::MAX)
+            .expect("a torn tail is not an error");
+        assert_eq!(page.entries.len(), 1, "the file holds exactly one complete record");
+
+        assert_eq!(
+            count_records(&path).expect("count"),
+            1,
+            "count_records must not count a torn tail -- a seek past EOF succeeds, so the \
+             landing position has to be checked, not the seek's Ok",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A length prefix the file cannot satisfy reads as a torn tail rather than an error.
+    ///
+    /// **What this test does not prove, stated because it is easy to assume otherwise:** it does
+    /// *not* detect the allocation itself. Deleting the bound leaves every assertion here passing.
+    /// `vec![0u8; want]` goes through `alloc_zeroed`, which the OS satisfies with lazy zero pages —
+    /// so a 4 GiB request succeeds instantly, the following `read_exact` fails, and the function
+    /// returns exactly what it returns with the bound in place. The observable outcome is identical
+    /// by construction; only the allocator sees the difference, and gating that would mean swapping
+    /// a counting global allocator into the whole test binary.
+    ///
+    /// So the bound is gated at the level it can be: [`record_fits`] is tested directly below, and
+    /// this test pins the *behaviour* the reader must keep while it is enforced. The call site
+    /// itself rests on review. That is a weaker claim than the other tests here make, and it is
+    /// written down rather than left to be inferred from a green run.
+    #[test]
+    fn a_length_the_file_cannot_contain_reads_as_a_torn_tail() {
+        let dir = tmpdir("huge");
+        let path = journal_with_torn_tail(&dir, u32::MAX);
+
+        let page = read_journal_from(&path, JournalCursor::default(), 4096, usize::MAX)
+            .expect("an impossible length is a torn tail, not an error");
+        assert_eq!(page.entries.len(), 1, "the one complete record is still returned");
+        assert!(!page.more, "there is nothing after the torn tail to come back for");
+        assert_eq!(count_records(&path).expect("count"), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bound must not refuse a record the file *can* supply, including the last one.
+    #[test]
+    fn a_record_that_exactly_fills_the_file_is_still_read() {
+        let dir = tmpdir("exact");
+        let path = dir.join("journal.log");
+        let records: [&[u8]; 3] = [b"first", b"second-is-longer", b"third"];
+        let mut bytes = Vec::new();
+        for r in records {
+            bytes.extend_from_slice(&(r.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(r);
+        }
+        std::fs::write(&path, &bytes).expect("write");
+
+        let page = read_journal_from(&path, JournalCursor::default(), 4096, usize::MAX).expect("read");
+        assert_eq!(page.entries.len(), 3, "every record, including the one ending at EOF");
+        assert_eq!(
+            page.entries.iter().map(|e| e.bytes.as_slice()).collect::<Vec<_>>(),
+            records.to_vec(),
+            "and their contents, in order",
+        );
+        assert_eq!(count_records(&path).expect("count"), 3);
+
+        // Reading again from the returned cursor yields nothing and does not error.
+        let tail = read_journal_from(&path, page.next, 4096, usize::MAX).expect("read tail");
+        assert!(tail.entries.is_empty(), "the cursor after the last record is the end");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bound itself, tested where it can actually be falsified.
+    ///
+    /// Boundary cases both ways: a record that exactly reaches EOF fits, one byte more does not,
+    /// and the arithmetic saturates rather than wrapping on a cursor past the end of the file.
+    #[test]
+    fn a_record_fits_exactly_when_the_file_can_supply_it() {
+        // 4-byte prefix at offset 0, then 10 bytes of record: a 14-byte file holds it exactly.
+        assert!(record_fits(10, 0, 14), "a record ending at EOF fits");
+        assert!(!record_fits(11, 0, 14), "one byte past EOF does not");
+        assert!(record_fits(0, 0, 4), "an empty record is still a record");
+
+        // Mid-file, after an earlier record.
+        assert!(record_fits(5, 20, 29), "a record ending at EOF fits, wherever it starts");
+        assert!(!record_fits(6, 20, 29), "and one byte more does not");
+
+        // A cursor at or past the end cannot admit anything, and must not wrap.
+        assert!(!record_fits(1, 100, 50), "a prefix beyond EOF admits nothing");
+        assert!(!record_fits(1, u64::MAX, 50), "and the arithmetic saturates");
+        assert!(!record_fits(usize::MAX, 0, 14), "the widest possible claim is refused");
     }
 }
