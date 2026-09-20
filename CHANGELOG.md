@@ -54,6 +54,21 @@ them were not relied on for what their own code claimed. One finding changes a p
   reaches all three. `PrincipalId` and `TermId` had the same gap against their own non-empty rule and
   are fixed with it.
 
+- **A torn journal tail is no longer counted as a record.** `count_records` decided a record was
+  complete by seeking past it and checking only that the seek returned `Ok` — but **seeking past the
+  end of a file is legal and succeeds**, so a tail whose length prefix outran the file counted as a
+  record. It drives the next append's sequence number while `read_journal_from` stops *at* the torn
+  record, so the two readers disagreed: the next append took a seq no reader would ever hand out,
+  and a cursor-based exporter would see that seq go missing. Under both the evidence journal and the
+  rights ledger. The landing position is now checked rather than the seek's `Ok`.
+- **A journal record is not allocated for before the file is known to hold it.** The reader took a
+  `u32` length prefix straight into `vec![0u8; want]`, and the `max_bytes` bound is checked *after*
+  the read and by design never for the first record — so a single flipped bit in a length prefix
+  asked for up to 4 GiB before anything looked at whether the file could supply it. The journal is
+  node-local, so this is corruption and disk error rather than an attacker; a corrupt journal should
+  be reported by the reader that finds it, not resolved by the allocator. **Behaviour is unchanged**
+  — such a record already read as a torn tail, just after the allocation.
+
 - **A replay bundle's fields survive being written and read back.** `mycelium-sim`'s flat object
   form is written by `quote` and read by `unquote`, and the pair disagreed in two ways. `unquote`
   used `trim_matches('"')`, which strips **every** trailing quote rather than the one delimiter — so
@@ -90,12 +105,10 @@ them were not relied on for what their own code claimed. One finding changes a p
 ### Known and not fixed — further trust-edge parsers
 
 A coverage sweep for the above found four more parsers that read externally-supplied bytes before
-anything is verified. They are **named here rather than quietly left out**, and each is a different
-subsystem from the ones fixed above rather than the same parser one layer deeper:
+anything is verified. **The journal's framing, which was the most serious, is fixed above.** The
+remaining three are **named here rather than quietly left out**, and each is a different subsystem
+from the ones fixed above rather than the same parser one layer deeper:
 
-- `src/agent/journal.rs:332` — the journal's length-prefix framing takes a `u32` straight from the
-  file into `vec![0u8; want]`, and the `max_bytes` bound is checked *after* the read and by design
-  never for the first record. Under both the evidence journal and the rights ledger.
 - `src/control/ledger.rs:333` — `PublishedRightsHead::decode` reads gossip bytes (`rights/head/{holder}`,
   writable by any peer) through the hand-rolled `serde_fixint`, before `verify_published_head`.
 - `src/control/ledger.rs:362` — `RightsLedger::open` decodes every on-disk `LedgerEvent`, which
