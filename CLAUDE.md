@@ -173,11 +173,20 @@ suite) and the scheduler seam in v2.9.0. **§12.2's seven how-to chapters shippe
 19 replay & simulation · 20 authorising actions · 21 mandates · 22 stability & control · 23 knowledge ·
 24 commitments, plus the axis vocabulary in `00-concepts.md`, `ReceiptError` in the error taxonomy, and chapter
 14's three-coordination-model comparison). **Nothing in CI enforces doc-vs-code accuracy** — `/doc-coverage` and
-`/wiki-lint` are operator-run, and that pass found six pre-existing drift defects. Still open publicly: §12.2's
-**chapter 17 restructure** (public discovery vs federated domains), the SDK narrative, the wiki page per new
-mechanism; **§12.3's operations runbook**; §12.4–12.6 (decks, philosophy, the Phase-C adversarial self-audit over
-items 1+2+7); item 2's row 11 (SDK verbs, TLS on the federation edge itself, a hostile network, more than two
-domains); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues silently and the
-criterion has never been met**. Delivery ledger:
+`/wiki-lint` are operator-run, and that pass found six pre-existing drift defects. **Shipped since (2026-09-19/20):** §12.2's
+chapter 17 restructure (public discovery vs federated domains) · §12.3's federation runbook + §12.3 rows across
+nine ops pages · §12.4 both decks · §12.5 (found complete) · **§12.6 complete**: the front door + companion
+onboarding checklist, the **Phase-C adversarial self-audit** over items 1+2+7 (v2.9.1, four defects, PR #323 —
+plus three post-release fixes #325–#327), **nine trust-edge fuzz targets** (#329/#331, which found four more
+defects: the wire `DomainId` validation bypass, replay-bundle field corruption, a torn journal tail counted as a
+record, an unbounded journal allocation — #330), and **migration notes per deprecation**, now an adopter-facing
+page `docs/guide/deprecations.md` (#333). Still open publicly: §12.2's SDK narrative and the wiki page per new
+mechanism; item 2's row 11 (SDK verbs, TLS on the federation edge itself, a hostile network, more than two
+domains); **four unmarked deprecations** — only 2 of the 7 §6.6 ledger entries carry `#[deprecated]`, so the page
+is the whole notice for the rest; `mycelium-commitment`'s unsigned `Offer`/`Award` (provenance, a design question);
+the two audit findings that need a decision rather than a patch (the consumer-side-only per-partner budget, and
+**the composition finding** — a receipt carries no principal, the evidence journal no durability rung, and a
+receipt is never persisted); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
+silently and the criterion has never been met**. Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).
