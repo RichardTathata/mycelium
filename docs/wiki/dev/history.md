@@ -22,6 +22,43 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.9.1 release — 2026-09-20 (tag `v2.9.1`) — the Phase-C adversarial self-audit and its findings
+
+§12.6's adversarial self-audit at Phase C exit, over **items 1 + 2 + 7 together** because those three
+compose into the plan's first *composed* guarantee. The audit was the deliverable; **four defects in
+shipped code** were the result, plus a fifth that surfaced only once the first was fixed. Wire **v12**
+unchanged (verified by diff), no API change.
+
+**The composition finding — the audit's actual subject, and NOT fixed.** *A durable, attributed,
+cross-domain effect* has **no gate**: the receipt tests and federation tests have zero overlap, and
+the Docker federation suite mentions durability zero times. Underneath is a structural gap —
+`WriteReceipt` carries no principal, `AeEvidence` carries no durability rung, and **a receipt is never
+persisted by the substrate**. So after the fact you can prove who asked, but not what durability the
+resulting write established. Posture rule 6, about the plan's own centrepiece. Needs a decision, not
+a patch.
+
+**The four fixed.** A durability receipt reported `on_disk` for a **failed** write (tokio's
+`sync_data` completes the in-flight write and *discards its error*; `set_requiring_sync` returned
+`OnDisk` then applied and gossiped — the codebase already knew, `do_snapshot` flushes for exactly this
+reason). A federated partner could **read or cancel any caller's tasks** (only `tasks/send` authorised
+against the export). A client could **supply its own caller-context frame** through the raw-emission
+routes. And a **remote panic** in item 7's own refusal path.
+
+**The fifth, and the most instructive.** `a_replayed_write_does_not_touch_the_disk` opened a read-only
+file to prove no I/O happened; the replay path *does* re-perform a recorded success, so the write was
+failing with `EBADF` every run and the swallowed error hid it. **The test measured nothing and
+passed.** Fixing the swallow made it fail — working correctly for the first time.
+
+**Two process notes.** A fix requiring a signature for the node-principal mapping was **tried and
+reverted** — it breaks a node's own unsigned self envelope on a non-`tls` mesh, which an existing test
+asserts; the reason is commented in place. And `make check` **lints** the `sim` feature but does not
+**run** its tests, which is why defect 5 was caught by CI rather than locally.
+
+**A correction to the release notes.** v2.9.1 listed `Buffered`'s "survives a process crash" as an
+open over-claim; the same flush closes it, so the notes under-sold their own fix. `CHANGELOG.md`
+carries a dated correction; the tag is left as the historical record. Log:
+[`.log/2026-09-20-phase-c-adversarial-self-audit.md`](.log/2026-09-20-phase-c-adversarial-self-audit.md).
+
 ## v3 contracts axis — §12.3–§12.6: the delivery surfaces, and the drift they exposed — 2026-09-19 (unreleased)
 
 Where §12.2 wrote what did not exist, this stretch mostly **corrected what did**: the axis shipped in
