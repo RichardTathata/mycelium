@@ -9,6 +9,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A federation credential is ASCII in its *content*, not merely its encoding.** The `/a2a`
+  credential header gate checked `raw.is_ascii()` on the header text. JSON spells any character in
+  pure ASCII, so `"\u0809"` is an ASCII header carrying a non-ASCII field — it passed, and
+  `PresentedCall::to_header_value` then re-emitted that character **unescaped**, producing a header
+  this same parser rejects.
+
+  Two consequences, and the second is why it is a defect rather than a nicety. The `principal` is
+  an identity string, and one that may hold arbitrary Unicode admits **confusables** — a principal
+  that renders like another one — which the ASCII rule existed to prevent and did not. And the
+  accept-set had come apart from the emit-set: a credential this node accepted, it could not itself
+  re-parse, and a peer forwarding it would refuse what we had just allowed. The method's own doc
+  said *"a principal that is not [ASCII] is refused at parse time"*; nothing delivered that.
+
+  `principal`, `export` and `signature` are now checked after parsing. `origin` needed no change —
+  `DomainId` is restricted to `[a-z0-9.-]` at construction and its `Deserialize` routes through it.
+
+  **Found by §12.6's own `presented_call` fuzz target**, on `main`, by the round-trip assertion
+  rather than the parse — and *after* v2.11.0 was tagged, which is the honest sequence. The target
+  had been running against noise only, which essentially never forms a parseable credential, so the
+  assertion sat unreachable while the target looked covered. The in-suite mini-fuzz now carries a
+  **valid credential seed** (asserted to parse, so the round-trip check is reached) and the escaped
+  case as a literal regression. Same tell, and the same fix, as the caller-envelope seed in 2.10.0.
+
 ## [2.11.0] — 2026-09-21
 
 **The AE slice's evidence and contract halves.** Wire **v12** unchanged.

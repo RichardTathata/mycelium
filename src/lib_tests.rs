@@ -3643,6 +3643,52 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
         }
     }
 
+    // Mutations of a VALID presented federation credential, plus the escaped-Unicode case.
+    //
+    // **This seed is the point.** `presented_call_parse` asserts round-trip stability, and random
+    // bytes essentially never form a parseable credential — so the assertion sat unreachable in
+    // the noise pass above while the target looked covered. Same tell as the envelope seed: a
+    // gate that has quietly stopped exercising what it names is worse than no gate.
+    //
+    // The specific case that got through on main (2026-09-21): JSON can spell a non-ASCII
+    // character in pure ASCII, so `\u0809` passed a header-level `is_ascii()` check and then came
+    // back out of `to_header_value` unescaped — a credential this node accepted and could not
+    // re-parse. Kept here as a literal because it is the shape, not the bytes, that matters.
+    #[cfg(feature = "tls")]
+    {
+        let valid_call = br#"{"origin":"partner.example","principal":"oidc:idp/alice","export":"depot.read","issued_at_ms":1700000000000,"expires_at_ms":1700000060000,"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
+        assert!(
+            crate::fuzz_internals::presented_call_parse(valid_call),
+            "the seed must parse, or the round-trip assertion is never reached",
+        );
+
+        // An ASCII header whose *content* is not ASCII. Must be refused, never panic, and above
+        // all never be accepted-then-re-emitted as something this parser would reject.
+        let escaped = br#"{"origin":"partner.example","principal":"oidc:idp/al\u0809ice","export":"depot.read","issued_at_ms":0,"expires_at_ms":1,"signature":"AAAA"}"#;
+        assert!(
+            escaped.is_ascii(),
+            "the regression input is ASCII on the wire — that was the whole trap",
+        );
+        assert!(
+            !crate::fuzz_internals::presented_call_parse(escaped),
+            "a credential whose content is not ASCII must be refused, not round-tripped",
+        );
+        cases += 2;
+
+        for i in 0..valid_call.len() {
+            for bit in 0..8 {
+                let mut m = valid_call.to_vec();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::presented_call_parse(&m);
+                cases += 1;
+            }
+        }
+        for cut in 0..valid_call.len() {
+            let _ = crate::fuzz_internals::presented_call_parse(&valid_call[..cut]);
+            cases += 1;
+        }
+    }
+
     // Mutations of a VALID federation policy: the same argument, for a text parser. A byte flipped
     // inside the domain string is how an id that no constructor would produce reaches the parser.
     {

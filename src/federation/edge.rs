@@ -124,9 +124,37 @@ impl PresentedCall {
         if !raw.is_ascii() {
             return Err("federation credential header is not ASCII".to_string());
         }
-        serde_json::from_str::<Self>(raw)
-            .map(Some)
-            .map_err(|e| format!("federation credential header is malformed: {e}"))
+        let call = serde_json::from_str::<Self>(raw)
+            .map_err(|e| format!("federation credential header is malformed: {e}"))?;
+
+        // **The ASCII rule is about the credential's content, not its encoding.**
+        //
+        // The check above reads the raw header, and JSON can spell any character in pure ASCII:
+        // `"\u0809"` is an ASCII header carrying a non-ASCII principal. So the gate passed an
+        // escaped field straight through, and [`Self::to_header_value`]'s promise that "a principal
+        // that is not [ASCII] is refused at parse time" was not kept by anything.
+        //
+        // Two consequences, and the second is why it is a defect rather than a nicety. An identity
+        // string that may hold arbitrary Unicode admits confusables — a `principal` that renders
+        // like another one. And the accept-set stopped matching the emit-set: `to_header_value`
+        // re-emits the character **unescaped**, so a credential this node accepted it could not
+        // itself re-parse, and a peer forwarding it would refuse what we had just allowed.
+        //
+        // `origin` needs no check: `DomainId` is already restricted to `[a-z0-9.-]` at
+        // construction, and its `Deserialize` routes through that constructor.
+        //
+        // Found by §12.6's `presented_call` fuzz target — the round-trip assertion, not the parse.
+        for (field, text) in [
+            ("principal", call.principal.as_str()),
+            ("export", call.export.as_str()),
+            ("signature", call.signature.as_str()),
+        ] {
+            if !text.is_ascii() {
+                return Err(format!("federation credential {field} is not ASCII"));
+            }
+        }
+
+        Ok(Some(call))
     }
 }
 
@@ -399,6 +427,43 @@ impl FederationEdge {
 
 #[cfg(test)]
 mod tests {
+    /// **A credential this node accepts, it can re-parse.** Regression for the defect §12.6's
+    /// `presented_call` fuzz target found on main, 2026-09-21.
+    ///
+    /// The header gate checked `raw.is_ascii()` on the *encoding*. JSON spells any character in
+    /// pure ASCII, so `"\u0809"` is an ASCII header carrying a non-ASCII field — it passed, and
+    /// `to_header_value` then re-emitted the character **unescaped**, producing a header this same
+    /// parser rejects. The accept-set and the emit-set had come apart.
+    ///
+    /// Both directions matter, so both are asserted: the escaped credential is refused by name,
+    /// and a well-formed one still round-trips.
+    #[test]
+    fn a_credential_is_ascii_in_its_content_not_merely_its_encoding() {
+        use super::PresentedCall;
+
+        // `\u0809` is written here as an ASCII escape, exactly as a partner would send it.
+        let escaped = r#"{"origin":"partner.example","principal":"oidc:idp/al\u0809ice","export":"depot.read","issued_at_ms":0,"expires_at_ms":1,"signature":"AAAA"}"#;
+        assert!(escaped.is_ascii(), "the header itself is ASCII — that was the whole trap");
+
+        let refused = PresentedCall::from_header_value(Some(escaped));
+        assert!(
+            refused.as_ref().is_err_and(|e| e.contains("principal") && e.contains("not ASCII")),
+            "a non-ASCII principal must be refused by name, got {refused:?}",
+        );
+
+        // And the honest case still works, encoding and content both ASCII.
+        let plain = r#"{"origin":"partner.example","principal":"oidc:idp/alice","export":"depot.read","issued_at_ms":0,"expires_at_ms":1,"signature":"AAAA"}"#;
+        let call = PresentedCall::from_header_value(Some(plain))
+            .expect("a well-formed credential parses")
+            .expect("present");
+        let again = PresentedCall::from_header_value(Some(&call.to_header_value()));
+        assert_eq!(
+            Ok(Some(call)),
+            again,
+            "what this node emits, it must be able to read back",
+        );
+    }
+
     use super::*;
 
     fn keypair(seed: u8) -> (ed25519_dalek::SigningKey, [u8; 32]) {

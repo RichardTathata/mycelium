@@ -20,6 +20,24 @@ make check-full        # clippy feature-matrix + wasm-host clippy + the test sui
 ```
 Must be green. (`make check` is the fast pre-push gate; a *release* runs `check-full`.)
 
+## 2b. CI on the branch you are releasing **from**
+
+```bash
+gh run list --branch main --limit 5          # the most recent push run must be green
+```
+
+**`make check-full` green is not the same as `main` green, and neither is a green PR.** Some jobs
+run only on `push` — the **fuzz** job is `main`-only by design (it is time-boxed and slow), so a PR
+can show every check passing while the very same commit fails on `main` minutes later.
+
+That is not hypothetical: **v2.11.0 was tagged on a `main` whose fuzz job had already failed**, and
+the failure was a real defect in the `/a2a` credential parser that §12.6's own target had found
+(`CHANGELOG.md`, 2.11.1). `check-full` was green, the wire gate was green, the PR was green — and
+none of them ran the job that mattered. Look at the branch, not at what fed it.
+
+If the latest `main` run is still in progress, **wait for it**. A release is the one place where
+"probably fine" costs a tag that cannot be honestly rewritten.
+
 ## 3. Rolling-upgrade check (wire compatibility)
 
 The claim every release makes — *"backwards-compatible rolling upgrade"* — is backed by a
