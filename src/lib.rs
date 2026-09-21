@@ -268,6 +268,11 @@ pub use agent::{
     PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA,
     AE_REFERENCE_SCHEMA,
 };
+/// AE4's contract fixtures — what the seam requires of *any* evaluator behind it. Public because
+/// its whole purpose is to be run against an evaluator this repository did not write: fixtures an
+/// adopter cannot see cannot hold their replacement evaluator to anything.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub use agent::ae_contract;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{
     read_evidence_journal, read_evidence_journal_from, Appended, EvidenceCursor, EvidenceJournal,

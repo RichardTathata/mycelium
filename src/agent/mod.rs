@@ -43,6 +43,10 @@ pub(crate) mod gateway_caller;
 /// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod action_evaluator;
+/// AE4's contract fixtures: what the seam requires of *any* evaluator behind it, stated once so a
+/// replacement evaluator is held to the same bar as the reference one. Same gate as the seam.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub mod ae_contract;
 /// The node-local fsynced journal — the *mechanism* (item 4 PR 3a): the AE evidence journal and
 /// the rights ledger (`control::ledger`) are both thin profiles over it, because a second journal
 /// beside the first is how guarantees drift. Ungated since the ledger landed (item 4 PR 3): it now
