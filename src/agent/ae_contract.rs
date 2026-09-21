@@ -170,6 +170,27 @@ pub enum Expected {
     NotRecorded,
 }
 
+/// How the enforcement point's expected policy revision relates to the one the evaluator reports.
+///
+/// **This exists because a real adapter cannot be told its revision.** The first version of this
+/// suite put a revision string in [`PolicyIntent`] and assumed every evaluator would report it
+/// back. `ReferenceEvaluator` does. The shipped Cedar adapter does not and must not: its revision
+/// is the `sha256` of the policy source, *derived* so that it cannot drift from what was actually
+/// loaded. Asking it to report `"rev-1"` would be asking it to lie about which artifact it holds.
+///
+/// So the suite asks the evaluator what it will report ([`EvaluatorUnderTest::revision_for`]) and
+/// binds the envelope to the answer — except where the case is *about* a mismatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RevisionBinding {
+    /// The enforcement point expects exactly what the evaluator reports. The ordinary case.
+    Matching,
+    /// The enforcement point expects a **different** revision — AE0 §9's stale-policy row. The
+    /// suite additionally requires the report to name both revisions, since an operator told only
+    /// that something is stale cannot tell which artifact to go and look at.
+    Stale,
+}
+
 /// One case: an intent, an envelope, and what the contract requires.
 #[derive(Clone, Debug)]
 pub struct ContractCase {
@@ -187,6 +208,10 @@ pub struct ContractCase {
     pub expect: Expected,
     /// Identifiers the decision must name somewhere — **not** wording. See the module doc.
     pub must_mention: Vec<String>,
+    /// Whether the enforcement point expects the revision the evaluator reports, or a different
+    /// one. The suite sets `expected_policy_revision` from this rather than from the fixture, so
+    /// an evaluator whose revision is derived rather than chosen can still be held to the case.
+    pub revision: RevisionBinding,
 }
 
 /// Why an evaluator cannot express a clause.
@@ -211,6 +236,17 @@ pub trait EvaluatorUnderTest {
 
     /// Build an evaluator expressing `intent`, or say which clause cannot be expressed.
     fn build(&self, intent: &PolicyIntent) -> Result<Arc<dyn ActionEvaluator>, Unexpressible>;
+
+    /// The revision this evaluator will report for `intent`.
+    ///
+    /// Default: `intent.revision`, for an evaluator that can simply be told. Override it when the
+    /// revision is **derived** — a policy digest, an artifact id — because the suite has to know
+    /// what the enforcement point should expect before it can judge a stale-policy case. Returning
+    /// something the evaluator does not actually report makes every revision case meaningless, so
+    /// this must be the real answer and not a convenient one.
+    fn revision_for(&self, intent: &PolicyIntent) -> String {
+        intent.revision.clone()
+    }
 
     /// Case ids this evaluator declares it cannot express.
     ///
@@ -314,7 +350,33 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
             }
         };
 
-        let outcome = preflight(Some(&evaluator), &case.envelope, case.now_ms);
+        // Bind the enforcement point's expectation to what this evaluator actually reports, so a
+        // derived revision is not mistaken for a stale one.
+        let reported = subject.revision_for(&case.policy);
+        let mut envelope = case.envelope.clone();
+        let mut must_mention = case.must_mention.clone();
+        match case.revision {
+            RevisionBinding::Matching => {
+                envelope.expected_policy_revision = Some(reported);
+            }
+            RevisionBinding::Stale => {
+                let expected = format!("{reported}-superseded");
+                // Both must be named: "something is stale" without saying which artifact leaves an
+                // operator with nothing to go and look at.
+                //
+                // **This check cannot currently fail, and is kept anyway.** The seam composes the
+                // stale reason itself, from both strings, whatever the evaluator said — so no
+                // evaluator can reach this case and name only one. It is stated here because this
+                // is where a reader looks for the requirement, and it would start biting the day
+                // the refusal is composed anywhere else. What actually gates the requirement today
+                // is `the_stale_refusal_names_both_revisions`, against the seam.
+                must_mention.push(expected.clone());
+                must_mention.push(reported);
+                envelope.expected_policy_revision = Some(expected);
+            }
+        }
+
+        let outcome = preflight(Some(&evaluator), &envelope, case.now_ms);
         let (actual, decision) = match &outcome {
             Ok(Some(d)) => (Expected::Admitted, Some(d.clone())),
             // No evaluator attached is impossible here: one was just built.
@@ -338,7 +400,7 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
         // The refusal must NAME what it could not establish. Identifiers, never wording.
         if let Some(d) = &decision {
             let said = format!("{} {} {}", d.reason, d.checked.join(" "), d.errors.join(" "));
-            if let Some(missing) = case.must_mention.iter().find(|m| !said.contains(m.as_str())) {
+            if let Some(missing) = must_mention.iter().find(|m| !said.contains(m.as_str())) {
                 report.failed.push(Failure {
                     case: case.id,
                     requirement: case.requirement,
@@ -421,6 +483,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::Admitted,
             must_mention: vec![],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "explicit_prohibition",
@@ -436,6 +499,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::Denied,
             must_mention: vec![],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "incomplete_allow_list",
@@ -450,6 +514,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "impersonation",
@@ -464,6 +529,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "missing_facts",
@@ -478,6 +544,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec!["mandate".into()],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "unsupported_clause",
@@ -495,6 +562,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec!["odrl:duty".into()],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "unmapped_operation",
@@ -510,6 +578,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "ambiguous_operation",
@@ -524,17 +593,23 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "stale_policy_revision",
             requirement:
                 "AE0 §9 — a decision from a revision this enforcement point does not expect \
                  establishes nothing, and the report names both revisions",
-            policy: PolicyIntent::new("rev-2", vec![PolicyClause::allow("*", "*", "*")]),
+            // The policy itself is unremarkable and would permit. What makes the case is
+            // `RevisionBinding::Stale`: the enforcement point is set to expect something other
+            // than whatever this evaluator reports, whether it was told its revision or derived
+            // it. The suite supplies both strings to `must_mention`.
+            policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow("*", "*", "*")]),
             envelope: base("oidc:idp/alice", "tools/call", "tool:square@n1"),
             now_ms: now,
             expect: Expected::NotEstablished,
-            must_mention: vec!["rev-1".into(), "rev-2".into()],
+            must_mention: vec![],
+            revision: RevisionBinding::Stale,
         },
         ContractCase {
             id: "expired_envelope",
@@ -546,6 +621,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: 61_001,
             expect: Expected::Denied,
             must_mention: vec!["validity".into()],
+            revision: RevisionBinding::Matching,
         },
         ContractCase {
             id: "arguments_are_evaluated_not_inherited",
@@ -564,6 +640,7 @@ pub fn cases() -> Vec<ContractCase> {
             now_ms: now,
             expect: Expected::Admitted,
             must_mention: vec![],
+            revision: RevisionBinding::Matching,
         },
     ]
 }
@@ -804,6 +881,139 @@ mod tests {
             report.declined,
         );
         assert_eq!(report.passed.len(), cases().len());
+    }
+
+    /// **An evaluator whose revision is DERIVED, not told, passes the same fixtures.**
+    ///
+    /// This is the case that forced [`RevisionBinding`]. The shipped Cedar adapter reports the
+    /// `sha256` of its policy source, deliberately, so the revision cannot drift from the artifact
+    /// actually loaded — it can no more be told to report `"rev-1"` than a file can be told its
+    /// own hash. The first version of this suite assumed every evaluator could be told, and the
+    /// real adapter could not have run a single revision case.
+    ///
+    /// Cedar itself lives in a private companion, so the property is pinned here by an evaluator
+    /// with the same shape: revision computed from the policy, never accepted from outside.
+    #[test]
+    fn an_evaluator_with_a_derived_revision_passes_the_same_fixtures() {
+        /// Revision = a cheap digest of the clauses. The point is that it is *computed*.
+        fn derive(intent: &PolicyIntent) -> String {
+            let mut acc: u64 = 1469598103934665603;
+            for clause in &intent.clauses {
+                for byte in format!("{clause:?}").bytes() {
+                    acc ^= byte as u64;
+                    acc = acc.wrapping_mul(1099511628211);
+                }
+            }
+            format!("sha-{acc:016x}")
+        }
+
+        struct Derived(String, ReferenceEvaluator);
+        impl ActionEvaluator for Derived {
+            fn evaluate(&self, env: &ActionEnvelope) -> Decision {
+                // Delegate the policy logic; the revision is this adapter's own.
+                let inner = self.1.evaluate(env);
+                Decision {
+                    policy_revision: self.0.clone(),
+                    ..inner
+                }
+            }
+        }
+
+        struct Subject;
+        impl EvaluatorUnderTest for Subject {
+            fn name(&self) -> &str {
+                "DerivedRevision"
+            }
+            fn revision_for(&self, intent: &PolicyIntent) -> String {
+                derive(intent)
+            }
+            fn build(
+                &self,
+                intent: &PolicyIntent,
+            ) -> Result<Arc<dyn ActionEvaluator>, Unexpressible> {
+                // Build the inner rules exactly as the reference does, then stamp the derived
+                // revision over whatever it would have reported.
+                let mut inner = ReferenceEvaluator::new(derive(intent));
+                for clause in &intent.clauses {
+                    inner = match clause {
+                        PolicyClause::Allow { actor, operation, resource } => inner
+                            .allow(
+                                Rule::new(actor, operation, resource)
+                                    .requiring_scopes(["mcp:invoke"]),
+                            ),
+                        PolicyClause::Forbid { actor, operation, resource } => {
+                            inner.prohibit(Rule::new(actor, operation, resource))
+                        }
+                        PolicyClause::AllowRequiringFacts {
+                            actor,
+                            operation,
+                            resource,
+                            facts,
+                        } => inner.allow(
+                            Rule::new(actor, operation, resource)
+                                .requiring_scopes(["mcp:invoke"])
+                                .requiring_facts(facts.clone()),
+                        ),
+                        PolicyClause::UnsupportedClause(name) => inner.unsupported_clause(name),
+                    };
+                }
+                Ok(Arc::new(Derived(derive(intent), inner)))
+            }
+        }
+
+        let report = run(&Subject);
+        assert!(
+            report.conformant(),
+            "{}\nfailures: {:#?}",
+            report.summary(),
+            report.failed,
+        );
+
+        // And the revision really is derived: a different policy gets a different one, so the
+        // stale case is a genuine mismatch rather than two spellings of the same label.
+        let a = PolicyIntent::new("ignored", vec![PolicyClause::allow("a", "b", "c")]);
+        let b = PolicyIntent::new("ignored", vec![PolicyClause::allow("a", "b", "d")]);
+        assert_ne!(Subject.revision_for(&a), Subject.revision_for(&b));
+        assert!(Subject.revision_for(&a).starts_with("sha-"), "not the told label");
+    }
+
+    /// **A stale refusal names both revisions.**
+    ///
+    /// The real gate for AE0 §9's stale-policy row. An operator told only that *something* is
+    /// stale cannot tell which artifact to go and look at — the loaded one or the expected one —
+    /// and a refusal that withholds that is a refusal nobody can act on.
+    ///
+    /// Written against the seam rather than through [`run`] on purpose: the seam composes this
+    /// refusal itself, so the suite's own `must_mention` for the case can never fail and would be
+    /// a gate in name only.
+    #[test]
+    fn the_stale_refusal_names_both_revisions() {
+        let case = cases()
+            .into_iter()
+            .find(|c| c.id == "stale_policy_revision")
+            .expect("the stale case");
+
+        let evaluator = ReferenceUnderTest.build(&case.policy).expect("builds");
+        let reported = ReferenceUnderTest.revision_for(&case.policy);
+        let expected = format!("{reported}-superseded");
+
+        let mut envelope = case.envelope.clone();
+        envelope.expected_policy_revision = Some(expected.clone());
+
+        let (outcome, decision) = outcome_of(&evaluator, &envelope, case.now_ms);
+        assert_eq!(outcome, Expected::NotEstablished, "stale establishes nothing");
+
+        let d = decision.expect("a decision");
+        let said = format!("{} {} {}", d.reason, d.checked.join(" "), d.errors.join(" "));
+        assert!(
+            said.contains(&reported),
+            "the refusal must name the revision actually loaded ({reported}): {said}",
+        );
+        assert!(
+            said.contains(&expected),
+            "and the one the enforcement point expected ({expected}): {said}",
+        );
+        assert_eq!(d.verdict, Verdict::Indeterminate, "stale is never a denial");
     }
 
     /// **Both evaluators reach the same verdict on every case.**
