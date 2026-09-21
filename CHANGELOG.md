@@ -38,6 +38,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   durable effect being attributed to the wrong principal; item 7 decides that at its own strength
   and this record carries its verdict.
 
+- **An evidence record can correct another (AE3).** `AeEvidence` gains `supersedes` — the content
+  hash of the record this one corrects — with `correcting()`, `is_correction()` and
+  `corrects_the_same_action_as()`. AE0 §5 requires correction/supersession references and nothing
+  carried them.
+
+  **A correction supersedes; it never edits.** The reason is the one that makes evidence
+  append-only at all: a record that could be revised in place could be revised *after someone read
+  it*. The corrected record is retained exactly as it was, so a reader sees both and sees which
+  replaced which.
+
+  **The hash, not a name** — a correction pointing at "the last execution record for this attempt"
+  would be ambiguous the moment there were two, which is precisely when a correction exists. It
+  cites the same hash `AeReference::journal_sha256` does, so the two agree by construction.
+
+  **And a correction must describe the same action.** Correcting an *observation* means the outcome
+  was misread, not that the action was something else. If the subject, operation, resource or
+  identities move, it is a different action wearing a citation, and accepting it would let one
+  attempt's evidence be replaced by another's. Checked rather than assumed, because the citation is
+  the only thing binding the two records and a citation can be wrong.
+
 - **`LocalDurability` is serialisable** (`serde::Serialize` / `Deserialize`, snake_case), so the rung
   can be recorded into the evidence journal rather than restated there. Additive.
 
