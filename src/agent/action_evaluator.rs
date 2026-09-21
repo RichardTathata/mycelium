@@ -34,6 +34,7 @@
 //! this gateway fronts — never `HardPrevention`, which only a resource fence earns.
 
 use crate::mandate::{MandateRefusal, PrincipalId, TermId};
+use mycelium_core::receipt::LocalDurability;
 use crate::node_id::NodeId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -647,6 +648,28 @@ pub struct AeEvidence {
     pub catalogue_revision: String,
     /// Whether this operation is mapped at that revision.
     pub mapping_status: MappingKind,
+    /// **The rung the effect's receipt named** — item 1's own [`LocalDurability`], carried rather
+    /// than re-derived (`docs/design/composed-effect.md`).
+    ///
+    /// This is the join the Phase-C audit's composition finding asked for. A receipt knows how
+    /// durable a write was and is then *returned and gone*; this record knows who asked and
+    /// survives. Neither half could state the axis' headline claim alone.
+    ///
+    /// `None` means the effect's durability was never established here — which is not
+    /// `Failed`, and is read as *not stated* rather than *not durable*.
+    ///
+    /// **Not to be confused with [`AeReference::evidence`]**, which is an [`EvidenceState`] about
+    /// whether *this record* reached disk. Two durabilities, one name apart: this one is the
+    /// effect's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_durability: Option<LocalDurability>,
+    /// The domain the call originated in, when it crossed a federated edge (item 2).
+    ///
+    /// A fact on the record rather than an inference from `subject`'s spelling: a principal that
+    /// *looks* federated is a string, and the axis' own rule is that unverified caller-supplied
+    /// identity never becomes authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_domain: Option<String>,
     /// The caller's correlation identity, stable across retries.
     pub operation_id: String,
     /// This dispatch's identity.
@@ -690,6 +713,10 @@ impl AeEvidence {
             catalogue: envelope.mapping.catalogue.clone(),
             catalogue_revision: envelope.mapping.revision.clone(),
             mapping_status: envelope.mapping.status.into(),
+            // Both are set by the enforcement point after the effect, through the builders below:
+            // neither is knowable when the decision is recorded.
+            effect_durability: None,
+            origin_domain: None,
             operation_id: envelope.operation_id.clone(),
             attempt_id: envelope.attempt_id.clone(),
             arguments_digest: hex32(&envelope.arguments_digest),
@@ -752,6 +779,45 @@ pub enum EvidenceState {
     NotEstablished,
     /// No journal is attached, so no evidence was produced at all.
     NotConfigured,
+}
+
+impl AeEvidence {
+    /// Carry the rung the effect's receipt named.
+    pub fn with_effect_durability(mut self, durability: LocalDurability) -> Self {
+        self.effect_durability = Some(durability);
+        self
+    }
+
+    /// Carry the domain the call originated in, when it crossed a federated edge.
+    pub fn with_origin_domain(mut self, domain: impl Into<String>) -> Self {
+        self.origin_domain = Some(domain.into());
+        self
+    }
+
+    /// Does this one record state the axis' composed claim — **a durable, attributed, cross-domain
+    /// effect**?
+    ///
+    /// All four legs, from this record alone. The predicate exists so the claim is *checked* rather
+    /// than assembled by eye at each reading, which is how the composition went unproved: every leg
+    /// worked and nothing ever asked for them together.
+    ///
+    /// **`OnDisk` only.** [`LocalDurability::Buffered`] survives a process crash and is lost to a
+    /// power failure — a real rung, and not this one. Item 1 added `Buffered` precisely to stop a
+    /// receipt claiming a durability the node never established, and a composed claim resting on it
+    /// would re-make that mistake one level up.
+    ///
+    /// **Completion only.** `Attempted` is the honest answer when a dispatcher did not watch, and
+    /// it is not an effect that happened.
+    ///
+    /// What this does **not** establish: that the attribution is correct. Item 7 decides that, at
+    /// its own strength; this carries that verdict rather than re-deciding it
+    /// (`docs/design/composed-effect.md` §7).
+    pub fn states_a_composed_effect(&self) -> bool {
+        matches!(self.effect_durability, Some(LocalDurability::OnDisk))
+            && self.origin_domain.is_some()
+            && !self.subject.is_empty()
+            && self.execution == Execution::Completed
+    }
 }
 
 /// The **safe reference record**: all that may enter the gossiped audit chain (AE0 §5).
@@ -1320,6 +1386,7 @@ pub(crate) fn arguments_digest(canonical: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mycelium_core::receipt::LocalDurability;
 
     fn node() -> NodeId {
         NodeId::new("127.0.0.1", 9000).unwrap()
@@ -1370,6 +1437,164 @@ mod tests {
             let mut out = [0u8; 32];
             for (i, b) in bytes.iter().enumerate() { out[i % 32] ^= *b; }
             out
+        }
+    }
+
+
+    // ── The composed guarantee ──────────────────────────────────────────────────────────
+    //
+    // Design of record: `docs/design/composed-effect.md`.
+
+    /// **The gate the Phase-C audit asked for.**
+    ///
+    /// The axis' headline claim is *a durable, attributed, cross-domain effect*. Posture rule 6
+    /// says a composed guarantee is established by argument **and** gate, never by naming — and the
+    /// audit found it *"proved leg by leg and nowhere as a whole"*.
+    ///
+    /// So: from **one execution record**, with no access to the receipt that was returned, the
+    /// caller's memory or the federation client's state, reconstruct the whole sentence.
+    ///
+    /// What this does NOT prove: that the attribution is *correct*. Item 7 establishes that, at its
+    /// own strength; this record carries item 7's verdict rather than re-deciding it. The claim
+    /// here is that the sentence is **checkable from one artefact** rather than believed across
+    /// four — which is what the audit asked for, and all of it.
+    #[test]
+    fn a_durable_attributed_cross_domain_effect_is_reconstructable_from_one_record() {
+        let env = ActionEnvelope::builder(
+            "federation:depot.example/dispatcher",
+            node(),
+            "tools/call",
+            "tool:reroute@n1",
+        )
+        .identities("op-77", "op-77/1")
+        .scopes(["mcp:invoke"])
+        .mapping(ActionMapping::mapped("cat", "1"))
+        .validity(1_000, 61_000)
+        .build();
+
+        let decision = Decision::permit("within the granted remit", "rev-9");
+        let record = AeEvidence::for_decision(&env, &decision, Execution::Completed, "depot-resource")
+            .with_effect_durability(LocalDurability::OnDisk)
+            .with_origin_domain("depot.example");
+
+        // Durable — the rung the receipt named, not a re-derivation of it.
+        assert_eq!(
+            record.effect_durability,
+            Some(LocalDurability::OnDisk),
+            "the record must carry the receipt's rung",
+        );
+        // Attributed — item 7's verified principal.
+        assert_eq!(record.subject, "federation:depot.example/dispatcher");
+        // Cross-domain — a fact on the record, not an inference from the principal's spelling.
+        assert_eq!(record.origin_domain.as_deref(), Some("depot.example"));
+        // ... and an effect, which is the part that was never in doubt.
+        assert_eq!(record.execution, Execution::Completed);
+        assert_eq!(record.operation_id, "op-77");
+
+        assert!(
+            record.states_a_composed_effect(),
+            "all four present must read as the composed claim",
+        );
+    }
+
+    /// The gate must fail when **any** leg is missing, or it is not testing the composition.
+    ///
+    /// Both plants live here rather than in a comment: remove the durability rung, and remove the
+    /// origin domain. A test that still passes with either absent would have been satisfied by the
+    /// world before this change.
+    #[test]
+    fn the_composed_claim_needs_every_leg() {
+        let env = ActionEnvelope::builder(
+            "federation:depot.example/dispatcher",
+            node(),
+            "tools/call",
+            "tool:reroute@n1",
+        )
+        .identities("op-77", "op-77/1")
+        .mapping(ActionMapping::mapped("cat", "1"))
+        .validity(1_000, 61_000)
+        .build();
+        let decision = Decision::permit("ok", "rev-9");
+        let whole = AeEvidence::for_decision(&env, &decision, Execution::Completed, "depot-resource")
+            .with_effect_durability(LocalDurability::OnDisk)
+            .with_origin_domain("depot.example");
+        assert!(whole.states_a_composed_effect());
+
+        let no_rung = AeEvidence::for_decision(&env, &decision, Execution::Completed, "depot-resource")
+            .with_origin_domain("depot.example");
+        assert!(
+            !no_rung.states_a_composed_effect(),
+            "without a durability rung the effect is not known to be durable",
+        );
+
+        let no_domain =
+            AeEvidence::for_decision(&env, &decision, Execution::Completed, "depot-resource")
+                .with_effect_durability(LocalDurability::OnDisk);
+        assert!(
+            !no_domain.states_a_composed_effect(),
+            "without an origin domain the effect is not known to be cross-domain",
+        );
+    }
+
+    /// **The negative the finding is really about.** An effect whose durability was *not
+    /// established* must not read as a durable one — and neither must one that was merely buffered.
+    ///
+    /// `Buffered` is the case worth having: the bytes survive a process crash and are lost to a
+    /// power failure. It is a real rung and it is **not** `OnDisk`, so a composed claim resting on
+    /// it would overstate exactly the thing item 1 added `Buffered` to stop overstating.
+    #[test]
+    fn a_buffered_or_failed_effect_does_not_state_a_durable_one() {
+        let env = ActionEnvelope::builder(
+            "federation:depot.example/dispatcher",
+            node(),
+            "tools/call",
+            "tool:reroute@n1",
+        )
+        .identities("op-77", "op-77/1")
+        .mapping(ActionMapping::mapped("cat", "1"))
+        .validity(1_000, 61_000)
+        .build();
+        let decision = Decision::permit("ok", "rev-9");
+
+        for rung in [
+            LocalDurability::Buffered,
+            LocalDurability::Failed("writer gone".into()),
+            LocalDurability::NotConfigured,
+        ] {
+            let r = AeEvidence::for_decision(&env, &decision, Execution::Completed, "depot-resource")
+                .with_effect_durability(rung.clone())
+                .with_origin_domain("depot.example");
+            assert!(
+                !r.states_a_composed_effect(),
+                "{rung:?} is not a durable effect, and the record must not say it is",
+            );
+        }
+    }
+
+    /// An effect that did not *complete* states nothing composed either, however durable the
+    /// record claims to be — `Attempted` is item 1's honest answer and it is not completion.
+    #[test]
+    fn an_unfinished_effect_states_nothing_composed() {
+        let env = ActionEnvelope::builder(
+            "federation:depot.example/dispatcher",
+            node(),
+            "tools/call",
+            "tool:reroute@n1",
+        )
+        .identities("op-77", "op-77/1")
+        .mapping(ActionMapping::mapped("cat", "1"))
+        .validity(1_000, 61_000)
+        .build();
+        let decision = Decision::permit("ok", "rev-9");
+
+        for ex in [Execution::Attempted, Execution::Unknown, Execution::Failed, Execution::None] {
+            let r = AeEvidence::for_decision(&env, &decision, ex, "depot-resource")
+                .with_effect_durability(LocalDurability::OnDisk)
+                .with_origin_domain("depot.example");
+            assert!(
+                !r.states_a_composed_effect(),
+                "{ex:?} is not a completed effect",
+            );
         }
     }
 

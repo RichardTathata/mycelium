@@ -180,8 +180,13 @@ impl LocalApplication {
 /// that the record is absent. The WAL writes the record before it syncs, so after a failure the
 /// bytes may or may not be on disk and a later replay may restore them. Nothing is promised;
 /// nothing is denied either.
+/// Serialisable because the AE slice records the rung an effect achieved **into the evidence
+/// journal** — the join the composition finding asked for (`docs/design/composed-effect.md`). It is
+/// carried there rather than restated as a string, because a second spelling of a durability rung
+/// is a second vocabulary, and the one thing that record refuses to mint is a parallel ledger.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LocalDurability {
     /// The record was written **and synced**: a forced `fdatasync` returned, or the node's
     /// `SyncMode::Flush` syncs every append. The one state that establishes durability.
