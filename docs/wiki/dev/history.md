@@ -22,6 +22,45 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.11.0 release — 2026-09-21 (tag `v2.11.0`) — the AE slice's evidence and contract halves
+
+Wire **v12** unchanged. Ten workspace crates on the shared train move to 2.11.0.
+
+Two things this release is about.
+
+**A composed claim finally has an artefact that carries it.** The axis' headline sentence — *a
+durable, attributed, cross-domain effect* — had been proved leg by leg and nowhere as a whole: the
+receipt tests and the federation tests had zero overlap, and no single artefact held all four
+properties, so the sentence could only be believed. The execution record now carries item 1's own
+`LocalDurability` and the origin domain, and `states_a_composed_effect()` checks all four legs from
+one record. **What that establishes, exactly:** the sentence is *reconstructable*, not *enforced* —
+nothing here stops a durable effect being attributed to the wrong principal.
+
+**The evaluator seam stopped being replaceable in principle only.** AE0 §9's negative cases existed
+and passed, but each was written inline against `ReferenceEvaluator`'s own rule types, so nobody
+else's evaluator could run one of them. They were tests of an implementation wearing the name of a
+contract, and the gap was invisible *because* they all passed. `mycelium::ae_contract` states them
+once, evaluator-neutrally, and is public because fixtures an adopter cannot see hold nobody to
+anything.
+
+**The suite immediately paid for itself.** Putting a real adapter through it found the suite's own
+last assumption: it handed every evaluator a revision *string* and expected it back, which an
+adapter whose revision is a policy **digest** can no more do than a file can be told its own hash.
+Two evaluators had passed without noticing; only a third could surface it.
+
+| Landed | What |
+|---|---|
+| #340 | `RecordKind` and `Execution` marked `#[non_exhaustive]` **before** the variants arrive |
+| #341/#342 | the composed guarantee's gate, and its wiki ingest |
+| #343/#344 | AE3 — an evidence record can correct another, and the two crash points through the real journal |
+| #345 | AE4 — contract fixtures a replacement evaluator can actually run |
+| #346 | `revision_for` / `RevisionBinding` — a real adapter cannot be told its revision |
+
+**Upgrade notes**, both one class — an exhaustive `match` needs a `_` arm: `RecordKind` and
+`Execution` are now `#[non_exhaustive]`. For `Execution` that arm **must fail safe**: an execution a
+reader does not recognise is *we did not look*, never *nothing ran*; omitting the field is the
+stronger claim and belongs only to `None`.
+
 ## v3 contracts axis — the composed guarantee gets a gate — 2026-09-21 (unreleased)
 
 The Phase-C audit's **composition finding**, open since v2.9.1, closed. PR #341; record

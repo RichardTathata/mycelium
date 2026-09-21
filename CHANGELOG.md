@@ -9,7 +9,67 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.11.0] — 2026-09-21
+
+**The AE slice's evidence and contract halves.** Wire **v12** unchanged.
+
+Two things this release is actually about. First, **a composed claim finally has an artefact that
+carries it**: the axis' headline sentence — *a durable, attributed, cross-domain effect* — was
+proved leg by leg and nowhere as a whole, and the execution record now carries the receipt's rung
+and the origin domain so the sentence is reconstructable from one record instead of believed across
+four. Note precisely what that does and does not establish: it is *reconstructable*, not *enforced*.
+
+Second, **the AE evaluator seam stopped being replaceable in principle only**. AE0 §9's negative
+cases existed and passed, but each was written against the reference evaluator's own rule types, so
+nobody else's evaluator could run one of them — tests of an implementation wearing the name of a
+contract. `mycelium::ae_contract` states them once, evaluator-neutrally, and is public because
+fixtures an adopter cannot see hold nobody to anything.
+
+That change immediately paid for itself. Putting a real adapter through the new suite found the
+suite's own last assumption: it handed every evaluator a revision *string* and expected it back,
+which an adapter whose revision is a policy **digest** can no more do than a file can be told its
+own hash. Two evaluators had passed without noticing.
+
+**Upgrade notes**, both one class — an exhaustive `match` needs a `_` arm: `RecordKind` and
+`Execution` are now `#[non_exhaustive]`. For `Execution` that arm **must fail safe**: an execution a
+reader does not recognise is *we did not look*, never *nothing ran*.
+
 ### Added
+
+- **Contract fixtures a replacement evaluator can actually run (AE4).** New public module
+  `mycelium::ae_contract`: AE0 §9's negative cases stated **once**, in evaluator-neutral terms, so
+  the same set holds the shipped reference evaluator and anybody else's.
+
+  They existed before and they passed — but each was written inline against `ReferenceEvaluator`,
+  constructing that evaluator's own `Rule` type. **An adopter with a different evaluator could not
+  run a single one of them.** They were tests of the reference implementation wearing the name of a
+  contract, and the gap was invisible precisely because they all passed.
+
+  A `ContractCase` states an intent, an envelope and the outcome the seam must reach; each
+  evaluator translates the intent into whatever it holds internally, and the suite judges only what
+  came out of the seam. It is **public on purpose** — fixtures an adopter cannot see hold nobody to
+  anything, and *"the evaluator is replaceable"* is a claim about someone else's code.
+
+  Three rules keep it a contract rather than a description. It checks **identifiers, not wording**,
+  so a conforming evaluator may say it however it likes. **Declining is not passing** — an
+  evaluator that cannot express a clause must declare that in advance, and `Report::conformant`
+  requires the declined set to equal the declared set *exactly* (an undeclared decline is a silent
+  gap; a stale declaration claims a weakness that is not there). And the suite carries its own
+  adversarial tests, because a suite that passes everything is worth nothing.
+
+  **What running a real adapter found.** The first version put a revision *string* in `PolicyIntent`
+  and assumed every evaluator would report it back. An adapter whose revision is a policy **digest**
+  — derived so it cannot drift from the artifact actually loaded — cannot be told to report a label,
+  any more than a file can be told its own hash. `EvaluatorUnderTest::revision_for` and
+  `RevisionBinding` fix it: the suite now *asks* what the evaluator will report instead of assuming
+  it was told. Nothing about the contract changed; the suite had one assumption left in it, and only
+  a third evaluator could surface it.
+
+  Coverage is stated rather than implied: **9 of AE0 §9's 11 rows** are gated (`ae_contract::COVERAGE`
+  says which and why). *Shared identity* and *unobserved route* are properties of the evidence record
+  and of route coverage, not of a decision — no fixture about decisions can speak to them — and
+  *substitution* is partial, because the seam holds no decision cache for a bound decision to be
+  substituted into. Guide chapter 20 gains the worked example under *Replacing the evaluator*.
 
 - **The composed guarantee has a gate** — *a durable, attributed, cross-domain effect*. The
   Phase-C audit found it **proved leg by leg and nowhere as a whole**: the receipt tests and the
@@ -63,8 +123,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed — API
 
-- **`RecordKind` is now `#[non_exhaustive]`.** A downstream exhaustive `match` needs a `_` arm.
-  The two variants it ships are not the whole list: AE0 §5 names six records, and two exist because
+- **`RecordKind` and `Execution` are now `#[non_exhaustive]`.** A downstream exhaustive `match` on
+  either needs a `_` arm — and for `Execution` that arm **must fail safe**: an execution a reader
+  does not recognise is *we did not look*, never *nothing ran*. Omitting the field is the stronger
+  claim and belongs only to `None`.
+
+  The variants each ships are not the whole list: AE0 §5 names six records, and two exist because
   two are what AE-T needed. The rest wait on the evidence consumer's contract 1.2
   (`not_dispatched`, handover seam 2) — minting them first would put a distinction in our records
   that nothing downstream could read.
