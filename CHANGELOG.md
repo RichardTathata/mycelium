@@ -9,6 +9,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The composed guarantee has a gate** — *a durable, attributed, cross-domain effect*. The
+  Phase-C audit found it **proved leg by leg and nowhere as a whole**: the receipt tests and the
+  federation tests had zero overlap, and no single artefact ever held all four properties, so the
+  sentence could not be checked — only believed. Record:
+  [`docs/design/composed-effect.md`](docs/design/composed-effect.md).
+
+  The fix is a **join between things that already existed**, not a new mechanism. A receipt knows
+  how durable a write was and is then *returned and gone*; an evidence record knows who asked and
+  *survives*. So the execution record now carries item 1's own `LocalDurability` — carried, not
+  restated as a string, because a second spelling of a rung is a second vocabulary — and the
+  **origin domain** as a fact rather than an inference from the principal's spelling.
+  `AeEvidence::states_a_composed_effect()` checks all four legs from one record.
+
+  **`OnDisk` only**: `Buffered` survives a process crash and is lost to a power failure, and item 1
+  added it precisely to stop a receipt claiming a durability the node never established — a composed
+  claim resting on it would re-make that mistake one level up. **Completion only**: `Attempted` is
+  the honest answer when a dispatcher did not watch, and it is not an effect that happened.
+
+  Ordering is unchanged: the receipt rides the `Execution` record, which was always *post*-effect,
+  while AE0 §5's pre-effect barrier is on the `Decided` record. Nothing is added in front of an
+  effect.
+
+  **What it establishes, exactly:** the sentence is now *reconstructable from one artefact* rather
+  than believed across four. It does **not** make the composition enforced — nothing here stops a
+  durable effect being attributed to the wrong principal; item 7 decides that at its own strength
+  and this record carries its verdict.
+
+- **`LocalDurability` is serialisable** (`serde::Serialize` / `Deserialize`, snake_case), so the rung
+  can be recorded into the evidence journal rather than restated there. Additive.
+
 ### Changed — API
 
 - **`RecordKind` is now `#[non_exhaustive]`.** A downstream exhaustive `match` needs a `_` arm.
@@ -225,6 +257,11 @@ reads as a set of vulnerabilities, and these are not:
   overlap. Underneath: a receipt carries **no principal**, the evidence journal carries **no
   durability rung**, and a receipt is **never persisted**. Closing it means deciding whether a receipt
   should be *recorded* rather than merely returned.
+
+  > **Closed in [Unreleased] (2026-09-21).** The answer was *yes, recorded* — the execution record
+  > carries the receipt's rung and the origin domain, so the claim is reconstructable from one
+  > artefact. See [`docs/design/composed-effect.md`](docs/design/composed-effect.md). The finding is
+  > left in place as the historical record of what was open at 2.10.0.
 
 ## [2.9.1] — 2026-09-19
 
