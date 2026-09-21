@@ -670,6 +670,21 @@ pub struct AeEvidence {
     /// identity never becomes authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_domain: Option<String>,
+    /// The **content hash of the record this one corrects**, lowercase hex, when it is a
+    /// correction (AE0 §5's correction/supersession reference).
+    ///
+    /// A correction **supersedes; it never edits**. The reason is the one that makes evidence
+    /// append-only at all: a record that could be revised in place could be revised *after someone
+    /// read it*. So an observation that turns out wrong is corrected by a new record citing the old
+    /// one's hash, and the old record stays exactly as it was — a reader can see both, and see
+    /// which replaced which.
+    ///
+    /// **The hash, not a name.** A correction that pointed at "the last execution record for this
+    /// attempt" would be ambiguous the moment there were two, which is precisely when a correction
+    /// exists. The hash is the same one [`AeReference::journal_sha256`] cites, so the two agree by
+    /// construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
     /// The caller's correlation identity, stable across retries.
     pub operation_id: String,
     /// This dispatch's identity.
@@ -717,6 +732,8 @@ impl AeEvidence {
             // neither is knowable when the decision is recorded.
             effect_durability: None,
             origin_domain: None,
+            // A record is an original until something says otherwise.
+            supersedes: None,
             operation_id: envelope.operation_id.clone(),
             attempt_id: envelope.attempt_id.clone(),
             arguments_digest: hex32(&envelope.arguments_digest),
@@ -792,6 +809,37 @@ impl AeEvidence {
     pub fn with_origin_domain(mut self, domain: impl Into<String>) -> Self {
         self.origin_domain = Some(domain.into());
         self
+    }
+
+    /// Mark this record as correcting the record whose content hash is `journal_sha256`.
+    ///
+    /// The corrected record is **retained**, not replaced: this is a citation, and the journal is
+    /// append-only.
+    pub fn correcting(mut self, journal_sha256: impl Into<String>) -> Self {
+        self.supersedes = Some(journal_sha256.into());
+        self
+    }
+
+    /// Does this record correct another?
+    pub fn is_correction(&self) -> bool {
+        self.supersedes.is_some()
+    }
+
+    /// Does this record describe **the same action** as `other`?
+    ///
+    /// A correction of an *observation* means the outcome was misread — not that the action was
+    /// something else. If the subject, the operation, the resource or the identities move, this is
+    /// a different action wearing a citation, and a reader that accepted it would let one attempt's
+    /// evidence be replaced by another's.
+    ///
+    /// Checked here rather than assumed, because the citation is the only thing binding the two
+    /// records together and a citation can be wrong or forged.
+    pub fn corrects_the_same_action_as(&self, other: &Self) -> bool {
+        self.subject == other.subject
+            && self.operation == other.operation
+            && self.resource == other.resource
+            && self.operation_id == other.operation_id
+            && self.attempt_id == other.attempt_id
     }
 
     /// Does this one record state the axis' composed claim — **a durable, attributed, cross-domain
@@ -1821,6 +1869,99 @@ mod tests {
             );
         let d = e.evaluate(&with_mandate(MandateState::Established, 9));
         assert_eq!(d.verdict, Verdict::Deny, "a prohibition still wins over a mandated allowance");
+    }
+
+
+    // ── Corrections (AE3) ───────────────────────────────────────────────────────────────
+
+    /// **A correction supersedes; it never edits.**
+    ///
+    /// AE0 §5 requires every record to carry correction/supersession references, and the reason is
+    /// the same one that makes evidence append-only in the first place: *a record that could be
+    /// revised in place could be revised after someone read it*. So an observation that turns out
+    /// wrong is corrected by a **new record citing the old one's content hash**, and the old record
+    /// stays exactly as it was.
+    ///
+    /// The hash is the citation rather than a name, because a correction that pointed at "the last
+    /// execution record for this attempt" would be ambiguous the moment there were two — which is
+    /// precisely when a correction exists.
+    #[test]
+    fn a_correction_cites_the_record_it_supersedes_and_leaves_it_intact() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:pay@n1");
+        let first = AeEvidence::for_decision(
+            &env,
+            &Decision::permit("ok", "rev-1"),
+            Execution::Completed,
+            "depot-resource",
+        );
+        assert_eq!(first.supersedes, None, "an original cites nothing");
+
+        // The observer later establishes that it did not complete after all.
+        let hash = "a1b2c3";
+        let correction = AeEvidence::for_decision(
+            &env,
+            &Decision::permit("ok", "rev-1"),
+            Execution::Failed,
+            "depot-resource",
+        )
+        .correcting(hash);
+
+        assert_eq!(correction.supersedes.as_deref(), Some(hash));
+        assert!(correction.is_correction());
+        assert!(!first.is_correction());
+
+        // The original is untouched — it still says what it said.
+        assert_eq!(first.execution, Execution::Completed);
+        assert_eq!(first.supersedes, None);
+    }
+
+    /// A correction is **not** a licence to change the action it describes.
+    ///
+    /// Correcting an *observation* means the outcome was misread. If the subject, the operation or
+    /// the identities move too, this is not a correction of that record — it is a different action
+    /// wearing a citation, and a reader that accepted it would let one attempt's evidence be
+    /// replaced by another's.
+    #[test]
+    fn a_correction_must_describe_the_same_action_it_corrects() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:pay@n1");
+        let original = AeEvidence::for_decision(
+            &env,
+            &Decision::permit("ok", "rev-1"),
+            Execution::Completed,
+            "depot-resource",
+        );
+
+        let honest = AeEvidence::for_decision(
+            &env,
+            &Decision::permit("ok", "rev-1"),
+            Execution::Failed,
+            "depot-resource",
+        )
+        .correcting("a1b2c3");
+        assert!(honest.corrects_the_same_action_as(&original));
+
+        let other_env = envelope("oidc:idp/mallory", "tools/call", "tool:pay@n1");
+        let impostor = AeEvidence::for_decision(
+            &other_env,
+            &Decision::permit("ok", "rev-1"),
+            Execution::Failed,
+            "depot-resource",
+        )
+        .correcting("a1b2c3");
+        assert!(
+            !impostor.corrects_the_same_action_as(&original),
+            "a different subject is a different action, whatever it cites",
+        );
+
+        let other_op = envelope("oidc:idp/alice", "tools/call", "tool:refund@n1");
+        let wrong_resource = AeEvidence::for_decision(
+            &other_op,
+            &Decision::permit("ok", "rev-1"),
+            Execution::Failed,
+            "depot-resource",
+        )
+        .correcting("a1b2c3");
+        assert!(!wrong_resource.corrects_the_same_action_as(&original));
     }
 
     fn evaluator(e: ReferenceEvaluator) -> Arc<dyn ActionEvaluator> {
