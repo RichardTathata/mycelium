@@ -182,3 +182,170 @@ mod tests {
         assert_eq!(page.entries[0].content_hash, a.content_hash);
     }
 }
+
+
+#[cfg(test)]
+mod crash_state_tests {
+    use super::*;
+    use crate::agent::action_evaluator::{
+        ActionEnvelope, ActionMapping, AeEvidence, Decision, Execution,
+    };
+    use crate::node_id::NodeId;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "mycelium-ae3-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("temp dir");
+        d
+    }
+
+    fn evidence(execution: Execution) -> AeEvidence {
+        let via = NodeId::new("127.0.0.1", 9000).expect("node id");
+        let env = ActionEnvelope::builder("oidc:idp/dispatcher", via, "tools/call", "tool:pay@n1")
+            .identities("op-9", "op-9/1")
+            .mapping(ActionMapping::mapped("cat", "1"))
+            .validity(1_000, 61_000)
+            .build();
+        AeEvidence::for_decision(
+            &env,
+            &Decision::permit("within remit", "rev-1"),
+            execution,
+            "depot-resource",
+        )
+    }
+
+    /// **AE3: after a crash before the execution record, the journal holds the decision and
+    /// invents nothing.**
+    ///
+    /// The effect happened; the record saying so never reached the journal. On restart the evidence
+    /// holds exactly what was acknowledged and no more — in particular **no attested refusal**,
+    /// because `Execution::None` is a claim this node never made and a journal that manufactured
+    /// one would hand a reader an all-clear out of a crash.
+    ///
+    /// Driven through the **real** journal, reopened from disk, because the AE3 gate asks for these
+    /// states from a journal rather than from records a test assembled.
+    ///
+    /// **What this does not prove, and it is the larger half.** Whether a *reader* then refuses to
+    /// read the absent record as "nothing happened" is a property of the reader, not of the
+    /// journal — AE0 §5's rule that *silence is never reassurance* is enforced in the correlator,
+    /// where it has its own test. This one establishes only that the journal gives that reader an
+    /// honest input: what was acknowledged, nothing more, nothing invented.
+    #[tokio::test]
+    async fn a_crash_before_the_execution_record_leaves_only_what_was_acknowledged() {
+        let dir = tmpdir("before");
+        let path = dir.join("evidence.log");
+
+        {
+            let journal = EvidenceJournal::open(&path, EvidenceProfile::Strict).expect("open");
+            let decided = evidence(Execution::Attempted);
+            let bytes = serde_json::to_vec(&decided).expect("encode");
+            journal.append(bytes).await.expect("the decision is recorded");
+            // ... the effect runs, and the process dies here. No execution record is appended.
+        }
+
+        // Restart: a fresh reader over the same file.
+        let back: Vec<AeEvidence> = read_evidence_journal(&path)
+            .expect("the journal survives a crash")
+            .into_iter()
+            .map(|b| serde_json::from_slice(&b).expect("a record decodes"))
+            .collect();
+
+        assert_eq!(back.len(), 1, "exactly what was acknowledged is what survives");
+        assert_eq!(back[0].operation_id, "op-9");
+        assert_eq!(
+            back[0].execution,
+            Execution::Attempted,
+            "what it recorded is what it recorded: dispatched, outcome unobserved",
+        );
+        assert!(
+            !back.iter().any(|r| r.execution == Execution::None),
+            "no surviving record may attest a refusal — `None` is a claim this node never made, \
+             and a journal that produced one out of a crash would hand a reader an all-clear",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AE3: a crash *after* the append, before the acknowledgement reaches the caller.**
+    ///
+    /// The caller never learned the record landed — and it did. The evidence must hold it, because
+    /// the alternative is a caller that retries against a world where the effect is already
+    /// recorded, and evidence that disagrees with itself across a restart.
+    ///
+    /// This is the direction people expect to be safe and is worth pinning anyway: a lost
+    /// *acknowledgement* is not a lost *record*, and item 1 draws that distinction everywhere else.
+    #[tokio::test]
+    async fn a_crash_after_the_append_still_holds_the_record() {
+        let dir = tmpdir("after");
+        let path = dir.join("evidence.log");
+
+        {
+            let journal = EvidenceJournal::open(&path, EvidenceProfile::Strict).expect("open");
+            journal
+                .append(serde_json::to_vec(&evidence(Execution::Attempted)).expect("encode"))
+                .await
+                .expect("decision recorded");
+            // The append returns only once fsynced, so this record is on disk before the
+            // acknowledgement below is even constructed.
+            journal
+                .append(serde_json::to_vec(&evidence(Execution::Completed)).expect("encode"))
+                .await
+                .expect("execution recorded");
+            // ... the acknowledgement is lost on the way back to the caller, and the process dies.
+        }
+
+        let back: Vec<AeEvidence> = read_evidence_journal(&path)
+            .expect("read")
+            .into_iter()
+            .map(|b| serde_json::from_slice(&b).expect("decodes"))
+            .collect();
+
+        assert_eq!(back.len(), 2, "a lost acknowledgement is not a lost record");
+        assert_eq!(back[1].execution, Execution::Completed);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two crash points are **distinguishable** from the evidence alone, which is the property
+    /// that makes them useful rather than merely honest.
+    ///
+    /// If a reader could not tell "we never recorded the outcome" from "we recorded that it
+    /// completed", every crash would collapse into one indistinguishable shrug — and an operator
+    /// asking *did it happen?* would get the same non-answer either way.
+    #[tokio::test]
+    async fn the_two_crash_points_are_distinguishable_from_the_evidence() {
+        let before = tmpdir("dist-before");
+        let after = tmpdir("dist-after");
+        let (pb, pa) = (before.join("e.log"), after.join("e.log"));
+
+        {
+            let j = EvidenceJournal::open(&pb, EvidenceProfile::Strict).expect("open");
+            j.append(serde_json::to_vec(&evidence(Execution::Attempted)).expect("enc"))
+                .await
+                .expect("append");
+        }
+        {
+            let j = EvidenceJournal::open(&pa, EvidenceProfile::Strict).expect("open");
+            j.append(serde_json::to_vec(&evidence(Execution::Attempted)).expect("enc"))
+                .await
+                .expect("append");
+            j.append(serde_json::to_vec(&evidence(Execution::Completed)).expect("enc"))
+                .await
+                .expect("append");
+        }
+
+        let count = |p: &std::path::Path| read_evidence_journal(p).expect("read").len();
+        assert_ne!(
+            count(&pb),
+            count(&pa),
+            "a crash before the outcome and a crash after it must not read the same",
+        );
+
+        let _ = std::fs::remove_dir_all(&before);
+        let _ = std::fs::remove_dir_all(&after);
+    }
+}
