@@ -22,6 +22,47 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v3 contracts axis — the composed guarantee gets a gate — 2026-09-21 (unreleased)
+
+The Phase-C audit's **composition finding**, open since v2.9.1, closed. PR #341; record
+[`docs/design/composed-effect.md`](../../design/composed-effect.md).
+
+**What was wrong, and why it was hard to see.** The axis' headline claim is *a durable, attributed,
+cross-domain effect*, and posture rule 6 says a composed guarantee needs an argument **and** a gate.
+The audit found it *"proved leg by leg and nowhere as a whole"* — the receipt tests and the
+federation tests had zero overlap. **Every leg worked. Nothing was broken.** No single artefact ever
+held all four properties, so the sentence could not be checked, only believed.
+
+**The fix is a join, not a mechanism.** A receipt knows how durable a write was and is then
+*returned and gone*; an evidence record knows who asked and *survives*. Neither half could state the
+sentence alone. The execution record now carries item 1's own `LocalDurability` — carried, not
+restated as a string, because a second spelling of a rung is a second vocabulary — and the origin
+domain as a fact rather than an inference from the principal's spelling.
+
+**A correction worth keeping.** I first argued the audit had overstated the finding, because
+`EvidenceState` looked like the missing durability rung. It is not: it sits on `AeReference` and
+describes whether **the evidence record** reached disk, not whether **the effect** did. Two
+durabilities one name apart. `AeEvidence` had zero references to `LocalDurability` — a one-line
+check that would have settled it before the argument rather than after.
+
+**Two judgements, both deliberate.** `OnDisk` only: `Buffered` survives a process crash and is lost
+to a power failure, and item 1 added it precisely to stop a receipt claiming a durability the node
+never established — a composed claim resting on it would re-make that mistake one level up.
+Completion only: `Attempted` is the honest answer when a dispatcher did not watch.
+
+**Ordering was the thing to check before committing to the design**, and it resolves: the receipt
+rides the `Execution` record, which was always post-effect, while AE0 §5's pre-effect barrier is on
+the `Decided` record. Nothing is added in front of an effect.
+
+**The gate was written first and observed failing** (`no method named with_effect_durability`),
+because a gate written after the thing it gates tends to describe it.
+
+**What it establishes, exactly:** the sentence is reconstructable from one artefact rather than
+believed across four. It does **not** make the composition enforced — item 7 decides attribution at
+its own strength and this record carries its verdict. Closing a *"you cannot check this"* finding by
+making something checkable is the right scope; claiming prevention would be the same overreach in a
+new place.
+
 ## v2.10.0 release — 2026-09-20 (tag `v2.10.0`) — the axis auditing itself, and §12.6 closed
 
 Wire **v12** unchanged. Ten workspace crates on the shared train move to 2.10.0.

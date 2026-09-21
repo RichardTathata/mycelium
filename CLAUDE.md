@@ -184,9 +184,10 @@ page `docs/guide/deprecations.md` (#333). Still open publicly: §12.2's SDK narr
 mechanism; item 2's row 11 (SDK verbs, TLS on the federation edge itself, a hostile network, more than two
 domains); **four unmarked deprecations** — only 2 of the 7 §6.6 ledger entries carry `#[deprecated]`, so the page
 is the whole notice for the rest; `mycelium-commitment`'s unsigned `Offer`/`Award` (provenance, a design question);
-the two audit findings that need a decision rather than a patch (the consumer-side-only per-partner budget, and
-**the composition finding** — a receipt carries no principal, the evidence journal no durability rung, and a
-receipt is never persisted); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
+the **consumer-side-only per-partner budget** (the edge has no slot accounting — the one audit finding still
+needing a decision rather than a patch; **the composition finding is closed**, 2026-09-21, by recording the
+receipt's rung and the origin domain onto the execution record — `docs/design/composed-effect.md`, and note what
+it claims: the composed sentence is *reconstructable*, not *enforced*); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
 silently and the criterion has never been met**. **Phase state (2026-09-20, after v2.10.0).** **Phase C is closed** — AE1 was its last gate and
 landed with the release. **Phase A has one gate still open and it is not a code gate:** V1, above.
 **Phase D's remaining work is entirely in the private repo** — RA4, AE2 and AE3; the public side of
