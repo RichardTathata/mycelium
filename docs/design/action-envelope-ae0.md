@@ -203,6 +203,19 @@ Each is a fixture the reference evaluator and the Cedar adapter must both pass; 
 same set (AE4). Local CI is self-contained (a stub consumer, D31); no fixture, stub or single cloud closes a
 scenario gate (§6.8's joint pack).
 
+**Where these live, as of AE4** (2026-09-21): `mycelium::ae_contract` — an evaluator-independent suite, public so
+that an adopter's replacement evaluator can be held to it. Until AE4 these rows were tested, but inline against
+`ReferenceEvaluator`'s own rule types, so no other evaluator could run one of them: they were tests of the
+reference implementation rather than statements of the contract.
+
+**Nine of the eleven rows below are gated there; two are not, and one only partly.** `ae_contract::COVERAGE`
+records it row by row. In short: *shared identity* and *unobserved route* are properties of the evidence record
+and of route coverage rather than of a decision, so no fixture about decisions can establish them; and
+*substitution* as stated below is about **reusing a decision bound to one argument digest for a different one**,
+which the seam cannot exercise because it holds no decision cache — anything that caches decisions must gate the
+reuse itself. This paragraph exists because the sentence above calls these fixtures the gate "for every
+evaluator", and an adopter reading that should be able to find out precisely what passing it buys.
+
 | Case | Envelope / facts | Required decision |
 |---|---|---|
 | substitution | the argument digest differs from the one the decision was bound to | `Deny` (bound decision does not apply) |

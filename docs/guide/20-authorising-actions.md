@@ -204,6 +204,56 @@ A note the code itself records: `Decision` needed a public constructor before a 
 could return anything but `indeterminate`. The replaceable-evaluator premise depended on a
 constructor that did not exist until a review found it.
 
+### Checking your evaluator against the contract
+
+Writing an evaluator is the easy half. The hard half is knowing it agrees with the seam about the
+three verdicts — and in particular that it never reports *nobody decided* as *someone said no*.
+
+`mycelium::ae_contract` is that check, and it is public for exactly this reason: fixtures an adopter
+cannot run hold nobody to anything.
+
+```rust
+use mycelium::ae_contract::{self, EvaluatorUnderTest, PolicyIntent, PolicyClause, Unexpressible};
+use mycelium::{ActionEvaluator};
+use std::sync::Arc;
+
+struct MyEvaluator;               // your ActionEvaluator lives here
+
+struct MyEvaluatorUnderTest;
+
+impl EvaluatorUnderTest for MyEvaluatorUnderTest {
+    fn name(&self) -> &str { "MyEvaluator" }
+
+    // Translate the neutral policy statement into whatever your evaluator holds.
+    fn build(&self, intent: &PolicyIntent) -> Result<Arc<dyn ActionEvaluator>, Unexpressible> {
+        // ... build from intent.clauses, reporting intent.revision as policy_revision ...
+        Ok(Arc::new(MyEvaluator))
+    }
+}
+
+#[test]
+fn my_evaluator_meets_the_contract() {
+    let report = ae_contract::run(&MyEvaluatorUnderTest);
+    assert!(report.conformant(), "{}: {:#?}", report.summary(), report.failed);
+}
+```
+
+Three things worth knowing before you run it:
+
+- **It judges outcomes, not wording.** Where a case requires your refusal to report what it could
+  not establish, it checks that the *identifier* appears — the fact's name, the clause's name, the
+  revision. Your evaluator may say it however it likes.
+- **Declining is not passing.** If your evaluator genuinely cannot express a clause, return
+  `Unexpressible` and list the case id in `declared_limits`. `conformant()` requires the declined
+  set to equal the declared set *exactly*: an undeclared decline is a silent gap, and a declaration
+  you have since outgrown tells an operator you have a weakness you do not have.
+- **It is not all of AE0 §9.** Nine of its eleven rows are gated; `ae_contract::COVERAGE` says which
+  are not and why. Two of them are not properties of a decision at all, so no evaluator fixture can
+  speak to them.
+
+The same suite is what holds the shipped `ReferenceEvaluator` and a deliberately unrelated
+replacement to the same bar, which is the only reason "replaceable" is a claim rather than a hope.
+
 ---
 
 ## What this does not establish
