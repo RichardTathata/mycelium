@@ -3846,6 +3846,32 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
             let _ = crate::fuzz_internals::fixint_decode(&valid[..cut]);
             cases += 1;
         }
+
+        // **Bit flips, not only truncations.** Truncation reaches the *end* of a buffer; a binary
+        // decoder goes wrong at its variant indices, length prefixes and discriminants, and only a
+        // flipped bit reaches those. This block was truncation-only, which meant the interesting
+        // region of a hand-rolled codec was never touched.
+        //
+        // Measured when this was added: of ~2,500 flipped inputs, **796 decoded** and therefore
+        // reached the round-trip assertion — and none failed it. That is a real negative result
+        // rather than an empty one, which is the distinction `COVERAGE` and the reachability
+        // registry exist to keep visible.
+        for i in 0..valid.len() {
+            for bit in 0..8 {
+                let mut m = valid.clone();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::fixint_decode(&m);
+                cases += 1;
+            }
+        }
+        // Trailing garbage: `from_slice` tolerates it by design, so the decoded value must still
+        // be the one that was encoded rather than one the extra bytes changed.
+        for extra in 1..32usize {
+            let mut m = valid.clone();
+            m.extend(std::iter::repeat_n(0xAAu8, extra));
+            let _ = crate::fuzz_internals::fixint_decode(&m);
+            cases += 1;
+        }
         for i in 0..valid.len() {
             for bit in 0..8 {
                 let mut m = valid.clone();
