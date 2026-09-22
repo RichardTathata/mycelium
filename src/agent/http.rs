@@ -6063,6 +6063,85 @@ mod ae_seam_tests {
         resp.json().await.unwrap()
     }
 
+    /// **The other door describes a refusal the same way — over the wire, not in the type.**
+    ///
+    /// The `/mcp` refusal body has been asserted at this surface since AE-T. `/a2a` never was, and
+    /// that is exactly where the two drifted: MCP sent `data.reason` and `data.policy_revision`,
+    /// A2A sent a number and a sentence. A unit test on `PreflightRefusal::error_data` pins what
+    /// the *type* produces; only this pins what a **client actually receives**, which is where the
+    /// gap was.
+    ///
+    /// `/a2a` is the door a foreign agent and a partner domain come through, so it is the one that
+    /// mattered most and was checked least.
+    ///
+    /// Gated on `a2a` as well as the module's own features: `with_a2a` only exists when the
+    /// route does, and a test that cannot mount the door cannot check what comes through it.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn the_a2a_door_sends_the_same_refusal_body_as_mcp() {
+        use crate::capability::Capability;
+
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("ae-a2a-surface-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        // `/a2a` is mounted by `with_a2a`; without it the route 404s and the preflight this test
+        // is about never runs.
+        let agent = Arc::new(
+            GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a(),
+        );
+        let me = agent.node_id().clone();
+
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-a2a-surface")
+                .with_catalogue("cat-test", "1")
+                .map_action("skill.invoke", format!("skill:depot/dispatch@{me}"))
+                .prohibit(Rule::new("*", "skill.invoke", format!("skill:depot/dispatch@{me}"))),
+        ));
+        agent.start().await.unwrap();
+
+        // The skill must resolve: `/a2a` looks the provider up before the preflight runs, so an
+        // unadvertised skill is refused as "not found" and never reaches the evaluator at all.
+        let _reg = agent
+            .capabilities()
+            .advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{http_port}/a2a"))
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
+                "params": {
+                    "id": "task-1",
+                    "skillId": "depot/dispatch",
+                    "message": {"role": "user", "parts": [{"type": "text", "text": "dispatch"}]},
+                },
+            }))
+            .send()
+            .await
+            .expect("tasks/send");
+        assert_eq!(resp.status(), 200, "answered as JSON-RPC");
+        let body: serde_json::Value = resp.json().await.unwrap();
+
+        assert_eq!(body["error"]["code"], -32030, "an explicit prohibition denies: {body}");
+        assert_eq!(
+            body["error"]["data"]["reason"], "action_denied",
+            "machine-readable, not prose — the field A2A was missing: {body}",
+        );
+        assert_eq!(
+            body["error"]["data"]["policy_revision"], "rev-a2a-surface",
+            "which artifact decided — how a caller tells a stale policy from a denial: {body}",
+        );
+        assert!(body["error"]["data"]["checked"].is_array(), "{body}");
+
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
     /// An attached evaluator refuses at the gateway: the provider's tool never runs, the client
     /// gets the decision, and a permitted call on the same node still works.
     #[tokio::test]
