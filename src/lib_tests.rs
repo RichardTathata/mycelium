@@ -3616,7 +3616,72 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
         // The seed must actually reach both layers, or the mutation pass below silently tests
         // only the framing. A gate that has quietly stopped exercising what it names is worse
         // than no gate, so this is asserted rather than assumed.
-        assert!(
+        // ── REACHABILITY REGISTRY ─────────────────────────────────────────────────────────────────
+    //
+    // **Every target below asserts an invariant, and noise reaches none of them.** That is
+    // measured, not assumed: a 20,000-input random pass reached 0 of 7. A target fed only noise
+    // therefore proves "does not panic on garbage" and *nothing it claims* — while looking fully
+    // covered, which is the worse half.
+    //
+    // This cost a real defect. `presented_call_parse` asserted round-trip stability from the day
+    // it was written and had never executed that assertion; the `/a2a` credential parser shipped
+    // in v2.11.0 accepting a non-ASCII principal it could not re-emit.
+    //
+    // **This list claims completeness**, in the same sense the lock-order table does: adding a
+    // trust-edge target that asserts anything means adding a row here *and* a valid seed above.
+    // A row that fails means the seed stopped reaching the parser — which is the failure to care
+    // about, because the target goes on passing either way.
+    {
+        let frame_seed = {
+            let envelope = br#"{"v":1,"p":"token:node-1/dispatch","via":"127.0.0.1:7001","s":["kv:write"],"t":1700000000000,"k":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","sig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
+            let mut f = vec![0x00, b'G', b'W', b'C', 1];
+            f.extend_from_slice(&(envelope.len() as u16).to_be_bytes());
+            f.extend_from_slice(envelope);
+            f.extend_from_slice(b"application-bytes");
+            f
+        };
+        let policy_seed = br#"{"domain":"depot.example","revision":7,"grants":[["kitchen.example","dispatch"]]}"#;
+        let bundle_seed = serde_json::to_vec(&crate::federation::TrustBundle::trusting([(
+            crate::federation::DomainId::new("partner.example").expect("a valid domain"),
+            [7u8; 32],
+        )]))
+        .expect("a bundle serialises");
+
+        let mut rows: Vec<(&str, bool)> = vec![
+            ("caller_frame_classify", crate::fuzz_internals::caller_frame_classify(&frame_seed)),
+            ("caller_envelope_decode", crate::fuzz_internals::caller_envelope_decode(&frame_seed)),
+            ("federation_objects_parse", crate::fuzz_internals::federation_objects_parse(policy_seed)),
+            ("trust_bundle_parse", crate::fuzz_internals::trust_bundle_parse(&bundle_seed)),
+        ];
+
+        #[cfg(feature = "tls")]
+        {
+            let call_seed = br#"{"origin":"partner.example","principal":"oidc:idp/alice","export":"depot.read","issued_at_ms":1700000000000,"expires_at_ms":1700000060000,"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
+            let reply_seed = serde_json::to_vec(&crate::federation::edge::CatalogReply {
+                domain: crate::federation::DomainId::new("depot.example").expect("valid"),
+                for_partner: crate::federation::DomainId::new("kitchen.example").expect("valid"),
+                policy_revision: 7,
+                issued_at_ms: 1_700_000_000_000,
+                exports: vec!["depot.read".to_string()],
+                signature: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+            })
+            .expect("a reply serialises");
+            rows.push(("presented_call_parse", crate::fuzz_internals::presented_call_parse(call_seed)));
+            rows.push(("catalog_reply_parse", crate::fuzz_internals::catalog_reply_parse(&reply_seed)));
+        }
+
+        // `fixint_decode` is reached by its own seeded block above, which asserts it there.
+        for (name, reached) in rows {
+            assert!(
+                reached,
+                "{name} did not reach its invariant: its seed no longer parses, so the assertion \
+                 the target exists for never runs. A target fed only noise looks covered and \
+                 checks nothing — see this block's note.",
+            );
+        }
+    }
+
+    assert!(
             crate::fuzz_internals::caller_frame_classify(&valid_frame),
             "the seed must classify as a framed payload",
         );
@@ -3643,6 +3708,52 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
         }
     }
 
+    // Mutations of a VALID presented federation credential, plus the escaped-Unicode case.
+    //
+    // **This seed is the point.** `presented_call_parse` asserts round-trip stability, and random
+    // bytes essentially never form a parseable credential — so the assertion sat unreachable in
+    // the noise pass above while the target looked covered. Same tell as the envelope seed: a
+    // gate that has quietly stopped exercising what it names is worse than no gate.
+    //
+    // The specific case that got through on main (2026-09-21): JSON can spell a non-ASCII
+    // character in pure ASCII, so `\u0809` passed a header-level `is_ascii()` check and then came
+    // back out of `to_header_value` unescaped — a credential this node accepted and could not
+    // re-parse. Kept here as a literal because it is the shape, not the bytes, that matters.
+    #[cfg(feature = "tls")]
+    {
+        let valid_call = br#"{"origin":"partner.example","principal":"oidc:idp/alice","export":"depot.read","issued_at_ms":1700000000000,"expires_at_ms":1700000060000,"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
+        assert!(
+            crate::fuzz_internals::presented_call_parse(valid_call),
+            "the seed must parse, or the round-trip assertion is never reached",
+        );
+
+        // An ASCII header whose *content* is not ASCII. Must be refused, never panic, and above
+        // all never be accepted-then-re-emitted as something this parser would reject.
+        let escaped = br#"{"origin":"partner.example","principal":"oidc:idp/al\u0809ice","export":"depot.read","issued_at_ms":0,"expires_at_ms":1,"signature":"AAAA"}"#;
+        assert!(
+            escaped.is_ascii(),
+            "the regression input is ASCII on the wire — that was the whole trap",
+        );
+        assert!(
+            !crate::fuzz_internals::presented_call_parse(escaped),
+            "a credential whose content is not ASCII must be refused, not round-tripped",
+        );
+        cases += 2;
+
+        for i in 0..valid_call.len() {
+            for bit in 0..8 {
+                let mut m = valid_call.to_vec();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::presented_call_parse(&m);
+                cases += 1;
+            }
+        }
+        for cut in 0..valid_call.len() {
+            let _ = crate::fuzz_internals::presented_call_parse(&valid_call[..cut]);
+            cases += 1;
+        }
+    }
+
     // Mutations of a VALID federation policy: the same argument, for a text parser. A byte flipped
     // inside the domain string is how an id that no constructor would produce reaches the parser.
     {
@@ -3654,6 +3765,63 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
                 let _ = crate::fuzz_internals::federation_objects_parse(&m);
                 cases += 1;
             }
+        }
+    }
+
+    // VALID seeds for the two trust-edge parsers that had none.
+    //
+    // Measured, not assumed: a 20,000-input noise pass reached the invariant of **zero** of the
+    // seven assertion-bearing targets. Noise proves "does not panic on garbage", which is worth
+    // having and is not what these targets claim. Without a seed, `trust_bundle_parse` and
+    // `catalog_reply_parse` had never once run the assertion they exist for.
+    {
+        let bundle = crate::federation::TrustBundle::trusting([(
+            crate::federation::DomainId::new("partner.example").expect("a valid domain"),
+            [7u8; 32],
+        )]);
+        let valid = serde_json::to_vec(&bundle).expect("a bundle serialises");
+        assert!(
+            crate::fuzz_internals::trust_bundle_parse(&valid),
+            "the seed must parse, or the partner-id assertion is never reached",
+        );
+        for i in 0..valid.len() {
+            for bit in 0..8 {
+                let mut m = valid.clone();
+                m[i] ^= 1 << bit;
+                // A flipped byte inside a domain string is how an id no constructor would produce
+                // reaches the parser — which is exactly what the assertion is about.
+                let _ = crate::fuzz_internals::trust_bundle_parse(&m);
+                cases += 1;
+            }
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    {
+        let reply = crate::federation::edge::CatalogReply {
+            domain: crate::federation::DomainId::new("depot.example").expect("a valid domain"),
+            for_partner: crate::federation::DomainId::new("kitchen.example").expect("valid"),
+            policy_revision: 7,
+            issued_at_ms: 1_700_000_000_000,
+            exports: vec!["depot.read".to_string(), "depot.dispatch".to_string()],
+            signature: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+        };
+        let valid = serde_json::to_vec(&reply).expect("a reply serialises");
+        assert!(
+            crate::fuzz_internals::catalog_reply_parse(&valid),
+            "the seed must parse, or the round-trip assertion is never reached",
+        );
+        for i in 0..valid.len() {
+            for bit in 0..8 {
+                let mut m = valid.clone();
+                m[i] ^= 1 << bit;
+                let _ = crate::fuzz_internals::catalog_reply_parse(&m);
+                cases += 1;
+            }
+        }
+        for cut in 0..valid.len() {
+            let _ = crate::fuzz_internals::catalog_reply_parse(&valid[..cut]);
+            cases += 1;
         }
     }
 

@@ -9,6 +9,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A federation credential is ASCII in its *content*, not merely its encoding.** The `/a2a`
+  credential header gate checked `raw.is_ascii()` on the header text. JSON spells any character in
+  pure ASCII, so `"\u0809"` is an ASCII header carrying a non-ASCII field — it passed, and
+  `PresentedCall::to_header_value` then re-emitted that character **unescaped**, producing a header
+  this same parser rejects.
+
+  Two consequences, and the second is why it is a defect rather than a nicety. The `principal` is
+  an identity string, and one that may hold arbitrary Unicode admits **confusables** — a principal
+  that renders like another one — which the ASCII rule existed to prevent and did not. And the
+  accept-set had come apart from the emit-set: a credential this node accepted, it could not itself
+  re-parse, and a peer forwarding it would refuse what we had just allowed. The method's own doc
+  said *"a principal that is not [ASCII] is refused at parse time"*; nothing delivered that.
+
+  `principal`, `export` and `signature` are now checked after parsing. `origin` needed no change —
+  `DomainId` is restricted to `[a-z0-9.-]` at construction and its `Deserialize` routes through it.
+
+  **Found by §12.6's own `presented_call` fuzz target**, on `main`, by the round-trip assertion
+  rather than the parse — and *after* v2.11.0 was tagged, which is the honest sequence.
+
+- **Every trust-edge fuzz target now reaches the invariant it asserts.** Auditing the above found
+  the general case, and it is worse than the specific one: a 20,000-input noise pass reached the
+  invariant of **0 of the 7** assertion-bearing targets. Random bytes essentially never form a
+  parseable credential, policy, bundle or reply — so those targets proved *"does not panic on
+  garbage"*, which is worth having, and **nothing they claim**, while looking fully covered.
+
+  `presented_call_parse` had asserted round-trip stability from the day it was written and had
+  never once executed that assertion. `trust_bundle_parse` and `catalog_reply_parse` had no valid
+  seed at all. The in-suite mini-fuzz now seeds all of them — each **asserted to parse**, so the
+  invariant is provably reached — with mutations and truncations of each seed, plus the escaped
+  credential as a literal regression.
+
+  And a **reachability registry** closes the class: one block naming every target that asserts
+  anything, with the seed that reaches it. It claims completeness in the same sense the lock-order
+  table does — adding a trust-edge target means adding a row — and it fails loudly if a seed ever
+  stops reaching its parser, which is the failure that matters, because the target goes on passing
+  either way. Same tell as the caller-envelope seed in 2.10.0; this is the systematic version.
+
 ## [2.11.0] — 2026-09-21
 
 **The AE slice's evidence and contract halves.** Wire **v12** unchanged.
