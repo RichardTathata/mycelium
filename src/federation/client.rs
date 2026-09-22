@@ -200,7 +200,12 @@ impl FederationClient {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).last_catalogue.clone()
     }
 
-    fn present(&self, export: &str) -> PresentedCall {
+    /// Mint a credential for `export`, binding `body` when there is one.
+    ///
+    /// `None` is for a request that carries no payload — the catalogue `GET`. There is nothing to
+    /// bind there, and the reply is separately signed, so the field is honestly absent rather than
+    /// bound to an empty string that would look like a guarantee.
+    fn present(&self, export: &str, body: Option<&[u8]>) -> PresentedCall {
         let now = now_ms();
         PresentedCall::sign(
             &FederatedCaller {
@@ -209,6 +214,7 @@ impl FederationClient {
                 export: export.to_string(),
                 issued_at_ms: now,
                 expires_at_ms: now + self.credential_lifetime.as_millis() as u64,
+                body_sha256: body.map(FederatedCaller::digest_of),
             },
             &self.signing_key,
         )
@@ -223,7 +229,7 @@ impl FederationClient {
     /// leaves the link `Down`; a refusal (revoked, untrusted, expired) leaves it `Down` too and
     /// says why.
     pub async fn connect(&self) -> Result<Vec<String>, ClientError> {
-        let presented = self.present(CATALOG_EXPORT);
+        let presented = self.present(CATALOG_EXPORT, None);
         let mut last: Option<ClientError> = None;
         for gw in &self.endpoints {
             let url = format!("{}{}", gw.base_url, CATALOG_PATH);
@@ -342,7 +348,6 @@ impl FederationClient {
                     Err(e) => return Err(e),
                 }
             };
-            let presented = self.present(export);
             let body = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
                 "params": {
@@ -350,11 +355,19 @@ impl FederationClient {
                     "message": { "role": "user", "parts": [{ "type": "text", "text": text }] },
                 },
             });
+            // **Serialised once.** The digest has to be over the bytes that actually go on the
+            // wire, so the body is encoded here and those same bytes are both signed over and
+            // sent. Handing the `Value` to `.json()` would re-encode it, and the receiver would
+            // then be comparing our digest against a different serialisation of the same JSON —
+            // which is how a binding becomes a source of false refusals instead of a guarantee.
+            let body_bytes = serde_json::to_vec(&body).expect("a request we constructed serialises");
+            let presented = self.present(export, Some(&body_bytes));
             let sent = self
                 .http
                 .post(format!("{}/a2a", ep.base_url))
                 .header(HEADER_FEDERATED_CALL, presented.to_header_value())
-                .json(&body)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body_bytes)
                 .send()
                 .await;
             let resp = match sent {

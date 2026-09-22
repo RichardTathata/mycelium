@@ -171,6 +171,7 @@ check:
 	cargo clippy -p mycelium-core --lib --tests -- -D warnings
 	cargo clippy -p mycelium-sim --all-targets -- -D warnings   # the replay harness (item 6)
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
+	cargo build --examples --features tls,metrics,a2a,llm       # CI builds these; `--lib --tests` does not
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary

@@ -59,6 +59,19 @@ pub struct FederatedCaller {
     pub issued_at_ms: u64,
     /// Epoch milliseconds after which it is worthless.
     pub expires_at_ms: u64,
+    /// **sha256 of the request body this credential authorises.**
+    ///
+    /// Without it the signature proves *who is asking and for which export* and says nothing about
+    /// **what they asked**. An on-path attacker between two domains could rewrite the payload,
+    /// leave the credential header untouched, and the receiving gateway would accept the altered
+    /// call as authentic — then make and record an authorisation decision about the attacker's
+    /// text. The same reasoning as `ActionEnvelope::arguments_digest` one layer up, which binds
+    /// arguments to a decision; this binds the body to the caller.
+    ///
+    /// `None` is a credential from a partner that predates the binding. It is **not** the same as
+    /// a match, and a verifier that treats it as one gets no protection at all — an attacker would
+    /// simply strip the field. See [`CallPolicy::require_body_binding`].
+    pub body_sha256: Option<[u8; 32]>,
 }
 
 /// What the **receiving** domain will accept, independent of what a credential claims.
@@ -70,11 +83,28 @@ pub struct CallPolicy {
     /// skewed. Cross-domain deadlines are wall-clock (see the module docs), so some tolerance is
     /// required; unbounded tolerance would make `issued_at` decorative.
     pub skew_tolerance: Duration,
+    /// Refuse a credential that does not bind the request body.
+    ///
+    /// **Default `false`, and that default is a rolling-upgrade window, not a recommendation.**
+    /// A partner that predates the binding sends no digest; refusing it outright would break every
+    /// existing federation on upgrade, so the receiving domain chooses when to require it.
+    ///
+    /// What `false` costs, stated plainly: an attacker on the path between two domains can rewrite
+    /// a call's payload and **strip** the binding, and this verifier will accept it. Absence is
+    /// indistinguishable from a partner that has not upgraded, which is exactly what makes a
+    /// downgrade free. So `false` provides **no integrity guarantee against an active attacker** —
+    /// it is worth having only against a partner that has upgraded and is not being tampered with,
+    /// and it is worth turning on as soon as every partner has.
+    pub require_body_binding: bool,
 }
 
 impl Default for CallPolicy {
     fn default() -> Self {
-        Self { max_lifetime: Duration::from_secs(300), skew_tolerance: Duration::from_secs(30) }
+        Self {
+            max_lifetime: Duration::from_secs(300),
+            skew_tolerance: Duration::from_secs(30),
+            require_body_binding: false,
+        }
     }
 }
 
@@ -88,6 +118,20 @@ impl Default for CallPolicy {
 pub enum CallRefusal {
     /// The origin domain is not in this operator's trust bundle.
     UnknownDomain,
+    /// The credential carries no body binding and this domain requires one
+    /// ([`CallPolicy::require_body_binding`]).
+    ///
+    /// Distinct from [`CallRefusal::BodyMismatch`] on purpose: *not bound* is a partner that has
+    /// not upgraded (or an attacker who stripped the field), while *mismatch* is a body that was
+    /// changed under a binding. The operator response differs — upgrade the partner, versus
+    /// someone is on the path.
+    BodyNotBound,
+    /// The credential binds a body digest and the body received is not that body.
+    ///
+    /// There is no benign reading of this. The credential is authentic — it verified under a key
+    /// this domain chose to trust — and it authorises a different payload than the one that
+    /// arrived, so the payload was changed after the partner signed for it.
+    BodyMismatch,
     /// The signature does not verify under the key the bundle trusts for that domain.
     BadSignature,
     /// The credential authorises a different export than the one being invoked.
@@ -106,6 +150,14 @@ impl std::fmt::Display for CallRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownDomain => write!(f, "origin domain is not in the trust bundle"),
+            Self::BodyNotBound => {
+                write!(f, "the credential does not bind the request body and this domain requires it")
+            }
+            Self::BodyMismatch => write!(
+                f,
+                "the credential binds a different request body than the one received — the payload \
+                 was changed after it was signed"
+            ),
             Self::BadSignature => write!(f, "signature does not verify under the trusted key"),
             Self::WrongExport { authorised, requested } =>
                 write!(f, "credential authorises {authorised:?}, not {requested:?}"),
@@ -153,7 +205,36 @@ impl FederatedCaller {
         put_lp(&mut out, self.export.as_bytes());
         out.extend_from_slice(&self.issued_at_ms.to_le_bytes());
         out.extend_from_slice(&self.expires_at_ms.to_le_bytes());
+        // A presence byte. **It is not load-bearing today, and saying so is the point** — a plant
+        // that removed it broke no test, which is how the original note here was found to be
+        // wrong. That note claimed an attacker could otherwise strip `Some([0; 32])` down to
+        // `None`; they cannot, because the digest is fixed-length and last, so removing it changes
+        // the byte length and the signature fails either way.
+        //
+        // It is kept because that argument depends on *being last*. The day any field is appended
+        // after this one, an absent digest and a present one would no longer be distinguishable by
+        // length alone, and the ambiguity would be silent. One byte now is cheaper than noticing
+        // then.
+        match &self.body_sha256 {
+            None => out.push(0),
+            Some(d) => {
+                out.push(1);
+                out.extend_from_slice(d);
+            }
+        }
         out
+    }
+
+    /// The digest this credential should carry for `body`.
+    ///
+    /// Over the **bytes as received**, never a re-serialisation: `{"a":1,"b":2}` and
+    /// `{"b":2,"a":1}` are the same JSON and different bytes, so digesting a parsed-then-re-encoded
+    /// body would compare our serialiser against theirs and fail for honest partners while an
+    /// attacker who matched our encoder would pass. Same rule as the exporter's *verify the
+    /// received bytes, then parse*.
+    pub fn digest_of(body: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(body).into()
     }
 
     /// The window this credential claims. Used by the verifier, which needs `tls`.
@@ -228,6 +309,7 @@ pub fn verify_federated_call(
     credential: &FederatedCaller,
     signature: &[u8],
     requested_export: &str,
+    body: &[u8],
     bundle: &TrustBundle,
     policy: &DomainPolicy,
     call_policy: &CallPolicy,
@@ -254,6 +336,28 @@ pub fn verify_federated_call(
             authorised: credential.export.clone(),
             requested: requested_export.to_string(),
         });
+    }
+
+    // 3b. what, continued — **which body**. The export says which door; this says what was carried
+    //     through it. Checked here, after the signature and beside the export, because it is the
+    //     same question: a credential authorises *one* call, and a call is an export and a payload.
+    //
+    //     Order matters: the signature is verified first, so a digest from an unauthenticated
+    //     credential is never compared against anything. Comparing first would let an attacker
+    //     learn whether a guessed body matched, under a credential we had not yet trusted.
+    match &credential.body_sha256 {
+        Some(bound) => {
+            let actual = FederatedCaller::digest_of(body);
+            // Constant-time is not required: both sides are public once the call is made, and the
+            // comparison reveals nothing an attacker who holds the body does not already have.
+            if *bound != actual {
+                return Err(CallRefusal::BodyMismatch);
+            }
+        }
+        None if call_policy.require_body_binding => return Err(CallRefusal::BodyNotBound),
+        // Absent, and this domain has not yet required it — the rolling-upgrade window. See
+        // `CallPolicy::require_body_binding` for exactly what is and is not guaranteed here.
+        None => {}
     }
 
     // 4. when — our ceiling first, because a credential claiming a century should be refused for
@@ -303,8 +407,10 @@ mod tests {
             export: "invoice.submit".into(),
             issued_at_ms: NOW,
             expires_at_ms: NOW + 60_000,
+            body_sha256: None,
         }
     }
+
 
     #[test]
     fn the_call_tag_is_distinct_from_the_other_object_tags() {
@@ -335,6 +441,11 @@ mod tests {
         use crate::federation::DomainPolicy;
         use ed25519_dalek::SigningKey;
 
+        /// The body the bound fixtures below authorise. Declared here rather than beside `cred()`
+        /// because only this `tls`-gated module uses it, and a constant that is dead in a
+        /// feature-minimal build fails `make check`'s `--no-default-features` clippy.
+        const BODY: &[u8] = br#"{"jsonrpc":"2.0","method":"tasks/send","params":{"skillId":"invoice.submit"}}"#;
+
         fn policy() -> DomainPolicy {
             DomainPolicy {
                 domain: did("alpha.example"),
@@ -360,7 +471,128 @@ mod tests {
             bundle: &TrustBundle,
             now_ms: u64,
         ) -> Result<AcceptedCall, CallRefusal> {
-            verify_federated_call(c, sig, requested, bundle, &policy(), &CallPolicy::default(), now_ms)
+            check_body(c, sig, requested, BODY, bundle, &CallPolicy::default(), now_ms)
+        }
+
+        fn check_body(
+            c: &FederatedCaller,
+            sig: &[u8],
+            requested: &str,
+            body: &[u8],
+            bundle: &TrustBundle,
+            call_policy: &CallPolicy,
+            now_ms: u64,
+        ) -> Result<AcceptedCall, CallRefusal> {
+            verify_federated_call(c, sig, requested, body, bundle, &policy(), call_policy, now_ms)
+        }
+
+        /// A credential for [`BODY`], signed.
+        fn bound() -> (FederatedCaller, [u8; 32], Vec<u8>) {
+            let c = FederatedCaller {
+                body_sha256: Some(FederatedCaller::digest_of(BODY)),
+                ..cred()
+            };
+            let (pk, sig) = signed(&c);
+            (c, pk, sig)
+        }
+
+        // ── item 2 row 11: the credential binds the body ──────────────────────────────────────
+
+        /// **A credential authenticates who is asking and, now, what they asked.**
+        ///
+        /// Before this the signature covered the origin, the principal, the export and the window —
+        /// and nothing about the payload. An attacker on the path between two domains could rewrite
+        /// the body, leave the header untouched, and the receiving gateway would accept the altered
+        /// call as authentic, then make and record an authorisation decision about the attacker's
+        /// text. The credential said *this principal may call `invoice.submit`* and stayed true
+        /// while the invoice became a different invoice.
+        #[test]
+        fn a_body_changed_in_flight_is_refused() {
+            let (c, pk, sig) = bound();
+            let bundle = bundle_for(&c.origin_domain, pk);
+
+            assert!(
+                check_body(&c, &sig, "invoice.submit", BODY, &bundle, &CallPolicy::default(), NOW + 1_000)
+                    .is_ok(),
+                "the body it was signed for must be accepted",
+            );
+
+            let tampered = br#"{"jsonrpc":"2.0","method":"tasks/send","params":{"skillId":"invoice.submit","amount":999999}}"#;
+            assert_eq!(
+                check_body(&c, &sig, "invoice.submit", tampered, &bundle, &CallPolicy::default(), NOW + 1_000),
+                Err(CallRefusal::BodyMismatch),
+                "a payload changed after signing has no benign reading",
+            );
+        }
+
+        /// **Stripping the binding is a forgery, not a downgrade.**
+        ///
+        /// Whether a credential binds a body is *inside* the signed bytes, so one minted with a
+        /// binding and arriving without fails as `BadSignature` — the attacker is caught forging
+        /// rather than quietly granted the weaker check. That is what the presence byte in
+        /// `canonical_bytes` is for: without it, an absent binding and an all-zero digest would
+        /// sign identically.
+        #[test]
+        fn stripping_the_binding_is_a_forgery_not_a_downgrade() {
+            let (c, pk, sig) = bound();
+            let bundle = bundle_for(&c.origin_domain, pk);
+
+            let stripped = FederatedCaller { body_sha256: None, ..c.clone() };
+            assert_eq!(
+                check_body(&stripped, &sig, "invoice.submit", BODY, &bundle, &CallPolicy::default(), NOW + 1_000),
+                Err(CallRefusal::BadSignature),
+                "removing the binding must not verify, or the protection is opt-out by anyone on \
+                 the path",
+            );
+
+            // Absent and all-zero must sign differently. **What this does not prove:** removing
+            // the presence byte still passes it, because the digest is fixed-length and last, so
+            // the two differ by 32 bytes anyway. The assertion pins the property; the byte is
+            // insurance for the day a field is appended after this one. Measured, not assumed — a
+            // plant that deleted the byte broke nothing.
+            let zeroed = FederatedCaller { body_sha256: Some([0u8; 32]), ..c.clone() };
+            assert_ne!(
+                stripped.canonical_bytes(),
+                zeroed.canonical_bytes(),
+                "absent and all-zero must be distinguishable in the signature",
+            );
+        }
+
+        /// **An unbound credential is accepted only while this domain allows it.**
+        ///
+        /// A partner that predates the binding sends no digest, and refusing it outright would
+        /// break every existing federation on upgrade — so the default is a rolling-upgrade window
+        /// and the receiving domain closes it when it is ready.
+        #[test]
+        fn an_unbound_credential_is_a_choice_the_receiving_domain_makes() {
+            let c = cred();
+            let (pk, sig) = signed(&c);
+            let bundle = bundle_for(&c.origin_domain, pk);
+
+            let permissive = CallPolicy::default();
+            assert!(!permissive.require_body_binding, "the default is the upgrade window");
+            assert!(
+                check_body(&c, &sig, "invoice.submit", BODY, &bundle, &permissive, NOW + 1_000).is_ok(),
+                "a partner that has not upgraded still works",
+            );
+
+            let strict = CallPolicy { require_body_binding: true, ..CallPolicy::default() };
+            assert_eq!(
+                check_body(&c, &sig, "invoice.submit", BODY, &bundle, &strict, NOW + 1_000),
+                Err(CallRefusal::BodyNotBound),
+                "and a domain that has finished upgrading can say so",
+            );
+        }
+
+        /// The two refusals are **not** the same event.
+        ///
+        /// *Not bound* sends an operator to upgrade a partner. *Mismatch* sends them to look for
+        /// someone on the path. Collapsing them sends them to the wrong place on the worse day.
+        #[test]
+        fn not_bound_and_mismatch_are_different_answers() {
+            assert_ne!(CallRefusal::BodyNotBound, CallRefusal::BodyMismatch);
+            assert!(format!("{}", CallRefusal::BodyNotBound).contains("does not bind"));
+            assert!(format!("{}", CallRefusal::BodyMismatch).contains("changed after it was signed"));
         }
 
         /// The happy path, and the point of the provider adapter: **origin survives**.

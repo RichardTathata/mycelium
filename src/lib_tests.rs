@@ -6551,6 +6551,7 @@ mod federation_transport {
         let now = now_ms();
         PresentedCall::sign(
             &FederatedCaller {
+                body_sha256: None,
                 origin_domain: beta.clone(),
                 principal: "svc/billing".into(),
                 export: export.into(),
@@ -7177,7 +7178,7 @@ mod federation_transport {
         assert!(v.get("error").is_none(), "a credential issued before the partition, still inside its lifetime, is accepted: {v}");
         let now = now_ms();
         let expired = PresentedCall::sign(
-            &FederatedCaller { origin_domain: beta.clone(), principal: "svc/billing".into(), export: "demo/whoami".into(), issued_at_ms: now - 120_000, expires_at_ms: now - 60_000 },
+            &FederatedCaller { body_sha256: None, origin_domain: beta.clone(), principal: "svc/billing".into(), export: "demo/whoami".into(), issued_at_ms: now - 120_000, expires_at_ms: now - 60_000 },
             &beta_sk,
         );
         let r = raw.post(&a2a2).header(HEADER_FEDERATED_CALL, expired.to_header_value()).json(&task_body("demo/whoami")).send().await.unwrap();

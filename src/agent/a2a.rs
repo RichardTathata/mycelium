@@ -309,6 +309,9 @@ async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse 
     Json(card)
 }
 
+/// `raw` is the request body **exactly as it arrived**, before parsing. A federated credential may
+/// bind it (item 2 row 11), and that binding is worth nothing if it is checked against a
+/// re-serialisation: two encodings of the same JSON are the same request and different bytes.
 async fn handle_tasks_send(
     state:  &A2aState,
     caller: Option<&ResolvedPrincipal>,
@@ -316,6 +319,8 @@ async fn handle_tasks_send(
     federated: Option<&super::federation_http::FederatedIdentity>,
     id:     Option<Value>,
     params: &Value,
+    #[cfg_attr(not(feature = "tls"), allow(unused_variables))]
+    raw:    &[u8],
 ) -> Value {
     let task_id  = params.get("id")
         .and_then(|v| v.as_str())
@@ -334,7 +339,9 @@ async fn handle_tasks_send(
         let Some(edge) = state.task_ctx.federation_edge.get() else {
             return jsonrpc_error(id, -32003, "federation is not enabled at this gateway");
         };
-        if let Err(refusal) = edge.authorize(&federated.presented, skill_id, crate::federation::edge::now_ms()) {
+        if let Err(refusal) =
+            edge.authorize(&federated.presented, skill_id, raw, crate::federation::edge::now_ms())
+        {
             return jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}"));
         }
     }
@@ -549,8 +556,19 @@ pub(crate) async fn a2a_jsonrpc_full(
     caller:       Option<Extension<ResolvedPrincipal>>,
     #[cfg(feature = "tls")]
     federated:    Option<Extension<super::federation_http::FederatedIdentity>>,
-    Json(body):   Json<Value>,
+    // `Bytes`, not `Json`, because a federated credential may bind these exact bytes and the
+    // extractor would have thrown them away. Parsing is done here instead, which also lets a
+    // malformed request be answered as JSON-RPC `-32700` rather than as a bare 400 — a JSON-RPC
+    // endpoint that replies in a different protocol when it dislikes the input is its own small
+    // dishonesty.
+    raw:          axum::body::Bytes,
 ) -> axum::response::Response {
+    let body: Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(jsonrpc_error(None, -32700, &format!("parse error: {e}"))).into_response()
+        }
+    };
     // Item 7: inserted by the gateway's `/a2a` optional-auth layer (a bearer's principal, or
     // `anonymous`); a handler reached without it (a bare router in a unit test) dispatches with
     // no context and is refused by the secure profile.
@@ -607,6 +625,7 @@ pub(crate) async fn a2a_jsonrpc_full(
             federated.as_ref(),
             id.clone(),
             &params,
+            &raw,
         ).await,
         "tasks/get"    => handle_tasks_get(&state, id.clone(), &params),
         "tasks/cancel" => handle_tasks_cancel(&state, id.clone(), &params),
