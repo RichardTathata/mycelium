@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.11.1] — 2026-09-22
+
+**Four defects, and the gate that had never run.** Wire **v12** unchanged; no API change.
+
+Every defect here was found by §12.6's own fuzz targets — and the release is really about *why
+they were still there to find*. The fuzz job runs its twelve targets **sequentially and stops at
+the first crash**. `presented_call` is fifth. It began failing in the very commit that **added**
+the trust-edge targets on 2026-09-20, so targets six through twelve never executed at all. `main`
+was red for **22 consecutive runs**, through every AE commit and through v2.11.0's tag, and each
+fix simply let the queue advance to the next defect waiting behind it.
+
+So §12.6's "nine trust-edge fuzz targets" was a weaker claim than it read as, in two independent
+ways. Three of them never reached their own invariants, because random bytes essentially never
+form a parseable credential — measured: **0 of 7** assertion-bearing targets were reached by a
+20,000-input noise pass. And most of them were never *run*. Both are fixed: every target now has a
+valid seed asserted to parse, and a **reachability registry** claims completeness the way the
+lock-order table does.
+
+`RELEASING.md` gains **step 2b — check CI on the branch you are releasing *from***. A green
+`make check-full` and a green PR do not imply a green `main`; v2.11.0 was tagged on exactly that
+gap. This release was cut from a commit whose CI run was checked by id, fuzz job included.
+
 ### Fixed
 
 - **A replay bundle's object codec loses nothing: two defects, found by searching instead of

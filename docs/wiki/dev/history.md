@@ -22,6 +22,49 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.11.1 release — 2026-09-22 (tag `v2.11.1`) — four defects, and the gate that had never run
+
+Wire **v12** unchanged; no API change. Ten workspace crates move to 2.11.1.
+
+**The defects were the smaller half.** Every one was found by §12.6's own fuzz targets:
+
+| Target | Defect |
+|---|---|
+| `presented_call` | the `/a2a` credential gate checked `is_ascii()` on the **encoding** — `"\u0809"` is an ASCII header carrying a non-ASCII principal, so it passed, and `to_header_value` re-emitted it unescaped. A credential this node accepted, it could not re-parse; and an identity field holding arbitrary Unicode admits confusables |
+| `replay_trace` | `str::lines()` strips `\r` only before `\n`, so a line ending in a bare carriage return lost it on the round trip. A trace is what a recording replays from — what it decodes to *is* the run |
+| `replay_bundle` | `parse_object` trimmed the value **inside** its quotes; the separator had already eaten the opening quote |
+| `replay_bundle` | `split_once("\": \"")` found its separator inside an **escaped key** — a key of `"` came back as `\`. Unpatchable in principle: a substring split cannot tell a real delimiter from one inside a quoted string. Replaced by a scanner |
+
+**Why they were still there to find, which is the actual lesson.** The fuzz job runs its twelve
+targets **sequentially and stops at the first crash**. `presented_call` is fifth, and it began
+failing in the very commit that *added* the trust-edge targets (2026-09-20). So targets six through
+twelve never executed at all; `main` was red for **22 consecutive runs**, through every AE commit
+and through v2.11.0's tag. Each fix merely let the queue advance to the next defect behind it.
+
+So §12.6's "nine trust-edge fuzz targets" was weaker than it read, in two independent ways:
+
+- **Three never reached their own invariants.** Random bytes essentially never form a parseable
+  credential. Measured: a 20,000-input noise pass reached **0 of 7** assertion-bearing targets.
+  `presented_call` had asserted round-trip stability since the day it was written and had never
+  executed it; `trust_bundle` and `catalog_reply` had no valid seed at all.
+- **Most were never run**, per the queue above.
+
+Both closed. Every target now has a valid seed *asserted to parse*, plus mutations and truncations;
+a **reachability registry** names each target beside the seed that reaches it and claims
+completeness the way the lock-order table does; and the fixint sweep gained bit flips (796 of ~2,500
+flipped inputs decode and reach the assertion — a negative result that is actually a result).
+
+**Process.** `RELEASING.md` gains **step 2b — check CI on the branch you are releasing *from***. A
+green `check-full` and a green PR do not imply a green `main`: the fuzz job is `main`-only. v2.11.0
+was tagged on exactly that gap. v2.11.1 was cut from a commit whose run was checked by id
+(`35718298201`, fuzz job included) — the first green `main` since 2026-09-20.
+
+**Also shipped:** §12.1's **AE gallery row** — `procurement_authority`, on the public seam and
+reference evaluator, CI-run in `coop/ci_smoke.sh`. Six steps, two of which carry it: an action no
+rule covers is *authority not established* and never a denial; and a denied action that ran anyway
+is reported as an **enforcement gap** rather than reconciled away. (CLI half only; the Docker half
+and the cloud runs are not done, and the plan's row says so.)
+
 ## v2.11.0 release — 2026-09-21 (tag `v2.11.0`) — the AE slice's evidence and contract halves
 
 Wire **v12** unchanged. Ten workspace crates on the shared train move to 2.11.0.
