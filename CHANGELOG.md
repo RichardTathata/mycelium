@@ -11,6 +11,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A replay bundle's object codec loses nothing: two defects, found by searching instead of
+  sampling.** An exhaustive fidelity sweep over the characters that break flat text formats — every
+  key/value pair up to length two — found **7,092 of 17,556 pairs did not survive a write and a
+  read**. Then, with the first defect fixed, **1,729 still did not**.
+
+  The first: `parse_object` trimmed the value *inside* its quotes. The separator it split on had
+  already consumed the value's opening quote, so `.trim()` was stripping characters that belonged
+  to the value — `" v"` read back as `v`, and `"\t"` as empty. The line's own indentation was
+  already gone, which is the only thing the trim was ever for.
+
+  The second could not be patched. `split_once("\": \"")` searched for four characters that occur
+  *inside* an escaped key: a key of `"` is written `"\""`, whose tail is `"` `"`, so the search
+  found its separator one character early and the key came back as `\`. **A literal-substring
+  split cannot tell a real delimiter from one appearing inside a quoted string**; it is replaced by
+  a scanner that knows where a string ends.
+
+  The stake is what the bundle carries: `Build.commit`, the field a replay uses to decide it is
+  replaying against the same binary, and `witness.assertion`, which is free text.
+
+  **Why example-based tests missed it.** Two fidelity tests for this codec already existed and
+  passed throughout — they used ordinary strings, and ordinary strings round-tripped fine. The
+  sweep is now a permanent test, and both defects are planted against it (14,364 and 10,032 pairs
+  fail respectively when reintroduced).
+
+  Same family as the `\n` / `\r` escapes fixed in 2.10.0 — and the part of that fix which did not
+  go far enough.
+
 - **A replay trace does not silently lose a carriage return.** `str::lines()` strips a `\r` only
   when it precedes `\n`. A trace line ending in a *bare* carriage return therefore parsed with the
   `\r` kept in its last field; `to_text` appended `\n`, making it `\r\n`; and re-parsing stripped
