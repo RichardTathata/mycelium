@@ -11,6 +11,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A replay trace does not silently lose a carriage return.** `str::lines()` strips a `\r` only
+  when it precedes `\n`. A trace line ending in a *bare* carriage return therefore parsed with the
+  `\r` kept in its last field; `to_text` appended `\n`, making it `\r\n`; and re-parsing stripped
+  it. The trace that came back was not the trace that went in.
+
+  That matters more than a stray byte sounds. A trace is what a whole-node recording replays from,
+  so **what it decodes to *is* the run** — a silently shortened field replays a different run while
+  looking like the same one, which is the exact failure `Trace::parse` refuses holes to prevent.
+  `Trace::parse` now refuses a line containing `\r`, so what it accepts is what `to_text` can
+  re-emit. Our recorder emits none, so nothing legitimate is refused.
+
+  Found by §12.6's `replay_trace` fuzz target, by the round-trip assertion.
+
+- **`main` had been red for 21 consecutive CI runs, and the release was cut on it.** The fuzz job
+  runs its twelve targets **sequentially and stops at the first crash**. `presented_call` is fifth.
+  It began failing in the very commit that added the trust-edge targets (2026-09-20), so targets
+  six through twelve **never executed at all** — for two days, through every AE commit and through
+  v2.11.0's tag.
+
+  So §12.6's "nine trust-edge fuzz targets" was a weaker claim than it read as, in a second way:
+  not only were three of them never reaching their own invariants (above), most of them were never
+  being *run*. Both defects fixed in this release were found the moment the queue started moving.
+  `RELEASING.md` gains step 2b — check CI on the branch you are releasing *from*; a green
+  `check-full` and a green PR do not imply it.
+
+  **Not yet known to be the end of the queue:** `caller_envelope`, `replay_bundle` and
+  `fixint_decode` sit after `replay_trace` and have still never run in CI.
+
 - **A federation credential is ASCII in its *content*, not merely its encoding.** The `/a2a`
   credential header gate checked `raw.is_ascii()` on the header text. JSON spells any character in
   pure ASCII, so `"\u0809"` is an ASCII header carrying a non-ASCII field — it passed, and

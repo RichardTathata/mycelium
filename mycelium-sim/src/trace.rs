@@ -195,6 +195,25 @@ impl Trace {
             if line.trim().is_empty() {
                 continue;
             }
+            // **A carriage return is refused, because this format cannot carry one.**
+            //
+            // `str::lines()` strips a `\r` only when it precedes `\n`. A line ending in a *bare*
+            // carriage return therefore parses with the `\r` kept in its last field; `to_text`
+            // appends `\n`, making it `\r\n`; and re-parsing strips it. The trace that comes back
+            // is not the trace that went in — and a trace is what a whole-node recording replays
+            // from, so what it decodes to *is* the run. A silently shortened field replays a
+            // different run while looking like the same one, which is the exact failure
+            // `Trace::parse` refuses holes to prevent.
+            //
+            // Only a **trailing** `\r` breaks the round trip today; an interior one survives. The
+            // rule is the broader one anyway, because the narrow one depends on `to_text` choosing
+            // `\n` over `\r\n` — and a parser should not encode its writer's current taste in line
+            // endings. Our recorder emits none of these, so nothing legitimate is refused.
+            //
+            // Found by §12.6's `replay_trace` fuzz target, by the round-trip assertion.
+            if line.contains('\r') {
+                return Err(TraceError::Malformed { line: i + 1 });
+            }
             let choice = Choice::parse(line).ok_or(TraceError::Malformed { line: i + 1 })?;
             entries.push(choice);
         }
@@ -223,6 +242,34 @@ impl std::error::Error for TraceError {}
 
 #[cfg(test)]
 mod tests {
+    /// **A trace that parses must re-render and re-parse to itself.** Regression for the defect
+    /// §12.6's `replay_trace` fuzz target found on main, 2026-09-22.
+    ///
+    /// `str::lines()` strips a `\r` only when it precedes `\n`. So a line ending in a *bare*
+    /// carriage return parses with the `\r` kept in its last field; `to_text` then appends `\n`,
+    /// making it `\r\n`; and re-parsing strips it. The trace that comes back is not the trace that
+    /// went in — and a trace is the record a whole-node recording replays from, so what it decodes
+    /// to *is* the run.
+    #[test]
+    fn a_line_ending_in_a_carriage_return_does_not_silently_lose_it() {
+        let text = "1\t-\tfs\tstream\trequest\tresult\r";
+
+        match Trace::parse(text) {
+            // Refused is the correct answer: `to_text` is line-oriented and cannot represent a
+            // field that ends in a carriage return, so accepting one would mean accepting what we
+            // cannot re-emit.
+            Err(_) => {}
+            Ok(trace) => {
+                let again = Trace::parse(&trace.to_text()).expect("a rendered trace must re-parse");
+                assert_eq!(
+                    trace, again,
+                    "a trace that parses must survive its own round trip; the carriage return was \
+                     absorbed, so the replayed run is not the recorded one",
+                );
+            }
+        }
+    }
+
     use super::*;
 
     fn choice(kind: ChoiceKind, stream: &str, request: &str, result: &str) -> Choice {
