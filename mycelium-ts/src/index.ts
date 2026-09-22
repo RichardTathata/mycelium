@@ -20,6 +20,8 @@ export {
   Artifact,
   Part,
   TaskStatusUpdate,
+  A2aError,
+  ActionRefusedError,
 } from "./a2a";
 export { PromptSkillClient, PromptTemplate, CallResult } from "./prompt_skill";
 export {

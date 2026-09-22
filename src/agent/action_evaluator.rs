@@ -994,6 +994,27 @@ impl PreflightRefusal {
         }
     }
 
+    /// The machine-readable `data` block a refusal carries to a caller.
+    ///
+    /// **One function, because two call sites drifted.** `/mcp` sent `reason`, `policy_revision`,
+    /// `checked` and `errors`; `/a2a` sent the numeric code and a prose message and nothing else.
+    /// The same refusal was therefore machine-readable at one enforcement point and not at the
+    /// other — and `/a2a` is the federation edge, so the path a *partner domain* calls was the
+    /// poorer one. A consumer that wrote refusal handling against one surface broke on the other.
+    ///
+    /// `policy_revision` is the field that earns its place here: without it a caller cannot tell a
+    /// **stale-policy** refusal (this enforcement point expected a different artifact) from a real
+    /// denial, and those call for opposite responses — retry after redeploying, versus stop.
+    pub fn error_data(&self) -> serde_json::Value {
+        let d = self.decision();
+        serde_json::json!({
+            "reason": self.reason(),
+            "policy_revision": d.policy_revision,
+            "checked": d.checked,
+            "errors": d.errors,
+        })
+    }
+
     /// JSON-RPC error code for the MCP and A2A surfaces.
     pub fn json_rpc_code(&self) -> i32 {
         match self {
@@ -2111,6 +2132,51 @@ mod tests {
         let env = envelope("oidc:idp/alice", "tools/call", "tool:square@n1");
         let r = preflight(Some(&ev), &env, 2_000).expect_err("refused");
         assert_eq!(r.decision().verdict, Verdict::Indeterminate);
+    }
+
+    /// **Both enforcement points describe a refusal the same way.**
+    ///
+    /// `/mcp` and `/a2a` are two doors into the same slice, and they had drifted: MCP sent
+    /// `reason`, `policy_revision`, `checked` and `errors`; A2A sent a number and an English
+    /// sentence. So the path a **partner domain** calls across the federation edge was the poorer
+    /// one, and a consumer that wrote refusal handling against MCP broke on A2A.
+    ///
+    /// The fix is that both call `error_data`, and this pins what it must carry. `policy_revision`
+    /// is the field that earns its place: without it a caller cannot tell a **stale-policy**
+    /// refusal from a real denial, and those call for opposite responses — redeploy and retry,
+    /// versus stop.
+    #[test]
+    fn a_refusal_carries_the_same_machine_readable_data_whichever_door_it_came_through() {
+        let ev = evaluator(
+            ReferenceEvaluator::new("rev-1")
+                .allow(Rule::new("*", "*", "*"))
+                .prohibit(Rule::new("oidc:idp/mallory", "tools/call", "*")),
+        );
+        let env = envelope("oidc:idp/mallory", "tools/call", "tool:square@n1");
+        let refusal = preflight(Some(&ev), &env, 2_000).expect_err("denied");
+
+        let data = refusal.error_data();
+        assert_eq!(data["reason"], "action_denied", "machine-readable, not prose: {data}");
+        assert_eq!(data["policy_revision"], "rev-1", "which artifact decided: {data}");
+        assert!(data["checked"].is_array(), "what it checked: {data}");
+        assert!(data["errors"].is_array(), "what it could not evaluate: {data}");
+
+        // The three refusals stay distinguishable — this is the collapse the slice exists to
+        // prevent, and it has to survive the trip to a caller, not only live in the Rust type.
+        let unestablished = {
+            let ev = evaluator(ReferenceEvaluator::new("rev-1").allow(Rule::new(
+                "oidc:idp/alice",
+                "tools/call",
+                "tool:square@n1",
+            )));
+            let env = envelope("oidc:idp/alice", "tools/call", "tool:cube@n1");
+            preflight(Some(&ev), &env, 2_000).expect_err("refused")
+        };
+        assert_eq!(unestablished.error_data()["reason"], "authority_not_established");
+        assert_ne!(
+            data["reason"], unestablished.error_data()["reason"],
+            "a denial and an unestablished authority must not arrive as the same thing",
+        );
     }
 
     /// A panicking adapter must never become an admission.

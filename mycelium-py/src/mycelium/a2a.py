@@ -24,7 +24,96 @@ import httpx
 
 from ._pool import ClientPool
 
-__all__ = ["A2aClient"]
+__all__ = ["A2aClient", "A2aError", "ActionRefusedError"]
+
+
+class A2aError(Exception):
+    """A JSON-RPC error from the A2A endpoint.
+
+    Carries the numeric ``code`` and ``message`` rather than folding them into a string, so a
+    caller can branch on them. Previously this raised a bare :class:`KeyError` with the code
+    inside the message — which is the wrong type for a protocol error and forced callers to parse
+    English to find out what happened.
+    """
+
+    def __init__(self, code: int, message: str, data: Optional[Dict] = None) -> None:
+        super().__init__(f"A2A error {code}: {message}")
+        self.code = code
+        self.message = message
+        self.data = data or {}
+
+
+class ActionRefusedError(A2aError):
+    """The gateway's action evaluator refused the call.
+
+    **Three refusals, and they must not be collapsed.** This is the distinction the whole
+    authorisation slice exists to keep, and it has to survive the trip to a caller:
+
+    ``action_denied`` (-32030)
+        An authority decided **no**. A prohibition matched. Do not retry; the answer will not
+        change until the policy does.
+
+    ``authority_not_established`` (-32031)
+        **Nobody decided.** No clause covered the action, a fact could not be established, the
+        policy revision was not the expected one, or the operation is outside the reviewed
+        catalogue. This is *not* evidence of drift or of a violation — treating it as one reports
+        a breach that never happened.
+
+    ``evidence_not_recorded`` (-32032)
+        The policy **permitted** the action, but the decision could not be recorded, so it was
+        refused anyway. An action allowed to proceed with no record of why is an unlogged gate,
+        not governance. Retrying is reasonable once the recording path is healthy.
+
+    ``policy_revision`` in :attr:`data` is what tells a *stale policy* apart from a real denial:
+    if the refusal names a revision you did not deploy, redeploy and retry rather than stop.
+    """
+
+    DENIED = "action_denied"
+    NOT_ESTABLISHED = "authority_not_established"
+    NOT_RECORDED = "evidence_not_recorded"
+
+    #: The three JSON-RPC codes the evaluator seam uses.
+    CODES = {-32030: DENIED, -32031: NOT_ESTABLISHED, -32032: NOT_RECORDED}
+
+    @property
+    def reason(self) -> str:
+        """The machine-readable reason, from ``data.reason`` or the code."""
+        return self.data.get("reason") or self.CODES.get(self.code, "unknown")
+
+    @property
+    def denied(self) -> bool:
+        """An authority decided no."""
+        return self.reason == self.DENIED
+
+    @property
+    def authority_not_established(self) -> bool:
+        """Nobody decided — **never** the same as a denial."""
+        return self.reason == self.NOT_ESTABLISHED
+
+    @property
+    def evidence_not_recorded(self) -> bool:
+        """Permitted, but unrecordable, so refused."""
+        return self.reason == self.NOT_RECORDED
+
+    @property
+    def policy_revision(self) -> Optional[str]:
+        """Which policy artifact decided, when the gateway said."""
+        return self.data.get("policy_revision")
+
+    @property
+    def checked(self) -> list:
+        """What the evaluator reports it checked."""
+        return self.data.get("checked", [])
+
+
+def _raise_for_error(error: Dict) -> None:
+    """Raise the most specific error type this JSON-RPC error warrants."""
+    code = error.get("code", 0)
+    message = error.get("message", "")
+    data = error.get("data")
+    if code in ActionRefusedError.CODES:
+        raise ActionRefusedError(code, message, data)
+    raise A2aError(code, message, data)
 
 
 class A2aClient:
@@ -114,7 +203,7 @@ class A2aClient:
         resp.raise_for_status()
         body = resp.json()
         if "error" in body:
-            raise KeyError(f"A2A error {body['error']['code']}: {body['error']['message']}")
+            _raise_for_error(body["error"])
         task = body.get("result", {})
         return _extract_text(task)
 

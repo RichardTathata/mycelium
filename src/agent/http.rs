@@ -1500,10 +1500,7 @@ async fn mcp_handler(
                 return Json(json!({
                     "jsonrpc": "2.0", "id": id,
                     "error": {"code": refusal.json_rpc_code(), "message": refusal.to_string(),
-                              "data": {"reason": refusal.reason(),
-                                       "policy_revision": refusal.decision().policy_revision,
-                                       "checked": refusal.decision().checked,
-                                       "errors": refusal.decision().errors}},
+                              "data": refusal.error_data()},
                 })).into_response();
             }
 
