@@ -298,9 +298,7 @@ pub fn fuzz_build_roundtrip(text: &str) -> bool {
 fn parse_object(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
-        let line = line.trim().trim_end_matches(',');
-        let Some((k, v)) = line.split_once(business_separator()) else { continue };
-        let (k, v) = (unquote(k.trim()), unquote(v.trim()));
+        let Some((k, v)) = parse_pair(line.trim()) else { continue };
         if !k.is_empty() {
             out.insert(k, v);
         }
@@ -308,10 +306,66 @@ fn parse_object(text: &str) -> BTreeMap<String, String> {
     out
 }
 
-fn business_separator() -> &'static str {
-    "\": \""
+/// Read one `"key": "value"` pair, **respecting escapes**.
+///
+/// This replaces a `split_once("\": \"")` heuristic, which could not be made correct. The
+/// separator it searched for is four characters that can occur *inside* an escaped key: a key of
+/// `"` is written `"\""`, whose tail is `"` `"` — so the search found its separator one character
+/// early and the key came back as `\`. A literal-substring split cannot tell a real delimiter from
+/// one that happens to appear inside a quoted string; only a scanner that knows where the string
+/// ends can.
+///
+/// Returns `None` for a line that is not a well-formed pair — an unterminated string, a missing
+/// `": "`, a missing closing quote. Those lines are skipped, exactly as before.
+fn parse_pair(line: &str) -> Option<(String, String)> {
+    let mut chars = line.chars();
+    let key = scan_quoted(&mut chars)?;
+    if chars.next()? != ':' {
+        return None;
+    }
+    if chars.next()? != ' ' {
+        return None;
+    }
+    let value = scan_quoted(&mut chars)?;
+    Some((key, value))
 }
 
+/// Scan one quoted, backslash-escaped string, consuming through its closing quote.
+///
+/// The unescaping rules are [`quote`]'s, read backwards — including the deliberate one: **an escape
+/// this writer never emits is kept verbatim** rather than swallowed, because a byte dropped here is
+/// a field that reads back shorter than it was written.
+///
+/// This replaces a separate `unquote` that stripped **at most one quote from each end**. That rule
+/// existed because the old reader split a line in the middle of the pair, so a key arrived with
+/// only its opening quote and a value with only its closing one — a fragile arrangement that had
+/// already cost one defect (a value ending in an escaped quote lost it, 2.10.0). Scanning the
+/// string properly removes the need for the rule and the class of bug with it: the closing quote is
+/// found by reading, not guessed at by position.
+fn scan_quoted(chars: &mut std::str::Chars<'_>) -> Option<String> {
+    if chars.next()? != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    loop {
+        match chars.next()? {
+            '"' => return Some(out),
+            '\\' => match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                // A trailing backslash with nothing after it never closes the string.
+                None => return None,
+            },
+            c => out.push(c),
+        }
+    }
+}
 /// Escape one field for the flat object form.
 ///
 /// Newlines are escaped because the reader is **line-oriented** — `parse_object` iterates
@@ -334,47 +388,72 @@ fn quote(s: &str) -> String {
     out.push('"');
     out
 }
-
-/// The inverse of [`quote`].
-///
-/// Strips **exactly one** surrounding quote rather than `trim_matches('"')`, which stripped every
-/// trailing quote — so a value ending in an escaped quote came back with the quote gone and its
-/// backslash left behind (`he said "hi"` read back as `he said "hi\`). Unescaping is a single
-/// left-to-right pass rather than two chained `replace`s, which decoded `\\"` as an escaped quote
-/// instead of a backslash followed by a quote.
-fn unquote(s: &str) -> String {
-    // At most one quote from each end, stripped independently: `parse_object` splits a line in
-    // the middle of the pair, so a key arrives with only its opening quote and a value with only
-    // its closing one. `trim_matches` removed every trailing quote, which is how a value ending in
-    // an escaped quote lost it.
-    let inner = s.strip_prefix('"').unwrap_or(s);
-    let inner = inner.strip_suffix('"').unwrap_or(inner);
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            // An escape this writer never emits is kept verbatim rather than swallowed: a byte
-            // dropped here is a field that reads back shorter than it was written.
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
+    /// **What the bundle writer writes, the bundle reader reads back unchanged** — exhaustively,
+    /// over the characters that break flat text formats.
+    ///
+    /// This is a search, not an example. Every key/value pair up to length two is drawn from the
+    /// alphabet below and asserted to survive a write and a read. It exists because the two defects
+    /// it found were both invisible to example-based tests: the examples used ordinary strings, and
+    /// ordinary strings round-tripped fine.
+    ///
+    /// | Found | Defect |
+    /// |---|---|
+    /// | 7,092 / 17,556 pairs | `parse_object` trimmed the value *inside* its quotes — the separator had already eaten the opening quote, so `" v"` read back as `v` and `"\t"` as empty |
+    /// | 1,729 / 17,556 pairs | `split_once("\": \"")` found its separator inside an escaped key — a key of `"` is written `"\""`, and came back as `\` |
+    ///
+    /// The second could not be patched: a literal-substring split cannot tell a real delimiter from
+    /// one appearing inside a quoted string. It was replaced by [`parse_pair`]'s scanner.
+    ///
+    /// **What this does not prove.** Length two, and this alphabet. A three-character search is
+    /// about 2 million pairs and runs in seconds, but the failures found here were all reachable at
+    /// length one or two — the shapes that break a format are short. The `replay_bundle` fuzz
+    /// target is the unbounded version of this test.
+    #[test]
+    fn a_bundle_object_survives_being_written_and_read_back() {
+        use std::collections::BTreeMap;
+
+        // Quote and backslash break the escaping; the whitespace characters broke the trimming;
+        // `=` and `:` are delimiter-adjacent; the control characters are what a fuzzer reaches for.
+        let alphabet = ['a', '"', '\\', '\n', '\r', '\t', ' ', '=', ':', '\u{1}', '\u{0}'];
+
+        let mut words: Vec<String> = vec![String::new()];
+        for c in alphabet.iter() {
+            words.push(c.to_string());
+        }
+        for a in alphabet.iter() {
+            for b in alphabet.iter() {
+                words.push(format!("{a}{b}"));
+            }
+        }
+
+        let mut failures = Vec::new();
+        for k in &words {
+            // An empty key is not representable in the flat form and `parse_object` drops it by
+            // design, so it is out of scope for a fidelity claim.
+            if k.is_empty() {
+                continue;
+            }
+            for v in &words {
+                let mut m = BTreeMap::new();
+                m.insert(k.clone(), v.clone());
+                let back = super::fuzz_write_read(&m);
+                if back != m {
+                    failures.push(format!("key={k:?} value={v:?} -> {back:?}"));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} of {} pairs did not survive a write and a read:\n  {}",
+            failures.len(),
+            (words.len() - 1) * words.len(),
+            failures.iter().take(10).cloned().collect::<Vec<_>>().join("\n  "),
+        );
+    }
+
     use super::*;
     use crate::trace::{Choice, ChoiceKind};
 
