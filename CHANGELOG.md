@@ -9,6 +9,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A federated credential now binds the request body** (item 2 row 11). Its signature covered the
+  origin domain, the principal, the export and the validity window — and **nothing about the
+  payload**. An attacker on the path between two domains could rewrite a call's body, leave the
+  credential header untouched, and the receiving gateway would accept the altered call as
+  authentic; the AE preflight would then decide and record against the attacker's text. The
+  credential said *this principal may call this export* and stayed true while the call became a
+  different call.
+
+  `FederatedCaller` gains `body_sha256`, covered by the signature. The same reasoning as
+  `ActionEnvelope::arguments_digest` one layer up: that binds arguments to a **decision**, this
+  binds the body to the **caller**.
+
+  Three details that make it hold rather than merely exist:
+
+  - **Over the bytes as received.** The client serialises once and signs those bytes; the gateway
+    takes the body as `Bytes` and parses afterwards. Digesting a re-serialisation would compare our
+    encoder against theirs — false refusals for honest partners, and a pass for an attacker who
+    matched our encoder. Same rule as the exporter's *verify the received bytes, then parse*.
+  - **Stripping the binding is a forgery, not a downgrade.** Whether a credential binds is inside
+    the signed bytes, so removing it fails as `BadSignature`.
+  - **`CallPolicy::require_body_binding`**, default `false`. That default is a rolling-upgrade
+    window, not a recommendation: a partner predating the binding sends no digest, and absence is
+    indistinguishable from tampering, so `false` gives **no integrity guarantee against an active
+    attacker**. Turn it on once every partner has upgraded. Two refusals, deliberately distinct —
+    `BodyNotBound` (upgrade the partner) and `BodyMismatch` (someone is on the path).
+
+  **Upgrade notes.** `FederationEdge::authorize` takes the request body; `FederatedCaller` gained a
+  field, so an exhaustive struct literal needs it. `POST /a2a` answers a malformed request as
+  JSON-RPC `-32700` rather than a bare 400 — a JSON-RPC endpoint replying in a different protocol
+  when it dislikes the input was its own small dishonesty.
+
+  What this does **not** do: it is integrity, not confidentiality. An on-path observer still reads
+  every federated call. TLS on the edge is the other half of row 11 and needs a trust-anchor
+  decision (public PKI, or pinning the partner's certificate in the `TrustBundle` beside its
+  Ed25519 key) that has not been made.
+
 ## [2.11.1] — 2026-09-22
 
 **Four defects, and the gate that had never run.** Wire **v12** unchanged; no API change.

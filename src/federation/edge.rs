@@ -63,6 +63,25 @@ pub fn now_ms() -> u64 {
     mycelium_core::sim_seam::wall_now_ms()
 }
 
+fn hex_of(d: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in d {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn bytes_of_hex(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 /// A [`FederatedCaller`] and its signature, in the form that crosses the wire.
 ///
 /// The signature is the 64-byte Ed25519 signature over the credential's canonical bytes, standard
@@ -76,6 +95,17 @@ pub struct PresentedCall {
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
     pub signature: String,
+    /// Lowercase hex of the sha256 of the request body this credential authorises.
+    ///
+    /// **Hex, not base64**, so the header stays ASCII under this module's own content check, and
+    /// so a malformed value is obvious rather than merely undecodable.
+    ///
+    /// Omitted entirely when absent, so a credential from a partner that predates the binding is
+    /// byte-identical to what that partner already sends — the field is additive on the wire, and
+    /// an old verifier ignores it. See [`FederatedCaller::body_sha256`] for what its absence does
+    /// and does not guarantee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<String>,
 }
 
 impl PresentedCall {
@@ -89,6 +119,7 @@ impl PresentedCall {
             issued_at_ms: credential.issued_at_ms,
             expires_at_ms: credential.expires_at_ms,
             signature: base64::engine::general_purpose::STANDARD.encode(sig),
+            body_sha256: credential.body_sha256.as_ref().map(hex_of),
         }
     }
 
@@ -100,6 +131,12 @@ impl PresentedCall {
             export: self.export.clone(),
             issued_at_ms: self.issued_at_ms,
             expires_at_ms: self.expires_at_ms,
+            // A malformed digest decodes to `None`, which is *not* "no binding was claimed": the
+            // signature covers the presence byte, so a credential minted with a binding and
+            // arriving with a corrupt one fails as `BadSignature` rather than silently downgrading
+            // to unbound. That is the intended outcome — the two states cannot be confused because
+            // they sign differently.
+            body_sha256: self.body_sha256.as_deref().and_then(bytes_of_hex),
         }
     }
 
@@ -148,6 +185,7 @@ impl PresentedCall {
             ("principal", call.principal.as_str()),
             ("export", call.export.as_str()),
             ("signature", call.signature.as_str()),
+            ("body_sha256", call.body_sha256.as_deref().unwrap_or("")),
         ] {
             if !text.is_ascii() {
                 return Err(format!("federation credential {field} is not ASCII"));
@@ -373,10 +411,14 @@ impl FederationEdge {
     /// Step two, at the handler: does the credential name `requested_export`, and does policy
     /// grant it? Re-runs the identity checks — they are cheap, and a handler must not have to
     /// trust that a layer ran before it.
+    /// `body` is the request payload **exactly as received**, before parsing. A credential that
+    /// binds a body is checked against these bytes; see [`FederatedCaller::body_sha256`] for why a
+    /// re-serialisation will not do.
     pub fn authorize(
         &self,
         presented: &PresentedCall,
         requested_export: &str,
+        body: &[u8],
         now_ms: u64,
     ) -> Result<AcceptedCall, CallRefusal> {
         if requested_export == CATALOG_EXPORT {
@@ -392,6 +434,7 @@ impl FederationEdge {
             &credential,
             &signature,
             requested_export,
+            body,
             &trust.bundle,
             &trust.policy,
             &self.call_policy,
@@ -484,9 +527,13 @@ mod tests {
         )
     }
 
+    /// The body every `presented` credential in these tests authorises.
+    const TEST_BODY: &[u8] = br#"{"jsonrpc":"2.0","method":"tasks/send"}"#;
+
     fn presented(sk: &ed25519_dalek::SigningKey, export: &str, now: u64) -> PresentedCall {
         PresentedCall::sign(
             &FederatedCaller {
+                body_sha256: Some(FederatedCaller::digest_of(TEST_BODY)),
                 origin_domain: DomainId::new("beta.example").unwrap(),
                 principal: "svc/billing".into(),
                 export: export.into(),
@@ -527,20 +574,20 @@ mod tests {
 
         let call = presented(&sk, "invoice.submit", now);
         assert!(e.authenticate(&call, now).is_ok());
-        let accepted = e.authorize(&call, "invoice.submit", now).unwrap();
+        let accepted = e.authorize(&call, "invoice.submit", TEST_BODY, now).unwrap();
         assert_eq!(accepted.policy_revision, 3);
         assert_eq!(accepted.principal, "svc/billing");
-        assert!(matches!(e.authorize(&call, "invoice.status", now), Err(CallRefusal::WrongExport { .. })));
+        assert!(matches!(e.authorize(&call, "invoice.status", TEST_BODY, now), Err(CallRefusal::WrongExport { .. })));
 
         // Named but not granted: `ledger.audit` is exported, beta has no grant for it.
         let ungranted = presented(&sk, "ledger.audit", now);
         assert!(e.authenticate(&ungranted, now).is_ok(), "identity is not a grant");
-        assert_eq!(e.authorize(&ungranted, "ledger.audit", now), Err(CallRefusal::NotPermitted));
+        assert_eq!(e.authorize(&ungranted, "ledger.audit", TEST_BODY, now), Err(CallRefusal::NotPermitted));
 
         // The reserved export is not a call, whichever side names it.
         let cat = presented(&sk, CATALOG_EXPORT, now);
-        assert!(matches!(e.authorize(&cat, CATALOG_EXPORT, now), Err(CallRefusal::WrongExport { .. })));
-        assert!(matches!(e.authorize(&cat, "invoice.submit", now), Err(CallRefusal::WrongExport { .. })));
+        assert!(matches!(e.authorize(&cat, CATALOG_EXPORT, TEST_BODY, now), Err(CallRefusal::WrongExport { .. })));
+        assert!(matches!(e.authorize(&cat, "invoice.submit", TEST_BODY, now), Err(CallRefusal::WrongExport { .. })));
     }
 
     /// The catalogue is filtered to the grant, needs the reserved export, and follows a policy
@@ -574,7 +621,7 @@ mod tests {
         // Revoked: the partner is unknown to every path.
         e.revoke(&beta);
         assert_eq!(e.catalog_for(&cat, now), Err(CallRefusal::UnknownDomain));
-        assert_eq!(e.authorize(&call, "invoice.submit", now), Err(CallRefusal::UnknownDomain));
+        assert_eq!(e.authorize(&call, "invoice.submit", TEST_BODY, now), Err(CallRefusal::UnknownDomain));
     }
 
     /// A signed catalogue verifies under the domain's key and is bound to the domain and the
@@ -634,6 +681,7 @@ mod tests {
 
         let gamma = PresentedCall::sign(
             &FederatedCaller {
+                body_sha256: None,
                 origin_domain: DomainId::new("gamma.example").unwrap(),
                 principal: "x".into(),
                 export: "invoice.submit".into(),
