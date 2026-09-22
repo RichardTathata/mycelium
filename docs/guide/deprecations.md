@@ -101,6 +101,21 @@ it: add `..` to any exhaustive `Committed` destructure (it gained fields in 2.4.
 `false` as "absent from the WAL" — it means durability was *not established*, which is a different
 claim. [Chapter 18](18-contracts-and-receipts.md) is the full ladder.
 
+**Why the compiler does not warn here, costed rather than asserted** *(2026-09-22)*. It *could*:
+Rust does support `#[deprecated]` on a struct-variant field, and it warns on both construction and
+destructuring — checked, not assumed, because the first draft of this note claimed the opposite and
+was wrong.
+
+The cost is that the field is **still produced by this crate**, in about fifty places across ten
+files. Marking it would mean an `#[allow(deprecated)]` beside each one — `make check` runs
+`-D warnings` — so the substrate would be suppressing a warning about itself, permanently, and every
+future internal use would need the same. That is a lot of noise to buy a nudge for the one pattern
+already spelled out above.
+
+So it is left unmarked **deliberately**, and this paragraph is the reason. It is a judgement about
+signal-to-noise, not an oversight, and it is worth revisiting if the internal uses shrink — the
+day this crate stops producing the field is the day marking it costs nothing.
+
 ## 5. Node-as-caller gateway dispatch → `GatewayCaller`
 
 Before item 7, every gateway-originated dispatch ran under the **node's** identity, so a provider's

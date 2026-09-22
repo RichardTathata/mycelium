@@ -182,8 +182,13 @@ defects: the wire `DomainId` validation bypass, replay-bundle field corruption, 
 record, an unbounded journal allocation — #330), and **migration notes per deprecation**, now an adopter-facing
 page `docs/guide/deprecations.md` (#333). Still open publicly: §12.2's SDK narrative and the wiki page per new
 mechanism; item 2's row 11 (SDK verbs, TLS on the federation edge itself, a hostile network, more than two
-domains); **four unmarked deprecations** — only 2 of the 7 §6.6 ledger entries carry `#[deprecated]`, so the page
-is the whole notice for the rest; `mycelium-commitment`'s unsigned `Offer`/`Award` (provenance, a design question);
+domains); the §6.6 **removal ledger** is complete and its non-warnings are
+**deliberate, each with a stated reason** — an earlier version of this line called them *"four unmarked
+deprecations"*, which was wrong twice: the ledger has **9 entries, 4 warning** (2 `#[deprecated]`, 2
+`#[non_exhaustive]` from 2.10.0), and *"unmarked"* implied an oversight. Entry 4 is the one that could
+carry a compiler warning and does not: a struct-variant field **can** be `#[deprecated]` (checked), but
+the field is still produced in ~50 places here, so marking it would mean suppressing a warning about
+ourselves in all of them under `-D warnings`. Costed on the page, not open work; `mycelium-commitment`'s unsigned `Offer`/`Award` (provenance, a design question);
 the **consumer-side-only per-partner budget** (the edge has no slot accounting — the one audit finding still
 needing a decision rather than a patch; **the composition finding is closed**, 2026-09-21, by recording the
 receipt's rung and the origin domain onto the execution record — `docs/design/composed-effect.md`, and note what
