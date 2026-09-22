@@ -55,5 +55,9 @@ run_demo "09 · mcp_toolgrowth"   mcp_toolgrowth   "All assertions passed" "the 
 run_demo "10 · llm_council"      llm_council      "All assertions passed" "fanned out to 3 specialists, synthesized, and refined"
 run_demo "11 · catalog"          catalog          "All assertions passed" "installed from a peer cache and ran it"
 run_demo "12 · diagnostics"      diagnostics      "All assertions passed" "diagnosed the governed-group conflict"
+# The AE gallery row. Markers chosen so a regression in the two claims that matter fails the
+# smoke: that an uncovered action is NOT a denial, and that a denied action which ran anyway is
+# reported rather than reconciled away.
+run_demo "13 · procurement_authority" procurement_authority "All assertions passed" "authority not established" "denied, and it ran anyway"
 
 echo "All co-op smokes passed."

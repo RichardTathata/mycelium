@@ -58,6 +58,13 @@ required-features = ["wasm"]
 name = "federation_facts"
 path = "src/bin/federation_facts.rs"
 
+# The AE gallery row: runtime authorisation on the PUBLIC seam and reference evaluator. No cluster
+# and no wasm — decisions and evidence are what it is about, and spawning depots for atmosphere
+# would make a fast, honest demo slow and no more truthful.
+[[bin]]
+name = "procurement_authority"
+path = "src/bin/procurement_authority.rs"
+
 [[bin]]
 name = "rotation"
 path = "src/bin/rotation.rs"
@@ -134,3 +141,6 @@ tracing-subscriber = "0.3"
 reqwest            = { version = "0.12", features = ["json"] }
 # catalog: sign an installable artifact's provenance (publisher vouches for the bytes).
 ed25519-dalek      = "2"
+# procurement_authority: an evidence correction cites the content hash of the record it replaces,
+# derived the same way the journal and the exporter derive it.
+sha2               = "0.10"

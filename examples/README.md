@@ -46,6 +46,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`control_envelope_viz`](../docs/design/adaptive-stability.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
+| [`procurement_authority`](../docs/guide/20-authorising-actions.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | |
 | [`mailbox_llm`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
 | [`stigmergy`](coop/README.md) | · | ● | · | ○ | Adv | CLI | · | · | · |
