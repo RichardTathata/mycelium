@@ -97,13 +97,19 @@ build: `store::prop_tests::fuzz_apply_observe_tick_never_panics`,
 only added in pass 5, after a fifth audit pass found the un-fuzzed `rate.rs` overflow) — the Robustness
 dimension in `ratings.md` stays at its floor until a pass validates the sweep by finding nothing.
 
-**Trust-edge fuzz gate (§12.6, 2026-09-20).** A parser sits on a **trust edge** when it reads bytes a
-partner, a client or an operator controls *before anything about them has been verified*. Eight targets
-cover the v3 axis' three such surfaces — `caller_frame` and `caller_envelope` (`src/agent/gateway_caller.rs`),
-`presented_call` / `catalog_reply` / `federation_objects` / `trust_bundle` (`src/federation*`), and
-`replay_trace` / `replay_bundle` (`mycelium-sim`). Nightly `cargo-fuzz`, plus mutation passes over valid
-seeds in the in-suite `mini_fuzz_decoders_survive_adversarial_bytes` on every PR (that line needs
+**Trust-edge fuzz gate (§12.6, 2026-09-20; audited and corrected in v2.11.1, 2026-09-22).** A parser
+sits on a **trust edge** when it reads bytes a partner, a client or an operator controls *before
+anything about them has been verified*. Eight targets cover the v3 axis' three such surfaces —
+`caller_frame` and `caller_envelope` (`src/agent/gateway_caller.rs`), `presented_call` /
+`catalog_reply` / `federation_objects` / `trust_bundle` (`src/federation*`), and `replay_trace` /
+`replay_bundle` (`mycelium-sim`). Nightly `cargo-fuzz`, plus mutation passes over valid seeds in the
+in-suite `mini_fuzz_decoders_survive_adversarial_bytes` on every PR (that line needs
 `--features fuzz-internals,tls`, or two of the eight are not compiled and the pass silently covers six).
+
+> **Read the next four lessons as one story.** For the first two days these targets existed they
+> found nothing, and the reason was not that the parsers were sound: **four defects were waiting**,
+> and the gate could not reach them. v2.11.1 is the correction. A gate that exists is not a gate that
+> runs, and a gate that runs is not a gate that checks.
 
 The discipline that distinguishes this from the gate above: **assert the invariant the parser is relied
 on for, not that it survived.** A crash is the easy case; a wrong-but-well-formed parse is the one that
@@ -122,7 +128,48 @@ Three lessons, each paid for:
   frame-shaped, so every envelope assertion was unreachable; the case count was identical before and
   after adding a whole layer. The same trap caught a `serde_fixint` sweep from the other direction:
   40,000 *random* inputs produced **zero successful decodes**, because noise dies on the first length
-  prefix — so "0 panics" measured nothing at all until the sweep mutated a *valid* encoding instead
+  prefix — so "0 panics" measured nothing at all until the sweep mutated a *valid* encoding instead.
+
+  **This lesson was written here and then not applied**, which is the part worth remembering. When
+  v2.11.1 finally measured it across the whole set, a 20,000-input noise pass reached the invariant of
+  **0 of the 7** assertion-bearing targets — none, not few. `presented_call` had asserted round-trip
+  stability since the day it was written and had **never executed that assertion**; `trust_bundle` and
+  `catalog_reply` had no valid seed at all. Writing the lesson down is not the same as checking it, so
+  the check is now structural: a **reachability registry** in the mini-fuzz names every target beside
+  the seed that reaches it and fails by name if one stops arriving. It claims completeness in the same
+  sense the [lock-order table](../concurrency/lock-order.md) does — **adding a trust-edge target means
+  adding a row**.
+
+- **A sequential gate hides everything behind its first failure.** The CI fuzz job runs its twelve
+  targets one after another and stops at the first crash. `presented_call` is fifth, and it began
+  failing *in the very commit that added the trust-edge targets*. So targets six through twelve never
+  executed at all, and `main` was red for **22 consecutive runs** — through an entire slice of AE work
+  and through a tagged release. Each fix merely let the queue advance to the next defect behind it:
+  four, one at a time.
+
+  Two consequences. **Check CI on the branch you are releasing *from***, not on what fed it — the fuzz
+  job is `main`-only, so a green `make check-full` and a green PR say nothing about it
+  (`RELEASING.md` step 2b, which exists because v2.11.0 was tagged on exactly that gap). And when a
+  sequential gate is red, treat **every later stage as unrun**, because it is.
+
+- **What a parser accepts, its writer must be able to emit.** Three of the four defects were the same
+  shape: the accept-set and the emit-set had drifted apart, so a value this node took in, it could not
+  put back out. An `/a2a` credential whose ASCII check read the *encoding* (`"\u0809"` is an ASCII
+  header carrying a non-ASCII principal); a replay trace losing a bare `\r`, because `str::lines()`
+  strips one only when it precedes `\n`; a bundle value trimmed *inside* its quotes. Each parses, none
+  survives being written back — and a peer forwarding what we accepted would refuse it.
+
+  The fourth is the general case: `split_once("\": \"")` searched for a delimiter that also occurs
+  **inside an escaped key**, so a key of `"` came back as `\`. That one could not be patched — *a
+  literal-substring split cannot tell a real delimiter from one inside a quoted string, because the
+  information it needs is not in the substring*. It takes a scanner that knows where a string ends.
+
+- **Search the alphabet, do not sample it.** Two fidelity tests for the bundle codec already existed
+  and passed throughout, because they used ordinary strings and ordinary strings round-trip fine. An
+  exhaustive sweep over the characters that break flat text formats — quote, backslash, the whitespace
+  family, the delimiters, the control bytes, every pair up to length two — found **7,092 of 17,556
+  pairs corrupted**, then **1,729 more** behind the first fix. Both defects lived in characters nobody
+  writes on purpose, which is exactly what an example-based test cannot reach
   (3,808 decodes, 0 panics). **Noise tests the entry check; only mutation tests the decoder.** Every
   mini-fuzz seed now **asserts its own reachability** before being mutated.
 - **A public type is not public until it is re-exported, and only an out-of-crate test can tell you.**
