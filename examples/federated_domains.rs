@@ -29,6 +29,11 @@ use mycelium::federation::{
 };
 use std::time::{Duration, Instant};
 
+/// A sub-step of the one before it — same subject, sharper question.
+fn substep(label: &str, title: &str) {
+    println!("\n\x1b[1m{label}. {title}\x1b[0m");
+}
+
 fn step(n: u8, title: &str) {
     println!("\n\x1b[1m{n}. {title}\x1b[0m");
 }
@@ -103,19 +108,22 @@ fn main() {
     step(4, "Beta calls — and the credential names the call, not just the caller");
 
     let now_ms = 1_789_000_010_000;
+    // The request beta is actually making. The credential binds *these bytes* — see step 4b.
+    let body = br#"{"jsonrpc":"2.0","method":"tasks/send","params":{"invoice":"INV-4471","amount_pence":21900}}"#;
     let credential = FederatedCaller {
         origin_domain: beta.clone(),
         principal: "svc/billing".into(),
         export: "invoice.submit".into(),
         issued_at_ms: now_ms,
         expires_at_ms: now_ms + 60_000,
+        body_sha256: Some(FederatedCaller::digest_of(body)),
     };
     let signature = sign(&signing, &credential.canonical_bytes());
     let bundle = TrustBundle::trusting([(beta.clone(), verifying)]);
     let call_policy = CallPolicy::default();
 
     match verify_federated_call(
-        &credential, &signature, "invoice.submit", &bundle, &policy, &call_policy, now_ms + 1_000,
+        &credential, &signature, "invoice.submit", body, &bundle, &policy, &call_policy, now_ms + 1_000,
     ) {
         Ok(accepted) => {
             note(format!(
@@ -130,7 +138,7 @@ fn main() {
     note("");
     note("The same credential, used for a different export:");
     match verify_federated_call(
-        &credential, &signature, "invoice.status", &bundle, &policy, &call_policy, now_ms + 1_000,
+        &credential, &signature, "invoice.status", body, &bundle, &policy, &call_policy, now_ms + 1_000,
     ) {
         Err(CallRefusal::WrongExport { authorised, requested }) => note(format!(
             "refused — authorises {authorised:?}, asked for {requested:?}. Binding only the caller",
@@ -138,6 +146,30 @@ fn main() {
         other => note(format!("unexpected: {other:?}")),
     }
     note("would leave the deputy confused about WHAT, having fixed WHO.");
+
+    // ── 4b. the payload, changed in flight ────────────────────────────────────────────────────
+    substep("4b", "…and the credential names the PAYLOAD, or the deputy is still confused");
+
+    note("The credential above authorises invoice INV-4471 for £219.00.");
+    note("Someone on the path between the two domains rewrites the amount and forwards it:");
+    let tampered = br#"{"jsonrpc":"2.0","method":"tasks/send","params":{"invoice":"INV-4471","amount_pence":2190000}}"#;
+    match verify_federated_call(
+        &credential, &signature, "invoice.submit", tampered, &bundle, &policy, &call_policy, now_ms + 1_000,
+    ) {
+        Err(CallRefusal::BodyMismatch) => {
+            note("refused — the credential binds a different body than the one that arrived.");
+            note("The header is untouched and still verifies: the signature is genuine, the");
+            note("principal is real, the export is right. Only the payload moved — which until");
+            note("this binding existed was enough, and the £21,900 invoice would have been");
+            note("accepted as authentically beta's, then recorded as such in the evidence.");
+        }
+        other => note(format!("unexpected: {other:?}")),
+    }
+    note("");
+    note("A partner that predates the binding sends no digest at all. That is accepted while");
+    note("`CallPolicy::require_body_binding` is false — a rolling-upgrade window, and one that");
+    note("gives no protection against an attacker, who would simply strip the field. Turn it on");
+    note("once every partner has upgraded.");
 
     // ── 5. budgets and failover ───────────────────────────────────────────────────────────────
     step(5, "Two gateways, per-partner budgets, and what a silence means");
