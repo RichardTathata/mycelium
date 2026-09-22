@@ -189,6 +189,24 @@ fn jsonrpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
     })
 }
 
+/// A JSON-RPC error carrying a machine-readable `data` block.
+///
+/// Used for AE refusals, which a caller has to be able to *act on* differently: a denial and an
+/// authority that was never established call for opposite responses, and neither is legible from a
+/// prose message without parsing English.
+fn jsonrpc_error_with_data(
+    id: Option<Value>,
+    code: i32,
+    message: &str,
+    data: Value,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message, "data": data }
+    })
+}
+
 fn jsonrpc_ok(id: Option<Value>, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
@@ -349,7 +367,14 @@ async fn handle_tasks_send(
     .await;
     #[cfg(all(feature = "gateway", feature = "tls"))]
     if let super::http::Preflight::Refuse(refusal) = &preflight {
-        return jsonrpc_error(id, refusal.json_rpc_code(), &refusal.to_string());
+        // The same body `/mcp` sends. A partner domain calling across the federation edge gets the
+        // machine-readable reason and the policy revision, not only a number and a sentence.
+        return jsonrpc_error_with_data(
+            id,
+            refusal.json_rpc_code(),
+            &refusal.to_string(),
+            refusal.error_data(),
+        );
     }
 
     // Item 7: the skill provider is told who called (the resolved bearer principal, or

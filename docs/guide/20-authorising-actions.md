@@ -178,6 +178,65 @@ and it is visible rather than silent.
 The codes are stable across the tool-invocation and agent-to-agent surfaces, so a client can
 distinguish the three without parsing prose.
 
+### What a refusal tells the caller
+
+Both surfaces send the same machine-readable `data` block. They did not always: `/mcp` carried it and
+`/a2a` sent only the code and an English sentence, so the path a **partner domain** calls across the
+federation edge was the poorer one, and a client written against one broke on the other. Both now
+call one function, which is the only way two doors stay described the same.
+
+```json
+{ "jsonrpc": "2.0", "id": 1,
+  "error": { "code": -32031,
+             "message": "authority not established: ...",
+             "data": { "reason": "authority_not_established",
+                       "policy_revision": "procurement-2026-q3.r7",
+                       "checked": ["allowance actor=... operation=..."],
+                       "errors": ["fact not established: mandate"] } } }
+```
+
+**`policy_revision` is the field to branch on**, and the reason it is worth carrying: without it a
+caller cannot tell a *stale policy* refusal — this enforcement point expected a different artifact —
+from a real denial. Those call for opposite responses: redeploy and retry, versus stop.
+
+### In the SDKs
+
+Both SDKs raise a typed refusal rather than a generic error, because *"the call failed"* is precisely
+the collapse this chapter is about. Python raised a bare `KeyError` with the code inside the message
+until this landed; TypeScript threw a plain `Error`.
+
+```python
+from mycelium.a2a import A2aClient, ActionRefusedError
+
+try:
+    reply = client.send("procurement/purchase", "raise a PO for 12 pallets")
+except ActionRefusedError as refused:
+    if refused.denied:
+        ...                       # an authority said no; do not retry
+    elif refused.authority_not_established:
+        ...                       # nobody decided — NOT a violation to report
+    elif refused.evidence_not_recorded:
+        ...                       # permitted, but unrecordable; retry when recording is healthy
+    print(refused.reason, refused.policy_revision, refused.checked)
+```
+
+```typescript
+import { A2aClient, ActionRefusedError } from "@mycelium/client";
+
+try {
+  await client.send("procurement/purchase", "raise a PO for 12 pallets");
+} catch (e) {
+  if (e instanceof ActionRefusedError) {
+    if (e.authorityNotEstablished) { /* nobody decided — not drift */ }
+    console.log(e.reason, e.policyRevision, e.checked);
+  }
+}
+```
+
+The middle branch is the one worth writing out. **An action no rule covers is not a violation.** A
+dashboard that counts `authority_not_established` as a policy breach reports drift that never
+happened — and the operator who trusts it will go looking for an attacker who does not exist.
+
 ---
 
 ## Replacing the evaluator
