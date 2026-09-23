@@ -275,6 +275,47 @@ differing only in their TLS key. Still **not** claimed: caller authentication st
 auth model at one edge is the drift v2.4.1/v2.4.2 removed), and nothing here helps against an attacker holding
 the partner's private key.
 
+**The per-partner budget's other half, closed 2026-09-23 — the Phase-C audit's last finding.** The
+audit's *"the per-partner budget is enforced consumer-side only (the edge has no slot accounting)"*
+was left as a decision rather than a patch, and this is the decision.
+
+`GatewayPool` has metered per-partner slots since PR 5: it bounds what *we send* a partner. Nothing
+bounded what a partner sends *us*. The realistic threat is not an anonymous flood — the credential
+gate stops that — it is a **compromised or simply buggy partner**, whose credentials are by
+construction minted by *them*, holding this gateway's whole capacity.
+
+Three shapes were available:
+
+| Shape | Why not / why |
+|---|---|
+| Accept it; the operator's ingress is the answer | True as far as it goes, and it leaves the two sides of one edge asymmetric with no mechanism on the side that faces a party we do not control. |
+| **Shared observation, local decision** (the `rate` module's M7 pattern, applied to partner domains) | Catches a partner fanning out across several of our gateways — and puts **foreign domain names into `sys/`**, which is what D7 exists to prevent, and tells every node in the mesh which partners exist and how hard each is calling. It is also unbuildable without a local counter to clamp: M7's own design is a per-peer limit *first*, aggregate observation second. |
+| **A per-partner in-flight cap at the edge** | **Chosen.** The mirror of `GatewayPool` on the other side of the same edge: fixed slots per partner, refused rather than queued, node-local, nothing foreign entering the medium. And it is the prerequisite for the second shape rather than a competitor to it, should a deployment ever need one. |
+
+`CallPolicy::max_in_flight_per_partner` (**0 = unlimited**, so no deployment acquires a cap by
+upgrading); `FederationEdge::admit` returns a `PartnerSlot` **RAII guard** whose `Drop` releases —
+because a release that a handler has to remember is a release it will miss on an early return or an
+unwind, and a leaked slot is a partner permanently short of capacity with nothing saying so.
+Refused with `CallRefusal::AtCapacity { partner, limit }` and a distinct JSON-RPC code (**-32004**),
+kept apart from `NotPermitted`/-32003 on purpose: *not permitted* is a standing answer about
+authority that a retry will not change, this is a transient one about load that a retry probably
+will, and merging them tells a partner to go and ask their operator about a grant they already have.
+
+**Capacity is asked after authority**, never before: a caller we would refuse on authority must not
+be able to occupy a slot, or an unauthorised partner could exhaust an authorised one's allowance —
+turning an access-control refusal into a denial of service against the partner who was in the right.
+
+**What it does not do, stated because the asymmetry is now smaller rather than gone.** The count is
+*one gateway's*: a domain running N gateways admits up to **N × cap** from one partner in
+aggregate, because there is no cross-gateway counter, by the D7 reasoning above. And it bounds
+**concurrency, not rate** — a partner making brief calls in a tight loop stays under any in-flight
+cap. Rate remains the operator's ingress. Gates: `lib_tests.rs` →
+`the_edge_meters_calls_per_partner_and_refuses_rather_than_queues` (per-partner isolation, the
+guard's release, unlimited by default) and
+`the_per_partner_cap_refuses_a_concurrent_call_at_the_live_gateway` (two concurrent calls through a
+real gateway against a provider that blocks until released — with an instant provider the first
+call finishes before the second arrives and the cap is never consulted).
+
 **Row 11's SDK half, closed 2026-09-23 — and the rule it had to carry.** A federated call could
 only be made from Rust: `FederationClient` was the only consumer, and the example had to hand-roll
 a control API around one. The question "what is an SDK verb here?" had three answers and only one

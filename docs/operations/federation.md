@@ -111,6 +111,37 @@ The consumer side is independent of the edge: a node may call out without export
 export without calling out. `GET /gateway/federation/domain` answers `{"configured": false}` on a
 node with no edge, which is the quickest way to tell the two halves apart in a deployment.
 
+## Bounding what a partner can send you
+
+The consumer side has always metered slots per partner (`FederationClient`'s pool bounds what you
+send). The provider side does now too, and it is **off unless you set it**:
+
+```rust
+let edge = FederationEdge::new(our_domain, exports, policy, bundle, CallPolicy {
+    max_in_flight_per_partner: 8,        // 0 (the default) is unlimited
+    ..CallPolicy::default()
+});
+```
+
+A call over the cap is refused with `AtCapacity` and JSON-RPC **-32004**, not queued. Partners
+should treat -32004 as *retry shortly* and -32003 as *talk to your operator* — the two are kept
+apart precisely so a transient load answer is not read as a standing authority answer.
+
+**Sizing it, and the three things to know before you do.**
+
+1. **The cap is per gateway.** Running N gateways means one partner can have up to **N × cap** in
+   flight against your domain. Divide your intended aggregate by the number of gateways you run,
+   and accept that a gateway which is down leaves its share unused — there is deliberately no
+   cross-gateway counter (it would need either a coordinator or partner names gossiped through
+   `sys/`, which the design forbids).
+2. **It bounds concurrency, not rate.** A partner making brief calls in a tight loop stays under any
+   in-flight cap. If rate is your problem, that is your ingress' job.
+3. **Capacity is checked after authority**, so a partner you would refuse anyway cannot occupy a
+   slot belonging to one you would admit.
+
+Read the current occupancy with `FederationEdge::in_flight_for(&partner)` — the map holds only
+partners with work in flight, so an empty read means idle, not unconfigured.
+
 ## Encrypting the link (TLS pinning)
 
 Federated calls are signed, not encrypted: without this step an on-path observer reads every call

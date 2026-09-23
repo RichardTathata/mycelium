@@ -40,7 +40,8 @@ use super::catalog::filtered_catalog;
 use super::{DomainId, DomainPolicy, TrustBundle};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::sync::RwLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// The request header a federated call rides in. Its value is [`PresentedCall`] as JSON.
 pub const HEADER_FEDERATED_CALL: &str = "x-mycelium-federation-call";
@@ -339,6 +340,47 @@ pub struct FederationEdge {
     signing_key: Option<ed25519_dalek::SigningKey>,
     /// Lock-order row 38: leaf, µs read on every federated request, never held across an await.
     trust: RwLock<EdgeTrust>,
+    /// In-flight calls per partner (item 2, the Phase-C audit's last finding). Empty and untouched
+    /// when `max_in_flight_per_partner` is 0.
+    ///
+    /// Lock-order row 39: leaf, µs, taken twice per call — once to admit and once, on the guard's
+    /// drop, to release. **Never held across the dispatch**, which is the whole reason the guard
+    /// exists rather than a lock held for the duration.
+    in_flight: Mutex<HashMap<DomainId, usize>>,
+}
+
+/// One admitted call's slot at the edge, released when this is dropped.
+///
+/// It holds an `Arc` of the edge rather than a borrow so a handler can carry it across the dispatch
+/// await without lending the edge's lifetime to the future. Dropping it on **any** path — a reply, a
+/// refusal further in, a panic unwinding through the handler — returns the slot; that is why it is a
+/// guard and not a pair of calls, because a leaked slot is a partner permanently short of capacity
+/// and nothing would ever say so.
+pub struct PartnerSlot {
+    edge: Arc<FederationEdge>,
+    partner: DomainId,
+}
+
+/// Hand-written rather than derived: the guard holds the whole edge, and an edge holds the
+/// domain's **signing key**. A derived `Debug` would put it one `{:?}` away from a log line.
+impl std::fmt::Debug for PartnerSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartnerSlot").field("partner", &self.partner).finish_non_exhaustive()
+    }
+}
+
+impl Drop for PartnerSlot {
+    fn drop(&mut self) {
+        let mut in_flight = self.edge.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = in_flight.get_mut(&self.partner) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                // Drop the entry rather than leave a zero: the map is then exactly the set of
+                // partners with work in flight, which is what a diagnostic wants to read.
+                in_flight.remove(&self.partner);
+            }
+        }
+    }
 }
 
 impl FederationEdge {
@@ -355,6 +397,7 @@ impl FederationEdge {
             call_policy,
             signing_key: None,
             trust: RwLock::new(EdgeTrust { policy, bundle }),
+            in_flight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -440,6 +483,42 @@ impl FederationEdge {
             &self.call_policy,
             now_ms,
         )
+    }
+
+    /// **Take a slot for `partner`**, or refuse (item 2, the Phase-C audit's last finding).
+    ///
+    /// Step three, after the credential has been authenticated and the export authorised: is this
+    /// gateway willing to carry another call for that partner *right now*? Hold the returned
+    /// [`PartnerSlot`] for the dispatch and drop it when the call is done.
+    ///
+    /// Ordered **after** authorisation deliberately. A caller we would refuse on authority must not
+    /// be able to occupy a slot, or an unauthorised partner could exhaust an authorised one's
+    /// allowance — which would turn an access-control refusal into a denial of service against the
+    /// partner who was in the right.
+    ///
+    /// `max_in_flight_per_partner: 0` admits unconditionally and touches no lock, so a deployment
+    /// that has not configured a budget pays nothing for this existing.
+    pub fn admit(self: &Arc<Self>, partner: &DomainId) -> Result<PartnerSlot, CallRefusal> {
+        let limit = self.call_policy.max_in_flight_per_partner;
+        if limit == 0 {
+            return Ok(PartnerSlot { edge: Arc::clone(self), partner: partner.clone() });
+        }
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        let n = in_flight.entry(partner.clone()).or_insert(0);
+        if *n >= limit {
+            // The refusal path leaves no entry behind that it created: `or_insert(0)` can only
+            // insert a *zero*, and a zero is never `>= limit` while `limit >= 1`, which it is here.
+            // So the map stays exactly the set of partners with work in flight.
+            return Err(CallRefusal::AtCapacity { partner: partner.clone(), limit });
+        }
+        *n += 1;
+        Ok(PartnerSlot { edge: Arc::clone(self), partner: partner.clone() })
+    }
+
+    /// How many calls this gateway is carrying for `partner` right now — for diagnostics and for
+    /// the tests that assert a slot came back. Zero for a partner with nothing in flight.
+    pub fn in_flight_for(&self, partner: &DomainId) -> usize {
+        self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).get(partner).copied().unwrap_or(0)
     }
 
     /// The catalogue for the partner presenting `presented`, which must be credentialed for

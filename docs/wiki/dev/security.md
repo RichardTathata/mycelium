@@ -234,6 +234,33 @@ the safe direction — gated by a test that it equals the structural read of a r
 `lib_tests.rs` → `a_pinned_federation_link_talks_only_to_the_key_the_bundle_names`, two gateways running the
 *same* edge and differing only in their TLS key.
 
+**The budget runs both ways (2026-09-23) — the Phase-C audit's last finding, closed as a decision
+with a mechanism.** `GatewayPool` metered slots per partner on the *consumer* side only: it bounded
+what we send a partner, and nothing bounded what a partner sends us. The threat is not an anonymous
+flood (the credential gate stops that) but a **compromised or buggy partner**, whose credentials are
+by construction minted by *them*.
+
+The alternative considered and rejected was the `rate` module's M7 shape — shared observation, local
+decision — applied to partner domains: it catches a partner fanning out across several of our
+gateways, and it puts **foreign domain names into `sys/`**, which is exactly what D7 prevents, and
+tells every node in the mesh which partners exist and how hard each calls. It is also unbuildable
+without a local counter to clamp; M7's own design is per-peer limit first, aggregate second.
+
+So: `CallPolicy::max_in_flight_per_partner` (0 = unlimited, nobody acquires a cap by upgrading),
+`FederationEdge::admit` → a `PartnerSlot` **RAII guard** (release on reply, on a later refusal, on
+an unwind — a release a handler must remember is one it misses, and a leaked slot is a partner
+permanently short of capacity with nothing saying so), `CallRefusal::AtCapacity` and JSON-RPC
+**-32004**, kept apart from -32003 because a transient load answer must not read as a standing
+authority answer. **Capacity is asked after authority**, so an unauthorised partner cannot exhaust
+an authorised one's allowance. Lock-order row 40; never nested with row 38.
+
+Two limits stated rather than implied: the count is **one gateway's** (N gateways ⇒ N × cap), and it
+bounds **concurrency, not rate**. Gates: `the_edge_meters_calls_per_partner_and_refuses_rather_than_queues`
+and `the_per_partner_cap_refuses_a_concurrent_call_at_the_live_gateway` — the second drives two
+*concurrent* calls through a real gateway against a provider that blocks until released, because
+with an instant provider the first call finishes before the second arrives and the cap is never
+consulted.
+
 **The consumer side reaches local clients — the SDK verbs (row 11, 2026-09-23):**
 `GossipAgent::with_federation_clients` attaches one `FederationClient` per partner to the node, and five gateway
 routes drive them: `GET /gateway/federation/{domain,partners,catalog/{domain}}` under **`federation:read`**,

@@ -6932,6 +6932,96 @@ mod federation_transport {
         a0.shutdown().await;
     }
 
+    /// **The cap applies at `/a2a`, not only in the type.** A mechanism nothing wires is the
+    /// failure this project keeps finding in its own gates, so this drives two *concurrent*
+    /// federated calls through a real gateway with `max_in_flight_per_partner: 1`.
+    ///
+    /// The provider blocks until the test releases it, which is what makes "in flight" mean
+    /// something: with an instant provider the first call would be finished before the second
+    /// arrived and the cap would never be consulted.
+    #[tokio::test]
+    async fn the_per_partner_cap_refuses_a_concurrent_call_at_the_live_gateway() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(61);
+
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy { max_in_flight_per_partner: 1, ..CallPolicy::default() },
+        ));
+        let http_port = alloc_port();
+        let mut nodes = mesh(1, Some((http_port, Arc::clone(&edge)))).await;
+        let a0 = Arc::new(nodes.remove(0));
+
+        // A provider that reports when it has been entered and waits to be let go.
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let _reg = a0.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        let provider = Arc::clone(&a0);
+        let mut rx = a0.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            let mut release = Some(release_rx);
+            while let Some(req) = rx.recv().await {
+                let _ = entered_tx.send(());
+                if let Some(r) = release.take() {
+                    let _ = r.await; // the first call waits; any later one answers at once
+                }
+                provider.service().rpc_respond(&req, b"ok".to_vec());
+            }
+        });
+        let cap_key = format!("cap/{}/demo/whoami", a0.node_id());
+        let marker = format!("sys/caller-context/{}", a0.node_id());
+        poll_until(|| a0.kv().get(&cap_key).is_some() && a0.kv().get(&marker).is_some(), 10_000).await;
+
+        let a2a = format!("http://127.0.0.1:{http_port}/a2a");
+        let call = |sk: ed25519_dalek::SigningKey, url: String, beta: DomainId| async move {
+            reqwest::Client::new()
+                .post(&url)
+                .header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &sk).to_header_value())
+                .json(&task_body("demo/whoami"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        };
+
+        // 1. The first call is in flight and parked inside the provider.
+        let first = tokio::spawn(call(beta_sk.clone(), a2a.clone(), beta.clone()));
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .expect("the provider was entered")
+            .expect("the channel is live");
+        assert_eq!(edge.in_flight_for(&beta), 1, "the gateway is carrying it");
+
+        // 2. A second concurrent call from the same partner is refused — and refused with its own
+        //    code, because a capacity refusal is transient and -32003 says talk to your operator.
+        let refused = call(beta_sk.clone(), a2a.clone(), beta.clone()).await;
+        assert_eq!(refused["error"]["code"], -32004, "{refused}");
+        assert!(
+            refused["error"]["message"].as_str().unwrap().contains("refused, not queued"),
+            "the message says what happened: {refused}",
+        );
+
+        // 3. Release the first; its slot comes back and the next call is admitted. Without the
+        //    guard's `Drop` this is where a leaked slot would show up as a partner permanently
+        //    short of capacity.
+        let _ = release_tx.send(());
+        let ok = first.await.expect("the first call completes");
+        assert!(ok.get("error").is_none(), "the first call was never refused: {ok}");
+        poll_until(|| edge.in_flight_for(&beta) == 0, 5_000).await;
+        assert_eq!(edge.in_flight_for(&beta), 0, "the slot returned");
+
+        let after = call(beta_sk, a2a, beta).await;
+        assert!(after.get("error").is_none(), "capacity recovered: {after}");
+
+        a0.shutdown().await;
+    }
+
     // ── The release gate's choreography (item 2 PR 9) ─────────────────────────────────────
     //
     // The record's §13 gate, run over the PR 8 transport: discover, invoke, lose a gateway, sever
@@ -7497,7 +7587,7 @@ fn a_mandate_identifier_from_the_wire_is_never_empty() {
 mod federation_gateway_verbs {
     use super::*;
     use crate::federation::{
-        call::{CallPolicy, FederatedCaller},
+        call::{CallPolicy, CallRefusal, FederatedCaller},
         client::{ClientError, FederationClient, GatewayEndpoint},
         edge::{now_ms, FederationEdge, PresentedCall, HEADER_FEDERATED_CALL},
         gateway::Repeatability,
@@ -7782,6 +7872,79 @@ mod federation_gateway_verbs {
 
         b.shutdown().await;
         a.shutdown().await;
+    }
+
+    /// **The provider's side of the budget** — the Phase-C audit's last open finding.
+    ///
+    /// `GatewayPool` has metered per-partner slots since PR 5, on the **consumer** side: it bounds
+    /// what we send a partner. Nothing bounded what a partner sends us, so a compromised or simply
+    /// buggy partner — one whose credentials are, by construction, minted by *them* — could hold
+    /// this gateway's whole capacity.
+    ///
+    /// Four claims, and the third is the one that makes it a budget rather than a global limit.
+    #[tokio::test]
+    async fn the_edge_meters_calls_per_partner_and_refuses_rather_than_queues() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let gamma = DomainId::new("gamma.example").unwrap();
+        let (_, beta_vk) = keypair(51);
+        let (_, gamma_vk) = keypair(52);
+
+        let edge = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami"],
+            DomainPolicy {
+                domain: alpha.clone(),
+                revision: 1,
+                grants: vec![(beta.clone(), "demo/whoami".into()), (gamma.clone(), "demo/whoami".into())],
+            },
+            TrustBundle::trusting([(beta.clone(), beta_vk), (gamma.clone(), gamma_vk)]),
+            CallPolicy { max_in_flight_per_partner: 2, ..CallPolicy::default() },
+        ));
+
+        // 1. The cap admits up to its limit and then refuses — by name, with the limit in it.
+        let first = edge.admit(&beta).expect("the first slot");
+        let second = edge.admit(&beta).expect("the second");
+        match edge.admit(&beta) {
+            Err(CallRefusal::AtCapacity { partner, limit }) => {
+                assert_eq!((partner.as_str(), limit), ("beta.example", 2));
+            }
+            other => panic!("over the cap must be AtCapacity, got {other:?}"),
+        }
+        assert_eq!(edge.in_flight_for(&beta), 2);
+
+        // 2. A slot comes back when its guard drops — on any path, which is why it is a guard.
+        drop(second);
+        assert_eq!(edge.in_flight_for(&beta), 1);
+        let replacement = edge.admit(&beta).expect("the freed slot is usable");
+        assert_eq!(edge.in_flight_for(&beta), 2);
+
+        // 3. **Per partner, not per gateway.** beta at its cap does not cost gamma anything —
+        //    without this the budget would be a global limit and one partner could starve every
+        //    other, which is the failure the consumer side's slots were built to avoid.
+        let gamma_slot = edge.admit(&gamma).expect("gamma has its own allowance");
+        assert_eq!((edge.in_flight_for(&beta), edge.in_flight_for(&gamma)), (2, 1));
+
+        // 4. Everything returns, and the map is then empty rather than full of zeroes — it is the
+        //    set of partners with work in flight, so a diagnostic reading it sees the truth.
+        drop(first);
+        drop(replacement);
+        drop(gamma_slot);
+        assert_eq!((edge.in_flight_for(&beta), edge.in_flight_for(&gamma)), (0, 0));
+
+        // 5. The default is unlimited, so no deployment acquires a cap by upgrading.
+        let unmetered = Arc::new(FederationEdge::new(
+            alpha.clone(),
+            ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), beta_vk)]),
+            CallPolicy::default(),
+        ));
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            held.push(unmetered.admit(&beta).expect("0 means unlimited"));
+        }
+        assert_eq!(unmetered.in_flight_for(&beta), 0, "an unmetered edge counts nothing at all");
     }
 
     /// **More than two domains** — the last of item 2's row 11.

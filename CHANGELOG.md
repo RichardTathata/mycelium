@@ -11,6 +11,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The federation edge meters calls per partner** — the Phase-C audit's last open finding, closed
+  as a decision with a mechanism. `GatewayPool` has metered slots per partner since PR 5 on the
+  *consumer* side: it bounds what we send a partner. Nothing bounded what a partner sends us, and
+  the realistic threat there is not an anonymous flood (the credential gate stops that) but a
+  **compromised or buggy partner**, whose credentials are by construction minted by them.
+
+  `CallPolicy::max_in_flight_per_partner` (**0 = unlimited**, so no deployment acquires a cap by
+  upgrading) and `FederationEdge::admit`, which returns a `PartnerSlot` **RAII guard** — the release
+  is a `Drop` because a release a handler has to remember is one it misses on an early return or an
+  unwind, and a leaked slot is a partner permanently short of capacity with nothing saying so. Over
+  the cap is `CallRefusal::AtCapacity { partner, limit }` and JSON-RPC **-32004**, deliberately not
+  -32003: *not permitted* is a standing answer about authority that a retry will not change, this is
+  a transient one about load that a retry probably will, and merging them tells a partner to go and
+  ask their operator about a grant they already have. **Capacity is asked after authority**, so an
+  unauthorised partner cannot occupy a slot belonging to an authorised one.
+
+  **The alternative, and why not.** Applying `mycelium-core`'s M7 pattern — shared observation,
+  local decision — to partner domains would catch a partner fanning out across several gateways, and
+  would put **foreign domain names into `sys/`**, which is what D7 exists to prevent, and tell every
+  node in the mesh which partners exist and how hard each calls. It is also unbuildable without a
+  local counter to clamp: M7's own design is a per-peer limit first and aggregate observation
+  second. So this is the prerequisite for that, not a competitor to it.
+
+  **What it does not do**, stated because the asymmetry is now smaller rather than gone: the count is
+  **one gateway's** (N gateways ⇒ N × cap in aggregate), and it bounds **concurrency, not rate**.
+
+  Gated by `the_edge_meters_calls_per_partner_and_refuses_rather_than_queues` and
+  `the_per_partner_cap_refuses_a_concurrent_call_at_the_live_gateway`, which drives two *concurrent*
+  calls through a real gateway against a provider that blocks until released — with an instant
+  provider the first call finishes before the second arrives and the cap is never consulted. Removing
+  the `admit` call from the `/a2a` path makes it fail.
+
+  **Upgrade note:** `CallPolicy` gained a field (an exhaustive struct literal needs
+  `max_in_flight_per_partner: 0`; the `..Default::default()` pattern is unaffected), and
+  `CallRefusal` gained a variant, so an exhaustive `match` on it needs another arm.
+
 - **`mycelium-commitment`: the crate's first rule acquires a mechanism** — the open provenance
   decision, resolved. *"No component assigns another participant's obligation"* has been the
   companion's headline rule since CN1 and had **nothing enforcing it**: an offer names its
