@@ -254,6 +254,47 @@ const id = await agent.nodeId;  // cached property
 
 ### Consistency & Ordering Overlay
 
+#### Receipts — what an acknowledgement proves (and what it does not)
+
+Every write verb answers a question, and **the four questions are different facts, not degrees of
+confidence on one scale**. Nothing infers a higher rung from a lower one:
+
+| Rung | Question | What reports it from TypeScript |
+|---|---|---|
+| 1 | did *this node* apply it? | `set` resolving |
+| 2 | did *this exact write* cross that node's persistence barrier? | `CommitResult.localDurability` |
+| 3 | do named, distinct **peers** hold it on disk? | `setWithMinAcks` |
+| 4 | did a **destination** commit the business change? | not a KV verb — an effect adapter's receipt |
+
+Applied is not on-disk. On-disk on one node is not replica sync. Three replicas are not a
+destination commit. The full argument is [guide 18](../docs/guide/18-contracts-and-receipts.md);
+what matters at the SDK boundary is that the fields below are already this vocabulary.
+
+```ts
+const res = await agent.consistentSet("config/endpoint", Buffer.from("https://api.v2/"));
+
+res.persisted;            // rung 2, the v2.4.2 bool — folds "on disk" and "nothing was promised"
+res.localDurability;      // rung 2, unfolded: "on_disk" | "buffered" | "not_configured" | "failed"
+res.localDurabilityError; // why, when it is "failed"
+```
+
+Read each state precisely, because each is a different operational fact:
+
+- **`on_disk`** — the forced `fdatasync` returned. Durability established.
+- **`buffered`** — the log took it and the bytes are in the OS page cache: it **survives a process
+  crash and is lost to a power failure**. Not a softer way of saying `on_disk`.
+- **`not_configured`** — that node has no persistence. Nothing was promised, so nothing is claimed
+  — and this is the state `persisted: true` quietly hides.
+- **`failed`** — durability was **not established**, which is not the same as *the record is
+  absent*: the log writes before it syncs, so a replay may restore it. Nothing is promised either
+  way.
+
+**A timeout is not a negative.** `setWithMinAcks` timing out means fewer peers *answered* in time —
+unreachable, mid-restart, or already holding a newer value all look the same from here. The write
+was applied locally and gossiped either way and **is not rolled back**; do not retry it on the
+strength of a timeout. The same rule crosses a domain boundary as `DeliveryUnknownError` in
+`federation()`.
+
 #### `consistentSet(key, value)` / `consistentGet(key) → Promise<Buffer | null>`
 
 Linearizable KV: runs a consensus round before writing.
@@ -315,6 +356,52 @@ Consumer-group subscription: at most one consumer per group per entry.
 
 Sends `payload` and waits for an explicit application-level ACK.
 
+### Federated domains
+
+A **domain** is one independently admitted mesh. Federation is one domain calling a service
+another has explicitly *exported* to it — the two meshes never merge, and neither learns the
+other's members.
+
+These verbs drive **your own node**, which holds the domain's signing key and the partner's trust
+bundle; the SDK never speaks the cross-domain protocol itself. The node must be started with
+`with_federation_clients([...])` for a partner, or the verbs answer *no client is configured*.
+
+```ts
+const fed = agent.federation();
+
+await fed.domain();                     // { configured: true, domain: "…", exports: [...] }
+await fed.partners();                   // [{ domain, link: "ready", last_catalogue }]
+await fed.catalog("partner.example");   // the LAST OBSERVED catalogue — no network
+await fed.connect("partner.example");   // go and ask; returns the exports granted to us
+const reply = await fed.call("partner.example", "invoice.status", "INV-42");
+```
+
+**Who the partner sees.** The credential names *the principal your bearer resolved to at your own
+gateway* — never the node, never a service account. With no token model configured that principal
+is `anonymous`, which is honest and usually not what you want in a partner's records.
+
+**Reading a refusal** — two fields, not the message:
+
+```ts
+import { DeliveryUnknownError, FederationError } from "mycelium-ts";
+
+try {
+  await fed.call("partner.example", "invoice.submit", body);
+} catch (e) {
+  if (e instanceof DeliveryUnknownError) {
+    // The call MAY HAVE RUN. Not a failure — nobody can say. Retrying it retries the effect.
+    console.warn("attempted via", e.attemptedVia);
+  } else if (e instanceof FederationError && e.nothingWasSent) {
+    await retryLater();                  // refused at our own gateway; nothing crossed
+  }
+}
+```
+
+`e.delivery` is `none` · `refused` · `completed` · `unknown`, and `e.sent` says whether any byte
+reached the partner. `{ repeatable: true }` on `call` states that *your* effect tolerates being run
+twice — it is the only thing that lets a silent gateway be retried elsewhere, and it defaults to
+`false`.
+
 ---
 
 ## Running the tests
@@ -364,3 +451,8 @@ MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
 | `subscribeLog` | `GET /gateway/overlay/log/subscribe` | SSE stream |
 | `subscribeLogGroup` | `GET /gateway/overlay/log/group/subscribe` | SSE stream |
 | `emitReliable` | `POST /gateway/overlay/emit_reliable` | |
+| `federation().domain` | `GET /gateway/federation/domain` | `federation:read` |
+| `federation().partners` | `GET /gateway/federation/partners` | `federation:read` |
+| `federation().catalog` | `GET /gateway/federation/catalog/{domain}` | last observation, no network |
+| `federation().connect` | `POST /gateway/federation/connect` | `federation:invoke` |
+| `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |

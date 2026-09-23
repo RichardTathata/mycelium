@@ -43,6 +43,21 @@ Route a fact with: *"would this still be true if Mycelium were rewritten in anot
 | [`dev/`](dev/dev.md) | **How the substrate is built and verified** — architecture invariants, concurrency discipline, testing/scale lore, security workstreams, companion crates, ops surface, delivery history. | *No* — it's about our code, tests, and infra. |
 | [`domain/`](domain/domain.md) | **The coordinator-free thesis and its world** — the theory (Holland/Hayek, the Coordinator Trap, HLKS), the publications corpus, governance patterns (management-as-intent), federation positioning (NANDA), commercial strategy. | *Yes* — true whatever the implementation. |
 
+### Where a v3 mechanism's knowledge goes
+
+The contracts axis added mechanisms that sit across several pages, and a fact about one of them has
+a home rather than a choice. Add a row when a mechanism lands; if a fact fits two rows it belongs in
+the more specific one and is *linked* from the other.
+
+| Mechanism | Page | What belongs there |
+|---|---|---|
+| Receipts and what an ack proves | [`dev/architecture/contracts.md`](dev/architecture/contracts.md) | the rungs, `LocalDurability`, `DeliveryUnknown`, the regression floor and fixture rule |
+| Deterministic replay | [`dev/testing/replay.md`](dev/testing/replay.md) | the nondeterminism inventory, the seams, scenarios A/B/C, the corpus |
+| Federated domains · the threat model | [`dev/security.md`](dev/security.md) | the trust boundary, the edge and consumer sides, non-merger, TLS pinning |
+| Scoped mandates · knowledge · control | the page of the subsystem they fence or feed | they are core surfaces, not companions — link from `security.md` where they carry authority |
+| The AE slice (public half) | [`dev/dev.md`](dev/dev.md) → *V3 runtime authorisation and evidence* | the seam, the evidence journal, enforcement points; the adapters and exporter are the private companion's |
+| A companion crate | `dev/companions/<crate>.md` | design, rationale, gates — and its row in [`onboarding-checklist.md`](dev/companions/onboarding-checklist.md) |
+
 Where a concept meets its implementation, **cross-link** the sections rather than duplicating.
 Top-level sections are **fixed** (`dev`, `domain`). Do not add another without explicit user
 direction (no `visual/` — Mycelium has no UI design language; demo aesthetics live with the

@@ -69,6 +69,16 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
 - **Gossip-eventual metadata** — read-your-writes holds only against the *same*
   node's gateway. A cross-node reader polls until the thread head has gossiped in
   (the test suite shows the structural convergence loop).
+- **`put()` returns a rung-1 receipt** — the index row was *applied* to the store of
+  the node you are talking to (`_kv_set` → `POST /gateway/kv`). It does **not** say
+  the row crossed that node's persistence barrier, and it says nothing about any
+  other node. A checkpoint `put()` acknowledged is therefore not yet one that
+  survives losing that node. Where that matters — before an irreversible external
+  effect, or before handing a thread to another node — ask for more: `set_with_min_acks`
+  on the head key, or read the head back from the node that will resume it, which is
+  what `examples/langgraph/06_deploy_reheal.py` does before it kills node A. The
+  vocabulary is [guide 18](../docs/guide/18-contracts-and-receipts.md): *a receipt
+  names its rung and nothing above it.*
 - **`delete_thread` tombstones index rows only** — content-addressed blobs may be
   shared across threads; unreferenced blobs are a GC concern, not a correctness
   one.

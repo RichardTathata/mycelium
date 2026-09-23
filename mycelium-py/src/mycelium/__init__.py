@@ -10,6 +10,7 @@ from .agent import (
     CommitResult,
 )
 from .a2a import A2aClient
+from .federation import Federation, FederationError, DeliveryUnknown
 from .prompt_skill import PromptTemplate, PromptSkillClient
 from .reason import (
     ReasonClient,
@@ -32,6 +33,9 @@ __all__ = [
     "LogEntry",
     "LockGuard",
     "A2aClient",
+    "Federation",
+    "FederationError",
+    "DeliveryUnknown",
     "PromptTemplate",
     "PromptSkillClient",
     "ReasonClient",

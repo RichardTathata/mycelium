@@ -62,6 +62,55 @@ leaving it stale makes a real change invisible to the far side.
 Check `signs_catalogue()` at start-up. An unsigned catalogue reply is refused by a conforming
 partner, so a missing signing key looks like a partner-side failure from your logs.
 
+## Letting local clients call a partner (the consumer side)
+
+The edge above is the direction *in*. Calling *out* needs a `FederationClient` per partner, and
+attaching it to the node is what turns on `/gateway/federation/*` — and with it the Python and
+TypeScript verbs, which have no other way to reach a partner.
+
+```rust
+let client = FederationClient::new(
+    our_domain.clone(), "svc/discovery", our_signing_key, partner_domain.clone(),
+    vec![GatewayEndpoint { id: "gw-1".into(), base_url: "https://gw1.partner.example".into() }],
+    /* slots per partner */ 2, Duration::from_secs(60),
+)
+.with_partner_key(partner_public_key)                       // else the catalogue is only an observation
+.with_tls_pins(bundle.tls_pins_for(&partner_domain).to_vec());
+
+let agent = agent.with_federation_clients([Arc::new(client)]);   // before start(), like the edge
+```
+
+Then, from any local client holding a bearer:
+
+```bash
+curl -sX POST localhost:7946/gateway/federation/connect -H "Authorization: Bearer $TOKEN" \
+     -d '{"domain":"partner.example"}'                         # federation:invoke
+curl -s localhost:7946/gateway/federation/partners -H "Authorization: Bearer $TOKEN"   # federation:read
+curl -sX POST localhost:7946/gateway/federation/call -H "Authorization: Bearer $TOKEN" \
+     -d '{"domain":"partner.example","export":"surplus-food/collection","text":"…"}'
+```
+
+```python
+fed = agent.federation()                      # mycelium-py ≥ 0.2.5
+fed.connect("partner.example")
+fed.call("partner.example", "surplus-food/collection", "…")
+```
+
+**Three things to get right before you expose this.**
+
+1. **The principal the partner sees is the local caller's**, resolved by your own gateway's auth
+   layer — not the node, and not the client's configured principal (that one is used only for
+   discovery). On a gateway with **no token model** it is `anonymous`, and your partner's evidence
+   will say so. If attribution matters to them, configure tokens *before* connecting the two.
+2. **`federation:invoke` is the power to spend your domain's credential.** Grant it to the
+   services that need it, not to everything holding a read scope — the split exists for this.
+3. **`repeatable` is the caller's statement about their own effect**, and the only thing that lets
+   a silent gateway be retried elsewhere. It defaults to false in both SDKs.
+
+The consumer side is independent of the edge: a node may call out without exporting anything, or
+export without calling out. `GET /gateway/federation/domain` answers `{"configured": false}` on a
+node with no edge, which is the quickest way to tell the two halves apart in a deployment.
+
 ## Encrypting the link (TLS pinning)
 
 Federated calls are signed, not encrypted: without this step an on-path observer reads every call
@@ -179,10 +228,28 @@ than you accept. Defaults are a 300-second maximum lifetime and 30 seconds of cl
   cause is fixed. Do not treat it as a possible execution. Check it against the rotation order above
   before assuming an attack.
 
+## Reading a refusal from an SDK
+
+The gateway routes carry the same distinctions the Rust API does, in two fields on every refusal
+body, because an SDK caller cannot see `ClientError`:
+
+| Field | Values | What you do with it |
+|---|---|---|
+| `sent` | `true` / `false` | `false` means the refusal happened at **your** gateway and nothing crossed — safe to retry |
+| `delivery` | `none` · `refused` · `completed` · `unknown` | `unknown` is *we cannot say whether it ran*, never a failure |
+
+Both SDKs raise a distinct type for `unknown` (`DeliveryUnknown` in Python,
+`DeliveryUnknownError` in TypeScript) precisely so it cannot be caught by accident alongside
+ordinary failures and retried.
+
 ## What this runbook does not cover
 
-- **More than two domains**, a hostile network, and the SDK verbs are item 2's row 11 and are not
-  shipped. TLS on the edge itself *is* shipped — see "Encrypting the link" above, and
-  [gateway-tls](gateway-tls.md) for the serving side.
+- **Running a hub** — a node that is a provider to one partner and a consumer of another — works
+  and is gated (`three_domains_compose_without_trust_composing`), but this runbook has no section
+  on operating one. Two things to carry over meanwhile: trust is **not** transitive (your partner's
+  partners are strangers to you, and a call from one is refused before any catalogue is computed),
+  and a grant you *hold* is never re-exported by holding it — if a third party should reach it,
+  that is a grant you write, deliberately, in your own policy.
+- **Streaming under a credential** is refused: federated calls are unary (§5 of the record).
 - **Who the caller is inside your own mesh** is [rbac](rbac.md); federation preserves the origin
   principal but does not authorise it for you.

@@ -8,15 +8,18 @@ pages here cite `src/` / `mycelium-core/src/` rather than paraphrasing it.
 ## Areas
 
 - **[architecture/](architecture/architecture.md)** — the three layers, the crate split,
-  runtime invariants that keep recurring in review.
+  runtime invariants that keep recurring in review, and **[contracts](architecture/contracts.md)**:
+  what an acknowledgement proves, and the floor that is how its meaning gets changed.
 - **[concurrency/](concurrency/concurrency.md)** — the lock-order table, lock-free (papaya)
   mutation rules, atomics ordering policy. The discipline that the calibration ledger shows
   is this codebase's recurring bug family.
 - **[testing/](testing/testing.md)** — test conventions, the feature matrix, the CI-gated
   Docker cluster suites (+ their self-diagnosing harness), scale-test + Docker-bridge lore,
-  the SWIM divergence saga.
+  the SWIM divergence saga — and **[replay](testing/replay.md)**: the nondeterminism inventory,
+  the seams, scenarios A/B/C and the checked-in corpus.
 - **[companions/](companions/companions.md)** — the companion crates built on the public API
-  (tuple-space, blackboard, wasm-host, agentfacts).
+  (tuple-space, blackboard, wiki, wasm-host, agentfacts, and the axis' three: `mycelium-effects`,
+  `mycelium-sim`, `mycelium-commitment`), plus what a new one owes before it counts as landed.
 
 ## Leaf pages
 
@@ -35,9 +38,14 @@ pages here cite `src/` / `mycelium-core/src/` rather than paraphrasing it.
 - **[history.md](history.md)** — the delivery ledger: v1.x + v2.0 workstreams, PR ranges,
   what was declined-with-evidence.
 
-## Planned V3 runtime authorisation and evidence
+## V3 runtime authorisation and evidence (the AE slice)
 
-The project owner adopted the AE slice on 2026-09-12, **plan rev 1.9, not implemented**.
+The project owner adopted the AE slice on 2026-09-12 (plan rev 1.9). **Its public half is built**
+— the evaluator seam, the evidence journal and its reader, the execution record, the mandate
+binding (AE1) and the evaluator-neutral contract fixtures (`mycelium::ae_contract`) all ship; the
+adapters, the exporter and the cloud pack are the private companion's. This section's heading said
+*"not implemented"* until 2026-09-23, which had been wrong for nine releases: the paragraphs below
+had been kept current while the sentence introducing them had not.
 See [the plan of record §6.8](../../plans/v3-contracts-axis.md#68-the-ae-slice--runtime-authorisation-and-evidence-rev-19)
 and [ROADMAP](../../../ROADMAP.md). It composes receipts, caller identity, resource fences,
 allocated rights and replay; policy evaluation is replaceable and no new central control service
@@ -74,7 +82,7 @@ journal record saying what the gateway observed — `completed`/`failed` from th
 `none` when refused before sending, and **`unknown` on a timeout, never `failed`** (the call may have
 run). Before it every permitted call read as `effect: unknown`, so the evidence could say what an
 agent was allowed to do and never what it did.
-**AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../design/action-envelope-ae0.md): the envelope
+**AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../../design/action-envelope-ae0.md): the envelope
 (item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
 `policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;
 Cedar in-process as the one adapter, D37 adopted), five evidence records through the `AuditSink`, the consumer's

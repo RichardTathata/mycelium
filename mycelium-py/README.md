@@ -262,6 +262,48 @@ Opt-in strong guarantees layered on top of the epidemic substrate. Requires the 
 node to be started with `MYCELIUM_ROLE=overlay` (or any role that calls
 `start_consensus_listener`).
 
+#### Receipts — what an acknowledgement proves (and what it does not)
+
+Every write verb here answers a question, and **the four questions are different facts, not degrees
+of confidence on one scale**. Nothing infers a higher rung from a lower one:
+
+| Rung | Question | What reports it from Python |
+|---|---|---|
+| 1 | did *this node* apply it? | `set` returning without raising |
+| 2 | did *this exact write* cross that node's persistence barrier? | `CommitResult.local_durability` |
+| 3 | do named, distinct **peers** hold it on disk? | `set_with_min_acks` |
+| 4 | did a **destination** commit the business change? | not a KV verb — an effect adapter's receipt |
+
+Applied is not on-disk. On-disk on one node is not replica sync. Three replicas are not a
+destination commit. The full argument is [guide 18](../docs/guide/18-contracts-and-receipts.md);
+what matters at the SDK boundary is that the fields below are already this vocabulary.
+
+```python
+res = agent.consistent_set("config/endpoint", b"https://api.v2/")
+
+res.persisted            # rung 2, the v2.4.2 bool — folds "on disk" and "nothing was promised"
+res.local_durability     # rung 2, unfolded: "on_disk" | "buffered" | "not_configured" | "failed"
+res.on_disk              # True ONLY for "on_disk" — the one state that establishes durability
+res.local_durability_error   # why, when it is "failed"
+```
+
+Read each state precisely, because each is a different operational fact:
+
+- **`on_disk`** — the forced `fdatasync` returned. Durability established.
+- **`buffered`** — the log took it and the bytes are in the OS page cache: it **survives a process
+  crash and is lost to a power failure**. Not a softer way of saying `on_disk`.
+- **`not_configured`** — that node has no persistence. Nothing was promised, so nothing is claimed
+  — and this is the state `persisted: True` quietly hides.
+- **`failed`** — durability was **not established**. That is not the same as *the record is
+  absent*: the log writes before it syncs, so the bytes may or may not be there and a replay may
+  restore them. Nothing is promised in either direction.
+
+**A timeout is not a negative.** `set_with_min_acks` raising `TimeoutError` means fewer peers
+*answered* in time — unreachable, mid-restart, or already holding a newer value all look the same
+from here. The write was applied locally and gossiped either way, and **is not rolled back**; do not
+retry it on the strength of a timeout. The same rule crosses a domain boundary as
+`DeliveryUnknown` in `mycelium.federation`.
+
 #### `consistent_set(key, value)` / `consistent_get(key) → bytes | None`
 
 Ballot-serialized (consensus-durable) write: runs a consensus round before writing. Concurrent
@@ -378,6 +420,50 @@ guard.release()           # sync release
 await guard.arelease()    # async release
 ```
 
+### Federated domains
+
+A **domain** is one independently admitted mesh. Federation is one domain calling a service
+another has explicitly *exported* to it — the two meshes never merge, and neither learns the
+other's members.
+
+These verbs drive **your own node**, which holds the domain's signing key and the partner's trust
+bundle. The SDK never speaks the cross-domain protocol itself; the node must be started with
+`with_federation_clients([...])` for a partner, or the verbs answer *no client is configured*.
+
+```python
+fed = agent.federation()
+
+fed.domain()                       # {"configured": True, "domain": "…", "exports": [...], …}
+fed.partners()                     # [{"domain": …, "link": "ready", "last_catalogue": [...]}]
+fed.catalog("partner.example")     # the LAST OBSERVED catalogue — no network
+fed.connect("partner.example")     # go and ask; returns the exports granted to us
+reply = fed.call("partner.example", "invoice.status", "INV-42")
+```
+
+**Who the partner sees.** The credential names *the principal your bearer resolved to at your own
+gateway* — never the node, never a service account. With no token model configured that principal
+is `anonymous`, which is honest and usually not what you want in a partner's records.
+
+**Reading a refusal** — two fields, not the message:
+
+```python
+from mycelium import DeliveryUnknown, FederationError
+
+try:
+    fed.call("partner.example", "invoice.submit", body)
+except DeliveryUnknown as e:
+    # The call MAY HAVE RUN. Not a failure — nobody can say. Retrying it retries the effect.
+    print("attempted via", e.attempted_via)
+except FederationError as e:
+    if e.nothing_was_sent:                 # refused at our own gateway; nothing crossed
+        retry_later()
+```
+
+`e.delivery` is `none` · `refused` · `completed` · `unknown`, and `e.sent` says whether any byte
+reached the partner. `repeatable=True` on `call` states that *your* effect tolerates being run
+twice — it is the only thing that lets a silent gateway be retried elsewhere, and it defaults to
+`False`.
+
 ---
 
 ## Running the tests
@@ -429,3 +515,8 @@ All methods talk to the embedded HTTP gateway on the Rust node:
 | `subscribe_log` | `GET /gateway/overlay/log/subscribe` | SSE stream |
 | `subscribe_log_group` | `GET /gateway/overlay/log/group/subscribe` | SSE stream |
 | `emit_reliable` | `POST /gateway/overlay/emit_reliable` | |
+| `federation().domain` | `GET /gateway/federation/domain` | `federation:read` |
+| `federation().partners` | `GET /gateway/federation/partners` | `federation:read` |
+| `federation().catalog` | `GET /gateway/federation/catalog/{domain}` | last observation, no network |
+| `federation().connect` | `POST /gateway/federation/connect` | `federation:invoke` |
+| `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |

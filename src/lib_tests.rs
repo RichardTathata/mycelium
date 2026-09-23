@@ -170,6 +170,8 @@ fn spawn_handler(
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        federation_clients: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         audit_sink: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
@@ -1147,6 +1149,8 @@ async fn test_subscribe_notified_via_gossip() {
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        federation_clients: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -7474,4 +7478,535 @@ fn a_mandate_identifier_from_the_wire_is_never_empty() {
     let back: PrincipalId = serde_json::from_str(&serde_json::to_string(&p).expect("encode"))
         .expect("a valid principal must still parse");
     assert_eq!(p, back);
+}
+
+// ── The federation verbs at the gateway (item 2 row 11) ──────────────────────
+//
+// `/gateway/federation/*` is the consumer side of federation, and the thing the Python and
+// TypeScript SDK verbs talk to. The provider side (`/federation/catalog`, `/a2a`) is tested above
+// under `federation_transport`; what is tested here is what these routes add, and it is one claim
+// with a negative attached:
+//
+//   **The credential the partner receives names the local caller** — not this node, not the
+//   client's configured principal — **and the request body cannot say otherwise.**
+//
+// Everything else in this module exists to make that claim non-vacuous: the routes are behind the
+// gateway's bearer-then-scope layer, a refusal says whether anything was sent, and the read verbs
+// read without touching the network.
+#[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
+mod federation_gateway_verbs {
+    use super::*;
+    use crate::federation::{
+        call::{CallPolicy, FederatedCaller},
+        client::{ClientError, FederationClient, GatewayEndpoint},
+        edge::{now_ms, FederationEdge, PresentedCall, HEADER_FEDERATED_CALL},
+        gateway::Repeatability,
+        session::LinkState,
+        DomainId, DomainPolicy, TrustBundle,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    /// A credential minted by hand, for planting a call the client would refuse to make.
+    fn cred_for(origin: &DomainId, export: &str, sk: &ed25519_dalek::SigningKey) -> PresentedCall {
+        let now = now_ms();
+        PresentedCall::sign(
+            &FederatedCaller {
+                origin_domain: origin.clone(),
+                principal: "svc/hub".into(),
+                export: export.into(),
+                issued_at_ms: now,
+                expires_at_ms: now + 60_000,
+                body_sha256: None,
+            },
+            sk,
+        )
+    }
+
+    fn keypair(seed: u8) -> (ed25519_dalek::SigningKey, [u8; 32]) {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        (sk, vk)
+    }
+
+    /// A serving domain: one node that is its own gateway, advertises `skills` and answers with
+    /// the principal it was told. Returns the node, its HTTP port, the call counter and the
+    /// advertisement registrations (which must outlive the test, or the capability is tombstoned).
+    async fn serving_domain(
+        edge: Arc<FederationEdge>,
+        skills: &[&str],
+    ) -> (Arc<GossipAgent>, u16, Arc<AtomicUsize>, Vec<crate::CapabilityReg>) {
+        let port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(http_port);
+        cfg.health_check_max_jitter_ms = 50;
+        let a = Arc::new(
+            GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg)
+                .with_a2a()
+                .with_federation_edge(edge),
+        );
+        a.start().await.unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        // The registrations are returned, not dropped here: dropping one tombstones its capability.
+        let regs: Vec<crate::CapabilityReg> = skills
+            .iter()
+            .map(|s| {
+                let (ns, name) = s.split_once('/').expect("a skill id is ns/name");
+                a.capabilities()
+                    .advertise_capability(crate::capability::Capability::new(ns, name), Duration::from_secs(5))
+            })
+            .collect();
+        let provider = Arc::clone(&a);
+        let counted = Arc::clone(&calls);
+        let mut rx = a.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let reply = match provider.request_principal(&req) {
+                    Ok(p) => p.name(),
+                    Err(e) => format!("refused:{e}"),
+                };
+                provider.service().rpc_respond(&req, reply.into_bytes());
+            }
+        });
+
+        // The gateway dispatches only to a provider whose capability *and* caller-context marker
+        // it has seen (item 7's secure profile). Here they are the same node, so both are local.
+        let cap_keys: Vec<String> = skills.iter().map(|s| format!("cap/{}/{s}", a.node_id())).collect();
+        let marker = format!("sys/caller-context/{}", a.node_id());
+        poll_until(
+            || cap_keys.iter().all(|k| a.kv().get(k).is_some()) && a.kv().get(&marker).is_some(),
+            10_000,
+        )
+        .await;
+        await_gateway(http_port).await;
+        (a, http_port, calls, regs)
+    }
+
+    /// The consumer domain: one node with a gateway, a bearer token, and a client for `partner`.
+    async fn beta_domain(client: Arc<FederationClient>, token: &str) -> (GossipAgent, u16) {
+        let port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some(token.to_string());
+        cfg.health_check_max_jitter_ms = 50;
+        let b = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg)
+            .with_federation_clients([client]);
+        b.start().await.unwrap();
+        await_gateway(http_port).await;
+        (b, http_port)
+    }
+
+    /// The HTTP server comes up on its own task, so every test here waits for it structurally —
+    /// `/health` answering, never a sleep (the testing page's rule).
+    async fn await_gateway(port: u16) {
+        let url = format!("http://127.0.0.1:{port}/health");
+        let http = reqwest::Client::new();
+        for _ in 0..200 {
+            if http.get(&url).send().await.is_ok_and(|r| r.status().is_success()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("gateway on {port} never became reachable");
+    }
+
+    async fn get(url: &str, bearer: Option<&str>) -> (u16, serde_json::Value) {
+        let mut req = reqwest::Client::new().get(url);
+        if let Some(b) = bearer {
+            req = req.bearer_auth(b);
+        }
+        let r = req.send().await.expect("gateway answered");
+        let status = r.status().as_u16();
+        (status, r.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
+    async fn post(url: &str, bearer: Option<&str>, body: serde_json::Value) -> (u16, serde_json::Value) {
+        let mut req = reqwest::Client::new().post(url).json(&body);
+        if let Some(b) = bearer {
+            req = req.bearer_auth(b);
+        }
+        let r = req.send().await.expect("gateway answered");
+        let status = r.status().as_u16();
+        (status, r.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
+    /// **The row-11 gate.** A local client with nothing but a bearer token discovers a partner,
+    /// calls one of its exports, and the partner's provider reports *that client's* principal.
+    #[tokio::test]
+    async fn the_gateway_verbs_carry_the_local_caller_across_the_boundary() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (alpha_sk, alpha_vk) = keypair(21);
+        let (beta_sk, beta_vk) = keypair(22);
+
+        let edge = Arc::new(
+            FederationEdge::new(
+                alpha.clone(),
+                ["demo/whoami", "demo/secret"],
+                DomainPolicy {
+                    domain: alpha.clone(),
+                    revision: 7,
+                    grants: vec![(beta.clone(), "demo/whoami".into())],
+                },
+                TrustBundle::trusting([(beta.clone(), beta_vk)]),
+                CallPolicy::default(),
+            )
+            .with_signing_key(alpha_sk),
+        );
+        let (a, alpha_http, calls, _regs) = serving_domain(Arc::clone(&edge), &["demo/whoami"]).await;
+
+        // The client's *own* principal is `svc/billing`. Nothing a gateway caller does should ever
+        // make the partner see it — that is the whole point of the route.
+        let client = Arc::new(
+            FederationClient::new(
+                beta.clone(),
+                "svc/billing",
+                beta_sk,
+                alpha.clone(),
+                vec![GatewayEndpoint { id: "gw-a".into(), base_url: format!("http://127.0.0.1:{alpha_http}") }],
+                2,
+                Duration::from_secs(30),
+            )
+            .with_partner_key(alpha_vk),
+        );
+        let (b, beta_http) = beta_domain(Arc::clone(&client), "s3cret").await;
+        let base = format!("http://127.0.0.1:{beta_http}/gateway/federation");
+        let bearer = Some("s3cret");
+
+        // 0. The routes are behind the gateway's auth layer. A missing bearer is 401 — checked
+        //    first, because every assertion after it would be worthless if they were open.
+        let (status, _) = get(&format!("{base}/partners"), None).await;
+        assert_eq!(status, 401, "the federation verbs sit behind bearer-then-scope like every other local verb");
+
+        // 1. Before discovery: a partner row exists, the link is down, nothing was observed.
+        let (status, v) = get(&format!("{base}/partners"), bearer).await;
+        assert_eq!(status, 200);
+        assert_eq!(v["partners"][0]["domain"], "alpha.example");
+        assert_eq!(v["partners"][0]["link"], "down");
+        assert!(v["partners"][0]["last_catalogue"].is_null());
+
+        // 2. A call before discovery is refused **here**, and says so: nothing was sent, so an
+        //    at-most-once caller may retry without reasoning about our internals.
+        let (status, v) = post(
+            &format!("{base}/call"),
+            bearer,
+            serde_json::json!({"domain": "alpha.example", "export": "demo/whoami", "text": "?"}),
+        )
+        .await;
+        assert_eq!(status, 409, "{v}");
+        assert_eq!(v["error"], "link");
+        assert_eq!(v["sent"], false);
+        assert_eq!(v["delivery"], "none");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // 3. Discovery through the route: the catalogue is the grant, not the export list.
+        let (status, v) = post(&format!("{base}/connect"), bearer, serde_json::json!({"domain": "alpha.example"})).await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["exports"], serde_json::json!(["demo/whoami"]));
+        assert_eq!(v["link"], "ready");
+
+        // 4. The read verb reads what is already held — no network, and the same answer twice.
+        let (status, v) = get(&format!("{base}/catalog/alpha.example"), bearer).await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["observed"], true);
+        assert_eq!(v["exports"], serde_json::json!(["demo/whoami"]));
+
+        // 5. **The gate.** The provider is told the *gateway caller's* principal, qualified by the
+        //    domain that vouched for it — not `svc/billing`, and not the node.
+        let (status, v) = post(
+            &format!("{base}/call"),
+            bearer,
+            serde_json::json!({"domain": "alpha.example", "export": "demo/whoami", "text": "?"}),
+        )
+        .await;
+        assert_eq!(status, 200, "{v}");
+        let expected = crate::federation_principal("beta.example", &format!("token:{}/legacy", b.node_id()));
+        assert_eq!(v["reply"], expected, "the partner sees the local caller, qualified by this domain");
+        assert_ne!(v["reply"], crate::federation_principal("beta.example", "svc/billing"), "never the client's configured principal");
+        assert_eq!(v["delivery"], "completed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // 6. **The negative.** The body cannot name the principal. A caller who could would have
+        //    this domain vouch for an identity nothing authenticated — item 7's confused deputy,
+        //    one boundary out.
+        let (status, v) = post(
+            &format!("{base}/call"),
+            bearer,
+            serde_json::json!({
+                "domain": "alpha.example", "export": "demo/whoami", "text": "?",
+                "principal": "svc/treasury", "origin_domain": "gamma.example",
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["reply"], expected, "the body is not an identity claim");
+
+        // 7. An export the catalogue never granted: refused by the resolver, before any byte.
+        let (status, v) = post(
+            &format!("{base}/call"),
+            bearer,
+            serde_json::json!({"domain": "alpha.example", "export": "demo/secret", "text": "?"}),
+        )
+        .await;
+        assert_eq!(status, 409, "{v}");
+        assert_eq!(v["error"], "resolve");
+        assert_eq!(v["sent"], false);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the refused call never reached the provider");
+
+        // 8. A domain nobody configured is a 404 that names it, not a silent failure.
+        let (status, v) = post(
+            &format!("{base}/call"),
+            bearer,
+            serde_json::json!({"domain": "gamma.example", "export": "demo/whoami", "text": "?"}),
+        )
+        .await;
+        assert_eq!(status, 404, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("gamma.example"));
+
+        // 9. The provider domain answers `domain` about itself; the consumer, having no edge,
+        //    answers `configured: false` rather than pretending to be a domain.
+        let (status, v) = get(&format!("http://127.0.0.1:{alpha_http}/gateway/federation/domain"), None).await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["configured"], true);
+        assert_eq!(v["domain"], "alpha.example");
+        assert_eq!(v["policy_revision"], 7);
+        assert_eq!(v["exports"], serde_json::json!(["demo/whoami", "demo/secret"]));
+        let (status, v) = get(&format!("{base}/domain"), bearer).await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["configured"], false);
+
+        b.shutdown().await;
+        a.shutdown().await;
+    }
+
+    /// **More than two domains** — the last of item 2's row 11.
+    ///
+    /// Everything before this ran with exactly two domains, where several distinct properties are
+    /// indistinguishable: "filtered for the asker" looks like "the export list", and "trust is not
+    /// transitive" cannot even be stated. Three domains separate them.
+    ///
+    /// The topology is a chain, because a chain is what would break if trust composed:
+    ///
+    /// ```text
+    ///   alpha ──grants demo/whoami──▶ beta ──grants demo/relay──▶ gamma
+    ///     ▲                                                          │
+    ///     └──────────── no relationship, in either direction ────────┘
+    /// ```
+    ///
+    /// beta is a **provider and a consumer at once**, which is the case two domains cannot
+    /// produce, and the one a hub deployment is made of.
+    #[tokio::test]
+    async fn three_domains_compose_without_trust_composing() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let gamma = DomainId::new("gamma.example").unwrap();
+        let (alpha_sk, alpha_vk) = keypair(41);
+        let (beta_sk, beta_vk) = keypair(42);
+        let (gamma_sk, gamma_vk) = keypair(43);
+
+        // alpha exports two skills and grants beta exactly one of them. gamma is not in its
+        // bundle at all — not "granted nothing", *unknown*, which is a different refusal.
+        let alpha_edge = Arc::new(
+            FederationEdge::new(
+                alpha.clone(),
+                ["demo/whoami", "demo/secret"],
+                DomainPolicy {
+                    domain: alpha.clone(),
+                    revision: 1,
+                    grants: vec![(beta.clone(), "demo/whoami".into())],
+                },
+                TrustBundle::trusting([(beta.clone(), beta_vk)]),
+                CallPolicy::default(),
+            )
+            .with_signing_key(alpha_sk),
+        );
+        // beta exports its own service to gamma. It does **not** re-export what alpha granted it.
+        let beta_edge = Arc::new(
+            FederationEdge::new(
+                beta.clone(),
+                ["demo/relay"],
+                DomainPolicy {
+                    domain: beta.clone(),
+                    revision: 1,
+                    grants: vec![(gamma.clone(), "demo/relay".into())],
+                },
+                TrustBundle::trusting([(gamma.clone(), gamma_vk)]),
+                CallPolicy::default(),
+            )
+            .with_signing_key(beta_sk.clone()),
+        );
+
+        let (a, alpha_http, alpha_calls, _ra) =
+            serving_domain(Arc::clone(&alpha_edge), &["demo/whoami", "demo/secret"]).await;
+        let (b, beta_http, beta_calls, _rb) = serving_domain(Arc::clone(&beta_edge), &["demo/relay"]).await;
+        // gamma serves nothing; it is the end of the chain and only ever a consumer.
+        let (g, _gamma_http, _gamma_calls, _rg) = serving_domain(
+            Arc::new(FederationEdge::new(
+                gamma.clone(),
+                [] as [&str; 0],
+                DomainPolicy { domain: gamma.clone(), revision: 1, grants: vec![] },
+                TrustBundle::trusting([]),
+                CallPolicy::default(),
+            )),
+            &[],
+        )
+        .await;
+
+        let endpoint = |port: u16, id: &str| GatewayEndpoint { id: id.into(), base_url: format!("http://127.0.0.1:{port}") };
+        let beta_to_alpha = FederationClient::new(
+            beta.clone(), "svc/hub", beta_sk.clone(), alpha.clone(),
+            vec![endpoint(alpha_http, "gw-alpha")], 2, Duration::from_secs(30),
+        ).with_partner_key(alpha_vk);
+        let gamma_to_beta = FederationClient::new(
+            gamma.clone(), "svc/edge", gamma_sk.clone(), beta.clone(),
+            vec![endpoint(beta_http, "gw-beta")], 2, Duration::from_secs(30),
+        ).with_partner_key(beta_vk);
+        // gamma's operator configures a link to alpha too. Nothing stops them *configuring* it —
+        // what matters is what alpha does with it.
+        let gamma_to_alpha = FederationClient::new(
+            gamma.clone(), "svc/edge", gamma_sk.clone(), alpha.clone(),
+            vec![endpoint(alpha_http, "gw-alpha")], 2, Duration::from_secs(30),
+        ).with_partner_key(alpha_vk);
+
+        // ── 1. Each link works on its own terms. ─────────────────────────────────────────────
+        assert_eq!(beta_to_alpha.connect().await.expect("beta discovers alpha"), vec!["demo/whoami".to_string()]);
+        assert_eq!(gamma_to_beta.connect().await.expect("gamma discovers beta"), vec!["demo/relay".to_string()]);
+
+        let via_beta = beta_to_alpha.call("demo/whoami", "?", Repeatability::AtMostOnce).await.expect("beta calls alpha");
+        assert_eq!(via_beta, crate::federation_principal("beta.example", "svc/hub"));
+        let into_beta = gamma_to_beta.call("demo/relay", "?", Repeatability::AtMostOnce).await.expect("gamma calls beta");
+        assert_eq!(into_beta, crate::federation_principal("gamma.example", "svc/edge"));
+        assert_eq!((alpha_calls.load(Ordering::SeqCst), beta_calls.load(Ordering::SeqCst)), (1, 1));
+
+        // ── 2. **Trust does not compose.** alpha trusts beta; beta trusts gamma; alpha does not
+        //    trust gamma — and no amount of the first two makes the third true. The refusal is
+        //    `UnknownDomain` at the *catalogue*, so gamma cannot even learn what alpha exports.
+        let refused = gamma_to_alpha.connect().await.expect_err("gamma is unknown to alpha");
+        assert!(
+            matches!(&refused, ClientError::Refused { status: 401, .. }),
+            "an unknown origin is refused at the auth layer, not filtered to an empty catalogue: {refused:?}",
+        );
+        assert_eq!(gamma_to_alpha.link_state(), LinkState::Down);
+
+        // ── 3. **A grant is not re-exported.** beta may call alpha's `demo/whoami`, and gamma may
+        //    call beta — but beta's catalogue to gamma names beta's own export and nothing it
+        //    holds from alpha. Transitive *reach* would otherwise arrive by accident, through a
+        //    hub that is merely honest about what it can do.
+        let gammas_view = gamma_to_beta.last_catalogue().expect("gamma connected");
+        assert_eq!(gammas_view, vec!["demo/relay".to_string()]);
+        assert!(!gammas_view.contains(&"demo/whoami".to_string()), "beta does not re-export alpha's grant");
+
+        // ── 4. **One catalogue per asker, with three parties to tell apart.** With two domains a
+        //    filtered catalogue and an export list are the same list; here alpha exports two
+        //    skills, grants one, and beta sees exactly that one.
+        let betas_view = beta_to_alpha.last_catalogue().expect("beta connected");
+        assert_eq!(betas_view, vec!["demo/whoami".to_string()]);
+        assert!(!betas_view.contains(&"demo/secret".to_string()), "an export is not a grant");
+
+        // A credential minted for the export alpha exports but grants to nobody is refused at the
+        // edge — planted directly, because beta's own resolver would refuse it first and we are
+        // testing alpha's decision, not beta's.
+        let raw = reqwest::Client::new();
+        let planted = cred_for(&beta, "demo/secret", &beta_sk);
+        let r = raw
+            .post(format!("http://127.0.0.1:{alpha_http}/a2a"))
+            .header(HEADER_FEDERATED_CALL, planted.to_header_value())
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
+                "params": {"skillId": "demo/secret", "message": {"role": "user", "parts": [{"type": "text", "text": "?"}]}},
+            }))
+            .send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32003, "{v}");
+        assert_eq!(alpha_calls.load(Ordering::SeqCst), 1, "the ungranted export never reached a provider");
+
+        // ── 5. **Three meshes, pairwise.** Non-merger is a property of every pair, and checking
+        //    only the pair that exchanged bytes would miss a domain joined through a third.
+        crate::lib_tests::assert_never_merged(&[&a], &[&b]);
+        crate::lib_tests::assert_never_merged(&[&b], &[&g]);
+        crate::lib_tests::assert_never_merged(&[&a], &[&g]);
+
+        // ── 6. **Slots are per partner.** A hub's gateway serves several partners, and one
+        //    partner saturating its allowance must not refuse another's work — otherwise a busy
+        //    neighbour is a denial of service on everyone else the hub talks to.
+        let mut pool = crate::federation::gateway::GatewayPool::new(["gw-hub"], 1);
+        let first = pool.admit(&alpha, &[]).expect("alpha's one slot");
+        assert!(
+            matches!(pool.admit(&alpha, &[]), Err(crate::federation::gateway::CallOutcome::NoCapacity { .. })),
+            "alpha's allowance is one",
+        );
+        assert!(pool.admit(&gamma, &[]).is_ok(), "gamma's allowance is its own, not what alpha left");
+        pool.release(&first, &alpha);
+
+        g.shutdown().await;
+        b.shutdown().await;
+        a.shutdown().await;
+    }
+
+    /// `federation:read` is not `federation:invoke`: a token that may *look* at the partners may
+    /// not spend this domain's credential on them. The table is pinned in `http.rs`; this is the
+    /// same rule at a live gateway, because a table nothing enforces is a comment.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn a_read_scoped_token_cannot_invoke_a_partner() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (_, alpha_vk) = keypair(31);
+        let (beta_sk, _) = keypair(32);
+        let client = Arc::new(FederationClient::new(
+            beta.clone(),
+            "svc/billing",
+            beta_sk,
+            alpha.clone(),
+            vec![GatewayEndpoint { id: "gw-a".into(), base_url: "http://127.0.0.1:1".into() }],
+            1,
+            Duration::from_secs(30),
+        ).with_partner_key(alpha_vk));
+
+        let port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(http_port);
+        cfg.health_check_max_jitter_ms = 50;
+        cfg.gateway_named_tokens = vec![
+            crate::GatewayNamedToken { name: "viewer".into(), token: "look".into(), scopes: vec!["federation:read".into()] },
+            crate::GatewayNamedToken { name: "caller".into(), token: "act".into(), scopes: vec!["federation:invoke".into()] },
+        ];
+        let b = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg)
+            .with_federation_clients([client]);
+        b.start().await.unwrap();
+        await_gateway(http_port).await;
+        let base = format!("http://127.0.0.1:{http_port}/gateway/federation");
+
+        let (status, _) = get(&format!("{base}/partners"), Some("look")).await;
+        assert_eq!(status, 200, "federation:read reads");
+        let (status, _) = post(&format!("{base}/connect"), Some("look"), serde_json::json!({"domain": "alpha.example"})).await;
+        assert_eq!(status, 403, "federation:read does not invoke");
+        let (status, _) = post(
+            &format!("{base}/call"),
+            Some("look"),
+            serde_json::json!({"domain": "alpha.example", "export": "demo/whoami", "text": "?"}),
+        )
+        .await;
+        assert_eq!(status, 403, "federation:read does not call");
+
+        // The invoke token gets past the scope layer and is refused by the *link* instead — the
+        // positive control, without which "403" could mean the route was simply broken.
+        let (status, v) = post(
+            &format!("{base}/call"),
+            Some("act"),
+            serde_json::json!({"domain": "alpha.example", "export": "demo/whoami", "text": "?"}),
+        )
+        .await;
+        assert_eq!(status, 409, "{v}");
+        assert_eq!(v["error"], "link");
+
+        b.shutdown().await;
+    }
 }
