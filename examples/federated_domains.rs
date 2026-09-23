@@ -24,6 +24,7 @@ use mycelium::federation::{
     call::{verify_federated_call, CallPolicy, CallRefusal, FederatedCaller},
     catalog::{filtered_catalog, CatalogObservation, RemoteResolver, ResolveFailure},
     gateway::{on_gateway_silent, CallOutcome, GatewayPool, Repeatability},
+    pinning::spki_sha256,
     session::{LinkRefusal, PartnerLink},
     DomainDescriptor, DomainId, DomainPolicy, TrustBundle,
 };
@@ -242,11 +243,50 @@ fn main() {
     note("A tombstone, not a deletion: \"we used to trust them and stopped\" is a different fact");
     note("from \"we never heard of them\", and an operator reading a refusal needs to know which.");
 
+    step(8, "The endpoint is pinned: who answers, not just who signs");
+    note("Everything above is signed and none of it is encrypted. The credential makes a call");
+    note("unforgeable; it does nothing to stop an on-path observer READING it. TLS closes that,");
+    note("and TLS needs a trust anchor — of which this design has none, because partner trust");
+    note("here is an Ed25519 key an operator chose, with no X.509 material anywhere.");
+    note("So the anchor is the bundle: pin the sha256 of the endpoint's SubjectPublicKeyInfo.");
+    // Beta's own bundle this time: the side that *dials* is the side that pins. (The demo reuses
+    // one keypair throughout, so `verifying` stands in for alpha's signing key here.)
+    let mut beta_bundle = TrustBundle::trusting([(alpha.clone(), verifying)]);
+    let partner_cert = self_signed_cert("gw-1.alpha.example");
+    let impostor_cert = self_signed_cert("gw-1.alpha.example");
+    let partner_pin = spki_sha256(&partner_cert).expect("a certificate we just generated");
+    beta_bundle.pin_tls(&alpha, partner_pin);
+    note(format!(
+        "alpha's pin recorded beside its key: {} pin(s), first bytes {:02x?}",
+        beta_bundle.tls_pins_for(&alpha).len(),
+        &partner_pin[..4],
+    ));
+    let impostor_pin = spki_sha256(&impostor_cert).expect("also a certificate");
+    note(format!(
+        "an endpoint with the SAME NAME and a different key: pinned={} — refused, and nothing is sent",
+        beta_bundle.tls_pins_for(&alpha).contains(&impostor_pin),
+    ));
+    note("The name matched and it was refused anyway, which is the point: a name is checked");
+    note("against an authority, and there is no authority here — there is one key, written down.");
+
     println!("\n\x1b[1mWhat was NOT demonstrated\x1b[0m");
-    println!("   No bytes crossed a network: there is no federation transport yet.");
-    println!("   The record's release gate — a two-mesh demonstration proving from membership");
-    println!("   tables, consensus state and traces that the meshes never merged — is NOT met by");
-    println!("   this example, and is not claimed by it.");
+    println!("   No bytes crossed a network *in this example*. The transport exists — the provider");
+    println!("   side is `federation::edge`, the consumer side `federation::client` — and it is");
+    println!("   exercised by the two-mesh tests in `src/lib_tests.rs` and the Docker suite");
+    println!("   (`make test-federation`), which is where the record's release gate is met.");
+    println!("   Step 8 compares pins in process; it completes no handshake. The gate that does is");
+    println!("   `a_pinned_federation_link_talks_only_to_the_key_the_bundle_names`, two real HTTPS");
+    println!("   gateways differing only in their TLS key.");
+}
+
+/// A self-signed certificate for `name`, as a partner's gateway endpoint would present.
+#[cfg(feature = "tls")]
+fn self_signed_cert(name: &str) -> Vec<u8> {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("keypair");
+    let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).expect("params");
+    params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    params.self_signed(&key).expect("self-signed").der().to_vec()
 }
 
 // ── signing helpers ───────────────────────────────────────────────────────────────────────────

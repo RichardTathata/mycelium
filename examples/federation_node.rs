@@ -353,6 +353,11 @@ fn client_error(e: &ClientError) -> Value {
         ClientError::Refused { .. } => "refused",
         ClientError::Transport(_) => "transport",
         ClientError::Catalogue(_) => "catalogue",
+        ClientError::Tls(_) => "tls",
+        // `ClientError` is `#[non_exhaustive]`, and this arm fails **closed**: an unrecognised
+        // refusal is a refusal, never a success. Naming it `unknown-refusal` rather than folding it
+        // into an existing label keeps a harness reading this JSON from reporting the wrong cause.
+        _ => "unknown-refusal",
     };
     json!({ "error": kind, "detail": e.to_string(), "debug": format!("{e:?}") })
 }

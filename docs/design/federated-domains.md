@@ -200,7 +200,7 @@ Per §5's sequence, and gated in that order:
 | **9** *(2026-09-18)* | the gate's choreography over that transport, in one process under the enforced profile and two CAs (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`): lose the only gateway, sever every link, keep working locally, change the grant mid-partition, replace the gateway, reconnect; the *traces* leg from each node's connection table (`connected_peers`); `GatewayPool::retire` |
 | **10a** *(2026-09-18)* | the signed catalogue reply: `CatalogReply` carries the domain, **the partner it was filtered for**, the policy revision and an issue time under `TAG_CATALOG`; `FederationEdge::with_signing_key` signs, `FederationClient::with_partner_key` requires and verifies (unsigned, forged, wrong-domain or misaddressed → `ClientError::Catalogue`, link `Down`) |
 | **10b** *(2026-09-18)* | the two-mesh **Docker** suite — one container per node, two CAs, the federation link cut with `docker network disconnect` and restored: `make test-federation`, CI job `federation` (`examples/federation_node.rs`, `docker/docker-compose.federation.yml`, `tests/integration/run_federation.sh`) |
-| 11 | SDK verbs (py/ts); a hostile network between domains; more than two domains |
+| 11 | SDK verbs (py/ts); a hostile network between domains (**closed** — integrity 2026-09-22, confidentiality 2026-09-23); more than two domains |
 
 **Release gate** (§5): the two-mesh demonstration — discover, invoke, lose a gateway, sever every link, keep
 working locally, change permissions mid-partition, reconnect — and prove **from membership tables, consensus
@@ -231,8 +231,8 @@ key still relies on it only as an observation attributed to the gateway asked. S
 federated. The *traces* leg is each node's own connection table, not a packet capture — it is the record the
 transport keeps of whom it wrote to, which is what a trace would show if it were taken. The federation edge
 itself is plain HTTP in both suites (intra-mesh traffic is TLS under each domain's CA, which is what the
-enforced profile requires); a hostile network between domains, more than two domains, and the SDK verbs are
-row 11.
+enforced profile requires) — pinned TLS on the edge shipped separately, below, and is gated by its own
+end-to-end test rather than by these suites; more than two domains and the SDK verbs are row 11.
 
 **Row 11's integrity half, closed 2026-09-22.** *"A hostile network between domains"* turned out to name two
 different problems, and the worse one needed no TLS at all. The credential's signature covered the origin
@@ -247,12 +247,35 @@ encoder against theirs. Stripping the binding is a `BadSignature`, not a downgra
 `CallPolicy::require_body_binding` defaults to `false` as a rolling-upgrade window and the type says, in those
 words, that `false` provides **no integrity guarantee against an active attacker**.
 
-**What remains of row 11 is genuinely different work.** Confidentiality — an on-path observer still reads every
-federated call — needs TLS on the edge, and TLS needs a **trust anchor that does not exist yet**: partner trust
-here is an Ed25519 key in the `TrustBundle`, with no X.509 material anywhere. The options are public PKI,
-pinning the partner's certificate or SPKI in the bundle beside its key, or exchanging each domain's CA. That is
-a decision, not an implementation, and it is unmade. More than two domains, and the SDK verbs, are also still
-open.
+**Row 11's confidentiality half, closed 2026-09-23 — and the anchor decision it forced.** An on-path observer
+could still *read* every federated call, and closing that needed TLS, which needs a trust anchor. Partner trust
+here is an Ed25519 key in the `TrustBundle` with no X.509 material anywhere, so there were three candidates and
+the choice is recorded rather than defaulted:
+
+| Anchor | Why not / why |
+|---|---|
+| Public Web PKI | Installs a trust root **larger than the relationship** under a design whose whole point is that the relationship is bilateral: anyone a public CA will issue for becomes a possible endpoint. It also demands a publicly resolvable name and a renewed public certificate from every partner gateway. |
+| Exchange each domain's CA | Workable, and strictly more machinery — a CA per domain, a second rotation story, and a document whose compromise is total, since a CA signs *any* name. What it buys is delegation, which a two-party link does not need. |
+| **Pin the SPKI in the bundle** | **Chosen.** The anchor is the decision the operator already made, nothing new is distributed, and a compromise costs one endpoint rather than a namespace. It is also this record's own rule for descriptors, one layer down: *the bundle decides which key, never the document.* |
+
+`PartnerTrust::tls_spki_sha256` is a **list** (`pin_tls`/`unpin_tls`), for the reason `retiring` is: one pin
+makes a TLS key change a flag day. `FederationClient::with_tls_pins` installs a rustls verifier whose entire
+trust decision is that list — no chain, no name, no expiry, because there is no authority here to check them
+against. Two refusals, both meaning **nothing was sent**, and neither a `DeliveryUnknown` (which would say *it
+may have run* and bar an at-most-once caller from retrying): `Tls(PinMismatch)` and `Tls(PlaintextEndpoint)`,
+the latter because pins configured against an `http://` URL are refused rather than silently downgraded.
+
+The design note worth carrying: the SPKI is read from its **structural position** by the X.509 parser rustls
+already uses. `mycelium_core::tls::ed25519_key_from_cert_der` *scans* for the Ed25519 SPKI prefix and is sound
+because its input is CA-validated first — a premise that is absent at a pinning verifier, whose input is
+attacker-chosen. A plant puts the victim's key bytes in an attacker-signed certificate's serial number and
+asserts the scan is fooled while the structural read is not. Gate:
+`a_pinned_federation_link_talks_only_to_the_key_the_bundle_names`, two gateways running the same edge and
+differing only in their TLS key. Still **not** claimed: caller authentication stays the credential (a second
+auth model at one edge is the drift v2.4.1/v2.4.2 removed), and nothing here helps against an attacker holding
+the partner's private key.
+
+**What remains of row 11.** More than two domains, and the SDK verbs.
 
 ## Appendix — anchors verified at adoption (2026-09-17)
 

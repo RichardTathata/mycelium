@@ -211,8 +211,29 @@ without a caveat (PR 10b, 2026-09-18):** the two-mesh **Docker** suite runs the 
 container per node and the federation link cut by `docker network disconnect` — the two things the in-process
 test could not claim. `make test-federation`; CI job `federation`; files `examples/federation_node.rs`,
 `docker/docker-compose.federation.yml`, `tests/integration/run_federation.sh`. Every assertion reads a node's
-own tables, never a log line. **What is still not built:** SDK verbs, TLS on the federation edge itself (run it
-behind `gateway_tls`; intra-mesh traffic is already TLS under each domain's CA, which the enforced profile
-requires), a hostile network between domains, more than two domains, and streaming
+own tables, never a log line.
+
+**TLS on the edge, anchored on a pin (row 11, 2026-09-23):** `src/federation/pinning.rs`. The credential made a
+federated call unforgeable; it was still **readable**, and closing that needed a trust anchor the design did not
+have — partner trust is one Ed25519 key per partner, bilaterally chosen, with no X.509 material anywhere. Three
+candidates, and the choice is recorded in the module doc: the public Web PKI (a root far larger than the
+bilateral trust it would carry, under a design whose whole point is bilateral), an exchange of private CAs (more
+machinery, a second rotation story, and a CA signs *any* name — it buys delegation, the one property a two-party
+link does not need), or **pin the key in the bundle**. The third, because it is the same rule the module already
+states for descriptors: *the bundle decides which key, never the document.* `PartnerTrust::tls_spki_sha256` is a
+**list** (`pin_tls`/`unpin_tls`) for the same reason `retiring` exists — one pin makes a TLS key change a flag
+day. Two refusals, both meaning **nothing was sent**: `Tls(PinMismatch)` and `Tls(PlaintextEndpoint)`, and
+neither is a `DeliveryUnknown`, which would say *it may have run* and bar an at-most-once caller from retrying.
+**The lesson worth keeping** is where the SPKI comes from: `mycelium_core::tls::ed25519_key_from_cert_der`
+finds a key by **scanning the DER for the Ed25519 SPKI prefix**, which is sound *because its input is already
+CA-validated* — and that premise is exactly what is absent at a pinning verifier, whose input is whatever an
+attacker sent. A plant puts the victim's key bytes in an attacker-signed certificate's **serial number** (it
+precedes the real SPKI in the encoding) and asserts the scan is fooled while the structural read is not. The
+same reasoning admits `ed25519_spki_sha256`, which *writes* the RFC 8410 encoding for an already-trusted key —
+the safe direction — gated by a test that it equals the structural read of a real certificate. Gate:
+`lib_tests.rs` → `a_pinned_federation_link_talks_only_to_the_key_the_bundle_names`, two gateways running the
+*same* edge and differing only in their TLS key.
+
+**What is still not built:** SDK verbs, a hostile network between domains, more than two domains, and streaming
 (`tasks/sendSubscribe` under a credential is refused: federated calls are unary, §5).
 `examples/federated_domains.rs` still runs in one process and says so. Ledger: [history](history.md) → *item 2*.

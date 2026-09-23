@@ -45,6 +45,10 @@ pub mod edge;
 /// The transport's consumer side (item 2 PR 8): link, resolver and pool driven by HTTP.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub mod client;
+/// The transport's **confidentiality** half (item 2 row 11): TLS anchored on a key pinned in the
+/// trust bundle, because there is no CA in this design to anchor it on.
+#[cfg(feature = "tls")]
+pub mod pinning;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -197,6 +201,20 @@ pub struct PartnerTrust {
     /// distinguishable from *"we never heard of them"* — the two mean different things to an
     /// operator reading a refusal.
     pub revoked: bool,
+    /// sha256 of each `SubjectPublicKeyInfo` this domain will accept when it dials the partner
+    /// over TLS (item 2 row 11) — the transport's anchor, not the credential's.
+    ///
+    /// **Empty means no pinning, and therefore no confidentiality guarantee**: the client talks
+    /// over whatever the endpoint URL says, and an `http://` endpoint is read by anyone on the
+    /// path. This is the same rolling-upgrade default as `CallPolicy::require_body_binding` and it
+    /// carries the same warning — absence is not safety, it is the absence of a check.
+    ///
+    /// A **list** because one pin makes key rotation a flag day; see
+    /// [`crate::federation::pinning`] for what the value is and how to compute it. It is deliberately
+    /// *not* the same key as [`Self::key`]: that one signs credentials, this one terminates TLS, and
+    /// an operator may well hold them in different places.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tls_spki_sha256: Vec<[u8; 32]>,
 }
 
 /// The partners this operator has chosen to trust, and their keys.
@@ -216,7 +234,13 @@ impl TrustBundle {
         Self {
             partners: entries
                 .into_iter()
-                .map(|(domain, key)| PartnerTrust { domain, key, retiring: None, revoked: false })
+                .map(|(domain, key)| PartnerTrust {
+                    domain,
+                    key,
+                    retiring: None,
+                    revoked: false,
+                    tls_spki_sha256: Vec::new(),
+                })
                 .collect(),
         }
     }
@@ -251,6 +275,58 @@ impl TrustBundle {
             keys.push(old);
         }
         keys
+    }
+
+    /// The TLS pins acceptable for `domain` when dialling it, empty if it is unknown, revoked, or
+    /// has none configured.
+    ///
+    /// **Revoked returns empty, and empty means "install no pinned verifier"** — which would leave
+    /// a client dialling a revoked partner over unpinned TLS. That is not a hole, because the link
+    /// itself is refused before any byte is sent (`PartnerLink::admit`), and it is the reason this
+    /// returns the same emptiness for *unknown*, *revoked* and *unpinned*: a transport anchor is
+    /// not the place to express revocation, and a second place to express it is a second place to
+    /// get it wrong. See [`FederationClient::with_tls_pins`](crate::federation::client::FederationClient::with_tls_pins)
+    /// for the wiring, which is one line:
+    ///
+    /// ```ignore
+    /// let client = FederationClient::new(..).with_tls_pins(bundle.tls_pins_for(&partner).to_vec());
+    /// ```
+    pub fn tls_pins_for(&self, domain: &DomainId) -> &[[u8; 32]] {
+        match self.entry(domain) {
+            Some(p) if !p.revoked => &p.tls_spki_sha256,
+            _ => &[],
+        }
+    }
+
+    /// Add a TLS pin for `domain`, keeping any it already has.
+    ///
+    /// Additive on purpose: replacing the list is how a rotation becomes a flag day. Adding the
+    /// same pin twice is a no-op rather than a duplicate. Returns whether the partner is known —
+    /// `false` means nothing was recorded, because a pin for a partner this domain does not trust
+    /// would be a trust decision made by the wrong document.
+    pub fn pin_tls(&mut self, domain: &DomainId, spki_sha256: [u8; 32]) -> bool {
+        match self.partners.iter_mut().find(|p| &p.domain == domain) {
+            Some(p) => {
+                if !p.tls_spki_sha256.contains(&spki_sha256) {
+                    p.tls_spki_sha256.push(spki_sha256);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Stop accepting `spki_sha256` for `domain` — the second half of a rotation. Returns whether
+    /// it was there.
+    pub fn unpin_tls(&mut self, domain: &DomainId, spki_sha256: &[u8; 32]) -> bool {
+        match self.partners.iter_mut().find(|p| &p.domain == domain) {
+            Some(p) => {
+                let before = p.tls_spki_sha256.len();
+                p.tls_spki_sha256.retain(|p| p != spki_sha256);
+                p.tls_spki_sha256.len() != before
+            }
+            None => false,
+        }
     }
 
     /// Is this partner known but revoked? Distinct from unknown — see [`PartnerTrust::revoked`].

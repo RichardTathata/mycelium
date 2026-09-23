@@ -181,8 +181,9 @@ plus three post-release fixes #325–#327), **nine trust-edge fuzz targets** (#3
 defects: the wire `DomainId` validation bypass, replay-bundle field corruption, a torn journal tail counted as a
 record, an unbounded journal allocation — #330), and **migration notes per deprecation**, now an adopter-facing
 page `docs/guide/deprecations.md` (#333). Still open publicly: §12.2's SDK narrative and the wiki page per new
-mechanism; item 2's row 11 (SDK verbs, TLS on the federation edge itself, a hostile network, more than two
-domains); the §6.6 **removal ledger** is complete and its non-warnings are
+mechanism; item 2's row 11 (SDK verbs, more than two domains — **TLS on the federation edge shipped
+2026-09-23**, anchored on an SPKI pinned in the `TrustBundle` rather than a CA, because this design holds no
+X.509 material; `src/federation/pinning.rs`); the §6.6 **removal ledger** is complete and its non-warnings are
 **deliberate, each with a stated reason** — an earlier version of this line called them *"four unmarked
 deprecations"*, which was wrong twice: the ledger has **9 entries, 4 warning** (2 `#[deprecated]`, 2
 `#[non_exhaustive]` from 2.10.0), and *"unmarked"* implied an oversight. Entry 4 is the one that could

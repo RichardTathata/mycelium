@@ -9,6 +9,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **TLS on the federation edge, anchored on a pin rather than a CA** (item 2 row 11). v2.12.0 stopped
+  an on-path attacker *altering* a federated call; it left them able to *read* one, and said so:
+  "TLS on the edge needs a trust anchor that does not exist". This is that anchor.
+
+  Partner trust here is one Ed25519 key per partner, chosen bilaterally — there is no X.509 material
+  in the design. Rather than install the public Web PKI underneath a bilateral relationship (a root
+  far larger than the trust it would carry) or exchange private CAs (more machinery, and a CA signs
+  *any* name), the anchor is the decision the operator already made: `PartnerTrust::tls_spki_sha256`
+  pins the sha256 of the endpoint's `SubjectPublicKeyInfo`, and `FederationClient::with_tls_pins`
+  dials only an endpoint holding one of those keys. A **list**, because one pin makes a TLS key
+  change a flag day — `TrustBundle::pin_tls`/`unpin_tls` open and close the window.
+
+  Two refusals come with it, and both mean **nothing was sent**: `Tls(PinMismatch)` for an endpoint
+  presenting an unpinned key, and `Tls(PlaintextEndpoint)` for pins configured against an `http://`
+  URL, which is refused rather than quietly downgraded. Neither is a `DeliveryUnknown` — that says
+  *it may have run*, and bars an at-most-once caller from retrying, whereas a failed handshake
+  delivered nothing.
+
+  The SPKI is read from its **structural position** by the X.509 parser rustls already uses, never by
+  scanning the DER for a key-shaped byte pattern. The existing `ed25519_key_from_cert_der` does scan,
+  and is sound where it is used because its input is already CA-validated — a premise absent here. A
+  test plants the victim's key bytes in an attacker-signed certificate's serial number and asserts
+  the scan is fooled while the structural read is not.
+
+  **Not claimed:** this is confidentiality and endpoint authentication, not caller authentication —
+  that stays the credential, deliberately, rather than adding a second auth model at one edge. The
+  verifier checks no name, chain or expiry, because there is no authority here to check them against.
+
+  **Upgrade notes.** `PartnerTrust` gained a field, so an exhaustive struct literal needs it
+  (`TrustBundle::trusting` is unaffected). `ClientError` gained a `Tls` variant **and is now
+  `#[non_exhaustive]`**, so an exhaustive `match` needs a `_` arm — and that arm must fail closed: an
+  unrecognised refusal is *the call did not happen for a reason this code does not know*, never *the
+  call is fine*. Pinning is off unless configured, and off means no confidentiality guarantee.
+
 ## [2.12.0] — 2026-09-23
 
 **Authenticating the caller is not authenticating the call.** Wire **v12** unchanged.
