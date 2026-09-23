@@ -57,6 +57,27 @@ that has to decide what it means for `sent` and `delivery` — the fail-closed r
 (`gateway:federation/call`), separate from `gateway:a2a`, because the two directions are different
 and an evaluator guarding `/mcp` and `/a2a` but not this route is a remit with a third door open.
 
+## The third domain, and what two could not state
+
+Row 11's last line was *more than two domains*, and it is worth being precise about why two was not
+enough rather than treating three as more of the same. With two domains, three distinct properties
+collapse into one another: a catalogue **filtered for the asker** is byte-identical to the export
+list; a **grant to one partner** is indistinguishable from a grant; and **trust is not transitive**
+cannot be stated at all, because there is no third party for it to fail to reach.
+
+The gate is a chain — alpha grants to beta, beta grants to gamma, alpha and gamma strangers — which
+makes beta a **provider and a consumer at once**, the case two domains cannot produce and the one a
+hub deployment is made of. The five claims are in the record; the two worth repeating here are that
+gamma's link to alpha is refused `UnknownDomain` **at the auth layer**, so it never learns what
+alpha exports (a filtered-to-empty catalogue would have leaked the existence of the relationship),
+and that **non-merger is asserted pairwise over all three meshes** — checking only the pair that
+exchanged bytes would pass a domain joined through a third, which is exactly the shape a hub could
+produce by accident.
+
+And one that only exists above two: `GatewayPool` slots are **per partner**, so a busy neighbour at
+a hub is not a denial of service on everyone else. With two domains, *per partner* and *per gateway*
+are the same number, and a per-gateway implementation would have passed every test we had.
+
 ## The defect the test found
 
 The scope test asserted 403 for a `federation:read` token on `/call` and got **504** — the call had

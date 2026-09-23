@@ -244,8 +244,12 @@ ordinary failures and retried.
 
 ## What this runbook does not cover
 
-- **More than two domains** is item 2's row 11 and is not shipped. TLS on the edge and the SDK
-  verbs *are* — see "Encrypting the link" and "Letting local clients call a partner" above, and
-  [gateway-tls](gateway-tls.md) for the serving side.
+- **Running a hub** — a node that is a provider to one partner and a consumer of another — works
+  and is gated (`three_domains_compose_without_trust_composing`), but this runbook has no section
+  on operating one. Two things to carry over meanwhile: trust is **not** transitive (your partner's
+  partners are strangers to you, and a call from one is refused before any catalogue is computed),
+  and a grant you *hold* is never re-exported by holding it — if a third party should reach it,
+  that is a grant you write, deliberately, in your own policy.
+- **Streaming under a credential** is refused: federated calls are unary (§5 of the record).
 - **Who the caller is inside your own mesh** is [rbac](rbac.md); federation preserves the origin
   principal but does not authorise it for you.

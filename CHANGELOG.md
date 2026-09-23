@@ -72,6 +72,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run: the partner's provider reports the *caller's* principal, and a body that names another one
   changes nothing) and `a_read_scoped_token_cannot_invoke_a_partner`.
 
+- **More than two domains — item 2's row 11 is closed.** Every federation test until now ran with
+  exactly two domains, where three separate properties are indistinguishable: a catalogue *filtered
+  for the asker* looks like the export list, a grant to one partner looks like a grant, and *trust
+  is not transitive* cannot be stated at all for want of a third party to fail to reach.
+
+  The new gate runs a chain — alpha grants `demo/whoami` to beta, beta grants `demo/relay` to
+  gamma, alpha and gamma strangers — so **beta is a provider and a consumer at once**, which is
+  what a hub deployment is made of and what two domains cannot produce. It pins: trust does not
+  compose (gamma's link to alpha is refused `UnknownDomain` at the auth layer, before any catalogue
+  is computed, so it cannot even learn what alpha exports); a grant you *hold* is not re-exported by
+  holding it (beta's catalogue to gamma names beta's own export only); a catalogue is filtered per
+  asker with three askers to tell apart, and a planted credential for an exported-but-ungranted
+  skill is refused at the edge without reaching a provider; **non-merger holds pairwise over all
+  three meshes**, since checking only the pair that exchanged bytes would miss a domain joined
+  through a third; and a hub's gateway slots are **per partner**, so one busy neighbour is not a
+  denial of service on every other partner — a distinction that does not exist with two domains.
+
 - **TLS on the federation edge, anchored on a pin rather than a CA** (item 2 row 11). v2.12.0 stopped
   an on-path attacker *altering* a federated call; it left them able to *read* one, and said so:
   "TLS on the edge needs a trust anchor that does not exist". This is that anchor.

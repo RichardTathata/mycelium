@@ -200,7 +200,7 @@ Per §5's sequence, and gated in that order:
 | **9** *(2026-09-18)* | the gate's choreography over that transport, in one process under the enforced profile and two CAs (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`): lose the only gateway, sever every link, keep working locally, change the grant mid-partition, replace the gateway, reconnect; the *traces* leg from each node's connection table (`connected_peers`); `GatewayPool::retire` |
 | **10a** *(2026-09-18)* | the signed catalogue reply: `CatalogReply` carries the domain, **the partner it was filtered for**, the policy revision and an issue time under `TAG_CATALOG`; `FederationEdge::with_signing_key` signs, `FederationClient::with_partner_key` requires and verifies (unsigned, forged, wrong-domain or misaddressed → `ClientError::Catalogue`, link `Down`) |
 | **10b** *(2026-09-18)* | the two-mesh **Docker** suite — one container per node, two CAs, the federation link cut with `docker network disconnect` and restored: `make test-federation`, CI job `federation` (`examples/federation_node.rs`, `docker/docker-compose.federation.yml`, `tests/integration/run_federation.sh`) |
-| 11 | SDK verbs (py/ts) (**closed** 2026-09-23); a hostile network between domains (**closed** — integrity 2026-09-22, confidentiality 2026-09-23); more than two domains |
+| 11 | SDK verbs (py/ts) (**closed** 2026-09-23); a hostile network between domains (**closed** — integrity 2026-09-22, confidentiality 2026-09-23); more than two domains (**closed** 2026-09-23) |
 
 **Release gate** (§5): the two-mesh demonstration — discover, invoke, lose a gateway, sever every link, keep
 working locally, change permissions mid-partition, reconnect — and prove **from membership tables, consensus
@@ -308,7 +308,36 @@ failures. Gate: `the_gateway_verbs_carry_the_local_caller_across_the_boundary` �
 gateway, and the partner's provider reporting the caller's principal while a body naming another one
 changes nothing.
 
-**What remains of row 11.** More than two domains.
+**Row 11's third domain, closed 2026-09-23 — and what two could not state.** Every test before this
+ran with exactly two domains, where three distinct properties are indistinguishable: a catalogue
+*filtered for the asker* looks the same as the export list; a grant to one partner looks the same as
+a grant; and *trust is not transitive* cannot be expressed at all, because there is no third party
+for it to fail to reach.
+
+The topology is a chain, because a chain is what would break if trust composed: alpha grants
+`demo/whoami` to beta, beta grants `demo/relay` to gamma, and alpha has no relationship with gamma
+in either direction. **beta is a provider and a consumer at once** — the case two domains cannot
+produce, and what a hub deployment is made of. Five claims, all in
+`three_domains_compose_without_trust_composing`:
+
+1. Each link works on its own terms, and each provider is told its *own* partner's principal.
+2. **Trust does not compose.** gamma's client to alpha is refused `UnknownDomain` at the auth layer
+   — a 401 before any catalogue is computed, so gamma cannot even learn what alpha exports. No
+   amount of *alpha trusts beta* and *beta trusts gamma* makes it otherwise.
+3. **A grant is not re-exported.** beta's catalogue to gamma names beta's own export and nothing it
+   holds from alpha, so transitive *reach* cannot arrive by accident through a hub that is merely
+   honest about what it can do.
+4. **One catalogue per asker, with three parties to tell apart:** alpha exports two skills, grants
+   one, and beta sees exactly one — and a planted credential for the ungranted export is refused at
+   alpha's edge without reaching a provider.
+5. **Non-merger is asserted pairwise over all three meshes**, not only over the pair that exchanged
+   bytes; a domain joined through a third would otherwise pass.
+
+A sixth, cheap and worth stating: **slots are per partner** (`GatewayPool`), so one partner
+saturating its allowance at a hub's gateway does not refuse another's work — with two domains, "per
+partner" and "per gateway" are the same number.
+
+**Row 11 is closed.**
 
 ## Appendix — anchors verified at adoption (2026-09-17)
 

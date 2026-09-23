@@ -260,7 +260,21 @@ Two rules this adds to the boundary:
   route is a remit with a third door open. Gate: `lib_tests.rs` →
   `the_gateway_verbs_carry_the_local_caller_across_the_boundary`.
 
-**What is still not built:** more than two domains, and streaming
+**More than two domains (row 11, 2026-09-23) — what two could not state.** With exactly two domains,
+*filtered for the asker* is indistinguishable from *the export list*, a grant to one partner from a
+grant, and **trust is not transitive** cannot be expressed at all. The chain alpha → beta → gamma
+(alpha and gamma strangers) states all three, and `lib_tests.rs` →
+`three_domains_compose_without_trust_composing` pins them: gamma's link to alpha is refused
+`UnknownDomain` **at the auth layer**, so it never learns what alpha exports; beta's catalogue to
+gamma names beta's own export and nothing beta holds from alpha (a grant you hold is not re-exported
+by holding it); alpha exports two skills, grants one, and a planted credential for the other is
+refused at the edge without reaching a provider; non-merger is asserted **pairwise over all three
+meshes**, since a domain joined through a third would pass a check of only the pair that exchanged
+bytes; and `GatewayPool` slots are **per partner**, so a busy neighbour at a hub is not a denial of
+service on everyone else — with two domains "per partner" and "per gateway" are the same number.
+**Row 11 is closed.**
+
+**What is still not built:** streaming
 (`tasks/sendSubscribe` under a credential is refused: federated calls are unary, §5).
 `examples/federated_domains.rs` still runs in one process and says so. Ledger: [history](history.md) → *item 2*.
 

@@ -329,8 +329,14 @@ unbounded client could not report the `DeliveryUnknown` the contract promises. T
 partner it was issued to; a client given the partner's key (`with_partner_key`) refuses an unsigned,
 forged or misaddressed one and leaves the link down. PR 10b closed the gate's last caveat: the same
 choreography runs in Docker with one container per node and the link cut for real
-(`make test-federation`). The SDK verbs and a hostile network between domains are closed too (above,
-and "Encrypting the link"); **more than two domains** is what remains of row 11. Streaming under a
+(`make test-federation`). **Row 11 is closed:** the SDK verbs (above), a hostile network between
+domains ("Encrypting the link"), and more than two domains —
+`three_domains_compose_without_trust_composing` runs a chain (alpha grants to beta, beta grants to
+gamma, alpha and gamma strangers) and pins what two domains could not state: **trust does not
+compose** (gamma is refused at alpha's auth layer before any catalogue is computed), a grant you
+hold is **not re-exported** by holding it, a catalogue is filtered *per asker* with three askers to
+tell apart, non-merger holds **pairwise** over all three meshes, and a hub's slots are per partner
+so a busy neighbour is not a denial of service on everyone else. Streaming under a
 credential is refused (federated calls are unary); `examples/federated_domains.rs` still runs the
 lifecycle in one process and says so. The invocation edge **is A2A** (D5) with domain-bound origin
 credentials — not a second call protocol, because two invocation edges with different auth models is
