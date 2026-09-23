@@ -72,6 +72,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run: the partner's provider reports the *caller's* principal, and a body that names another one
   changes nothing) and `a_read_scoped_token_cannot_invoke_a_partner`.
 
+- **§12.2's last two lines — the SDK receipt narrative, and a wiki page per mechanism.** The SDKs
+  had *carried* the receipt vocabulary since 2.8.0 (`CommitResult.local_durability` /
+  `localDurability`) and never explained it: a field an SDK user has to read the Rust source to
+  interpret is carried, not delivered. Both READMEs now state the four rungs, what each
+  `LocalDurability` state actually means operationally, and the rule that **a timeout is not a
+  negative** — with the federation verbs' `DeliveryUnknown` named as the same rule at a domain
+  boundary.
+
+  The LangGraph chapter and the checkpointer's README gained the part that was missing and is not
+  flattering: `MyceliumCheckpointSaver.put()` writes with a plain `POST /gateway/kv`, so it returns
+  a **rung-1 receipt** — applied to the store of the node you are talking to, saying nothing about
+  that node's disk and nothing about any peer. A checkpoint `put()` acknowledged is therefore not
+  yet one that survives losing that node, and the flagship demo already knew it: it waits for
+  replication by *reading from node B in a bounded poll* before killing A, rather than trusting the
+  write. That is a client-side observation of rung 3, and now it is documented as one.
+
+  Two wiki pages: `dev/architecture/contracts.md` (the rungs, `LocalDurability`'s four states and
+  the lesson in `Buffered`, and the regression floor — *a PR changes an ack's meaning by changing a
+  pin, in the open*) and `dev/testing/replay.md` (the nondeterminism inventory, the seams, scenarios
+  A/B/C, the corpus — moved out of `testing.md`, which had grown five replay sections). `AGENTS.md`
+  gains a routing table so a fact about a v3 mechanism has a home rather than a choice, and
+  `dev/dev.md`'s AE heading stopped saying *"not implemented"*, which it had said for nine releases
+  while the paragraphs under it were kept current.
+
 - **More than two domains — item 2's row 11 is closed.** Every federation test until now ran with
   exactly two domains, where three separate properties are indistinguishable: a catalogue *filtered
   for the asker* looks like the export list, a grant to one partner looks like a grant, and *trust

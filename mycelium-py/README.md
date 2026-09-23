@@ -262,6 +262,48 @@ Opt-in strong guarantees layered on top of the epidemic substrate. Requires the 
 node to be started with `MYCELIUM_ROLE=overlay` (or any role that calls
 `start_consensus_listener`).
 
+#### Receipts — what an acknowledgement proves (and what it does not)
+
+Every write verb here answers a question, and **the four questions are different facts, not degrees
+of confidence on one scale**. Nothing infers a higher rung from a lower one:
+
+| Rung | Question | What reports it from Python |
+|---|---|---|
+| 1 | did *this node* apply it? | `set` returning without raising |
+| 2 | did *this exact write* cross that node's persistence barrier? | `CommitResult.local_durability` |
+| 3 | do named, distinct **peers** hold it on disk? | `set_with_min_acks` |
+| 4 | did a **destination** commit the business change? | not a KV verb — an effect adapter's receipt |
+
+Applied is not on-disk. On-disk on one node is not replica sync. Three replicas are not a
+destination commit. The full argument is [guide 18](../docs/guide/18-contracts-and-receipts.md);
+what matters at the SDK boundary is that the fields below are already this vocabulary.
+
+```python
+res = agent.consistent_set("config/endpoint", b"https://api.v2/")
+
+res.persisted            # rung 2, the v2.4.2 bool — folds "on disk" and "nothing was promised"
+res.local_durability     # rung 2, unfolded: "on_disk" | "buffered" | "not_configured" | "failed"
+res.on_disk              # True ONLY for "on_disk" — the one state that establishes durability
+res.local_durability_error   # why, when it is "failed"
+```
+
+Read each state precisely, because each is a different operational fact:
+
+- **`on_disk`** — the forced `fdatasync` returned. Durability established.
+- **`buffered`** — the log took it and the bytes are in the OS page cache: it **survives a process
+  crash and is lost to a power failure**. Not a softer way of saying `on_disk`.
+- **`not_configured`** — that node has no persistence. Nothing was promised, so nothing is claimed
+  — and this is the state `persisted: True` quietly hides.
+- **`failed`** — durability was **not established**. That is not the same as *the record is
+  absent*: the log writes before it syncs, so the bytes may or may not be there and a replay may
+  restore them. Nothing is promised in either direction.
+
+**A timeout is not a negative.** `set_with_min_acks` raising `TimeoutError` means fewer peers
+*answered* in time — unreachable, mid-restart, or already holding a newer value all look the same
+from here. The write was applied locally and gossiped either way, and **is not rolled back**; do not
+retry it on the strength of a timeout. The same rule crosses a domain boundary as
+`DeliveryUnknown` in `mycelium.federation`.
+
 #### `consistent_set(key, value)` / `consistent_get(key) → bytes | None`
 
 Ballot-serialized (consensus-durable) write: runs a consensus round before writing. Concurrent

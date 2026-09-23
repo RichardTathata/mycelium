@@ -42,9 +42,11 @@ upgrade. See [dev/history](dev/history.md) for the ledger.
 ## Sections
 
 - **[dev/](dev/dev.md)** — how the substrate is built and verified: [architecture
-  invariants](dev/architecture/architecture.md), [concurrency
+  invariants](dev/architecture/architecture.md) (incl. [contracts — what an ack
+  proves](dev/architecture/contracts.md)), [concurrency
   discipline](dev/concurrency/concurrency.md), [testing & scale
-  lore](dev/testing/testing.md), [security workstreams](dev/security.md), [companion
+  lore](dev/testing/testing.md) (incl. [replay](dev/testing/replay.md)), [security
+  workstreams](dev/security.md), [companion
   crates](dev/companions/companions.md), [operational surface](dev/operations.md),
   [example suites](dev/examples.md), [delivery history](dev/history.md).
 - **[domain/](domain/domain.md)** — the coordinator-free thesis and its world:

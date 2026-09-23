@@ -94,6 +94,44 @@ them. The rung waits for convergence with a bounded structural poll (read-your-w
 only against the *same* node's gateway; a cross-node reader polls until the head has gossiped
 in — an honest consequence of eventual consistency, not a bug).
 
+### What a checkpoint's acknowledgement actually proves
+
+A word of warning about the word *rung*: this chapter's rungs are **demo steps**, and
+[guide 18](18-contracts-and-receipts.md)'s rungs are **receipts** — what an acknowledgement
+establishes. They are unrelated ladders, and the second one decides how much rung 2 above is worth.
+
+`MyceliumCheckpointSaver.put()` writes its index row with a plain `POST /gateway/kv`
+(`saver.py::_kv_set`). That is **receipt rung 1 and nothing above it**: the row was applied to the
+store of *the node you are talking to*. It does not say the row reached that node's disk, and it
+says nothing at all about any other node. When `put()` returns:
+
+| Question | Answered? |
+|---|---|
+| is the checkpoint in this node's store? | yes |
+| did it cross this node's persistence barrier? | **no** — that is `local_durability`, and this path never asks |
+| does any peer hold it? | **no** — that is `set_with_min_acks`, and this path never asks |
+
+So a checkpoint that `put()` acknowledged is **not yet a checkpoint that survives losing this
+node**, and treating the return as if it were is precisely the overclaim the contracts axis exists
+to remove.
+
+The flagship is honest about this, and the honesty is visible in its code rather than its prose: it
+does not trust `put()` for replication. It **reads from node B in a bounded poll until the
+checkpoint appears there** (`examples/langgraph/06_deploy_reheal.py`, step 5) and only then kills
+A. That is a client-side *observation* of rung 3, paid for in latency, because the write path does
+not request it.
+
+If you are building on this, the choice is yours to make deliberately:
+
+- **Accept rung 1** for high-frequency intermediate super-steps, where re-running a step is cheaper
+  than waiting. This is the default, and it is usually right.
+- **Ask for more at the points that matter** — before an irreversible external effect, or before
+  handing a thread to another node — with `set_with_min_acks` on the head key, or by reading the
+  head back from the node that will resume it, as the flagship does.
+
+What you should not do is read `put()` returning as durability. It is a rung-1 receipt, and
+[a receipt names its rung and nothing above it](18-contracts-and-receipts.md).
+
 **Rung 4 — routed inference.** `POST /gateway/reason/route` (and `ReasonClient.route`) route
 each call to a healthy `llm/{model}` provider and fail over down a ranked candidate list.
 This is a *real routing layer*, not a byproduct of resolution: capability resolution is
@@ -205,7 +243,9 @@ node it ran against. The choreography, all of it real substrate machinery:
    (which serves the model), reaches an interrupt, and **checkpoints** — state gossips, the
    payload lands in the blob tier.
 2. The checkpoint **replicates A→B** (the driver waits for convergence — once it's replicated,
-   the failure is survivable).
+   the failure is survivable). It waits by *reading from B*, not by trusting the write: `put()`
+   returns a rung-1 receipt and promises nothing about any other node — see
+   [what a checkpoint's acknowledgement actually proves](#what-a-checkpoints-acknowledgement-actually-proves).
 3. **Node A is killed.**
 4. **Node B** — which was *not* serving the model — reheals: `require_model` declares the
    demand, the model artifact **streams in over the mesh** (content-addressed, SHA-256
