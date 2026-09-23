@@ -30,6 +30,11 @@ the notice.
 | 7 | `GossipConfig` (and sibling config structs) not `#[non_exhaustive]` | — | `..Default::default()` | No — it breaks at 3.0.0 |
 | 8 | exhaustive `match` on `RecordKind` | 2.10.0 | add a `_` arm | **Yes** — `#[non_exhaustive]` from 2.10.0 |
 | 9 | exhaustive `match` on `Execution` | 2.10.0 | add a `_` arm that reads as **unknown**, not as *nothing ran* | **Yes** — `#[non_exhaustive]` from 2.10.0 |
+| 10 | `FederationEdge::authorize(presented, export, now_ms)` | unreleased | `authorize(presented, export, **body**, now_ms)` | **Yes** — it will not compile |
+
+**Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
+a behaviour change to discover at runtime. You cannot authorise a federated call without saying
+which body it is — see §10 below.
 
 Entries 6 and 7 are the inverse of the usual case: nothing is deprecated *today*, but a future
 `#[non_exhaustive]` will break one specific pattern, so the pattern is worth abandoning now.
@@ -161,3 +166,34 @@ The `Default` + assignment pattern is the supported one. Same for `BoardConfig` 
 Wire-format compatibility, which is versioned separately (`mycelium-core/src/framing.rs`) and
 described under [rolling upgrades](../operations/deployment.md#rolling-upgrades). Companion crates
 version on their own lines and carry their own notes.
+
+## 10. `FederationEdge::authorize` takes the request body
+
+The credential's signature covered the origin domain, the principal, the export and the validity
+window — **and nothing about the payload**. An attacker on the path between two domains could
+rewrite a call's body, leave the credential header untouched, and the receiving gateway would accept
+the altered call as authentic, then run the authorisation preflight and record an evidence decision
+about the attacker's text.
+
+```rust
+// before — authorises a caller and an export, and nothing about what was asked
+edge.authorize(&presented, skill_id, now_ms)?;
+// after — the bytes as they arrived, before parsing
+edge.authorize(&presented, skill_id, &raw_body, now_ms)?;
+```
+
+**Why a break rather than a second method.** An `authorize_with_body` beside the old one would have
+left the *insecure* call still compiling, still public, and still the shorter name. The point of the
+change is that you cannot authorise a federated call without saying which body it is, and only the
+signature can enforce that.
+
+**Pass the bytes as received**, not a re-serialisation: two encodings of the same JSON are the same
+request and different bytes, so digesting a parsed-then-re-encoded body compares your serialiser
+against your partner's. `POST /a2a` reads the body as `Bytes` and parses afterwards for exactly this
+reason.
+
+**You also choose when to require it.** `CallPolicy::require_body_binding` defaults to `false` so a
+partner that predates the binding keeps working — and that default gives **no integrity guarantee
+against an active attacker**, because an absent binding is indistinguishable from a stripped one.
+Turn it on once every partner has upgraded. `BodyNotBound` means upgrade the partner;
+`BodyMismatch` means someone is on the path.
