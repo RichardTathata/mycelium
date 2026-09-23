@@ -1,6 +1,8 @@
 # Mycelium v3.0 — the contracts axis: roadmap and implementation plan
 
-**Status:** adopted plan — **approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **rev 1.11, 2026-09-13** restores the **coordination sense of "contract"** — the thesis in §1.2 and the **commitment companion** (contract net) in §6.9, D39 · **rev 1.12, 2026-09-13** brings §12 (delivery surfaces) up to date with revs 1.9–1.11: AE, AE-T and CN examples, chapters, runbook rows; the decks lead with the wedge · **Owner:** Mycelium maintainers · **Version of record:** this file
+**Status:** **delivered — all eight items shipped across v2.5.0 → v2.12.0**, wire v12 unchanged; §10 is the
+state of play and §10.2 names the four things that remain (none blocked on unwritten code). Adopted plan —
+**approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **rev 1.11, 2026-09-13** restores the **coordination sense of "contract"** — the thesis in §1.2 and the **commitment companion** (contract net) in §6.9, D39 · **rev 1.12, 2026-09-13** brings §12 (delivery surfaces) up to date with revs 1.9–1.11: AE, AE-T and CN examples, chapters, runbook rows; the decks lead with the wedge · **rev 1.15, 2026-09-23** rewrites §10 as the delivered state (the queue it replaced was nine releases stale) and records two structural corrections: items 2/3/4/5 shipped in core, not as companions · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -11,7 +13,7 @@ next epoch, each with a seven-PR implementation plan. Those six documents are ve
 decided differently and why, how the six compose, and the order we will build in. Every divergence from the
 reviewer's text is marked **⚠ Divergence** and collected in [§7, the decision register](#7-decision-register).
 
-**"v3.0" is a roadmap epoch, not a version.** The released substrate is `mycelium` **2.4.3** (wire v12, PREV 11).
+**"v3.0" is a roadmap epoch, not a version.** The released substrate is `mycelium` **2.12.0** (wire v12, PREV 11).
 Nothing in this plan changes the wire. **The one compatibility rule, used throughout (rev 1.3):** *ship compatible
 additions on 2.x; assess any incompatible public-API or protocol change on its merits* — §4.2 names the one
 *protocol* candidate; §9 states the rule for public types. Deliverables ship as companion crates on their own version lines and as
@@ -937,7 +939,71 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
   reputation; inferred observer independence; mandatory LLM judgment; consensus over truth; authenticated SWIM;
   transitive federation; dynamic quota transfer; delegation of mandates; replicated authority.
 
-## 10. Immediate next steps
+## 10. State of play — what is delivered, and what is left
+
+*Rewritten at rev 1.15 (2026-09-23). This section had been a queue of next steps since rev 1.14
+(2026-09-15) and was nine releases stale: it still opened with "Item 1, PR 1 — this unblocks
+everything", which landed on 2026-09-13. **The queue is kept below as §10.1, unedited**, because the
+order things were done in is part of the record — but it is history, not instructions.*
+
+### 10.1 Delivered
+
+**All eight items are complete**, across v2.5.0 → v2.12.0, wire **v12** unchanged throughout and
+every change additive on the 2.x line:
+
+| Item | Delivered | Where |
+|---|---|---|
+| **1 Contracts** | PRs 1–7: the ADR + regression floor, stable identities, typed receipts, required local sync, the exact-identity ack, persisted-by-peer, the effects companion and gateway/SDK parity | v2.5.0–v2.8.0, `mycelium-effects` |
+| **6 Replay** | PRs 1–7: the inventory, the `mycelium-sim` kernel, every seam (incl. the scheduler seam), scenarios A/B/C, the checked-in corpus | v2.8.0, v2.9.0 |
+| **2 Domains** | PRs 1–11: the ADR, trust bundles, filtered catalogues, the A2A-carried credential, gateways and budgets, partition/revocation, the transport, the release gate over a two-mesh **Docker** suite, the signed catalogue, body binding, TLS pinning, **and row 11** — SDK verbs and a third domain | v2.8.0 → 2026-09-23 |
+| **3 Knowledge** | typed records, evidence-aware resolution, the semantic gate's three negatives | v2.8.0 |
+| **4 Stability** | the ADR, the control contract, the allocated-rights ledger, every governor and the provisioner through the contract, companion admission control, the §7 profile ladder + shadow-mode runbook | v2.8.0, v2.9.0 |
+| **5 Mandates** | PRs 1–5 + D4: the fence inside the store's own atomic boundary, lifecycle events, the handover journal, scenario B | v2.8.0, v2.9.0 |
+| **7 Caller identity** | `GatewayCaller` on every dispatch path, four negatives, the secure profile — and, at row 11, the same rule across a domain boundary | v2.5.0, 2026-09-23 |
+| **8 Threat model rev 2** | published and cited by items 2/3/5 | v2.5.0 |
+
+Beside them: **CN1–CN3** (`mycelium-commitment`, the contract net — the epoch's thesis made
+executable), the **AE slice's public half** (the evaluator seam, the evidence journal and its
+reader, the execution record, AE1's mandate binding, `mycelium::ae_contract`), **RA0–RA6 and
+AE-T/AE1–AE4 privately**, and **§12 complete** — the demonstration gallery, guide chapters 18–24,
+the ops runbooks, both decks, the philosophy, the front door, the companion onboarding checklist,
+the Phase-C adversarial self-audit and twelve fuzz targets.
+
+**Two structural corrections the plan carried for weeks**, recorded because the plan was wrong and
+the code was right: items 2, 3, 4 and 5 shipped **in core** (`src/federation/`, `src/knowledge/`,
+`src/control/`, `src/mandate/`), not as the separate `mycelium-federation` / `mycelium-knowledge` /
+`mycelium-control` companions §1.2 names; the three crates that did appear are `mycelium-sim`,
+`mycelium-effects` and `mycelium-commitment`. And §6.6's `3.0.0` removal ledger is complete with its
+non-warnings costed, rather than open.
+
+### 10.2 What is left
+
+Four things, and **none of them is blocked on code we have not written**:
+
+1. **V1 — the nightly scale runner.** A **Phase A** gate that has never been met: the self-hosted
+   box is offline, so the job queues silently. Nothing scale-related can be evidenced until it is
+   green, and it is the one gate in the whole axis that is infrastructure rather than engineering.
+2. **The four joint AWS/GCP runs** of the AE slice (§6.8, AE4). Both scenarios pass locally against
+   the stub consumer; §6.8 says in as many words that neither a fixture nor one cloud closes that
+   gate. It needs the counterparty, not another commit. AE4's operator and SDK examples travel with
+   it.
+3. **Two open design questions**, open by decision rather than omission: `mycelium-commitment`'s
+   unsigned `Offer`/`Award` (provenance), and the **consumer-side-only per-partner budget** — the
+   federation edge has no slot accounting, the one audit finding still wanting a decision rather
+   than a patch.
+4. **§13's two recorded questions** — the composition hypothesis and reversible components — which
+   are explicitly *not* v3 deliverables and open the next epoch.
+
+**One claim to read precisely.** Phase E's *"combined-feedback scenario green"* is met **in the
+bounded sense scenario C states**: with the loop-breakers on every swept schedule settles and with
+them off at least one does not, under the shipped decision functions. The ADR's sharper sentence —
+*several loops can oscillate together while each is stable alone* — is **not shown**, and the
+2026-09-22 measurement recorded why: the three loops share one state variable, so neither isolation
+method available can pose the question. That is a known limit of the demonstration, not a gap in the
+control work.
+
+### 10.3 The original queue, as it ran *(kept verbatim; history, not instructions)*
+
 1. **Item 1, PR 1** — the contract ADR (with D8, D11) and the regression floor. *(This unblocks everything.)*
 2. **Item 6, PR 1** — the nondeterminism inventory with D13 and the trace schema.
 3. **Item 4's cooldown fix** — standalone, this week.
@@ -981,6 +1047,19 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 
 ## 11. Revision log
 
+- **rev 1.15 (2026-09-23):** **§10 rewritten as a state of play.** It had been a queue of next steps
+  since rev 1.14 and was nine releases stale — opening with *"Item 1, PR 1 … this unblocks
+  everything"* ten days after PR 1 landed. All eight items, CN1–CN3, the AE slice's public half and
+  §12 are delivered (v2.5.0 → v2.12.0, wire v12 unchanged); item 2's **row 11 closed 2026-09-23**
+  (SDK verbs, a hostile network, more than two domains). Two structural corrections recorded: items
+  2/3/4/5 shipped **in core** rather than as the companions §1.2 names, and the `3.0.0` ledger is
+  complete. What is left is named in §10.2 and is four things, none blocked on unwritten code: **V1**
+  (the offline nightly runner, a Phase A gate), the **four joint AWS/GCP runs** (AE4 — it needs the
+  counterparty), two open design questions, and §13's recorded questions. Phase E's combined-feedback
+  claim is restated in the bounded sense scenario C actually supports. The original queue is kept
+  verbatim as §10.3, because the order things were done in is part of the record. No engineering
+  change; `ROADMAP.md § v3.0` and `CLAUDE.md` updated in the same pass, both of which were carrying
+  the same staleness.
 - **rev 1.12 (2026-09-13):** §12 brought up to date with revs 1.9–1.11 — three gallery rows (AE-T at the gateway on
   the public reference evaluator; AE scenario 1; the redistribution workload re-run as contract net beside its tuple-space
   and blackboard versions), the boundary note (public entries demonstrate the seam; adapters, exporter and cloud pack are
