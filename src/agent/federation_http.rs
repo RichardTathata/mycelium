@@ -11,10 +11,29 @@
 //!   anonymous one.
 //! - **One identity per request.** A bearer and a federation credential on the same request is a
 //!   400: the gateway will not choose which of two callers it is dispatching for.
+//!
+//! # The other direction (item 2 row 11)
+//!
+//! Everything above is the **provider** side: a partner's call arriving here. The second half of
+//! this module is the **consumer** side — the `/gateway/federation/*` routes a *local* client uses
+//! to reach a partner, and so the thing the Python and TypeScript SDK verbs talk to. Its decisions
+//! live in [`crate::federation::client`]; what is this module's own is the vocabulary a refusal
+//! comes back in, and that vocabulary answers two questions rather than one:
+//!
+//! - **`sent`** — did any byte reach the partner? A local refusal (link down, export not in a
+//!   fresh catalogue, no slot, a pin mismatch) sent nothing, and saying so is what lets an
+//!   at-most-once caller retry without reasoning about our internals.
+//! - **`delivery`** — `none`, `refused`, `completed` or **`unknown`**. `unknown` is not an error
+//!   dressed up: it is the hot invariant (*a timeout is `DeliveryUnknown`, never a negative*)
+//!   carried to an SDK, and a caller that treats it as failure will double-run effects.
 
 use super::gateway_caller::{federation_principal, ResolvedPrincipal};
 use crate::agent::TaskCtx;
+use crate::federation::client::{ClientError, FederationClient};
 use crate::federation::edge::{now_ms, FederationEdge, PresentedCall, CATALOG_PATH, HEADER_FEDERATED_CALL};
+use crate::federation::gateway::CallOutcome;
+use crate::federation::session::LinkState;
+use crate::federation::DomainId;
 use axum::{
     extract::{Request, State},
     http::{header, HeaderMap, StatusCode},
@@ -100,4 +119,115 @@ async fn catalog_handler(
 
 pub(crate) fn federation_router(edge: Arc<FederationEdge>) -> Router {
     Router::new().route(CATALOG_PATH, get(catalog_handler)).with_state(edge)
+}
+
+// ── The consumer side: `/gateway/federation/*` (item 2 row 11) ────────────────
+
+/// How a link reads to an operator and an SDK. Lower-case and stable, because it is a wire value:
+/// `Debug` formatting would make renaming a Rust variant a breaking change to every SDK.
+pub(crate) fn link_word(state: LinkState) -> &'static str {
+    match state {
+        LinkState::Down => "down",
+        LinkState::Refreshing => "refreshing",
+        LinkState::Ready => "ready",
+    }
+}
+
+/// The client configured for `domain`, or a response saying why there is none.
+///
+/// Two distinct refusals, kept apart on purpose: a gateway with **no** consumer side at all is a
+/// deployment that never configured one, and a gateway that has clients but not *this* partner is a
+/// name the operator got wrong. Folding them into one 404 would make the second look like the first.
+pub(crate) fn client_for(ctx: &TaskCtx, domain: &str) -> Result<Arc<FederationClient>, Box<Response>> {
+    let Some(clients) = ctx.federation_clients.get() else {
+        return Err(Box::new(refuse(StatusCode::NOT_FOUND, "this gateway has no federation consumer configured")));
+    };
+    if DomainId::new(domain).is_err() {
+        return Err(Box::new(refuse(StatusCode::BAD_REQUEST, format!("{domain:?} is not a domain id"))));
+    }
+    clients
+        .iter()
+        .find(|c| c.partner().as_str() == domain)
+        .cloned()
+        .ok_or_else(|| Box::new(refuse(StatusCode::NOT_FOUND, format!("no federation client is configured for domain {domain}"))))
+}
+
+/// `GET /gateway/federation/domain` — what this node *is*, federally: the edge's identity, what it
+/// exports and the policy revision those exports are filtered by. `configured: false` when no edge
+/// is attached, rather than a 404: "this gateway serves no domain" is an answer, not a missing page.
+pub(crate) fn domain_json(ctx: &TaskCtx) -> Response {
+    match ctx.federation_edge.get() {
+        None => Json(json!({ "configured": false })).into_response(),
+        Some(edge) => Json(json!({
+            "configured": true,
+            "domain": edge.domain().as_str(),
+            "exports": edge.exports(),
+            "policy_revision": edge.policy_revision(),
+            "signs_catalogue": edge.signs_catalogue(),
+        }))
+        .into_response(),
+    }
+}
+
+/// `GET /gateway/federation/partners` — one row per configured partner: the link state and the
+/// exports the **last** successful discovery was granted.
+///
+/// `last_catalogue` is remembered, not fresh, and the field name says so. Whether an export may be
+/// called now is the resolver's freshness rule at call time — this row is what an operator looks at,
+/// never what a caller should branch on.
+pub(crate) fn partners_json(ctx: &TaskCtx) -> Response {
+    let rows: Vec<serde_json::Value> = ctx
+        .federation_clients
+        .get()
+        .map(|cs| {
+            cs.iter()
+                .map(|c| {
+                    json!({
+                        "domain": c.partner().as_str(),
+                        "link": link_word(c.link_state()),
+                        "last_catalogue": c.last_catalogue(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(json!({ "partners": rows })).into_response()
+}
+
+/// The refusal vocabulary, and the two fields that make it usable: see the module docs.
+///
+/// **No `_` arm, deliberately.** [`ClientError`] is `#[non_exhaustive]` to *other* crates, but in
+/// this one the compiler still demands every variant — so a new refusal stops the build here, at
+/// the place that has to decide what it means for `sent` and `delivery`, rather than being folded
+/// into a default. The fail-closed rule that a `_` arm would carry is instead applied to each
+/// value: where this gateway cannot establish that nothing ran, it says `unknown`, because the one
+/// thing worse than a caller that cannot retry is a caller that retries an effect which already
+/// happened.
+pub(crate) fn call_refusal(e: &ClientError) -> Response {
+    let (status, kind, sent, delivery) = match e {
+        // Refused here, before any byte left this process.
+        ClientError::Link(_) => (StatusCode::CONFLICT, "link", false, "none"),
+        ClientError::Resolve(_) => (StatusCode::CONFLICT, "resolve", false, "none"),
+        ClientError::Principal(_) => (StatusCode::BAD_REQUEST, "principal", false, "none"),
+        ClientError::Outcome(CallOutcome::NoCapacity { .. }) => (StatusCode::TOO_MANY_REQUESTS, "capacity", false, "none"),
+        ClientError::Tls(_) => (StatusCode::BAD_GATEWAY, "tls", false, "none"),
+        // The partner answered.
+        ClientError::Refused { .. } => (StatusCode::BAD_GATEWAY, "refused", true, "refused"),
+        ClientError::Catalogue(_) => (StatusCode::BAD_GATEWAY, "catalogue", true, "refused"),
+        // Nobody can say what happened.
+        ClientError::Outcome(CallOutcome::DeliveryUnknown { .. }) => (StatusCode::GATEWAY_TIMEOUT, "delivery-unknown", true, "unknown"),
+        // A reply arrived and could not be read: the partner ran something. Reporting this as a
+        // clean failure would be the overclaim item 1 exists to remove.
+        ClientError::Transport(_) => (StatusCode::BAD_GATEWAY, "transport", true, "unknown"),
+        ClientError::Outcome(_) => (StatusCode::BAD_GATEWAY, "outcome", true, "unknown"),
+    };
+    let mut body = json!({ "error": kind, "detail": e.to_string(), "sent": sent, "delivery": delivery });
+    if let ClientError::Outcome(CallOutcome::DeliveryUnknown { attempted_via, .. }) = e {
+        body["attempted_via"] = json!(attempted_via);
+    }
+    if let ClientError::Refused { status: partner_status, code, .. } = e {
+        body["partner_status"] = json!(partner_status);
+        body["partner_code"] = json!(code);
+    }
+    (status, Json(body)).into_response()
 }

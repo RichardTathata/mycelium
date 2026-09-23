@@ -32,4 +32,12 @@ export {
 } from "./tuple";
 export { Blackboard, BlackboardNotFoundError, Fact } from "./blackboard";
 export { Wiki, Page, Section, SectionRef, ProposeArgs } from "./wiki";
+export {
+  Federation,
+  FederationError,
+  DeliveryUnknownError,
+  PartnerLink,
+  DomainInfo,
+  CatalogView,
+} from "./federation";
 export { TOKEN_ENV, resolveToken, authHeaders, type AuthOptions } from "./auth";

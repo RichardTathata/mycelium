@@ -76,6 +76,16 @@ pub enum ClientError {
     /// TLS refusal means the handshake did not complete, so the partner received no request and the
     /// call is safe to retry once the endpoint or the pin is fixed.
     Tls(TlsRefusal),
+    /// The principal offered for this call cannot be carried in a credential (item 2 row 11).
+    ///
+    /// Refused locally, before any byte was sent. It exists because [`FederationClient::call_as`]
+    /// takes the principal from its caller rather than from this client's configuration, and a
+    /// principal that cannot survive the header is one the partner would refuse *after* the call
+    /// crossed: `PresentedCall::from_header_value` requires ASCII **content**, and
+    /// `to_header_value` re-emits a non-ASCII character unescaped, so such a credential is one we
+    /// could mint and neither side could re-parse. Refusing here keeps the accept-set and the
+    /// emit-set the same on our side too.
+    Principal(String),
 }
 
 /// Why the transport was refused before it carried anything. See [`ClientError::Tls`].
@@ -119,6 +129,7 @@ impl std::fmt::Display for ClientError {
             Self::Transport(s) => write!(f, "transport: {s}"),
             Self::Catalogue(r) => write!(f, "catalogue: {r}"),
             Self::Tls(r) => write!(f, "tls: {r}"),
+            Self::Principal(why) => write!(f, "principal: {why}"),
         }
     }
 }
@@ -363,17 +374,20 @@ impl FederationClient {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).last_catalogue.clone()
     }
 
-    /// Mint a credential for `export`, binding `body` when there is one.
+    /// Mint a credential for `export` **naming `principal`**, binding `body` when there is one.
     ///
     /// `None` is for a request that carries no payload — the catalogue `GET`. There is nothing to
     /// bind there, and the reply is separately signed, so the field is honestly absent rather than
     /// bound to an empty string that would look like a guarantee.
-    fn present(&self, export: &str, body: Option<&[u8]>) -> PresentedCall {
+    ///
+    /// The principal is a parameter rather than always `self.principal` because a gateway makes
+    /// this call *for* somebody (item 2 row 11): see [`Self::call_as`].
+    fn present(&self, principal: &str, export: &str, body: Option<&[u8]>) -> PresentedCall {
         let now = now_ms();
         PresentedCall::sign(
             &FederatedCaller {
                 origin_domain: self.origin.clone(),
-                principal: self.principal.clone(),
+                principal: principal.to_string(),
                 export: export.to_string(),
                 issued_at_ms: now,
                 expires_at_ms: now + self.credential_lifetime.as_millis() as u64,
@@ -398,7 +412,9 @@ impl FederationClient {
                 base_url: ep.base_url.clone(),
             }));
         }
-        let presented = self.present(CATALOG_EXPORT, None);
+        // Discovery is this domain's own act — *what may we see?* — not any one caller's, so it
+        // carries the configured principal even when a call made through it will not.
+        let presented = self.present(&self.principal, CATALOG_EXPORT, None);
         let mut last: Option<ClientError> = None;
         for gw in &self.endpoints {
             let url = format!("{}{}", gw.base_url, CATALOG_PATH);
@@ -510,7 +526,42 @@ impl FederationClient {
 
     /// Invoke `export` on the partner with `text` as the A2A message, and return the task's first
     /// text artifact. See the module docs for the sequence and where each refusal comes from.
+    ///
+    /// The credential names this client's configured principal. When the call is made *for*
+    /// somebody — a gateway dispatching an SDK client's request — use [`Self::call_as`].
     pub async fn call(&self, export: &str, text: &str, repeatability: Repeatability) -> Result<String, ClientError> {
+        self.call_as(&self.principal.clone(), export, text, repeatability).await
+    }
+
+    /// [`Self::call`], with the credential naming `principal` instead of this client's configured
+    /// one — **item 7's caller identity, one boundary further out** (item 2 row 11).
+    ///
+    /// A gateway that exposes federation to local SDK clients is a deputy: it holds the domain's
+    /// signing key and the partner's trust, and it makes the call for a client who has neither. If
+    /// it minted every credential under its own configured principal, the partner's evidence would
+    /// record *the gateway's service account* for work it never asked for — the confused deputy
+    /// item 7 removed inside a domain, reintroduced across one. So the principal comes from the
+    /// **authenticated local caller** and never from the request body; `src/agent/http.rs` is the
+    /// one place in this crate that calls this, and that is where the rule is enforced.
+    ///
+    /// What this does **not** change: the credential still says *this domain vouches for this
+    /// caller*, and the partner's grant is still keyed on the domain and the export, never on the
+    /// principal. A partner that has granted us `invoice.status` has granted it to us, whoever here
+    /// asks. Carrying the principal buys attribution and the partner's own authorisation input, not
+    /// a second authorisation layer of ours.
+    pub async fn call_as(
+        &self,
+        principal: &str,
+        export: &str,
+        text: &str,
+        repeatability: Repeatability,
+    ) -> Result<String, ClientError> {
+        if principal.is_empty() {
+            return Err(ClientError::Principal("empty".to_string()));
+        }
+        if !principal.is_ascii() {
+            return Err(ClientError::Principal("not ASCII".to_string()));
+        }
         if let Some(ep) = self.insecure_endpoint() {
             return Err(ClientError::Tls(TlsRefusal::PlaintextEndpoint {
                 gateway: ep.id.clone(),
@@ -547,7 +598,7 @@ impl FederationClient {
             // then be comparing our digest against a different serialisation of the same JSON —
             // which is how a binding becomes a source of false refusals instead of a guarantee.
             let body_bytes = serde_json::to_vec(&body).expect("a request we constructed serialises");
-            let presented = self.present(export, Some(&body_bytes));
+            let presented = self.present(principal, export, Some(&body_bytes));
             let sent = self
                 .http
                 .post(format!("{}/a2a", ep.base_url))

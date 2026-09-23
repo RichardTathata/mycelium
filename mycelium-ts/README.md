@@ -315,6 +315,52 @@ Consumer-group subscription: at most one consumer per group per entry.
 
 Sends `payload` and waits for an explicit application-level ACK.
 
+### Federated domains
+
+A **domain** is one independently admitted mesh. Federation is one domain calling a service
+another has explicitly *exported* to it — the two meshes never merge, and neither learns the
+other's members.
+
+These verbs drive **your own node**, which holds the domain's signing key and the partner's trust
+bundle; the SDK never speaks the cross-domain protocol itself. The node must be started with
+`with_federation_clients([...])` for a partner, or the verbs answer *no client is configured*.
+
+```ts
+const fed = agent.federation();
+
+await fed.domain();                     // { configured: true, domain: "…", exports: [...] }
+await fed.partners();                   // [{ domain, link: "ready", last_catalogue }]
+await fed.catalog("partner.example");   // the LAST OBSERVED catalogue — no network
+await fed.connect("partner.example");   // go and ask; returns the exports granted to us
+const reply = await fed.call("partner.example", "invoice.status", "INV-42");
+```
+
+**Who the partner sees.** The credential names *the principal your bearer resolved to at your own
+gateway* — never the node, never a service account. With no token model configured that principal
+is `anonymous`, which is honest and usually not what you want in a partner's records.
+
+**Reading a refusal** — two fields, not the message:
+
+```ts
+import { DeliveryUnknownError, FederationError } from "mycelium-ts";
+
+try {
+  await fed.call("partner.example", "invoice.submit", body);
+} catch (e) {
+  if (e instanceof DeliveryUnknownError) {
+    // The call MAY HAVE RUN. Not a failure — nobody can say. Retrying it retries the effect.
+    console.warn("attempted via", e.attemptedVia);
+  } else if (e instanceof FederationError && e.nothingWasSent) {
+    await retryLater();                  // refused at our own gateway; nothing crossed
+  }
+}
+```
+
+`e.delivery` is `none` · `refused` · `completed` · `unknown`, and `e.sent` says whether any byte
+reached the partner. `{ repeatable: true }` on `call` states that *your* effect tolerates being run
+twice — it is the only thing that lets a silent gateway be retried elsewhere, and it defaults to
+`false`.
+
 ---
 
 ## Running the tests
@@ -364,3 +410,8 @@ MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
 | `subscribeLog` | `GET /gateway/overlay/log/subscribe` | SSE stream |
 | `subscribeLogGroup` | `GET /gateway/overlay/log/group/subscribe` | SSE stream |
 | `emitReliable` | `POST /gateway/overlay/emit_reliable` | |
+| `federation().domain` | `GET /gateway/federation/domain` | `federation:read` |
+| `federation().partners` | `GET /gateway/federation/partners` | `federation:read` |
+| `federation().catalog` | `GET /gateway/federation/catalog/{domain}` | last observation, no network |
+| `federation().connect` | `POST /gateway/federation/connect` | `federation:invoke` |
+| `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |

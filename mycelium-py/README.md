@@ -378,6 +378,50 @@ guard.release()           # sync release
 await guard.arelease()    # async release
 ```
 
+### Federated domains
+
+A **domain** is one independently admitted mesh. Federation is one domain calling a service
+another has explicitly *exported* to it — the two meshes never merge, and neither learns the
+other's members.
+
+These verbs drive **your own node**, which holds the domain's signing key and the partner's trust
+bundle. The SDK never speaks the cross-domain protocol itself; the node must be started with
+`with_federation_clients([...])` for a partner, or the verbs answer *no client is configured*.
+
+```python
+fed = agent.federation()
+
+fed.domain()                       # {"configured": True, "domain": "…", "exports": [...], …}
+fed.partners()                     # [{"domain": …, "link": "ready", "last_catalogue": [...]}]
+fed.catalog("partner.example")     # the LAST OBSERVED catalogue — no network
+fed.connect("partner.example")     # go and ask; returns the exports granted to us
+reply = fed.call("partner.example", "invoice.status", "INV-42")
+```
+
+**Who the partner sees.** The credential names *the principal your bearer resolved to at your own
+gateway* — never the node, never a service account. With no token model configured that principal
+is `anonymous`, which is honest and usually not what you want in a partner's records.
+
+**Reading a refusal** — two fields, not the message:
+
+```python
+from mycelium import DeliveryUnknown, FederationError
+
+try:
+    fed.call("partner.example", "invoice.submit", body)
+except DeliveryUnknown as e:
+    # The call MAY HAVE RUN. Not a failure — nobody can say. Retrying it retries the effect.
+    print("attempted via", e.attempted_via)
+except FederationError as e:
+    if e.nothing_was_sent:                 # refused at our own gateway; nothing crossed
+        retry_later()
+```
+
+`e.delivery` is `none` · `refused` · `completed` · `unknown`, and `e.sent` says whether any byte
+reached the partner. `repeatable=True` on `call` states that *your* effect tolerates being run
+twice — it is the only thing that lets a silent gateway be retried elsewhere, and it defaults to
+`False`.
+
 ---
 
 ## Running the tests
@@ -429,3 +473,8 @@ All methods talk to the embedded HTTP gateway on the Rust node:
 | `subscribe_log` | `GET /gateway/overlay/log/subscribe` | SSE stream |
 | `subscribe_log_group` | `GET /gateway/overlay/log/group/subscribe` | SSE stream |
 | `emit_reliable` | `POST /gateway/overlay/emit_reliable` | |
+| `federation().domain` | `GET /gateway/federation/domain` | `federation:read` |
+| `federation().partners` | `GET /gateway/federation/partners` | `federation:read` |
+| `federation().catalog` | `GET /gateway/federation/catalog/{domain}` | last observation, no network |
+| `federation().connect` | `POST /gateway/federation/connect` | `federation:invoke` |
+| `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |

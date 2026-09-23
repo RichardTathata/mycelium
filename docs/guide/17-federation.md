@@ -206,6 +206,52 @@ let granted = client.connect().await?;                       // the catalogue is
 let reply = client.call("invoice.submit", text, Repeatability::AtMostOnce).await?;
 ```
 
+### Calling a partner from Python or TypeScript
+
+The Rust client above is the whole trust story: it holds your domain's signing key, mints
+credentials and checks the partner's catalogue and TLS pin. None of that belongs in an SDK
+process, so the SDKs do not re-implement it — they drive **your own node**, which does.
+
+Attach a client per partner and the gateway grows the consumer verbs:
+
+```rust
+let agent = GossipAgent::new(id, cfg)
+    .with_federation_clients([Arc::new(client)])    // before start(), like the edge
+```
+
+| Route | Scope | What it does |
+|---|---|---|
+| `GET /gateway/federation/domain` | `federation:read` | this node's own domain, exports and policy revision |
+| `GET /gateway/federation/partners` | `federation:read` | link state and last-granted catalogue, per partner |
+| `GET /gateway/federation/catalog/{domain}` | `federation:read` | the last observation — **no network** |
+| `POST /gateway/federation/connect` | `federation:invoke` | go and fetch the catalogue; bring the link up |
+| `POST /gateway/federation/call` | `federation:invoke` | invoke an export |
+
+```python
+fed = agent.federation()
+fed.connect("alpha.example")
+reply = fed.call("alpha.example", "invoice.submit", text)        # repeatable=False by default
+```
+
+```ts
+const fed = agent.federation();
+await fed.connect("alpha.example");
+const reply = await fed.call("alpha.example", "invoice.submit", text);
+```
+
+**The principal is the caller's, and the body cannot say otherwise.** The credential names the
+principal your gateway's auth layer resolved for *that request* — item 7's rule carried one
+boundary further out. A gateway that minted every credential under its own configured principal
+would be the confused deputy again, one domain wider: the partner's evidence would record a
+service account for work it never asked for. On a gateway with no token model the principal is
+`anonymous`, which is honest and rarely what you want in a partner's records.
+
+**A refusal answers two questions, not one.** `sent` says whether any byte crossed; `delivery` is
+`none` · `refused` · `completed` · `unknown`. Both SDKs raise a *distinct type* for `unknown`
+(`DeliveryUnknown` / `DeliveryUnknownError`) so it cannot be swept up with ordinary failures and
+retried — it means the call may already have run. That is the receipt vocabulary of
+[chapter 18](18-contracts-and-receipts.md), at a domain boundary.
+
 ### Encrypting the link: the pin is the anchor
 
 Everything above is **signed and not encrypted**. The credential binds the origin domain, the
@@ -283,8 +329,8 @@ unbounded client could not report the `DeliveryUnknown` the contract promises. T
 partner it was issued to; a client given the partner's key (`with_partner_key`) refuses an unsigned,
 forged or misaddressed one and leaves the link down. PR 10b closed the gate's last caveat: the same
 choreography runs in Docker with one container per node and the link cut for real
-(`make test-federation`). Still to build: SDK verbs, a hostile network between domains, more than
-two domains. Streaming under a
+(`make test-federation`). The SDK verbs and a hostile network between domains are closed too (above,
+and "Encrypting the link"); **more than two domains** is what remains of row 11. Streaming under a
 credential is refused (federated calls are unary); `examples/federated_domains.rs` still runs the
 lifecycle in one process and says so. The invocation edge **is A2A** (D5) with domain-bound origin
 credentials — not a second call protocol, because two invocation edges with different auth models is

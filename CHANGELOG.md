@@ -9,7 +9,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A deployment whose only credential model was `gateway_named_tokens` had an open gateway.**
+  `gateway_auth`'s "is a token model configured?" test counted `gateway_auth_token` and
+  `gateway_scoped_tokens` — and not the named table, which 2.10.0 added and `resolve_token` has
+  honoured ever since. Such a node therefore took the *open gateway* branch: **no bearer
+  required**, with `open_gateway_scopes` handing each request exactly the scope its route asks
+  for, which turns deny-by-default into admit-by-default for every gateway route on the port.
+
+  It hid because the tokens kept working. Presenting one was admitted (`resolve_token` knows
+  them), so nothing looked wrong; the only way to see the hole was to present **nothing**. The
+  existing identity test configures both tables at once and so never could — the same shape as the
+  fuzz seeds in 2.11.1, where a gate that appeared covered was never reaching its invariant.
+  `GossipConfig`'s own documentation says to *prefer* named tokens, so the recommended
+  configuration was the affected one.
+
+  **Affected: 2.10.0 – 2.12.0**, and only deployments configuring `gateway_named_tokens` with no
+  `gateway_auth_token` and no `gateway_scoped_tokens`. Check yours: an unauthenticated
+  `GET /gateway/kv/keys` must answer 401. Found while writing the federation verbs' scope test,
+  which returned 504 where 403 was expected — the scope layer had not run at all. Pinned by
+  `named_tokens_alone_still_close_the_gateway`, which asserts both halves (no bearer is 401, a
+  named token still resolves to its own principal and is still bounded by its scopes) and fails
+  when the fix is reverted.
+
 ### Added
+
+- **Federation's consumer side reaches local clients — the SDK verbs** (item 2 row 11). Until now
+  a federated call could only be made from Rust: `FederationClient` was the sole consumer, and
+  `examples/federation_node.rs` had to hand-roll its own control API to drive one. The Python and
+  TypeScript SDKs had no way to reach a partner at all.
+
+  They do not get one by re-implementing the protocol. The credential is signed with the domain's
+  key and the catalogue is checked against the partner's; neither the key nor the trust bundle
+  belongs in an SDK process, and putting credential minting into two more languages would put the
+  trust story in three places. Instead `GossipAgent::with_federation_clients` attaches one client
+  per partner to the node, and the gateway grows five routes behind two new scopes —
+  `GET /gateway/federation/{domain,partners,catalog/{domain}}` under `federation:read`,
+  `POST /gateway/federation/{connect,call}` under `federation:invoke`. `agent.federation()` in
+  both SDKs drives them.
+
+  **The principal on the wire is the local caller's, and the request body cannot say otherwise.**
+  That is item 7's rule at one more boundary: a gateway holds the domain's key and the partner's
+  trust while the client calling it has neither, so a gateway minting every credential under its
+  own configured principal would record a service account in the partner's evidence for work it
+  never asked for — the confused deputy, one domain wider. `FederationClient::call_as` takes the
+  principal from the authenticated caller; `call` is now that, with this client's own principal.
+  On a gateway with no token model it is `anonymous`, which is an honest statement and the reason
+  the runbook says to configure tokens before connecting two domains.
+
+  **A refusal answers two questions.** `sent` — did any byte reach the partner — and `delivery`:
+  `none` · `refused` · `completed` · `unknown`. Both SDKs raise a **distinct type** for `unknown`
+  (`DeliveryUnknown`, `DeliveryUnknownError`), so the one outcome that must not be retried blindly
+  cannot be caught by accident alongside ordinary failures. An unreadable refusal body (an HTML
+  page from a proxy) fails closed to `unknown` rather than to success.
+
+  The outbound call is also an **AE enforcement point** (`gateway:federation/call`), named
+  separately from `gateway:a2a` because the two directions are different: an evaluator that
+  guards `/mcp` and `/a2a` and not this one is a remit with a third door left open.
+
+  Gated by `the_gateway_verbs_carry_the_local_caller_across_the_boundary` (a real two-domain
+  run: the partner's provider reports the *caller's* principal, and a body that names another one
+  changes nothing) and `a_read_scoped_token_cannot_invoke_a_partner`.
 
 - **TLS on the federation edge, anchored on a pin rather than a CA** (item 2 row 11). v2.12.0 stopped
   an on-path attacker *altering* a federated call; it left them able to *read* one, and said so:

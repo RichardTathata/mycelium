@@ -200,7 +200,7 @@ Per §5's sequence, and gated in that order:
 | **9** *(2026-09-18)* | the gate's choreography over that transport, in one process under the enforced profile and two CAs (`lib_tests.rs` → `the_release_gates_choreography_over_the_transport`): lose the only gateway, sever every link, keep working locally, change the grant mid-partition, replace the gateway, reconnect; the *traces* leg from each node's connection table (`connected_peers`); `GatewayPool::retire` |
 | **10a** *(2026-09-18)* | the signed catalogue reply: `CatalogReply` carries the domain, **the partner it was filtered for**, the policy revision and an issue time under `TAG_CATALOG`; `FederationEdge::with_signing_key` signs, `FederationClient::with_partner_key` requires and verifies (unsigned, forged, wrong-domain or misaddressed → `ClientError::Catalogue`, link `Down`) |
 | **10b** *(2026-09-18)* | the two-mesh **Docker** suite — one container per node, two CAs, the federation link cut with `docker network disconnect` and restored: `make test-federation`, CI job `federation` (`examples/federation_node.rs`, `docker/docker-compose.federation.yml`, `tests/integration/run_federation.sh`) |
-| 11 | SDK verbs (py/ts); a hostile network between domains (**closed** — integrity 2026-09-22, confidentiality 2026-09-23); more than two domains |
+| 11 | SDK verbs (py/ts) (**closed** 2026-09-23); a hostile network between domains (**closed** — integrity 2026-09-22, confidentiality 2026-09-23); more than two domains |
 
 **Release gate** (§5): the two-mesh demonstration — discover, invoke, lose a gateway, sever every link, keep
 working locally, change permissions mid-partition, reconnect — and prove **from membership tables, consensus
@@ -275,7 +275,40 @@ differing only in their TLS key. Still **not** claimed: caller authentication st
 auth model at one edge is the drift v2.4.1/v2.4.2 removed), and nothing here helps against an attacker holding
 the partner's private key.
 
-**What remains of row 11.** More than two domains, and the SDK verbs.
+**Row 11's SDK half, closed 2026-09-23 — and the rule it had to carry.** A federated call could
+only be made from Rust: `FederationClient` was the only consumer, and the example had to hand-roll
+a control API around one. The question "what is an SDK verb here?" had three answers and only one
+of them is compatible with this record:
+
+| Shape | Why not / why |
+|---|---|
+| The SDK speaks the edge protocol | Puts credential minting, catalogue verification and TLS pinning into two more languages, and the **domain's signing key into an SDK process**. Three implementations of one trust story, diverging on their own schedules. |
+| Read-only verbs | Cheap, and leaves the actual gap open: an SDK application still cannot call a partner. |
+| **The node is the consumer; the SDK drives the node** | **Chosen.** One implementation of the trust decisions, in the crate that already holds the key. The SDK holds a bearer, which it already had. |
+
+So `with_federation_clients` attaches one `FederationClient` per partner to the node, and five
+gateway routes expose them: `domain`, `partners`, `catalog/{domain}` (`federation:read`) and
+`connect`, `call` (`federation:invoke`). The scopes are split because the powers are: reading which
+partners exist is operator information, while `connect` and `call` **spend this domain's
+credential** on a partner's gateway.
+
+The rule the shape forced, and the reason it is stated here rather than in the runbook: **the
+credential names the local caller, resolved by our own auth layer, and never anything in the
+request body.** A gateway holds the domain's key and the partner's trust; the client calling it has
+neither. Minting under the gateway's own configured principal would record a service account in the
+partner's evidence for work it never asked for — §5's confused deputy, one boundary further out
+again — and reading the principal from the body would let any local holder of `federation:invoke`
+have this domain vouch for an identity nothing authenticated. `FederationClient::call_as` is the
+whole mechanism, and `src/agent/http.rs` is the only caller of it in this crate.
+
+What the SDKs carry beyond the reply is the pair of fields a refusal needs: `sent` (did any byte
+cross) and `delivery` (`none` · `refused` · `completed` · `unknown`). Both raise a distinct type for
+`unknown`, so the outcome that must not be blindly retried cannot be caught alongside ordinary
+failures. Gate: `the_gateway_verbs_carry_the_local_caller_across_the_boundary` — two domains, a real
+gateway, and the partner's provider reporting the caller's principal while a body naming another one
+changes nothing.
+
+**What remains of row 11.** More than two domains.
 
 ## Appendix — anchors verified at adoption (2026-09-17)
 

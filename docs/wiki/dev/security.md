@@ -234,6 +234,50 @@ the safe direction — gated by a test that it equals the structural read of a r
 `lib_tests.rs` → `a_pinned_federation_link_talks_only_to_the_key_the_bundle_names`, two gateways running the
 *same* edge and differing only in their TLS key.
 
-**What is still not built:** SDK verbs, a hostile network between domains, more than two domains, and streaming
+**The consumer side reaches local clients — the SDK verbs (row 11, 2026-09-23):**
+`GossipAgent::with_federation_clients` attaches one `FederationClient` per partner to the node, and five gateway
+routes drive them: `GET /gateway/federation/{domain,partners,catalog/{domain}}` under **`federation:read`**,
+`POST /gateway/federation/{connect,call}` under **`federation:invoke`** (`src/agent/federation_http.rs`, the
+consumer half; handlers in `src/agent/http.rs`). The SDKs do **not** re-implement the edge protocol: the
+signing key and the trust bundle stay in the node, so one implementation of the trust decisions serves all three
+languages — the alternative would have put credential minting into two more languages and the domain's private
+key into an SDK process.
+
+Two rules this adds to the boundary:
+
+- **The credential names the local caller, and the body cannot say otherwise** — item 7's fix at one more
+  boundary. `FederationClient::call_as` takes the principal from the authenticated request; a gateway minting
+  under its *own* configured principal would record a service account in the partner's evidence for work it
+  never asked for, and reading it from the body would let any holder of `federation:invoke` have this domain
+  vouch for an unauthenticated identity. On an open gateway the principal is `anonymous` — honest, and the
+  reason the runbook says to configure tokens *before* connecting two domains.
+- **A refusal states whether anything was sent.** `sent` and `delivery` (`none` · `refused` · `completed` ·
+  `unknown`) travel in every refusal body, and both SDKs raise a **distinct type** for `unknown`, so the one
+  outcome that must not be blindly retried cannot be caught alongside ordinary failures. The in-crate match has
+  **no `_` arm**: `ClientError` is `#[non_exhaustive]` to other crates but not to this one, so a new refusal
+  stops the build at the place that must decide what it means. The outbound call is also its own **AE
+  enforcement point** (`gateway:federation/call`), because an evaluator guarding `/mcp` and `/a2a` and not this
+  route is a remit with a third door open. Gate: `lib_tests.rs` →
+  `the_gateway_verbs_carry_the_local_caller_across_the_boundary`.
+
+**What is still not built:** more than two domains, and streaming
 (`tasks/sendSubscribe` under a credential is refused: federated calls are unary, §5).
 `examples/federated_domains.rs` still runs in one process and says so. Ledger: [history](history.md) → *item 2*.
+
+## A named token is a token model (2026-09-23)
+
+`gateway_auth`'s open-gateway predicate (`src/agent/http.rs`) counted `gateway_auth_token` and
+`gateway_scoped_tokens` and **not** `gateway_named_tokens`, which 2.10.0 added and `resolve_token` has honoured
+since. A deployment whose only credential model was named tokens therefore ran an **open gateway**: no bearer
+required, and `open_gateway_scopes` granting each request exactly the scope its route asks for — deny-by-default
+inverted. Affected 2.10.0–2.12.0; `GossipConfig`'s own docs say to *prefer* named tokens, so the recommended
+configuration was the affected one.
+
+**Why it survived two audits and a fuzz campaign:** the tokens worked. Presenting one was admitted, so every
+positive test passed; the only way to see the hole was to present **nothing**, and the one test that configures
+named tokens sets the positional table too. Same shape as 2.11.1's unreached fuzz seeds — *a gate that looks
+covered because its positive case passes*. The general lesson for this codebase: **an auth test that never sends
+an unauthenticated request proves nothing about the gate**, and a predicate listing credential sources is a
+completeness claim of the lock-order-table kind — adding a source means adding a term. Pinned by
+`named_tokens_alone_still_close_the_gateway` (404-free negative, positive control, and the scope bound still
+applied), which fails when the fix is reverted.

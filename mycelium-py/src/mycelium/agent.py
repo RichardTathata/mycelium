@@ -55,6 +55,7 @@ import httpx
 from httpx_sse import aconnect_sse
 
 from ._pool import ClientPool
+from .federation import Federation
 
 
 @dataclass
@@ -323,6 +324,18 @@ class MyceliumAgent:
 
     async def __aexit__(self, *_: Any) -> None:
         await self.aclose()
+
+    # ── Federated domains ───────────────────────────────────────────────────
+
+    def federation(self) -> Federation:
+        """The federation verbs on this node's gateway — discover a partner domain, read the
+        exports it granted us, and call one.
+
+        Shares this agent's connection pool and bearer, so it is cheap to call repeatedly.
+        See :mod:`mycelium.federation`; the one thing to read before using it is what a
+        refusal's ``sent`` and ``delivery`` fields mean.
+        """
+        return Federation(_pool=self._pool)
 
     # ── Capability advertisement ────────────────────────────────────────────
 

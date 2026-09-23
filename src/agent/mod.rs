@@ -497,6 +497,16 @@ pub(crate) struct TaskCtx {
     /// serves no federated calls: a presented credential is refused, never anonymised.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) federation_edge: std::sync::OnceLock<Arc<crate::federation::edge::FederationEdge>>,
+    /// The consumer side (item 2 row 11), set via `with_federation_clients`: one client per
+    /// partner this node may call *out* to, which is what `/gateway/federation/*` dispatches
+    /// through. Absent or empty = this gateway exposes no outbound federation to local clients.
+    ///
+    /// A `Vec` behind a `OnceLock` rather than a map behind a lock: the set is whatever the
+    /// operator configured before `start`, it is never mutated afterwards (a client's *own* state
+    /// is behind its own mutex), and a node has partners in the single digits — so a linear scan
+    /// by `partner()` costs nothing and the lock-order table gains no row.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) federation_clients: std::sync::OnceLock<Vec<Arc<crate::federation::client::FederationClient>>>,
     /// Optional external audit sink (SOC 2 WS-C), set via `with_audit_sink`.
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink: std::sync::OnceLock<Arc<dyn audit::AuditSink>>,
@@ -925,6 +935,8 @@ impl GossipAgent {
             evidence_journal: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_edge: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            federation_clients: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -1127,6 +1139,43 @@ impl GossipAgent {
             return self;
         }
         self.with_http_routes(federation_http::federation_router(edge));
+        self
+    }
+
+    /// Attach this node's **consumer** side of federation (item 2 row 11): one
+    /// [`FederationClient`](crate::federation::client::FederationClient) per partner domain this
+    /// node may call out to.
+    ///
+    /// This is what makes the `/gateway/federation/*` routes — and so the Python and TypeScript
+    /// SDK verbs — do anything: without it they answer *no client is configured for that domain*.
+    /// The edge ([`with_federation_edge`](Self::with_federation_edge)) is the other direction and
+    /// is independent; a node may have either, both or neither.
+    ///
+    /// **The principal on the wire is the gateway caller's, not the client's.** Each configured
+    /// client carries a principal for its own discovery, but a call dispatched through the gateway
+    /// is minted under the authenticated local caller's principal
+    /// ([`FederationClient::call_as`](crate::federation::client::FederationClient::call_as)) — the
+    /// gateway never speaks to a partner as itself on a client's behalf.
+    ///
+    /// Two clients for the same partner is a configuration fault: the second is dropped with a
+    /// warning, because which one answered would otherwise depend on registration order. Call
+    /// **before** `start()`; a second call keeps the first set and warns.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_federation_clients(
+        self,
+        clients: impl IntoIterator<Item = Arc<crate::federation::client::FederationClient>>,
+    ) -> Self {
+        let mut kept: Vec<Arc<crate::federation::client::FederationClient>> = Vec::new();
+        for c in clients {
+            if kept.iter().any(|k| k.partner() == c.partner()) {
+                tracing::warn!(partner = %c.partner(), "with_federation_clients: a client for this partner is already configured; dropping the duplicate");
+                continue;
+            }
+            kept.push(c);
+        }
+        if self.task_ctx.federation_clients.set(kept).is_err() {
+            tracing::warn!("with_federation_clients: clients are already attached; keeping the first set");
+        }
         self
     }
 

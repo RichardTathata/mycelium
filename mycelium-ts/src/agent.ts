@@ -1,4 +1,5 @@
 import { sseStream } from "./sse";
+import { Federation } from "./federation";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 import {
   CapabilityHandle,
@@ -109,6 +110,19 @@ export class MyceliumAgent {
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     }
     return url.toString();
+  }
+
+  // ── Federated domains ─────────────────────────────────────────────────────
+
+  /**
+   * The federation verbs on this node's gateway (item 2 row 11): discover a partner domain, read
+   * the exports it granted us, and call one. Shares this agent's base URL, bearer and timeout.
+   *
+   * See `./federation` — the one thing to read first is what a refusal's `sent` and `delivery`
+   * fields mean, because `delivery: "unknown"` is not a failure.
+   */
+  federation(): Federation {
+    return new Federation(this.base, this.auth, this.timeout);
   }
 
   // ── Introspection ─────────────────────────────────────────────────────────

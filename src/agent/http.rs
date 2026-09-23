@@ -241,6 +241,18 @@ pub(super) async fn run_http_server(
         .route("/llm/call",            post(gw_llm_call))
         .route("/llm/stream",          post(gw_llm_stream));
 
+    // ── Federation, the consumer side (item 2 row 11) ─────────────────────────
+    // The provider side is merged at the root (`/federation/catalog`, credential-authenticated);
+    // these are the local client's verbs, and they sit inside `/gateway` precisely so they get the
+    // bearer-then-scope layer every other local verb gets. `federation:read` / `federation:invoke`.
+    #[cfg(feature = "tls")]
+    let gateway = gateway
+        .route("/federation/domain",           get(gw_federation_domain))
+        .route("/federation/partners",         get(gw_federation_partners))
+        .route("/federation/catalog/{domain}", get(gw_federation_catalog))
+        .route("/federation/connect",          post(gw_federation_connect))
+        .route("/federation/call",             post(gw_federation_call));
+
     // WS2 audit trail query + verification (compliance feature).
     #[cfg(feature = "compliance")]
     let gateway = gateway.route("/audit", get(gw_audit));
@@ -439,8 +451,14 @@ async fn gateway_auth(
     let cfg = &ctx.agent_ctx.config;
     let legacy = cfg.gateway_auth_token.as_deref();
 
+    // **Every** token table counts, not only the positional one. `gateway_named_tokens` was added
+    // in 2.10.0 and `resolve_token` has honoured it since, but this predicate did not — so a
+    // deployment whose *only* credential model was named tokens (the model the config docs tell an
+    // operator to prefer) fell into the open-gateway branch below: no bearer required, and
+    // `open_gateway_scopes` granting each route exactly the scope it asks for. The tokens worked,
+    // which is what hid it: presenting one was admitted, and so was presenting nothing.
     #[cfg(feature = "compliance")]
-    let have_scoped = !cfg.gateway_scoped_tokens.is_empty();
+    let have_scoped = !cfg.gateway_scoped_tokens.is_empty() || !cfg.gateway_named_tokens.is_empty();
     #[cfg(not(feature = "compliance"))]
     let have_scoped = false;
 
@@ -747,6 +765,15 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/tuple/take_by_key" => "tuple:write",
         "/gateway/tuple/complete"    => "tuple:write",
         "/gateway/tuple/ack"         => "tuple:write",
+        // Federation's consumer side (item 2 row 11). `federation:invoke` is separate from
+        // `federation:read` because the two are different powers: reading which partners exist and
+        // what they last exported is operator information, while `connect` and `call` spend this
+        // domain's credentials on a partner's gateway under the caller's own name.
+        "/gateway/federation/domain"           => "federation:read",
+        "/gateway/federation/partners"         => "federation:read",
+        "/gateway/federation/catalog/{domain}" => "federation:read",
+        "/gateway/federation/connect"          => "federation:invoke",
+        "/gateway/federation/call"             => "federation:invoke",
         // Deny-by-default.
         _ => "admin",
     }
@@ -1978,6 +2005,12 @@ pub(crate) const ENFORCEMENT_POINT_MCP: &str = "gateway:mcp/tools/call";
 /// alive in a build that never uses it is the feature-gated dead-code trap CI checks for.
 #[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
 pub(crate) const ENFORCEMENT_POINT_A2A: &str = "gateway:a2a";
+
+/// The outbound federated-call route (item 2 row 11). Named separately from `gateway:a2a` because
+/// it *is* a different point: `/a2a` is where a partner's call arrives, this is where ours leaves.
+/// An operator reading evidence has to be able to tell the two directions apart.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) const ENFORCEMENT_POINT_FEDERATION: &str = "gateway:federation/call";
 
 /// Assemble an [`ActionEnvelope`](super::action_evaluator::ActionEnvelope) from facts this
 /// gateway verified and run the evaluator over it. `Some(refusal)` means do not dispatch.
@@ -3786,6 +3819,172 @@ async fn gw_llm_stream(
     Sse::new(stream::once(async move { Ok::<_, std::convert::Infallible>(event) }))
 }
 
+// ── Federation: the consumer side (item 2 row 11) ────────────────────────────
+//
+// The verbs a *local* client — Rust, Python or TypeScript — uses to reach a partner domain. The
+// decisions are `crate::federation::client`'s and the refusal vocabulary is
+// `federation_http`'s; what lives here is the part that is this file's business, and it is one
+// sentence long: **the principal on the credential is the authenticated caller's, and is never
+// read from the request body.**
+//
+// That is item 7's rule at one more boundary. A gateway holds the domain's signing key and the
+// partner's trust; the client calling it has neither. If the body could name the principal, any
+// local caller with `federation:invoke` could have this domain vouch for a principal it made up,
+// and the partner's evidence would record it — authority by assertion, which is exactly the
+// confused deputy the axis has now removed twice.
+
+/// `GET /gateway/federation/domain`
+#[cfg(feature = "tls")]
+async fn gw_federation_domain(State(ctx): State<Arc<HttpCtx>>) -> Response {
+    super::federation_http::domain_json(&ctx.agent_ctx)
+}
+
+/// `GET /gateway/federation/partners`
+#[cfg(feature = "tls")]
+async fn gw_federation_partners(State(ctx): State<Arc<HttpCtx>>) -> Response {
+    super::federation_http::partners_json(&ctx.agent_ctx)
+}
+
+/// `GET /gateway/federation/catalog/{domain}` — the **last observed** catalogue for one partner.
+///
+/// Deliberately reads only what this node already holds: no network, so an operator can look at a
+/// partner during an outage without the act of looking changing the link's state. `POST
+/// /gateway/federation/connect` is the one that goes and asks.
+#[cfg(feature = "tls")]
+async fn gw_federation_catalog(
+    State(ctx): State<Arc<HttpCtx>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> Response {
+    let client = match super::federation_http::client_for(&ctx.agent_ctx, &domain) {
+        Ok(c) => c,
+        Err(r) => return *r,
+    };
+    let exports = client.last_catalogue();
+    Json(json!({
+        "domain": domain,
+        "link": super::federation_http::link_word(client.link_state()),
+        "observed": exports.is_some(),
+        "exports": exports,
+    }))
+    .into_response()
+}
+
+/// `POST /gateway/federation/connect` — fetch a partner's catalogue and bring the link up.
+#[cfg(feature = "tls")]
+async fn gw_federation_connect(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(domain) = body["domain"].as_str() else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing domain"}))).into_response();
+    };
+    let client = match super::federation_http::client_for(&ctx.agent_ctx, domain) {
+        Ok(c) => c,
+        Err(r) => return *r,
+    };
+    match client.connect().await {
+        Ok(exports) => Json(json!({
+            "domain": domain,
+            "link": super::federation_http::link_word(client.link_state()),
+            "exports": exports,
+        }))
+        .into_response(),
+        Err(e) => super::federation_http::call_refusal(&e),
+    }
+}
+
+/// `POST /gateway/federation/call` — invoke one of a partner's exports.
+///
+/// `repeatable` is the caller's statement about **their own** effect, not ours, and it is the field
+/// that decides whether a silent gateway may be retried elsewhere: a repeatable call can be, an
+/// at-most-once call comes back `delivery: unknown` instead. It defaults to `false`, because the
+/// safe default for an unstated effect is the one that never runs it twice.
+#[cfg(feature = "tls")]
+async fn gw_federation_call(
+    State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let caller = caller.map(|Extension(c)| c);
+    let (Some(domain), Some(export)) = (body["domain"].as_str(), body["export"].as_str()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing domain or export"}))).into_response();
+    };
+    let text = body["text"].as_str().unwrap_or("");
+    let repeatability = if body["repeatable"].as_bool().unwrap_or(false) {
+        crate::federation::gateway::Repeatability::Repeatable
+    } else {
+        crate::federation::gateway::Repeatability::AtMostOnce
+    };
+    let client = match super::federation_http::client_for(&ctx.agent_ctx, domain) {
+        Ok(c) => c,
+        Err(r) => return *r,
+    };
+
+    // AE slice: the same evaluator preflight `/mcp` and `/a2a` run. A federated call is a third
+    // door onto an effect, and the argument a2a.rs makes for its own preflight is the argument
+    // here verbatim — an enforcement point that can be walked around by choosing a different door
+    // is not one. Inert unless an evaluator is attached.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let preflight = ae_preflight(
+        &ctx.agent_ctx,
+        caller.as_ref(),
+        "federation.call",
+        &format!("export:{export}@{domain}"),
+        &json!({ "domain": domain, "export": export, "text": text }),
+        &body,
+        ENFORCEMENT_POINT_FEDERATION,
+    )
+    .await;
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    if let Preflight::Refuse(refusal) = &preflight {
+        // `sent: false` is a fact about this refusal, not a courtesy: the preflight runs before
+        // the client is touched, so no credential was minted and no byte left the process.
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "policy", "detail": refusal.to_string(), "data": refusal.error_data(),
+                "sent": false, "delivery": "none",
+            })),
+        )
+            .into_response();
+    }
+
+    // Item 7 across the boundary: the principal the partner is told is the one the auth layer
+    // resolved. On an open gateway that is `anonymous`, which is honest — this domain is vouching
+    // that the caller was anonymous *here* — and is why the federation runbook tells an operator
+    // who needs attribution to put a token model in front of these routes.
+    let principal = caller
+        .as_ref()
+        .map(|c| c.principal.clone())
+        .unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+
+    let outcome = client.call_as(&principal, export, text, repeatability).await;
+
+    // What this gateway observed, in the evidence vocabulary. The mapping is the refusal
+    // vocabulary's `delivery` field one more time, and it is the same rule: a refusal this side
+    // made is `None`, an answer is `Completed`, and everything else is `Unknown` — never a
+    // negative we did not establish.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    {
+        use super::action_evaluator::Execution;
+        use crate::federation::client::ClientError;
+        let observed = match &outcome {
+            Ok(_) => Execution::Completed,
+            Err(ClientError::Link(_)) | Err(ClientError::Resolve(_)) | Err(ClientError::Principal(_))
+            | Err(ClientError::Tls(_)) => Execution::None,
+            Err(ClientError::Outcome(crate::federation::gateway::CallOutcome::NoCapacity { .. })) => Execution::None,
+            Err(ClientError::Refused { .. }) => Execution::Failed,
+            Err(_) => Execution::Unknown,
+        };
+        ae_record_execution(&ctx.agent_ctx, &preflight, observed).await;
+    }
+
+    match outcome {
+        Ok(reply) => Json(json!({ "reply": reply, "sent": true, "delivery": "completed" })).into_response(),
+        Err(e) => super::federation_http::call_refusal(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{GossipAgent, GossipConfig, NodeId};
@@ -4611,6 +4810,13 @@ mod tests {
         assert_eq!(required_scope(&Method::GET,  "/gateway/reason/trace/{run_id}"), "llm:read");
         assert_eq!(required_scope(&Method::PUT,  "/gateway/reason/blob"), "llm:write");
         assert_eq!(required_scope(&Method::POST, "/gateway/wiki/query"), "wiki:read");
+        // Federation's consumer side (item 2 row 11): reading about partners and spending a
+        // credential on one are different powers, and the table is where that is decided.
+        assert_eq!(required_scope(&Method::GET,  "/gateway/federation/domain"), "federation:read");
+        assert_eq!(required_scope(&Method::GET,  "/gateway/federation/partners"), "federation:read");
+        assert_eq!(required_scope(&Method::GET,  "/gateway/federation/catalog/{domain}"), "federation:read");
+        assert_eq!(required_scope(&Method::POST, "/gateway/federation/connect"), "federation:invoke");
+        assert_eq!(required_scope(&Method::POST, "/gateway/federation/call"), "federation:invoke");
         assert_eq!(required_scope(&Method::POST, "/gateway/wiki/ingest"), "wiki:write");
         assert_eq!(required_scope(&Method::GET,  "/gateway/bb/depth"), "board:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/tuple/take"), "tuple:write");
@@ -6039,6 +6245,59 @@ mod gateway_caller_tests {
         let n1 = who(p1, "named", Arc::clone(&seen)).await;
         assert_eq!(n1, format!("token:{}/ci-bot", g1.node_id()));
         g1.shutdown().await; g2.shutdown().await; provider.shutdown().await;
+    }
+
+    /// **A named token is a token model.** Found 2026-09-23 while adding the federation verbs'
+    /// scope test, which failed with a 504 where a 403 was expected — the scope layer had not run
+    /// at all.
+    ///
+    /// `gateway_auth`'s open-gateway predicate counted `gateway_auth_token` and
+    /// `gateway_scoped_tokens` and **not** `gateway_named_tokens`, which 2.10.0 added and
+    /// `resolve_token` has honoured since. So a deployment whose only credential model was named
+    /// tokens — the model `GossipConfig`'s own documentation says to *prefer* — ran an open
+    /// gateway: no bearer required, and `open_gateway_scopes` handing each route exactly the scope
+    /// it asks for, which is deny-by-default inverted into admit-by-default.
+    ///
+    /// It hid because the tokens kept working: presenting one was admitted (`resolve_token` knows
+    /// them), and the only way to see the hole was to present **nothing**. The existing identity
+    /// test above configures both tables, so it never could.
+    ///
+    /// Both halves are asserted, because the fix must not simply close the port: no bearer is 401,
+    /// and a named token still resolves to its own principal.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn named_tokens_alone_still_close_the_gateway() {
+        let g = node(Some(alloc_port()), vec![], |c| {
+            c.gateway_named_tokens = vec![crate::GatewayNamedToken {
+                name: "ci-bot".into(), token: "named".into(), scopes: vec!["kv:read".into()],
+            }];
+        });
+        g.start().await.unwrap();
+        let port = g.config().http_port.unwrap();
+        let url = format!("http://127.0.0.1:{port}/gateway/kv/keys");
+        let http = reqwest::Client::new();
+        for _ in 0..100 {
+            if http.get(format!("http://127.0.0.1:{port}/health")).send().await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let anonymous = http.get(&url).send().await.expect("gateway answered");
+        assert_eq!(anonymous.status(), 401, "a named-token deployment is not an open gateway");
+
+        let wrong = http.get(&url).header(axum::http::header::AUTHORIZATION, "Bearer nope").send().await.unwrap();
+        assert_eq!(wrong.status(), 401, "an unrecognised bearer is refused");
+
+        let named = http.get(&url).header(axum::http::header::AUTHORIZATION, "Bearer named").send().await.unwrap();
+        assert_eq!(named.status(), 200, "the named token still admits what its scopes allow");
+
+        // ...and its scopes still bound it: `kv:read` is not `kv:write`.
+        let write = http.post(format!("http://127.0.0.1:{port}/gateway/kv"))
+            .header(axum::http::header::AUTHORIZATION, "Bearer named")
+            .json(&serde_json::json!({"key": "probe/x", "value_b64": ""}))
+            .send().await.unwrap();
+        assert_eq!(write.status(), 403, "a read token does not write");
+
+        g.shutdown().await;
     }
 }
 

@@ -50,6 +50,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
 | `audit:read` / `transparency:read` | audit-trail query / revocation transparency log |
 | `identity:write` | key revocation (`POST /gateway/identity/revoke`) |
+| `federation:read` / `federation:invoke` | federation's **consumer** side (item 2 row 11): `GET /gateway/federation/domain`, `/partners`, `/catalog/{domain}` / `POST /gateway/federation/connect`, `/call`. Split because they are different powers — reading which partners exist is operator information; `connect` and `call` spend this domain's credential on a partner's gateway, under the caller's own name |
 | `*` | everything (the legacy `gateway_auth_token` is equivalent) |
 | `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` |
 | `wiki:read` / `wiki:write` | `mycelium-wiki`: `/wiki/read`, `/wiki/query` / `/wiki/propose`, `/wiki/ingest` |
@@ -69,6 +70,15 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 > `consensus:read` for slot inspection; a legacy `gateway_auth_token` grants all of them.
 > **SDK clients:** `mycelium-py` ≥ 0.2.4 and `mycelium-ts` ≥ 0.1.1 take the bearer at construction
 > (`token=` / `{ token }`) or from `MYCELIUM_GATEWAY_TOKEN`; earlier versions cannot present one.
+
+> **Since 2026-09-23** a deployment whose **only** credential model was `gateway_named_tokens`
+> was running an *open* gateway: the auth layer's "is a token model configured?" test counted
+> `gateway_auth_token` and `gateway_scoped_tokens` and not the named table, so no bearer was
+> required at all and every route was granted exactly the scope it asked for. The tokens
+> themselves worked, which is what hid it — presenting one was admitted, and so was presenting
+> nothing. Shipped in 2.10.0 and fixed here; **check any deployment on 2.10.0–2.12.0 that
+> configures named tokens only** (a request with no `Authorization` header should now be 401).
+> `gateway_scoped_tokens`-only and `gateway_auth_token` deployments were never affected.
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`, `/stats`, `/metrics`,
 the A2A descriptor (`/.well-known/agent.json`), `POST /a2a` (an A2A peer needs no Mycelium
