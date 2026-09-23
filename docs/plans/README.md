@@ -19,7 +19,7 @@ record, not duplicates of those.
 > the only remaining slice is the *additive* disconnected KV-native variant). The one open
 > non-engineering item is a **research experiment** (three-arm work distribution, for Paper 1).
 >
-> **v3.0 — the contracts axis (adopted plan, 2026-09-05):** [`v3-contracts-axis.md`](v3-contracts-axis.md) —
+> **v3.0 — the contracts axis (adopted 2026-09-05; **delivered** v2.5.0 → v2.12.0, rev 1.15):** [`v3-contracts-axis.md`](v3-contracts-axis.md) —
 > eight items (typed contracts · federated domains · knowledge layer · adaptive stability · scoped mandates ·
 > deterministic replay · gateway caller identity · threat model), plus the authorisation seam and the commitment
 > companion, with one dependency graph, phase gates, and a decision register of every departure from the external
@@ -29,7 +29,11 @@ record, not duplicates of those.
 > since 2.0 and entirely additive. **v2.9.0** (2026-09-19) carried the *evidence* that it holds: a whole node
 > replaying deterministically, and a runnable decisive demonstration per item, two of which found real defects.
 > Since then §12's delivery surfaces have landed — the seven how-to guide chapters (18–24), the axis vocabulary,
-> the [federation runbook](../operations/federation.md), and the contracts-axis metrics.
+> the [federation runbook](../operations/federation.md), and the contracts-axis metrics — and **§12 and item 2's
+> row 11 both closed on 2026-09-23** (the SDK receipt narrative, two wiki pages, federation's SDK verbs and a
+> third domain). **The plan's §10 is the state of play**: four things remain and none is blocked on unwritten
+> code — V1's offline nightly runner, AE4's four joint AWS/GCP runs, two open design questions, and §13's
+> recorded questions, which belong to the next epoch.
 >
 > **Still open:** the deck and philosophy passes, the companion onboarding checklist, the **Phase-C adversarial
 > self-audit** over items 1 + 2 + 7, and the private RA/AE slices (a separate repository — see §8).

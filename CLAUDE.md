@@ -203,11 +203,18 @@ the **consumer-side-only per-partner budget** (the edge has no slot accounting �
 needing a decision rather than a patch; **the composition finding is closed**, 2026-09-21, by recording the
 receipt's rung and the origin domain onto the execution record — `docs/design/composed-effect.md`, and note what
 it claims: the composed sentence is *reconstructable*, not *enforced*); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
-silently and the criterion has never been met**. **Phase state (2026-09-20, after v2.10.0).** **Phase C is closed** — AE1 was its last gate and
-landed with the release. **Phase A has one gate still open and it is not a code gate:** V1, above.
-**Phase D's remaining work is entirely in the private repo** — RA4, AE2 and AE3; the public side of
-D (items 3·4·5·6) shipped in 2.8.0/2.9.0. **Phase E** is RA5–RA6 and AE4, plus the
-combined-feedback scenario. So a session looking for public work should look at the open list above
-or §13's recorded questions, not at a phase gate. Delivery ledger:
+silently and the criterion has never been met**. **Phase state (2026-09-23, after v2.12.0 — the axis is delivered).** Phases **B, C, D and E are
+closed**: D's private half (RA4, AE2, AE3) landed 2026-09-20/21 and E's (RA5, RA6, AE4's contract
+half) on 2026-09-21, alongside the public side in 2.8.0/2.9.0. **Phase A has one gate still open and
+it is not a code gate:** V1, above. The **only other outstanding gate in the whole axis** is AE4's
+**four joint AWS/GCP runs** — §6.8 says neither a fixture nor one cloud can close it, so it needs the
+counterparty rather than a commit; AE4's operator and SDK examples travel with it. Phase E's
+*combined-feedback scenario green* is met **in the bounded sense scenario C supports** (with the
+breakers on every swept schedule settles, with them off at least one does not); the ADR's sharper
+sentence — loops oscillating together while each is stable alone — is **not shown**, because the
+three loops share one state variable and neither available isolation method can pose the question
+(measured 2026-09-22). So a session looking for public work should look at the open list above or
+§13's recorded questions, not at a phase gate. The plan's §10 is now a state of play rather than a
+queue (**rev 1.15**). Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

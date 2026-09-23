@@ -2936,13 +2936,15 @@ evolution needing field-level migration.
 
 ---
 
-## v3.0 — two primaries (one shipped its first tranche) · packaging candidates · one adapter · the contracts axis (proposed)
+## v3.0 — two primaries (both shipped) · packaging candidates · one adapter · the contracts axis (**shipped**, v2.5.0 → v2.12.0)
 
 > **Naming note — "v3.0" is a roadmap _epoch_, not a version.** The released substrate is at
-> **`2.4.4`** (wire v12, additive-only); there is no `3.0.0` crate. "v3.0" labels a *body of work* the way
+> **`2.12.0`** (wire v12, additive-only); there is no `3.0.0` crate. "v3.0" labels a *body of work* the way
 > "v2.0 Milestones" named the prior epoch — and since 2026-09-05 it has **two axes**: the **companion / DX
 > axis** (shipped July 2026: `mycelium-guardrails` **`1.0.0`**, `mycelium-reason` **`0.6.0`**, the validated
-> pattern gallery) and the **contracts axis** (adopted plan, no code yet — [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md)).
+> pattern gallery) and the **contracts axis**, which **shipped across v2.5.0 → v2.12.0**
+> ([`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md) — all eight items, the commitment
+> companion, and the delivery surfaces; what remains is named in that plan's §10).
 > Deliverables ship as independent companion crates on their own version lines, plus additive core APIs on the
 > stable `mycelium` 2.x line. A `3.0.0` *substrate* release would require an actual breaking change (wire or
 > public API) — none has occurred, and the only candidate anywhere in the plan is a later authenticated,
@@ -3044,7 +3046,7 @@ mesh). Honest limits: **promise-strength** (Tiers A/B) and **eventually-consiste
 Plan: [`docs/plans/mycelium-guardrails.md`](docs/plans/mycelium-guardrails.md) · guide
 [`docs/guide/16-guardrails.md`](docs/guide/16-guardrails.md).
 
-### The contracts axis (adopted plan 2026-09-05; **rev 1.2 approved by the reviewer as the strategic baseline**, rev 1.4 adds the delivery surfaces, rev 1.5 the composition hypothesis, rev 1.6 the RA slice; rev 1.3 records their implementation requirements — `docs/plans/v3-contracts-axis.md`)
+### The contracts axis — **shipped v2.5.0 → v2.12.0** (adopted 2026-09-05; rev 1.15 records the delivered state — `docs/plans/v3-contracts-axis.md`)
 
 **The plan of record is [`docs/plans/v3-contracts-axis.md`](docs/plans/v3-contracts-axis.md).** This section is its
 index. An external review of v2.4.1 (2026-09-05) found five defects — fixed and released the same day — and
@@ -3065,14 +3067,26 @@ gallery entry); roles evaporate and authority expires. The axis is the philosoph
 
 | # | Item | One line | Kind | Divergences | Status |
 |---|------|----------|------|:-----------:|--------|
-| 1 | **Contracts** | typed receipts for what an ack means; one complete external-effect adapter | core (additive) + companion | 4 | Phase 0 done (dir fsync, read-back abort, honest WAL acks); PR 1 next |
-| 6 | **Deterministic replay** | production logic under controlled time/RNG/scheduling/storage; replay from a bundle | core seams + `mycelium-sim` | 5 | PR 1 next (with item 1) |
-| 2 | **Federated domains** | a domain = one admitted mesh; federation = exported services over an authenticated edge protocol; **no wire change** | companion `mycelium-federation` | 7 | after Phase A |
-| 3 | **Knowledge layer** | claim · observation · assessment · acceptance; reader-specific acceptance | companion `mycelium-knowledge` | 6 | after 1 + 6 |
-| 4 | **Adaptive stability** | one admission contract for every governor; budgets as allocated rights | agent interfaces + `mycelium-control` | 7 | explicit cooldown parameter now (*rev 1.1: the "live coupling" claim was wrong*); rest after 6 |
-| 5 | **Scoped mandates** | authority checked by the resource, never inferred from a role | wiki + consensus + companion | 7 | after 1 + 6 (replay scenario B) |
-| 7 | **Gateway caller identity** *(rev 1.2)* | every gateway-originated call carries the client's identity to the provider — the `/mcp` confused-deputy class, closed everywhere | core gateway (additive) | — | Phase A, standalone |
-| 8 | **Threat model rev 2** *(rev 1.2)* | foreign principals · abusive authenticated clients · evidence confidentiality · a compromised former holder | `docs/threat-model.md` | — | Phase A; gates 2/3/5 |
+| 1 | **Contracts** | typed receipts for what an ack means; one complete external-effect adapter | core (additive) + companion | 4 | ✅ **complete** (PRs 1–7, v2.5.0–v2.8.0; `mycelium-effects` is the destination rung) |
+| 6 | **Deterministic replay** | production logic under controlled time/RNG/scheduling/storage; replay from a bundle | core seams + `mycelium-sim` | 5 | ✅ **complete** (PRs 1–7; the scheduler seam in v2.9.0 closed the last unrouted row) |
+| 2 | **Federated domains** | a domain = one admitted mesh; federation = exported services over an authenticated edge protocol; **no wire change** | **core** `src/federation/` (not a companion — D-note below) | 7 | ✅ **complete incl. row 11** (transport v2.8.0, release gate met over Docker; body binding, TLS pinning, SDK verbs and a third domain 2026-09-22/23) |
+| 3 | **Knowledge layer** | claim · observation · assessment · acceptance; reader-specific acceptance | **core** `src/knowledge/` | 6 | ✅ **complete**, incl. the semantic gate's three negatives |
+| 4 | **Adaptive stability** | one admission contract for every governor; budgets as allocated rights | agent interfaces + `src/control/` | 7 | ✅ **complete** — the rights ledger, every governor through the contract, the §7 profile ladder + rollout runbook; scenario C green *in its bounded sense* (§below) |
+| 5 | **Scoped mandates** | authority checked by the resource, never inferred from a role | wiki + consensus + `src/mandate/` | 7 | ✅ **complete** (PRs 1–5 + D4; the fence names its own refusal) |
+| 7 | **Gateway caller identity** *(rev 1.2)* | every gateway-originated call carries the client's identity to the provider — the `/mcp` confused-deputy class, closed everywhere | core gateway (additive) | — | ✅ **complete** (v2.5.0), and extended across a domain boundary by item 2's row 11 |
+| 8 | **Threat model rev 2** *(rev 1.2)* | foreign principals · abusive authenticated clients · evidence confidentiality · a compromised former holder | `docs/threat-model.md` | — | ✅ **published** (v2.5.0), cited by items 2/3/5 |
+
+> **Two corrections this table carried for weeks.** Items 2, 3, 4 and 5 shipped **in core**, not as the
+> separate `mycelium-federation` / `mycelium-knowledge` / `mycelium-control` companions the plan first
+> imagined; the three crates that *did* appear are `mycelium-sim`, `mycelium-effects` and
+> `mycelium-commitment`. And the Status column said *"PR 1 next"* nine releases after PR 1 landed — the
+> kind of drift the axis' own §12 alignment gate exists to catch, found by hand on 2026-09-23.
+
+**What is left of the axis** (plan §10): **V1**, the nightly scale runner, whose self-hosted box is offline
+so the job queues silently — a Phase A gate that has never been met and is not a code gate; and the **four
+joint AWS/GCP runs** of the AE slice, which §6.8 says neither a fixture nor one cloud can close. Two design
+questions stay open by decision rather than omission: `mycelium-commitment`'s unsigned `Offer`/`Award`, and
+the consumer-side-only per-partner budget at the federation edge.
 
 **Order:** 1 + 6 together → 2 → 3, 4, 5 as companions. **The one architectural disagreement with the reviewer** (D1):
 no resource-authoritative *service process* for mandates — the fence goes inside the canonical store's own atomic
