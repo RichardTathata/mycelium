@@ -22,6 +22,57 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.13.0 release — 2026-09-23 (tag `v2.13.0`) — the axis' last open questions, and a gateway that was not closed
+
+Wire **v12** unchanged (`PREV = 11`); every change additive on the 2.x line. Three threads.
+
+**Item 2's row 11 is complete**, and the interesting part is how much of it could not be *stated*
+before. The **SDK verbs** (`with_federation_clients`, five `/gateway/federation/*` routes behind
+`federation:read` / `federation:invoke`) put the node in the consumer's seat rather than porting
+credential minting into two more languages — one trust story, not three — and the credential names
+the **local caller**, never the node and never anything in the request body, which is item 7's
+confused deputy at one more boundary. A **hostile network** closed in two halves (body binding
+09-22, TLS pinned on an SPKI in the trust bundle 09-23, because the design holds no X.509 to anchor
+on). And **more than two domains**: with exactly two, a catalogue *filtered for the asker* is
+indistinguishable from the export list, a grant to one partner from a grant, and *trust is not
+transitive* has no third party to fail to reach. A chain — alpha grants to beta, beta grants to
+gamma, alpha and gamma strangers — states all three.
+
+**The two open design decisions, decided and built.** `mycelium-commitment`'s offers and awards
+carry provenance: the crate's first rule (*no component assigns another participant's obligation*)
+had nothing enforcing it, and a forged offer would have **passed the award's own check** — a pure
+rule over forgeable inputs verifies that the rule was applied, not that the inputs were real.
+Signing beat binding a record to its writer on a fact about the substrate: **anti-entropy carries no
+author**, so writer-binding would hold on the gossip path and evaporate on the repair path. And the
+**federation edge meters calls per partner** — the mirror of `GatewayPool` on the other side of the
+same edge, with the M7 shared-observation alternative rejected because it would put foreign domain
+names into `sys/` (D7) and is unbuildable without this counter anyway.
+
+**The security fix, and why it survived two audits.** A deployment whose only credential model was
+`gateway_named_tokens` — the configuration `GossipConfig`'s own docs tell operators to **prefer** —
+had been running an **open gateway** since 2.10.0: `gateway_auth`'s token-model predicate counted
+the legacy and positional tables and not the named one, so no bearer was required at all and
+`open_gateway_scopes` granted each route exactly the scope it asked for. It survived the Phase-C
+audit and the fuzz campaign because **the tokens worked**: every positive assertion passed, and the
+only way to see it was to present *nothing*. Found by a scope test that returned 504 where 403 was
+expected. **Operators on 2.10.0–2.12.0 with named tokens only: an unauthenticated
+`GET /gateway/kv/keys` answers 200 today and 401 after this release.**
+
+Also: §12.2 closed (the SDK receipt narrative — including that `MyceliumCheckpointSaver.put()`
+returns a **rung-1 receipt**, which the flagship demo already knew, waiting for replication by
+*reading from node B*), two wiki pages (`architecture/contracts`, `testing/replay`), the plan of
+record's **rev 1.15**, and `CallRefusal` / `CommitmentRefusal` marked `#[non_exhaustive]` before
+their next addition rather than after it.
+
+**Upgrade notes**, all in v2.8.0's class — a struct gained a field or an enum gained a variant:
+`CallPolicy` (`max_in_flight_per_partner`), `Offer` and `Award` (`signature`),
+`CommitmentRefusal::AlreadyAwarded` now `Box<Award>`, and the two `#[non_exhaustive]` enums whose
+`_` arms **must fail closed**.
+
+**Not claimed:** a commitment signature's strength rests on `require_identity_proofs`, which is
+**default-off**; and the per-partner cap is **per gateway** (N gateways ⇒ N × cap) and bounds
+concurrency, not rate. Both are written beside the mechanisms rather than left to be discovered.
+
 ## v2.12.0 release — 2026-09-23 (tag `v2.12.0`) — authenticating the caller is not authenticating the call
 
 Wire **v12** unchanged. Ten workspace crates move to 2.12.0.

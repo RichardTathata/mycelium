@@ -9,17 +9,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [2.13.0] — 2026-09-23
 
-- **`CallRefusal` and `CommitmentRefusal` are `#[non_exhaustive]`.** Both gained a variant this
-  cycle (`AtCapacity`; and `AlreadyAwarded` changed shape), and both are vocabularies of *why
-  something was refused* that have now grown twice — so this is the §6.6 ledger's own reasoning
-  applied before the next addition rather than after it: **one announced break instead of a series
-  of unannounced ones**, the same move 2.10.0 made for `CatalogRefusal`.
+**The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged
+(`PREV = 11`); every change additive on the 2.x line.
 
-  An exhaustive `match` downstream needs a `_` arm, and **that arm must fail closed**: an
-  unrecognised `CallRefusal` is *this call was not authorised for a reason this code does not know*,
-  never *it is fine*; an unrecognised `CommitmentRefusal` is *no award was made*, never *one was*.
+Three things run through this release. Item 2's **row 11 is complete** — federation reaches Python
+and TypeScript, survives a hostile network, and has been shown to work with more than two domains,
+which is the first time several of its claims could even be *stated*. The contracts axis' **two open
+design decisions are decided and built**, each with the limit it does not close written down beside
+it. And a **security fix**: a deployment whose only credential model was `gateway_named_tokens` — the
+configuration `GossipConfig`'s own documentation tells operators to prefer — has been running an
+**open gateway** since 2.10.0.
+
+**Check first, upgrade second.** If you run 2.10.0–2.12.0 with named tokens and no
+`gateway_auth_token` or `gateway_scoped_tokens`, an unauthenticated `GET /gateway/kv/keys` answers
+**200 today and 401 after this release**. That is the whole test.
+
+### Security
+
+- **A deployment whose only credential model was `gateway_named_tokens` had an open gateway.**
+  `gateway_auth`'s "is a token model configured?" test counted `gateway_auth_token` and
+  `gateway_scoped_tokens` — and not the named table, which 2.10.0 added and `resolve_token` has
+  honoured ever since. Such a node therefore took the *open gateway* branch: **no bearer
+  required**, with `open_gateway_scopes` handing each request exactly the scope its route asks
+  for, which turns deny-by-default into admit-by-default for every gateway route on the port.
+
+  It hid because the tokens kept working. Presenting one was admitted (`resolve_token` knows
+  them), so nothing looked wrong; the only way to see the hole was to present **nothing**. The
+  existing identity test configures both tables at once and so never could — the same shape as the
+  fuzz seeds in 2.11.1, where a gate that appeared covered was never reaching its invariant.
+  `GossipConfig`'s own documentation says to *prefer* named tokens, so the recommended
+  configuration was the affected one.
+
+  **Affected: 2.10.0 – 2.12.0**, and only deployments configuring `gateway_named_tokens` with no
+  `gateway_auth_token` and no `gateway_scoped_tokens`. Check yours: an unauthenticated
+  `GET /gateway/kv/keys` must answer 401. Found while writing the federation verbs' scope test,
+  which returned 504 where 403 was expected — the scope layer had not run at all. Pinned by
+  `named_tokens_alone_still_close_the_gateway`, which asserts both halves (no bearer is 401, a
+  named token still resolves to its own principal and is still bounded by its scopes) and fails
+  when the fix is reverted.
 
 ### Added
 
@@ -97,32 +126,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unaffected); and `CommitmentRefusal::AlreadyAwarded` now carries a `Box<Award>`, because an
   unboxed one made every `Result` in the crate as large as its rarest outcome — `existing.participant`
   is unchanged, but moving the award out of the variant needs a `*`.
-
-### Security
-
-- **A deployment whose only credential model was `gateway_named_tokens` had an open gateway.**
-  `gateway_auth`'s "is a token model configured?" test counted `gateway_auth_token` and
-  `gateway_scoped_tokens` — and not the named table, which 2.10.0 added and `resolve_token` has
-  honoured ever since. Such a node therefore took the *open gateway* branch: **no bearer
-  required**, with `open_gateway_scopes` handing each request exactly the scope its route asks
-  for, which turns deny-by-default into admit-by-default for every gateway route on the port.
-
-  It hid because the tokens kept working. Presenting one was admitted (`resolve_token` knows
-  them), so nothing looked wrong; the only way to see the hole was to present **nothing**. The
-  existing identity test configures both tables at once and so never could — the same shape as the
-  fuzz seeds in 2.11.1, where a gate that appeared covered was never reaching its invariant.
-  `GossipConfig`'s own documentation says to *prefer* named tokens, so the recommended
-  configuration was the affected one.
-
-  **Affected: 2.10.0 – 2.12.0**, and only deployments configuring `gateway_named_tokens` with no
-  `gateway_auth_token` and no `gateway_scoped_tokens`. Check yours: an unauthenticated
-  `GET /gateway/kv/keys` must answer 401. Found while writing the federation verbs' scope test,
-  which returned 504 where 403 was expected — the scope layer had not run at all. Pinned by
-  `named_tokens_alone_still_close_the_gateway`, which asserts both halves (no bearer is 401, a
-  named token still resolves to its own principal and is still bounded by its scopes) and fails
-  when the fix is reverted.
-
-### Added
 
 - **Federation's consumer side reaches local clients — the SDK verbs** (item 2 row 11). Until now
   a federated call could only be made from Rust: `FederationClient` was the sole consumer, and
@@ -235,6 +238,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `#[non_exhaustive]`**, so an exhaustive `match` needs a `_` arm — and that arm must fail closed: an
   unrecognised refusal is *the call did not happen for a reason this code does not know*, never *the
   call is fine*. Pinning is off unless configured, and off means no confidentiality guarantee.
+
+### Changed
+
+- **`CallRefusal` and `CommitmentRefusal` are `#[non_exhaustive]`.** Both gained a variant this
+  cycle (`AtCapacity`; and `AlreadyAwarded` changed shape), and both are vocabularies of *why
+  something was refused* that have now grown twice — so this is the §6.6 ledger's own reasoning
+  applied before the next addition rather than after it: **one announced break instead of a series
+  of unannounced ones**, the same move 2.10.0 made for `CatalogRefusal`.
+
+  An exhaustive `match` downstream needs a `_` arm, and **that arm must fail closed**: an
+  unrecognised `CallRefusal` is *this call was not authorised for a reason this code does not know*,
+  never *it is fine*; an unrecognised `CommitmentRefusal` is *no award was made*, never *one was*.
 
 ## [2.12.0] — 2026-09-23
 
