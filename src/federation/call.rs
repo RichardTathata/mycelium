@@ -96,6 +96,26 @@ pub struct CallPolicy {
     /// it is worth having only against a partner that has upgraded and is not being tampered with,
     /// and it is worth turning on as soon as every partner has.
     pub require_body_binding: bool,
+    /// **The most calls from one partner this gateway will carry at once.** `0` (the default) is
+    /// unlimited, which is what every deployment had before this field existed.
+    ///
+    /// The consumer side has metered per-partner slots since PR 5 ([`GatewayPool`]): it bounds what
+    /// *we send* a partner. Nothing bounded what a partner sends *us* — the Phase-C audit's last
+    /// open finding — so this is that counter, on the other side of the same edge, and deliberately
+    /// the same shape: fixed slots per partner, refused rather than queued, so one partner
+    /// saturating its allowance cannot consume another's.
+    ///
+    /// **What it does not do, and cannot.** The count is *this gateway's*. A domain that runs N
+    /// gateways admits up to **N × this** from one partner in aggregate, because there is no
+    /// cross-gateway counter — by design: a shared one would mean either a coordinator or partner
+    /// identifiers gossiped through `sys/`, and D7 says foreign state does not enter the medium.
+    /// If you need an aggregate bound, divide it by the number of gateways you run and accept that
+    /// a gateway which is down leaves its share unused.
+    ///
+    /// It also bounds *concurrency*, not rate: a partner making brief calls in a tight loop stays
+    /// under any in-flight cap. Rate is the operator's ingress, and `mycelium-core`'s `rate` module
+    /// is the intra-mesh answer to the same question.
+    pub max_in_flight_per_partner: usize,
 }
 
 impl Default for CallPolicy {
@@ -104,6 +124,7 @@ impl Default for CallPolicy {
             max_lifetime: Duration::from_secs(300),
             skew_tolerance: Duration::from_secs(30),
             require_body_binding: false,
+            max_in_flight_per_partner: 0,
         }
     }
 }
@@ -144,6 +165,14 @@ pub enum CallRefusal {
     LifetimeTooLong { claimed: Duration, max: Duration },
     /// Authentic, current, correctly bound — and not something our policy grants.
     NotPermitted,
+    /// This gateway is already carrying [`CallPolicy::max_in_flight_per_partner`] calls for that
+    /// partner. **Refused, not queued** — the same choice the consumer side's `NoCapacity` makes.
+    ///
+    /// Distinct from [`CallRefusal::NotPermitted`] and it must stay so: *not permitted* is a
+    /// standing answer about authority that a retry will not change, while this is a transient
+    /// answer about load that a retry probably will. Merging them would tell a partner to go and
+    /// ask their operator about a grant they already have.
+    AtCapacity { partner: DomainId, limit: usize },
 }
 
 impl std::fmt::Display for CallRefusal {
@@ -168,6 +197,8 @@ impl std::fmt::Display for CallRefusal {
             Self::LifetimeTooLong { claimed, max } =>
                 write!(f, "claims a {claimed:?} lifetime; this domain honours at most {max:?}"),
             Self::NotPermitted => write!(f, "authenticated, but policy does not grant this export"),
+            Self::AtCapacity { partner, limit } =>
+                write!(f, "this gateway is already carrying {limit} calls for {partner}; refused, not queued"),
         }
     }
 }

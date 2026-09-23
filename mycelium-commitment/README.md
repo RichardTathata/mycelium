@@ -17,7 +17,15 @@ component that assigns another participant's obligation.
 **Rules.** One award per requirement — a second is *refused*, never written over the first. A requirement
 with no offers is a visible state, not a retry loop. An awardee that vanishes leaves an award with no
 report, reported as such; re-announcement is the declarer's decision, never automatic reassignment. An
-unsigned assessment is unproven: `verify_assessment` says `false` for it.
+unsigned record is unproven: `verify_assessment` / `verify_offer` / `verify_award` say `false` for one,
+never true-by-absence.
+
+**No component assigns another participant's obligation — and since 2026-09-23 that rule has a
+mechanism.** An offer names its participant in a field, so anyone able to append could post an offer
+naming somebody else and the deterministic rule would award them work they never offered. Sign offers
+(`offer_signed`) and award from `offers_verified(requirement, resolve)`, where an offer signed by its
+forger fails because the key checked is the *named participant's*. Unsigned stays legal and unchanged
+(`offers()` + `plan_award`) — provenance is the declarer's decision, not this crate's policy.
 
 Built entirely on Mycelium's public API (`default-features = false`).
 

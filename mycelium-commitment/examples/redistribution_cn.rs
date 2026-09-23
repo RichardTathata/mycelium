@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
 use mycelium::{GossipAgent, GossipConfig, LocalApplication, NodeId};
-use mycelium_commitment::{verify_assessment, AwardRule, CommitmentRefusal, ContractNet, Outcome};
+use mycelium_commitment::{verify_assessment, verify_award, AwardRule, CommitmentRefusal, ContractNet, Offer, Outcome};
 
 const PICKUPS: usize = 6;
 
@@ -44,6 +44,16 @@ async fn main() {
         ["driver-a", "driver-b", "driver-c"].iter().map(|d| ContractNet::new(Arc::clone(&agent), *d)).collect();
     let auditor = ContractNet::new(Arc::clone(&agent), "food-bank-auditor");
     let auditor_key = SigningKey::from_bytes(&[11u8; 32]);
+    // Each driver holds its own key, and the hub knows which key belongs to which driver. In a
+    // deployment this directory is the operator's — `sys/identity/{node}` for nodes, whatever the
+    // co-op already uses for people and vehicles. The companion does not mint identity.
+    let driver_keys: Vec<SigningKey> = (0..drivers.len()).map(|i| SigningKey::from_bytes(&[20 + i as u8; 32])).collect();
+    let directory: std::collections::HashMap<String, [u8; 32]> = drivers
+        .iter()
+        .zip(&driver_keys)
+        .map(|(d, k)| (d.me().to_string(), k.verifying_key().to_bytes()))
+        .collect();
+    let resolve = |participant: &str| directory.get(participant).copied();
 
     // ── Announce: the hub declares each pickup — terms, a deadline for offers, what satisfies it.
     let t0 = now_ms();
@@ -59,7 +69,9 @@ async fn main() {
     for (d, driver) in drivers.iter().enumerate() {
         for (i, p) in pickups.iter().enumerate() {
             if i == 0 || i % drivers.len() == d {
-                driver.offer(p, format!("{} km", 2 + (i + d) % 5), t0 + 10).expect("announced");
+                driver
+                    .offer_signed(p, format!("{} km", 2 + (i + d) % 5), Some(&driver_keys[d]), t0 + 10)
+                    .expect("announced");
                 offers += 1;
             }
         }
@@ -110,6 +122,45 @@ async fn main() {
     }
     let unsigned = hub.assessments(&pickups[0]).into_iter().find(|x| x.assessor == "hub").unwrap();
     assert!(!unsigned.is_signed() && !verify_assessment(&unsigned, &public), "unsigned means unproven");
+
+    // ── Provenance: an offer nobody made.
+    //
+    // A member of the co-op's mesh posts an offer on a fresh pickup NAMING driver-a, signed with
+    // its own key. `driver-a` sorts lowest, so the deterministic rule would hand driver-a a job
+    // they never offered to do — and every reader checking the award against the offers would
+    // agree it was correct. This is the crate's first rule (*no component assigns another
+    // participant's obligation*) being defeated by a field anyone can write.
+    let contested = "pickup-forged";
+    hub.announce(contested, "4 crates from the market", "delivered to the pantry before close", t0 + 1_000, t0);
+    drivers[1].offer_signed(contested, "6 km", Some(&driver_keys[1]), t0 + 10).expect("announced");
+    let forged = {
+        use ed25519_dalek::Signer;
+        let stranger = SigningKey::from_bytes(&[99u8; 32]);
+        let o = Offer {
+            requirement: contested.to_string(),
+            participant: "driver-a".to_string(),
+            bid: "0 km".to_string(),
+            offered_at_ms: t0 + 11,
+            signature: Vec::new(),
+        };
+        let sig = stranger.sign(&o.canonical_bytes()).to_bytes().to_vec();
+        Offer { signature: sig, ..o }
+    };
+    agent.kv().append(&format!("cn/{contested}/offers"), serde_json::to_vec(&forged).unwrap());
+
+    let unchecked = hub.plan_award(contested, AwardRule::LowestParticipant, t0 + 20).expect("plans");
+    assert_eq!(unchecked.participant, "driver-a", "unchecked, the forged offer wins");
+    let verified = hub.offers_verified(contested, resolve);
+    let checked = hub
+        .plan_award_from(contested, AwardRule::LowestParticipant, t0 + 20, verified)
+        .expect("plans from the verified set");
+    assert_eq!(checked.participant, "driver-b", "checked, only an offer its participant signed is a candidate");
+    let awarded = hub.commit_award(checked.signed(&SigningKey::from_bytes(&[12u8; 32]))).await.expect("commits");
+    assert!(
+        verify_award(&awarded.award, &SigningKey::from_bytes(&[12u8; 32]).verifying_key().to_bytes()),
+        "and the award proves which declarer made it",
+    );
+    println!("hub: a forged offer naming driver-a was not a candidate — {contested} → {}", awarded.award.participant);
 
     println!("{PICKUPS} pickups: announced, offered, awarded once each with a receipt, reported, and assessed by a third party.");
     agent.shutdown().await;

@@ -334,15 +334,26 @@ async fn handle_tasks_send(
     // Item 2 PR 8: a federated caller was authenticated at the auth layer; the export it named is
     // authorised here, now that the body has said which skill it is asking for. The credential
     // binds *what*, not only *who* — a credential for one export refused for another (PR 4).
+    // The partner's slot at this gateway, held for the dispatch and released on drop — on the
+    // reply, on a refusal further in, or on an unwind. `None` for a call that is not federated.
+    #[cfg(feature = "tls")]
+    let mut _slot: Option<crate::federation::edge::PartnerSlot> = None;
     #[cfg(feature = "tls")]
     if let Some(federated) = federated {
         let Some(edge) = state.task_ctx.federation_edge.get() else {
             return jsonrpc_error(id, -32003, "federation is not enabled at this gateway");
         };
-        if let Err(refusal) =
-            edge.authorize(&federated.presented, skill_id, raw, crate::federation::edge::now_ms())
-        {
-            return jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}"));
+        let accepted =
+            match edge.authorize(&federated.presented, skill_id, raw, crate::federation::edge::now_ms()) {
+                Ok(accepted) => accepted,
+                Err(refusal) => return jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}")),
+            };
+        // Capacity is asked **after** authority, so a partner we would refuse on authority cannot
+        // occupy a slot belonging to one we would admit. Its own code: a capacity refusal is
+        // transient and a retry resolves it, while -32003 says go and talk to your operator.
+        match edge.admit(&accepted.origin_domain) {
+            Ok(slot) => _slot = Some(slot),
+            Err(refusal) => return jsonrpc_error(id, -32004, &format!("federated call refused: {refusal}")),
         }
     }
     let message  = params.get("message").cloned().unwrap_or(Value::Null);

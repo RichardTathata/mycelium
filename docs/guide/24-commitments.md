@@ -63,6 +63,37 @@ pub enum AwardRule { LowestParticipant }   // lowest participant id, ties on the
 conclusion**, which is what lets an award be *checked* rather than trusted. A rule that consulted
 anything outside the offer log would make the award an assertion.
 
+### And a pure rule over forgeable inputs checks nothing
+
+An offer names its participant in a **field**. Until 2026-09-23 nothing bound that field to anyone,
+so a member able to append to the stream could post an offer naming somebody else — and because
+`LowestParticipant` is deterministic, every reader checking the award against the offers would agree
+the award was **correct**. The purity of the rule is what made the forgery invisible: the check
+confirms the rule was applied, not that the inputs were real.
+
+So an offer is signed when its participant holds a key, and a declarer that cares awards from the
+verified set:
+
+```rust
+driver.offer_signed("pickup-9", "2 km", Some(&driver_key), now)?;   // the participant signs
+
+let candidates = hub.offers_verified("pickup-9", |p| directory.get(p).copied());
+let award = hub.plan_award_from("pickup-9", AwardRule::LowestParticipant, now, candidates)?;
+```
+
+`offers_verified` checks each offer against the key of the participant **the offer names**, so an
+offer signed by its forger fails — which is the attack worth stopping, not the careless one. Passing
+`offers()` instead gives you the old behaviour unchanged: provenance is the declarer's decision, not
+the crate's policy. Awards sign symmetrically (`Award::signed`, `verify_award`), because an award
+names a declarer too.
+
+**What a verifying signature buys, precisely.** It proves the holder of that key made the record.
+Whether the key belongs to the participant it names is the identity layer's question, and under the
+default configuration (`require_identity_proofs` off) that layer is weaker than the signature looks
+— see [09 · Security](09-security.md). And nothing stops the forged offer being *written*; it stops
+it being *awarded*. That is refusal at the decision point, not prevention at the medium, which is
+the substrate's standing posture.
+
 ---
 
 ## Refusals are visible states, not retries
@@ -105,10 +136,13 @@ per ambiguous run.
 
 ---
 
-## An unsigned assessment verifies as false
+## An unsigned record verifies as false
 
 Anyone may assess, not only the declarer, and an assessment names its assessor. Verification returns
 `false` for an unsigned assessment — **unproven, not forged**, and specifically not true-by-absence.
+The same rule now holds for offers and awards; unsigned stays legal, because a single-tenant mesh
+whose members are trusted equally has nothing to prove to itself, and what is never legal is reading
+an unsigned record as proof.
 
 That is the difference between "we have no proof this was assessed" and "this was assessed and the
 proof failed", and a reader has to be able to tell them apart.
@@ -153,8 +187,12 @@ offer carries information, and not merely to make a queue feel deliberate.
 
 ## What this does not establish
 
-- **Not identity.** The companion does not mint or check participant identity. Authority lives in the
-  gateway's caller context and in mandates; the contract net records who said what.
+- **Not identity.** The companion does not mint participant identity, and `offers_verified` takes a
+  **resolver** rather than reaching into the mesh precisely because a participant may be a person or
+  a vehicle rather than a node. It checks a signature against a key you supply; where that key came
+  from, and whether it really is that participant's, is the identity layer's question. Authority
+  lives in the gateway's caller context and in mandates; the contract net records who said what, and
+  now lets a declarer check that the saying was theirs.
 - **Not exactly-once effect.** The award is durable to the rung its receipt names. Making the *work*
   exactly-once is the destination's job — chapter 18's rung 4.
 - **Not fairness.** `LowestParticipant` is deterministic, which is a different property from fair. It

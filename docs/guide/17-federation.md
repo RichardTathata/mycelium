@@ -206,6 +206,26 @@ let granted = client.connect().await?;                       // the catalogue is
 let reply = client.call("invoice.submit", text, Repeatability::AtMostOnce).await?;
 ```
 
+### Bounding what a partner sends you
+
+Budgets used to run one way. `FederationClient`'s pool meters slots per partner on the **consumer**
+side — what you send — and the provider side had no counter at all, which the Phase-C audit named
+and left as a decision. The decision is the mirror of what the other side already does:
+
+```rust
+CallPolicy { max_in_flight_per_partner: 8, ..CallPolicy::default() }   // 0 = unlimited
+```
+
+Over the cap is `CallRefusal::AtCapacity` and JSON-RPC **-32004** — refused, not queued, and kept
+distinct from -32003 (`NotPermitted`) because *"too busy right now"* and *"you may not do this"* are
+different answers that call for different responses. The slot is an **RAII guard**, so it returns on
+a reply, on a later refusal, or on an unwind; a release a handler had to remember is one it would
+miss.
+
+Two honest limits, both consequences of having no coordinator: the cap is **per gateway** (N
+gateways ⇒ N × cap in aggregate, because a shared counter would mean partner names gossiped through
+`sys/`, which [D7](../design/federated-domains.md) forbids), and it bounds **concurrency, not rate**.
+
 ### Calling a partner from Python or TypeScript
 
 The Rust client above is the whole trust story: it holds your domain's signing key, mints
