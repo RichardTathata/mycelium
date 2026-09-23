@@ -234,6 +234,26 @@ itself is plain HTTP in both suites (intra-mesh traffic is TLS under each domain
 enforced profile requires); a hostile network between domains, more than two domains, and the SDK verbs are
 row 11.
 
+**Row 11's integrity half, closed 2026-09-22.** *"A hostile network between domains"* turned out to name two
+different problems, and the worse one needed no TLS at all. The credential's signature covered the origin
+domain, the principal, the export and the validity window — **and nothing about the payload**. An on-path
+attacker could rewrite a call's body, leave the header untouched, and this gateway would accept the altered
+call as authentic, then run the AE preflight and record an evidence decision about the attacker's text. The
+credential said *this principal may call this export* and stayed true while the call became a different call.
+
+`FederatedCaller::body_sha256` is inside the signature now; `FederationEdge::authorize` takes the request body
+and `POST /a2a` reads it as bytes before parsing, because a digest over a re-serialisation compares our
+encoder against theirs. Stripping the binding is a `BadSignature`, not a downgrade, since presence is signed.
+`CallPolicy::require_body_binding` defaults to `false` as a rolling-upgrade window and the type says, in those
+words, that `false` provides **no integrity guarantee against an active attacker**.
+
+**What remains of row 11 is genuinely different work.** Confidentiality — an on-path observer still reads every
+federated call — needs TLS on the edge, and TLS needs a **trust anchor that does not exist yet**: partner trust
+here is an Ed25519 key in the `TrustBundle`, with no X.509 material anywhere. The options are public PKI,
+pinning the partner's certificate or SPKI in the bundle beside its key, or exchanging each domain's CA. That is
+a decision, not an implementation, and it is unmade. More than two domains, and the SDK verbs, are also still
+open.
+
 ## Appendix — anchors verified at adoption (2026-09-17)
 
 | Claim | Where |

@@ -208,6 +208,26 @@ regenerate `GOLDENS`, freeze the *outgoing* version's bytes as `V{N}_*` fixtures
 `decode_wire_v{N}`, and extend the gate so new code still decodes vN frames. A live two-binary
 mixed-version *cluster* test remains a documented (unbuilt) nightly-tier follow-up.
 
+## A local gate predicts CI only where it runs the same things (2026-09-22)
+
+Three times in one week a green local gate meant less than it looked like, in three different ways.
+The pattern is worth more than any of them:
+
+| Gate said green | What it had not run |
+|---|---|
+| `make check-full` before tagging v2.11.0 | the **fuzz** job is `push`-to-`main` only — it had been red for 22 runs, and seven of twelve targets had never executed |
+| a unit test on `PreflightRefusal::error_data` | the **surface**: `/mcp`'s refusal body was asserted over a socket, `/a2a`'s never was, which is why the two drifted |
+| `make check` on the body-binding change | `cargo build --examples` — CI builds them, the gate did not, and a gallery example used the changed signature |
+
+**A gate that does not run what CI runs is not a prediction, it is a hope.** Two fixes came out of it:
+`RELEASING.md` step 2b (check CI on the branch you are releasing *from*), and `make check` now
+builds the examples. The general rule is the cheap one: when a local gate and CI disagree about
+*scope*, the local gate is the one that is wrong, because CI is what decides.
+
+The corollary is about sequential gates. The fuzz job stops at its first crash, so while it was red
+**every later target was unrun, not passing** — four defects were queued behind one. Treat a red
+sequential stage as a wall, not a single failure.
+
 ## Golden on-disk fixtures replay in CI (V2, contracts axis)
 
 `tests/fixtures/persistence/<format>/{wal.bin,snapshot.bin,expected.json}` are real files written by

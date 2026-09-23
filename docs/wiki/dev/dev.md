@@ -90,6 +90,10 @@ History: [.log/2026-09-12-runtime-authorisation-evidence.md](.log/2026-09-12-run
 restored as the **commitment companion**, plan §6.9; the two senses of "contract", §1.2)
 · [.log/2026-09-13-delivery-surfaces-rev1.12.md](.log/2026-09-13-delivery-surfaces-rev1.12.md) (rev 1.12: §12 examples,
 chapters, runbooks and decks aligned with revs 1.9–1.11)
+· [.log/2026-09-22-a-credential-that-names-the-call.md](.log/2026-09-22-a-credential-that-names-the-call.md)
+(federation's confused deputy: the credential authenticated *who is asking* and not *what they asked*, so a
+body could be rewritten in flight under a valid header — **authenticating the caller is not authenticating
+the call**)
 · [.log/2026-09-22-does-stability-compose.md](.log/2026-09-22-does-stability-compose.md)
 (the ADR's *loops unstable together, stable alone* stays unshown — two isolation methods measured, neither
 can pose the question, because the three loops share one state variable)
