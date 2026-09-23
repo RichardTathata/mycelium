@@ -263,6 +263,7 @@ pub use agent::{
 // The AE evaluator seam (runtime authorisation at the gateway) — present where it is enforced.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::{
+    preflight,
     ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision, DecisionKind,
     EvidenceState, Execution, MandateBinding, MandateState, MappingKind, MappingStatus,
     PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA,

@@ -1061,14 +1061,30 @@ pub fn evaluator_facts(
 
 /// Run the evaluator over `envelope` and turn its decision into an admit-or-refuse.
 ///
-/// `Ok(Some(decision))` — admitted, with the decision for the evidence record. `Ok(None)` — no
-/// evaluator is attached, so the seam is inert. `Err(_)` — refused.
+/// **Call this rather than `ActionEvaluator::evaluate`.** This is the whole reason it is public:
+/// building an enforcement point of your own — a resource that decides at its own boundary rather
+/// than behind this gateway — means running the same five checks the gateway runs, and an
+/// evaluator called directly performs **none** of them:
 ///
-/// The seam, not the evaluator, enforces the invariants an adapter might get wrong:
-/// a `Permit` carrying evaluation errors is downgraded to `Indeterminate`; a decision whose
-/// `policy_revision` is not the one the envelope expected is stale policy; an expired envelope is
-/// denied; an unmapped or ambiguous operation cannot be permitted; and a panicking evaluator is
-/// caught rather than trusted.
+/// | The seam checks | Because an adapter that skipped it would |
+/// |---|---|
+/// | a `Permit` carrying evaluation errors is downgraded | trust a permit its own adapter could not fully evaluate |
+/// | a decision from an unexpected `policy_revision` is stale | act on a policy this enforcement point never deployed |
+/// | an expired envelope is denied *before* the evaluator runs | let a cached decision outlive its window — the evaluator holds no clock |
+/// | an unmapped or ambiguous operation cannot be permitted | name an unreviewed action as a business operation |
+/// | a panicking evaluator is caught, not trusted | turn an adapter bug into an admission |
+///
+/// None of those is the evaluator's job, and none of them is optional. Skipping them is the
+/// *"proved leg by leg and nowhere as a whole"* failure one layer out: every piece correct, and the
+/// composition wrong.
+///
+/// Returns `Ok(Some(decision))` — admitted, with the decision for the evidence record;
+/// `Ok(None)` — no evaluator is attached, so the seam is inert and the caller proceeds as before;
+/// `Err(_)` — refused, and [`PreflightRefusal`] says which of the three refusals it is.
+///
+/// What it does **not** do: record anything. An admitted action still needs its evidence written,
+/// and an enforcement point that decides without recording is an unlogged gate — which is what
+/// [`PreflightRefusal::NotRecorded`] exists to refuse when the recording fails.
 pub fn preflight(
     evaluator: Option<&Arc<dyn ActionEvaluator>>,
     envelope: &ActionEnvelope,
@@ -2177,6 +2193,70 @@ mod tests {
             data["reason"], unestablished.error_data()["reason"],
             "a denial and an unestablished authority must not arrive as the same thing",
         );
+    }
+
+    /// **What an enforcement point loses by calling `evaluate` instead of `preflight`.**
+    ///
+    /// `preflight` is public so a resource can enforce at its own boundary. This is why it must be
+    /// the thing it calls: for each case below the evaluator, asked directly, returns a **permit** —
+    /// correctly, on its own terms — and the seam refuses. An adapter is not wrong to permit here;
+    /// it simply is not being asked the question the seam asks.
+    ///
+    /// Written as a *difference* rather than as "preflight refuses", because the refusal alone
+    /// would pass even if `evaluate` refused too, and then the test would prove nothing about which
+    /// layer is carrying the guarantee.
+    #[test]
+    fn calling_the_evaluator_directly_skips_what_the_seam_enforces() {
+        // 1. An expired envelope. The evaluator holds no clock and cannot know.
+        {
+            let ev = evaluator(ReferenceEvaluator::new("rev-1").allow(Rule::new("*", "*", "*")));
+            let env = envelope("oidc:idp/alice", "tools/call", "tool:square@n1");
+            assert_eq!(
+                ev.evaluate(&env).verdict,
+                Verdict::Permit,
+                "the evaluator permits — it has no clock, and that is not its job",
+            );
+            let refused = preflight(Some(&ev), &env, 61_001).expect_err("the seam denies");
+            assert!(matches!(refused, PreflightRefusal::Denied(_)));
+        }
+
+        // 2. A decision from a policy revision this enforcement point never deployed.
+        {
+            let ev = evaluator(ReferenceEvaluator::new("rev-2").allow(Rule::new("*", "*", "*")));
+            let env = envelope("oidc:idp/alice", "tools/call", "tool:square@n1"); // expects rev-1
+            assert_eq!(ev.evaluate(&env).verdict, Verdict::Permit);
+            let refused = preflight(Some(&ev), &env, 2_000).expect_err("stale policy");
+            assert_eq!(refused.decision().verdict, Verdict::Indeterminate, "never a denial");
+        }
+
+        // 3. An operation outside the reviewed catalogue.
+        {
+            let ev = evaluator(ReferenceEvaluator::new("rev-1").allow(Rule::new("*", "*", "*")));
+            let mut env = envelope("oidc:idp/alice", "tools/call", "tool:execute_shell@n1");
+            env.mapping = ActionMapping::unmapped("cat-procurement", "7");
+            assert_eq!(ev.evaluate(&env).verdict, Verdict::Permit);
+            assert!(preflight(Some(&ev), &env, 2_000).is_err(), "a permit cannot name it");
+        }
+
+        // 4. A permit carrying evaluation errors — a contradiction the seam resolves.
+        {
+            struct Sloppy;
+            impl ActionEvaluator for Sloppy {
+                fn evaluate(&self, _: &ActionEnvelope) -> Decision {
+                    Decision::permit("allowed", "rev-1").with_errors(["clause 3 did not evaluate"])
+                }
+            }
+            let ev: Arc<dyn ActionEvaluator> = Arc::new(Sloppy);
+            let env = envelope("oidc:idp/alice", "tools/call", "tool:square@n1");
+            assert_eq!(ev.evaluate(&env).verdict, Verdict::Permit);
+            let refused = preflight(Some(&ev), &env, 2_000).expect_err("downgraded");
+            assert_eq!(refused.decision().verdict, Verdict::Indeterminate);
+        }
+
+        // 5. No evaluator at all is inert — an enforcement point with none proceeds as before,
+        //    rather than failing closed on a node that never opted in.
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:square@n1");
+        assert_eq!(preflight(None, &env, 2_000), Ok(None));
     }
 
     /// A panicking adapter must never become an admission.

@@ -9,6 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`mycelium::preflight` is public**, so an enforcement point that is not this gateway can run the
+  same checks this gateway runs. It was reachable only inside the crate, which meant a resource
+  enforcing at its own boundary — AE2's shape — had no way to call anything but
+  `ActionEvaluator::evaluate`, and **an evaluator called directly performs none of the seam's five
+  checks**: expiry, stale policy revision, a `Permit` carrying evaluation errors, an unmapped or
+  ambiguous operation, and a panicking adapter.
+
+  In every one of those cases a *correct* evaluator returns a permit and the seam refuses — it is
+  not being overridden, it was never asked that question. So the failure mode was silent and looked
+  like success, which is the *every leg correct, the composition wrong* shape one layer out from
+  where this axis first found it.
+
+  Gated as a **difference**: the test asserts that `evaluate` permits *and* `preflight` refuses, for
+  four of the five. Asserting only the refusal would pass even if the evaluator refused too, and
+  would then prove nothing about which layer carries the guarantee. Guide chapter 20 gains the
+  worked example.
+
 ### Security
 
 - **A federated credential now binds the request body** (item 2 row 11). Its signature covered the

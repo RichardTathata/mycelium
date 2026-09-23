@@ -263,6 +263,41 @@ A note the code itself records: `Decision` needed a public constructor before a 
 could return anything but `indeterminate`. The replaceable-evaluator premise depended on a
 constructor that did not exist until a review found it.
 
+### Enforcing somewhere else: call `preflight`, not `evaluate`
+
+Everything above happens behind this gateway. If you are enforcing at your **own** boundary — a
+resource that decides for itself rather than trusting a preflight at one route — use
+`mycelium::preflight`, not `ActionEvaluator::evaluate`.
+
+```rust
+use mycelium::{preflight, PreflightRefusal};
+
+match preflight(Some(&evaluator), &envelope, now_ms) {
+    Ok(Some(decision)) => { /* admitted — and record `decision` */ }
+    Ok(None)           => { /* no evaluator attached; the seam is inert */ }
+    Err(refusal)       => { /* refused — `refusal.reason()` says which of the three */ }
+}
+```
+
+The difference is not stylistic. An evaluator asked directly answers only the policy question, and
+**five checks are the seam's, not its**:
+
+| The seam checks | An evaluator called directly would |
+|---|---|
+| an expired envelope is denied *first* | permit it — it holds no clock, and that is not its job |
+| a decision from an unexpected `policy_revision` is stale | act on a policy you never deployed |
+| a `Permit` carrying evaluation errors is downgraded | trust a permit its own adapter could not fully evaluate |
+| an unmapped or ambiguous operation cannot be permitted | name an unreviewed action as a business operation |
+| a panicking adapter is caught | turn an adapter bug into an admission |
+
+In each of those cases a correct evaluator returns **permit** and the seam refuses. It is not being
+overridden; it was never asked that question. Skipping the seam is the *every leg correct, the
+composition wrong* failure, one layer out — and it is silent, because the permits look right.
+
+`preflight` does **not** record anything. An admitted action still needs its evidence written, and
+an enforcement point that decides without recording is an unlogged gate; that is what
+`PreflightRefusal::NotRecorded` exists to refuse when the recording fails.
+
 ### Checking your evaluator against the contract
 
 Writing an evaluator is the easy half. The hard half is knowing it agrees with the seam about the
