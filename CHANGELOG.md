@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.12.0] — 2026-09-23
+
+**Authenticating the caller is not authenticating the call.** Wire **v12** unchanged.
+
+A federated credential's signature covered the origin domain, the principal, the export and the
+validity window — and **nothing about the payload**. An attacker on the path between two domains
+could rewrite a call's body, leave the header untouched, and the receiving gateway would accept the
+altered call as authentic, then run the authorisation preflight and record an evidence decision
+about *the attacker's* text. The credential said *this principal may call this export* and stayed
+true while the call became a different call.
+
+That is the release. The second change is the same shape one layer out: `preflight` was reachable
+only inside this crate, so an enforcement point that is **not** this gateway had no public path but
+`ActionEvaluator::evaluate` — which performs none of the seam's five checks. In every one of those
+cases a *correct* evaluator returns a permit and the seam refuses; it was never asked that
+question. Both defects are compositions where each part behaved exactly as documented.
+
+**Upgrade notes.** `FederationEdge::authorize` takes the request body — §6.6 removal-ledger entry
+10, and it will not compile until you pass it. `FederatedCaller` gained `body_sha256`, so an
+exhaustive struct literal needs it. `POST /a2a` answers a malformed request as JSON-RPC `-32700`
+rather than a bare 400. `CallPolicy::require_body_binding` defaults to `false` — a rolling-upgrade
+window that gives **no integrity guarantee against an active attacker**; turn it on once every
+partner has upgraded.
+
 ### Added
 
 - **`mycelium::preflight` is public**, so an enforcement point that is not this gateway can run the

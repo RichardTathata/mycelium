@@ -96,7 +96,11 @@ for f in "${TRAIN[@]}"; do
   perl -i -pe "s/^version = \"$OLD\"/version = \"$NEW\"/" "$f"
 done
 cargo metadata --format-version 1 >/dev/null     # refresh Cargo.lock
-grep -c "version = \"$NEW\"" Cargo.lock          # expect ${#TRAIN[@]}
+# Count only OUR crates. A bare `grep -c "version = \"$NEW\"" Cargo.lock` counts every package at
+# that version, including third-party ones: at 2.12.0 `ipnet` is also 2.12.0, so the naive check
+# reported 11 for 10 crates and looked like a double-count. It happened not to collide at 2.10.0 or
+# 2.11.x, which is exactly how a check like this survives to mislead someone later.
+grep -B3 "version = \"$NEW\"" Cargo.lock | grep -c '^name = "mycelium'   # expect ${#TRAIN[@]}
 ```
 Then verify nothing is left behind — a remaining hit is an inter-crate dep spec that must move too:
 

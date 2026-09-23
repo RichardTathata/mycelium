@@ -22,6 +22,38 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.12.0 release — 2026-09-23 (tag `v2.12.0`) — authenticating the caller is not authenticating the call
+
+Wire **v12** unchanged. Ten workspace crates move to 2.12.0.
+
+**Two defects, one shape.** Both are compositions where every part behaved exactly as documented
+and the join did not — which is the failure this axis was created to find, arriving twice more.
+
+**The federated credential authenticated *who* and *which export*, and not *what*.** Its signature
+covered the origin domain, the principal, the export and the validity window. An attacker between
+two domains could rewrite a call's body, leave the header untouched, and the receiving gateway would
+accept the altered call as authentic — then run the AE preflight and write an evidence record about
+the attacker's text. `FederatedCaller::body_sha256` is inside the signature now; the client
+serialises once and signs those bytes, and `POST /a2a` reads the body as `Bytes` and parses
+afterwards, because a digest over a re-serialisation compares our encoder against theirs.
+
+**`preflight` was crate-private**, so an enforcement point that is not this gateway had no public
+path but `ActionEvaluator::evaluate` — which performs none of the seam's five checks: expiry, stale
+policy revision, a `Permit` carrying evaluation errors, an unmapped operation, a panicking adapter.
+In each, a *correct* evaluator returns a permit and the seam refuses. It is public now, gated as a
+**difference**: the test asserts `evaluate` permits *and* `preflight` refuses, because asserting
+only the refusal would prove nothing about which layer carries the guarantee.
+
+**What is deliberately not claimed.** This is integrity, not confidentiality: an on-path observer
+still reads every federated call. TLS on the edge needs a trust anchor that does not exist —
+partner trust here is an Ed25519 key with no X.509 material anywhere — and that is a decision, not
+an implementation.
+
+**Process.** `make check` now builds the examples, after CI caught a gallery example the gate never
+compiled. That is the third instance of one pattern and it is recorded as such: *a gate that does
+not run what CI runs is not a prediction, it is a hope.* Cut from a commit whose CI run was checked
+by id (`35820109743`, fuzz job included).
+
 ## v2.11.1 release — 2026-09-22 (tag `v2.11.1`) — four defects, and the gate that had never run
 
 Wire **v12** unchanged; no API change. Ten workspace crates move to 2.11.1.
