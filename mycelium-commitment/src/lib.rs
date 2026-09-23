@@ -14,7 +14,7 @@
 //! | Record | Mechanism | Where it lives |
 //! |---|---|---|
 //! | **announce** — a declared requirement with terms, deadline, criteria | a KV head, declarer-owned | `cn/{requirement}` |
-//! | **offer** — a participant's willingness; *not yet an obligation* | `append` on a log stream | `log/cn/{requirement}/offers` |
+//! | **offer** — a participant's willingness; *not yet an obligation*; signed when the participant holds a key | `append` on a log stream | `log/cn/{requirement}/offers` |
 //! | **award** — acceptance: one participant, one requirement, once | the deterministic lowest-participant rule (the tuple-space primary election's rule), written with **`set_with_receipt`** | `cn/{requirement}/award` |
 //! | **report** — the awardee's receipt of the work: outcome, or *unknown* | `append` | `log/cn/{requirement}/reports` |
 //! | **assess** — whether the requirement was satisfied; signed | `append`, Ed25519 over the record | `log/cn/{requirement}/assessments` |
@@ -24,6 +24,29 @@
 //! - **No component assigns another participant's obligation.** An award only records an *offer* the
 //!   participant made; a requirement with no offers is a visible state ([`CommitmentRefusal::NoOffers`]),
 //!   not a retry loop.
+//!
+//!   **And the rule now has a mechanism under it.** It used to be a convention: an offer names its
+//!   participant in a field, so any member able to append to the stream could post an offer naming
+//!   somebody else, and the deterministic rule would award that participant work they never offered
+//!   — with every reader checking the award against the offers agreeing it was correct. An offer is
+//!   signed when the participant holds a key ([`ContractNet::offer_signed`]), and a declarer that
+//!   cares awards from [`offers_verified`](ContractNet::offers_verified), where a forgery is not a
+//!   candidate. An award is signed by its declarer the same way ([`Award::signed`]).
+//!
+//!   **Unsigned stays legal and keeps meaning *unproven*.** A single-tenant mesh whose members are
+//!   trusted equally has nothing to prove to itself, and [`plan_award`](ContractNet::plan_award)
+//!   behaves exactly as before. What is not legal is reading an unsigned record as proof:
+//!   [`verify_offer`] and [`verify_award`] answer `false` for one, never true-by-absence.
+//!
+//!   **What a verifying signature does and does not establish** — the same care item 1 takes with a
+//!   receipt. It proves the holder of that key made the record. Whether the key belongs to the
+//!   participant the record names is `sys/identity/{node}`'s question, and that is only as strong as
+//!   `require_identity_proofs`, which is **default-off**: without proofs an admitted node can append
+//!   its own key to another node's identity entry (`src/consensus.rs`, and why identity-auth Phase 2
+//!   exists). So this is `SelfImposedPrevention` in the guardrails tier vocabulary under the default
+//!   configuration, and it rises no higher on its own. Where the participant is not a node at all —
+//!   a principal, a driver, a service — the key directory is the caller's, which is why
+//!   `offers_verified` takes a resolver rather than reaching into the mesh.
 //! - **One award per requirement.** A second award is **refused** ([`CommitmentRefusal::AlreadyAwarded`]),
 //!   never written over the first. Two declarers racing to the same key is the companion's defining
 //!   failure and gets a replay witness in CN2; here the refusal is the local half of that rule.
@@ -35,7 +58,10 @@
 //!   automatic reassignment by this crate.
 //! - **The declarer is not the only permitted assessor.** Anyone may assess; an assessment names its
 //!   assessor and is signed when the assessor holds a key — **unsigned means unproven**, and
-//!   [`verify_assessment`] says `false` for it rather than true-by-absence.
+//!   [`verify_assessment`] says `false` for it rather than true-by-absence. Offers and awards now
+//!   follow the same rule; reports do not, and that is deliberate: a report is the *awardee's* claim
+//!   about its own work, and an award already names the awardee, so a forged report is a claim about
+//!   somebody else's obligation that the assessment layer exists to contradict.
 //!
 //! Heads and terms are in the gossip KV; offers, reports and assessments are the companion's streams
 //! under one prefix (`cn/`, registered in `mycelium`'s namespace table). Time enters through the
@@ -85,6 +111,39 @@ pub struct Offer {
     pub participant: String,
     pub bid: String,
     pub offered_at_ms: u64,
+    /// Ed25519 over [`Offer::canonical_bytes`]; empty means unsigned.
+    ///
+    /// **Why an offer is the record that most needs one.** The crate's first rule is that *no
+    /// component assigns another participant's obligation* — and an unsigned offer defeats exactly
+    /// that, because any member who can append to the stream can post an offer naming somebody
+    /// else as `participant`, and [`AwardRule::LowestParticipant`] will duly award them work they
+    /// never offered to do. A signature is what turns that rule from a convention into something a
+    /// declarer can check ([`ContractNet::offers_verified`]).
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl Offer {
+    /// The bytes a signature covers: the record with its signature emptied, as canonical JSON.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let unsigned = Offer { signature: Vec::new(), ..self.clone() };
+        serde_json::to_vec(&unsigned).unwrap_or_default()
+    }
+
+    /// Whether the participant signed at all. `false` means *unproven*, not *forged*.
+    pub fn is_signed(&self) -> bool {
+        !self.signature.is_empty()
+    }
+}
+
+/// Verify an offer against the **participant's** Ed25519 public key. `false` for an unsigned one,
+/// and `false` for one signed by anybody else — which is the whole point: the key belongs to the
+/// participant the offer names, so a forgery fails even when it is validly signed by its forger.
+pub fn verify_offer(offer: &Offer, key: &[u8; 32]) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(vk) = VerifyingKey::from_bytes(key) else { return false };
+    let Ok(sig) = Signature::from_slice(&offer.signature) else { return false };
+    vk.verify(&offer.canonical_bytes(), &sig).is_ok()
 }
 
 /// The acceptance: one participant's offer, taken, once.
@@ -98,6 +157,43 @@ pub struct Award {
     pub awarded_at_ms: u64,
     /// The operation the award was written under: `cn/{requirement}/award`.
     pub operation_id: String,
+    /// Ed25519 over [`Award::canonical_bytes`], by the **declarer**; empty means unsigned.
+    ///
+    /// An award names a `declarer`, and without a signature that name is a claim rather than a
+    /// fact: any member can write `cn/{requirement}/award` and say the announcement's declarer made
+    /// it. The signature is what lets a participant check that the acceptance came from the party
+    /// that announced the requirement, rather than trusting the key it was written under.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl Award {
+    /// The bytes a signature covers: the record with its signature emptied, as canonical JSON.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let unsigned = Award { signature: Vec::new(), ..self.clone() };
+        serde_json::to_vec(&unsigned).unwrap_or_default()
+    }
+
+    /// Sign this award as the declarer. Consuming, so a signed award is built once and not
+    /// mutated afterwards — a mutated one would carry a signature over bytes it no longer has.
+    pub fn signed(mut self, key: &ed25519_dalek::SigningKey) -> Self {
+        use ed25519_dalek::Signer;
+        self.signature = key.sign(&self.canonical_bytes()).to_bytes().to_vec();
+        self
+    }
+
+    /// Whether the declarer signed at all. `false` means *unproven*, not *forged*.
+    pub fn is_signed(&self) -> bool {
+        !self.signature.is_empty()
+    }
+}
+
+/// Verify an award against the **declarer's** Ed25519 public key. `false` for an unsigned one.
+pub fn verify_award(award: &Award, key: &[u8; 32]) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(vk) = VerifyingKey::from_bytes(key) else { return false };
+    let Ok(sig) = Signature::from_slice(&award.signature) else { return false };
+    vk.verify(&award.canonical_bytes(), &sig).is_ok()
 }
 
 /// What became of the work, in the receipts vocabulary: an outcome, or *unknown* — never
@@ -178,7 +274,11 @@ pub enum CommitmentRefusal {
     /// The requirement was announced and nobody offered before its deadline.
     NoOffers,
     /// The requirement already has an award; it is returned, never overwritten.
-    AlreadyAwarded(Award),
+    ///
+    /// **Boxed** since the signature field: an `Award` carries six owned fields and a signature,
+    /// and an unboxed one in the error variant makes every `Result` in this crate as large as its
+    /// rarest outcome. The box costs an allocation on a path that has already lost a race.
+    AlreadyAwarded(Box<Award>),
     /// The award's write did not yield a receipt (item 1's vocabulary: the fate may be unknown).
     Receipt(ReceiptError),
     /// A linearizable award's round produced no commit before its deadline: the award **may or may
@@ -289,8 +389,42 @@ impl ContractNet {
     /// **Offer** against an announced requirement. Returns the offer's log position, or `None`
     /// when the requirement was never announced — an offer needs something to offer against.
     pub fn offer(&self, requirement: &str, bid: impl Into<String>, now_ms: u64) -> Option<u64> {
+        self.offer_signed(requirement, bid, None, now_ms)
+    }
+
+    /// **Offer, signed** — the same verb with the participant's key, so a declarer can check that
+    /// the offer came from the participant it names ([`offers_verified`](Self::offers_verified)).
+    ///
+    /// `None` for the key is [`offer`](Self::offer) and stays legal: a single-tenant mesh where
+    /// every member is trusted equally has nothing to prove to itself. What is *not* legal is
+    /// reading an unsigned offer as proof — [`verify_offer`] answers `false` for it rather than
+    /// true-by-absence.
+    ///
+    /// **What this does and does not establish.** A verifying signature proves the holder of that
+    /// key made the offer. Whether the key belongs to the participant it names is
+    /// `sys/identity/{node}`'s question, and *that* is only as strong as
+    /// `require_identity_proofs` — **default-off** — because without proofs an admitted node can
+    /// append its own key to another's identity entry. In the guardrails tier vocabulary this is
+    /// `SelfImposedPrevention` under the default configuration and rises no higher on its own.
+    pub fn offer_signed(
+        &self,
+        requirement: &str,
+        bid: impl Into<String>,
+        key: Option<&ed25519_dalek::SigningKey>,
+        now_ms: u64,
+    ) -> Option<u64> {
+        use ed25519_dalek::Signer;
         self.announcement(requirement)?;
-        let o = Offer { requirement: requirement.to_string(), participant: self.me.clone(), bid: bid.into(), offered_at_ms: now_ms };
+        let mut o = Offer {
+            requirement: requirement.to_string(),
+            participant: self.me.clone(),
+            bid: bid.into(),
+            offered_at_ms: now_ms,
+            signature: Vec::new(),
+        };
+        if let Some(k) = key {
+            o.signature = k.sign(&o.canonical_bytes()).to_bytes().to_vec();
+        }
         Some(self.agent.kv().append(&offers_stream(requirement), encode(&o)))
     }
 
@@ -304,17 +438,57 @@ impl ContractNet {
             .collect()
     }
 
+    /// The offers whose signature verifies under the key `resolve` gives for the participant they
+    /// name — **the candidate set a declarer that cares about provenance should award from**.
+    ///
+    /// An unsigned offer is not a candidate here, and neither is one signed by anybody but the
+    /// participant it names. `resolve` returning `None` for a participant drops that participant's
+    /// offers: a key we cannot find is not a key we may assume.
+    ///
+    /// Where the key comes from is deliberately the caller's business, not this crate's — the
+    /// substrate publishes node keys at `sys/identity/{node}`, but a participant here may be a
+    /// principal, a driver or a service that is not a node at all, and minting identity is not
+    /// something a coordination companion should start doing.
+    pub fn offers_verified(
+        &self,
+        requirement: &str,
+        resolve: impl Fn(&str) -> Option<[u8; 32]>,
+    ) -> Vec<(u64, Offer)> {
+        self.offers(requirement)
+            .into_iter()
+            .filter(|(_, o)| resolve(&o.participant).is_some_and(|k| verify_offer(o, &k)))
+            .collect()
+    }
+
     /// **Plan** an award: read the head, any existing award and the offers made by the deadline,
     /// and choose by `rule` — **no write**. [`award`](Self::award) is this followed by
     /// [`commit_award`](Self::commit_award); they are separate so a harness can interleave two
     /// declarers' steps and show what the plain path cannot promise (CN2's witness).
     pub fn plan_award(&self, requirement: &str, rule: AwardRule, now_ms: u64) -> Result<Award, CommitmentRefusal> {
+        let offers = self.offers(requirement);
+        self.plan_award_from(requirement, rule, now_ms, offers)
+    }
+
+    /// **Plan an award from a candidate set you chose** — the same rule, over offers the caller has
+    /// already filtered. This is the seam that makes provenance the declarer's decision rather than
+    /// this crate's policy: pass [`offers_verified`](Self::offers_verified) and a forged offer is
+    /// not a candidate; pass [`offers`](Self::offers) and you get today's behaviour, unchanged.
+    ///
+    /// The deadline and the already-awarded check still apply — they are the requirement's, not the
+    /// candidate set's.
+    pub fn plan_award_from(
+        &self,
+        requirement: &str,
+        rule: AwardRule,
+        now_ms: u64,
+        candidates: Vec<(u64, Offer)>,
+    ) -> Result<Award, CommitmentRefusal> {
         let announcement = self.announcement(requirement).ok_or(CommitmentRefusal::NotAnnounced)?;
         if let Some(existing) = self.award_of(requirement) {
-            return Err(CommitmentRefusal::AlreadyAwarded(existing));
+            return Err(CommitmentRefusal::AlreadyAwarded(Box::new(existing)));
         }
         let eligible: Vec<(u64, Offer)> =
-            self.offers(requirement).into_iter().filter(|(_, o)| o.offered_at_ms <= announcement.deadline_ms).collect();
+            candidates.into_iter().filter(|(_, o)| o.offered_at_ms <= announcement.deadline_ms).collect();
         let (offer_hlc, offer) = rule.choose(&eligible).cloned().ok_or(CommitmentRefusal::NoOffers)?;
         Ok(Award {
             requirement: requirement.to_string(),
@@ -323,6 +497,7 @@ impl ContractNet {
             offer_hlc,
             awarded_at_ms: now_ms,
             operation_id: award_key(requirement),
+            signature: Vec::new(),
         })
     }
 
@@ -364,7 +539,7 @@ impl ContractNet {
                 let existing = self.award_of(&award.requirement).ok_or_else(|| {
                     CommitmentRefusal::Encoding("superseded, but the committed award did not decode".into())
                 })?;
-                Err(CommitmentRefusal::AlreadyAwarded(existing))
+                Err(CommitmentRefusal::AlreadyAwarded(Box::new(existing)))
             }
             Err(CommitError::DeliveryUnknown { ballots_tried, .. }) => Err(CommitmentRefusal::AwardUnknown { ballots_tried }),
             Err(other) => Err(CommitmentRefusal::NotCommitted(other.to_string())),
@@ -489,7 +664,7 @@ mod tests {
     use mycelium::{GossipConfig, NodeId};
 
     fn offer(participant: &str) -> Offer {
-        Offer { requirement: "r".into(), participant: participant.into(), bid: "".into(), offered_at_ms: 0 }
+        Offer { requirement: "r".into(), participant: participant.into(), bid: "".into(), offered_at_ms: 0, signature: Vec::new() }
     }
 
     #[test]
@@ -738,6 +913,126 @@ mod tests {
         assert!(!verify_assessment(&assessments[0], &[9u8; 32]), "and not under another key");
         assert!(!assessments[1].is_signed());
         assert!(!verify_assessment(&assessments[1], &key.verifying_key().to_bytes()), "unsigned never verifies");
+        agent.shutdown().await;
+    }
+
+    /// **The crate's first rule, with a mechanism under it.**
+    ///
+    /// *"No component assigns another participant's obligation"* was, until now, a rule with
+    /// nothing enforcing it: an offer names its participant in a field, and any member able to
+    /// append to the stream could name somebody else. `LowestParticipant` would then dutifully
+    /// award that participant work they never offered to do — and every reader of the streams,
+    /// checking the award against the offers as the design intends, would agree it was correct.
+    ///
+    /// The forgery here is the realistic one. `attacker` does not merely *claim* to be `driver-a`:
+    /// it signs its forged offer with **its own key**, which is the best a forger can do. It fails
+    /// because the key the declarer checks against is the one belonging to the participant the
+    /// offer *names*.
+    #[tokio::test]
+    async fn a_forged_offer_is_not_a_candidate_when_the_declarer_checks_provenance() {
+        use ed25519_dalek::SigningKey;
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let driver_a = ContractNet::new(Arc::clone(&agent), "driver-a");
+        let driver_b = ContractNet::new(Arc::clone(&agent), "driver-b");
+        // The attacker acts under its own name in the mesh and lies in the record.
+        let attacker = ContractNet::new(Arc::clone(&agent), "attacker");
+
+        let key_a = SigningKey::from_bytes(&[11u8; 32]);
+        let key_b = SigningKey::from_bytes(&[12u8; 32]);
+        let key_attacker = SigningKey::from_bytes(&[13u8; 32]);
+        let directory = move |participant: &str| -> Option<[u8; 32]> {
+            match participant {
+                "driver-a" => Some(key_a.verifying_key().to_bytes()),
+                "driver-b" => Some(key_b.verifying_key().to_bytes()),
+                _ => None,
+            }
+        };
+
+        hub.announce("pickup-9", "2 crates", "pantry signs off", 100, 0);
+        driver_b.offer_signed("pickup-9", "5 km", Some(&SigningKey::from_bytes(&[12u8; 32])), 1);
+        // The forgery: an offer NAMING driver-a, signed by the attacker's own key. `driver-a`
+        // sorts lowest, so the deterministic rule would award it.
+        let forged = Offer {
+            requirement: "pickup-9".into(),
+            participant: "driver-a".into(),
+            bid: "0 km".into(),
+            offered_at_ms: 2,
+            signature: Vec::new(),
+        };
+        let forged = {
+            use ed25519_dalek::Signer;
+            let sig = key_attacker.sign(&forged.canonical_bytes()).to_bytes().to_vec();
+            Offer { signature: sig, ..forged }
+        };
+        agent.kv().append(&offers_stream("pickup-9"), encode(&forged));
+        let _ = &attacker; // the attacker's own handle is not needed to write the lie
+
+        // 1. Unchecked, the forgery wins — which is the defect, stated as a test rather than a
+        //    worry. This is today's behaviour for a declarer that does not check.
+        let unchecked = hub.plan_award("pickup-9", AwardRule::LowestParticipant, 10).expect("plans");
+        assert_eq!(unchecked.participant, "driver-a", "the unchecked path awards the forged offer");
+
+        // 2. Checked, it is not a candidate at all, and the award goes to the real offer.
+        let verified = hub.offers_verified("pickup-9", &directory);
+        assert_eq!(verified.len(), 1, "only driver-b's own signed offer survives");
+        assert_eq!(verified[0].1.participant, "driver-b");
+        let checked = hub
+            .plan_award_from("pickup-9", AwardRule::LowestParticipant, 10, verified)
+            .expect("plans from the verified set");
+        assert_eq!(checked.participant, "driver-b", "no component assigns another participant's obligation");
+
+        // 3. An UNSIGNED offer is not a candidate either — unproven is not the same as trusted,
+        //    and a forger who simply omits the signature must not do better than one who tries.
+        driver_a.offer("pickup-9", "1 km", 3);
+        assert_eq!(
+            hub.offers_verified("pickup-9", &directory).len(),
+            1,
+            "an unsigned offer is unproven, so it is not a candidate on the checked path",
+        );
+
+        // 4. A participant with no key in the directory is dropped, not assumed.
+        let stranger = ContractNet::new(Arc::clone(&agent), "stranger");
+        stranger.offer_signed("pickup-9", "9 km", Some(&SigningKey::from_bytes(&[14u8; 32])), 4);
+        assert!(
+            hub.offers_verified("pickup-9", &directory).iter().all(|(_, o)| o.participant != "stranger"),
+            "a key we cannot find is not a key we may assume",
+        );
+
+        agent.shutdown().await;
+    }
+
+    /// An award names a declarer, and a signed one proves it. The mirror of the offer case: the
+    /// participant checks who accepted, not merely that something was written at the award key.
+    #[tokio::test]
+    async fn a_signed_award_proves_its_declarer_and_an_unsigned_one_proves_nothing() {
+        use ed25519_dalek::SigningKey;
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let d = ContractNet::new(Arc::clone(&agent), "driver-a");
+        let hub_key = SigningKey::from_bytes(&[21u8; 32]);
+
+        hub.announce("pickup-11", "1 crate", "pantry signs off", 100, 0);
+        d.offer("pickup-11", "2 km", 1);
+        let plan = hub.plan_award("pickup-11", AwardRule::LowestParticipant, 10).expect("plans");
+        assert!(!plan.is_signed(), "a planned award is unsigned until the declarer signs it");
+
+        let signed = plan.signed(&hub_key);
+        assert!(verify_award(&signed, &hub_key.verifying_key().to_bytes()));
+        assert!(!verify_award(&signed, &[9u8; 32]), "and not under another key");
+
+        let awarded = hub.commit_award(signed.clone()).await.expect("commits");
+        let read_back = hub.award_of("pickup-11").expect("the award is readable");
+        assert!(
+            verify_award(&read_back, &hub_key.verifying_key().to_bytes()),
+            "the signature survives the write and the read — it covers the record, not the transport",
+        );
+        assert_eq!(read_back.operation_id, awarded.award.operation_id);
+
+        // The unsigned award is still legal and still proves nothing, which is the honest pair.
+        let unsigned = Award { signature: Vec::new(), ..read_back };
+        assert!(!unsigned.is_signed());
+        assert!(!verify_award(&unsigned, &hub_key.verifying_key().to_bytes()), "unsigned never verifies");
         agent.shutdown().await;
     }
 }

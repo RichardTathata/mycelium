@@ -9,6 +9,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`mycelium-commitment`: the crate's first rule acquires a mechanism** — the open provenance
+  decision, resolved. *"No component assigns another participant's obligation"* has been the
+  companion's headline rule since CN1 and had **nothing enforcing it**: an offer names its
+  participant in a *field*, so any member able to append to the stream could post an offer naming
+  somebody else, `AwardRule::LowestParticipant` would award that participant work they never offered,
+  and — this is the part that makes it more than an annoyance — **every reader checking the award
+  against the offers would agree the award was correct.** A pure rule over forgeable inputs checks
+  that the rule was applied, not that the inputs were real.
+
+  `Offer` and `Award` gain a signature, exactly as `Assessment` already had one:
+  `ContractNet::offer_signed`, `Award::signed`, `verify_offer`, `verify_award`. The teeth are
+  `offers_verified(requirement, resolve)` — the candidate set whose signature verifies under the key
+  the caller's directory gives for the participant **the offer names**, so an offer signed by its
+  forger fails, which is the realistic attack rather than the lazy one — and `plan_award_from`,
+  which takes a candidate set the caller chose. That seam is deliberate: **provenance is the
+  declarer's decision, not this crate's policy.** `offers()` + `plan_award` behave exactly as before.
+
+  **Unsigned stays legal and keeps meaning *unproven*.** A single-tenant mesh whose members are
+  trusted equally has nothing to prove to itself. What is not legal is reading an unsigned record as
+  proof.
+
+  **What a verifying signature does not establish**, stated because the axis is about not
+  overclaiming: it proves the holder of that key made the record. Whether the key belongs to the
+  participant named is `sys/identity/{node}`'s question, only as strong as `require_identity_proofs`
+  — **default-off**, without which an admitted node can append its own key to another's identity
+  entry. `SelfImposedPrevention` in the guardrails tier vocabulary, no higher, and nothing here stops
+  a forged offer being *written* — it stops it being *awarded*.
+
+  Gated by `a_forged_offer_is_not_a_candidate_when_the_declarer_checks_provenance`, which asserts
+  **both halves** (unchecked, the forgery wins; checked, it is not a candidate) because a test that
+  showed only the fix would leave a reader unable to tell what the fix is for. The gallery example
+  `redistribution_cn` carries the same scene end to end.
+
+  **Upgrade notes**, both small and both in the same class as v2.8.0's: `Offer` and `Award` gained a
+  field, so an exhaustive struct literal needs `signature: Vec::new()` (`..Default::default()` is
+  unaffected); and `CommitmentRefusal::AlreadyAwarded` now carries a `Box<Award>`, because an
+  unboxed one made every `Result` in the crate as large as its rarest outcome — `existing.participant`
+  is unchanged, but moving the award out of the variant needs a `*`.
+
 ### Security
 
 - **A deployment whose only credential model was `gateway_named_tokens` had an open gateway.**
