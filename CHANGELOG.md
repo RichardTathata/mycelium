@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`CallRefusal` and `CommitmentRefusal` are `#[non_exhaustive]`.** Both gained a variant this
+  cycle (`AtCapacity`; and `AlreadyAwarded` changed shape), and both are vocabularies of *why
+  something was refused* that have now grown twice — so this is the §6.6 ledger's own reasoning
+  applied before the next addition rather than after it: **one announced break instead of a series
+  of unannounced ones**, the same move 2.10.0 made for `CatalogRefusal`.
+
+  An exhaustive `match` downstream needs a `_` arm, and **that arm must fail closed**: an
+  unrecognised `CallRefusal` is *this call was not authorised for a reason this code does not know*,
+  never *it is fine*; an unrecognised `CommitmentRefusal` is *no award was made*, never *one was*.
+
 ### Added
 
 - **The federation edge meters calls per partner** — the Phase-C audit's last open finding, closed

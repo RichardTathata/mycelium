@@ -978,7 +978,8 @@ non-warnings costed, rather than open.
 
 ### 10.2 What is left
 
-Four things, and **none of them is blocked on code we have not written**:
+Two things, and **neither is blocked on code we have not written** (a third and fourth were closed
+on 2026-09-23 and are struck through below):
 
 1. **V1 — the nightly scale runner.** A **Phase A** gate that has never been met: the self-hosted
    box is offline, so the job queues silently. Nothing scale-related can be evidenced until it is
@@ -987,10 +988,19 @@ Four things, and **none of them is blocked on code we have not written**:
    the stub consumer; §6.8 says in as many words that neither a fixture nor one cloud closes that
    gate. It needs the counterparty, not another commit. AE4's operator and SDK examples travel with
    it.
-3. **Two open design questions**, open by decision rather than omission: `mycelium-commitment`'s
-   unsigned `Offer`/`Award` (provenance), and the **consumer-side-only per-partner budget** — the
-   federation edge has no slot accounting, the one audit finding still wanting a decision rather
-   than a patch.
+3. ~~**Two open design questions**~~ — **both decided and implemented 2026-09-23** (PR #365).
+   `mycelium-commitment`'s offers and awards now carry provenance: the crate's first rule (*no
+   component assigns another participant's obligation*) had nothing enforcing it, and a forged
+   offer would have **passed the award's own check**, because a pure rule over forgeable inputs
+   verifies that the rule was applied and not that the inputs were real. Signing was chosen over
+   binding a record to its writer because **anti-entropy carries no author** — writer-binding would
+   have held on the gossip path and evaporated on the repair path. And the **federation edge now
+   meters calls per partner** (`CallPolicy::max_in_flight_per_partner`, an RAII slot, `AtCapacity`
+   / -32004), the mirror of `GatewayPool` on the other side of the same edge; the M7
+   shared-observation alternative was rejected because it would put foreign domain names into
+   `sys/` (D7) and is unbuildable without this counter anyway. Both carry stated limits rather than
+   implied ones: a signature's strength rests on `require_identity_proofs` (**default-off**), and
+   the cap is per gateway (N gateways ⇒ N × cap) and bounds concurrency rather than rate.
 4. **§13's two recorded questions** — the composition hypothesis and reversible components — which
    are explicitly *not* v3 deliverables and open the next epoch.
 
