@@ -6481,7 +6481,7 @@ mod federation_transport {
     use super::*;
     use crate::federation::{
         call::{CallPolicy, FederatedCaller},
-        client::{ClientError, FederationClient, GatewayEndpoint},
+        client::{ClientError, FederationClient, GatewayEndpoint, TlsRefusal},
         edge::{now_ms, FederationEdge, PresentedCall, HEADER_FEDERATED_CALL},
         gateway::{CallOutcome, Repeatability},
         session::{LinkRefusal, LinkState},
@@ -7210,6 +7210,199 @@ mod federation_transport {
         a1.shutdown().await;
         let _ = std::fs::remove_dir_all(&ca_a);
         let _ = std::fs::remove_dir_all(&ca_b);
+    }
+
+    /// A single-node agent serving its gateway over **HTTPS** (the node-cert reuse path), with the
+    /// A2A and federation edges attached. Returns the agent, its port and its cert directory.
+    async fn https_gateway(tag: &str, edge: Arc<FederationEdge>) -> (Arc<GossipAgent>, u16, std::path::PathBuf) {
+        let bind = alloc_port();
+        let http = alloc_port();
+        let dir = std::env::temp_dir().join(format!("fed-pin-{}-{tag}-{bind}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = bind;
+        cfg.http_port = Some(http);
+        cfg.http_addr = "127.0.0.1".to_string();
+        cfg.health_check_max_jitter_ms = 50;
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        cfg.gateway_tls = Some(crate::GatewayTlsConfig::default()); // reuse the node cert
+        let id = NodeId::new("127.0.0.1", bind).unwrap();
+        let a = Arc::new(GossipAgent::new(id, cfg).with_a2a().with_federation_edge(edge));
+        a.start().await.unwrap();
+        (a, http, dir)
+    }
+
+    /// The SPKI pin of the key an agent terminates TLS with, computed the way a partner would
+    /// publish it — from the identity key, with no certificate to exchange.
+    fn pin_of(a: &GossipAgent) -> [u8; 32] {
+        let key = a.task_ctx.tls.get().expect("the agent runs with TLS").verifying_key_bytes();
+        crate::federation::pinning::ed25519_spki_sha256(&key)
+    }
+
+
+    /// **The federation edge over TLS, anchored on a pin rather than a CA (item 2 row 11).**
+    ///
+    /// Two gateways, both up, both running the *same* federation edge — same domain, same policy,
+    /// same catalogue signing key. They differ in exactly one thing: the TLS key that terminates
+    /// the connection. So every refusal below is attributable to the transport anchor and to
+    /// nothing else, and the positive control is the same client code succeeding against the
+    /// gateway it pins.
+    ///
+    /// In order:
+    /// 1. A pinned link discovers and invokes normally — pinning is not a mode that breaks things.
+    /// 2. An endpoint presenting an unpinned key is refused **by name**, and the provider behind it
+    ///    never sees the call. Without pinning that same endpoint answers correctly, which is what
+    ///    makes this a test of the anchor rather than of reachability.
+    /// 3. The refusal is `Tls(PinMismatch)` and **not** `Outcome(DeliveryUnknown)`. That is the
+    ///    whole reason the variant exists: `DeliveryUnknown` says *it may have run*, which bars a
+    ///    non-repeatable caller from ever retrying, and a failed handshake sent nothing.
+    /// 4. Pins plus an `http://` endpoint is a refusal, not a quiet plaintext call.
+    /// 5. The two builder setters both rebuild the HTTP client, so the order they are called in
+    ///    must not decide whether TLS is pinned.
+    ///
+    /// What this does **not** prove: nothing here says anything about an attacker who holds the
+    /// partner's private key, and nothing exercises certificate expiry — which this verifier
+    /// deliberately does not check, for the reason given in `federation::pinning`.
+    #[tokio::test]
+    async fn a_pinned_federation_link_talks_only_to_the_key_the_bundle_names() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(21);
+        let (alpha_sk, alpha_vk) = keypair(22);
+
+        let edge = Arc::new(
+            FederationEdge::new(
+                alpha.clone(),
+                ["demo/whoami"],
+                DomainPolicy {
+                    domain: alpha.clone(),
+                    revision: 1,
+                    grants: vec![(beta.clone(), "demo/whoami".into())],
+                },
+                TrustBundle::trusting([(beta.clone(), beta_vk)]),
+                CallPolicy::default(),
+            )
+            .with_signing_key(alpha_sk),
+        );
+
+        let (gw1, http1, dir1) = https_gateway("one", Arc::clone(&edge)).await;
+        let (gw2, http2, dir2) = https_gateway("two", Arc::clone(&edge)).await;
+        let (pin1, pin2) = (pin_of(&gw1), pin_of(&gw2));
+        assert_ne!(pin1, pin2, "two gateways must differ in their TLS key, or nothing below is a test");
+
+        // The provider lives behind gw-1 only; gw-2 is a correct gateway with the wrong key.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _reg = gw1.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&gw1), Arc::clone(&calls));
+        let cap_key = format!("cap/{}/demo/whoami", gw1.node_id());
+        poll_until(|| gw1.kv().get(&cap_key).is_some(), 5_000).await;
+
+        // The operator's wiring: the pin goes in the bundle beside the signing key, and the client
+        // takes it from there.
+        let mut bundle = TrustBundle::trusting([(alpha.clone(), alpha_vk)]);
+        assert!(bundle.pin_tls(&alpha, pin1), "the partner is in the bundle");
+        assert!(!bundle.pin_tls(&DomainId::new("stranger.example").unwrap(), pin1), "an unknown partner records nothing");
+        assert_eq!(bundle.tls_pins_for(&alpha), &[pin1]);
+        assert!(bundle.pin_tls(&alpha, pin1) && bundle.tls_pins_for(&alpha).len() == 1, "pinning twice is not two pins");
+
+        let endpoints = vec![
+            GatewayEndpoint { id: "gw-1".into(), base_url: format!("https://127.0.0.1:{http1}") },
+            GatewayEndpoint { id: "gw-2".into(), base_url: format!("https://127.0.0.1:{http2}") },
+        ];
+        let client = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
+            endpoints.clone(), 2, Duration::from_secs(30),
+        )
+        .with_partner_key(alpha_vk)
+        .with_tls_pins(bundle.tls_pins_for(&alpha).to_vec());
+
+        // ── 1. The pinned link works, over real TLS. ──────────────────────────────────────────
+        assert_eq!(client.connect().await.expect("catalogue over pinned TLS"), vec!["demo/whoami".to_string()]);
+        assert_eq!(client.link_state(), LinkState::Ready);
+        let reply = client.call("demo/whoami", "?", Repeatability::AtMostOnce).await.expect("call over pinned TLS");
+        assert_eq!(reply, crate::federation_principal("beta.example", "svc/billing"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // ── 2/3. Retire gw-1, so the next call must use the endpoint with the unpinned key. ───
+        // Discovery stays fresh, the link stays Ready, the pool has one gateway left: the refusal
+        // that follows can only be the transport's.
+        assert!(client.retire_gateway("gw-1"));
+        let refused = client.call("demo/whoami", "?", Repeatability::AtMostOnce).await;
+        match &refused {
+            Err(ClientError::Tls(TlsRefusal::PinMismatch { gateway, presented })) => {
+                assert_eq!(gateway, "gw-2");
+                let expected = presented.as_deref().expect("the refusal names the key that arrived");
+                assert_eq!(expected.len(), 64, "a sha256 in hex");
+                assert!(expected.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+            }
+            other => panic!("an unpinned endpoint must be refused by name, got {other:?}"),
+        }
+        assert!(
+            !matches!(refused, Err(ClientError::Outcome(CallOutcome::DeliveryUnknown { .. }))),
+            "a failed handshake sent nothing: reporting DeliveryUnknown would bar a retry forever",
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the call must not have reached any provider");
+
+        // ── 4. Pins plus a plaintext endpoint: refused with nothing attempted. ────────────────
+        let plaintext = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(),
+            vec![GatewayEndpoint { id: "gw-1".into(), base_url: format!("http://127.0.0.1:{http1}") }],
+            2, Duration::from_secs(30),
+        )
+        .with_partner_key(alpha_vk)
+        .with_tls_pins(vec![pin1]);
+        match plaintext.connect().await {
+            Err(ClientError::Tls(TlsRefusal::PlaintextEndpoint { gateway, base_url })) => {
+                assert_eq!(gateway, "gw-1");
+                assert!(base_url.starts_with("http://"));
+            }
+            other => panic!("a pinned client must refuse an http:// endpoint, got {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // ── 5. The builder order does not decide whether TLS is pinned. ───────────────────────
+        // Both clients point *only* at gw-2 and pin gw-1's key, so both must fail — the question is
+        // *how*. A live pin fails as `Tls(PinMismatch)`, from our verifier. A dropped pin falls
+        // back to the default Web-PKI verifier, which also rejects this self-signed endpoint, but
+        // as an ordinary transport error: `Outcome(DeliveryUnknown)`. The variant is therefore the
+        // whole gate here, and the control below pins that the two are actually distinguishable
+        // rather than both arriving as the same thing.
+        let only_gw2 = vec![GatewayEndpoint { id: "gw-2".into(), base_url: format!("https://127.0.0.1:{http2}") }];
+        let pins_then_timeouts = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(), only_gw2.clone(), 2, Duration::from_secs(30),
+        )
+        .with_tls_pins(vec![pin1])
+        .with_timeouts(Duration::from_secs(2), Duration::from_secs(5));
+        let timeouts_then_pins = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(), only_gw2, 2, Duration::from_secs(30),
+        )
+        .with_timeouts(Duration::from_secs(2), Duration::from_secs(5))
+        .with_tls_pins(vec![pin1]);
+        for (order, c) in [("pins then timeouts", &pins_then_timeouts), ("timeouts then pins", &timeouts_then_pins)] {
+            match c.connect().await {
+                Err(ClientError::Tls(TlsRefusal::PinMismatch { .. })) => {}
+                other => panic!("{order}: the pinning was dropped by the builder, got {other:?}"),
+            }
+        }
+
+        // The control for step 5: the same endpoint with **no** pins configured fails as a
+        // transport error, not as a pin mismatch. Without this, step 5 would pass even if every
+        // failure in this test were being labelled `PinMismatch` by accident.
+        let unpinned = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk, alpha.clone(),
+            vec![GatewayEndpoint { id: "gw-2".into(), base_url: format!("https://127.0.0.1:{http2}") }],
+            2, Duration::from_secs(30),
+        )
+        .with_partner_key(alpha_vk);
+        match unpinned.connect().await {
+            Err(ClientError::Outcome(CallOutcome::DeliveryUnknown { .. })) => {}
+            other => panic!("an unpinned client has no anchor and must fail as transport, got {other:?}"),
+        }
+
+        gw1.shutdown().await;
+        gw2.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir1);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 }
 

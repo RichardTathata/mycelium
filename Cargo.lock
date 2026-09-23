@@ -2178,6 +2178,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-pemfile",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "sha2",

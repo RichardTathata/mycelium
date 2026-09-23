@@ -62,7 +62,55 @@ leaving it stale makes a real change invisible to the far side.
 Check `signs_catalogue()` at start-up. An unsigned catalogue reply is refused by a conforming
 partner, so a missing signing key looks like a partner-side failure from your logs.
 
-## Rotation
+## Encrypting the link (TLS pinning)
+
+Federated calls are signed, not encrypted: without this step an on-path observer reads every call
+and every reply. Turning it on is two decisions on each side.
+
+**The partner's side — serve TLS and publish a pin.** Run the gateway behind `gateway_tls`, then
+publish the sha256 of the endpoint's `SubjectPublicKeyInfo`:
+
+```bash
+# From a certificate file:
+openssl x509 -in gateway.pem -pubkey -noout | openssl pkey -pubin -outform der | sha256sum
+```
+
+On the node-cert reuse path (`GatewayTlsConfig::default()`) there is no certificate file to read —
+the certificate is regenerated at every startup — but the identity key behind it is stable, so
+publish `federation::pinning::ed25519_spki_sha256(&identity_key)` instead. The value is the same;
+`the_two_ways_to_compute_a_pin_agree` is the test that keeps it so.
+
+**Your side — pin it and require https.**
+
+```rust
+bundle.pin_tls(&partner_domain, pin);                     // beside their signing key
+let client = FederationClient::new(..)
+    .with_tls_pins(bundle.tls_pins_for(&partner_domain).to_vec());
+```
+
+Send the pin over a channel that is not the link you are securing (the same call anyone would make
+about a signing key), and **verify it with the partner before installing it** — a pin accepted from
+whoever is currently answering is not a trust decision, it is a record of who answered.
+
+Once pins are set, an `http://` endpoint for that partner is refused rather than dialled
+(`Tls(PlaintextEndpoint)`), so fix the URLs in the same change.
+
+### Rotating a TLS key without a flag day
+
+The pin list is a list for this reason. In order:
+
+1. The partner generates the new key and publishes its pin **before** using it.
+2. Every counterparty runs `bundle.pin_tls(&partner, new_pin)` — both pins now verify.
+3. The partner swaps its endpoint to the new key. Nothing is refused, on either side.
+4. Every counterparty runs `bundle.unpin_tls(&partner, &old_pin)`. **The window is not closed until
+   this step runs** — until then the retired key still opens a connection.
+
+Doing 3 before 2 is the outage: every counterparty refuses the endpoint with `Tls(PinMismatch)`, and
+the refusal names the digest that arrived, which is the new one. That is the symptom to recognise —
+a `PinMismatch` whose `presented` value matches the partner's *new* published pin means step 2 was
+skipped, not that anyone is being attacked.
+
+## Rotation (signing keys)
 
 ```rust
 bundle.rotate(&partner_domain, new_key, overlap_until_ms);
@@ -71,6 +119,10 @@ bundle.rotate(&partner_domain, new_key, overlap_until_ms);
 Rotation is **overlapping by design**: `acceptable_keys` returns both the old and new key until
 `overlap_until_ms` passes. Set the overlap wider than the partner's deployment window, or calls
 signed with the old key fail during their rollout.
+
+This is a different key from the TLS pin above and rotates independently: one signs credentials and
+catalogues, the other terminates connections, and an operator may well hold them in different
+places. Revocation, below, covers both — a revoked partner's pins stop being returned too.
 
 ## Revocation
 
@@ -122,10 +174,15 @@ Refusals are typed so they route you to the right file. Two pairs matter most:
 `LifetimeTooLong` is about **your** `CallPolicy`, not their credential: they claimed a lifetime longer
 than you accept. Defaults are a 300-second maximum lifetime and 30 seconds of clock-skew tolerance.
 
+- **`Tls(PinMismatch)` is not `DeliveryUnknown`.** A pin mismatch means the handshake never
+  completed, so the partner received nothing and even an at-most-once call is safe to retry once the
+  cause is fixed. Do not treat it as a possible execution. Check it against the rotation order above
+  before assuming an attack.
+
 ## What this runbook does not cover
 
-- **TLS on the federation edge itself** is item 2's row 11 and is not shipped. The edge today rides
-  the gateway's own transport posture — see [gateway-tls](gateway-tls.md).
-- **More than two domains**, a hostile network, and the SDK verbs are also row 11.
+- **More than two domains**, a hostile network, and the SDK verbs are item 2's row 11 and are not
+  shipped. TLS on the edge itself *is* shipped — see "Encrypting the link" above, and
+  [gateway-tls](gateway-tls.md) for the serving side.
 - **Who the caller is inside your own mesh** is [rbac](rbac.md); federation preserves the origin
   principal but does not authorise it for you.

@@ -46,7 +46,14 @@ pub struct GatewayEndpoint {
 
 /// Why a federated call did not complete. Every variant is one the contract already names;
 /// `Transport` is the one this module adds, for a reply that was received but could not be read.
+///
+/// `#[non_exhaustive]` as of the release that added `Tls`. A new refusal here is a refusal that already existed and was
+/// being reported as something less precise — `Tls` was exactly that — so the honest expectation is
+/// that more will arrive, and a `_` arm now means the next one is not a breaking change. The arm
+/// should **fail closed**: an unrecognised refusal is *the call did not happen for a reason this
+/// code does not know*, never *the call is fine*.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClientError {
     /// Refused locally, before any byte was sent: the link is not ready.
     Link(LinkRefusal),
@@ -61,6 +68,45 @@ pub enum ClientError {
     /// The catalogue arrived but is not one this client will rely on: unsigned when a signature is
     /// required, forged, for another domain, or filtered for someone else (item 2 PR 10a).
     Catalogue(CatalogRefusal),
+    /// The transport was refused before any request crossed it (item 2 row 11).
+    ///
+    /// **Not a [`CallOutcome::DeliveryUnknown`].** That distinction is the reason this variant
+    /// exists rather than reusing the silent-gateway path: `DeliveryUnknown` means *it may have
+    /// run*, which for a non-repeatable call is a permanent stain — the caller may never retry. A
+    /// TLS refusal means the handshake did not complete, so the partner received no request and the
+    /// call is safe to retry once the endpoint or the pin is fixed.
+    Tls(TlsRefusal),
+}
+
+/// Why the transport was refused before it carried anything. See [`ClientError::Tls`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TlsRefusal {
+    /// The endpoint completed no handshake this client would accept: it presented a certificate
+    /// whose `SubjectPublicKeyInfo` is not pinned for this partner.
+    ///
+    /// Either the partner rotated its TLS key without publishing the new pin, or the endpoint is
+    /// not the partner. Both are an operator's decision, not something to retry around.
+    /// `presented` is the digest that arrived, lower-case hex, so it can be compared against a
+    /// bundle by eye — it is *not* a value to paste in without asking the partner first.
+    PinMismatch { gateway: String, presented: Option<String> },
+    /// Pins are configured and this endpoint's URL is not `https://`, so nothing would be encrypted
+    /// and no certificate would be presented to check. Refused with no connection attempted.
+    PlaintextEndpoint { gateway: String, base_url: String },
+}
+
+impl std::fmt::Display for TlsRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PinMismatch { gateway, presented } => match presented {
+                Some(p) => write!(f, "gateway {gateway} presented an unpinned key (spki sha256 {p})"),
+                None => write!(f, "gateway {gateway} presented an unpinned key"),
+            },
+            Self::PlaintextEndpoint { gateway, base_url } => {
+                write!(f, "gateway {gateway} is pinned but its endpoint {base_url} is not https")
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for ClientError {
@@ -72,11 +118,59 @@ impl std::fmt::Display for ClientError {
             Self::Refused { status, code, message } => write!(f, "refused ({status}, {code:?}): {message}"),
             Self::Transport(s) => write!(f, "transport: {s}"),
             Self::Catalogue(r) => write!(f, "catalogue: {r}"),
+            Self::Tls(r) => write!(f, "tls: {r}"),
         }
     }
 }
 
 impl std::error::Error for ClientError {}
+
+/// Find a pin mismatch inside a transport error, if that is what it was.
+///
+/// The refusal is raised deep inside rustls and arrives wrapped by hyper and reqwest, so it is
+/// recovered by **walking the error graph and downcasting** rather than by matching on a message —
+/// a string match would be a gate that silently stops working the next time any layer rewords
+/// itself. Returning `None` costs only precision: the caller then reports the failure as a silent
+/// gateway, which is the conservative reading.
+///
+/// `source()` alone is not enough, and that is not a guess — it is what the wrapping actually does:
+///
+/// ```text
+/// reqwest::Error → hyper_util Error → io::Error(Custom) → io::Error(Custom) → rustls::Error
+///                                     ^ source() stops here
+/// ```
+///
+/// `io::Error` does not report a custom payload through `source()`; it exposes it through
+/// `get_ref()`, and here there are **two** such layers nested. So both edges are followed. The
+/// depth bound is not defending against anything in particular — the chain is four deep — it is
+/// there so a future wrapper that made the graph cyclic could not hang a caller's request path.
+fn pin_mismatch(err: &(dyn std::error::Error + 'static)) -> Option<crate::federation::pinning::PinMismatch> {
+    use crate::federation::pinning::PinMismatch;
+    let mut pending: Vec<&(dyn std::error::Error + 'static)> = vec![err];
+    for _ in 0..16 {
+        let Some(e) = pending.pop() else { break };
+        if let Some(m) = e.downcast_ref::<PinMismatch>() {
+            return Some(m.clone());
+        }
+        // rustls does not expose the wrapped error through `source()` either, so the one variant
+        // that can carry ours is opened by hand.
+        if let Some(rustls::Error::InvalidCertificate(rustls::CertificateError::Other(other))) =
+            e.downcast_ref::<rustls::Error>()
+        {
+            let inner: &(dyn std::error::Error + 'static) = &*other.0;
+            if let Some(m) = inner.downcast_ref::<PinMismatch>() {
+                return Some(m.clone());
+            }
+        }
+        if let Some(inner) = e.downcast_ref::<std::io::Error>().and_then(|io| io.get_ref()) {
+            pending.push(inner);
+        }
+        if let Some(src) = e.source() {
+            pending.push(src);
+        }
+    }
+    None
+}
 
 struct ClientState {
     link: PartnerLink,
@@ -101,6 +195,15 @@ pub struct FederationClient {
     partner_key: Option<[u8; 32]>,
     endpoints: Vec<GatewayEndpoint>,
     credential_lifetime: Duration,
+    /// The transport anchor (item 2 row 11). Empty: no pinning, and `http://` endpoints are read by
+    /// anyone on the path. Non-empty: only an endpoint holding one of these keys is talked to.
+    ///
+    /// Held here rather than only inside `http` because **two builder methods rebuild the client**,
+    /// and a setting that lives only in the built object is a setting the next builder call drops.
+    /// `the_builder_order_does_not_decide_whether_tls_is_pinned` is the gate on that.
+    tls_pins: Vec<[u8; 32]>,
+    connect_timeout: Duration,
+    request_timeout: Duration,
     http: reqwest::Client,
     /// Lock-order row 39: leaf, µs, never held across the HTTP await (two critical sections
     /// around it, by construction of `call`).
@@ -119,14 +222,26 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The whole-request bound, for a partner that accepts a connection and then stops talking.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn http_client(connect: Duration, request: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(connect)
-        .timeout(request)
+fn http_client(connect: Duration, request: Duration, tls_pins: &[[u8; 32]]) -> reqwest::Client {
+    let builder = reqwest::Client::builder().connect_timeout(connect).timeout(request);
+    let builder = if tls_pins.is_empty() {
+        builder
+    } else {
+        builder.use_preconfigured_tls(super::pinning::pinned_client_config(tls_pins.to_vec()))
+    };
+    builder
         .build()
         // A builder failure here is a TLS-backend problem, not a per-call condition; the default
         // client is still better than refusing to construct the whole client.
-        .unwrap_or_else(|_| reqwest::Client::new())
+        //
+        // **Except when pins were asked for.** Falling back to a default client would silently
+        // discard the pinning and dial the partner with the ordinary Web-PKI verifier — the one
+        // shape of failure this whole module exists to refuse. A client that cannot honour its pins
+        // must not be a client that quietly does not.
+        .unwrap_or_else(|e| {
+            assert!(tls_pins.is_empty(), "a pinned TLS client could not be built, and falling back would drop the pinning: {e}");
+            reqwest::Client::new()
+        })
 }
 
 impl FederationClient {
@@ -151,7 +266,10 @@ impl FederationClient {
             partner_key: None,
             endpoints,
             credential_lifetime: Duration::from_secs(60),
-            http: http_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
+            tls_pins: Vec::new(),
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            http: http_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, &[]),
             state: Mutex::new(ClientState {
                 link: PartnerLink::new(partner),
                 pool,
@@ -181,8 +299,53 @@ impl FederationClient {
     /// obligation rather than a tuning knob: a blackholed partner never refuses, and an unbounded
     /// wait cannot produce the `DeliveryUnknown` the contract promises.
     pub fn with_timeouts(mut self, connect: Duration, request: Duration) -> Self {
-        self.http = http_client(connect, request);
+        self.connect_timeout = connect;
+        self.request_timeout = request;
+        self.rebuild_http();
         self
+    }
+
+    /// Dial this partner over TLS terminated by a key the trust bundle pins (item 2 row 11).
+    ///
+    /// ```ignore
+    /// let client = FederationClient::new(..).with_tls_pins(bundle.tls_pins_for(&partner).to_vec());
+    /// ```
+    ///
+    /// With pins set, the partner's certificate is trusted **only** if its `SubjectPublicKeyInfo`
+    /// hashes to one of them — no certificate authority is consulted, because this design has none
+    /// to consult. See [`crate::federation::pinning`] for why the bundle is the anchor, what a
+    /// completed handshake does and does not prove, and how to compute the value.
+    ///
+    /// An empty list is *no pinning*, and leaves the client exactly as it was. A **non-empty** list
+    /// makes an `http://` endpoint a refusal rather than a plaintext call: see
+    /// [`TlsRefusal::PlaintextEndpoint`].
+    pub fn with_tls_pins(mut self, pins: Vec<[u8; 32]>) -> Self {
+        self.tls_pins = pins;
+        self.rebuild_http();
+        self
+    }
+
+    /// Rebuild the HTTP client from every setting that shapes it.
+    ///
+    /// One function, called by both setters, because the alternative — each setter building from
+    /// its own arguments — made the result depend on the order they were called in, and dropped
+    /// whichever setting was applied first.
+    fn rebuild_http(&mut self) {
+        self.http = http_client(self.connect_timeout, self.request_timeout, &self.tls_pins);
+    }
+
+    /// The first endpoint that pinning cannot protect: pins are configured and the URL is
+    /// plaintext, so the transport would carry the call in the clear and no certificate would ever
+    /// be presented to check.
+    ///
+    /// Refused rather than downgraded. An operator who configured a pin has stated what they want;
+    /// silently dialling `http://` would give them the ceremony of pinning and none of the
+    /// confidentiality, which is worse than not offering it.
+    fn insecure_endpoint(&self) -> Option<&GatewayEndpoint> {
+        if self.tls_pins.is_empty() {
+            return None;
+        }
+        self.endpoints.iter().find(|e| !e.base_url.starts_with("https://"))
     }
 
     pub fn partner(&self) -> &DomainId {
@@ -229,6 +392,12 @@ impl FederationClient {
     /// leaves the link `Down`; a refusal (revoked, untrusted, expired) leaves it `Down` too and
     /// says why.
     pub async fn connect(&self) -> Result<Vec<String>, ClientError> {
+        if let Some(ep) = self.insecure_endpoint() {
+            return Err(ClientError::Tls(TlsRefusal::PlaintextEndpoint {
+                gateway: ep.id.clone(),
+                base_url: ep.base_url.clone(),
+            }));
+        }
         let presented = self.present(CATALOG_EXPORT, None);
         let mut last: Option<ClientError> = None;
         for gw in &self.endpoints {
@@ -236,6 +405,17 @@ impl FederationClient {
             let sent = self.http.get(&url).header(HEADER_FEDERATED_CALL, presented.to_header_value()).send().await;
             let resp = match sent {
                 Ok(r) => r,
+                Err(e) if pin_mismatch(&e).is_some() => {
+                    // Not tried elsewhere and not reported as silence: an endpoint presenting a key
+                    // this domain does not pin is either the partner having rotated without saying
+                    // so, or not the partner. Moving quietly to the next gateway would turn an
+                    // authentication failure into a latency blip in a log nobody reads.
+                    self.state.lock().unwrap_or_else(|e| e.into_inner()).link.disconnected();
+                    return Err(ClientError::Tls(TlsRefusal::PinMismatch {
+                        gateway: gw.id.clone(),
+                        presented: pin_mismatch(&e).map(|m| crate::federation::pinning::hex32(&m.presented)),
+                    }));
+                }
                 Err(e) => {
                     last = Some(ClientError::Outcome(CallOutcome::DeliveryUnknown {
                         attempted_via: vec![gw.id.clone()],
@@ -331,6 +511,12 @@ impl FederationClient {
     /// Invoke `export` on the partner with `text` as the A2A message, and return the task's first
     /// text artifact. See the module docs for the sequence and where each refusal comes from.
     pub async fn call(&self, export: &str, text: &str, repeatability: Repeatability) -> Result<String, ClientError> {
+        if let Some(ep) = self.insecure_endpoint() {
+            return Err(ClientError::Tls(TlsRefusal::PlaintextEndpoint {
+                gateway: ep.id.clone(),
+                base_url: ep.base_url.clone(),
+            }));
+        }
         // Critical section 1: admit, resolve, take a slot. No HTTP has happened if this fails.
         let first = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -372,6 +558,16 @@ impl FederationClient {
                 .await;
             let resp = match sent {
                 Ok(r) => r,
+                Err(e) if pin_mismatch(&e).is_some() => {
+                    // The slot comes back — the gateway is not busy, it is not the partner — and the
+                    // call ends here rather than becoming `DeliveryUnknown`, because the handshake
+                    // failed: nothing was sent, so a non-repeatable call stays retryable.
+                    self.state.lock().unwrap_or_else(|e| e.into_inner()).pool.release(&gateway, &self.partner);
+                    return Err(ClientError::Tls(TlsRefusal::PinMismatch {
+                        gateway: gateway.clone(),
+                        presented: pin_mismatch(&e).map(|m| crate::federation::pinning::hex32(&m.presented)),
+                    }));
+                }
                 Err(e) => match self.silent(repeatability, &mut attempted, &e.to_string()) {
                     Ok(next) => { gateway = next; continue; }
                     Err(err) => return Err(err),

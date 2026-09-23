@@ -33,7 +33,7 @@ gateway = ["dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:futures-util",
 fuzz-internals = []
 # Enables mTLS on the gossip TCP port, keypair-backed node identity, and
 # consensus payload signing. Adds tokio-rustls, rcgen, and ed25519-dalek.
-tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap"]
+tls = ["mycelium-core/tls", "dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:webpki", "reqwest?/rustls-tls-manual-roots"]
 # Enables OTEL span export from SkillRunner (opentelemetry-otlp gRPC).
 otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 # Exposes a Prometheus /metrics endpoint on the gateway HTTP port.
@@ -122,6 +122,11 @@ tokio-rustls   = { version = "0.26", optional = true }
 rustls         = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 rcgen          = { version = "0.13", optional = true }
 rustls-pemfile = { version = "2",    optional = true }
+# X.509 reading for the federation edge's SPKI pins (`federation::pinning`). This is the parser
+# rustls already uses — it is in the tree via `rustls`, so declaring it adds no new compiled crate,
+# and reading the SPKI with the same code that validates chains is the point: the alternative was a
+# second, hand-rolled scan over attacker-supplied DER.
+webpki         = { package = "rustls-webpki", version = "0.103", optional = true }
 ed25519-dalek  = { version = "2",    features = ["rand_core", "pkcs8"], optional = true }
 rand_core      = { version = "0.6",  features = ["getrandom"],         optional = true }
 # Lock-free atomic swap of the live TLS identity (hot cert rotation, WS5).

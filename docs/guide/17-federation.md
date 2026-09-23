@@ -179,6 +179,7 @@ absence. Design record: [`design/federated-domains.md`](../design/federated-doma
 | `federation::session` | the partition/reconnect state machine — work refused until discovery refreshes |
 | `federation::edge` (`tls`) | the provider side of the transport: the credential's wire form (`PresentedCall`, one header on `/a2a`), `FederationEdge` — authenticate at the auth layer, authorise in the handler — and the filtered catalogue on `GET /federation/catalog` |
 | `federation::client` (`gateway` + `tls`) | the consumer side: `FederationClient` drives link → resolver → pool → HTTP, and turns a silent gateway into `DeliveryUnknown` or a failover by repeatability |
+| `federation::pinning` (`tls`) | the transport's **confidentiality** half: TLS anchored on a key pinned in the trust bundle, because this design has no CA to anchor it on |
 
 Serve federated calls from a node:
 
@@ -199,10 +200,55 @@ Call one from another domain:
 let client = FederationClient::new(beta, "svc/billing", beta_signing_key, alpha,
     vec![GatewayEndpoint { id: "gw-1".into(), base_url: "https://alpha-gw-1:8443".into() }],
     /* slots per partner */ 4, /* catalogue freshness */ Duration::from_secs(60))
-    .with_partner_key(alpha_public_key); // require the catalogue to be alpha's, issued to us
+    .with_partner_key(alpha_public_key)   // require the catalogue to be alpha's, issued to us
+    .with_tls_pins(bundle.tls_pins_for(&alpha).to_vec()); // and require the endpoint to be alpha's
 let granted = client.connect().await?;                       // the catalogue is the grant
 let reply = client.call("invoice.submit", text, Repeatability::AtMostOnce).await?;
 ```
+
+### Encrypting the link: the pin is the anchor
+
+Everything above is **signed and not encrypted**. The credential binds the origin domain, the
+principal, the export, the validity window and (since 2.12.0) the request body — so an on-path
+attacker cannot alter a call — but it can still *read* every call and every reply.
+
+TLS closes that, and TLS needs a trust anchor. There is no X.509 anywhere in this design: partner
+trust is one Ed25519 key per partner that an operator chose bilaterally. So the anchor is **the
+bundle** — the same decision, extended to the transport — rather than the public Web PKI (whose root
+is far larger than the bilateral one) or an exchange of private CAs (more machinery, and a CA signs
+*any* name).
+
+```rust
+// The partner publishes a pin: sha256 of its endpoint's SubjectPublicKeyInfo.
+//   openssl x509 -in gw.pem -pubkey -noout | openssl pkey -pubin -outform der | sha256sum
+// A partner reusing its node identity key (GatewayTlsConfig::default(), where the certificate is
+// regenerated at every startup) computes it from the key instead:
+let pin = federation::pinning::ed25519_spki_sha256(&partner_identity_key);
+
+bundle.pin_tls(&alpha, pin);                                  // beside the signing key
+let client = FederationClient::new(..).with_tls_pins(bundle.tls_pins_for(&alpha).to_vec());
+```
+
+The field is a **list**, for the reason key rotation is a list: one pin makes a TLS key change a flag
+day. The partner publishes the next pin, every counterparty adds it (`pin_tls`), the partner swaps,
+the old one is dropped (`unpin_tls`).
+
+Two refusals come with it, and both mean *nothing was sent*:
+
+| Refusal | What happened |
+|---|---|
+| `Tls(PinMismatch { gateway, presented })` | The endpoint presented a key this domain does not pin. Either the partner rotated without publishing, or that endpoint is not the partner. `presented` is the digest that arrived — compare it against what the partner says, never paste it in. |
+| `Tls(PlaintextEndpoint { gateway, base_url })` | Pins are configured and the URL is `http://`. Refused rather than downgraded: silently dialling plaintext would give you the ceremony of pinning and none of the confidentiality. |
+
+Neither is a `DeliveryUnknown`, and that distinction is the point of a separate variant: a
+`DeliveryUnknown` says *it may have run*, which bars an at-most-once caller from ever retrying. A
+failed handshake sent nothing, so the call is safe to retry once the pin or the endpoint is fixed.
+
+**What pinning does not do.** It does not authenticate the *caller* — that stays the credential,
+deliberately, because a second authentication model at the same edge is the drift v2.4.1 and v2.4.2
+were spent removing. It does not check the certificate's name, chain or expiry, because there is no
+authority here to check them against, and a name checked against nothing reads like validation while
+proving nothing. And it says nothing about an attacker holding the partner's private key.
 
 A call before `connect` is refused with no HTTP (`Link(Down)`); an export the catalogue never named is
 refused with no HTTP (`Resolve`); a credential the partner does not trust, or one minted for another
@@ -228,8 +274,10 @@ consensus namespace and each node's connection table (`connected_peers`) before,
 (`src/lib_tests.rs` → `the_release_gates_choreography_over_the_transport`). Two things to know when you
 run this for real: a replaced gateway should be **retired** (`FederationClient::retire_gateway`) — the
 pool keeps no health memory, so a dead gateway left listed costs every at-most-once call a
-`DeliveryUnknown`; and the edge is plain HTTP in the test — in production it is whatever the gateway
-serves, so run it behind `gateway_tls`. Every attempt is bounded (5 s to connect, 30 s in total;
+`DeliveryUnknown`; and the edge is plain HTTP in *that* test — in production it is whatever the
+gateway serves, so run it behind `gateway_tls` and pin it (above;
+`a_pinned_federation_link_talks_only_to_the_key_the_bundle_names` is the same edge over real TLS,
+with two gateways differing only in their TLS key). Every attempt is bounded (5 s to connect, 30 s in total;
 `with_timeouts` to change them), because a partner whose network is blackholed never refuses and an
 unbounded client could not report the `DeliveryUnknown` the contract promises. The catalogue is signed under the domain's key and bound to the
 partner it was issued to; a client given the partner's key (`with_partner_key`) refuses an unsigned,
