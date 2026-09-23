@@ -180,10 +180,19 @@ onboarding checklist, the **Phase-C adversarial self-audit** over items 1+2+7 (v
 plus three post-release fixes #325–#327), **nine trust-edge fuzz targets** (#329/#331, which found four more
 defects: the wire `DomainId` validation bypass, replay-bundle field corruption, a torn journal tail counted as a
 record, an unbounded journal allocation — #330), and **migration notes per deprecation**, now an adopter-facing
-page `docs/guide/deprecations.md` (#333). Still open publicly: §12.2's SDK narrative and the wiki page per new
-mechanism; item 2's row 11 (SDK verbs, more than two domains — **TLS on the federation edge shipped
-2026-09-23**, anchored on an SPKI pinned in the `TrustBundle` rather than a CA, because this design holds no
-X.509 material; `src/federation/pinning.rs`); the §6.6 **removal ledger** is complete and its non-warnings are
+page `docs/guide/deprecations.md` (#333). **The delivery remnants closed 2026-09-23** (PR #362): **item 2's row 11 is
+complete** — the SDK verbs (`with_federation_clients` + five `/gateway/federation/*` routes behind
+`federation:read`/`federation:invoke`; the credential names the *local caller*, never the node or the client's
+configured principal, and never anything in the request body), a hostile network (integrity 09-22, TLS pinned on
+an SPKI in the `TrustBundle` 09-23 — this design holds no X.509 material; `src/federation/pinning.rs`), and
+**more than two domains** (`three_domains_compose_without_trust_composing`: trust does not compose, a grant you
+hold is not re-exported, non-merger pairwise, slots per partner); and **§12.2 is complete** — the SDK receipt
+narrative in both READMEs + guide 15 + the checkpointer README (whose `put()` is a **rung-1 receipt**, which
+is why the flagship waits by *reading from node B*), the two missing wiki pages
+(`dev/architecture/contracts.md`, `dev/testing/replay.md`) and `AGENTS.md` routing rules. That PR also
+carries a **security fix**: a deployment configuring only `gateway_named_tokens` ran an **open gateway**
+(the auth layer's token-model predicate did not count the named table), affecting **2.10.0–2.12.0** —
+found because a scope test returned 504 where 403 was expected. Still open publicly: the §6.6 **removal ledger** is complete and its non-warnings are
 **deliberate, each with a stated reason** — an earlier version of this line called them *"four unmarked
 deprecations"*, which was wrong twice: the ledger has **9 entries, 4 warning** (2 `#[deprecated]`, 2
 `#[non_exhaustive]` from 2.10.0), and *"unmarked"* implied an oversight. Entry 4 is the one that could
