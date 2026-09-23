@@ -267,7 +267,14 @@ pub struct AwardedLinearizable {
 }
 
 /// Why an award was not made. **Each is a visible state, not a retry.**
+///
+/// `#[non_exhaustive]` since the release that boxed [`CommitmentRefusal::AlreadyAwarded`]: the
+/// vocabulary of *why an award did not happen* has grown twice already (the mandate refusals at
+/// CN3), and one announced break is better than a series of unannounced ones. A `_` arm is required
+/// downstream and **must fail closed** — an unrecognised refusal is *no award was made*, never *an
+/// award was made*.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CommitmentRefusal {
     /// No announcement head exists for the requirement.
     NotAnnounced,

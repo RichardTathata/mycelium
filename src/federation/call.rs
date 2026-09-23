@@ -135,7 +135,14 @@ impl Default for CallPolicy {
 /// `Refused`. In particular **`BadSignature` and `NotPermitted` must never merge**: the first says
 /// someone is forging, the second says a partner asked for something we chose not to grant. Reading
 /// a forgery as a policy gap sends the operator to edit the wrong file.
+/// `#[non_exhaustive]` since the release that added [`CallRefusal::AtCapacity`]. A new refusal here
+/// is, as with [`ClientError`](crate::federation::client::ClientError), a refusal that already
+/// existed and was being reported as something less precise — so more are expected, and a `_` arm
+/// now means the next one is not a breaking change. **That arm must fail closed**: an unrecognised
+/// refusal is *this call was not authorised for a reason this code does not know*, never *it is
+/// fine*.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CallRefusal {
     /// The origin domain is not in this operator's trust bundle.
     UnknownDomain,
