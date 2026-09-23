@@ -6,7 +6,7 @@ typed receipts lands in PR 2 (identities, receipts, failure vocabulary), PR 3 (r
 PR 4a (exact-identity ack), PR 4b (persisted-by-peer). Nothing here changes a public type. What this
 PR adds in code is the **regression floor** (§8) and the **golden on-disk fixtures** (§9).
 
-> The philosophy's own statement of this axis: `docs/philosophy.md` — *Property 8, the contract: an
+> The philosophy's own statement of this axis: `docs/philosophy.md` — *Property 9, the contract: an
 > ack names what it proves* and litmus tests 4–5. This record is the WHY cell; the HOW is the guide's
 > contracts-and-receipts chapter, written with PR 3's release gate.
 

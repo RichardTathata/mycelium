@@ -373,11 +373,45 @@ In Mycelium terms, this is **Property 7 — Epistemic Symmetry**: the meta-knowl
 
 The political analogy is not decorative. Subsidiarity, polycentric governance, the Ostrom design principles, and the mandate TTL are the result of decades of empirical study of what makes distributed coordination sustainable at scale. They converge with Holland, Hayek, and Burgess because they are studying the same underlying problem in a different domain. The correct answer is the same: local self-determination wherever possible; emergent consensus structures where scale requires them; the higher layer as servant, not master; and the servant's mandate explicitly limited in time.
 
-### Property 8 — the contract: an ack names what it proves
+### Property 8 — Exit
 
-Properties 1–7 describe how state and authority move through the substrate. They say nothing about what a participant may *believe* when the substrate answers. Yet every layer answers — `true`, `Ok`, `Acknowledged`, `Committed` — and a system whose answers mean different things at different sites, or mean less than they read, breeds the same asymmetry Property 7 guards against: the participant who knows what an ack really proves holds an advantage over the one who took it at face value, and the difference is invisible until a failure makes it visible. A coordinator-free substrate cannot afford that, because there is no coordinator to ask.
+Properties 5–7 bound capture from inside the substrate: they raise its cost, time-limit its
+mandates, and deny it a privileged vantage point. Each of them still asks the mechanism to behave
+as designed. The fourth capture-resistance property does not.
 
-**Property 8 — the contract.** An acknowledgement is a **receipt**: it names exactly which rung was established — *applied locally*, *this exact operation on this node's disk*, *persisted by these named peers*, *committed by that destination together with its dedup result* — and never implies a rung above. Same identity with different content is a conflict, not a silent overwrite. A timeout returns the rungs that were established and an explicit *unknown* for the rest; the substrate never answers "nothing happened", because it cannot know that. Receipts are evidence, not verdicts: the reader decides what to accept (Property 7's epistemic symmetry, extended from state to *evidence* — the substrate never decides truth; the knowledge layer of the contracts axis makes that a rule for claims and assessments too). The design record is [`docs/design/contracts-receipts.md`](design/contracts-receipts.md); the v3 contracts axis is this property's implementation, and litmus tests 4 and 5 are its guards.
+**Property 8 — Exit.** A participant, or a coherent sub-domain of participants, can unilaterally
+withdraw from the substrate — taking its state and its capabilities with it — without the permission
+of any other party. **Exit is the capture-resistance mechanism that does not depend on the captor
+playing fair.**
+
+This is Hirschman's distinction applied to substrate design. *Voice* — participating in the
+collective mechanism — and *loyalty* — remaining despite dissatisfaction — both leave the captor in
+place. Only exit removes the captor's hold. A federation of sovereign sub-domains, each able to
+leave at will, bounds capture at the federation level structurally: no federation-wide captor can
+hold a sub-domain that can simply depart. It is the property that most sharply distinguishes a
+federation of equals from a hierarchy with extra steps.
+
+In Mycelium the property is architectural rather than contractual. A domain is independently
+admitted; federation connects *exported* services over a separate protocol and
+[never joins the transports](threat-model.md) — a foreign node never enters membership, native
+`cap/`, `grp/`, `sys/`, `consensus/`, anti-entropy or a quorum. Trust bundles are bilateral operator
+configuration: no registry, no transitive trust, no federation leader. A domain that disconnects
+keeps its own KV, its own capabilities and its own audit chain, and the discovery it exported simply
+expires. Membership merge — the state in which departure would no longer be possible — is named in
+the threat model as **the catastrophic case**. The organisational reading of this property is
+[`sovereignty.md`](sovereignty.md).
+
+> Exit is why Properties 5–7 can be honest about their limits. Capture resistance is a cost ratio,
+> not a guarantee; a mandate TTL bounds incumbency without preventing it; epistemic symmetry is
+> asymptotic. Each can degrade. Exit is what keeps degradation survivable, and it is the only one of
+> the four that a captor cannot erode from within — it can only be removed by design, which is why
+> its absence in a substrate is a structural finding rather than a missing feature.
+
+### Property 9 — the contract: an ack names what it proves
+
+Properties 1–8 describe how state and authority move through the substrate. They say nothing about what a participant may *believe* when the substrate answers. Yet every layer answers — `true`, `Ok`, `Acknowledged`, `Committed` — and a system whose answers mean different things at different sites, or mean less than they read, breeds the same asymmetry Property 7 guards against: the participant who knows what an ack really proves holds an advantage over the one who took it at face value, and the difference is invisible until a failure makes it visible. A coordinator-free substrate cannot afford that, because there is no coordinator to ask.
+
+**Property 9 — the contract.** An acknowledgement is a **receipt**: it names exactly which rung was established — *applied locally*, *this exact operation on this node's disk*, *persisted by these named peers*, *committed by that destination together with its dedup result* — and never implies a rung above. Same identity with different content is a conflict, not a silent overwrite. A timeout returns the rungs that were established and an explicit *unknown* for the rest; the substrate never answers "nothing happened", because it cannot know that. Receipts are evidence, not verdicts: the reader decides what to accept (Property 7's epistemic symmetry, extended from state to *evidence* — the substrate never decides truth; the knowledge layer of the contracts axis makes that a rule for claims and assessments too). The design record is [`docs/design/contracts-receipts.md`](design/contracts-receipts.md); the v3 contracts axis is this property's implementation, and litmus tests 4 and 5 are its guards.
 
 ## Further Reading
 
