@@ -45,7 +45,7 @@ use std::collections::{BTreeMap, HashMap};
 ///
 /// This is the only knowledge-layer object that belongs in the gossip KV namespace, and it is a
 /// pointer by construction — there is nowhere in it to put a statement.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Head {
     /// Whose stream.
     pub issuer: IssuerId,
@@ -57,9 +57,45 @@ pub struct Head {
     /// clock — two heads from the same issuer are ordered by the issuer's own counter, not by
     /// whichever arrived later.
     pub seq: u64,
+    /// The [`digest`](Self::digest) of the previous head in this stream, or `None` for the
+    /// stream's first head (Boundary H item K2).
+    ///
+    /// A higher `seq` alone proves nothing about continuity: an issuer can present head 12 from a
+    /// branch that diverged at 9. The `prev` chain is what lets a reader verify that a new head
+    /// **extends** the one it holds.
+    pub prev: Option<[u8; 32]>,
 }
 
 impl Head {
+    /// The exact bytes a head's signature covers and its digest hashes.
+    ///
+    /// Begins with its own tag, so a head signature can never authenticate a record, and the reverse.
+    /// Length-prefixed throughout, as the records are.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_lp_bytes(&mut out, b"mycelium.knowledge/head/1");
+        put_lp_bytes(&mut out, self.issuer.as_str().as_bytes());
+        put_lp_bytes(&mut out, self.stream.as_bytes());
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        match &self.prev {
+            Some(d) => {
+                out.push(1);
+                out.extend_from_slice(d);
+            }
+            None => out.push(0),
+        }
+        put_lp_bytes(&mut out, self.record.issuer.as_str().as_bytes());
+        out.extend_from_slice(&self.record.digest);
+        out
+    }
+
+    /// SHA-256 over [`canonical_bytes`](Self::canonical_bytes): the value the next head's `prev`
+    /// names.
+    pub fn digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(self.canonical_bytes()).into()
+    }
+
     /// The KV key this head would occupy: `knowledge/head/{issuer}/{stream}`.
     pub fn kv_key(&self) -> String {
         format!(
@@ -69,6 +105,11 @@ impl Head {
             self.stream
         )
     }
+}
+
+fn put_lp_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
 }
 
 /// Why the store refused something.
@@ -349,7 +390,12 @@ impl KnowledgeStore {
         self.records.is_empty()
     }
 
-    /// Publish or advance a head.
+    /// Publish or advance a head **locally, unsigned and without ancestry**.
+    ///
+    /// Checks the issuer, the record's issuer and a higher `seq` — no more. A higher `seq` from a
+    /// different history passes here. Heads received from anyone else belong in
+    /// [`HeadCheckpoints::offer`](super::heads::HeadCheckpoints::offer) (Boundary H item K2), which
+    /// authenticates them and verifies that they extend the reader's checkpoint.
     ///
     /// `by` is the issuer doing the publishing — checked against the head's own issuer, so an
     /// issuer cannot move someone else's stream.
@@ -436,6 +482,7 @@ mod tests {
             stream: stream.to_string(),
             record: r.id().clone(),
             seq,
+            prev: None,
         }
     }
 
@@ -698,6 +745,7 @@ mod tests {
             stream: "health".into(),
             record: b.id().clone(),
             seq: 1,
+            prev: None,
         };
         assert_eq!(
             s.advance_head(&iss("node-a"), smuggled),
