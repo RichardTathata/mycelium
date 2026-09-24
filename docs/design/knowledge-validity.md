@@ -1,8 +1,8 @@
 # Knowledge validity, heads and storage (ADR, Boundary H items K1–K3)
 
 **Status:** K1 **adopted and implemented** 2026-09-24 (`KnowledgeStore::put_signed`, `src/knowledge/store.rs`). K1b
-**adopted and implemented** 2026-09-24 (`classify_eligible`, `src/knowledge/resolution.rs`). K2 and K3 are
-**proposed**: decisions recorded here, implementation to follow. Plan:
+**adopted and implemented** 2026-09-24 (`classify_eligible`, `src/knowledge/resolution.rs`). K2
+**adopted and implemented** 2026-09-24 (`src/knowledge/heads.rs`). K3 is **proposed**: decisions recorded here, implementation to follow. Plan:
 [`docs/plans/boundary-h.md`](../plans/boundary-h.md) (rev 0.4, proposed) §6. It builds on the
 [issuer-binding ADR](knowledge-issuer-binding.md) (P1) and the [knowledge-layer ADR](knowledge-layer.md) (item 3).
 
@@ -84,27 +84,44 @@ one of three separate questions:
 **Not built here.** The plan's "judged under the current policy revision" layer: `ReaderPolicy` has no revision
 concept yet. It is recorded as open, not claimed.
 
-## 3. K2: signed heads, ancestry and durable checkpoints (proposed)
+## 3. K2: signed heads, ancestry and durable checkpoints (adopted)
 
-**What exists.** `Head { issuer, stream, record, seq }` in `store.rs`, with `advance_head` enforcing that an issuer
-publishes only its own heads, that a head points at its issuer's record, and that a lower or equal `seq` is refused
-as `StaleHead`. Heads are **not signed**, despite the knowledge-layer ADR calling them "signed heads", and they
-carry no ancestry.
+**What existed.** `Head { issuer, stream, record, seq }`, with `advance_head` checking the issuer, the record's
+issuer and a higher `seq`. Heads were **unsigned**, despite the knowledge-layer ADR calling them "signed heads", and
+had no ancestry, so a higher `seq` from a different history passed.
 
 **Decision.**
-- **The head format.** A head gains `prev_head_digest` and a signature by its issuer, verified through P1. A head
-  that fails verification reads as absent.
-- **Checkpoints.** The reader keeps a per-stream **checkpoint**: the latest head verified *by ancestry*.
-  Checkpoints are **durable across restart**.
-- **Rules for a new head:**
-  - A higher `seq` advances the checkpoint **only** through an unbroken chain of signed heads linked by
-    `prev_head_digest`.
-  - If that chain cannot be obtained, the result is `ContinuityUnavailable`, and the checkpoint is kept.
-  - If the chain diverges before the checkpoint, the result is `ForkedStream`, and both heads are retained and
-    reported.
-  - A lower `seq` is `StaleHead`, which is the existing behaviour.
-  - Two different heads at the same `seq` are a fork.
-  - A head whose body cannot be fetched is `BodyUnavailable`: insufficient evidence, never absence.
+- **Format.** `Head` gains `prev: Option<[u8; 32]>`: the digest of the previous head in the stream, or `None` for
+  the first. It has its own tagged `canonical_bytes`, so a head signature can never authenticate a record, and a
+  `digest`. `SignedHead { head, signature }` is the travelling form.
+- **Authentication.** Heads are verified through P1's two paths (`verify_signed_by`, the byte-level form P1 now
+  exposes). A head signed under a revoked key is refused (`SignedUnderRevokedKey`): a head is a present-tense claim.
+- **`HeadCheckpoints::offer(offered, intermediates, members, external) -> HeadVerdict`:**
+  - lower `seq` → `StaleHead`;
+  - same `seq`: the same head → `AlreadyHeld`, a different one → `ForkedStream`;
+  - higher `seq`: walk `prev` back through authenticated intermediates, and then:
+    - meeting the checkpoint → `Advanced`;
+    - a missing or unauthenticated link, or a non-descending chain → `ContinuityUnavailable`, and the checkpoint
+      stays;
+    - passing the checkpoint's height without meeting it, or reaching a genesis head above it → `ForkedStream`.
+  - Forks are retained (`forks()`) and never resolved.
+- **Durability as a contract.** A `CheckpointStore` trait:
+  - `open` **loads** state and **refuses** unreadable state (`OpenError::Unreadable`), rather than starting empty
+    and silently resetting rollback protection;
+  - every advance is **persisted before it is reported**, and a persist failure (`CheckpointNotPersisted`) leaves
+    the checkpoint where it was.
+- **Trust on first use, stated.** The first authenticated head for a stream becomes its checkpoint. Continuity is
+  guaranteed from then on, never before.
+
+**Not claimed.**
+- **The only store shipped is `MemoryCheckpointStore`, which is not durable.** A file-backed store must go through
+  the filesystem seam (`scripts/check-sim-seams.sh`) and arrives with K3's durable record store. Until then,
+  rollback protection across a restart is exactly as durable as the store the embedder supplies.
+- `KnowledgeStore::advance_head` remains, unsigned and without ancestry, for local use. Its doc comment now says so
+  and points to `HeadCheckpoints`.
+- Forks are held in memory, not persisted.
+- `BodyUnavailable` (a head whose record cannot be fetched) belongs to K3's transport. `is_resolvable` already
+  reports it locally.
 
 ## 4. K3: durable store, head transport, body authorisation (proposed)
 
@@ -136,4 +153,18 @@ carry no ancestry.
 - only the issuer can supersede its own record;
 - an assessment whose basis was withdrawn stops counting.
 
-**K2 and K3:** as listed in plan §6 and §10, case 3.
+**K2 (built, `src/knowledge/heads.rs` tests):**
+- a verified extension advances;
+- a higher head without its ancestry leaves the checkpoint where it was;
+- the reviewer's case, a higher head from a branch that diverged below the checkpoint, is a fork, and both heads are
+  kept;
+- same-`seq` forks, duplicates and stale heads are each reported as such;
+- checkpoints survive a restart and keep refusing rollback;
+- unreadable state refuses to open;
+- an unpersisted advance is not taken;
+- forged heads and forged links do not count;
+- a head signed under a revoked key is refused;
+- a head must point at its own issuer's record;
+- a new genesis above the checkpoint is a fork.
+
+**K3:** as listed in plan §6.

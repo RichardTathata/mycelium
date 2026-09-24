@@ -253,7 +253,21 @@ pub fn verify_issuer(
     members: &impl MemberKeySource,
     external: &TrustedExternalIssuers,
 ) -> Authenticity {
-    let issuer = record.issuer();
+    verify_signed_by(record.issuer(), &record.canonical_bytes(), signature, members, external)
+}
+
+/// **The same two paths, for any bytes an issuer signs** — a record, a stream head (Boundary H
+/// item K2), anything whose canonical bytes carry their own domain-separation tag.
+///
+/// The caller supplies the canonical bytes; the key always comes from the reader's view.
+pub fn verify_signed_by(
+    issuer: &IssuerId,
+    canonical_bytes: &[u8],
+    signature: &[u8],
+    members: &impl MemberKeySource,
+    external: &TrustedExternalIssuers,
+) -> Authenticity {
+    let verifies = |key: &[u8; 32]| mycelium_core::tls::verify_bytes(key, canonical_bytes, signature);
 
     if issuer.claims_member_namespace() {
         let Some(node) = issuer.member_node() else {
@@ -267,7 +281,7 @@ pub fn verify_issuer(
         // retained list somehow holds duplicates.
         let mut revoked_match = None;
         for key in &keys.retained {
-            if record.verify(key, signature) {
+            if verifies(key) {
                 if keys.revoked.contains(key) {
                     revoked_match = Some(*key);
                 } else {
@@ -285,7 +299,7 @@ pub fn verify_issuer(
         return Authenticity::Unverifiable(UnverifiableReason::UntrustedExternal);
     };
     for key in keys {
-        if record.verify(key, signature) {
+        if verifies(key) {
             return Authenticity::Current { path: IssuerPath::External, key: *key };
         }
     }

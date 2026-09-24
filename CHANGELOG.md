@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Signed stream heads with verified ancestry** (Boundary H plan, milestone M2, item K2; ADR
+  `docs/design/knowledge-validity.md` §3). Heads were unsigned, and `advance_head` took any higher `seq`,
+  so head 12 from a branch that diverged at 9 passed as "newer". Now:
+  - `Head` gains `prev` (the previous head's digest), its own tagged `canonical_bytes`, and `digest`;
+  - `knowledge::heads::HeadCheckpoints::offer` authenticates a `SignedHead` through issuer binding, then
+    advances the reader's per-stream checkpoint **only** through a chain of signed heads back to it;
+  - it reports `ContinuityUnavailable` (the checkpoint stays), `ForkedStream` (both heads kept),
+    `StaleHead`, `AlreadyHeld` or `SignedUnderRevokedKey`;
+  - checkpoints load through a `CheckpointStore` when opened (unreadable state **refuses to open**) and are
+    persisted **before** an advance is reported;
+  - `issuer::verify_signed_by` exposes P1's two paths for any signed bytes.
+
+  **Not claimed:** the only store shipped, `MemoryCheckpointStore`, is **not durable**. A file-backed one
+  goes through the filesystem seam with K3. **Upgrade note:** `Head` gained a public field, so an
+  exhaustive struct literal needs `prev`.
+
 - **Present eligibility at resolution** (Boundary H plan, milestone M2, item K1b; ADR
   `docs/design/knowledge-validity.md` §2). `resolution::classify_eligible(…, members, external)` returns
   `Classification { verdict, excluded }`. It re-derives eligibility on every call, re-verifies each
