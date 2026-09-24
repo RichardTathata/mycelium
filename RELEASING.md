@@ -127,6 +127,36 @@ git tag -a vNEW -m "vNEW — YYYY-MM-DD ..."      # annotated; summarize the hig
 git push origin main && git push origin vNEW
 ```
 
+## 8. Publish the GitHub Release
+
+A tag is not an announcement. The Releases page is what a reader who watches releases rather than
+commits actually sees, and **it silently stopped being updated after v2.4.4** — so from 2026-09-12
+to 2026-09-23 the page said *"Latest: v2.4.4"* while eleven tags shipped behind it, **four of them
+carrying security fixes**. Nobody noticed because nothing fails when this step is skipped; the tag
+is there, CI is green, and only the page is wrong. Backfilled 2026-09-23.
+
+```bash
+NEW=2.13.0
+title=$(git tag -l --format='%(contents:subject)' "v$NEW")
+git tag -l --format='%(contents:body)' "v$NEW" > /tmp/notes.md
+gh release create "v$NEW" --title "$title" --notes-file /tmp/notes.md --verify-tag --latest
+```
+
+The **annotated tag message is the release body** — it was written for this, at the moment the
+release was cut, and re-summarising it later produces a second account that can drift from the
+first. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
+pushed" mistake.
+
+> **`--notes-from-tag` is silently incompatible with `--repo`.** Together they print a usage error
+> and exit 1 — and in a `for` loop over tags that reads as *no output*, which looks exactly like
+> success. Either run from inside the repository (as above) or write the notes to a file. Found
+> while backfilling, by checking the Releases page rather than the loop's exit status.
+
+**A security release also needs the check an operator can run**, in the first paragraph of the body
+rather than the notes' middle — for v2.13.0, *"an unauthenticated `GET /gateway/kv/keys` answers 200
+today and 401 after this release"*. Someone deciding whether they are affected should not have to
+read a changelog to find out.
+
 ## Publishing
 
 Releases are **git tags only** — the crates are not published to crates.io (`cargo publish` is
