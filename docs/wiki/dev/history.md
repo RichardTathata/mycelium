@@ -24,6 +24,12 @@ The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/expl
 
 ## v2.13.0 release — 2026-09-23 (tag `v2.13.0`) — the axis' last open questions, and a gateway that was not closed
 
+> **Published to the Releases page 2026-09-23, along with the ten tags before it.** The page had
+> said *"Latest: v2.4.4"* since 2026-09-12 while eleven tags shipped behind it — four carrying
+> security fixes — because a tag is not an announcement and nothing fails when the publish step is
+> skipped. `RELEASING.md` gains **step 8** so the omission cannot recur silently; the release body
+> is the annotated tag message, which was written for exactly this and does not drift from itself.
+
 Wire **v12** unchanged (`PREV = 11`); every change additive on the 2.x line. Three threads.
 
 **Item 2's row 11 is complete**, and the interesting part is how much of it could not be *stated*
