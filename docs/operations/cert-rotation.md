@@ -87,18 +87,36 @@ peers **reject** an identity overwrite whose proof doesn't chain to a key they a
 the key-poisoning vector (a forged verifying key injected via `sys/identity`) is closed for any
 connected/established peer. Rejections increment `identity_anchor_conflicts` on `/stats`.
 
-One residual remains by default: an *unsigned* identity entry (mimicking a pre-upgrade node) is
-still **tolerated** during rollout. To close it, set **`require_identity_proofs`** (or
-`GOSSIP_REQUIRE_IDENTITY_PROOFS=1`) — then unsigned entries are rejected outright.
+**`require_identity_proofs` is now `true` by default.** An *unsigned* identity entry — one
+mimicking a pre-Phase-2 node — is rejected outright rather than tolerated. The two-release rollout
+this section used to prescribe is **complete**: Phase 2 shipped in **v2.3.0 (2026-07-24)** and every
+TLS node has written `sys/identity-proof/{self}` unconditionally at startup since. Within the
+version range a rolling upgrade is supported across — one release — no honest node is affected.
 
-**Two-release rollout (like a `PREV_WIRE_VERSION` window — do not skip):**
-1. **R1** — deploy the Phase-2 release fleet-wide (every node writes proofs). Leave
-   `require_identity_proofs = false`. Confirm rollout is complete (no node predates the release).
-2. **R2** — only then set `require_identity_proofs = true`. Flipping it before every node writes
-   proofs would reject legitimate pre-upgrade nodes and partition them out.
+**When to turn it off.** Only if you genuinely run nodes older than **v2.3.0**. They write no proof,
+so a node with the default on will refuse their identity entries and they will not join:
+
+```toml
+require_identity_proofs = false     # or GOSSIP_REQUIRE_IDENTITY_PROOFS=0
+```
+
+Upgrade those nodes rather than living on the exception; this is the one setting where the
+"tolerance" reading has an expiry date attached.
 
 A proof that gossips in *after* its identity re-validates automatically (the identity watcher also
 watches the proof prefix), so transient ordering never permanently rejects a legitimate node.
+
+**What this does *not* give you, and it is worth being exact.** *Proofs required* is **not**
+*identity authenticated*. First sighting of a node you have never seen is still **trust on first
+use**: a self-signed entry is accepted, because there is nothing established to chain it to. An
+admitted-but-hostile member can therefore still introduce a key for a node nobody has met yet.
+
+What closes *that* is an **anchor** — a direct, CA-validated connection, which records the peer's
+real key (Phase 1b) and after which an unchained key is rejected **and counted** in
+`identity_anchor_conflicts`. The two mechanisms are complementary: proofs close the unsigned-mimic
+residual, anchors close the first-sighting one. If your topology means some node pairs never connect
+directly, that pair's first sighting is the window, and `identity_anchor_conflicts` on `/stats` is
+where a later contradiction shows up.
 
 ---
 

@@ -9,6 +9,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`require_identity_proofs` defaults to `true`.** An unsigned `sys/identity/{V}` entry — the
+  pre-Phase-2 mimic — is now **rejected** rather than accepted-and-flagged.
+
+  **Why now.** Every TLS node has written `sys/identity-proof/{self}` unconditionally since Phase 2
+  (**v2.3.0**, 2026-07-24) — identity and proof are written back to back at startup. So within the
+  one-release window a rolling upgrade is supported across, **no honest node is affected**; what the
+  default rejects is a node predating v2.3.0, or something imitating one. The old guidance ("enable
+  only after every node runs the Phase-2 release") was written when that rollout was ahead of us
+  rather than ten releases behind. It also matters more than it did: `mycelium-commitment`'s
+  offer/award signatures verify against keys a caller resolves, and `sys/identity/{node}` is the
+  obvious source for a node participant.
+
+  **If you run nodes older than v2.3.0**, set `require_identity_proofs = false` (or
+  `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`). They write no proof, so they will not join a node running the
+  new default. Upgrading them is the better answer; this is the one setting whose tolerance reading
+  has an expiry date attached.
+
+  **Flipping it broke no test** — the tests that exercise the behaviour set the flag explicitly —
+  which is exactly why the default now has pins of its own: one on the value
+  (`the_default_requires_identity_proofs`) and one on the join
+  (`a_default_configuration_rejects_an_unsigned_identity_entry`), because a default nothing
+  exercises end to end is a default nobody has checked, and one nothing asserts can be flipped back
+  by a merge with nothing failing.
+
+  **What it does not close, stated as a test rather than a caveat.** *Proofs required* is **not**
+  *identity authenticated*: first sighting of a node never seen is still **trust on first use**,
+  because there is nothing established to chain a self-signed entry to. Anchors — a direct,
+  CA-validated connection — are what close that, after which an unchained key is rejected *and*
+  counted in `identity_anchor_conflicts`. `requiring_proofs_does_not_close_trust_on_first_use`
+  pins the boundary and is written to **fail if the window is ever closed**, so the claim cannot rot
+  the way a prose caveat would.
+
 ## [2.13.0] — 2026-09-23
 
 **The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged
