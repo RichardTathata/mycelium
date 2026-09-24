@@ -354,6 +354,35 @@ pub(crate) enum ConsensusMsg {
         value_digest: [u8; 32],
         locality:     Option<LocalityPath>,
     },
+    /// A refusal that **reports what this acceptor has already accepted**, so a proposer moving to
+    /// a higher ballot can adopt it instead of overwriting it.
+    ///
+    /// ## Why a bare `Nack` was not enough
+    ///
+    /// [`Nack`](Self::Nack) carries a `seen_ballot` and nothing else, and the proposer's retry is
+    /// `ballot = …max(ballot) + 1` while **still proposing its own `value`**, which never changes
+    /// across attempts. So a value a quorum had already accepted at ballot *N* could be replaced by
+    /// a different value at *N+1* — the acceptors allow it, because `may_cast_vote` returns `true`
+    /// for any strictly greater ballot.
+    ///
+    /// The commit record guards the *committed* case (`try_commit_if_ready` refuses when
+    /// `live_committed` holds a different value), but only once it has propagated; inside that
+    /// window the overwrite stands. Preserving the accepted value is what makes the guard
+    /// unnecessary rather than merely usually-sufficient.
+    ///
+    /// This is the classic promise: the acceptor answers a refusal with its highest accepted
+    /// `(ballot, value)`, and the proposer adopts the one with the **highest accepted ballot**
+    /// before retrying. Appended last, so older proposers drop it as an unknown variant and fall
+    /// back to the `Nack` that is still sent alongside.
+    Promise {
+        slot:           Arc<str>,
+        /// The ballot this acceptor has seen — the same field `Nack` carries.
+        seen_ballot:    u64,
+        /// The ballot at which `accepted_value` was accepted, or `0` when nothing is accepted.
+        accepted_ballot: u64,
+        /// The value this acceptor has accepted, if any.
+        accepted_value: Option<Bytes>,
+    },
 }
 
 /// SHA-256 of a proposal's value — what a [`VoteForValue`](ConsensusMsg::VoteForValue) commits its
@@ -804,6 +833,13 @@ impl ConsensusEngine {
         let ballot_key = format!("{}{}", consensus_ns::BALLOT, &*slot);
         let commit_key = format!("{}{}", consensus_ns::COMMITTED, &*slot);
 
+        // The value this proposer is currently carrying. It starts as the caller's, and is
+        // **replaced** by any higher-balloted accepted value an acceptor reports — accepted-value
+        // preservation, without which a retry at `ballot + 1` can overwrite what a quorum already
+        // accepted. `adopted_from` is the ballot the current value was accepted at (0 = ours).
+        let mut value = value;
+        let mut adopted_from: u64 = 0;
+
         let mut quorum_size = quorum_size;
         // Register for BOUNDARY_TRANSPARENT signals so we can re-evaluate quorum
         // mid-ballot when previously-opaque members become available.
@@ -843,8 +879,10 @@ impl ConsensusEngine {
         // A slot already committed with the *same* value under a lease may be
         // re-proposed while live — a successful re-commit refreshes the commit
         // timestamp (lease renewal). Any other live commitment supersedes us.
-        let superseded_by_live = |existing: &Bytes| -> bool {
-            !(lease_ms.is_some() && *existing == value)
+        // Takes the current value explicitly: the proposer may **adopt** a reported accepted value
+        // between ballots, so a closure capturing `value` would pin it and go stale.
+        let superseded_by_live = |existing: &Bytes, current: &Bytes| -> bool {
+            !(lease_ms.is_some() && existing == current)
         };
 
         // Extract the group name once for `sys/topology-override/{group}` lookups
@@ -856,7 +894,7 @@ impl ConsensusEngine {
 
         for _attempt in 0..config.max_ballots {
             if let Some(existing) = self.live_committed(&slot)
-                && superseded_by_live(&existing) {
+                && superseded_by_live(&existing, &value) {
                     return ConsensusResult::Superseded {
                         slot,
                         ballot: self.read_ballot(&ballot_key),
@@ -945,12 +983,24 @@ impl ConsensusEngine {
             let mut nack_ballot = 0u64;
             match outcome {
                 BallotOutcome::Committed(res) => return res,
-                BallotOutcome::NackHigher(b)  => nack_ballot = b,
-                BallotOutcome::Timeout        => {}
+                BallotOutcome::NackHigher(b, reported) => {
+                    nack_ballot = b;
+                    // **Accepted-value preservation.** An acceptor that refused us reported what
+                    // it already holds; the next ballot must carry *that* value, not ours. Without
+                    // this the retry is `ballot + 1` with the proposer's original value, which can
+                    // replace a value a quorum already accepted — acceptors permit it, because any
+                    // strictly greater ballot passes `may_cast_vote`.
+                    if let Some((ab, v)) = reported
+                        && ab >= adopted_from {
+                            adopted_from = ab;
+                            value = v;
+                        }
+                }
+                BallotOutcome::Timeout => {}
             }
 
             if let Some(existing) = self.live_committed(&slot)
-                && superseded_by_live(&existing) {
+                && superseded_by_live(&existing, &value) {
                     return ConsensusResult::Superseded {
                         slot,
                         ballot: self.read_ballot(&ballot_key),
@@ -1029,15 +1079,20 @@ impl ConsensusEngine {
         let ballot_key = format!("{}{}", consensus_ns::BALLOT,    &*slot);
         let commit_key = format!("{}{}", consensus_ns::COMMITTED, &*slot);
 
+        // The value this proposer carries; replaced by any higher-balloted accepted value an
+        // acceptor reports. `adopted_from` is the ballot it was accepted at (0 = ours).
+        let mut value = value;
+        let mut adopted_from: u64 = 0;
+
         // Epoch lease window (ms), with the same renewal exception as `propose`:
         // a live same-value leased commitment may be re-proposed to refresh it.
         let lease_ms = config.committed_lease_secs.map(|s| s.saturating_mul(1000));
-        let superseded_by_live = |existing: &Bytes| -> bool {
-            !(lease_ms.is_some() && *existing == value)
+        let superseded_by_live = |existing: &Bytes, current: &Bytes| -> bool {
+            !(lease_ms.is_some() && existing == current)
         };
 
         if let Some(existing) = self.live_committed(&slot)
-            && superseded_by_live(&existing) {
+            && superseded_by_live(&existing, &value) {
                 return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
             }
 
@@ -1104,6 +1159,9 @@ impl ConsensusEngine {
             let sleep_fut = time::sleep_until(deadline);
             tokio::pin!(sleep_fut);
             let mut nack_ballot = 0u64;
+            // The highest `(accepted_ballot, value)` any acceptor reported this attempt. A
+            // proposer that learns of an accepted value must adopt it rather than retry its own.
+            let mut learned: Option<(u64, Bytes)> = None;
 
             'collect: loop {
                 tokio::select! { biased;
@@ -1165,18 +1223,30 @@ impl ConsensusEngine {
                         }
                     }
                     Some(sig) = nack_rx.recv() => {
-                        if let Some(ConsensusMsg::Nack { slot: s, seen_ballot }) =
-                            self.decode_verify(&sig.payload)
-                            && s == slot && seen_ballot > ballot {
+                        match self.decode_verify(&sig.payload) {
+                            Some(ConsensusMsg::Promise {
+                                slot: s, seen_ballot, accepted_ballot, accepted_value,
+                            }) if s == slot && seen_ballot > ballot => {
+                                nack_ballot = seen_ballot;
+                                if let Some(v) = accepted_value
+                                    && accepted_ballot >= learned.as_ref().map(|(b, _)| *b).unwrap_or(0) {
+                                        learned = Some((accepted_ballot, v));
+                                    }
+                                break 'collect;
+                            }
+                            Some(ConsensusMsg::Nack { slot: s, seen_ballot })
+                                if s == slot && seen_ballot > ballot => {
                                 nack_ballot = seen_ballot;
                                 break 'collect;
                             }
+                            _ => {}
+                        }
                     }
                 }
             }
 
             if let Some(existing) = self.live_committed(&slot)
-                && superseded_by_live(&existing) {
+                && superseded_by_live(&existing, &value) {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
 
@@ -1184,6 +1254,12 @@ impl ConsensusEngine {
                 let jitter = fastrand::u64(0..config.ballot_retry_jitter_ms);
                 tokio::time::sleep(Duration::from_millis(jitter)).await;
             }
+            // Adopt before retrying: a value an acceptor already holds outranks ours.
+            if let Some((ab, v)) = learned.take()
+                && ab >= adopted_from {
+                    adopted_from = ab;
+                    value = v;
+                }
             ballot = nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
         }
 
@@ -1376,11 +1452,19 @@ impl ConsensusEngine {
                     }
                 }
                 Some(sig) = nack_rx.recv() => {
-                    if let Some(ConsensusMsg::Nack { slot: s, seen_ballot }) =
-                        self.decode_verify(&sig.payload)
-                        && s == *slot && seen_ballot > ballot {
-                            return BallotOutcome::NackHigher(seen_ballot);
-                        }
+                    match self.decode_verify(&sig.payload) {
+                        // A `Promise` refuses **and reports**: the proposer must adopt the accepted
+                        // value at the next ballot instead of retrying with its own.
+                        Some(ConsensusMsg::Promise {
+                            slot: s, seen_ballot, accepted_ballot, accepted_value,
+                        }) if s == *slot && seen_ballot > ballot =>
+                            return BallotOutcome::NackHigher(
+                                seen_ballot, accepted_value.map(|v| (accepted_ballot, v))),
+                        Some(ConsensusMsg::Nack { slot: s, seen_ballot })
+                            if s == *slot && seen_ballot > ballot =>
+                            return BallotOutcome::NackHigher(seen_ballot, None),
+                        _ => {}
+                    }
                 }
                 // Re-evaluate quorum when a member turns opaque mid-ballot.
                 // BOUNDARY_OPAQUE means the sender is now excluded from active_members,
@@ -1412,9 +1496,12 @@ impl ConsensusEngine {
 enum BallotOutcome {
     /// Quorum + topology gate satisfied; commit dispatched.
     Committed(ConsensusResult),
-    /// A NACK arrived with a strictly higher seen_ballot. Caller must
-    /// re-issue at `>= seen_ballot + 1` to win on the next attempt.
-    NackHigher(u64),
+    /// A refusal arrived with a strictly higher seen_ballot. Caller must
+    /// re-issue at `>= seen_ballot + 1` to win on the next attempt — and, if the refusal was a
+    /// [`Promise`](ConsensusMsg::Promise) reporting an accepted value, must **adopt that value**
+    /// rather than retry with its own. Carries the highest `(accepted_ballot, accepted_value)`
+    /// this attempt learned of, or `None` when nothing was reported.
+    NackHigher(u64, Option<(u64, Bytes)>),
     /// `phase1_timeout` elapsed. Caller may retry or surface TopologyUnsatisfied
     /// based on whether voters reached quorum-by-count.
     Timeout,
@@ -1457,7 +1544,7 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
         ConsensusMsg::VoteWithLocality { voter, .. } => voter == signer,
         ConsensusMsg::VoteForValue { voter, .. }     => voter == signer,
         ConsensusMsg::Propose { proposer, .. }       => proposer == signer,
-        ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } => true,
+        ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } | ConsensusMsg::Promise { .. } => true,
     }
 }
 
@@ -1600,6 +1687,23 @@ pub(crate) async fn run_consensus_listener(
                 // safety violation (audit 2026-07-15 pass 2). The claim goes through the *shared*
                 // memory, so this node's proposer role cannot cast a second, conflicting vote.
                 if !claim_vote(&accepted, &slot, ballot, &value) {
+                    // Report what we hold, so the proposer can **adopt** it at a higher ballot
+                    // rather than overwrite it. A bare `Nack` says only "I have seen a ballot",
+                    // which leaves the proposer free to retry with its own value and replace a
+                    // value a quorum already accepted.
+                    let held = accepted.pin().get(&slot).map(|(b, v)| (*b, v.clone()));
+                    let promise = ConsensusMsg::Promise {
+                        slot:            Arc::clone(&slot),
+                        seen_ballot:     local,
+                        accepted_ballot: held.as_ref().map(|(b, _)| *b).unwrap_or(0),
+                        accepted_value:  held.map(|(_, v)| v),
+                    };
+                    ctx.emit(
+                        Arc::from(consensus_kind::NACK),
+                        SignalScope::Individual(proposer.clone()),
+                        ctx.sign_payload(encode_consensus_msg(&promise)),
+                    );
+                    // And the legacy refusal, for a proposer that predates `Promise`.
                     let nack = ConsensusMsg::Nack { slot, seen_ballot: local };
                     ctx.emit(
                         Arc::from(consensus_kind::NACK),
@@ -2103,6 +2207,54 @@ mod consensus_msg_auth_tests {
         assert!(claim_vote(&accepted, &slot, 2, &v_y), "a higher ballot may choose anew");
         // …and the memory moved with it: ballot 1 is now stale.
         assert!(!claim_vote(&accepted, &slot, 1, &v_x), "a stale ballot cannot be voted in again");
+    }
+
+    /// **A proposer at a higher ballot adopts what was already accepted.**
+    ///
+    /// The adoption rule, as the decision the retry path makes. Before 2026-09-24 a refusal carried
+    /// only `Nack { seen_ballot }` — a number — and the retry was `ballot = …max(ballot) + 1` while
+    /// **still proposing the proposer's own value**, which never changed across attempts. Acceptors
+    /// permit that, because `may_cast_vote` returns `true` for any strictly greater ballot. So a
+    /// value a quorum had already accepted at ballot *N* could be replaced at *N+1*.
+    ///
+    /// The commit record guards the *committed* case, but only once it has propagated; inside that
+    /// window the overwrite stands. Preserving the accepted value is what makes the guard
+    /// unnecessary rather than merely usually-sufficient.
+    #[test]
+    fn a_higher_ballot_adopts_the_accepted_value() {
+        let mine = Bytes::from_static(b"mine");
+        let theirs = Bytes::from_static(b"already-accepted");
+        let older = Bytes::from_static(b"older");
+
+        // The rule the retry path applies: adopt when the report's ballot is at least as high as
+        // whatever we have already adopted (0 = still carrying our own value).
+        let adopt = |adopted_from: u64, reported: Option<(u64, Bytes)>, current: Bytes|
+            -> (u64, Bytes) {
+            match reported {
+                Some((ab, v)) if ab >= adopted_from => (ab, v),
+                _ => (adopted_from, current),
+            }
+        };
+
+        // Nothing reported → keep proposing our own value.
+        assert_eq!(adopt(0, None, mine.clone()), (0, mine.clone()));
+
+        // An acceptor reports a value accepted at ballot 3 → we carry it, not ours.
+        assert_eq!(
+            adopt(0, Some((3, theirs.clone())), mine.clone()),
+            (3, theirs.clone()),
+            "a value an acceptor already holds outranks the proposer's own",
+        );
+
+        // A *lower*-balloted report does not displace a higher one we already adopted.
+        assert_eq!(
+            adopt(3, Some((1, older)), theirs.clone()),
+            (3, theirs.clone()),
+            "adoption follows the highest accepted ballot, not the latest message",
+        );
+
+        // An equal-balloted report is accepted (idempotent — same decision, restated).
+        assert_eq!(adopt(3, Some((3, theirs.clone())), theirs.clone()), (3, theirs));
     }
 
     /// The digest is over the value **bytes**, so two proposals that differ at all are

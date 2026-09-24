@@ -326,10 +326,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_bound_vote_still_requires_its_signer` — binding and signer authorisation compose; neither
   replaces the other.
 
-  **Not yet done**, and tracked in `.log/2026-09-24-consensus-vote-binding.md`: ballot transitions
-  with accepted-value preservation, restart recovery, and replacing the "wait one second, then read
-  the local slot" success semantics. Binding votes is necessary for single-decree safety; it is not
-  the whole agreement repair.
+- **A node casts one vote per ballot, whichever role it is playing.** Without this the binding above
+  is decorative. A node kept **two separate memories**: as an acceptor, `run_consensus_listener`'s
+  `seen_ballot`/`voted_value` were task-local; as a proposer, the ballot loop **self-voted
+  unconditionally** without consulting them. So a node could accept `v_X` at ballot 1 as a voter and
+  propose-and-self-vote `v_Y` at ballot 1 as a proposer — equivocating with itself through the one
+  voter that never has to send a message to vote. Both roles now pass through `claim_vote` against
+  shared state on `TaskCtx` (`papaya`, so no lock-order row; the `compute` closure is a
+  compare-and-set and therefore retry-safe). **Proposing a value is accepting it.**
+
+- **A proposer at a higher ballot adopts what was already accepted.** `ConsensusMsg::Promise`
+  answers a refusal with the acceptor's highest `(accepted_ballot, accepted_value)`, and the retry
+  carries **that** value rather than the proposer's own.
+
+  A bare `Nack` carried a ballot number and nothing else, while the retry was
+  `ballot = …max(ballot) + 1` with the proposer's original value — which never changed across
+  attempts. Acceptors permit that, because `may_cast_vote` returns `true` for any strictly greater
+  ballot, so a value a quorum had already accepted at ballot *N* could be replaced at *N+1*. The
+  commit record guards the *committed* case, but only once it has propagated; inside that window the
+  overwrite stands. Preservation is what makes that guard unnecessary rather than
+  usually-sufficient. Applied in both proposer paths (`propose` and `cross_propose`).
+
+  `Promise` is appended last, so older proposers drop it and fall back to the `Nack` still sent
+  alongside. Pinned by `a_higher_ballot_adopts_the_accepted_value` — including that adoption follows
+  the **highest accepted ballot**, not the latest message.
+
+  **Still not the whole repair**, and tracked in `.log/2026-09-24-consensus-vote-binding.md`:
+  **restart recovery** (acceptor memory is in-process and does not survive a restart) and replacing
+  the **"wait one second, then read the local slot"** success semantics.
 
 ## [2.13.0] — 2026-09-23
 
