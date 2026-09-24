@@ -53,7 +53,13 @@ def _run_worker(host: str, results: list[LogEntry], n_expected: int) -> None:
 
 def run() -> None:
     # Step 1 — cluster must already be converged (run.py ensures this before scenarios run)
-    wait_for_cluster_ready(timeout=5)
+    # 30s, not 5. This used to be a free no-op: the readiness check wrote fixed sentinel keys
+    # and merely counted them, so once they had propagated in the first scenario every later call
+    # passed on the residue regardless of the timeout. It is now a real round trip — a freshly
+    # nonced write from every node, read back by every node with its exact value — and a fresh
+    # write needs more than 5s to cross three gossiping nodes on a loaded CI box, especially as
+    # the first scenario after start-up.
+    wait_for_cluster_ready(timeout=30)
 
     coord = MyceliumAgent(NODE_A_HOST, NODE_HTTP_PORT)
 
