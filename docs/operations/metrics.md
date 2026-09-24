@@ -67,6 +67,7 @@ extra labels.
 | `mycelium_emergent_membership_flaps` | gauge | governed groups whose membership is *flapping* (`>0` with a conflict ⇒ thrash) | → [same recipe](diagnostics.md#governed-group-conflict--thrash-the-56-pattern) — the thrash escalation |
 | `mycelium_emergent_opaque_node_pct` | gauge | percent of nodes opaque (overloaded / shedding); ≥ 34 = storm | → [fleet-opacity storm](diagnostics.md#fleet-opacity-storm) |
 | `mycelium_emergent_capability_coverage_gaps` | gauge | demands (`req/…`) with no fresh provider visible from here | → [capability-coverage gap](diagnostics.md#capability-coverage-gap) |
+| `mycelium_emergent_role_concentration_pct` | gauge | **percent** of the fleet's live single-writer roles held by one node (`0` = too few roles/holders to say) | → [a coordinator by accretion](diagnostics.md#a-coordinator-by-accretion-p10) — a *percentage*, because a raw count fires on a small well-spread fleet |
 | `mycelium_emergent_opacity_oscillations` | gauge | node/kind pairs flipping in/out of overload (unstable back-pressure) | → [opacity oscillation](diagnostics.md#opacity-oscillation) |
 | `mycelium_emergent_max_staleness_ms` | gauge | oldest peer view this observer holds (ms) | high = this observer's inputs are stale; qualifies its diagnoses |
 | `mycelium_emergent_peers_heard` | gauge | peers this observer is currently hearing | pair with `_peers_known` to qualify a partial view (RT1/RT2) |

@@ -11,6 +11,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **P10 reaches the operator** — the half of it that was missing. The detector, the `/stats` field
+  and the event ring shipped first; the Prometheus gauge, the `diagnose_fleet` rule and the runbook
+  did not, which made it **a mechanism nothing wires** — the exact failure this project keeps
+  finding in its own gates, committed one level up. `/gateway/diagnose`, the *"why is the fleet in
+  this state"* answer, would have stayed silent about the pathology that had just been added.
+
+  Now: `mycelium_emergent_role_concentration_pct` beside its sibling gauges, a `diagnose_fleet`
+  finding that **names who, how much, and what to do**, a `narrate` gloss so `explain` reads it in
+  plain language, a `diagnostics.md` recipe, a `metrics.md` row and a Prometheus alert — `for: 30m`
+  and `warning`, deliberately: this is a standing structural condition, not an incident, and it
+  should be noticed at the next review rather than at 3am.
+
+  The finding says the unusual part out loud — *"nothing is failing: this reads as healthy on every
+  other detector, which is why it is easy to miss"* — because an operator who sees a warning with
+  no symptom will otherwise assume a false positive. And the first action it gives is **check the
+  fleet finished upgrading**: one node too old to advertise `election_rule` pins its whole ring to
+  `lowest id wins`, which concentrates by construction, so the commonest cause is a half-done
+  rollout rather than anything an operator must fix by hand.
+
 - **P10 — "a coordinator by accretion", and the election rule that stops producing one.** A
   discussion note asked whether role accumulation is constrained anywhere. It is not — and the
   answer turned out to have two halves, neither of which was what the note expected.

@@ -86,6 +86,29 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   If the observer's `caveat` shows a partial view, confirm from a node that *should* hear the
   provider before concluding it is gone.
 
+### A coordinator by accretion (P10)
+
+- **Means:** one node holds most of the fleet's **single-writer roles** — tuple-space primaries,
+  blackboard primaries, wiki curators. Nothing is failing, and **that is the point**: this reads as
+  healthy on every other detector (no churn for the flap detector, no gap for the coverage
+  detector), so it is invisible until the node goes away and takes every one of those roles with it.
+- **Read:** gauge `mycelium_emergent_role_concentration_pct`; snapshot `role_concentration`
+  (`node`, `roles_held`, `roles_total`, `holders`, `share_percent`). The gauge is published
+  **whether or not it trips** — watch it move rather than waiting for the alert.
+- **Do:** first, check the fleet is electing under the **rendezvous** rule. Rings elect through
+  `mycelium::election`, and the rule is negotiated from the candidate set — **one node too old to
+  advertise `election_rule` pins the whole ring to `lowest id wins`**, which concentrates by
+  construction. Finish the upgrade and the rings spread themselves. Second, ask whether every node
+  needs to be a candidate for every ring: a node that does not run a companion is not a candidate
+  for it, and deliberate asymmetry is a legitimate answer.
+- **Do not** read a *low* reading as safety on a small fleet: three rings over three nodes leave a
+  ~78% chance somebody holds two even when everything is working as designed. The rule spreads,
+  it does not bound — which is why this gauge exists at all.
+- **Partition caveat:** a node that has lost sight of its peers sees only its own roles, which is
+  this pathology's exact shape. The detector withholds the reading below two visible holders for
+  that reason, so a `0` from a node with a degraded `view_confidence` means *cannot say*, not *no
+  concentration*.
+
 ### Stale bridged advert (provider shows live but is dead)
 
 - **Means:** the *inverse* of a coverage gap — a `cap/…` advert stays fresh though its real provider
@@ -191,6 +214,17 @@ groups:
     expr: mycelium_emergent_governed_group_conflicts > 0 and mycelium_emergent_membership_flaps == 0
     for: 5m
     labels: { severity: warning }
+
+  # A coordinator by accretion — one node holding most single-writer roles. Warning, and a long
+  # `for:` on purpose: this is a standing structural condition, not an incident, and it should not
+  # page. It is the thing you want noticed at the next review rather than at 3am.
+  - alert: MyceliumCoordinatorByAccretion
+    expr: mycelium_emergent_role_concentration_pct >= 60
+    for: 30m
+    labels: { severity: warning }
+    annotations:
+      summary: "One node holds {{ $value }}% of single-writer roles on {{ $labels.cluster }}"
+      runbook: "docs/operations/diagnostics.md#a-coordinator-by-accretion-p10"
 
   # Fleet-opacity storm — a third or more of the fleet shedding load. Critical.
   - alert: MyceliumOpacityStorm

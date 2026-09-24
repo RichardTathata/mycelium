@@ -671,6 +671,8 @@ pub fn narrate(events: &[Event]) -> Vec<String> {
                 "capability-coverage gap — a demand has no fresh provider visible from here",
             "opacity_oscillation" =>
                 "opacity oscillation — a node is flipping in and out of the overload state",
+            "role_concentration" =>
+                "a coordinator by accretion — one node holds most of the fleet's single-writer roles",
             "commit_conflict" =>
                 "consensus commit conflict — two proposals raced for the same slot",
             other => other,
@@ -1020,6 +1022,11 @@ pub async fn run_emergent_detectors(
                     metrics::gauge!("mycelium_emergent_capability_coverage_gaps").set(confirmed_gaps as f64);
                     metrics::gauge!("mycelium_emergent_membership_flaps").set(flaps as f64);
                     metrics::gauge!("mycelium_emergent_opacity_oscillations").set(oscillations as f64);
+                    // P10 — a percentage, not a count: `roles_held` means nothing without the
+                    // fleet's size, and an alert on a raw count would fire on a small fleet that
+                    // is perfectly well spread.
+                    metrics::gauge!("mycelium_emergent_role_concentration_pct")
+                        .set(ctx.role_concentration_pct.load(Ordering::Relaxed) as f64);
                     metrics::gauge!("mycelium_emergent_opaque_node_pct").set(compute_opaque_node_pct(&ctx) as f64);
                     let vc = compute_view_confidence(&ctx);
                     metrics::gauge!("mycelium_emergent_peers_heard").set(vc.peers_heard as f64);
@@ -1161,6 +1168,28 @@ pub fn diagnose_fleet(s: &FleetSnapshot) -> FleetDiagnosis {
                  Action: check whether the providers crashed or were never deployed; (re-)advertise \
                  the capability. NB: 'not visible from here' — a partitioned provider looks identical.",
                 s.capability_coverage_gaps.join(", "),
+            ),
+        });
+    }
+
+    // P10 — a coordinator by accretion. Severity is Warning rather than Critical on purpose: the
+    // fleet is *working*, and by every other reading it is healthy. What it has lost is the
+    // property the substrate exists to provide — that no single node's loss takes the fleet with
+    // it — so the finding names the consequence rather than a symptom, because there is no symptom
+    // to name until the node goes away.
+    if let Some(c) = s.role_concentration.as_ref().filter(|c| c.share_percent >= ROLE_CONCENTRATION_TRIP_PERCENT) {
+        findings.push(Finding {
+            pathology: "role_concentration".into(),
+            severity:  Severity::Warning,
+            cause: format!(
+                "{} holds {} of {} single-writer roles ({}%) across {} holder(s) — a coordinator \
+                 nobody declared. Nothing is failing: this reads as healthy on every other \
+                 detector, which is why it is easy to miss. Losing that node moves every one of \
+                 those roles at once. Action: check whether the rings are electing under the \
+                 rendezvous rule (a fleet still on `lowest id wins` concentrates by construction — \
+                 `mycelium::election`), and whether every node is a candidate for every ring when \
+                 it need not be.",
+                c.node, c.roles_held, c.roles_total, c.share_percent, c.holders,
             ),
         });
     }
@@ -1923,6 +1952,36 @@ mod tests {
             && f.cause.contains("ai/llm") && f.cause.contains("Action:")));
         let caveat = d.caveat.expect("partial view is caveated");
         assert!(caveat.contains("heard 1 of 3"), "caveat names the partial view: {caveat}");
+    }
+
+    /// **P10 reaches the operator, or it may as well not exist.** The detector, the `/stats` gauge
+    /// and the event ring were shipped first; a reading that never enters the narrative is a
+    /// mechanism nothing wires — which is the failure this project keeps finding in its own gates.
+    #[test]
+    fn diagnose_names_a_coordinator_by_accretion_and_says_what_to_do() {
+        let mut s = nominal_snapshot();
+        s.role_concentration = Some(RoleConcentration {
+            node: "127.0.0.1:7001".into(), roles_held: 3, roles_total: 4, holders: 2, share_percent: 75,
+        });
+        let d = diagnose_fleet(&s);
+        let f = d.findings.iter().find(|f| f.pathology == "role_concentration")
+            .expect("a tripped concentration must reach the narrative");
+        assert!(f.cause.contains("127.0.0.1:7001") && f.cause.contains("75%"), "it names who and how much: {}", f.cause);
+        assert!(f.cause.contains("Action:"), "every finding tells an operator what to do");
+        assert!(
+            f.cause.contains("healthy on every other detector"),
+            "and says why it was missable, which is the whole reason it needed its own detector",
+        );
+
+        // Below the trip, the narrative stays quiet — the reading is still on `/stats` for anyone
+        // watching it climb, but a diagnosis that fires at 40% is a diagnosis nobody reads.
+        s.role_concentration = Some(RoleConcentration {
+            node: "127.0.0.1:7001".into(), roles_held: 1, roles_total: 3, holders: 3, share_percent: 33,
+        });
+        assert!(
+            !diagnose_fleet(&s).findings.iter().any(|f| f.pathology == "role_concentration"),
+            "an even spread is not a finding",
+        );
     }
 
     #[test]

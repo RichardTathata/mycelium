@@ -37,6 +37,18 @@ covered by a live #56 integration test in `src/lib_tests.rs`.
 | **P6** capability-coverage gap (RT3 flagship) | `capability_coverage_gaps` | fresh `req/` with zero fresh `cap/` providers | loop + hysteresis |
 | **P2** failover flap | `membership_flaps` | a `(group,node)` toggling `grp/` membership | loop + sliding-window `FlapTracker` |
 | **P3** opacity oscillation | `opacity_oscillations` | a `(node,kind)` toggling `sys/load/` opacity | reuses P2's `FlapTracker` |
+| **P10** a coordinator by accretion (2026-09-24) | `role_concentration_pct` | one node's share of fresh `.primary` / `.curator` advertisements | loop + hysteresis, **withheld below 2 holders** |
+
+**P10 is the one the others could not see**, and the reason generalises: P2 watches *churn*, P6
+watches *gaps*, and concentration is the orthogonal axis — a node calmly holding every single-writer
+job produces neither. *A catalogue of pathologies is not a catalogue of axes.* Its gauge is a
+**percentage** (a raw count fires on a small, well-spread fleet) and it is published whether or not
+it trips, so an operator watches it climb instead of learning at the threshold. The two-holder floor
+is the partition guard: a node that has lost sight of its peers sees only its own roles, which is
+this pathology's exact shape — so `0` from a degraded view means *cannot say*, not *no
+concentration*. The **election rule** that was producing it is `mycelium::election`
+([companions](companions/companions.md)); detection and mitigation shipped together because
+rendezvous spreads but does not bound.
 
 ## Three design patterns worth reusing
 
