@@ -1434,8 +1434,11 @@ conflicting commitments where required, and recover when an obligation becomes i
 calculus: spatial composability = components declare dependencies and activate/deactivate reactively as providers
 appear and vanish; temporal composability = every context mutation goes through `ctx.effect`, which returns an
 inverse the runtime owns, and a component's inverses run **LIFO** on unload) was assessed against Mycelium in
-session. The paper is **not in this repository** and no vendored copy exists; if this question is pursued, cite it
-properly and vendor the reference first.
+session. **Vendored 2026-09-24** — Shi, Zhang & Cui, *A Programming Paradigm for Spatiotemporal Composability*,
+arXiv:**2608.25512v1** (Peking University · DeepSeek-AI): citation, abstract, stated contributions and a section
+map for §13.5's classification work are at
+[`external/2026-09-09-cordis-spatiotemporal-composability.md`](external/2026-09-09-cordis-spatiotemporal-composability.md).
+The precondition this paragraph set on itself is met.
 
 **The spatial half already exists, and was verified 2026-09-09.** `watch_capabilities`, `declare_requirement` and
 `watch_requirement` are the reactive coeffect surface; `CapFilter` filters providers on `schema_id` with input and
