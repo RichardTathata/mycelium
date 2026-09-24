@@ -1,8 +1,9 @@
 # Boundary H — implementation plan
 
-> **Status: PROPOSED, rev 0.2, 2026-09-24. Not adopted.** Rev 0.2 restructures rev 0.1 after an external design
-> review, which found that several guarantees promised more than the design established. §15 records each finding
-> and where it is addressed.
+> **Status: PROPOSED, rev 0.3, 2026-09-24. Not adopted.** Rev 0.2 restructured rev 0.1 after an external design
+> review, which found that several guarantees promised more than the design established. The reviewer accepted rev
+> 0.2's architecture and asked for six bounded amendments, which rev 0.3 makes. §15 records every finding from both
+> rounds and where it is addressed.
 >
 > The plan implements the mitigations that [`docs/threat-model.md`](../threat-model.md) §5 Boundary H (revision 3
 > draft) proposes against a **colluding population of admitted members**. It follows the contracts axis's posture
@@ -61,7 +62,7 @@ The plan delivers three things, and each is claimed separately:
 
 ## 3. The distinctions this plan keeps
 
-Rev 0.1 blurred each of these. Every item below states which side of each distinction it is on.
+Rev 0.1 blurred the first nine; rev 0.3 added the last three. Every item below states which side of each distinction it is on.
 
 1. **A signature proves who issued a statement.** It does not prove the issuer was entitled to issue it, or that no
    conflicting statement exists.
@@ -80,6 +81,10 @@ Rev 0.1 blurred each of these. Every item below states which side of each distin
    network is confined.
 9. **Refusing to decide is not refusing to bear the cost.** A threshold that stops a challenge storm deciding a
    verdict does nothing about the storm's cost in memory, storage and verification.
+10. **Losing freshness never creates independence.** A stale relationship is still a relationship (rev 0.3).
+11. **Silence is not evidence.** Receiving no revocation does not show that none occurred. A higher sequence number
+    does not show that a history continues from the one already held (rev 0.3).
+12. **A signature establishes attribution; trust policy establishes decisiveness** (rev 0.3).
 
 ---
 
@@ -167,10 +172,19 @@ no longer eligible" is visible.
 **K2, signed heads with rollback and fork rules (S–M).**
 - A head carries `(issuer, stream, seq, prev_head_digest, record_digest)`, signed by the issuer. `seq` is
   monotonic per stream.
-- The reader retains the highest verified head per stream as a checkpoint.
+- The reader retains, per stream, a **checkpoint**: the latest head it has verified *by ancestry*. Checkpoints are
+  **durable across restart**. A reader that forgot them on restart would lose its rollback protection.
+- A head with a higher `seq` replaces the checkpoint **only if its ancestry is verified**: an unbroken chain of
+  signed heads, linked by `prev_head_digest`, from the retained checkpoint to the new head. A higher `seq` alone
+  never authorises replacement.
+  - **Verified extension:** advance the checkpoint.
+  - **Missing ancestry** (the intermediate heads cannot be obtained): keep the checkpoint, and report
+    `ContinuityUnavailable`. That is insufficient evidence, not acceptance.
+  - **Proven incompatible ancestry** (the new head's chain diverges before the checkpoint): a **fork**. Both are
+    retained and reported as `ForkedStream`.
 - A valid head with a lower `seq` is a **rollback**: it is ignored and reported as `StaleHead`.
-- Two different valid heads at the same `seq` are a **fork**: both are retained and reported as `ForkedStream`,
-  preserving equivocation rather than resolving it.
+- Two different valid heads at the same `seq` are also a fork, handled the same way, preserving equivocation rather
+  than resolving it.
 - A head whose body cannot be fetched is `BodyUnavailable`, which counts as insufficient evidence and never as
   absence.
 
@@ -182,7 +196,11 @@ no longer eligible" is visible.
 
 **Gates.**
 - A stale head arriving after a newer one is ignored and reported.
-- Forked heads are both retained and reported.
+- Forked heads at the same `seq` are both retained and reported.
+- A reader holding head 10 is shown head 12 from a branch that diverged at 9. The result is `ForkedStream`, and the
+  checkpoint is not replaced.
+- Head 12 with heads 11 and 12 unobtainable gives `ContinuityUnavailable`, and the checkpoint stays at 10.
+- After a reader restarts, a head older than its pre-restart checkpoint is still refused.
 - Retracted support stops counting at the next resolution.
 - A revoked issuer's support stops counting for present decisions but stays in history.
 - An unavailable body gives `InsufficientEvidence` with its reason.
@@ -221,17 +239,39 @@ invent it.
 | Removal | Takes effect through a superseding declaration. Evidence issued *before* the removal still counts with the old cohort |
 | Reassignment from A to B | During any overlap in validity windows the member is in both, so A and B merge for that window |
 | Key rotation | No effect: membership is by member identity |
-| Declaration expired or stale in a partition | The member falls under the reader's `undeclared` rule |
+| Declaration expired or stale in a partition | **Known dependence is retained.** Losing freshness never splits a relationship the reader already knows (see below) |
 | Agent admitted before its declaration arrives | Falls under the `undeclared` rule |
 
-The `undeclared` rule is `OwnGroup` (today's behaviour, the default), `OneGroup` (all undeclared issuers together)
-or `Excluded`. **The confined profile requires `OneGroup` or `Excluded`.**
+**Dependence is sticky.** Once a reader has verified a declaration placing two issuers together, that relationship
+ends only through a positive, superseding declaration from the same operator. Expiry, staleness or loss of contact
+never ends it.
+- The reason: without this rule, if A and B were known members of one cohort, and A's declaration expired while B's
+  remained current, A would drop into the undeclared group and B would stay in the declared one. Their support would
+  then count as two independent groups. `OneGroup` combines unknown members with *each other*; it does not preserve
+  their known dependence on a declared cohort.
+- A validity window therefore marks a declaration as **stale**, which is reported, not **void**. A stale declaration
+  still merges the groups it names.
+- A reader that prefers not to rely on stale relationships may set `stale = Exclude`. Evidence from issuers whose
+  only placement is stale is then excluded until the relationship is refreshed or positively resolved. It never falls
+  back to looking independent.
+
+**Historical grouping.** Evidence is grouped by the union of the grouping in force when it was issued and the
+grouping the reader holds now. A removal therefore cannot make earlier evidence look more independent.
+
+The `undeclared` rule covers issuers that have never been placed: `OwnGroup` (today's behaviour, the default),
+`OneGroup` (all undeclared issuers together) or `Excluded`. **The confined profile requires `OneGroup` or
+`Excluded`.**
 
 **Gate.**
 - Permuting the reader's configuration and the arrival order of declarations gives identical verdicts.
 - Overlapping cohorts merge.
 - A superseded declaration stops applying to new evidence but not to evidence issued under it.
-- A stale declaration, and an agent that arrived early, both fall to `undeclared`.
+- **The expiry case, exactly:** A and B are declared in one cohort. A's declaration expires while B's stays
+  current, and A and B then both support a release. The result is one independent group, not two. The same holds
+  across a partition in which no refresh arrives.
+- With `stale = Exclude`, the same scenario excludes A's support and reports why.
+- Evidence issued before a removal keeps its historical grouping.
+- An agent that arrives before any declaration falls to `undeclared`.
 - A declaration from an untrusted operator is ignored.
 
 ### H1 — Challenge admission, substantiated facts and bounded cost (M)
@@ -242,11 +282,23 @@ are counted by H5's groups.
 - Below it, the verdict carries `unadmitted_challenges { records, groups, sample }`, so the storm is visible
   without deciding the outcome.
 
-**Substantiated invalidating facts bypass the threshold.** A challenge that cites a verifiable observation from an
-issuer in the reader's `decisive_sources` decides regardless of how many groups filed it. Examples of such an
-observation: the provider's own retraction, a signed revocation of the release, or an incident observation by a
-trusted observer. This keeps a real, isolated fact from being outvoted by a popularity threshold. Raising the
-threshold then trades away only *unsubstantiated* single challenges, and the reader chooses that trade.
+**Two kinds of challenge can bypass the threshold. They are different, and they are kept apart.**
+
+A signature establishes *who* said something. Trust policy decides whether it is *decisive*.
+
+1. **Mechanically verified invalidation.** The challenge cites a statement that the reader can verify decides the
+   question, with no judgement involved. Examples: the provider's own signed retraction of the release, or a
+   revocation signed by an authority P2 shows is entitled for that scope. These decide regardless of the threshold,
+   because the reader checks them, not trusts them.
+2. **A trusted observer's assessment.** The challenge cites an observation by an issuer in the reader's
+   `decisive_sources`. It decides because this reader's policy says that observer's judgement is decisive. That is a
+   policy choice, recorded as such in the verdict's reasons.
+
+**Other evidence-bearing challenges are not dismissed.** An honest challenger outside `decisive_sources` can still
+hold substantial evidence. A below-threshold challenge that cites verifiable records is reported separately as
+`evidenced_unadmitted`, apart from bare challenges, so a person can see it and act on it. It does not decide the
+verdict alone, and the verdict says so. Raising the threshold therefore trades away only unevidenced single
+challenges, and the reader chooses that trade.
 
 **Bounded cost.** A threshold does not stop resource exhaustion (§3, distinction 9), so every stage is bounded:
 - **ingestion:** a quota of records per issuer and per cohort per window, refusals counted (K3);
@@ -258,7 +310,10 @@ threshold then trades away only *unsubstantiated* single challenges, and the rea
 **Gate.**
 - A 1,000-challenge cohort storm below the threshold does not decide the verdict, and is reported with a bounded
   sample.
-- One substantiated fact from a decisive source rejects at a threshold of 2.
+- A mechanically verified retraction rejects at a threshold of 2.
+- A trusted observer's assessment rejects at a threshold of 2, and the reason names the policy.
+- An evidence-citing challenge from outside `decisive_sources` is reported as `evidenced_unadmitted` and does not
+  decide the verdict.
 - A 100,000-record storm stays within the declared memory, time and verification budgets. **Measured, not
   asserted.**
 
@@ -310,7 +365,14 @@ Under the confined profile, the contract is:
 
 **Two measurements, reported separately:**
 - **T_admit:** time from expiry until no new admissions (expected: the clock bound).
-- **T_drain:** time from expiry until no admitted work is still running (bounded by the continuation policies).
+- **T_drain:** time from expiry until admitted work has **confirmably stopped**. Its bound is: the time to reach the
+  next re-authorisation checkpoint, plus the cancellation latency declared for that operation class, plus the time
+  to confirm the stop.
+  - Reaching a checkpoint and *requesting* cancellation does not prove that work, or its external effects, have
+    stopped.
+  - Each protected operation class declares a `cancellation_latency` and how a stop is confirmed.
+  - The measurement reports three states separately: cancellation requested, acknowledged, and confirmed stopped.
+  - Effects the resource cannot confirm are reported as *unconfirmed*, never as stopped.
 
 **Expiry and revocation are separate.**
 - *Expiry* is decided locally from `valid_until_ms` under a stated clock assumption (HLC physical time, maximum
@@ -319,6 +381,23 @@ Under the confined profile, the contract is:
   *F*. A staler view makes the state `Unknown`, which is denied under the profile. **The cost, stated:** under a
   partition longer than *F*, protected work stops. That is the intended failure direction.
 
+**How freshness is established: authority-signed revocation checkpoints.**
+- Each establishing authority (the P2 entitlement table names them per scope) issues a signed
+  `RevocationCheckpoint { authority, scope, seq, issued_at_ms, revoked }` at least once per interval *I* < *F*. It is
+  issued **even when nothing has been revoked**. An empty checkpoint is a positive statement that nothing was
+  revoked as of `issued_at_ms`.
+- **Freshness is measured from `issued_at_ms`, not from when the reader received it.** Receiving an old checkpoint
+  again never refreshes its age.
+- **Replay protection.** The reader retains, durably, the highest `seq` it has verified per `(authority, scope)`. A
+  checkpoint with a lower or equal `seq` adds nothing and cannot refresh freshness.
+- **Silence is not evidence.** Receiving no revocations establishes nothing. Only a checkpoint no older than *F*
+  does.
+- **Clock assumptions, stated.** Age is `now − issued_at_ms`, under the same maximum skew *s* as expiry, so the
+  effective bound is *F* − *s*. A checkpoint dated in the future by more than *s* is refused.
+- **Binding.** A checkpoint covers only its own authority and scope. A fresh checkpoint for scope X says nothing
+  about scope Y.
+- This is independent of consensus: it needs only the authority's key and the reader's retained `seq`.
+
 **Gate.**
 - Admissions stop within *s* of expiry.
 - A queued item dequeued after expiry is refused.
@@ -326,7 +405,13 @@ Under the confined profile, the contract is:
 - Delegated work cannot outlive its parent.
 - A `ReauthorizeAt` task is cancelled at the first checkpoint after expiry.
 - A stale revocation view is denied.
-- T_admit and T_drain are both measured.
+- **A replayed old checkpoint** (valid signature, lower `seq`, or an old `issued_at_ms` delivered again) does not
+  refresh freshness. Authority is denied once *F* − *s* has passed since the last genuine checkpoint.
+- **A partition with no new revocation messages:** after *F* − *s* the state becomes `Unknown` and protected
+  operations are denied. The lack of messages is never read as "nothing revoked".
+- A checkpoint for scope X does not refresh scope Y.
+- A reader that restarts keeps its highest retained `seq` and still refuses a replayed checkpoint.
+- T_admit is measured, and so is T_drain, with requested, acknowledged and confirmed stop reported separately.
 
 ### H3 — Advertisement bound to authority (M; needs P2)
 
@@ -360,15 +445,27 @@ an honest node. Rev 0.2 makes every accusation rest on the accused node's own si
 | `HistoryUnavailable` | The statements needed to compare are not held by this verifier. |
 | `InsufficientEvidence` | No retained source-signed statement covers this position. |
 
-- **What it can detect.** A rewrite is detectable from the first position that a retained checkpoint or record
-  covers. The checkpoint interval is the stated resolution, and coverage is reported. The WS-C sink, where attached,
-  holds the original bytes; checkpoints hold only hashes.
+- **The guarantee, exactly.** A rewrite that conflicts with a retained source-signed record or checkpoint is
+  detectable once the verifier obtains the conflicting signed evidence. **Changes outside retained coverage remain
+  unproven.**
+  - A checkpoint at sequence 100 commits, through the hash chain, to records up to 100. Rewriting any of them
+    conflicts with it.
+  - A checkpoint at 100 **cannot** detect a rewrite of records 101–110 that no one retained. The original and
+    rewritten versions both extend the same checkpoint.
+  - The unwitnessed suffix after the newest retained checkpoint is therefore always unproven. Its length is reported
+    as part of coverage, and the checkpoint interval bounds it only where checkpoints are actually retained.
+- The WS-C sink, where attached, holds the original bytes, which extends coverage to everything it has mirrored.
+  Checkpoints hold only hashes.
 - **Honest limit.** Checkpoints do nothing about acts that were never recorded. That is H7's job.
 - **Gate.**
   - A malicious witness fabricates a hash, and the result is **not** `Equivocation` (it is `InsufficientEvidence`,
     and the unsupported assertion is reported).
-  - A rewrite after a retained checkpoint gives `Equivocation` carrying two source signatures.
-  - A rewrite before any checkpoint gives `InsufficientEvidence`, **never** `Consistent`.
+  - **Rewriting covered history produces a proof.** A checkpoint at 100 is retained, and a record at or below 100 is
+    rewritten. The result is `Equivocation` carrying two source signatures (the checkpoint, and the new chain's
+    statement for that position).
+  - **Rewriting an unwitnessed suffix produces insufficient evidence.** A checkpoint at 100 is retained, and records
+    101–110 are rewritten with none of them retained. The result is `InsufficientEvidence` for 101–110, with the
+    uncovered range reported. It is **never** `Consistent`, and never `Equivocation`.
 
 ---
 
@@ -452,7 +549,7 @@ Each step states its claim, its assumptions, where it is enforced, and what the 
 | 2 | A laundered power does not resolve for the observer | Observer protects the namespace | H3, the observer's resolve path | Observation plus counter | Replay |
 | 3 | Mutual support counts once | Observer trusts the declaration | H5 in `classify` | Verdict reasons | Replay |
 | 4 | A challenge storm is visible and does not decide, within bounds | Threshold of 2 | H1 plus ingestion bounds | Verdict, and measured resource use | Replay, measured |
-| 5 | A rewritten history is proven | A checkpoint was retained | H4 | `Equivocation` with two source signatures | Replay |
+| 5 | A rewritten history is proven | A retained checkpoint covers the rewritten position; the unwitnessed suffix stays unproven | H4 | `Equivocation` with two source signatures | Replay |
 | 6 | Cohort volume is capped | Provider sets a cohort budget | H6 at the provider | `AtCapacity` in the rights ledger | Replay |
 | 7 | Direct egress is blocked | Separate pods; enforcing CNI | The network layer, not Mycelium | The flow-log adapter, if built; otherwise "blocked, unobserved" | **Deployment only** |
 | 8 | "Which agent used this credential, under which mandate?" is a lookup | Journal attached; grants retained | — | AE journal plus P2 grants | Replay |
@@ -468,16 +565,23 @@ Each is a sentence the threat model can cite once green. **R** means replayed in
 
 1. One member cannot be many issuers. A configured external issuer still verifies. (R)
 2. Authentic but revoked, retracted or superseded evidence does not count for a present decision. (R)
-3. A rolled-back head is ignored, and a forked stream is reported. (R)
+3. A rolled-back head is ignored. A higher head that does not verifiably extend the checkpoint never replaces it: a
+   divergent one is a fork, and one without obtainable ancestry leaves continuity unavailable. Checkpoints survive
+   restart. (R)
 4. One issuer cannot meet `min_supporting` alone. (R)
-5. Independence does not depend on configuration or arrival order, and overlapping cohorts merge. (R)
-6. A cohort cannot decide a verdict below the threshold. A substantiated fact still decides. A storm stays within
+5. Independence does not depend on configuration or arrival order, and overlapping cohorts merge. A known dependence
+   survives expiry and partition: two members of one cohort never count as two groups because one declaration went
+   stale. (R)
+6. A cohort cannot decide a verdict below the threshold. A mechanically verified invalidation, or a policy-decisive
+   observer, still decides, and an evidence-citing outside challenge is reported. A storm stays within
    its bounds. (R, measured)
 7. An authentic grant from a non-entitled authority, a wrong-holder presentation and a superseded grant are all
    refused. (R)
 8. A protected operation without an established mandate is refused. Expired authority stops admission within *s*
-   and admitted work within its continuation bound. A stale revocation view is refused. (R; timing D)
-9. A fabricated witness hash never yields `Equivocation`. A real rewrite after a checkpoint always does. (R)
+   and admitted work is confirmably stopped within its declared bound. A stale revocation view is refused, a replayed
+   checkpoint never refreshes freshness, and silence is never read as no revocation. (R; timing D)
+9. A fabricated witness hash never yields `Equivocation`. A rewrite that conflicts with retained source-signed evidence
+   yields one. A rewrite of an unwitnessed suffix yields insufficient evidence, never `Consistent`. (R)
 10. A caller-supplied cohort label never selects a budget. (R)
 11. Under the reference deployment, an agent pod cannot reach external hosts, instance metadata, the Kubernetes API
     or the gateway's admin routes. (D)
@@ -497,6 +601,9 @@ This programme is **not** entirely additive. The breaking or behaviour-changing 
 | `KnowledgeStore::put` returns `Result` (K1) | Callers must handle refusal |
 | `AuditAction` gains `Checkpoint` (H4) | Exhaustive `match` breaks if the enum is exhaustive |
 | Head format gains `seq` and `prev_head_digest` (K2) | Namespace reserved but unused, so low impact; stated anyway |
+| Readers persist per-stream head checkpoints and per-authority revocation `seq` (K2, A1) | New durable reader state; a reader without storage cannot claim rollback or replay protection |
+| `RevocationCheckpoint` and `MandateGrant` types (A1, P2) | Additive |
+| `stale` rule and historical grouping in `ReaderPolicy` (H5) | New fields (same class as above); may lower counted independence |
 | The confined profile denies unmandated protected operations (A1) | Opt-in, but enabling it changes behaviour |
 | Gateway route for audit proofs (H4) | Additive, with both SDKs in the same PR |
 
@@ -567,3 +674,14 @@ policy in its signed batches.
 | — | H7 needs its own ADR | Accepted | §14 |
 | — | Replay evidence is not deployment evidence | Accepted. Every claim is labelled R or D | §3, §9, §10 |
 | — | Fixed release numbers; "additive" overstated | Accepted. Dependency milestones; compatibility table | §5, §11 |
+
+**Round 2 (the same reviewer, on rev 0.2).** Rev 0.2's architecture was accepted. Six bounded amendments followed.
+
+| # | Finding | Disposition | Where |
+|---|---|---|---|
+| R2-1 | H4 overclaimed: a checkpoint cannot detect a rewrite of the unwitnessed suffix after it | Accepted. The guarantee is restated as conflict with retained signed evidence. Tests added for covered history (proof) and an unwitnessed suffix (insufficient evidence) | §7 H4, §10 case 9 |
+| R2-2 | Cohort expiry could manufacture independence | Accepted. Dependence is sticky: staleness marks, never voids. Optional `stale = Exclude`. Historical grouping is the union of grouping at issue and now. The exact expiry and partition test is added | §6 H5, §10 case 5 |
+| R2-3 | Signed heads need ancestry, not sequence comparison | Accepted. Advancing requires a verified chain from the checkpoint; missing ancestry gives `ContinuityUnavailable`; incompatible ancestry is a fork; checkpoints are durable across restart | §6 K2, §10 case 3 |
+| R2-4 | Revocation freshness needs an authoritative mechanism | Accepted. Authority-signed revocation checkpoints, issued even when empty, aged by `issued_at_ms`, protected against replay by retained `seq`, with clock skew stated. Tests for a replayed checkpoint and a silent partition | §7 A1, §10 case 8 |
+| R2-5 | "Substantiated facts" conflated verification with trust | Accepted. Mechanically verified invalidation is kept separate from a policy-decisive observer; evidence-citing outside challenges are reported as `evidenced_unadmitted` | §6 H1 |
+| R2-6 | T_drain must include cancellation delay | Accepted. The bound includes checkpoint, cancellation latency and confirmation; requested, acknowledged and confirmed are reported separately; unconfirmable effects are reported as unconfirmed | §7 A1 |

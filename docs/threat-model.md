@@ -292,10 +292,12 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **H4, source-signed audit checkpoints.** Each node seals signed checkpoints of its own stream, and members
     retain the ones they receive. An equivocation proof is two statements *signed by the accused* for the same
     position, so a witness's assertion alone never accuses anyone. Outcomes are equivocation, consistent, history
-    unavailable, or insufficient evidence.
+    unavailable, or insufficient evidence. Only a rewrite that conflicts with retained signed evidence is provable. A
+    checkpoint cannot detect a rewrite of the unwitnessed records after it, and that suffix stays unproven.
   - **H5, cohorts declared at admission.** The operator admitting a fleet declares it as a cohort. Readers resolve
     declarations and configured groups as connected components, independent of order, and fall back
-    conservatively (merge, never split). A cohort captures *control dependence*, not *evidential lineage*: two
+    conservatively (merge, never split). A known dependence survives expiry and partition: staleness marks a
+    declaration, it never voids one. A cohort captures *control dependence*, not *evidential lineage*: two
     independent organisations repeating one report share an origin, and grouping issuers does not detect that.
   - **H6, aggregate budgets.** Provider-side budgets over a declared population, closing plan §6.7's consumer-side gap.
   - **H7, the confined-fleet profile** (its own ADR). Agents and gateways run in separate pods (containers in one
