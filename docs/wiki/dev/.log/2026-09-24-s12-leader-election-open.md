@@ -1,7 +1,8 @@
-# Open: S12 leader election disagrees, intermittently, cause unknown — 2026-09-24
+# S12 leader election disagrees, intermittently — **explained 2026-09-24**
 
-**Status: OPEN.** This entry exists because the failure briefly had a wrong owner, and a wrong owner
-is worse than none — it stops people looking.
+**Status: EXPLAINED**, and the explanation is checkable in the code at the failing commit rather
+than inferred from a diff. The entry opened because the failure briefly had a *wrong* owner, and a
+wrong owner is worse than none — it stops people looking. The resolution is at the bottom.
 
 ## The observation
 
@@ -138,3 +139,48 @@ documentation fix.
   one red run, two suites, is itself a hint about the host rather than the code.
 - **Do not assume it is a flake because it is rare.** "Nodes disagree on leader" is a
   correctness-class assertion; a low rate makes it harder to find, not less real.
+
+
+---
+
+## Resolved: three certain commits, and a one-second window to reconcile them
+
+Verified against `8b588c6` itself — `git show 8b588c6:…` — not against today's code, because the
+whole failure of the first explanation was reasoning about a commit from a different tree.
+
+At that commit, an S12 election was **not a race that sometimes went wrong. It was three
+independent, *certain* commits that then had one second to agree.**
+
+1. S12 joined no group (`git show 8b588c6:tests/overlay/scenarios/s12_leader_election.py` — the
+   scenario goes straight from `wait_for_cluster_ready` to `elect_leader`).
+2. `overlay_group_propose` therefore computed `n = members.len().max(1)` = **1**
+   (`http.rs:2831`), and `compute_quorum_size(0, 1)` = `1/2 + 1` = **1**.
+3. The proposer inserted **its own vote** before it began listening (`consensus.rs:829`), and the
+   *"single-node quorum check before entering the collect loop"* immediately followed.
+4. `try_commit_if_ready` returns early only when `voters.len() < quorum_size` (`consensus.rs:1129`).
+   With one voter and a quorum of one, it **commits without waiting for anybody**.
+
+So each of the three nodes committed its own candidate, deterministically, before exchanging a
+single vote. Then each slept 1 s (`elect/converge`) and read its **local** slot.
+
+**Disagreement is therefore the expected outcome, and agreement is the thing that needed
+explaining.** Three conflicting commits reconcile by HLC-LWW; whether a given node sees the winner
+within one second is ordinary gossip timing. The twelve green runs before the failure are the
+window usually being enough; the red one is it not being enough on one node. The `8b588c6` output
+fits exactly — two nodes on `…0.4`, one still reporting `…0.3`, which is that node reading its own
+commit.
+
+**What this is not.** Not the identity-proof flip: that flag is inert without TLS and those nodes
+configure none. Not #369's election rule: it landed after. The first entry in this log blamed the
+flip on "it was the only change in that commit", which is a prior, not a mechanism —
+[rule 3 on the testing page](../testing/testing.md) now says so.
+
+**What remains unproven, stated precisely.** That *this* mechanism produced *that* run. No trace was
+captured, and none can be now. What is established is that the mechanism was **present, certain and
+sufficient** at that commit, which is as far as evidence reaches — and is a different kind of claim
+from the one this log opened with.
+
+**Closed by** the electorate refusal (#377): an election with no electorate is now refused rather
+than decided alone, so the setup that made three certain commits possible cannot recur. S12 now
+establishes its three-member group and waits for the roster to be complete on every node before
+proposing, which is why it can finally fail for the right reason.
