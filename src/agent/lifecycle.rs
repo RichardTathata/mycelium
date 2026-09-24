@@ -580,6 +580,13 @@ impl GossipAgent {
     /// Reads all `sys/identity/{node_id}` KV entries already in the local store
     /// and inserts their 32-byte public keys into `task_ctx.peer_keys`.
     /// Called at startup after TLS is initialised, before listeners are spawned.
+    ///
+    /// **The enumeration is keyed on the legacy `sys/identity/` prefix on purpose, and that is safe
+    /// only while every node still writes it.** Phase 3b's sealed record is *preferred* per node,
+    /// but nodes are *found* here. The day the legacy write is dropped (a release after every node
+    /// publishes a sealed record), this scan — and the watcher's — must enumerate
+    /// `IDENTITY_SIGNED` as well, or a sealed-only peer becomes invisible rather than rejected.
+    /// Invisible is worse: rejection is counted, absence is not.
     #[cfg(feature = "tls")]
     fn prewarm_peer_keys(&self) {
         let prefix = kv_ns::IDENTITY;
