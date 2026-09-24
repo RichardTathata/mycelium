@@ -61,8 +61,10 @@ fn concentration_pct(holders: &[String]) -> u64 {
 
 #[tokio::main]
 async fn main() {
-    #[cfg(feature = "metrics")]
-    let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install();
+    // NOTE: the recorder is installed by the gateway (`agent::http`), not here. Installing it in
+    // the example too panics that thread with `FailedToSetGlobalRecorder` — the gateway comes up
+    // dead while the page keeps serving, which looks like a working demo with a broken console.
+    // Whoever owns `/metrics` owns the recorder.
 
     // A real fleet — three equally-capable nodes, each of which would run every companion.
     let mut agents: Vec<Arc<GossipAgent>> = Vec::new();

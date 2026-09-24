@@ -55,3 +55,32 @@ demo (a node that advertises nothing just hides the link).
 - The Audit and Metrics tabs degrade honestly: a node built without `compliance` / `metrics` shows an
   explicit "built without --features …" empty state rather than a blank panel.
 - Source: [`main.rs`](main.rs) (the proxy + page) + [`ops_console.html`](ops_console.html) (the dashboard).
+
+
+## The Integrity tab
+
+The coordination and identity properties this substrate added in 2026-09 are **refusals** — the
+node declining to decide alone, to trust transitively, or to accept an identity it cannot
+authenticate. A refusal has no dashboard of its own: *you cannot watch a thing not happen.* What an
+operator needs instead is the **preconditions**, before a refusal surprises them.
+
+| Panel | The question it answers | Composed from |
+|---|---|---|
+| **Electorates** | *Would an election here work, or be refused?* | `/gateway/kv/keys?prefix=grp/` |
+| **Sealed identity coverage** | *Is it safe to set `require_identity_proofs` yet?* | `/gateway/kv/keys?prefix=sys/identity` |
+| **Role concentration (P10)** | *Is one node quietly holding everything?* | `/stats` |
+| **Tripwires** | *What has been refused or flagged?* | `/stats` |
+
+Two design notes, because both were deliberate.
+
+**Nothing new is emitted for this tab.** Every panel composes endpoints the console already reads —
+which is the console's whole role: it *observes* the layers rather than adding to them.
+
+**Sealed-identity readiness has three states, not two.** A fleet with no identities at all is not
+"not ready"; it is running without TLS, and proofs are a TLS-only mechanism. Reporting "some node
+has not upgraded" there would send an operator looking for a node that does not exist.
+
+**And one panel says what has no panel.** Trust non-transitivity and leadership fencing are refusals
+*at a boundary* rather than fleet state, so there is nothing to plot — the property is that
+something did not happen. They are demonstrated by running `federation_trust_is_not_transitive` and
+`coordination_integrity`. A tile claiming "no breaches" would assert far more than one node can see.
