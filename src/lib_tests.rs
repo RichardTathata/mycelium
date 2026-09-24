@@ -145,6 +145,8 @@ fn spawn_handler(
         hot: Arc::new(mycelium_core::context::HotConfig::from_config(&crate::config::GossipConfig::default())),
     });
     let task_ctx = Arc::new(TaskCtx {
+        #[cfg(feature = "consensus")]
+        consensus_accepted: Arc::new(papaya::HashMap::new()),
         core: core_ctx,
         bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
         rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1125,6 +1127,8 @@ async fn test_subscribe_notified_via_gossip() {
             hot: Arc::new(mycelium_core::context::HotConfig::from_config(&crate::config::GossipConfig::default())),
         });
         let task_ctx = Arc::new(TaskCtx {
+        #[cfg(feature = "consensus")]
+        consensus_accepted: Arc::new(papaya::HashMap::new()),
             core: core_ctx,
             bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
             rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

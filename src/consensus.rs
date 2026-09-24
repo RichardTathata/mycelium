@@ -908,6 +908,16 @@ impl ConsensusEngine {
             // threshold is fixed for that ballot's lifetime. A joining member's votes do not
             // count toward this ballot; a leaving member's existing vote remains counted.
             let mut voters: AHashMap<NodeId, Option<LocalityPath>> = AHashMap::new();
+            // **The self-vote obeys the same rule as every other vote.** Proposing a value is
+            // accepting it, so it goes through this node's *shared* acceptor memory. Without this
+            // the node could accept one value as a voter and self-vote for another as a proposer
+            // at the same ballot — equivocating with itself, through the one voter that never has
+            // to send a message to vote, and defeating `VoteForValue`'s binding entirely.
+            if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value) {
+                // Already committed to a different value at this ballot. Cannot win here; move up.
+                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
+                continue;
+            }
             voters.insert(self.task_ctx.node_id.clone(), self.self_locality.clone());
 
             // Single-node quorum check before entering the collect loop.
@@ -1458,6 +1468,41 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
 /// ballot only for the *same* value (idempotent re-vote); at a lower ballot never. Without this, two
 /// proposers racing the same fresh slot both get a ballot-1 vote from an overlapping voter and both
 /// reach quorum with different values (audit 2026-07-15 pass 2).
+/// **Claim this node's single vote at `ballot` for `value`, or refuse.**
+///
+/// The one place both of this node's roles pass through. A node is an acceptor when it answers
+/// someone else's `Propose`, and *also* an acceptor when it proposes — proposing a value **is**
+/// accepting it — so both must consult and update the same memory, or the node equivocates with
+/// itself: accept `v_X` at ballot 1 as a voter, self-vote `v_Y` at ballot 1 as a proposer, and two
+/// proposers can each reach quorum with a different value at one ballot.
+///
+/// Returns `true` when the claim is recorded and the caller may vote. The `compute` closure is a
+/// compare-and-set and therefore **retry-safe**: it re-reads the current entry on every attempt and
+/// never acts on a value captured outside the closure.
+#[cfg(feature = "consensus")]
+pub(crate) fn claim_vote(
+    accepted: &papaya::HashMap<Arc<str>, (u64, Bytes)>,
+    slot:     &Arc<str>,
+    ballot:   u64,
+    value:    &Bytes,
+) -> bool {
+    use papaya::Operation;
+    let mut granted = false;
+    accepted.pin().compute(Arc::clone(slot), |entry| {
+        // Recomputed from scratch on every retry — never from a prior attempt's result.
+        granted = match entry {
+            Some((_, (b, v))) => may_cast_vote(*b, Some(v), ballot, value),
+            None              => true,
+        };
+        if granted {
+            Operation::Insert((ballot, value.clone()))
+        } else {
+            Operation::Abort(())
+        }
+    });
+    granted
+}
+
 fn may_cast_vote(local_ballot: u64, prior_value: Option<&Bytes>, ballot: u64, value: &Bytes) -> bool {
     use std::cmp::Ordering::*;
     match ballot.cmp(&local_ballot) {
@@ -1519,10 +1564,11 @@ pub(crate) async fn run_consensus_listener(
     mut rx_propose:  mpsc::Receiver<Signal>,
     mut rx_commit:   mpsc::Receiver<Signal>,
 ) {
-    let mut seen_ballot: AHashMap<Arc<str>, u64> = AHashMap::new();
-    // The value this node voted for at `seen_ballot[slot]` — the acceptor's anti-equivocation memory
-    // (see `may_cast_vote`). Cleared alongside `seen_ballot` on commit (audit 2026-07-15 pass 2).
-    let mut voted_value: AHashMap<Arc<str>, Bytes> = AHashMap::new();
+    // The acceptor's anti-equivocation memory lives on `TaskCtx`, **shared with this node's
+    // proposer role** — it used to be task-local here, which let the node accept one value as a
+    // voter and self-vote for another as a proposer at the same ballot. See
+    // `TaskCtx::consensus_accepted` and `claim_vote`.
+    let accepted = Arc::clone(&ctx.task_ctx.consensus_accepted);
     let mut consecutive_abstains: u32 = 0;
 
     loop {
@@ -1546,12 +1592,14 @@ pub(crate) async fn run_consensus_listener(
                     ctx.decode_verify(&sig.payload)
                 else { continue };
 
-                let local = *seen_ballot.get(&slot).unwrap_or(&0);
-                // NACK a stale ballot OR an equal-ballot proposal for a DIFFERENT value than we
-                // already accepted: casting a second vote at the same ballot for another value lets
-                // two proposers each reach quorum with an overlapping voter and both Commit different
-                // values at one ballot — a single-decree safety violation (audit 2026-07-15 pass 2).
-                if !may_cast_vote(local, voted_value.get(&slot), ballot, &value) {
+                let local = accepted.pin().get(&slot).map(|(b, _)| *b).unwrap_or(0);
+                // Claim this node's single vote at this ballot. Refuses a stale ballot OR an
+                // equal-ballot proposal for a DIFFERENT value than we already accepted: casting a
+                // second vote at one ballot for another value lets two proposers each reach quorum
+                // with an overlapping voter and both Commit different values — a single-decree
+                // safety violation (audit 2026-07-15 pass 2). The claim goes through the *shared*
+                // memory, so this node's proposer role cannot cast a second, conflicting vote.
+                if !claim_vote(&accepted, &slot, ballot, &value) {
                     let nack = ConsensusMsg::Nack { slot, seen_ballot: local };
                     ctx.emit(
                         Arc::from(consensus_kind::NACK),
@@ -1559,8 +1607,6 @@ pub(crate) async fn run_consensus_listener(
                         ctx.sign_payload(encode_consensus_msg(&nack)),
                     );
                 } else {
-                    seen_ballot.insert(Arc::clone(&slot), ballot);
-                    voted_value.insert(Arc::clone(&slot), value.clone());
                     ctx.kv_set(
                         format!("{}{}", consensus_ns::BALLOT, &*slot),
                         encode_ballot(ballot),
@@ -1654,12 +1700,12 @@ pub(crate) async fn run_consensus_listener(
                         continue;
                     }
 
-                let current = *seen_ballot.get(&slot).unwrap_or(&0);
+                let current = accepted.pin().get(&slot).map(|(b, _)| *b).unwrap_or(0);
                 if ballot >= current {
                     // Remove instead of insert: once a slot is committed it cannot
-                    // receive a valid higher ballot, so we don't need to track it.
-                    seen_ballot.remove(&slot);
-                    voted_value.remove(&slot); // drop the anti-equivocation memory with it
+                    // receive a valid higher ballot, so we don't need to track it. This drops the
+                    // acceptor's memory for the slot — for both roles, which is the point.
+                    accepted.pin().remove(&slot);
                 }
                 ctx.kv_set(
                     format!("{}{}", consensus_ns::COMMITTED, &*slot),
@@ -2022,6 +2068,41 @@ mod consensus_msg_auth_tests {
         assert!(!counts_for(&unbound, &v_a), "an unbound vote is not evidence for any value");
         let ancient = ConsensusMsg::Vote { slot, ballot: 1, voter };
         assert!(!counts_for(&ancient, &v_a), "nor is the oldest form");
+    }
+
+    /// **A node casts at most one vote per ballot, whichever role it is playing.**
+    ///
+    /// `claim_vote` is the single gate both roles pass through. Before 2026-09-24 they had
+    /// *separate* memories: the listener's `seen_ballot`/`voted_value` were task-local, and the
+    /// proposer's ballot loop self-voted **unconditionally** without consulting them. A node could
+    /// therefore accept `v_X` at ballot 1 as a voter and propose-and-self-vote `v_Y` at ballot 1 as
+    /// a proposer — equivocating with itself through the one voter that never has to send a message
+    /// to vote, and defeating `VoteForValue`'s binding by the route binding does not cover.
+    #[test]
+    fn one_node_casts_one_vote_per_ballot_in_either_role() {
+        let accepted: papaya::HashMap<Arc<str>, (u64, Bytes)> = papaya::HashMap::new();
+        let slot: Arc<str> = Arc::from("leader/g");
+        let v_x = Bytes::from_static(b"value-X");
+        let v_y = Bytes::from_static(b"value-Y");
+
+        // Acting as an acceptor: accept v_X at ballot 1.
+        assert!(claim_vote(&accepted, &slot, 1, &v_x), "first claim at a ballot is granted");
+
+        // Acting as a proposer, same node, same ballot, different value — refused. This is the
+        // self-vote that used to be unconditional.
+        assert!(
+            !claim_vote(&accepted, &slot, 1, &v_y),
+            "a node must not vote for a second value at a ballot it has already voted in",
+        );
+
+        // Re-claiming the SAME value at the same ballot is fine — a retransmitted proposal must not
+        // look like equivocation.
+        assert!(claim_vote(&accepted, &slot, 1, &v_x), "idempotent for the same value");
+
+        // A higher ballot is a fresh decision, and may carry a different value.
+        assert!(claim_vote(&accepted, &slot, 2, &v_y), "a higher ballot may choose anew");
+        // …and the memory moved with it: ballot 1 is now stale.
+        assert!(!claim_vote(&accepted, &slot, 1, &v_x), "a stale ballot cannot be voted in again");
     }
 
     /// The digest is over the value **bytes**, so two proposals that differ at all are

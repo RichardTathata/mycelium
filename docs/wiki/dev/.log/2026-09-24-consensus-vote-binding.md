@@ -101,3 +101,34 @@ Fixed here: a fresh nonce per attempt, the write's status checked, and every nod
 every sentinel with its **exact expected value** (`found`, and the decoded `value_b64`). That
 proves fresh bidirectional propagation at the moment of asking — which is a real precondition, and
 still not a statement about consensus safety.
+
+
+---
+
+## The self-vote defeats the binding, and had to land with it
+
+Binding votes to a value closes the *cross-proposer* counting hole. It does **not** close a node
+equivocating with **itself**, and that gap would have made the binding decorative.
+
+**The mechanism.** A node plays two roles with **two separate memories**:
+
+- as an **acceptor**, `run_consensus_listener` keeps `seen_ballot` and `voted_value` as
+  **task-local** variables, and `may_cast_vote` refuses a second value at one ballot;
+- as a **proposer**, the ballot loop does `voters.insert(self.task_ctx.node_id, …)` — an
+  unconditional **self-vote** that never consults that memory.
+
+So node N can accept `v_X` at ballot 1 (from a remote proposer, broadcasting a vote bound to
+`v_X`), and *simultaneously* propose `v_Y` at ballot 1 and self-vote for it. With a three-member
+group and quorum two: A counts N's bound vote for `v_X` plus its own → commits `v_X`; N counts its
+own self-vote plus any other → commits `v_Y`. **Two values, one ballot** — the same violation the
+binding was added to prevent, reached through the one voter that never had to send a message to
+vote.
+
+**The fix is to give the two roles one memory.** Acceptor state moves onto `TaskCtx` (a `papaya`
+map, so no lock-order row — the `compute` closures are compare-and-set and therefore retry-safe),
+and the proposer passes through the *same* rule as every other acceptor before self-voting:
+proposing a value **is** accepting it, and a node that has already accepted a different value at
+this ballot cannot propose at it.
+
+**Stated as the property:** *a node casts at most one vote per ballot, for exactly one value,
+whichever role it is playing when it casts it.*

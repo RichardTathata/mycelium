@@ -378,6 +378,28 @@ pub(crate) struct TaskCtx {
     /// Shared registry for the consolidated `declare_requirement` opacity watcher.
     /// A single background task reads from this instead of one task per requirement.
     pub(crate) filter_opacity_registry: Arc<capability_ops::FilterOpacityRegistry>,
+
+    /// **This node's acceptor memory: `slot → (ballot, accepted value)`.**
+    ///
+    /// Shared deliberately between the two roles a node plays. The voter task and the proposer
+    /// used to keep *separate* memories — the listener's were task-local `seen_ballot` /
+    /// `voted_value`, and the proposer's ballot loop self-voted unconditionally without consulting
+    /// them. A node could therefore accept `v_X` at ballot 1 as an acceptor and propose-and-
+    /// self-vote `v_Y` at ballot 1 as a proposer: **equivocating with itself**, through the one
+    /// voter that never has to send a message to vote. Two proposers could then each reach quorum
+    /// and commit different values at one ballot — the violation
+    /// `ConsensusMsg::VoteForValue`'s binding exists to prevent, reached by the route binding does
+    /// not cover.
+    ///
+    /// The property both roles now obey: *a node casts at most one vote per ballot, for exactly
+    /// one value, whichever role it is playing when it casts it.* Proposing a value **is**
+    /// accepting it.
+    ///
+    /// `papaya`, not a lock — so no lock-order row. Every mutation is a compare-and-set and is
+    /// therefore retry-safe, per the `compute` rule in
+    /// [lock-free-and-atomics](../../docs/wiki/dev/concurrency/lock-free-and-atomics.md).
+    #[cfg(feature = "consensus")]
+    pub(crate) consensus_accepted: Arc<papaya::HashMap<Arc<str>, (u64, bytes::Bytes)>>,
     /// Short-lived cache of group membership lists keyed by group name.
     /// Invalidated generation-based: `KvState::grp_generation` is bumped (Release)
     /// whenever a `grp/` key changes; the cache reader loads it with Acquire so it
@@ -910,6 +932,8 @@ impl GossipAgent {
             task_handles:        Arc::clone(&task_handles_arc),
         });
         let task_ctx = Arc::new(TaskCtx {
+            #[cfg(feature = "consensus")]
+            consensus_accepted: Arc::new(papaya::HashMap::new()),
             core: Arc::clone(&core_ctx),
             bulk_transport:  Arc::new(bulk::BulkTransport::new(
                 config.http_port.unwrap_or(0),
