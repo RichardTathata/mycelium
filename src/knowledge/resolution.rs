@@ -124,6 +124,26 @@ pub struct ReaderPolicy {
     pub undeclared: UndeclaredRule,
     /// What to do with an issuer whose only placements rest on stale declarations.
     pub stale: StaleRule,
+    /// How many **independent groups** must challenge a release before challenges decide it
+    /// (Boundary H item H1). Counted by the same components as support, so a declared cohort's
+    /// thousand challenges are one group.
+    ///
+    /// Defaults to 1, which is the behaviour before H1: any single challenger decides. Raising it
+    /// removes the automatic blocking effect of challenges that neither establish mechanically
+    /// verified invalidation nor come from a source in [`decisive_sources`](Self::decisive_sources).
+    /// Their evidence remains visible in [`Classification::challenges`].
+    pub min_challenge_groups: usize,
+    /// Issuers whose challenge decides by **this reader's policy**, whatever the threshold. The
+    /// verdict names the policy ([`RejectionReason::DecisiveSource`]): a signature establishes who
+    /// said it, and trust policy — this field — establishes that it decides.
+    pub decisive_sources: BTreeSet<IssuerId>,
+    /// The most records about one subject a resolution will examine (H1's bounded cost). Past it the
+    /// verdict is `InsufficientEvidence` and [`Classification::budget_exhausted`] is set — never a
+    /// silent partial count. Default: unbounded.
+    pub max_examined: usize,
+    /// The most exclusions and sampled challengers a [`Classification`] reports individually. Totals
+    /// are always complete. Default: 64.
+    pub max_reported: usize,
 }
 
 /// What a reader does with records stored without verification.
@@ -149,6 +169,10 @@ impl Default for ReaderPolicy {
             cohorts: CohortView::default(),
             undeclared: UndeclaredRule::OwnGroup,
             stale: StaleRule::Retain,
+            min_challenge_groups: 1,
+            decisive_sources: BTreeSet::new(),
+            max_examined: usize::MAX,
+            max_reported: 64,
         }
     }
 }
@@ -198,6 +222,18 @@ pub enum RejectionReason {
     /// An issuer challenged the release and the reader's policy treats that as disqualifying.
     Challenged {
         /// Who challenged it.
+        by: IssuerId,
+    },
+    /// **Mechanically verified invalidation** (H1): the provider itself, verifiably, challenged its
+    /// own release. No trust decision is involved — the one party whose release it is disowned it.
+    DisownedByProvider {
+        /// The provider.
+        by: IssuerId,
+    },
+    /// A challenge from a source this reader's policy designates decisive (H1). A policy choice, and
+    /// named as one.
+    DecisiveSource {
+        /// The decisive source.
         by: IssuerId,
     },
 }
@@ -324,8 +360,33 @@ pub struct Excluded {
 pub struct Classification {
     /// The verdict over the eligible records.
     pub verdict: Verdict,
-    /// What was excluded, and why.
+    /// What was excluded, and why — at most `policy.max_reported` of them, sorted by record id.
     pub excluded: Vec<Excluded>,
+    /// How many were excluded in total.
+    pub excluded_total: usize,
+    /// What the challenges amounted to, including those that did not decide the verdict (H1).
+    pub challenges: ChallengeReport,
+    /// Whether the resolution stopped at `policy.max_examined`. If so the verdict is
+    /// `InsufficientEvidence`: nothing was concluded from a partial count.
+    pub budget_exhausted: bool,
+}
+
+/// What the eligible challenges amounted to (Boundary H item H1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChallengeReport {
+    /// Eligible challenging records, in total.
+    pub records: usize,
+    /// Independent groups they came from.
+    pub groups: usize,
+    /// Whether they decided the verdict: enough groups, a decisive source, or the provider disowning
+    /// its release.
+    pub admitted: bool,
+    /// Challengers that decided nothing but **cite evidence** — a `DerivedFrom` link to a record this
+    /// store holds. Kept apart from bare challenges so a person can see them. Sorted, at most
+    /// `max_reported`.
+    pub evidenced_unadmitted: Vec<IssuerId>,
+    /// A sample of challengers, sorted, at most `max_reported`.
+    pub sample: Vec<IssuerId>,
 }
 
 /// **Classify the evidence for one bound release.**
@@ -496,16 +557,36 @@ fn evaluate<M: MemberKeySource>(
     let mut supporting_issuers: BTreeSet<IssuerId> = BTreeSet::new();
     // Every counted supporting record's issuer and issue time, for historical grouping (H5).
     let mut supporting_records: Vec<(IssuerId, u64)> = Vec::new();
-    let mut challenges: Vec<IssuerId> = Vec::new();
+    // Every eligible challenging record: issuer, issue time, and whether it cites evidence.
+    let mut challenge_records: Vec<(IssuerId, u64, bool)> = Vec::new();
+    let mut disowned = false;
     let mut excluded: Vec<Excluded> = Vec::new();
+    let mut examined = 0usize;
+    let mut budget_exhausted = false;
 
     for record in store.about(&subject) {
-        // Only a judgement counts. A claim or an observation is not one.
-        if record.kind() != RecordKind::Assessment {
+        examined += 1;
+        if examined > policy.max_examined {
+            budget_exhausted = true;
+            break;
+        }
+        // **Mechanically verified invalidation:** the provider, verifiably, challenging its own
+        // release. Any kind of record: disowning is not a judgement of someone else.
+        if record.issuer() == provider {
+            let challenges_own = record.links().iter().any(|l| l.kind == LinkKind::Challenges);
+            let eligible = authenticity_exclusion(store, record, policy, keys).is_none()
+                && matches!(
+                    standing(store, &index, record.id(), now_ms, policy.max_evidence_age_ms),
+                    Some(Standing::Current)
+                );
+            if challenges_own && eligible {
+                disowned = true;
+            }
+            // Otherwise the provider assessing its own release is not evidence about it.
             continue;
         }
-        // The provider assessing its own release is not evidence about it.
-        if record.issuer() == provider {
+        // Only a judgement counts. A claim or an observation is not one.
+        if record.kind() != RecordKind::Assessment {
             continue;
         }
 
@@ -542,38 +623,95 @@ fn evaluate<M: MemberKeySource>(
         // A record that both supports and challenges is a challenge: the cautious reading, and the
         // one that cannot be used to manufacture support.
         if challenges_it {
-            challenges.push(record.issuer().clone());
+            let evidenced = record
+                .links()
+                .iter()
+                .any(|l| l.kind == LinkKind::DerivedFrom && store.get(&l.target).is_some());
+            challenge_records.push((record.issuer().clone(), record.at_ms(), evidenced));
         } else {
             supporting_issuers.insert(record.issuer().clone());
             supporting_records.push((record.issuer().clone(), record.at_ms()));
         }
     }
     excluded.sort_by(|a, b| a.record.cmp(&b.record));
+    let excluded_total = excluded.len();
+    excluded.truncate(policy.max_reported);
 
     let supporting = supporting_issuers.len();
-    let challenging = challenges.len();
+    let challenging = challenge_records.len();
 
     // Independence by control — configured or declared, never inferred — as connected components.
+    // Support and challenge are counted by the same components (H5, H1).
     let independent = independent_groups(policy, &supporting_records, now_ms);
+    let challenge_times: Vec<(IssuerId, u64)> =
+        challenge_records.iter().map(|(i, t, _)| (i.clone(), *t)).collect();
+    let challenge_groups = independent_groups(policy, &challenge_times, now_ms);
 
-    // Support and challenge together is a conflict, and it is not this layer's to resolve.
-    let verdict = if challenging > 0 && supporting > 0 {
+    let challengers: BTreeSet<IssuerId> = challenge_records.iter().map(|(i, _, _)| i.clone()).collect();
+    let decisive: Vec<IssuerId> =
+        challengers.iter().filter(|i| policy.decisive_sources.contains(*i)).cloned().collect();
+    let admitted = disowned
+        || !decisive.is_empty()
+        || (challenging > 0 && challenge_groups >= policy.min_challenge_groups);
+
+    let insufficient = || Verdict::InsufficientEvidence {
+        have: supporting,
+        need: policy.min_supporting,
+        independent,
+        need_independent: policy.min_independent,
+    };
+    let verdict = if budget_exhausted {
+        // Nothing is concluded from a partial count.
+        insufficient()
+    } else if disowned || !decisive.is_empty() {
+        // Decisive, whatever the support: the provider disowned it, or a source this reader's
+        // policy designates decisive challenged it. Named, and bounded.
+        let mut reasons: Vec<RejectionReason> = Vec::new();
+        if disowned {
+            reasons.push(RejectionReason::DisownedByProvider { by: provider.clone() });
+        }
+        reasons.extend(decisive.iter().cloned().map(|by| RejectionReason::DecisiveSource { by }));
+        reasons.truncate(policy.max_reported.max(1));
+        Verdict::Rejected { reasons }
+    } else if admitted && supporting > 0 {
+        // Support and admitted challenge together is a conflict, and it is not this layer's to
+        // resolve.
         Verdict::Conflicted { supporting, challenging }
-    } else if challenging > 0 {
+    } else if admitted {
         Verdict::Rejected {
-            reasons: challenges.into_iter().map(|by| RejectionReason::Challenged { by }).collect(),
+            reasons: challengers
+                .iter()
+                .take(policy.max_reported.max(1))
+                .cloned()
+                .map(|by| RejectionReason::Challenged { by })
+                .collect(),
         }
     } else if supporting < policy.min_supporting || independent < policy.min_independent {
-        Verdict::InsufficientEvidence {
-            have: supporting,
-            need: policy.min_supporting,
-            independent,
-            need_independent: policy.min_independent,
-        }
+        insufficient()
     } else {
         Verdict::Accepted { supporting, independent }
     };
-    Classification { verdict, excluded }
+
+    let evidenced_unadmitted: Vec<IssuerId> = if admitted {
+        Vec::new()
+    } else {
+        challenge_records
+            .iter()
+            .filter(|(_, _, evidenced)| *evidenced)
+            .map(|(i, _, _)| i.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(policy.max_reported)
+            .collect()
+    };
+    let challenges = ChallengeReport {
+        records: challenging,
+        groups: challenge_groups,
+        admitted,
+        evidenced_unadmitted,
+        sample: challengers.into_iter().take(policy.max_reported).collect(),
+    };
+    Classification { verdict, excluded, excluded_total, challenges, budget_exhausted }
 }
 
 /// **Step 6: compose with load and locality — by filtering, never by reordering.**
@@ -1010,6 +1148,159 @@ mod tests {
             assert!(matches!(c.verdict, Verdict::InsufficientEvidence { have: 0, .. }));
             assert!(c.excluded.iter().all(|e| e.why == Exclusion::Undeclared));
             assert_eq!(c.excluded.len(), 2);
+        }
+    }
+
+    // ── H1: challenge admission ──────────────────────────────────────────────────────────────
+
+    mod h1 {
+        use super::*;
+        use crate::knowledge::cohort::{CohortDeclaration, CohortView, SignedCohortDeclaration};
+        use crate::knowledge::issuer::{MemberKeys, TrustedExternalIssuers};
+        use crate::node_id::NodeId;
+        use ed25519_dalek::SigningKey;
+        use std::collections::HashMap;
+
+        fn fleet(n: usize) -> (CohortView, Vec<String>) {
+            let sk = SigningKey::from_bytes(&[13u8; 32]);
+            let op = issuer("operator:acme");
+            let mut ext = TrustedExternalIssuers::new();
+            ext.trust(op.clone(), sk.verifying_key().to_bytes()).unwrap();
+            let names: Vec<String> = (0..n).map(|i| format!("agent-{i}")).collect();
+            let declaration = CohortDeclaration {
+                operator: op.clone(),
+                cohort: "fleet".into(),
+                seq: 1,
+                members: names.iter().map(|m| issuer(m)).collect(),
+                valid_from_ms: 0,
+                valid_until_ms: u64::MAX,
+            };
+            let signature = mycelium_core::tls::sign_bytes(&sk, &declaration.canonical_bytes()).to_vec();
+            let mut v = CohortView::trusting([op]);
+            v.offer(&SignedCohortDeclaration { declaration, signature }, &HashMap::<NodeId, MemberKeys>::new(), &ext);
+            (v, names)
+        }
+
+        fn run(store: &KnowledgeStore, policy: &ReaderPolicy) -> Classification {
+            classify_eligible(store, &release(), &issuer("provider"), policy, 2_000, &HashMap::<NodeId, MemberKeys>::new(), &TrustedExternalIssuers::new())
+        }
+
+        /// Two independent labs support; a declared cohort of a thousand challenges.
+        fn storm(n: usize) -> (KnowledgeStore, CohortView) {
+            let r = release();
+            let (v, names) = fleet(n);
+            let mut records = vec![
+                assessment("lab-a", &r, LinkKind::Supports, 1_000),
+                assessment("lab-b", &r, LinkKind::Supports, 1_000),
+            ];
+            records.extend(names.iter().map(|n| assessment(n, &r, LinkKind::Challenges, 1_000)));
+            (store_with(records), v)
+        }
+
+        /// **A challenge storm below the threshold is visible and does not decide.** A declared
+        /// cohort's thousand challenges are one group; at a threshold of two, the labs' support
+        /// stands, and the report says what happened — with a bounded sample.
+        #[test]
+        fn a_cohort_storm_below_the_threshold_is_reported_and_does_not_decide() {
+            let (store, v) = storm(1_000);
+            let p = ReaderPolicy { min_supporting: 2, min_independent: 2, min_challenge_groups: 2, cohorts: v, ..Default::default() };
+            let c = run(&store, &p);
+            assert_eq!(c.verdict, Verdict::Accepted { supporting: 2, independent: 2 });
+            assert_eq!((c.challenges.records, c.challenges.groups, c.challenges.admitted), (1_000, 1, false));
+            assert_eq!(c.challenges.sample.len(), p.max_reported, "the sample is bounded");
+        }
+
+        /// The default threshold keeps today's behaviour: the same storm makes a conflict.
+        #[test]
+        fn at_the_default_threshold_any_challenge_still_decides() {
+            let (store, v) = storm(10);
+            let p = ReaderPolicy { cohorts: v, ..Default::default() };
+            assert!(matches!(run(&store, &p).verdict, Verdict::Conflicted { supporting: 2, challenging: 10 }));
+        }
+
+        /// Two independent groups reach a threshold of two.
+        #[test]
+        fn independent_challengers_reaching_the_threshold_decide() {
+            let r = release();
+            let store = store_with(vec![
+                assessment("lab-a", &r, LinkKind::Supports, 1_000),
+                assessment("lab-x", &r, LinkKind::Challenges, 1_000),
+                assessment("lab-y", &r, LinkKind::Challenges, 1_000),
+            ]);
+            let p = ReaderPolicy { min_challenge_groups: 2, ..Default::default() };
+            assert!(matches!(run(&store, &p).verdict, Verdict::Conflicted { .. }));
+        }
+
+        /// **Mechanically verified invalidation.** The provider disowning its own release decides,
+        /// whatever the support and whatever the threshold.
+        #[test]
+        fn the_provider_disowning_its_release_decides() {
+            let r = release();
+            let disown = KnowledgeRecord::new(issuer("provider"), RecordKind::Claim, 1_500, r.subject(), b"withdrawn".to_vec(), vec![Link { kind: LinkKind::Challenges, target: target_id(&issuer("provider")) }]).unwrap();
+            let store = store_with(vec![
+                assessment("lab-a", &r, LinkKind::Supports, 1_000),
+                assessment("lab-b", &r, LinkKind::Supports, 1_000),
+                disown,
+            ]);
+            let p = ReaderPolicy { min_challenge_groups: 5, ..Default::default() };
+            assert_eq!(run(&store, &p).verdict, Verdict::Rejected { reasons: vec![RejectionReason::DisownedByProvider { by: issuer("provider") }] });
+        }
+
+        /// **A policy-decisive source decides, and the reason names the policy.**
+        #[test]
+        fn a_decisive_source_decides_and_is_named() {
+            let r = release();
+            let store = store_with(vec![
+                assessment("lab-a", &r, LinkKind::Supports, 1_000),
+                assessment("lab-b", &r, LinkKind::Supports, 1_000),
+                assessment("regulator", &r, LinkKind::Challenges, 1_000),
+            ]);
+            let p = ReaderPolicy { min_challenge_groups: 2, decisive_sources: BTreeSet::from([issuer("regulator")]), ..Default::default() };
+            assert_eq!(run(&store, &p).verdict, Verdict::Rejected { reasons: vec![RejectionReason::DecisiveSource { by: issuer("regulator") }] });
+        }
+
+        /// **An evidence-bearing outsider is not dismissed.** Below the threshold and outside the
+        /// decisive sources, a challenge citing a held record is reported apart from bare ones.
+        #[test]
+        fn an_evidence_citing_challenge_below_the_threshold_is_reported_separately() {
+            let r = release();
+            let finding = KnowledgeRecord::new(issuer("field-lab"), RecordKind::Observation, 900, "field/x", b"o".to_vec(), vec![]).unwrap();
+            let evidenced = KnowledgeRecord::new(issuer("careful-lab"), RecordKind::Assessment, 1_000, r.subject(), b"j".to_vec(), vec![
+                Link { kind: LinkKind::Challenges, target: target_id(&issuer("provider")) },
+                Link { kind: LinkKind::DerivedFrom, target: finding.id().clone() },
+            ]).unwrap();
+            let store = store_with(vec![
+                assessment("lab-a", &r, LinkKind::Supports, 1_000),
+                assessment("lab-b", &r, LinkKind::Supports, 1_000),
+                assessment("bare", &r, LinkKind::Challenges, 1_000),
+                evidenced,
+                finding,
+            ]);
+            let p = ReaderPolicy { min_supporting: 2, min_independent: 2, min_challenge_groups: 3, ..Default::default() };
+            let c = run(&store, &p);
+            assert!(c.verdict.is_accepted());
+            assert_eq!(c.challenges.evidenced_unadmitted, vec![issuer("careful-lab")]);
+            assert_eq!(c.challenges.records, 2);
+        }
+
+        /// **Bounded cost.** A resolution stops at its budget and concludes nothing from the part it
+        /// read; a 100,000-record storm is resolved with bounded output. Timing is measured and
+        /// printed, not asserted.
+        #[test]
+        fn a_large_storm_is_bounded_in_output_and_by_budget() {
+            let (store, v) = storm(100_000);
+            let budgeted = ReaderPolicy { min_challenge_groups: 2, max_examined: 500, cohorts: v.clone(), ..Default::default() };
+            let c = run(&store, &budgeted);
+            assert!(c.budget_exhausted);
+            assert!(matches!(c.verdict, Verdict::InsufficientEvidence { .. }), "nothing concluded from a partial count");
+
+            let full = ReaderPolicy { min_supporting: 2, min_independent: 2, min_challenge_groups: 2, cohorts: v, ..Default::default() };
+            let started = std::time::Instant::now();
+            let c = run(&store, &full);
+            eprintln!("H1 storm: 100,002 records resolved in {:?} (unoptimised test build)", started.elapsed());
+            assert!(c.verdict.is_accepted());
+            assert_eq!((c.challenges.records, c.challenges.groups), (100_000, 1));
+            assert!(c.challenges.sample.len() <= full.max_reported && c.excluded.len() <= full.max_reported);
         }
     }
 
