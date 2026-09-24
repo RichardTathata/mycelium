@@ -2538,6 +2538,11 @@ async fn test_group_propose_single_voter() {
 #[cfg(feature = "consensus")]
 async fn test_group_propose_timeout() {
     let agent = make_agent();
+    // The group must exist before it can fail to reach quorum. Without this join the proposal is
+    // refused for having **no electorate**, which is a different answer to the one under test —
+    // and before 2026-09-24 it was a third answer again: an empty roster counted as one member,
+    // so the test was exercising a singleton election it did not mean to create.
+    agent.mesh().join_group("cg2");
     // No listener started — no votes arrive, quorum of 2 is unreachable.
     let config = ConsensusConfig {
         quorum_size:    2,
@@ -2702,6 +2707,8 @@ async fn test_system_propose_commits() {
 async fn test_consensus_rx_fires_on_commit() {
     let agent = make_agent();
     let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+    // An explicit one-member electorate: legitimate, and now required to be explicit.
+    agent.mesh().join_group("rxg");
     let mut rx = agent.consensus().consensus_rx("slRx");
 
     let config = ConsensusConfig { quorum_size: 1, ..ConsensusConfig::default() };
@@ -2721,6 +2728,8 @@ async fn test_consensus_rx_fires_on_commit() {
 async fn test_consensus_get_returns_committed() {
     let agent = make_agent();
     let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+    // An explicit one-member electorate: legitimate, and now required to be explicit.
+    agent.mesh().join_group("cgg");
 
     let config = ConsensusConfig { quorum_size: 1, ..ConsensusConfig::default() };
     let _ = agent.consensus().group_propose("cgg", "slGet", Bytes::from_static(b"gotten"), config).await;
