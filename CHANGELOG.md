@@ -133,6 +133,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closed** so the claim cannot rot. Full account:
   [`docs/wiki/dev/security.md`](docs/wiki/dev/security.md).
 
+### Fixed
+
+- **`auto_election_is_deterministic` was asserting the rule we replaced** — *"lowest candidate id
+  wins"*, four days after the election became rendezvous (`mycelium::election`). It did not start
+  failing; it started being a **coin flip**, because the test's ports are kernel-assigned and
+  `hash(ring, node)` has no reason to favour the lower one. It passed twice on `main` — which is how
+  the election change and its follow-up both merged green — and failed on the next branch that ran
+  it, one with nothing to do with elections.
+
+  Fixed by asserting the property that is actually deterministic rather than pinning the other
+  answer: exactly one primary (which never depended on the rule), and the winner is the node
+  `mycelium::election::winner` names, computed in the test from the same ring name and candidate ids
+  the node uses. A future rule change now fails it honestly instead of re-rolling.
+
+  Two stale comments went with it (`mycelium-wiki`'s curator sentinel said *"lowest id wins"*
+  fifteen lines above its `elect` call). Both were only comments, because the wiki's assertions are
+  **rule-agnostic** — which is precisely why they survived the rule change, and is the shape worth
+  copying.
+
 ## [2.13.0] — 2026-09-23
 
 **The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged
