@@ -11,6 +11,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Knowledge cohorts, declared at admission** (Boundary H plan, milestone M2, item H5; ADR
+  `docs/design/knowledge-cohorts.md`). An operator the reader trusts signs a `CohortDeclaration` naming a
+  fleet, and `ReaderPolicy::cohorts` (a `CohortView`) makes its members **one control group**.
+  - Grouping is now **connected components** over configured groups, declared cohorts and each record's
+    placement, so overlapping groups merge and the result never depends on order.
+  - **Dependence is sticky:** expiry and partition mark a declaration stale and never remove a member.
+    Only a superseding declaration does, and only for later evidence.
+  - Records are grouped by membership at issue time **and** now.
+  - New `UndeclaredRule` (`OwnGroup` default, `OneGroup`, `Excluded`) and `StaleRule` (`Retain` default,
+    `Exclude`), with new exclusions `Undeclared` and `StaleCohortOnly`.
+
+  **Not claimed:** lineage, which is a different relation, and durability (`CohortView` is in memory).
+
 - **Durable knowledge stores** (Boundary H plan, milestone M2, item K3a; ADR
   `docs/design/knowledge-validity.md` §4). `knowledge::durable::DurableKnowledgeStore` and
   `DurableHeadCheckpoints` sit on the node-local journal (fsynced, never gossiped), which adds **no new
@@ -202,6 +215,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never learning the new key.
 
 ### Changed
+
+- **Control groups resolve as connected components, not first match** (Boundary H H5).
+  `ReaderPolicy::group_of` took the first configured group containing an issuer, so with overlapping
+  groups independence depended on listing order. Overlapping groups now merge, which can only lower
+  counted independence. **Upgrade note (v2.8.0's class):** `ReaderPolicy` gained `cohorts`, `undeclared`
+  and `stale`, so an exhaustive struct literal needs `..Default::default()`.
 
 - **`resolution::classify` honours retraction, same-issuer supersession and withdrawn bases**
   (Boundary H K1b). It never consulted them, so a withdrawn assessment kept supporting a release. It also

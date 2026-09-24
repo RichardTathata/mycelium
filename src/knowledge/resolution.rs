@@ -49,6 +49,7 @@ use std::collections::BTreeSet;
 
 use std::collections::BTreeMap;
 
+use super::cohort::{CohortView, StaleRule, UndeclaredRule};
 use super::correction::{standing, DependencyIndex, Standing};
 use super::issuer::{
     verify_issuer, Authenticity, MemberKeySource, MemberKeys, TrustedExternalIssuers,
@@ -98,7 +99,10 @@ pub struct ReaderPolicy {
     /// How many **independent** ones, counted by control group.
     pub min_independent: usize,
     /// The reader's control groups. Issuers in the same group are **not independent of each other**;
-    /// an issuer in no group is its own group.
+    /// an issuer in no group is its own group (or as `undeclared` says).
+    ///
+    /// Groups resolve as **connected components** together with cohort declarations: overlapping
+    /// groups merge, and the result does not depend on the order they are listed in (H5).
     ///
     /// This is configured, never inferred — §4's "identity is not independence".
     pub control_groups: Vec<BTreeSet<IssuerId>>,
@@ -113,6 +117,13 @@ pub struct ReaderPolicy {
     /// [`UncheckedRule::Exclude`], and the confined-fleet profile requires it. Under `Exclude`, an
     /// unchecked record can neither support, challenge, retract nor supersede anything.
     pub unchecked: UncheckedRule,
+    /// Cohort declarations from operators this reader trusts (Boundary H item H5). An issuer a
+    /// declaration places in a cohort is not independent of the cohort's other members.
+    pub cohorts: CohortView,
+    /// What to do with an issuer no declaration and no configured group places.
+    pub undeclared: UndeclaredRule,
+    /// What to do with an issuer whose only placements rest on stale declarations.
+    pub stale: StaleRule,
 }
 
 /// What a reader does with records stored without verification.
@@ -135,14 +146,44 @@ impl Default for ReaderPolicy {
             control_groups: Vec::new(),
             max_evidence_age_ms: u64::MAX,
             unchecked: UncheckedRule::Count,
+            cohorts: CohortView::default(),
+            undeclared: UndeclaredRule::OwnGroup,
+            stale: StaleRule::Retain,
         }
     }
 }
 
 impl ReaderPolicy {
-    /// Which control group `issuer` belongs to, as an index. `None` means it is its own group.
-    fn group_of(&self, issuer: &IssuerId) -> Option<usize> {
-        self.control_groups.iter().position(|g| g.contains(issuer))
+    /// Every configured control group `issuer` is in — all of them, not the first.
+    fn groups_of<'a>(&'a self, issuer: &'a IssuerId) -> impl Iterator<Item = usize> + 'a {
+        self.control_groups.iter().enumerate().filter(move |(_, g)| g.contains(issuer)).map(|(i, _)| i)
+    }
+}
+
+/// A tiny union-find over string-named nodes, for grouping issuers by control. Deterministic: the
+/// root of a set is its smallest member, so the grouping never depends on insertion order.
+#[derive(Default)]
+struct Components {
+    parent: BTreeMap<String, String>,
+}
+
+impl Components {
+    fn find(&mut self, x: &str) -> String {
+        let p = self.parent.entry(x.to_string()).or_insert_with(|| x.to_string()).clone();
+        if p == x {
+            return p;
+        }
+        let root = self.find(&p);
+        self.parent.insert(x.to_string(), root.clone());
+        root
+    }
+
+    fn union(&mut self, a: &str, b: &str) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+            self.parent.insert(hi, lo);
+        }
     }
 }
 
@@ -256,6 +297,12 @@ pub enum Exclusion {
         /// When it was issued.
         at_ms: u64,
     },
+    /// No trusted declaration and no configured group places the issuer, and the reader's
+    /// `UndeclaredRule::Excluded` excludes such issuers (H5).
+    Undeclared,
+    /// The issuer's only placements rest on stale declarations, and the reader's
+    /// `StaleRule::Exclude` excludes such evidence until the relationship is refreshed (H5).
+    StaleCohortOnly,
 }
 
 /// One record excluded from a verdict, and why.
@@ -366,6 +413,59 @@ fn authenticity_exclusion<M: MemberKeySource>(
     }
 }
 
+/// H5's exclusions: an undeclared issuer under `UndeclaredRule::Excluded`, or one placed only by stale
+/// declarations under `StaleRule::Exclude`.
+fn placement_exclusion(policy: &ReaderPolicy, issuer: &IssuerId, at_ms: u64, now_ms: u64) -> Option<Exclusion> {
+    if policy.groups_of(issuer).next().is_some() {
+        return None; // The reader's own configuration places it.
+    }
+    let placement = policy.cohorts.placement(issuer, at_ms, now_ms);
+    if placement.cohorts.is_empty() {
+        return (policy.undeclared == UndeclaredRule::Excluded).then_some(Exclusion::Undeclared);
+    }
+    (!placement.any_current && policy.stale == StaleRule::Exclude).then_some(Exclusion::StaleCohortOnly)
+}
+
+/// How many independent groups the counted supporting records come from.
+///
+/// Nodes are issuers, configured groups and declared cohorts; every placement is an edge. Two issuers
+/// are dependent if any path joins them — so overlapping groups merge, and the answer does not
+/// depend on the order anything was configured or declared in.
+fn independent_groups(policy: &ReaderPolicy, records: &[(IssuerId, u64)], now_ms: u64) -> usize {
+    let mut c = Components::default();
+    let cohort_node = |k: &super::cohort::CohortKey| format!("c:{}/{}", k.operator.as_str(), k.cohort);
+    // The whole graph, not just the supporters: a member who has said nothing still joins the two
+    // cohorts (or groups) it belongs to, so their supporters are dependent through it.
+    for (g, members) in policy.control_groups.iter().enumerate() {
+        for m in members {
+            c.union(&format!("i:{}", m.as_str()), &format!("g:{g}"));
+        }
+    }
+    for (key, member) in policy.cohorts.members_in_force(now_ms) {
+        c.union(&format!("i:{}", member.as_str()), &cohort_node(&key));
+    }
+    // Then each counted record's own placement, including membership at its issue time.
+    for (issuer, at_ms) in records {
+        let me = format!("i:{}", issuer.as_str());
+        c.find(&me);
+        let mut placed = false;
+        for g in policy.groups_of(issuer) {
+            c.union(&me, &format!("g:{g}"));
+            placed = true;
+        }
+        for cohort in policy.cohorts.placement(issuer, *at_ms, now_ms).cohorts {
+            c.union(&me, &cohort_node(&cohort));
+            placed = true;
+        }
+        if !placed && policy.undeclared == UndeclaredRule::OneGroup {
+            c.union(&me, "u:undeclared");
+        }
+    }
+    let roots: BTreeSet<String> =
+        records.iter().map(|(i, _)| c.find(&format!("i:{}", i.as_str()))).collect();
+    roots.len()
+}
+
 fn evaluate<M: MemberKeySource>(
     store: &KnowledgeStore,
     release: &ReleaseId,
@@ -394,6 +494,8 @@ fn evaluate<M: MemberKeySource>(
 
     // A set, not a list: one issuer is one supporter however many records it files.
     let mut supporting_issuers: BTreeSet<IssuerId> = BTreeSet::new();
+    // Every counted supporting record's issuer and issue time, for historical grouping (H5).
+    let mut supporting_records: Vec<(IssuerId, u64)> = Vec::new();
     let mut challenges: Vec<IssuerId> = Vec::new();
     let mut excluded: Vec<Excluded> = Vec::new();
 
@@ -430,7 +532,8 @@ fn evaluate<M: MemberKeySource>(
                     Standing::BasisWithdrawn { basis, hops } => Some(Exclusion::BasisWithdrawn { basis, hops }),
                     Standing::Expired { at_ms } => Some(Exclusion::Expired { at_ms }),
                 }
-            });
+            })
+            .or_else(|| placement_exclusion(policy, record.issuer(), record.at_ms(), now_ms));
         if let Some(why) = why {
             excluded.push(Excluded { record: record.id().clone(), issuer: record.issuer().clone(), why });
             continue;
@@ -442,6 +545,7 @@ fn evaluate<M: MemberKeySource>(
             challenges.push(record.issuer().clone());
         } else {
             supporting_issuers.insert(record.issuer().clone());
+            supporting_records.push((record.issuer().clone(), record.at_ms()));
         }
     }
     excluded.sort_by(|a, b| a.record.cmp(&b.record));
@@ -449,20 +553,8 @@ fn evaluate<M: MemberKeySource>(
     let supporting = supporting_issuers.len();
     let challenging = challenges.len();
 
-    // Independence by control group — configured, never inferred.
-    let mut groups: BTreeSet<String> = BTreeSet::new();
-    for issuer in &supporting_issuers {
-        match policy.group_of(issuer) {
-            Some(idx) => {
-                groups.insert(format!("g{idx}"));
-            }
-            // An issuer in no configured group is its own group.
-            None => {
-                groups.insert(format!("i{}", issuer.as_str()));
-            }
-        }
-    }
-    let independent = groups.len();
+    // Independence by control — configured or declared, never inferred — as connected components.
+    let independent = independent_groups(policy, &supporting_records, now_ms);
 
     // Support and challenge together is a conflict, and it is not this layer's to resolve.
     let verdict = if challenging > 0 && supporting > 0 {
@@ -772,6 +864,152 @@ mod tests {
             let c = classify_eligible(&store, &r, &issuer("provider"), &one(), 2_000, &HashMap::<NodeId, MemberKeys>::new(), &TrustedExternalIssuers::new());
             assert!(!c.verdict.is_accepted());
             assert_eq!(c.excluded[0].why, Exclusion::BasisWithdrawn { basis: observation.id().clone(), hops: 1 });
+        }
+    }
+
+    // ── H5: cohorts ──────────────────────────────────────────────────────────────────────────
+
+    mod h5 {
+        use super::*;
+        use crate::knowledge::cohort::{CohortDeclaration, CohortView, SignedCohortDeclaration, StaleRule, UndeclaredRule};
+        use crate::knowledge::issuer::{MemberKeys, TrustedExternalIssuers};
+        use crate::node_id::NodeId;
+        use ed25519_dalek::SigningKey;
+        use std::collections::HashMap;
+
+        fn operator() -> (SigningKey, IssuerId, TrustedExternalIssuers) {
+            let sk = SigningKey::from_bytes(&[12u8; 32]);
+            let op = issuer("operator:acme");
+            let mut ext = TrustedExternalIssuers::new();
+            ext.trust(op.clone(), sk.verifying_key().to_bytes()).unwrap();
+            (sk, op, ext)
+        }
+
+        fn declare(sk: &SigningKey, op: &IssuerId, cohort: &str, seq: u64, members: &[&str], from: u64, until: u64) -> SignedCohortDeclaration {
+            let declaration = CohortDeclaration {
+                operator: op.clone(),
+                cohort: cohort.into(),
+                seq,
+                members: members.iter().map(|m| issuer(m)).collect(),
+                valid_from_ms: from,
+                valid_until_ms: until,
+            };
+            let signature = mycelium_core::tls::sign_bytes(sk, &declaration.canonical_bytes()).to_vec();
+            SignedCohortDeclaration { declaration, signature }
+        }
+
+        fn view(decls: &[SignedCohortDeclaration]) -> CohortView {
+            let (_, op, ext) = operator();
+            let mut v = CohortView::trusting([op]);
+            for d in decls {
+                v.offer(d, &HashMap::<NodeId, MemberKeys>::new(), &ext);
+            }
+            v
+        }
+
+        fn two_independent(cohorts: CohortView) -> ReaderPolicy {
+            ReaderPolicy { min_supporting: 2, min_independent: 2, cohorts, ..Default::default() }
+        }
+
+        fn supports(by: &[(&str, u64)]) -> KnowledgeStore {
+            let r = release();
+            store_with(by.iter().map(|(i, t)| assessment(i, &r, LinkKind::Supports, *t)).collect())
+        }
+
+        fn independent(v: Verdict) -> usize {
+            match v {
+                Verdict::Accepted { independent, .. } => independent,
+                Verdict::InsufficientEvidence { independent, .. } => independent,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+
+        /// **Fifty agents, one voice.** A declared cohort of fifty supporting members is one
+        /// independent group.
+        #[test]
+        fn a_declared_cohort_of_fifty_is_one_independent_voice() {
+            let (sk, op, _) = operator();
+            let names: Vec<String> = (0..50).map(|i| format!("agent-{i}")).collect();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            let v = view(&[declare(&sk, &op, "fleet", 1, &refs, 0, 100_000)]);
+            let store = supports(&refs.iter().map(|n| (*n, 1_000)).collect::<Vec<_>>());
+            let verdict = classify(&store, &release(), &issuer("provider"), &two_independent(v), 2_000);
+            assert_eq!(verdict, Verdict::InsufficientEvidence { have: 50, need: 2, independent: 1, need_independent: 2 });
+        }
+
+        /// **Order does not matter.** Overlapping configured groups merge as connected components,
+        /// whatever order they are listed in; so do declarations, whatever order they arrive in.
+        #[test]
+        fn independence_does_not_depend_on_configuration_or_arrival_order() {
+            let (sk, op, _) = operator();
+            let d1 = declare(&sk, &op, "one", 1, &["a", "b"], 0, 100_000);
+            let d2 = declare(&sk, &op, "two", 1, &["b", "c"], 0, 100_000);
+            let store = supports(&[("a", 1_000), ("c", 1_000), ("d", 1_000)]);
+            let g = |xs: &[&str]| xs.iter().map(|x| issuer(x)).collect::<BTreeSet<_>>();
+
+            let mut seen = BTreeSet::new();
+            for decls in [vec![d1.clone(), d2.clone()], vec![d2.clone(), d1.clone()]] {
+                seen.insert(independent(classify(&store, &release(), &issuer("provider"), &two_independent(view(&decls)), 2_000)));
+            }
+            for groups in [vec![g(&["a", "x"]), g(&["x", "c"])], vec![g(&["x", "c"]), g(&["a", "x"])]] {
+                let p = ReaderPolicy { control_groups: groups, ..two_independent(CohortView::default()) };
+                seen.insert(independent(classify(&store, &release(), &issuer("provider"), &p, 2_000)));
+            }
+            assert_eq!(seen, BTreeSet::from([2]), "a and c merge through b (or x); d stands alone — in every order");
+        }
+
+        /// **The reviewer's case, exactly.** A and B are declared together. A's only declaration
+        /// expires while B stays current in another; no refresh arrives. They remain one group.
+        #[test]
+        fn expiry_and_partition_cannot_manufacture_independence() {
+            let (sk, op, _) = operator();
+            let v = view(&[
+                declare(&sk, &op, "fleet", 1, &["a", "b"], 0, 1_000),
+                declare(&sk, &op, "fleet-b", 1, &["b"], 0, 100_000),
+            ]);
+            let store = supports(&[("a", 2_000), ("b", 2_000)]);
+            assert_eq!(independent(classify(&store, &release(), &issuer("provider"), &two_independent(v.clone()), 5_000)), 1);
+
+            // Under StaleRule::Exclude, A's evidence — resting only on a stale declaration — is
+            // excluded and reported. It never falls back to looking independent.
+            let strict = ReaderPolicy { stale: StaleRule::Exclude, ..two_independent(v) };
+            let c = classify_eligible(&store, &release(), &issuer("provider"), &strict, 5_000, &HashMap::<NodeId, MemberKeys>::new(), &TrustedExternalIssuers::new());
+            assert!(matches!(c.verdict, Verdict::InsufficientEvidence { have: 1, independent: 1, .. }), "{c:?}");
+            assert_eq!(c.excluded.len(), 1);
+            assert_eq!(c.excluded[0].issuer, issuer("a"));
+            assert_eq!(c.excluded[0].why, Exclusion::StaleCohortOnly);
+        }
+
+        /// **Historical grouping.** A was declared with B, then removed. A's record from before the
+        /// removal is still grouped with B; A's record from after it is not.
+        #[test]
+        fn a_removal_does_not_make_earlier_evidence_independent() {
+            let (sk, op, _) = operator();
+            let v = view(&[
+                declare(&sk, &op, "fleet", 1, &["a", "b"], 0, 100_000),
+                declare(&sk, &op, "fleet", 2, &["b"], 5_000, 100_000),
+            ]);
+            let before = supports(&[("a", 1_000), ("b", 1_000)]);
+            assert_eq!(independent(classify(&before, &release(), &issuer("provider"), &two_independent(v.clone()), 6_000)), 1);
+            let after = supports(&[("a", 6_000), ("b", 6_000)]);
+            assert_eq!(independent(classify(&after, &release(), &issuer("provider"), &two_independent(v), 6_000)), 2);
+        }
+
+        /// The undeclared rule: own groups by default; one group together; or excluded and reported.
+        #[test]
+        fn undeclared_issuers_follow_the_readers_rule() {
+            let store = supports(&[("fresh-1", 1_000), ("fresh-2", 1_000)]);
+            let base = two_independent(CohortView::default());
+            assert_eq!(independent(classify(&store, &release(), &issuer("provider"), &base, 2_000)), 2);
+
+            let one = ReaderPolicy { undeclared: UndeclaredRule::OneGroup, ..base.clone() };
+            assert_eq!(independent(classify(&store, &release(), &issuer("provider"), &one, 2_000)), 1);
+
+            let ex = ReaderPolicy { undeclared: UndeclaredRule::Excluded, ..base };
+            let c = classify_eligible(&store, &release(), &issuer("provider"), &ex, 2_000, &HashMap::<NodeId, MemberKeys>::new(), &TrustedExternalIssuers::new());
+            assert!(matches!(c.verdict, Verdict::InsufficientEvidence { have: 0, .. }));
+            assert!(c.excluded.iter().all(|e| e.why == Exclusion::Undeclared));
+            assert_eq!(c.excluded.len(), 2);
         }
     }
 
