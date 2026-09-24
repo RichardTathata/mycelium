@@ -88,6 +88,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than *this reader is too new to parse it*. The fallback is now one named function
   (`decode_cap_entry`) instead of three inline copies.
 
+### Added
+
+- **The sealed identity record (`sys/identity-signed/{node}`, identity-auth Phase 3b)** — key
+  history *and* its proof in **one** KV entry: `version(1) ‖ history ‖ proof(96)`.
+
+  **What it fixes.** `require_identity_proofs` could not safely be turned on. A node's identity and
+  its proof were two KV entries, hence two gossip messages with no ordering between them; a peer
+  requiring proofs could learn the identity first, reject it, and hold **no key** for that node
+  until the proof landed. The key recovered on its own — a late proof re-validates its entry — so
+  the window was transient. A **leader election decided inside it is not**, being one-shot. That is
+  how the attempt to make the flag default-on split a four-node cluster.
+
+  One entry cannot arrive in two parts, so the window is closed **by construction rather than by
+  timing**, which is the only kind of fix worth having for a race.
+
+  **Compatibility — nothing to do.** Every TLS node writes the sealed record *and* the legacy pair,
+  so a node predating this release still learns keys exactly as before. Readers prefer the sealed
+  record; with the flag **off** (still the default) the legacy pair is honoured as it always was.
+  With the flag **on**, only the sealed record is accepted — the pair is refused not because it is
+  invalid but because it is two messages, and a peer publishing only the pair is one that predates
+  the mechanism, which is what the flag has always refused.
+
+  **The remaining precondition is a rollout, not a defect:** turn the flag on once every node runs a
+  release that writes the sealed record (`cert-rotation.md` has the one-line check). The *default*
+  should flip a release after that, deliberately — by editing a test that explains why it is there.
+
+  Rotation writes the sealed record too. It has to: readers **prefer** it, so a rotation that
+  updated only the pair would leave every proof-requiring peer reading the pre-rotation history and
+  never learning the new key.
+
 ### Changed
 
 - **`require_identity_proofs` stays `false` — the flip to `true` was made and reverted before any

@@ -919,35 +919,39 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_identity_issuer: Option<String>,
 
-    /// **Require signed identity proofs** (identity-auth Phase 3). A `sys/identity/{V}` entry
-    /// **without** a valid `sys/identity-proof/{V}` is **rejected** — not merged into `peer_keys` —
-    /// which closes the residual where an unsigned entry mimics a pre-Phase-2 node.
+    /// **Require signed identity proofs** (identity-auth Phase 3). An identity entry this node
+    /// cannot authenticate is **rejected** — not merged into `peer_keys` — which closes the
+    /// residual where an unsigned entry mimics a pre-Phase-2 node.
     ///
-    /// **`false` by default — and the attempt to flip it is why the default is documented at
-    /// this length.** It was flipped on 2026-09-23 and reverted on 2026-09-24. The reasoning for
-    /// the flip was sound and still is: every TLS node has written its proof unconditionally since
-    /// Phase 2 (v2.3.0, 2026-07-24), so no node this project supports for a rolling upgrade is
-    /// missing one. What the reasoning missed is that **identity and proof are two separate writes**
-    /// — `crate::…::lifecycle` issues `sys/identity/{self}` and `sys/identity-proof/{self}` as two
-    /// `kv_set` calls, hence two gossip messages with no ordering between them. A peer that learns
-    /// the identity *before* the proof rejects it, and holds **no key** for that peer until the
-    /// proof lands. The key does recover on its own — the identity watcher subscribes to the
-    /// broader `sys/identity` prefix precisely so a late proof re-validates its entry — so the
-    /// window is transient. **What happens inside it is not.** A leader election is a one-shot
-    /// decision: a node that could not verify a peer's signature while the window was open does
-    /// not re-run the election when the key arrives afterwards. The Docker suite showed exactly
-    /// that — `S12 leader election … Nodes disagree on leader`, intermittently, after twelve
-    /// consecutive green runs, with the federation two-mesh suite failing alongside it.
+    /// **What counts as authenticated, since Phase 3b:** the **sealed** record
+    /// `sys/identity-signed/{V}`, which carries the key history *and* its proof in one KV entry.
+    /// The legacy `sys/identity/{V}` + `sys/identity-proof/{V}` pair is **not** accepted while this
+    /// is set — not because it is invalid, but because it is *two* gossip messages, and accepting
+    /// it would reopen the window described below. A peer publishing only the pair is a peer that
+    /// predates the mechanism, which is what this flag has always refused.
     ///
-    /// That mechanism is the **leading account consistent with the evidence**, not an instrumented
-    /// root cause: what is certain is that the flip is the only change between twelve greens and an
-    /// intermittent split. Either way the flip needs the **propagation window closed first** —
-    /// identity and proof in one atomic record, or a bounded "pending its proof" state that
-    /// defers rather than rejects — which is a design change, not a default. Until it lands, an
-    /// operator who wants the residual closed sets this to `true` (or
-    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS=1`) knowing that a node's first moments after start are the
-    /// window: tolerable in a fleet that does not elect during bring-up, not tolerable in one that
-    /// does.
+    /// **`false` by default — one release longer than the mechanism needs.** The history is short
+    /// and worth keeping. It was flipped to `true` on 2026-09-23 and reverted on 2026-09-24,
+    /// because identity and proof were then two separate `kv_set` calls — two gossip messages with
+    /// no ordering between them. A peer that learned the identity first rejected it and held **no
+    /// key** for that peer until the proof landed. The key recovered on its own (the identity
+    /// watcher subscribes to the broader `sys/identity` prefix, so a late proof re-validates its
+    /// entry), so the window was transient — **but a leader election decided inside it is not**,
+    /// being one-shot. The Docker suite split: `S12 leader election … Nodes disagree on leader`,
+    /// intermittently, after twelve consecutive green runs.
+    ///
+    /// **Phase 3b closes that window by construction** rather than by timing: the sealed record
+    /// above is one KV entry, and one entry cannot arrive in two parts. There is no ordering left
+    /// to lose.
+    ///
+    /// **So why is the default still `false`?** Because a node only accepts what its *peers*
+    /// publish, and a peer running an older release publishes only the pair. Turning this on in a
+    /// half-upgraded fleet refuses the un-upgraded nodes — correctly, but unhelpfully. The
+    /// precondition is now the ordinary one this project applies to any additive change: **every
+    /// node runs a release that writes the sealed record.** After that, set this to `true` (or
+    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS=1`) and the residual is closed with no window. The default
+    /// itself should flip a release later, deliberately, by editing
+    /// `config::tests::the_default_requires_identity_proofs` — which is written to explain itself.
     ///
     /// **What it does not close, and the distinction matters.** *Proofs required* is not *identity
     /// authenticated*. First sighting of a node this one has never seen is still **trust on first
@@ -1663,21 +1667,19 @@ mod tests {
     /// because the reason is the whole value of the test.
     ///
     /// The default was flipped to `true` on 2026-09-23 and reverted on 2026-09-24. Flipping it
-    /// changed no unit test: every TLS node has written its proof unconditionally since Phase 2
-    /// (v2.3.0), so the in-process suites stayed green. The **Docker** suite did not. `S12 leader
-    /// election` failed intermittently — `Nodes disagree on leader` — because identity and proof
-    /// are two independent gossip writes, so a peer can learn an identity before its proof and
-    /// hold no key for it until the proof lands. The *key* recovers by itself (the identity
-    /// watcher re-validates on a late proof); an election decided inside the window does not.
+    /// changed no unit test: the in-process suites have no cross-process ordering window to lose a
+    /// race in, so they stayed green while the **Docker** suite split a leader election. The cause
+    /// — identity and proof arriving as two independent gossip messages — is **fixed**: Phase 3b's
+    /// sealed record (`sys/identity-signed/{node}`) carries both in one entry, and
+    /// `lib_tests::identity_proof_default` pins that a sealed record authenticates on its own while
+    /// the legacy pair does not.
     ///
-    /// Do not flip this back on the strength of "every node writes a proof anyway". That is true
-    /// and it is not the failing condition. The precondition is an **atomic** identity+proof
-    /// record, or a pending state that defers instead of rejecting. When that lands, this test
-    /// is the one to change, deliberately, in the open — which is what a pinned default is for.
-    /// Both arms of the *behaviour* remain tested in `agent::http`
-    /// (`test_require_identity_proofs_rejects_unsigned`) and in
-    /// `lib_tests::identity_proof_default`; what is pinned here is which arm a deployment gets
-    /// when it says nothing.
+    /// What remains is not a defect but a rollout: a node only accepts what its peers publish, and
+    /// a peer on an older release publishes only the pair. **Flip this one release after the sealed
+    /// record ships**, when every node writes one — deliberately, by editing this test, in the
+    /// open, which is what a pinned default is for. Do not flip it on the strength of "every node
+    /// writes a proof anyway": that was the 2026-09-23 argument, it was true, and it was not the
+    /// failing condition.
     #[test]
     fn the_default_requires_identity_proofs() {
         assert!(

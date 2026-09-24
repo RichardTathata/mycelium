@@ -77,7 +77,7 @@ the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key select
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
 identity.
 
-## The identity-proof default stays off — and why the attempt to flip it is the finding (2026-09-24)
+## The identity-proof window, closed by construction (2026-09-24)
 
 `require_identity_proofs` defaults to **`false`**. Set it, and an unsigned `sys/identity/{V}` — the
 pre-Phase-2 mimic — is rejected rather than accepted-and-flagged. It was flipped to `true` on
@@ -110,13 +110,33 @@ the one that runs after the merge. *A config default whose only failure mode is 
 processes is not testable by the suite that gates the PR* — worth remembering the next time a
 default looks cheap because the suite stayed green.
 
-**What is pinned, and what a future flip has to clear.** The value is pinned with its reason in
-`config::tests::the_default_requires_identity_proofs`, written so that flipping it back means
-editing a test that explains why it is there. The precondition is not "every node writes a proof
-anyway" — that is true and it is not the failing condition. It is an **atomic** identity+proof
-record, or a bounded *pending its proof* state that defers rather than rejects. Until then the flag
-is an operator opt-in: fine where nodes do not elect during bring-up, not fine where they do
-([cert-rotation](../../operations/cert-rotation.md)).
+**The fix: Phase 3b's sealed record (2026-09-24).** `sys/identity-signed/{node}` carries
+`version(1) ‖ history ‖ proof(96)` — the same key history and the same proof, in **one** KV entry.
+One entry cannot arrive in two parts, so the window is closed **by construction rather than by
+timing**, which is the only kind of fix worth having for a race. Every TLS node writes it *and* the
+legacy pair, so a node predating the release still learns keys; readers prefer it; and with
+`require_identity_proofs` set, readers accept **only** it — the pair is refused not because it is
+invalid but because it is two messages, which is the window. A peer publishing only the pair is a
+peer that predates the mechanism, which is what the flag has always refused.
+
+Rotation writes the sealed record too. It has to: readers *prefer* it, so a rotation that updated
+only the pair would leave every proof-requiring peer reading the pre-rotation history and never
+learning the new key. That is the kind of bug a preference introduces, and it is worth naming
+because the next reader-preference we add will have the same shape.
+
+**What is pinned.** The value, with its reason, in
+`config::tests::the_default_requires_identity_proofs`. That a sealed record authenticates on its own
+and the legacy pair does not, in `lib_tests::identity_proof_default`
+(`a_sealed_record_is_accepted_when_proofs_are_required`,
+`the_legacy_pair_is_refused_when_proofs_are_required` — if the latter ever stops holding, the window
+is back and the default must not be flipped). And end to end, two proof-requiring nodes still
+authenticating each other, in `test_identity_proofs_required_two_nodes_still_authenticate` — which
+states in its own doc comment that it **cannot** measure the race, only that the sealed path is
+wired and sufficient. The race's gate is the Docker suite.
+
+**What remains is a rollout, not a defect.** A node accepts what its peers publish, and a peer on an
+older release publishes only the pair. Turn the flag on once every node writes a sealed record; flip
+the *default* a release later ([cert-rotation](../../operations/cert-rotation.md) has the check).
 
 **The limit the flag never closed, kept visible on purpose.** *Proofs required* is **not** *identity
 authenticated*. First sighting of a node never seen is still **trust on first use**: a self-signed

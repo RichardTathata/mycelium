@@ -158,7 +158,16 @@ impl GossipAgent {
                     // so peers can authenticate this entry against the CA anchor / a trusted key.
                     let proof = super::helpers::sign_identity_proof(&arc_tls, &history);
                     let proof_key = format!("{}{}", kv_ns::IDENTITY_PROOF, self.node_id);
-                    let _ = kv_set(&self.task_ctx, Arc::from(proof_key.as_str()), Bytes::from(proof));
+                    let _ = kv_set(&self.task_ctx, Arc::from(proof_key.as_str()),
+                                   Bytes::from(proof.clone()));
+                    // identity-auth Phase 3b: the same keys and the same proof, **sealed into one
+                    // record**. The pair above is two gossip messages with no ordering between
+                    // them, so a peer requiring proofs can see the identity first and hold no key
+                    // until the proof lands. One record cannot arrive half-way. The pair is still
+                    // written, because a node older than this release only reads that.
+                    let sealed = super::helpers::encode_sealed_identity(&history, &proof);
+                    let sealed_key = format!("{}{}", kv_ns::IDENTITY_SIGNED, self.node_id);
+                    let _ = kv_set(&self.task_ctx, Arc::from(sealed_key.as_str()), Bytes::from(sealed));
                     let _ = self.task_ctx.tls.set(arc_tls);
                     // identity-auth Phase 1b: install the anchor sink so the outbound writer
                     // records each directly-connected peer's CA-validated key into the anchor
@@ -578,14 +587,20 @@ impl GossipAgent {
             let Some(node_id_str) = key.strip_prefix(prefix) else { continue };
             let Ok(node_id) = node_id_str.parse::<crate::node_id::NodeId>() else { continue };
             // 32 bytes = one key, 64 = current‖previous (rotation window).
-            let keys = super::helpers::parse_identity_keys(&bytes);
+            // Prefer the sealed record (Phase 3b) over the legacy pair; under
+            // `require_identity_proofs` the pair is not accepted at all — see
+            // `helpers::resolve_identity_record`.
+            let require = self.task_ctx.config.require_identity_proofs;
+            let sealed = kv_get(&self.task_ctx, &format!("{}{}", kv_ns::IDENTITY_SIGNED, node_id));
+            let legacy_proof = kv_get(&self.task_ctx, &format!("{}{}", kv_ns::IDENTITY_PROOF, node_id));
+            let (history, proof) = super::helpers::resolve_identity_record(
+                sealed.as_deref(), &bytes, legacy_proof.as_deref(), require);
+            let keys = super::helpers::parse_identity_keys(history);
             if !keys.is_empty() {
-                let proof = kv_get(&self.task_ctx, &format!("{}{}", kv_ns::IDENTITY_PROOF, node_id));
                 super::helpers::validate_and_merge_identity(
                     &self.task_ctx.peer_keys, &self.task_ctx.peer_anchor_keys,
                     &self.task_ctx.identity_anchor_conflicts,
-                    &node_id, &bytes, &keys, proof.as_deref(),
-                    self.task_ctx.config.require_identity_proofs);
+                    &node_id, history, &keys, proof, require);
             }
         }
     }
@@ -624,15 +639,23 @@ impl GossipAgent {
                     let Ok(node_id) = suffix.parse::<crate::node_id::NodeId>() else { continue };
                     match &entry.data {
                         Some(b) => {
-                            let keys = super::helpers::parse_identity_keys(b);
+                            // The sealed record (Phase 3b) first, then the legacy pair — both read
+                            // from the same store snapshot, so this decision never straddles a
+                            // write. Under `require_proofs` the pair is not accepted: it is two
+                            // messages, which is the window this exists to close.
+                            let sealed = store_guard
+                                .get(format!("{}{}", kv_ns::IDENTITY_SIGNED, node_id).as_str())
+                                .and_then(|e| e.data.clone());
+                            let legacy_proof = store_guard
+                                .get(format!("{}{}", kv_ns::IDENTITY_PROOF, node_id).as_str())
+                                .and_then(|e| e.data.clone());
+                            let (history, proof) = super::helpers::resolve_identity_record(
+                                sealed.as_deref(), b, legacy_proof.as_deref(), require_proofs);
+                            let keys = super::helpers::parse_identity_keys(history);
                             if !keys.is_empty() {
-                                // Read the sibling proof from the same store snapshot (Phase 2).
-                                let proof = store_guard
-                                    .get(format!("{}{}", kv_ns::IDENTITY_PROOF, node_id).as_str())
-                                    .and_then(|e| e.data.clone());
                                 super::helpers::validate_and_merge_identity(
                                     &peer_keys, &anchor_keys, &conflicts,
-                                    &node_id, b, &keys, proof.as_deref(), require_proofs);
+                                    &node_id, history, &keys, proof, require_proofs);
                             }
                         }
                         None => { peer_keys.pin().remove(&node_id); }

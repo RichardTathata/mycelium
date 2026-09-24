@@ -336,6 +336,72 @@ pub(crate) fn sign_identity_proof(tls: &mycelium_core::tls::NodeTls, history: &[
     encode_identity_proof(&signer, &sig)
 }
 
+/// The sealed-identity record's version byte. Bumping it is a format change old readers must
+/// refuse rather than misparse, which is why the version leads the value.
+#[cfg(feature = "tls")]
+pub(crate) const SEALED_IDENTITY_V1: u8 = 1;
+
+/// Build the `sys/identity-signed/{node}` value: `version(1) ‖ history ‖ proof(96)`.
+///
+/// One record, so a reader can never see the keys without the proof that authenticates them. The
+/// proof is the *same* bytes published at `sys/identity-proof/{node}` and signs the *same* history
+/// bytes published at `sys/identity/{node}` — this is a re-packaging, not a second credential, so
+/// the two forms can never disagree about what was signed.
+#[cfg(feature = "tls")]
+pub(crate) fn encode_sealed_identity(history: &[u8], proof: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + history.len() + proof.len());
+    v.push(SEALED_IDENTITY_V1);
+    v.extend_from_slice(history);
+    v.extend_from_slice(proof);
+    v
+}
+
+/// Split a sealed record into `(history, proof)`, or `None` if it is not one.
+///
+/// The proof is fixed-width (96 bytes), so the split is unambiguous without a length prefix: a
+/// well-formed value is the version byte, a whole number of 32-byte keys, and the proof. Anything
+/// else — wrong version, short value, a history that is not key-aligned — returns `None` and is
+/// treated as *no record*, never as a partial one.
+#[cfg(feature = "tls")]
+pub(crate) fn parse_sealed_identity(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    const PROOF: usize = 96;
+    if bytes.len() < 1 + 32 + PROOF || bytes[0] != SEALED_IDENTITY_V1 {
+        return None;
+    }
+    let (history, proof) = bytes[1..].split_at(bytes.len() - 1 - PROOF);
+    if history.is_empty() || !history.len().is_multiple_of(32) {
+        return None;
+    }
+    Some((history, proof))
+}
+
+/// Choose which identity record to validate for a peer: the **sealed** one when it is present and
+/// well-formed, else the legacy `sys/identity/` + `sys/identity-proof/` pair.
+///
+/// The `require_proofs` arm is the point of the whole mechanism. A legacy pair is two independent
+/// gossip messages; accepting it under `require_identity_proofs` would reopen exactly the window
+/// the flag exists to close, so the pair is surfaced **without** its proof and the validator
+/// rejects it — the same answer the flag already gave a node that published no proof at all, for
+/// the same reason: that node predates the mechanism being required.
+///
+/// With the flag off (the default) nothing changes for an existing deployment: the sealed record is
+/// preferred when present, and the legacy pair still works when it is not.
+#[cfg(feature = "tls")]
+pub(crate) fn resolve_identity_record<'a>(
+    sealed: Option<&'a [u8]>,
+    legacy_history: &'a [u8],
+    legacy_proof: Option<&'a [u8]>,
+    require_proofs: bool,
+) -> (&'a [u8], Option<&'a [u8]>) {
+    if let Some((history, proof)) = sealed.and_then(parse_sealed_identity) {
+        return (history, Some(proof));
+    }
+    if require_proofs {
+        return (legacy_history, None);
+    }
+    (legacy_history, legacy_proof)
+}
+
 /// Validate a peer `node`'s identity entry against its (optional) proof, and merge its keys into
 /// `peer_keys` only if authenticated (identity-auth Phase 2). See the module comment for the rule
 /// table. Rejection increments `conflict_counter` + warns; no proof falls back to the Phase-1b
