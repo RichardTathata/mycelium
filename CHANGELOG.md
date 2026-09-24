@@ -286,6 +286,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   votes not bound to the proposal they voted for, and no supported HTTP route by which a node joins
   a group — are **not** fixed here and are tracked there.
 
+### Fixed
+
+- **A vote now says what it voted for.** `ConsensusMsg::VoteForValue` carries a SHA-256
+  `value_digest`, and a proposer counts **only** votes bound to the value it proposed.
+
+  **The defect, stated exactly.** `Vote` and `VoteWithLocality` name a `(slot, ballot)` and a voter
+  and **nothing else**. The collector matched on `(slot, ballot)` alone and then committed **its
+  own** value. Three facts turn that into a safety violation rather than a curiosity:
+
+  1. ballots come from a **shared KV key** (`read_ballot + 1`), so concurrent proposers choose the
+     same ballot *by construction*;
+  2. votes are emitted to the **group scope** — a broadcast, not a unicast to the proposer — so
+     every proposer receives every vote;
+  3. the quorum test is a headcount over voters at that `(slot, ballot)`.
+
+  So: A proposes `v_A` at ballot 1, B proposes `v_B` at ballot 1, C votes once for whichever it saw
+  first, **both A and B count C's vote**, both reach quorum, and **two different values commit at
+  one ballot**.
+
+  **Why the existing defences did not cover it.** `may_cast_vote` (audit 2026-07-15) stops a *voter*
+  accepting two values at one ballot — and that is not the same thing: C's single vote never said
+  *which* value it accepted, so it could not stop the **counting**. The NACK C sends the second
+  proposer does not help either: a proposer acts only on `seen_ballot > ballot`, and that NACK
+  carries an **equal** ballot, so it is ignored while C's broadcast vote is still counted.
+
+  **Compatibility, and the trade made deliberately.** `VoteForValue` is appended *after*
+  `VoteWithLocality`, so a proposer predating it decodes an unknown variant as `None` and drops it —
+  the same rolling-upgrade shape `VoteWithLocality` itself used. **Wire v12 is unchanged.** Voters
+  emit the bound vote **and** the legacy form, so an old proposer keeps working exactly as before.
+  An upgraded proposer counts **only** bound votes.
+
+  **Rolling-upgrade note:** while any voter is un-upgraded, group proposals from an upgraded
+  proposer **time out** instead of committing — fail-closed and visible, rather than committing two
+  values quietly. Upgrade voters before relying on elections.
+
+  Pinned by `a_vote_for_one_value_cannot_authorise_another` (a vote for A must not contribute to B's
+  quorum at the same slot and ballot), `the_value_digest_separates_distinct_proposals`, and
+  `a_bound_vote_still_requires_its_signer` — binding and signer authorisation compose; neither
+  replaces the other.
+
+  **Not yet done**, and tracked in `.log/2026-09-24-consensus-vote-binding.md`: ballot transitions
+  with accepted-value preservation, restart recovery, and replacing the "wait one second, then read
+  the local slot" success semantics. Binding votes is necessary for single-decree safety; it is not
+  the whole agreement repair.
+
 ## [2.13.0] — 2026-09-23
 
 **The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged

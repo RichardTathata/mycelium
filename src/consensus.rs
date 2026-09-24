@@ -316,6 +316,53 @@ pub(crate) enum ConsensusMsg {
         voter:    NodeId,
         locality: Option<LocalityPath>,
     },
+    /// Voter response **bound to the value it voted for** — the only form a proposer counts.
+    ///
+    /// ## Why this variant exists
+    ///
+    /// [`Vote`](Self::Vote) and [`VoteWithLocality`](Self::VoteWithLocality) name a `(slot,
+    /// ballot)` and a voter, and **nothing else**. A proposer collecting votes matched on `(slot,
+    /// ballot)` alone and then committed **its own** value. Ballots are drawn from a shared KV key
+    /// (`read_ballot + 1`), so concurrent proposers pick the *same* ballot by construction, and
+    /// votes are emitted to the group scope — a **broadcast**, not a unicast to the proposer.
+    ///
+    /// Put together: A proposes `v_A` at ballot 1, B proposes `v_B` at ballot 1, C votes once for
+    /// whichever it saw first, and **both A and B count C's vote**. Each reaches quorum. Each
+    /// commits a different value at the same ballot — a single-decree safety violation.
+    ///
+    /// The acceptor already refused to *accept* two values at one ballot (`may_cast_vote`, audit
+    /// 2026-07-15), and that was not enough: it stopped C voting twice, but C's single vote did not
+    /// say **what C accepted**, so it could not stop the counting. The NACK C sends the second
+    /// proposer does not save it either — a proposer only acts on `seen_ballot > ballot`, and this
+    /// NACK carries an *equal* ballot.
+    ///
+    /// `value_digest` closes it: a vote is evidence for **one** value, and a proposer counts only
+    /// evidence for the value it proposed.
+    ///
+    /// ## Compatibility
+    ///
+    /// Added **after** `VoteWithLocality`, so a proposer predating it decodes an unknown variant as
+    /// `None` and drops the message — the same rolling-upgrade shape that variant used. Voters emit
+    /// this **and** the legacy form, so old proposers keep working exactly as before. New proposers
+    /// count only this one, which means a mixed cluster **times out rather than committing two
+    /// values**: fail-closed, and visible.
+    VoteForValue {
+        slot:         Arc<str>,
+        ballot:       u64,
+        voter:        NodeId,
+        /// SHA-256 over the exact value bytes this voter accepted.
+        value_digest: [u8; 32],
+        locality:     Option<LocalityPath>,
+    },
+}
+
+/// SHA-256 of a proposal's value — what a [`VoteForValue`](ConsensusMsg::VoteForValue) commits its
+/// voter to, and what a proposer checks its votes against.
+pub(crate) fn value_digest(value: &Bytes) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(value);
+    h.finalize().into()
 }
 
 /// Cancels the consensus listener task on drop.
@@ -1052,11 +1099,16 @@ impl ConsensusEngine {
                 tokio::select! { biased;
                     _ = &mut sleep_fut => break 'collect,
                     Some(sig) = vote_rx.recv() => {
+                        // **Only a vote bound to this value counts.** An unbound legacy vote
+                        // names a (slot, ballot) and nothing else, so a proposer that counted one
+                        // could be counting a vote cast for a *different* value at the same
+                        // ballot — which two concurrent proposers reach by construction, because
+                        // ballots come from a shared key. See `ConsensusMsg::VoteForValue`.
+                        let want = value_digest(&value);
                         let (s, b, voter) = match self.decode_verify(&sig.payload) {
-                            Some(ConsensusMsg::Vote { slot: s, ballot: b, voter }) =>
-                                (s, b, voter),
-                            Some(ConsensusMsg::VoteWithLocality { slot: s, ballot: b, voter, .. }) =>
-                                (s, b, voter),
+                            Some(ConsensusMsg::VoteForValue {
+                                slot: s, ballot: b, voter, value_digest: d, ..
+                            }) if d == want => (s, b, voter),
                             _ => continue 'collect,
                         };
                         if s != slot || b != ballot { continue 'collect; }
@@ -1282,13 +1334,19 @@ impl ConsensusEngine {
             tokio::select! { biased;
                 _ = &mut sleep => return BallotOutcome::Timeout,
                 Some(sig) = vote_rx.recv() => {
-                    // Accept both Vote (legacy, no locality) and VoteWithLocality.
-                    // Legacy votes contribute to quorum but to zero topology diversity.
+                    // **Only a vote bound to this value counts.** `Vote` and `VoteWithLocality`
+                    // name a (slot, ballot) and a voter and nothing else, so counting one risks
+                    // counting a vote cast for a *different* value at the same ballot — which two
+                    // concurrent proposers reach by construction, because ballots are drawn from a
+                    // shared KV key and votes are broadcast to the group rather than sent to the
+                    // proposer. The acceptor's `may_cast_vote` stops a voter accepting twice; it
+                    // cannot stop the counting, because an unbound vote does not say what was
+                    // accepted. See `ConsensusMsg::VoteForValue`.
+                    let want = value_digest(value);
                     let (s, b, voter, locality) = match self.decode_verify(&sig.payload) {
-                        Some(ConsensusMsg::Vote { slot: s, ballot: b, voter }) =>
-                            (s, b, voter, None),
-                        Some(ConsensusMsg::VoteWithLocality { slot: s, ballot: b, voter, locality }) =>
-                            (s, b, voter, locality),
+                        Some(ConsensusMsg::VoteForValue {
+                            slot: s, ballot: b, voter, value_digest: d, locality,
+                        }) if d == want => (s, b, voter, locality),
                         _ => continue,
                     };
                     if s == *slot && b == ballot {
@@ -1387,6 +1445,7 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
     match msg {
         ConsensusMsg::Vote { voter, .. }             => voter == signer,
         ConsensusMsg::VoteWithLocality { voter, .. } => voter == signer,
+        ConsensusMsg::VoteForValue { voter, .. }     => voter == signer,
         ConsensusMsg::Propose { proposer, .. }       => proposer == signer,
         ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } => true,
     }
@@ -1510,6 +1569,24 @@ pub(crate) async fn run_consensus_listener(
                     // unspecified). Topology gates only count voters that arrived
                     // via this variant — Soft policies and gate-less proposals
                     // count every voter regardless.
+                    // The **bound** vote: evidence for one value, which is the only form a
+                    // current proposer counts. Emitted first so it is the one that races ahead.
+                    let bound = ConsensusMsg::VoteForValue {
+                        slot:         Arc::clone(&slot),
+                        ballot,
+                        voter:        ctx.task_ctx.node_id.clone(),
+                        value_digest: value_digest(&value),
+                        locality:     ctx.self_locality.clone(),
+                    };
+                    ctx.emit(
+                        Arc::from(consensus_kind::VOTE),
+                        sig.scope.clone(),
+                        ctx.sign_payload(encode_consensus_msg(&bound)),
+                    );
+                    // And the legacy form, so a proposer predating `VoteForValue` still sees a
+                    // vote it understands. It is unbound and therefore unsafe to count — which is
+                    // no worse than before this change, and strictly better once the proposer is
+                    // upgraded, because an upgraded proposer ignores it.
                     let vote = ConsensusMsg::VoteWithLocality {
                         slot:     Arc::clone(&slot),
                         ballot,
@@ -1896,6 +1973,83 @@ mod consensus_msg_auth_tests {
     use super::*;
 
     fn id(p: u16) -> NodeId { NodeId::new("127.0.0.1", p).unwrap() }
+
+    /// **A vote for A cannot authorise B** — the single-decree safety property, as a decision over
+    /// the exact predicate the collector uses.
+    ///
+    /// The defect this pins: `Vote`/`VoteWithLocality` name a `(slot, ballot)` and a voter and
+    /// nothing else, and the collector matched on `(slot, ballot)` alone before committing **its
+    /// own** value. Ballots come from a shared KV key (`read_ballot + 1`), so two concurrent
+    /// proposers pick the same ballot **by construction**; votes go to the group scope, so both
+    /// proposers receive every vote. One voter's single vote therefore counted toward two
+    /// different values at one ballot, and both proposers reached quorum.
+    ///
+    /// `may_cast_vote` was not enough, and it is worth being precise about why: it stopped the
+    /// *voter* accepting two values at a ballot, but the vote it did cast never said **which**
+    /// value it accepted, so it could not stop the *counting*. Nor does the NACK the voter sends
+    /// the second proposer — a proposer acts on `seen_ballot > ballot`, and that NACK carries an
+    /// **equal** ballot, so it is ignored while the broadcast vote is still counted.
+    #[test]
+    fn a_vote_for_one_value_cannot_authorise_another() {
+        let voter = id(7);
+        let v_a = Bytes::from_static(b"value-A");
+        let v_b = Bytes::from_static(b"value-B");
+        let slot: Arc<str> = Arc::from("leader/g");
+
+        let vote_for_a = ConsensusMsg::VoteForValue {
+            slot: Arc::clone(&slot), ballot: 1, voter: voter.clone(),
+            value_digest: value_digest(&v_a), locality: None,
+        };
+
+        // The collector's predicate, stated once: a vote counts for `value` only when its digest
+        // is the digest of `value`.
+        let counts_for = |msg: &ConsensusMsg, value: &Bytes| -> bool {
+            matches!(msg, ConsensusMsg::VoteForValue { value_digest: d, .. } if *d == value_digest(value))
+        };
+
+        assert!(counts_for(&vote_for_a, &v_a), "a vote counts for the value it names");
+        assert!(
+            !counts_for(&vote_for_a, &v_b),
+            "a vote for A must NOT contribute to B's quorum, even at the same slot and ballot",
+        );
+
+        // The legacy forms carry no value, so they can never satisfy the predicate — which is the
+        // mechanism by which an upgraded proposer refuses to count evidence it cannot bind. In a
+        // mixed cluster this costs liveness (a timeout) and buys safety; the trade is deliberate.
+        let unbound = ConsensusMsg::VoteWithLocality {
+            slot: Arc::clone(&slot), ballot: 1, voter: voter.clone(), locality: None,
+        };
+        assert!(!counts_for(&unbound, &v_a), "an unbound vote is not evidence for any value");
+        let ancient = ConsensusMsg::Vote { slot, ballot: 1, voter };
+        assert!(!counts_for(&ancient, &v_a), "nor is the oldest form");
+    }
+
+    /// The digest is over the value **bytes**, so two proposals that differ at all are
+    /// distinguishable — including the empty value, which is a legitimate proposal.
+    #[test]
+    fn the_value_digest_separates_distinct_proposals() {
+        let a = Bytes::from_static(b"x");
+        let b = Bytes::from_static(b"y");
+        let empty = Bytes::new();
+        assert_ne!(value_digest(&a), value_digest(&b));
+        assert_ne!(value_digest(&a), value_digest(&empty));
+        assert_eq!(value_digest(&a), value_digest(&Bytes::from_static(b"x")),
+                   "equal bytes, equal digest — a re-sent vote for the same value still counts");
+    }
+
+    /// **A bound vote is still an impersonation risk if the signer is not checked**, so the two
+    /// defences compose rather than replace each other.
+    #[test]
+    fn a_bound_vote_still_requires_its_signer() {
+        let a = id(1);
+        let b = id(2);
+        let msg = ConsensusMsg::VoteForValue {
+            slot: Arc::from("s"), ballot: 1, voter: b.clone(),
+            value_digest: value_digest(&Bytes::from_static(b"v")), locality: None,
+        };
+        assert!(signer_authorized(&msg, &b), "signed by its own voter");
+        assert!(!signer_authorized(&msg, &a), "one key must not sign another node's bound vote");
+    }
 
     // ── F1: signer must match the vote/propose identity (audit 2026-07-15 pass 2) ──
     #[test]
