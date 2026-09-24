@@ -91,8 +91,19 @@ pub struct DependencyIndex {
 impl DependencyIndex {
     /// Build the index over every record in `store`.
     pub fn build(store: &KnowledgeStore) -> Self {
+        Self::build_filtered(store, |_| true)
+    }
+
+    /// Build the index over only the records `include` accepts (Boundary H item K1b).
+    ///
+    /// A reader that excludes unverified records must not let one of them retract or derive
+    /// anything: an unverified "retraction" of someone's verified statement would be suppression.
+    pub fn build_filtered(
+        store: &KnowledgeStore,
+        include: impl Fn(&super::KnowledgeRecord) -> bool,
+    ) -> Self {
         let mut index = Self::default();
-        for record in store.records() {
+        for record in store.records().filter(|r| include(r)) {
             for link in record.links() {
                 match link.kind {
                     LinkKind::DerivedFrom => {
