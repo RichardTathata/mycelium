@@ -127,6 +127,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Knowledge resolution counts support per issuer, not per record** (Boundary H plan, milestone M1,
+  item H2). `resolution::classify` counted every supporting *record* toward `min_supporting`, so one
+  issuer filing five supporting assessments met a threshold of two by repeating itself. Independence
+  was already counted by control group and was unaffected; support now matches it. A change that can
+  only make acceptance **harder**, never easier.
+
+  **Upgrade notes**, both in v2.8.0's class:
+  - `Verdict` and `RejectionReason` are now `#[non_exhaustive]`, ahead of challenge admission (H1). A
+    `match` outside the crate needs a `_` arm, and it **must fail safe**: an unrecognised verdict is not
+    an acceptance, which is what `Verdict::is_accepted` already returns.
+  - **Same type, new meaning:** `Verdict::Accepted.supporting`, `Conflicted.supporting` and
+    `InsufficientEvidence.have`/`need` now count **distinct issuers**. A reader whose issuers each file
+    one assessment sees no difference. `Conflicted.challenging` still counts records; H1 changes how
+    challenges are counted.
+
 - **`require_identity_proofs` stays `false` — the flip to `true` was made and reverted before any
   release carried it.** **No released version's behaviour changes**; nothing to do on upgrade. What
   ships here is the reason, pinned where the next person to consider the flip will hit it.

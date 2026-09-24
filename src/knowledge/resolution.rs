@@ -82,7 +82,11 @@ impl ReleaseId {
 /// reach the same verdict, which is what makes a verdict worth recording.
 #[derive(Clone, Debug)]
 pub struct ReaderPolicy {
-    /// How many supporting assessments are needed at all.
+    /// How many **distinct issuers** must support the release at all.
+    ///
+    /// Counted per issuer, not per record: an issuer that files five supporting assessments is one
+    /// supporter. Counting records would let one issuer meet this threshold by repeating itself
+    /// (threat model Boundary H, plan item H2).
     pub min_supporting: usize,
     /// How many **independent** ones, counted by control group.
     pub min_independent: usize,
@@ -116,6 +120,11 @@ impl ReaderPolicy {
 }
 
 /// Why a candidate was refused.
+///
+/// `#[non_exhaustive]`: challenge admission (plan item H1) will add reasons. A `match` outside this
+/// crate needs a `_` arm, and that arm must **fail safe**: an unrecognised reason is still a
+/// refusal.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RejectionReason {
     /// An issuer challenged the release and the reader's policy treats that as disqualifying.
@@ -126,11 +135,18 @@ pub enum RejectionReason {
 }
 
 /// What the reader concluded. **Four outcomes, and the distinctions between them are the point.**
+///
+/// `#[non_exhaustive]`: challenge admission (plan item H1) will extend it. A `match` outside this
+/// crate needs a `_` arm, and that arm must **fail safe**: treat an unrecognised verdict as not
+/// accepted, which is what [`Verdict::is_accepted`] already does.
+///
+/// Every `supporting` count is a count of **distinct issuers**, never of records.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Enough independent support, no unresolved challenge.
     Accepted {
-        /// How many supporting assessments counted.
+        /// How many distinct issuers support it.
         supporting: usize,
         /// How many independent control groups they came from.
         independent: usize,
@@ -142,9 +158,9 @@ pub enum Verdict {
     },
     /// **We do not know.** Distinct from `Rejected` on purpose.
     InsufficientEvidence {
-        /// Supporting assessments found.
+        /// Distinct supporting issuers found.
         have: usize,
-        /// Supporting assessments the policy wants.
+        /// Distinct supporting issuers the policy wants.
         need: usize,
         /// Independent groups found.
         independent: usize,
@@ -153,9 +169,10 @@ pub enum Verdict {
     },
     /// Support **and** challenge, both current. Not the reader's to silently resolve.
     Conflicted {
-        /// Supporting assessments.
+        /// Distinct supporting issuers.
         supporting: usize,
-        /// Challenging assessments.
+        /// Challenging assessments, counted per record. Challenge admission (plan item H1) will
+        /// change how challenges are counted; this change touches support only.
         challenging: usize,
     },
 }
@@ -176,6 +193,11 @@ impl Verdict {
 /// that a self-issued claim cannot be counted as support. **A self-assessment does not count
 /// either** — an issuer supporting its own release is not evidence, and the record's issuer is in
 /// its id, so that is checkable here without fetching anything.
+///
+/// **Support is counted per issuer.** Several supporting records from one issuer are one supporter,
+/// for `min_supporting` and in every `supporting` count the verdict reports. Independence was
+/// already counted by control group; this closes the remaining path by which one issuer could meet
+/// a support threshold by repeating itself.
 pub fn classify(
     store: &KnowledgeStore,
     release: &ReleaseId,
@@ -185,7 +207,8 @@ pub fn classify(
 ) -> Verdict {
     let subject = release.subject();
 
-    let mut supporting_issuers: Vec<IssuerId> = Vec::new();
+    // A set, not a list: one issuer is one supporter however many records it files.
+    let mut supporting_issuers: BTreeSet<IssuerId> = BTreeSet::new();
     let mut challenges: Vec<IssuerId> = Vec::new();
 
     for record in store.about(&subject) {
@@ -217,7 +240,7 @@ pub fn classify(
         if challenges_it {
             challenges.push(record.issuer().clone());
         } else if supports {
-            supporting_issuers.push(record.issuer().clone());
+            supporting_issuers.insert(record.issuer().clone());
         }
     }
 
@@ -364,6 +387,48 @@ mod tests {
             }
             other => panic!("expected InsufficientEvidence, got {other:?}"),
         }
+    }
+
+    /// **One issuer repeating itself is one supporter** (plan item H2). Five supporting records from
+    /// the same issuer do not meet `min_supporting = 2`, even though independence is satisfied. Before
+    /// H2 they counted as five, and a policy asking for two supporters accepted them.
+    #[test]
+    fn one_issuer_repeating_itself_is_one_supporter() {
+        let r = release();
+        let store = store_with(
+            (0..5).map(|i| assessment("lab-a", &r, LinkKind::Supports, 1_000 + i)).collect(),
+        );
+        let policy = ReaderPolicy { min_supporting: 2, min_independent: 1, ..Default::default() };
+
+        assert_eq!(
+            classify(&store, &r, &issuer("provider"), &policy, 2_000),
+            Verdict::InsufficientEvidence { have: 1, need: 2, independent: 1, need_independent: 1 },
+            "five records from one issuer are one supporter"
+        );
+    }
+
+    /// Every reported `supporting` count is a count of issuers: three records from one lab and one
+    /// from another are two supporters, in an acceptance and in a conflict alike.
+    #[test]
+    fn reported_support_counts_issuers_not_records() {
+        let r = release();
+        let mut records: Vec<_> =
+            (0..3).map(|i| assessment("lab-a", &r, LinkKind::Supports, 1_000 + i)).collect();
+        records.push(assessment("lab-b", &r, LinkKind::Supports, 1_000));
+        let store = store_with(records.clone());
+        let policy = ReaderPolicy { min_supporting: 2, min_independent: 2, ..Default::default() };
+
+        assert_eq!(
+            classify(&store, &r, &issuer("provider"), &policy, 2_000),
+            Verdict::Accepted { supporting: 2, independent: 2 }
+        );
+
+        records.push(assessment("lab-c", &r, LinkKind::Challenges, 1_000));
+        let store = store_with(records);
+        assert_eq!(
+            classify(&store, &r, &issuer("provider"), &policy, 2_000),
+            Verdict::Conflicted { supporting: 2, challenging: 1 }
+        );
     }
 
     /// **"Missing evidence is uncertainty, not a verdict."** Nothing found is

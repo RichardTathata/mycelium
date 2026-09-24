@@ -77,6 +77,10 @@ quantity of supporting evidence changes that. Evidence can only ever *narrow* th
 - **Identity is not independence.** Two issuers with different keys may be the same operator, the same
   deployment, or the same upstream. Independence is a **reader-configured control group**, not something the
   layer infers.
+  **Support is counted per issuer** (2026-09-24, Boundary H item H2): several supporting records from one issuer
+  are one supporter, for `min_supporting` and in every `supporting` count a verdict reports. Independence was
+  already counted by control group; counting support by record left one issuer able to meet a support threshold
+  by repeating itself.
 - **Missing evidence is uncertainty, not a verdict.** `InsufficientEvidence` is a distinct outcome from
   `Rejected` precisely so a reader can tell "we looked and it is bad" from "we do not know".
 - **Refreshing an advertisement never refreshes evidence.** The capability refresh is the evaporation lease —
