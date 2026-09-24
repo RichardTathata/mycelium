@@ -11,6 +11,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Present eligibility at resolution** (Boundary H plan, milestone M2, item K1b; ADR
+  `docs/design/knowledge-validity.md` §2). `resolution::classify_eligible(…, members, external)` returns
+  `Classification { verdict, excluded }`. It re-derives eligibility on every call, re-verifies each
+  verified record's retained signature against the reader's **current** key view, and reports every
+  excluded record with an `Exclusion`:
+  - authenticity: `Unchecked`, `NotAttributableNow`;
+  - present authority: `KeyRevoked`;
+  - currency: `Retracted`, `SupersededByIssuer`, `BasisWithdrawn`, `Expired`.
+
+  `ReaderPolicy::unchecked` (`UncheckedRule::Count`, the default, or `Exclude`) decides whether records
+  stored without verification count. `DependencyIndex::build_filtered` builds the currency index over
+  authentic records only, so an unverified "retraction" cannot suppress verified support.
+
 - **Knowledge store verifies on storage** (Boundary H plan, milestone M2, item K1; ADR
   `docs/design/knowledge-validity.md`). `KnowledgeStore::put_signed(SignedRecord, members, external)`
   checks two things before storing:
@@ -157,6 +170,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never learning the new key.
 
 ### Changed
+
+- **`resolution::classify` honours retraction, same-issuer supersession and withdrawn bases**
+  (Boundary H K1b). It never consulted them, so a withdrawn assessment kept supporting a release. It also
+  now excludes records stored under an already-revoked key, and unchecked records under
+  `UncheckedRule::Exclude`. A change that can only make acceptance **harder**. `classify` does not
+  re-verify signatures; `classify_eligible` does.
+
+  **Upgrade note (v2.8.0's class):** `ReaderPolicy` gained the field `unchecked`, so an exhaustive struct
+  literal needs `..Default::default()`.
 
 - **Knowledge resolution counts support per issuer, not per record** (Boundary H plan, milestone M1,
   item H2). `resolution::classify` counted every supporting *record* toward `min_supporting`, so one

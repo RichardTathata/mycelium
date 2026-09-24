@@ -1,7 +1,8 @@
 # Knowledge validity, heads and storage (ADR, Boundary H items K1–K3)
 
-**Status:** K1 **adopted and implemented** 2026-09-24 (`KnowledgeStore::put_signed`, `src/knowledge/store.rs`). K1b,
-K2 and K3 are **proposed**: decisions recorded here, implementation to follow. Plan:
+**Status:** K1 **adopted and implemented** 2026-09-24 (`KnowledgeStore::put_signed`, `src/knowledge/store.rs`). K1b
+**adopted and implemented** 2026-09-24 (`classify_eligible`, `src/knowledge/resolution.rs`). K2 and K3 are
+**proposed**: decisions recorded here, implementation to follow. Plan:
 [`docs/plans/boundary-h.md`](../plans/boundary-h.md) (rev 0.4, proposed) §6. It builds on the
 [issuer-binding ADR](knowledge-issuer-binding.md) (P1) and the [knowledge-layer ADR](knowledge-layer.md) (item 3).
 
@@ -48,17 +49,40 @@ change. K1 is **additive** instead: `put_signed` is new, and `put` is kept with 
 - The member path's strength rests on `require_identity_proofs`, which is default-off (see the P1 ADR).
 - Nothing here yet stops an `Unchecked` record from counting. That is K1b.
 
-## 2. K1b: present eligibility at resolution (proposed)
+## 2. K1b: present eligibility at resolution (adopted)
 
-`classify` re-derives, for every record and at read time:
-- **authenticity**, from its `Attribution`: `Unchecked` counts only under a policy that explicitly allows it, and
-  the confined-fleet profile forbids it;
-- **present authorisation of the issuer**, by re-running `verify_issuer` on the retained signature against the
-  reader's *current* key view. A key revoked after storage makes the record non-current;
-- **currency for this decision**: not retracted or superseded (through the `DependencyIndex`), no withdrawn basis,
-  within `max_evidence_age_ms`, and judged under the current policy revision.
+**Problem.**
+- `classify` never consulted retraction. A withdrawn assessment kept supporting a release.
+- Nothing distinguished a verified record from an unchecked one.
+- Nothing re-checked a stored signature against the reader's current keys.
 
-Eligibility is never cached as "eligible". Verdict reasons name the layer that excluded a record.
+**Decision.** Eligibility is **re-derived on every call** and never cached as "eligible". Each exclusion answers
+one of three separate questions:
+
+| Question | Exclusion | Source |
+|---|---|---|
+| Authentic? | `Unchecked` (only under `UncheckedRule::Exclude`) · `NotAttributableNow(reason)` | The `Attribution` from K1; `verify_issuer` re-run on the retained signature against the reader's **current** key view |
+| Present authority? | `KeyRevoked { key }` | Revoked at storage, or since |
+| Current for this decision? | `Retracted` · `SupersededByIssuer` · `BasisWithdrawn` · `Expired` | `correction::standing`, plus same-issuer `Supersedes` |
+
+- **`classify_eligible(…, members, external) -> Classification { verdict, excluded }`** re-verifies against the
+  current key view and reports every excluded record with its reason, sorted by record id.
+- **`classify`** keeps its signature and now shares the same core. It applies the currency checks, the
+  `Unchecked` rule and `revoked_at_storage`. It does **not** re-verify signatures, because it has no key view.
+  This is a **behaviour change that can only narrow**: a retracted, superseded or basis-withdrawn assessment no
+  longer counts.
+- **Only an issuer supersedes its own record.** Another issuer's `Supersedes` link is disagreement, not
+  replacement, and does not exclude anything.
+- **Suppression resistance.** The `DependencyIndex` used for currency is built only over records the reader
+  accepts as authentic and currently authorised (`DependencyIndex::build_filtered`). Under `Exclude`, an unchecked
+  "retraction" of someone's verified support has no effect. Suppression is an attack in its own right, not only
+  over-assertion.
+- **The default is `UncheckedRule::Count`, for compatibility.** Existing stores are built with `put` and keep
+  their verdicts. A reader receiving records from others sets `Exclude`, and the confined-fleet profile requires
+  it. Flipping the default goes to the §6.6 ledger.
+
+**Not built here.** The plan's "judged under the current policy revision" layer: `ReaderPolicy` has no revision
+concept yet. It is recorded as open, not claimed.
 
 ## 3. K2: signed heads, ancestry and durable checkpoints (proposed)
 
@@ -103,4 +127,13 @@ carry no ancestry.
 - a deserialised foreign retraction, with a recomputed id, is refused;
 - an unchecked `put` is marked, is upgraded by a later `put_signed`, and never downgrades a verified record.
 
-**K1b, K2 and K3:** as listed in plan §6 and §10, cases 2 and 3.
+**K1b (built, `src/knowledge/resolution.rs` tests, `mod k1b`):**
+- a retracted assessment stops counting, and nothing is deleted;
+- unchecked records are excluded under `Exclude` and counted by default;
+- a key revoked after storage removes the record from the count while it stays in the store;
+- an external issuer no longer trusted stops counting, with the reason named;
+- an unverified retraction cannot suppress verified support;
+- only the issuer can supersede its own record;
+- an assessment whose basis was withdrawn stops counting.
+
+**K2 and K3:** as listed in plan §6 and §10, case 3.
