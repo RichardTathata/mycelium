@@ -1,7 +1,8 @@
-# Knowledge issuer binding and portable authority (ADR, Boundary H items P1 + P2)
+# Knowledge issuer binding, portable authority and bound advertisements (ADR, Boundary H items P1, P2 and H3)
 
 **Status:** P1 **adopted and implemented** 2026-09-24 (`src/knowledge/issuer.rs`, `src/agent/knowledge_keys.rs`).
-P2 **proposed**: decisions recorded here, implementation to follow. Plan:
+P2 **adopted and implemented** 2026-09-24 (`src/mandate/grant.rs`). H3 **adopted and implemented** 2026-09-24
+(`src/mandate/protected.rs`, §6). Plan:
 [`docs/plans/boundary-h.md`](../plans/boundary-h.md) (rev 0.3, proposed) §6 P1 and §7 P2. Threat model:
 [`docs/threat-model.md`](../threat-model.md) §5 Boundary H (revision 3 draft).
 
@@ -76,9 +77,9 @@ Rotation is not revocation. A signature under a retained, unrevoked older key is
 - **It does not bind an external issuer to an organisation.** An external issuer is exactly as trustworthy as the
   reader's configuration of it.
 
-## 5. Decision (P2, proposed): signed, portable mandate grants
+## 5. Decision (P2, adopted): signed, portable mandate grants
 
-Recorded now so P1's types do not need to change for it. It is implemented in a later PR.
+Implemented as recorded below (`SignedMandateGrant`, `EntitlementTable`, `GrantVerifier::check`, `possession_message`).
 
 - **Issuance.** A `MandateGrant` is a threat-model §6 scoped attestation over the mandate's canonical bytes
   (holder, scope, enumerated operations, epoch, term, validity window). It is signed by `established_by` and
@@ -94,15 +95,49 @@ Recorded now so P1's types do not need to change for it. It is implemented in a 
     operation, and both are reported.
 - **Possession.** A grant is presented together with the holder's signature over the digest of the specific
   request or advertisement. A grant presented by anyone else is refused.
-- **Tests required before adoption:**
+- **Tests (`mandate::grant::tests`, all built):**
   - an altered operation list;
   - expiry;
   - an authentic grant from a non-entitled authority;
+  - a grant signed under a revoked member key;
   - a wrong-holder presentation;
   - a superseded grant;
   - conflicting equal-epoch grants.
 
-## 6. Alternatives considered
+## 6. Decision (H3, adopted): capability advertisements bound to authority
+
+**Problem.** Any member may advertise any capability name, and `advertise_capability` checks no role or mandate. A
+member holding a power no mandate gave it can offer it to others as a service: a power laundered as a capability.
+
+**Decision.** A reader-side filter, so Layer I is never taught a higher law. The advertisement still gossips.
+- A reader lists `ProtectedNamespaces`.
+- `filter_protected(candidates, protected, verifier, now, members, external)` keeps a capability in a protected
+  namespace only if its attributes carry:
+  - a `SignedMandateGrant` (`mycelium.grant`) that passes P2's checks, **names the advertiser as holder**, and
+    **enumerates `serve:{namespace}/{name}`**;
+  - a **possession proof** (`mycelium.grant.possession`): the holder's signature over this grant and *this*
+    advertisement (`advertisement_request`: node, namespace, name).
+- Everything else in a protected namespace is filtered out and **reported** as an `UnbackedCapability` with a reason
+  (`NoGrant`, `Malformed`, `HolderIsNotAdvertiser`, `OperationNotPermitted`, or P2's own verdict).
+- Unprotected namespaces pass untouched, and the router's order is preserved.
+- Advertisers use `attach_grant`.
+
+**Not claimed.**
+- Colluders resolve with their own policy. H3 keeps a laundered power away from **honest** readers and makes it
+  visible; it does not stop a cohort using it among its own members.
+- The report is a return value. Wiring it to a metric, an audit record or a knowledge `Observation` is not yet
+  built.
+- Retained epochs are in memory.
+
+**Gates.** `mandate::protected::tests`:
+- a backed capability resolves, and an unbacked one is filtered and reported;
+- unprotected namespaces pass, and order is preserved;
+- a grant for one capability does not back another;
+- a grant lifted onto another node's advertisement does not back it;
+- a proof not made by the holder is refused;
+- expired and non-entitled grants are filtered with their reason.
+
+## 7. Alternatives considered
 
 - **A per-issuer key registry in KV.** Rejected. It is a second identity system beside `sys/identity/`, with its
   own poisoning surface, and composition before primitives says to reuse the one that exists.
@@ -113,7 +148,7 @@ Recorded now so P1's types do not need to change for it. It is implemented in a 
   member issuers. The binding is enforced where it matters, at verification, where a `node:` name must verify under
   that node's keys.
 
-## 7. Gates
+## 8. Gates
 
 - `src/knowledge/issuer.rs` unit tests:
   - member round trip;
