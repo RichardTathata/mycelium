@@ -22,6 +22,63 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.14.0 release — 2026-09-24 (tag `v2.14.0`) — a coordinator nobody declared
+
+Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line.
+
+**The centrepiece started as a question in a design note** — *is role accumulation constrained
+anywhere I did not look?* The answer was **no**, twice over, and the second half is the one that
+mattered. *Not prevented* is the design working: **detection, not prevention** is this substrate's
+law, so a missing `max_roles` is expected. **Not detected** is not. Every single-writer ring elected
+by *lowest candidate node id wins*, so the same rule over the same candidates put **every
+single-writer job on one node** — deterministically, on first election and again after every
+restart — and the seven existing detectors were all watching other axes: **P2 churn** (a node calmly
+holding everything produces none), **P6 gaps** (everything has a provider, merely the same one).
+A concentrated fleet read as **perfectly healthy by every measurement that existed**, until the node
+it all depended on went away, taking every role with it *as a block*.
+
+The general lesson, worth more than the fix: **a catalogue of pathologies is not a catalogue of
+axes.** Seven detectors over two axes leave every other axis unwatched, and nothing in the catalogue
+says which axes it covers.
+
+Both halves shipped together, deliberately — because **rendezvous spreads but does not bound**:
+
+- **P10** makes it visible: `detect_role_concentration`, hysteresis-confirmed, with the
+  **partition guard** that is the subtle part (a node which has lost sight of its peers sees only
+  its own roles, *the pathology's exact shape*, so the reading is withheld below two visible
+  holders — otherwise a partitioned node's first act is to accuse itself). Plus the operator half:
+  `mycelium_emergent_role_concentration_pct`, a `diagnose_fleet` finding that says *"nothing is
+  failing: this reads as healthy on every other detector, which is why it is easy to miss"*, a
+  `narrate` gloss, a runbook recipe and a `for: 30m` warning alert — a standing structural
+  condition, not a page.
+- **`mycelium::election`** stops producing it: rendezvous ordering (`hash(ring, node)`), so
+  different rings pick different winners and a failover relocates one role rather than all of them.
+
+**The rollout was the real difficulty**, and it is the part to remember. The companions' safety
+rests on every node computing the *same* answer — the wiki's sentinel says so outright. Deploy a new
+rule node-by-node and an old node and a new one each believe they are the winner and **neither
+resigns**: a *stable* two-holder state for the length of the rollout, in the one place the design
+has no coordinator to break the tie. So the rule is **negotiated from the candidate set**: each
+candidate advertises what it can compute (`election_rule`, an ordinary capability attribute — no new
+gossip), and every elector takes the **minimum across live candidates**. A ring is only as new as
+its oldest member. What remains is a *convergence-length* window (seconds), not a rollout-length one.
+
+**`require_identity_proofs` defaults to `true`.** Every TLS node has written
+`sys/identity-proof/{self}` unconditionally since Phase 2 (v2.3.0), so the two-release rollout the
+old caveat prescribed finished ten releases ago. Flipping it **broke no test** — which was the
+finding, not the reassurance: nothing asserted which arm a deployment gets when it configures
+nothing, so the default now has pins of its own, and a third test states the boundary it does *not*
+close (first sighting is still trust-on-first-use; anchors close that, not proofs), written to fail
+if that window is ever shut.
+
+Also: `RELEASING.md` **step 8** — a tag is not an announcement. The Releases page had said *"Latest:
+v2.4.4"* since 2026-09-12 while eleven tags shipped behind it, four carrying security fixes, because
+**nothing fails when the publish step is skipped**. All eleven were backfilled from their own tag
+messages.
+
+**Upgrade notes:** `FleetSnapshot` gained `role_concentration`; nodes older than v2.3.0 write no
+proof and are refused; election behaviour changes only once every candidate advertises its rule.
+
 ## v2.13.0 release — 2026-09-23 (tag `v2.13.0`) — the axis' last open questions, and a gateway that was not closed
 
 > **Published to the Releases page 2026-09-23, along with the ten tags before it.** The page had

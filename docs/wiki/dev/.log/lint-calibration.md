@@ -225,3 +225,12 @@ Entry format:
   staleness check greps the matrix specifically for "not shipped" / "not provided" / "you must"
   claims against the release's changed surfaces, because it is the one page whose *whole content*
   is claims about what does and does not exist.
+- 2026-09-24: **§1 scope gap — `docs/plans/` was never a swept root.** The plan of record's §10.2
+  called `require_identity_proofs` *default-off* hours after the default was flipped, and the same
+  day's lint pass did not look: it swept `docs/wiki`, `guide`, `operations` and `design`, which are
+  the roots habit supplies. But `plans/` **restates code facts** exactly as the front-door docs do
+  (it is the document a session reads to decide what to work on next), so it drifts the same way and
+  is read earlier. Found by a user asking *"is v3 delivered?"* — a question the sweep should have
+  been able to answer without a human noticing the stale parenthetical. Sharpening: `docs/plans/` is
+  a swept root for §1 and §2, with the *plan of record* checked specifically against the release's
+  changed defaults and surfaces.

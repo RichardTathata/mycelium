@@ -9,6 +9,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.14.0] — 2026-09-24
+
+**A coordinator nobody declared, and an identity default that had outlived its caveat.** Wire
+**v12** unchanged (`PREV = 11`); additive on the 2.x line.
+
+The centrepiece began as a question in a design note — *is role accumulation constrained anywhere?*
+— and the answer was **no**, twice over. Not prevented, which is the design working: *detection, not
+prevention* is the law here. But **not detected either**, which is not: every single-writer ring
+elected by *lowest candidate node id wins*, so the same rule over the same candidates put **every
+single-writer job on one node**, and the seven existing detectors were all looking at other axes —
+P2 at churn, P6 at gaps. A concentrated fleet read as **perfectly healthy by every measurement that
+existed**, until the node it all depended on went away.
+
+Both halves ship together: **P10** makes it visible, and **`mycelium::election`** stops producing
+it — with the rule **negotiated from the candidate set** rather than flag-dayed, because changing an
+election rule node-by-node would leave two holders each believing itself correct and neither
+resigning.
+
+Beside it, `require_identity_proofs` now defaults to **`true`**. Every TLS node has written its
+proof since v2.3.0, so the two-release rollout the old guidance prescribed finished ten releases
+ago; the caveat had outlived the condition it was written for.
+
+**Upgrade notes.** `FleetSnapshot` gained `role_concentration` (an exhaustive struct literal needs
+it). Nodes older than **v2.3.0** write no identity proof and will be refused — set
+`require_identity_proofs = false` if you run any. Election behaviour changes only once every
+candidate advertises `election_rule`, so a mixed fleet keeps the old rule until the upgrade
+completes.
+
+**Not claimed:** rendezvous is a **spread, not a bound** (three rings over three nodes still leave
+~11% chance one node wins all three), and *proofs required* is **not** *identity authenticated* —
+first sighting remains trust-on-first-use, which anchors close, not proofs.
+
 ### Added
 
 - **Mandates established at the gateway** (Boundary H A1, gateway wiring; ADR
