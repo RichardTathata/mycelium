@@ -8,8 +8,9 @@ their first ADRs rather than restating a threat model each.*
 
 *Revision 3 draft, 2026-09-23: §5 adds **Boundary H**, a colluding population of admitted members — the plural of
 §4's "trusted member acting maliciously within its authorization", which revisions 1 and 2 model only one member
-at a time. §1–4, Boundaries D–G and §6 are unchanged. H's proposed mitigations are **unscheduled** and each needs its
-own ADR; nothing in H claims a mechanism the code does not have.*
+at a time. §1–4, Boundaries D–G and §6 are unchanged. As of 2026-09-24, eight of H's mitigations are **in force**
+(M1–M2 of the plan: H2, P1, K1, K1b, K2, K3a, H5, H1), each with its gate and stated limit. The rest are proposed.
+Nothing in H claims a mechanism the code does not have.*
 
 *Crown-jewel posture (Production Readiness Gap sub-gate #3, WS3).* This document
 states what an attacker gains at each trust boundary, the substrate mitigations
@@ -218,7 +219,7 @@ or whose key was stolen while it held one — attempting to commit under the old
   outlives authority: an observation keeps its provenance after its observer's appointment ends (posture rule 5) —
   history is not revoked with a key.
 
-### Boundary H — a colluding population of admitted members (revision 3; mitigations unscheduled)
+### Boundary H — a colluding population of admitted members (revision 3; partly in force)
 
 Every boundary above models *one* adversarial principal: a compromised node (A), a foreign principal (D), an abusive
 client (E), a former holder (G). The attacker here is **many admitted members acting in concert** — each validly
@@ -239,15 +240,16 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     as a service, and the credential itself never travels.
   - **Many issuers from one member.** `IssuerId::new` accepts any non-empty string, and `KnowledgeRecord::verify`
     takes the key from its caller, so nothing binds an issuer to an admitted identity. One member can be many
-    issuers, and every count below can be inflated from inside a single member.
+    issuers, and every count below can be inflated from inside a single member. *Mitigated: P1, in force below.*
   - **Manufactured support.** `resolution::classify` excludes self-assessment but not assessment by a peer. Under
     the default `ReaderPolicy` (one supporting assessment, one independent group, no control groups) a single
     colluding peer's `Supports` makes a release `Accepted`. `min_supporting` counts supporting *records*, so one
-    issuer's repeated assessments meet it; only the independence count deduplicates.
+    issuer's repeated assessments meet it; only the independence count deduplicates. *Mitigated: H2 and H5, in
+    force below.*
   - **Jammed verdicts.** One `Challenges` assessment from any non-provider issuer makes a verdict `Rejected`, or
     `Conflicted` when support exists. There is no challenge threshold and no control-group test on challengers.
     The cautious reading for a single member becomes denial of evidence at population scale: a population can hold
-    every honest release, including an observer's, in `Rejected` or `Conflicted`.
+    every honest release, including an observer's, in `Rejected` or `Conflicted`. *Mitigated: H1, in force below.*
   - **A rewritten history, and an unrecorded one.** Each audit chain is per-node and signed by that node's own key.
     `verify_chain` proves that a stream is internally consistent, not that it is the stream peers first received.
     Nothing in `src/agent/audit.rs` detects a key holder reissuing its own suffix, and `sys/audit/{node}/…` is the
@@ -269,23 +271,49 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     select among already-authorised candidates.
   - **Authority lapses** (item 5, AE1). A mandate carries `valid_until_ms`, expiry is locally decidable, and AE1
     refuses a revoked mandate before policy runs. A population's authority therefore ends at its term unless it is
-    renewed. Under the confined profile's authority-at-execution contract (plan A1), expiry stops new admissions locally,
-    and admitted work stops within its declared continuation bound. Those two times are measured separately.
+    renewed. Expiry stops **new admissions** at an enforcement point that checks the mandate. Stopping *admitted*
+    work needs the authority-at-execution contract (plan A1), which is proposed, not built.
   - **An external audit sink** (WS-C, opt-in). An attached `AuditSink` (SIEM or WORM archive) keeps the original
     bytes of every record it mirrors, so a reissued suffix is detectable against it where one is configured.
   - **Containment.** Clearance (L1–L3) bounds what each member holds. A population run as its own domain never
     enters another domain's membership, replication or quorum (Boundary D). `EgressPolicy.allow_hosts` fails closed
     on the paths the substrate chooses (Boundary C), but its default is allow-all.
-- *Proposed (unscheduled; sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
-  - **Prerequisites.**
-    - **P1:** bind issuers to admitted identities.
-    - **P2:** a signed, portable mandate grant. `Mandate` is unsigned today, and its signed epoch is checked only
-      by the wiki's pre-receive hook.
-    - **K1–K3:** the knowledge layer's own deferred PRs (verify on put, signed heads, durable store and head
-      transport).
-  - **H1, challenge admission.** Count challengers by control group, against a reader-set threshold. The default
-    stays one, the cautious reading, but a reader facing a population can require independent challenge.
-  - **H2, per-issuer support.** `min_supporting` counts distinct issuers, not records.
+- *Boundary H mitigations in force (2026-09-24; plan [`plans/boundary-h.md`](plans/boundary-h.md), milestones M1–M2):*
+  Each is claimed at the strength its gate shows, with its stated limit.
+  - **H2, per-issuer support** (#381). `min_supporting` counts distinct issuers, never records. *Gate:*
+    `resolution::tests::one_issuer_repeating_itself_is_one_supporter`.
+  - **P1, issuer binding** (#384; ADR `design/knowledge-issuer-binding.md`). A record is attributed only through
+    two paths, member (`node:{id}`, the reader's retained keys) or configured external (never inside `node:`), and
+    the reader reports `Current`, `Revoked` or `Unverifiable`. *Limit:* member-path strength rests on
+    `require_identity_proofs`, which is default-off. *Gate:* `issuer::tests` and the two-node
+    `test_boundary_h_p1_issuer_binding_on_live_nodes`.
+  - **K1, verify on storage** (#387; ADR `design/knowledge-validity.md` §1). `put_signed` checks integrity (the id
+    is the content digest; a deserialised record is re-checked) and attribution, and refusals are counted. *Limit:*
+    `put` remains, and marks its records `Unchecked`. *Gate:* `store::tests::k1`.
+  - **K1b, present eligibility** (#386; §2). Eligibility is re-derived at every read: authenticity, a key revoked
+    since storage, retraction, same-issuer supersession, a withdrawn basis and expiry. Retraction was previously
+    ignored at resolution. An unverified "retraction" cannot suppress verified support. *Limit:* `UncheckedRule`
+    defaults to `Count`. *Gate:* `resolution::tests::k1b`.
+  - **K2, signed heads with verified ancestry** (#389; §3). A checkpoint advances only through an authenticated
+    `prev` chain. Missing links leave the checkpoint where it is, divergence is a fork with both heads kept, and
+    unreadable checkpoint state refuses to open. *Gate:* `heads::tests`, including a branch that diverged below the
+    checkpoint.
+  - **K3a, durable stores** (#390; §4). Records and checkpoints are fsynced to the node-local journal **before**
+    they are reported. Reopening refuses an unreadable journal and still refuses rollback. *Limits:* no compaction,
+    and forks are in memory only. *Gate:* `durable::tests`.
+  - **H5, cohorts declared at admission** (#391; ADR `design/knowledge-cohorts.md`). A trusted operator's signed
+    declaration makes a fleet one control group. Grouping is by connected components (overlaps merge, and order is
+    irrelevant). Dependence survives expiry and partition, and is grouped at issue time and now. *Limit:* control,
+    not lineage; `CohortView` is in memory. *Gate:* `resolution::tests::h5`, including the expiry and partition case.
+  - **H1, challenge admission** (#392; same ADR §4). Challenges are counted by the same components against
+    `min_challenge_groups` (default 1). The only routes past the threshold are the provider disowning its release
+    and a policy-decisive source, each named. Resolution cost is bounded (`max_examined`, `max_reported`). *Gate:*
+    `resolution::tests::h1`, including a 100,000-record storm.
+- *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
+  - **P2:** a signed, portable mandate grant with entitlement, currency and possession. `Mandate` is unsigned
+    today, and its signed epoch is checked only by the wiki's pre-receive hook.
+  - **K3b and K3c:** head transport between nodes; body authorisation; per-issuer storage and ingestion caps (moved
+    from H1).
   - **H3, advertisement bound to authority.** A reader-side check at resolve: a capability in a protected namespace
     resolves only if its advertiser holds a role or mandate naming it. The check stays at the reader, so Layer I is
     not taught a higher law.
@@ -294,11 +322,6 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     position, so a witness's assertion alone never accuses anyone. Outcomes are equivocation, consistent, history
     unavailable, or insufficient evidence. Only a rewrite that conflicts with retained signed evidence is provable. A
     checkpoint cannot detect a rewrite of the unwitnessed records after it, and that suffix stays unproven.
-  - **H5, cohorts declared at admission.** The operator admitting a fleet declares it as a cohort. Readers resolve
-    declarations and configured groups as connected components, independent of order, and fall back
-    conservatively (merge, never split). A known dependence survives expiry and partition: staleness marks a
-    declaration, it never voids one. A cohort captures *control dependence*, not *evidential lineage*: two
-    independent organisations repeating one report share an origin, and grouping issuers does not detect that.
   - **H6, aggregate budgets.** Provider-side budgets over a declared population, closing plan §6.7's consumer-side gap.
   - **H7, the confined-fleet profile** (its own ADR). Agents and gateways run in separate pods (containers in one
     pod share a network namespace, so an in-pod sidecar cannot separate their egress), and the member key is mounted

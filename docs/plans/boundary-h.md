@@ -1,6 +1,9 @@
 # Boundary H — implementation plan
 
-> **Status: PROPOSED, rev 0.4, 2026-09-24. Not adopted.** Rev 0.2 restructured rev 0.1 after an external design
+> **Status: ADOPTED 2026-09-24, rev 0.5. Delivery in progress.** M1 is delivered, and M2 is delivered except
+> K3b and K3c (§16 records what shipped, and where delivery departed from this text).
+>
+> **Rev 0.4 status, kept for the record:** proposed, not adopted. Rev 0.2 restructured rev 0.1 after an external design
 > review, which found that several guarantees promised more than the design established. The reviewer accepted rev
 > 0.2's architecture and asked for six bounded amendments, which rev 0.3 makes. Rev 0.4 makes three small corrections the
 > reviewer asked to accompany adoption. §15 records every finding from all three rounds and where it is addressed.
@@ -743,3 +746,41 @@ policy in its signed batches.
 | R3-1 | H1's closing sentence contradicted the `evidenced_unadmitted` rule | Accepted. The reviewer's wording is used: raising the threshold removes the automatic blocking effect of challenges that are neither mechanically verified nor from a decisive source, and their evidence stays visible | §6 H1 |
 | R3-2 | `RunToCompletion` needs its own T_drain bound | Accepted. Its bound is *s* + remaining permitted duration + confirmation latency; `max_duration` must be enforced by the resource; a class with no demonstrable bound is `Unbounded` and excluded | §7 A1 |
 | R3-3 | The revocation clock rule must be executable | Accepted. *s* bounds each clock's deviation from real time (pairwise at most 2*s*). The exact predicate is given with safety and liveness bounds; *F* > 4*s* and *I* + *D* ≤ *F* − 4*s* are required and enforced at start-up; both clock extremes are tested | §7 A1 |
+
+---
+
+## 16. Delivery record
+
+What has shipped, in merge order, and where delivery departed from the text above. A departure is recorded here
+and in the item's ADR, never silently.
+
+| Item | PR | Commit | Gate |
+|---|---|---|---|
+| H2, per-issuer support | #381 | `a60a3d1` | `resolution::tests` (H2 cases) |
+| P1, issuer binding | #384 | `2235bf5` | `issuer::tests`; two-node live gate |
+| K1, verify on storage | #387 (replaced #385) | `c156334` | `store::tests::k1` |
+| K1b, present eligibility | #386 | `f6eeade` | `resolution::tests::k1b` |
+| K2, signed heads, verified ancestry | #389 | `2981da4` | `heads::tests` |
+| K3a, durable stores | #390 | `232a32e` | `durable::tests` |
+| H5, cohorts | #391 | `895dec0` | `resolution::tests::h5`, `cohort::tests` |
+| H1, challenge admission | #392 | `317852b` | `resolution::tests::h1` |
+
+**Departures:**
+- **K1 is additive, not breaking.** §11 listed `KnowledgeStore::put → Result`. `put` had 72 call sites building
+  trusted local records, so it stays and marks records `Unchecked`, and `put_signed` is the verified path. K1b's
+  `UncheckedRule` decides whether unchecked records count. It defaults to `Count`, and the confined profile will
+  require `Exclude`.
+- **K1b found a live defect.** `classify` never consulted retraction, so a withdrawn assessment kept counting. K1b
+  fixed it, and the fix only narrows.
+- **K2's durability became a contract, and K3 split into K3a, K3b and K3c.** There is no filesystem seam, so K2
+  defined `CheckpointStore` and shipped only an in-memory store. K3a made both stores durable over the existing
+  node-local journal, with no new filesystem site and no lock. K3b (transport) and K3c (body authorisation, and the
+  caps below) remain.
+- **H1's mechanically verified invalidation is concrete:** the provider's own current challenge of its release
+  (`DisownedByProvider`). The entitled-authority form waits for P2.
+- **H1's storage and ingestion caps moved to K3c.** They belong to the store and to transport.
+- **H4 reuses `AuditCheckpoint`** (`sys/audit-checkpoint/`), which already existed. That was found while
+  implementing P1, and recorded in rev 0.4.
+- **Found by tests while building H5.** A union-find fed only by supporters missed a silent member bridging two
+  cohorts. The graph now includes every configured and in-force member.
+
