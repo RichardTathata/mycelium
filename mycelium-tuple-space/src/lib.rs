@@ -110,7 +110,7 @@ use store::{Record, TupleStore};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TupleRole {
     /// Observe the capability ring and self-assign: advertise as candidate,
-    /// settle, then become primary if none exists (lowest candidate id wins
+    /// settle, then become primary if none exists (the ring's negotiated election rule wins
     /// the tie) or secondary otherwise. No coordinator assigns the role.
     Auto,
     /// Serve the store immediately.
@@ -743,13 +743,16 @@ impl TupleSpace {
 
     /// `TupleRole::Auto`: advertise as candidate, let candidates settle,
     /// then self-assign. The plan's bare resolve-then-promote races when two
-    /// candidates start together; the lowest candidate node id wins the tie
+    /// candidates start together; the ring's negotiated election rule breaks the tie
     /// deterministically — still no coordinator, every node reaches the same
     /// conclusion from its own view of the ring.
     async fn run_election(self: Arc<Self>) {
         let ns = &self.cfg.namespace;
+        // Which election rules this build can compute, so the ring negotiates rather than
+        // flag-days (`mycelium::election`).
+        let (attr, value) = mycelium::election::rule_attribute();
         let reg = self.agent.capabilities().advertise_capability(
-            Capability::new("tuple", format!("{ns}.candidate")),
+            Capability::new("tuple", format!("{ns}.candidate")).with(attr, value),
             self.cfg.cap_refresh,
         );
         *self.role_reg.lock() = Some(reg);
@@ -766,11 +769,13 @@ impl TupleSpace {
                 }
                 return;
             }
-            let mut candidates = self.resolve_role("candidate");
-            candidates.sort_by_key(NodeId::to_string);
+            // The ring's own name orders the candidates, so this ring and the blackboard's do not
+            // hand the same node both jobs (P10).
+            let ring = format!("tuple/{ns}.primary");
+            let candidates = self.resolve_role_pairs("candidate");
             let self_id = self.agent.node_id().to_string();
-            match candidates.first() {
-                Some(lowest) if lowest.to_string() == self_id => {
+            match mycelium::election::elect(&ring, &candidates) {
+                Some(winner) if winner.to_string() == self_id => {
                     if self.init_store().is_ok() {
                         self.become_primary();
                     } else {
@@ -1065,13 +1070,14 @@ impl TupleSpace {
     // ── Resolution ───────────────────────────────────────────────────────────
 
     fn resolve_role(&self, role: &str) -> Vec<NodeId> {
+        self.resolve_role_pairs(role).into_iter().map(|(node, _)| node).collect()
+    }
+
+    /// The same resolve, keeping each candidate's `Capability` — the election reads the advertised
+    /// rule attribute, which `resolve_role` throws away.
+    fn resolve_role_pairs(&self, role: &str) -> Vec<(NodeId, Capability)> {
         let filter = CapFilter::new("tuple", format!("{}.{role}", self.cfg.namespace));
-        self.agent
-            .capabilities()
-            .resolve(&filter)
-            .into_iter()
-            .map(|(node, _)| node)
-            .collect()
+        self.agent.capabilities().resolve(&filter)
     }
 
     /// Resolve the current primary from the capability ring.

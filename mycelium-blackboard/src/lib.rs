@@ -179,13 +179,14 @@ impl From<std::io::Error> for BlackboardError {
 // Mirrors the mycelium-tuple-space role pattern: the primary is discovered by capability
 // advertisement (`blackboard/{ns}.primary`); a secondary mirrors via Post/Ack replication + an
 // initial snapshot and promotes when the primary's capability evaporates (the ring IS the failure
-// detector); `Auto` self-elects with a lowest-candidate-id tie-break. No coordinator assigns roles.
+// detector); `Auto` self-elects under the ring's negotiated election rule. No coordinator assigns roles.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Role this node plays for a board namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoardRole {
-    /// Advertise as candidate, settle, then become primary (lowest candidate id wins) or secondary.
+    /// Advertise as candidate, settle, then become primary (the ring's negotiated election rule —
+    /// `mycelium::election`) or secondary.
     Auto,
     /// Serve the board immediately.
     Primary,
@@ -467,8 +468,12 @@ impl Blackboard {
 
     async fn run_election(self: Arc<Self>) {
         let ns = &self.cfg.namespace;
+        // The candidate ad carries which election rules this build can compute, so the ring
+        // negotiates rather than flag-days (`mycelium::election`). On the *candidate*, not the
+        // primary: the negotiation is over who might win, not over who did.
+        let (attr, value) = mycelium::election::rule_attribute();
         let reg = self.agent.capabilities().advertise_capability(
-            Capability::new("blackboard", format!("{ns}.candidate")),
+            Capability::new("blackboard", format!("{ns}.candidate")).with(attr, value),
             self.cfg.cap_refresh,
         );
         *self.role_reg.lock() = Some(reg);
@@ -483,11 +488,14 @@ impl Blackboard {
                 }
                 return;
             }
-            let mut candidates = self.resolve_role("candidate");
-            candidates.sort_by_key(NodeId::to_string);
+            // The ring's own name is what makes rendezvous spread: two rings must order the same
+            // candidates differently, or every ring lands on one node (P10 — a coordinator nobody
+            // declared).
+            let ring = format!("blackboard/{ns}.primary");
+            let candidates = self.resolve_role_pairs("candidate");
             let self_id = self.agent.node_id().to_string();
-            match candidates.first() {
-                Some(lowest) if lowest.to_string() == self_id => {
+            match mycelium::election::elect(&ring, &candidates) {
+                Some(winner) if winner.to_string() == self_id => {
                     if self.init_store().is_ok() {
                         self.become_primary();
                     }
@@ -573,8 +581,13 @@ impl Blackboard {
     // ── Resolution ───────────────────────────────────────────────────────────
 
     fn resolve_role(&self, role: &str) -> Vec<NodeId> {
+        self.resolve_role_pairs(role).into_iter().map(|(n, _)| n).collect()
+    }
+    /// The same resolve, keeping each candidate's `Capability` — the election needs the advertised
+    /// rule attribute, which `resolve_role` throws away.
+    fn resolve_role_pairs(&self, role: &str) -> Vec<(NodeId, Capability)> {
         let filter = CapFilter::new("blackboard", format!("{}.{role}", self.cfg.namespace));
-        self.agent.capabilities().resolve(&filter).into_iter().map(|(n, _)| n).collect()
+        self.agent.capabilities().resolve(&filter)
     }
     fn resolve_primary(&self) -> Result<NodeId, BlackboardError> {
         let mut providers = self.resolve_role("primary");
