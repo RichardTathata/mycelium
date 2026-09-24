@@ -7572,12 +7572,13 @@ fn a_mandate_identifier_from_the_wire_is_never_empty() {
     assert_eq!(p, back);
 }
 
-// ── The identity-proof default (Phase 3, on by default) ──────────────────────
+// ── The identity-proof opt-in (Phase 3, off by default) ──────────────────────
 //
 // `validate_and_merge_identity`'s two arms are unit-tested in `agent::http`, and the default value
-// is pinned in `mycelium-core::config`. What is tested here is the **join**: that a node built from
-// `GossipConfig::default()` actually reaches the rejecting arm, without an operator setting
-// anything — because a default nothing exercises end to end is a default nobody has checked.
+// is pinned — with the reason it is still `false` — in `mycelium-core::config`
+// (`the_default_requires_identity_proofs`). What is tested here is the **join**: that the flag an
+// operator sets actually reaches the rejecting arm, because a setting nothing exercises end to end
+// is a setting nobody has checked.
 //
 // And the second test states the limit, which matters more than it looks: requiring proofs closes
 // *one* residual (an unsigned entry mimicking a pre-Phase-2 node) and **not** trust-on-first-use.
@@ -7596,12 +7597,19 @@ mod identity_proof_default {
         papaya::HashMap::new()
     }
 
-    /// A node that configures nothing rejects an unsigned identity entry — the default is what
-    /// decides, not a flag somebody remembered to set.
+    /// A node that opts in rejects an unsigned identity entry — end to end, from the config field
+    /// an operator sets to the entry that does not enter `peer_keys`.
+    ///
+    /// This test once asserted the *default* did this. The default was flipped on 2026-09-23 and
+    /// reverted on 2026-09-24: requiring proofs opens a startup window, because identity and proof
+    /// are two independent gossip writes and a peer that learns one without the other rejects it
+    /// (`config::tests::the_default_requires_identity_proofs` carries the full account). The
+    /// mechanism being tested here was never what failed, so it is kept — with the flag set
+    /// explicitly, which is now how a deployment reaches this arm.
     #[test]
-    fn a_default_configuration_rejects_an_unsigned_identity_entry() {
-        let cfg = GossipConfig::default();
-        assert!(cfg.require_identity_proofs, "the default is what this test is about");
+    fn an_opted_in_configuration_rejects_an_unsigned_identity_entry() {
+        let mut cfg = GossipConfig::default();
+        cfg.require_identity_proofs = true; // the operator's choice, not the default
 
         let victim = NodeId::new("127.0.0.1", 7101).unwrap();
         let attacker_key = SigningKey::from_bytes(&[42u8; 32]).verifying_key().to_bytes();
@@ -7611,7 +7619,7 @@ mod identity_proof_default {
         validate_and_merge_identity(
             &pk, &anchor, &counter, &victim, &history, &[attacker_key],
             None,                              // no proof — the pre-Phase-2 mimic
-            cfg.require_identity_proofs,       // whatever the default says
+            cfg.require_identity_proofs,       // the opted-in arm
         );
         assert!(pk.pin().get(&victim).is_none(), "an unsigned entry does not enter peer_keys");
         assert_eq!(counter.load(Ordering::SeqCst), 1, "and it is counted, not silently dropped");

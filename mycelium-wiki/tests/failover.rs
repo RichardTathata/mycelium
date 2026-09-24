@@ -6,7 +6,7 @@
 //! never fixed sleeps — the capability-ring failure detector is timing-sensitive under CI load. The
 //! election settles on a fixed window, so a lost gossip race could once leave two nodes self-elected
 //! with no recovery (this flaked `curator_elects_…` once in CI). The curator **sentinel** now makes
-//! that self-healing — "lowest id wins" applied continuously, not just at election — so convergence
+//! that self-healing — the ring's election rule applied continuously, not just at election — so convergence
 //! to a single curator is guaranteed, not merely probable; `dual_curators_reconcile_to_a_single_writer`
 //! is its canary.
 
@@ -95,7 +95,9 @@ async fn dual_curators_reconcile_to_a_single_writer() {
 
     assert!(poll_until(|| !agent_a.peers().is_empty() && !agent_b.peers().is_empty(), Duration::from_secs(10)).await,
         "mesh forms");
-    // Both begin as curator (forced). The sentinel reconciles: lowest id wins, the other resigns.
+    // Both begin as curator (forced). The sentinel reconciles: the rule's winner stays, the other
+    // resigns. Which one wins is the rule's business — the assertion below is deliberately
+    // rule-agnostic, and stayed correct when the rule changed to rendezvous.
     assert!(poll_until(|| wiki_a.is_curator() ^ wiki_b.is_curator(), Duration::from_secs(30)).await,
         "the split-brain reconciles to exactly one curator");
     // …and it stays reconciled: the resigned node must NOT re-elect while the winner advertises. If

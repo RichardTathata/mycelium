@@ -77,37 +77,64 @@ the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key select
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
 identity.
 
-## Identity proofs are required by default (2026-09-24)
+## The identity-proof default stays off — and why the attempt to flip it is the finding (2026-09-24)
 
-`require_identity_proofs` defaults to **`true`**. An unsigned `sys/identity/{V}` — the pre-Phase-2
-mimic — is rejected rather than accepted-and-flagged.
+`require_identity_proofs` defaults to **`false`**. Set it, and an unsigned `sys/identity/{V}` — the
+pre-Phase-2 mimic — is rejected rather than accepted-and-flagged. It was flipped to `true` on
+2026-09-23 and **reverted on 2026-09-24**. Read the revert, not the flip: the argument for flipping
+was correct and is still correct, and it was not the argument that mattered.
 
-**Why the flip is cheap, and why that is also the danger.** Every TLS node has written
-`sys/identity-proof/{self}` unconditionally since Phase 2 (**v2.3.0**, 2026-07-24), so within the
-one-release window a rolling upgrade is supported across, **no honest node is affected** — and
-flipping it broke **no test**, because the tests that exercise the behaviour set the flag
-explicitly. A default that nothing asserts can be flipped back by a merge or a well-meant "restore
-rollout tolerance" with nothing failing, so the value itself is now pinned
-(`config::tests::the_default_requires_identity_proofs`) and the join is pinned separately
-(`lib_tests::identity_proof_default::a_default_configuration_rejects_an_unsigned_identity_entry`) —
-because a default nothing exercises end to end is a default nobody has checked.
+**The argument for the flip.** Every TLS node has written `sys/identity-proof/{self}`
+unconditionally since Phase 2 (**v2.3.0**, 2026-07-24), so within the one-release window a rolling
+upgrade is supported across, no honest node writes an unsigned identity. The rollout precondition
+the runbook used to prescribe was ten releases behind us.
 
-**The limit, kept visible on purpose.** *Proofs required* is **not** *identity authenticated*.
-First sighting of a node never seen is still **trust on first use**: a self-signed entry is accepted
-because there is nothing established to chain it to, so an admitted-but-hostile member can still
-introduce a key for a node nobody has met. What closes that is an **anchor** — a direct,
-CA-validated connection (Phase 1b) — after which an unchained key is rejected *and counted* in
-`identity_anchor_conflicts`. Proofs close the unsigned-mimic residual; anchors close the
-first-sighting one; they are complementary, not alternatives.
+**What it missed.** A node's identity and its proof are **two separate `kv_set` calls**
+(`src/agent/lifecycle.rs`), hence two gossip messages with no ordering between them. Requiring
+proofs therefore means a peer can learn an identity *before* its proof, reject it, and hold **no
+key** for that node. The key recovers by itself — `start_identity_watcher` subscribes to the
+broader `sys/identity` prefix, not `sys/identity/`, exactly so a late proof re-validates its
+entry — so the window is transient and self-healing.
 
-That boundary has its own test
-(`requiring_proofs_does_not_close_trust_on_first_use`), written so that **if the TOFU window is
-ever closed the test fails and must be rewritten** rather than quietly continuing to pass — the
-alternative being a caveat in prose that rots while the code moves under it.
+**A decision taken inside the window is not self-healing, and that is the whole lesson.** A leader
+election is one-shot: a node that could not verify a peer's consensus signature while the window
+was open does not re-run the election when the key lands a moment later. The Docker suite failed
+`S12 leader election … Nodes disagree on leader` intermittently — three nodes, two answers — with
+the federation two-mesh suite failing in the same run, after **twelve consecutive greens**. Two
+greens followed, which is what an intermittent race looks like.
+
+**Why nothing caught it before merge.** Flipping the default broke **no unit test**, because every
+test that exercises the behaviour sets the flag explicitly; the in-process suites have no
+gossip-ordering window to lose a race in. The gate that could see it is the Docker suite, and it is
+the one that runs after the merge. *A config default whose only failure mode is a race across
+processes is not testable by the suite that gates the PR* — worth remembering the next time a
+default looks cheap because the suite stayed green.
+
+**What is pinned, and what a future flip has to clear.** The value is pinned with its reason in
+`config::tests::the_default_requires_identity_proofs`, written so that flipping it back means
+editing a test that explains why it is there. The precondition is not "every node writes a proof
+anyway" — that is true and it is not the failing condition. It is an **atomic** identity+proof
+record, or a bounded *pending its proof* state that defers rather than rejects. Until then the flag
+is an operator opt-in: fine where nodes do not elect during bring-up, not fine where they do
+([cert-rotation](../../operations/cert-rotation.md)).
+
+**The limit the flag never closed, kept visible on purpose.** *Proofs required* is **not** *identity
+authenticated*. First sighting of a node never seen is still **trust on first use**: a self-signed
+entry is accepted because there is nothing established to chain it to, so an admitted-but-hostile
+member can still introduce a key for a node nobody has met. What closes that is an **anchor** — a
+direct, CA-validated connection (Phase 1b) — after which an unchained key is rejected *and counted*
+in `identity_anchor_conflicts`. Proofs close the unsigned-mimic residual; anchors close the
+first-sighting one; complementary, not alternatives. That boundary has its own test
+(`lib_tests::identity_proof_default::requiring_proofs_does_not_close_trust_on_first_use`), written
+so that **if the TOFU window is ever closed the test fails and must be rewritten** rather than
+quietly continuing to pass. The end-to-end join is pinned beside it
+(`an_opted_in_configuration_rejects_an_unsigned_identity_entry`) — renamed from
+`a_default_configuration_…` by this revert, which is the one substantive test change it made.
 
 **Who this matters to beyond the mesh:** `mycelium-commitment`'s offer/award signatures verify
 against keys a caller resolves, and `sys/identity/{node}` is the obvious source for a node
-participant. The strength of *that* chain was the reason this default was worth revisiting.
+participant. The strength of *that* chain was the reason this default was worth revisiting — and it
+remains as strong as the caller's key resolution, which on the default configuration is TOFU.
 
 ## Threat model revision 2 (v3 item 8, 2026-09-13)
 

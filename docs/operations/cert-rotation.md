@@ -87,24 +87,34 @@ peers **reject** an identity overwrite whose proof doesn't chain to a key they a
 the key-poisoning vector (a forged verifying key injected via `sys/identity`) is closed for any
 connected/established peer. Rejections increment `identity_anchor_conflicts` on `/stats`.
 
-**`require_identity_proofs` is now `true` by default.** An *unsigned* identity entry — one
-mimicking a pre-Phase-2 node — is rejected outright rather than tolerated. The two-release rollout
-this section used to prescribe is **complete**: Phase 2 shipped in **v2.3.0 (2026-07-24)** and every
-TLS node has written `sys/identity-proof/{self}` unconditionally at startup since. Within the
-version range a rolling upgrade is supported across — one release — no honest node is affected.
-
-**When to turn it off.** Only if you genuinely run nodes older than **v2.3.0**. They write no proof,
-so a node with the default on will refuse their identity entries and they will not join:
+**`require_identity_proofs` is `false` by default — an operator opt-in.** Set it, and an
+*unsigned* identity entry (one mimicking a pre-Phase-2 node) is rejected outright rather than
+tolerated:
 
 ```toml
-require_identity_proofs = false     # or GOSSIP_REQUIRE_IDENTITY_PROOFS=0
+require_identity_proofs = true      # or GOSSIP_REQUIRE_IDENTITY_PROOFS=1
 ```
 
-Upgrade those nodes rather than living on the exception; this is the one setting where the
-"tolerance" reading has an expiry date attached.
+**The rollout argument for making this the default is complete; the default is still off, and the
+gap between those two facts is worth your attention before you set it.** Phase 2 shipped in
+**v2.3.0 (2026-07-24)** and every TLS node has written `sys/identity-proof/{self}` unconditionally
+at startup since, so no node within a supported rolling-upgrade range writes an unsigned identity.
+On that reasoning the default was flipped to `true` on 2026-09-23 — and reverted on 2026-09-24,
+because a node's identity and its proof are **two separate KV writes**, hence two gossip messages
+with no ordering between them.
 
-A proof that gossips in *after* its identity re-validates automatically (the identity watcher also
-watches the proof prefix), so transient ordering never permanently rejects a legitimate node.
+A peer that learns the identity *before* the proof rejects it and holds no key for that node until
+the proof arrives. The key recovers on its own — the identity watcher subscribes to the broader
+`sys/identity` prefix precisely so a late proof re-validates its entry — so the window is
+**transient**. A decision taken inside it is not: a leader election is one-shot, and a node that
+could not verify a peer's signature during the window does not re-run the election afterwards. The
+Docker suite showed an intermittent `S12 leader election … Nodes disagree on leader` after twelve
+consecutive green runs. Closing the window properly means an atomic identity+proof record, or a
+bounded "pending its proof" state that defers rather than rejects — a design change, not a default.
+
+**So: turn it on** if you want the unsigned-mimic residual closed and your fleet does not elect
+leaders during bring-up. **Leave it off** if nodes join and elect in the same breath, or if you
+genuinely run nodes older than **v2.3.0** (they write no proof and would never join).
 
 **What this does *not* give you, and it is worth being exact.** *Proofs required* is **not**
 *identity authenticated*. First sighting of a node you have never seen is still **trust on first

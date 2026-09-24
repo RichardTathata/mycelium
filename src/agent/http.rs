@@ -4300,8 +4300,8 @@ mod tests {
         let k = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
         let history = k.to_vec();
 
-        // Flag OFF (the rollout-tolerance setting; **no longer the default** since the release that
-        // flipped it — see `config::tests::the_default_requires_identity_proofs`): unsigned accepted.
+        // Flag OFF (**the default** — the 2026-09-23 flip to on was reverted the next day; see
+        // `config::tests::the_default_requires_identity_proofs`): unsigned accepted.
         let pk_off: papaya::HashMap<NodeId, Vec<[u8; 32]>> = papaya::HashMap::new();
         let c_off = std::sync::atomic::AtomicU64::new(0);
         crate::agent::helpers::validate_and_merge_identity(
@@ -4309,7 +4309,7 @@ mod tests {
         assert!(pk_off.pin().get(&node).is_some_and(|v| v.contains(&k)),
                 "flag off: unsigned entry accepted (rollout tolerance)");
 
-        // Flag ON (Phase 3, and now the default): the same unsigned entry rejected + counted.
+        // Flag ON (Phase 3, the operator opt-in): the same unsigned entry rejected + counted.
         let pk_on: papaya::HashMap<NodeId, Vec<[u8; 32]>> = papaya::HashMap::new();
         let c_on = std::sync::atomic::AtomicU64::new(0);
         crate::agent::helpers::validate_and_merge_identity(

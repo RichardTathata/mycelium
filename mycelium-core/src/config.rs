@@ -923,17 +923,31 @@ pub struct GossipConfig {
     /// **without** a valid `sys/identity-proof/{V}` is **rejected** — not merged into `peer_keys` —
     /// which closes the residual where an unsigned entry mimics a pre-Phase-2 node.
     ///
-    /// **`true` by default since the release that flipped it.** Every TLS node has written its
-    /// proof unconditionally since Phase 2 (v2.3.0, 2026-07-24): `sys/identity/{self}` and
-    /// `sys/identity-proof/{self}` are written back to back at startup. So within any version range
-    /// this project supports for a rolling upgrade — one release — **no honest node is affected**,
-    /// and what the default now rejects is a node predating v2.3.0, or something imitating one.
-    /// The earlier guidance ("enable only after every node runs the Phase-2 release") was written
-    /// when that rollout was ahead of us rather than ten releases behind.
+    /// **`false` by default — and the attempt to flip it is why the default is documented at
+    /// this length.** It was flipped on 2026-09-23 and reverted on 2026-09-24. The reasoning for
+    /// the flip was sound and still is: every TLS node has written its proof unconditionally since
+    /// Phase 2 (v2.3.0, 2026-07-24), so no node this project supports for a rolling upgrade is
+    /// missing one. What the reasoning missed is that **identity and proof are two separate writes**
+    /// — `crate::…::lifecycle` issues `sys/identity/{self}` and `sys/identity-proof/{self}` as two
+    /// `kv_set` calls, hence two gossip messages with no ordering between them. A peer that learns
+    /// the identity *before* the proof rejects it, and holds **no key** for that peer until the
+    /// proof lands. The key does recover on its own — the identity watcher subscribes to the
+    /// broader `sys/identity` prefix precisely so a late proof re-validates its entry — so the
+    /// window is transient. **What happens inside it is not.** A leader election is a one-shot
+    /// decision: a node that could not verify a peer's signature while the window was open does
+    /// not re-run the election when the key arrives afterwards. The Docker suite showed exactly
+    /// that — `S12 leader election … Nodes disagree on leader`, intermittently, after twelve
+    /// consecutive green runs, with the federation two-mesh suite failing alongside it.
     ///
-    /// **Set it to `false`** — or `GOSSIP_REQUIRE_IDENTITY_PROOFS=0` — if you genuinely run nodes
-    /// older than v2.3.0. They will otherwise be unable to join: their identity entries carry no
-    /// proof, and this node will refuse them.
+    /// That mechanism is the **leading account consistent with the evidence**, not an instrumented
+    /// root cause: what is certain is that the flip is the only change between twelve greens and an
+    /// intermittent split. Either way the flip needs the **propagation window closed first** —
+    /// identity and proof in one atomic record, or a bounded "pending its proof" state that
+    /// defers rather than rejects — which is a design change, not a default. Until it lands, an
+    /// operator who wants the residual closed sets this to `true` (or
+    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS=1`) knowing that a node's first moments after start are the
+    /// window: tolerable in a fleet that does not elect during bring-up, not tolerable in one that
+    /// does.
     ///
     /// **What it does not close, and the distinction matters.** *Proofs required* is not *identity
     /// authenticated*. First sighting of a node this one has never seen is still **trust on first
@@ -1052,7 +1066,7 @@ impl Default for GossipConfig {
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
-            require_identity_proofs:       true,
+            require_identity_proofs:       false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
             domain_profile:                DomainProfile::Open,
             egress:                        EgressPolicy::default(),
@@ -1645,19 +1659,30 @@ mod tests {
     use super::*;
     use crate::node_id::NodeId;
 
-    /// **The default requires identity proofs**, and this pins it.
+    /// **The default does not require identity proofs — yet**, and this pins it *with its reason*,
+    /// because the reason is the whole value of the test.
     ///
-    /// Flipping it changed no test — every TLS node has written its proof unconditionally since
-    /// Phase 2 (v2.3.0), so honest nodes are unaffected and the suites stayed green. That is
-    /// precisely why the default needs a pin of its own: a value nothing asserts can be flipped
-    /// back by a merge, a refactor or a well-meant "restore rollout tolerance", and **nothing would
-    /// fail**. The behaviour of both arms is tested in `agent::http` (`validate_and_merge_identity`);
-    /// what is tested here is which arm a deployment gets when it says nothing.
+    /// The default was flipped to `true` on 2026-09-23 and reverted on 2026-09-24. Flipping it
+    /// changed no unit test: every TLS node has written its proof unconditionally since Phase 2
+    /// (v2.3.0), so the in-process suites stayed green. The **Docker** suite did not. `S12 leader
+    /// election` failed intermittently — `Nodes disagree on leader` — because identity and proof
+    /// are two independent gossip writes, so a peer can learn an identity before its proof and
+    /// hold no key for it until the proof lands. The *key* recovers by itself (the identity
+    /// watcher re-validates on a late proof); an election decided inside the window does not.
+    ///
+    /// Do not flip this back on the strength of "every node writes a proof anyway". That is true
+    /// and it is not the failing condition. The precondition is an **atomic** identity+proof
+    /// record, or a pending state that defers instead of rejecting. When that lands, this test
+    /// is the one to change, deliberately, in the open — which is what a pinned default is for.
+    /// Both arms of the *behaviour* remain tested in `agent::http`
+    /// (`test_require_identity_proofs_rejects_unsigned`) and in
+    /// `lib_tests::identity_proof_default`; what is pinned here is which arm a deployment gets
+    /// when it says nothing.
     #[test]
     fn the_default_requires_identity_proofs() {
         assert!(
-            GossipConfig::default().require_identity_proofs,
-            "an unsigned sys/identity entry is rejected unless an operator opts out",
+            !GossipConfig::default().require_identity_proofs,
+            "deferred until identity and proof propagate as one record — see this test's doc",
         );
     }
 
