@@ -1000,11 +1000,13 @@ on 2026-09-23 and are struck through below):
    / -32004), the mirror of `GatewayPool` on the other side of the same edge; the M7
    shared-observation alternative was rejected because it would put foreign domain names into
    `sys/` (D7) and is unbuildable without this counter anyway. Both carry stated limits rather than
-   implied ones: a signature's strength rests on `require_identity_proofs` — **default-off when
-   this was written, default-on since 2026-09-24**, which is what made the caveat worth acting on
-   rather than merely recording — and the cap is per gateway (N gateways ⇒ N × cap) and bounds
-   concurrency rather than rate. Even on the new default the signature does **not** establish
-   identity: first sighting remains trust-on-first-use, which anchors close, not proofs.
+   implied ones: a signature's strength rests on `require_identity_proofs`, which is **default-off**
+   — it was flipped on 2026-09-23 and reverted on 2026-09-24, because identity and proof are two
+   independent gossip writes and requiring proofs opens a window a leader election can be decided
+   inside (`docs/wiki/dev/security.md`) — and the cap is per gateway (N gateways ⇒ N × cap) and
+   bounds concurrency rather than rate. Note that even *with* proofs required the signature would
+   not establish identity: first sighting remains trust-on-first-use, which anchors close, not
+   proofs. The caveat is therefore still live, and acting on it means anchors.
 4. **§13's two recorded questions** — the composition hypothesis and reversible components — which
    are explicitly *not* v3 deliverables and open the next epoch.
 
