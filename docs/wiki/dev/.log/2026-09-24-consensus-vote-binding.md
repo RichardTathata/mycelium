@@ -136,7 +136,7 @@ whichever role it is playing when it casts it.*
 
 ---
 
-## Open: restart recovery (designed, not built)
+## Restart recovery — **built 2026-09-24**, design below as recorded
 
 **The hole.** `TaskCtx::consensus_accepted` is in-process. A node that restarts mid-ballot forgets
 what it accepted, and the property the other three changes establish — *a node casts at most one
@@ -175,6 +175,32 @@ answer:
 alternative — accepting that a restarted node may equivocate — is what the substrate does today, and
 it is not defensible for a slot anyone builds exclusivity on.
 
-**Not started.** The three changes in this log's earlier sections are sufficient for single-decree
-safety *within a process lifetime*, and that limit should be stated wherever the guarantee is
-claimed until this lands.
+### Built — and the one place the design changed under contact
+
+`sys/consensus-accepted/{node}/{slot}` = `ballot(8, LE) ‖ digest(32)`, written **before** the vote
+leaves at both roles, recovered by `prewarm_accepted` at startup before any listener can vote, and
+deleted when the slot commits.
+
+**The cost turned out lower than the design feared.** The acceptor was *already* doing a gossiped KV
+write per acceptance (`consensus/ballot/{slot}`), so the durable record is one extra small write
+beside an existing one, not a new write on a previously write-free path. That is worth recording
+because the objection — *"a durable write on the hot path"* — was the reason to hesitate, and it was
+answered by reading the path rather than by argument.
+
+**What did change: `Promise` and the digest pull apart.** Accepted-value preservation needs the
+**value** so a proposer can adopt it; the durable record wants a **digest** so it is small enough to
+write. Resolved by splitting the live entry from the recovered one — `Accepted::Full(Bytes)` in
+process, `Accepted::DigestOnly([u8; 32])` after a restart. A recovered node can therefore **refuse**
+a conflicting vote, which is the safety property, and **cannot** report a value in a `Promise`,
+which is only a liveness aid to some proposer. Safety survives the restart; that assistance does
+not, and the asymmetry is the right way round.
+
+`may_cast_vote` is now asked of a digest, so a recovered record answers it identically to a live
+one. The value-taking twin was deleted rather than kept as a dead alias, and its regression gate
+retargeted at the live function.
+
+Pinned by `acceptor_memory_survives_a_restart` (write the record, lose the map, recover, find the
+conflicting vote still refused), `a_recovered_acceptance_reports_no_value`, and
+`a_malformed_acceptor_record_is_no_record` — malformed is **no record**, never a partial one,
+because a half-understood memory refuses votes it cannot justify, which is worse than an absent
+one.

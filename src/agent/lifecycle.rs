@@ -132,6 +132,18 @@ impl GossipAgent {
 
         self.rehydrate_boundary_from_kv();
         self.warm_quorum_from_layer1();
+        // Recover the acceptor's memory **before** any listener can vote. Without this a node that
+        // restarts mid-ballot forgets what it accepted and can vote again, for a different value,
+        // at the same ballot — the one-vote-per-ballot guarantee would hold only for a process
+        // lifetime. See `consensus::prewarm_accepted`.
+        #[cfg(feature = "consensus")]
+        {
+            let n = crate::consensus::prewarm_accepted(
+                &self.task_ctx.kv_state, &self.node_id, &self.task_ctx.consensus_accepted);
+            if n > 0 {
+                tracing::info!(slots = n, "recovered acceptor memory from durable records");
+            }
+        }
         self.prewarm_peer_localities();
         self.advertise_locality();
 

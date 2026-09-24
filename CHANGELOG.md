@@ -355,6 +355,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **restart recovery** (acceptor memory is in-process and does not survive a restart) and replacing
   the **"wait one second, then read the local slot"** success semantics.
 
+### Fixed
+
+- **The acceptor's memory now survives a restart.** `sys/consensus-accepted/{node}/{slot}` holds
+  `ballot ‖ value_digest`, written **before** the vote leaves at both roles, recovered at startup
+  before any listener can vote, and deleted when the slot commits.
+
+  Until now *at most one value per ballot* held only for a **process lifetime**: a node that
+  restarted mid-ballot forgot what it accepted and could vote again, for a different value, at the
+  same ballot. Every acceptor-side guarantee in classical consensus depends on that memory being
+  durable, and ours was not.
+
+  **The cost is one extra small write beside one the acceptor already made** (`consensus/ballot/`),
+  not a new write on a previously write-free path — which is the answer to the obvious objection,
+  arrived at by reading the path rather than arguing about it.
+
+  **A recovered acceptance refuses but cannot report.** The record holds a digest, so a restarted
+  node can still refuse a conflicting vote — the safety property — but cannot supply a value in a
+  `Promise`, which is only a liveness aid to a proposer. Safety survives the restart; that
+  assistance does not.
+
+  Pinned by `acceptor_memory_survives_a_restart`, `a_recovered_acceptance_reports_no_value` and
+  `a_malformed_acceptor_record_is_no_record`.
+
 ## [2.13.0] — 2026-09-23
 
 **The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged

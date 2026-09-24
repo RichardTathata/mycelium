@@ -971,6 +971,29 @@ pub mod kv_ns {
     /// never sees it.
     pub const IDENTITY_SIGNED: &str = "sys/identity-signed/";
 
+    /// **This node's acceptor record, so a restart cannot make it equivocate.**
+    ///
+    /// Key: `sys/consensus-accepted/{node_id}/{slot}`. Value: `ballot(8, LE) ‖ value_digest(32)`.
+    ///
+    /// A consensus acceptor's whole guarantee — *at most one value per ballot* — rests on
+    /// remembering what it accepted. That memory was in-process, so a node that restarted mid-ballot
+    /// forgot, and could vote again for a different value at the same ballot. This is the record
+    /// that survives.
+    ///
+    /// **Digest, not value**, because the only question ever asked of it is equality, and 40 bytes
+    /// is what makes writing it on the voting path affordable. A node recovered from this record
+    /// can therefore **refuse** a conflicting vote — the safety property — but cannot report the
+    /// value in a `Promise`, which is only a liveness aid to a proposer.
+    ///
+    /// **Strictly self-owned**, like every other `sys/{…}/{self}` key: the value is this node's own
+    /// testimony, and a peer's write to it under LWW would erase exactly the memory it exists to
+    /// keep. An acceptance is already public — votes are broadcast to the group — so publishing it
+    /// discloses nothing the vote did not.
+    ///
+    /// Removed when the slot commits: a committed slot cannot receive a valid higher ballot, so
+    /// there is nothing left to protect.
+    pub const CONSENSUS_ACCEPTED: &str = "sys/consensus-accepted/";
+
     /// Gateway caller-context marker (v3 item 7). Key: `sys/caller-context/{node}`, value: the
     /// envelope version this node enforces (`b"1"`). Written once at start by every node that
     /// strips and verifies the `GatewayCaller` envelope on its RPC receive path; a gateway in the

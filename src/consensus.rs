@@ -929,6 +929,13 @@ impl ConsensusEngine {
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
                 continue;
             }
+            // Durable before the proposal leaves, for the same reason the voter records before its
+            // vote leaves: a proposal is an acceptance, and an acceptance a restart forgets is one
+            // this node can contradict.
+            self.kv_set(
+                accepted_key(&self.task_ctx.node_id, &slot),
+                encode_accepted(ballot, value_digest(&value)),
+            );
 
             self.set_async(ballot_key.as_str(), encode_ballot(ballot)).await;
 
@@ -1558,6 +1565,97 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
 /// ballot only for the *same* value (idempotent re-vote); at a lower ballot never. Without this, two
 /// proposers racing the same fresh slot both get a ballot-1 vote from an overlapping voter and both
 /// reach quorum with different values (audit 2026-07-15 pass 2).
+/// The durable acceptor record's key for `slot` on this node.
+#[cfg(feature = "consensus")]
+pub(crate) fn accepted_key(node: &NodeId, slot: &str) -> String {
+    format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED, node, slot)
+}
+
+/// Encode `ballot(8, LE) ‖ digest(32)`.
+#[cfg(feature = "consensus")]
+pub(crate) fn encode_accepted(ballot: u64, digest: [u8; 32]) -> Bytes {
+    let mut v = Vec::with_capacity(40);
+    v.extend_from_slice(&ballot.to_le_bytes());
+    v.extend_from_slice(&digest);
+    Bytes::from(v)
+}
+
+/// Decode a durable acceptor record. Anything malformed is **no record** — never a partial one,
+/// because a half-understood memory is worse than an absent one: it would refuse votes it cannot
+/// justify.
+#[cfg(feature = "consensus")]
+pub(crate) fn decode_accepted(bytes: &[u8]) -> Option<(u64, [u8; 32])> {
+    if bytes.len() != 40 { return None; }
+    let ballot = u64::from_le_bytes(bytes[..8].try_into().ok()?);
+    let mut d = [0u8; 32];
+    d.copy_from_slice(&bytes[8..40]);
+    Some((ballot, d))
+}
+
+/// **Recover this node's acceptor memory from its durable records.**
+///
+/// Called at startup **before any listener can vote**. Without it the acceptor's guarantee — *at
+/// most one value per ballot* — would hold only for a process lifetime: a node that restarted
+/// mid-ballot would forget what it accepted and could vote again, for a different value, at the
+/// same ballot.
+///
+/// Recovered entries are [`Accepted::DigestOnly`]: enough to **refuse** a conflicting vote, which
+/// is the safety property, and not enough to report a value in a `Promise`, which is only a
+/// liveness aid. Malformed records are skipped rather than guessed at.
+#[cfg(feature = "consensus")]
+pub(crate) fn prewarm_accepted(
+    kv_state: &crate::store::KvState,
+    node:     &NodeId,
+    accepted: &papaya::HashMap<Arc<str>, (u64, Accepted)>,
+) -> usize {
+    let prefix = format!("{}{}/", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED, node);
+    let mut recovered = 0;
+    let guard = kv_state.store.pin();
+    for (key, entry) in guard.iter() {
+        let Some(slot) = key.strip_prefix(prefix.as_str()) else { continue };
+        let Some(bytes) = entry.data.as_ref() else { continue };
+        let Some((ballot, digest)) = decode_accepted(bytes) else { continue };
+        accepted.pin().insert(Arc::from(slot), (ballot, Accepted::DigestOnly(digest)));
+        recovered += 1;
+    }
+    recovered
+}
+
+/// What this node accepted at a ballot.
+///
+/// Two shapes, because two requirements pull apart. `Promise` must report the **value** so a
+/// proposer at a higher ballot can adopt it, which needs the bytes. Surviving a restart needs a
+/// record small enough to write on the voting path, which wants a digest. So the live entry keeps
+/// the value, and the durable record keeps the digest — and a node that has restarted holds
+/// [`DigestOnly`](Self::DigestOnly): still able to **refuse** a conflicting vote, which is the
+/// safety property, but unable to help a proposer adopt, which is only liveness.
+#[cfg(feature = "consensus")]
+#[derive(Clone, Debug)]
+pub(crate) enum Accepted {
+    /// Accepted in this process: the value is known and can be reported in a `Promise`.
+    Full(Bytes),
+    /// Recovered from the durable record after a restart: the digest is known, the value is not.
+    DigestOnly([u8; 32]),
+}
+
+#[cfg(feature = "consensus")]
+impl Accepted {
+    /// The digest of whatever was accepted — the only thing equality is ever asked about.
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        match self {
+            Accepted::Full(v)     => value_digest(v),
+            Accepted::DigestOnly(d) => *d,
+        }
+    }
+    /// The value, when this node still has it. `None` after a restart.
+    pub(crate) fn value(&self) -> Option<Bytes> {
+        match self {
+            Accepted::Full(v)       => Some(v.clone()),
+            Accepted::DigestOnly(_) => None,
+        }
+    }
+}
+
 /// **Claim this node's single vote at `ballot` for `value`, or refuse.**
 ///
 /// The one place both of this node's roles pass through. A node is an acceptor when it answers
@@ -1571,21 +1669,24 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
 /// never acts on a value captured outside the closure.
 #[cfg(feature = "consensus")]
 pub(crate) fn claim_vote(
-    accepted: &papaya::HashMap<Arc<str>, (u64, Bytes)>,
+    accepted: &papaya::HashMap<Arc<str>, (u64, Accepted)>,
     slot:     &Arc<str>,
     ballot:   u64,
     value:    &Bytes,
 ) -> bool {
     use papaya::Operation;
+    let want = value_digest(value);
     let mut granted = false;
     accepted.pin().compute(Arc::clone(slot), |entry| {
         // Recomputed from scratch on every retry — never from a prior attempt's result.
         granted = match entry {
-            Some((_, (b, v))) => may_cast_vote(*b, Some(v), ballot, value),
+            // Comparison is by digest, so a value recovered from the durable record after a
+            // restart is as decisive as one accepted in this process.
+            Some((_, (b, a))) => may_cast_vote_digest(*b, Some(a.digest()), ballot, want),
             None              => true,
         };
         if granted {
-            Operation::Insert((ballot, value.clone()))
+            Operation::Insert((ballot, Accepted::Full(value.clone())))
         } else {
             Operation::Abort(())
         }
@@ -1593,15 +1694,21 @@ pub(crate) fn claim_vote(
     granted
 }
 
-fn may_cast_vote(local_ballot: u64, prior_value: Option<&Bytes>, ballot: u64, value: &Bytes) -> bool {
+/// `may_cast_vote` over digests — the form both roles and the restart path share.
+#[cfg(feature = "consensus")]
+fn may_cast_vote_digest(
+    local_ballot: u64,
+    prior:        Option<[u8; 32]>,
+    ballot:       u64,
+    digest:       [u8; 32],
+) -> bool {
     use std::cmp::Ordering::*;
     match ballot.cmp(&local_ballot) {
         Less    => false,
         Greater => true,
-        Equal   => prior_value.is_none_or(|pv| pv == value),
+        Equal   => prior.is_none_or(|p| p == digest),
     }
 }
-
 pub(crate) fn encode_ballot(ballot: u64) -> Bytes {
     Bytes::copy_from_slice(&ballot.to_le_bytes())
 }
@@ -1699,7 +1806,10 @@ pub(crate) async fn run_consensus_listener(
                         slot:            Arc::clone(&slot),
                         seen_ballot:     local,
                         accepted_ballot: held.as_ref().map(|(b, _)| *b).unwrap_or(0),
-                        accepted_value:  held.map(|(_, v)| v),
+                        // `None` after a restart: the durable record carries the digest, not the
+                        // value, so this node can refuse a conflicting vote but cannot help the
+                        // proposer adopt. Safety survives the restart; that liveness aid does not.
+                        accepted_value:  held.and_then(|(_, a)| a.value()),
                     };
                     ctx.emit(
                         Arc::from(consensus_kind::NACK),
@@ -1714,6 +1824,15 @@ pub(crate) async fn run_consensus_listener(
                         ctx.sign_payload(encode_consensus_msg(&nack)),
                     );
                 } else {
+                    // **Durable before the vote leaves.** A vote that reaches a proposer while this
+                    // node's acceptance is unrecorded is exactly the memory a restart would lose —
+                    // the proposer counts it, the node forgets it, and after a restart the node can
+                    // vote again at the same ballot for another value. Same ordering rule as
+                    // "apply to the store, then hand the record to the WAL", one layer up.
+                    ctx.kv_set(
+                        accepted_key(&ctx.task_ctx.node_id, &slot),
+                        encode_accepted(ballot, value_digest(&value)),
+                    );
                     ctx.kv_set(
                         format!("{}{}", consensus_ns::BALLOT, &*slot),
                         encode_ballot(ballot),
@@ -1811,8 +1930,10 @@ pub(crate) async fn run_consensus_listener(
                 if ballot >= current {
                     // Remove instead of insert: once a slot is committed it cannot
                     // receive a valid higher ballot, so we don't need to track it. This drops the
-                    // acceptor's memory for the slot — for both roles, which is the point.
+                    // acceptor's memory for the slot — for both roles, which is the point — and the
+                    // durable record with it, so the prefix does not grow without bound.
                     accepted.pin().remove(&slot);
+                    ctx.kv_delete(&accepted_key(&ctx.task_ctx.node_id, &slot));
                 }
                 ctx.kv_set(
                     format!("{}{}", consensus_ns::COMMITTED, &*slot),
@@ -2187,7 +2308,7 @@ mod consensus_msg_auth_tests {
     /// to vote, and defeating `VoteForValue`'s binding by the route binding does not cover.
     #[test]
     fn one_node_casts_one_vote_per_ballot_in_either_role() {
-        let accepted: papaya::HashMap<Arc<str>, (u64, Bytes)> = papaya::HashMap::new();
+        let accepted: papaya::HashMap<Arc<str>, (u64, Accepted)> = papaya::HashMap::new();
         let slot: Arc<str> = Arc::from("leader/g");
         let v_x = Bytes::from_static(b"value-X");
         let v_y = Bytes::from_static(b"value-Y");
@@ -2260,6 +2381,69 @@ mod consensus_msg_auth_tests {
         assert_eq!(adopt(3, Some((3, theirs.clone())), theirs.clone()), (3, theirs));
     }
 
+    /// **The acceptor's memory survives a restart.**
+    ///
+    /// Without the durable record, *at most one value per ballot* held only for a **process
+    /// lifetime**: a node that restarted mid-ballot forgot what it accepted and could vote again,
+    /// for a different value, at the same ballot. Every acceptor-side guarantee in classical
+    /// consensus depends on that memory being durable; ours was not.
+    ///
+    /// The round trip below is what a restart actually does — write the record, lose the in-memory
+    /// map, recover from the record, and find the conflicting vote still refused.
+    #[test]
+    fn acceptor_memory_survives_a_restart() {
+        let node = id(11);
+        let slot: Arc<str> = Arc::from("leader/g");
+        let v_x = Bytes::from_static(b"value-X");
+        let v_y = Bytes::from_static(b"value-Y");
+
+        // Before the restart: accept v_X at ballot 4 and write the durable record.
+        let live: papaya::HashMap<Arc<str>, (u64, Accepted)> = papaya::HashMap::new();
+        assert!(claim_vote(&live, &slot, 4, &v_x));
+        let record = encode_accepted(4, value_digest(&v_x));
+        assert_eq!(accepted_key(&node, &slot), format!("sys/consensus-accepted/{node}/leader/g"));
+
+        // The restart: the map is gone.
+        let recovered: papaya::HashMap<Arc<str>, (u64, Accepted)> = papaya::HashMap::new();
+        let (ballot, digest) = decode_accepted(&record).expect("a well-formed record");
+        recovered.pin().insert(Arc::clone(&slot), (ballot, Accepted::DigestOnly(digest)));
+
+        // After the restart: the conflicting vote is still refused…
+        assert!(
+            !claim_vote(&recovered, &slot, 4, &v_y),
+            "a restarted node must not vote for a second value at a ballot it already voted in",
+        );
+        // …the same value is still idempotent…
+        assert!(claim_vote(&recovered, &slot, 4, &v_x), "equal digests, so the same vote stands");
+        // …and a higher ballot is still a fresh decision.
+        assert!(claim_vote(&recovered, &slot, 5, &v_y));
+    }
+
+    /// A recovered record refuses, but cannot help a proposer adopt — safety survives the restart,
+    /// that liveness aid does not, and the distinction is deliberate: the record holds a digest so
+    /// it is small enough to write on the voting path.
+    #[test]
+    fn a_recovered_acceptance_reports_no_value() {
+        let full = Accepted::Full(Bytes::from_static(b"v"));
+        let recovered = Accepted::DigestOnly(value_digest(&Bytes::from_static(b"v")));
+        assert_eq!(full.digest(), recovered.digest(), "both answer the equality question");
+        assert!(full.value().is_some(), "a live acceptance can be reported in a Promise");
+        assert!(recovered.value().is_none(), "a recovered one cannot, and must not invent it");
+    }
+
+    /// A malformed durable record is **no record**, never a partial one: a half-understood memory
+    /// would refuse votes it cannot justify, which is worse than an absent one.
+    #[test]
+    fn a_malformed_acceptor_record_is_no_record() {
+        let good = encode_accepted(7, [9u8; 32]);
+        assert_eq!(decode_accepted(&good), Some((7, [9u8; 32])));
+        assert!(decode_accepted(&good[..39]).is_none(), "truncated");
+        assert!(decode_accepted(&[]).is_none(), "empty");
+        let mut long = good.to_vec();
+        long.push(0);
+        assert!(decode_accepted(&long).is_none(), "over-long is not silently truncated");
+    }
+
     /// The digest is over the value **bytes**, so two proposals that differ at all are
     /// distinguishable — including the empty value, which is a legitimate proposal.
     #[test]
@@ -2316,17 +2500,19 @@ mod consensus_msg_auth_tests {
     // ── F2: acceptor must not equivocate at the same ballot (audit 2026-07-15 pass 2) ──
     #[test]
     fn regression_voter_never_accepts_two_values_at_one_ballot() {
-        let a = Bytes::from_static(b"A");
-        let b = Bytes::from_static(b"B");
+        // Digests, since 2026-09-24: the rule is the same, but it is now asked of a digest so a
+        // record recovered after a restart — which holds no value — answers it identically.
+        let a = value_digest(&Bytes::from_static(b"A"));
+        let b = value_digest(&Bytes::from_static(b"B"));
         // Never voted this slot (prior None): any ballot >= 0 is votable.
-        assert!(may_cast_vote(0, None, 1, &a));
+        assert!(may_cast_vote_digest(0, None, 1, a));
         // Voted A at ballot 1. A second ballot-1 proposal for a DIFFERENT value B must be refused.
-        assert!(!may_cast_vote(1, Some(&a), 1, &b), "equivocation at the same ballot must be refused");
+        assert!(!may_cast_vote_digest(1, Some(a), 1, b), "equivocation at the same ballot must be refused");
         // Re-voting for the SAME value at the same ballot is idempotent and allowed.
-        assert!(may_cast_vote(1, Some(&a), 1, &a));
+        assert!(may_cast_vote_digest(1, Some(a), 1, a));
         // A strictly higher ballot supersedes — vote for whatever value it carries.
-        assert!(may_cast_vote(1, Some(&a), 2, &b));
+        assert!(may_cast_vote_digest(1, Some(a), 2, b));
         // A stale (lower) ballot is never votable.
-        assert!(!may_cast_vote(2, Some(&a), 1, &a));
+        assert!(!may_cast_vote_digest(2, Some(a), 1, a));
     }
 }
