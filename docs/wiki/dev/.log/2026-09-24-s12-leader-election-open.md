@@ -35,6 +35,47 @@ prior, not a mechanism. Nobody traced a path from the change to the assertion �
 taken one grep — before writing the conclusion into six documents. Recorded as rule 3 on the
 [testing page](../testing/testing.md) §a green run is evidence about that run.
 
+## A traced hypothesis (not a confirmed cause — the distinction is the whole point of this entry)
+
+`elect_leader` (`src/agent/consensus_handle.rs:556`) never returns "I committed, therefore I won" —
+that was fixed in the 2026-07-15 audit, because an optimistic `Committed` is not mutually exclusive.
+Instead it waits for the winning commit to converge and reads the authoritative slot. The wait is a
+**fixed sleep**:
+
+```rust
+ConsensusResult::Committed { .. } => {
+    mycelium_core::sim_seam::sleep_ms("elect/converge", 1000).await;
+    leader_from_slot(self).ok_or(ConsistencyError::Superseded)
+}
+ConsensusResult::Superseded { .. } =>
+    leader_from_slot(self).ok_or(ConsistencyError::Superseded),
+```
+
+Two things follow, and both match the observed shape (one node dissenting, two agreeing):
+
+1. **The 1 s is a timing assumption, and the project already says so.** The replay-nondeterminism
+   inventory calls this pair *"the one whose duration is a correctness assumption"*
+   (`docs/design/replay-nondeterminism-inventory.md` §2.3/§4). If gossip convergence exceeds 1 s
+   under CI load, the reader returns a value the cluster has not settled on.
+2. **The `Superseded` arm has no converge wait at all.** It reads the slot immediately. A node that
+   lost a ballot can therefore read its local slot *before* the winner's commit has reached it and
+   return whatever is there — including a value from its own earlier optimistic commit.
+
+This is a *mechanism traced to the assertion*, which is what the previous hypothesis lacked. It is
+still **not** a confirmed cause of the `8b588c6` run.
+
+**What would confirm it:** a failing run in which the dissenting node's `leader/s12-demo` slot agrees
+with the majority when read again a few seconds later. That distinguishes "read too early" from
+"genuinely committed two different values". Capture per-node `consensus_get("leader/s12-demo")` at
+failure *and* 5 s after.
+
+**What a fix would look like**, in the order I would attempt it: make the `Superseded` arm wait as
+the `Committed` arm does (small, strictly closer to the existing intent); then replace *both* fixed
+sleeps with a bounded poll for slot stability, so convergence is **observed rather than assumed** —
+the same move as the sealed identity record, closing a race by construction instead of by timing.
+Neither is done here: consensus timing deserves its own change and its own review, not a rider on a
+documentation fix.
+
 ## Where to start
 
 - The consensus path, not the identity path: `elect_leader` goes through gossip consensus, so the
