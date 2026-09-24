@@ -269,7 +269,8 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     select among already-authorised candidates.
   - **Authority lapses** (item 5, AE1). A mandate carries `valid_until_ms`, expiry is locally decidable, and AE1
     refuses a revoked mandate before policy runs. A population's authority therefore ends at its term unless it is
-    renewed: withholding renewal is the halt.
+    renewed. Under the confined profile's authority-at-execution contract (plan A1), expiry stops new admissions locally,
+    and admitted work stops within its declared continuation bound. Those two times are measured separately.
   - **An external audit sink** (WS-C, opt-in). An attached `AuditSink` (SIEM or WORM archive) keeps the original
     bytes of every record it mirrors, so a reissued suffix is detectable against it where one is configured.
   - **Containment.** Clearance (L1–L3) bounds what each member holds. A population run as its own domain never
@@ -288,15 +289,27 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **H3, advertisement bound to authority.** A reader-side check at resolve: a capability in a protected namespace
     resolves only if its advertiser holds a role or mandate naming it. The check stays at the reader, so Layer I is
     not taught a higher law.
-  - **H4, witnessed audit heads.** Members record the audit heads they receive from others as witness records. A
-    reissued suffix then surfaces as equivocation, preserved rather than resolved, in keeping with Boundary F.
-  - **H5, the population as one control group, declared at admission.** The operator admitting a fleet declares it
-    as a single control group. This is a statement made at admission, not an inference, so §4's "identity is not
-    independence" is kept and not weakened.
+  - **H4, source-signed audit checkpoints.** Each node seals signed checkpoints of its own stream, and members
+    retain the ones they receive. An equivocation proof is two statements *signed by the accused* for the same
+    position, so a witness's assertion alone never accuses anyone. Outcomes are equivocation, consistent, history
+    unavailable, or insufficient evidence.
+  - **H5, cohorts declared at admission.** The operator admitting a fleet declares it as a cohort. Readers resolve
+    declarations and configured groups as connected components, independent of order, and fall back
+    conservatively (merge, never split). A cohort captures *control dependence*, not *evidential lineage*: two
+    independent organisations repeating one report share an origin, and grouping issuers does not detect that.
   - **H6, aggregate budgets.** Provider-side budgets over a declared population, closing plan §6.7's consumer-side gap.
-  - **H7, the confined-fleet profile.** Agent code never holds a member key, and agent pods reach nothing on the
-    network except their node's gateway, so acts off the substrate are blocked rather than invisible. A node
-    self-report states what it can verify, and states network confinement as `Unverified`.
+  - **H7, the confined-fleet profile** (its own ADR). Agents and gateways run in separate pods (containers in one
+    pod share a network namespace, so an in-pod sidecar cannot separate their egress), and the member key is mounted
+    only in the gateway pod. Agent pods reach only the gateway: no instance metadata, no Kubernetes API, no admin
+    routes. A blocked connection never reaches the gateway, so it is observed only through the network's own
+    telemetry. Without that telemetry the claim is "blocked", not "recorded". A node self-report states what it can
+    verify, and states network confinement as `Unverified`.
+  - **A1, authority at execution.** Under the profile, every protected operation requires an established mandate,
+    checked at the execution boundary. Queued, retried and delegated work keeps the requirement, and long-running
+    work declares whether it re-authorises or runs to a stated bound.
+  - **The consensus boundary.** No H claim rests on exclusive authority until the election and lock repairs pass
+    their acceptance gate. Until then, a signed grant proves who issued it, and entitlement comes from
+    configuration.
 - *Residual:*
   - **Collusion and cooperation are the same behaviour with different intent.** mTLS authenticates membership, not
     intent, and that is as true of a thousand members as of one. A population acting within its authorisation will
@@ -305,13 +318,15 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **Acts off the substrate are invisible to it.** Direct network calls and credentials the substrate never issued
     are outside every guarantee here, and the evidence must say so (`coverage.complete: false`).
   - **No coordinator means no central halt.** That is the property the substrate exists to provide, and against a
-    misbehaving population it protects the population from its operator too. The halt is non-renewal of mandates
-    plus key revocation, and revocation reaches only connected readers (Boundary D, §6). Shutdown latency is
-    therefore bounded by the longest term the operator issues, and the operator owns that number.
+    misbehaving population it protects the population from its operator too. The nearest thing to a halt is expiry
+    plus revocation. Expiry is decided locally under a clock bound and stops *new admissions*. Admitted work stops
+    only where the resource re-checks authority at execution (A1). Revocation reaches only connected readers
+    (Boundary D, §6), or fails closed under a freshness bound. The operator owns the term lengths, the clock bound
+    and the freshness bound.
   - **Moving coordination onto the substrate makes it both visible and easier.** An operator who admits untrusted
     agents as members is choosing that trade, and should also:
     - run the agents as their own domain;
-    - use a sidecar so that agent code never holds a member key;
+    - run agents and gateways in separate pods, with the member key mounted only in the gateway pod;
     - declare the fleet as one control group;
     - issue short terms;
     - admit an observer member;

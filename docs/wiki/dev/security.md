@@ -185,8 +185,10 @@ are each verified in code:
 - one challenger of any group jams a verdict to `Rejected` or `Conflicted`;
 - a key holder can reissue its own audit suffix undetected, and the chain cannot show acts never recorded.
 
-Mitigations in force are attribution, observation by membership, reader-configured independence, mandate expiry as
-the halt, and domain containment. Six proposals (H1–H6) are **unscheduled**. The residual is stated bluntly:
+Mitigations in force are attribution, observation by membership, reader-configured independence, mandate expiry
+(which stops new admissions; admitted work needs plan A1), and domain containment. The proposals are sequenced in
+`docs/plans/boundary-h.md` (rev 0.2, revised after an external design review) and are **not adopted**. The residual
+is stated bluntly:
 collusion and cooperation are the same behaviour, acts off the substrate are invisible, and there is no central halt
 by design. Motivated by the 2026 OpenAI–Hugging Face agent incident.
 Log: [`.log/2026-09-23-threat-model-boundary-h.md`](.log/2026-09-23-threat-model-boundary-h.md).
