@@ -254,3 +254,15 @@ Entry format:
   since). Sharpening: the front-door check diffs the install block's **host** against
   `git remote get-url origin`, not only its tags — a pin can be current and still point at the wrong
   repository. Also fixed two issue/PR permalinks in guide 14 carrying the old account.
+- 2026-09-24 (same pass, self-inflicted): **§1 verified a claim against a HEAD the post-merge gates
+  had not passed.** The pass corrected the plan's stale *default-off* parenthetical by reading
+  `config.rs` at `main` and writing "default-on since 2026-09-24" into the plan — settled prose,
+  present tense. The flip was reverted the next day (#372) when the Docker suite split a leader
+  election, so the "fix" was drift within hours, and the *prior* wording would have been right again
+  by the time it merged. The check was not wrong about the code; it was wrong about the code's
+  standing. Sharpening: §1 confirms code, but a claim about a **default or a behaviour changed on an
+  unreleased commit** is recorded with its status — *flipped on <date>, unreleased* — not as settled
+  fact, until a release or the post-merge suites carry it. The signal is cheap to get: `git tag
+  --contains <commit>` empty, or a `[Unreleased]` CHANGELOG entry, means the claim is provisional.
+  The general form, which is the part worth keeping: **a lint pass inherits the confidence of the
+  gate that last ran, and `make check` is not the gate for a cross-process default.**
