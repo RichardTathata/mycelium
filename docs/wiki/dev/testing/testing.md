@@ -228,6 +228,39 @@ The corollary is about sequential gates. The fuzz job stops at its first crash, 
 **every later target was unrun, not passing** — four defects were queued behind one. Treat a red
 sequential stage as a wall, not a single failure.
 
+## A green run is evidence about that run (2026-09-24)
+
+The page above is about gates that did not *run* the thing. This one is about gates that ran and
+still told you nothing — two cases on one day, which is what made the shape visible.
+
+| What went green | Why the green was empty |
+|---|---|
+| every pre-merge gate on the `require_identity_proofs` default flip | the failure is a **race between processes**; the in-process suites have no ordering window to lose it in, and every test that exercises the flag sets it explicitly, so none of them was testing the *default* |
+| `auto_election_is_deterministic` for four days after the rule became rendezvous | the assertion (*lowest id wins*) had become a **coin flip** — kernel-assigned ports, and `hash(ring, node)` favours neither — so two passes on `main` were two heads, not two checks |
+
+**Neither test was wrong about what it asserted. Both were wrong about what their passing implied.**
+The first shipped a default whose only failure mode lives in the Docker suite that runs *after*
+merge. The second passed twice by luck and failed on the next unrelated branch — an identity-proofs
+revert — which is the only reason anybody looked.
+
+Two rules come out of it, and the second is the cheap one to apply:
+
+1. **A config default whose only failure mode is a race between processes is not testable by the
+   suite that gates the PR.** Flipping one needs the Docker suites deliberately, before merge, or
+   it needs the window designed out. A green `make check` on such a change is not evidence; it is
+   the absence of a gate. (The revert and its full account:
+   [`../security.md`](../security.md), `.log/2026-09-24-identity-proof-default-revert.md`.)
+2. **Assert the property, or compute the expectation from the rule — never restate the rule in the
+   assertion.** `assert!(ts1.is_primary())` names an answer the rule happened to give; *exactly one
+   primary, and it is the node `mycelium::election::winner` names* is the property, and it stays
+   true across a rule change or fails honestly. The wiki's failover assertions
+   (`is_curator() ^ is_curator()`) survived the rendezvous change untouched for exactly this reason
+   — they never named the rule. The tuple-space one did, and rotted silently.
+
+The failure mode to watch for is specific and easy to name once seen: **an assertion that a rule
+change makes probabilistic rather than false.** It does not go red on the PR that breaks it. It
+goes red later, somewhere unrelated, and looks like a flake.
+
 ## Golden on-disk fixtures replay in CI (V2, contracts axis)
 
 `tests/fixtures/persistence/<format>/{wal.bin,snapshot.bin,expected.json}` are real files written by
