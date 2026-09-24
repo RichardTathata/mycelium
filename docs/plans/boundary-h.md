@@ -1,9 +1,9 @@
 # Boundary H — implementation plan
 
-> **Status: PROPOSED, rev 0.3, 2026-09-24. Not adopted.** Rev 0.2 restructured rev 0.1 after an external design
+> **Status: PROPOSED, rev 0.4, 2026-09-24. Not adopted.** Rev 0.2 restructured rev 0.1 after an external design
 > review, which found that several guarantees promised more than the design established. The reviewer accepted rev
-> 0.2's architecture and asked for six bounded amendments, which rev 0.3 makes. §15 records every finding from both
-> rounds and where it is addressed.
+> 0.2's architecture and asked for six bounded amendments, which rev 0.3 makes. Rev 0.4 makes three small corrections the
+> reviewer asked to accompany adoption. §15 records every finding from all three rounds and where it is addressed.
 >
 > The plan implements the mitigations that [`docs/threat-model.md`](../threat-model.md) §5 Boundary H (revision 3
 > draft) proposes against a **colluding population of admitted members**. It follows the contracts axis's posture
@@ -297,8 +297,9 @@ A signature establishes *who* said something. Trust policy decides whether it is
 **Other evidence-bearing challenges are not dismissed.** An honest challenger outside `decisive_sources` can still
 hold substantial evidence. A below-threshold challenge that cites verifiable records is reported separately as
 `evidenced_unadmitted`, apart from bare challenges, so a person can see it and act on it. It does not decide the
-verdict alone, and the verdict says so. Raising the threshold therefore trades away only unevidenced single
-challenges, and the reader chooses that trade.
+verdict alone, and the verdict says so. Raising the threshold removes the automatic blocking effect of challenges
+that neither establish mechanically verified invalidation nor come from a policy-designated decisive source. Their
+evidence remains visible. The reader chooses that trade.
 
 **Bounded cost.** A threshold does not stop resource exhaustion (§3, distinction 9), so every stage is bounded:
 - **ingestion:** a quota of records per issuer and per cohort per window, refusals counted (K3);
@@ -360,14 +361,24 @@ Under the confined profile, the contract is:
    Delegated work carries the original binding and cannot extend it: a child's `not_after_ms` is at most its
    parent's.
 5. **Long-running work declares a continuation policy.** It is either `ReauthorizeAt { interval }`, which re-checks
-   at checkpoints and cancels on failure, or `RunToCompletion { max_duration }`, a stated bound. The profile's
-   default is `ReauthorizeAt`.
+   at checkpoints and cancels on failure, or `RunToCompletion { max_duration }`, which may finish without further
+   authorisation. `max_duration` must be **enforced by the resource** (a hard limit whose termination the resource
+   can confirm); a declared but unenforced duration is not a bound. The profile's default is `ReauthorizeAt`.
 
 **Two measurements, reported separately:**
 - **T_admit:** time from expiry until no new admissions (expected: the clock bound).
-- **T_drain:** time from expiry until admitted work has **confirmably stopped**. Its bound is: the time to reach the
-  next re-authorisation checkpoint, plus the cancellation latency declared for that operation class, plus the time
-  to confirm the stop.
+- **T_drain:** time from expiry until admitted work has **confirmably stopped**. Its bound depends on the
+  continuation policy. In both, *s* is the clock bound defined below, since a reader may detect expiry up to *s*
+  late.
+  - **`ReauthorizeAt { interval }`:** T_drain ≤ *s* + `interval` (the wait for the next checkpoint) +
+    `cancellation_latency` + `confirmation_latency`.
+  - **`RunToCompletion { max_duration }`:** T_drain ≤ *s* + the **remaining permitted duration** at expiry (at most
+    `max_duration` minus the time already run) + `confirmation_latency`. Nothing is cancelled: the work was
+    permitted to finish, and the bound is how long that may take.
+  - **An operation class without a demonstrable bound cannot satisfy the bounded-stop claim.** That covers a class
+    with no declared policy, an undeclared or unmeasured latency, an unenforced `max_duration`, or a resource that
+    cannot confirm a stop. Such a class is reported as `Unbounded` and excluded from A1's T_drain guarantee. It is
+    never assumed to be bounded.
   - Reaching a checkpoint and *requesting* cancellation does not prove that work, or its external effects, have
     stopped.
   - Each protected operation class declares a `cancellation_latency` and how a stop is confirmed.
@@ -375,11 +386,19 @@ Under the confined profile, the contract is:
   - Effects the resource cannot confirm are reported as *unconfirmed*, never as stopped.
 
 **Expiry and revocation are separate.**
-- *Expiry* is decided locally from `valid_until_ms` under a stated clock assumption (HLC physical time, maximum
-  skew *s*). It works while disconnected.
+- *Expiry* is decided locally from `valid_until_ms` under the clock model below. It works while disconnected.
 - *Revocation* needs delivery. Present authorisation requires a revocation view no older than a freshness bound
   *F*. A staler view makes the state `Unknown`, which is denied under the profile. **The cost, stated:** under a
   partition longer than *F*, protected work stops. That is the intended failure direction.
+
+**The clock model: one definition, used everywhere in A1.**
+- ***s* bounds each clock's deviation from real time.** For every authority and every reader, |C(t) − t| ≤ *s* at
+  all times *t*. C is HLC physical time, disciplined by the deployment's time synchronisation. The A1 ADR names the
+  synchronisation source and how *s* is monitored, and a node that cannot confirm its synchronisation reports
+  `Unknown` for every time-dependent authority check.
+- **Consequence:** any two clocks differ by at most 2*s*. Every bound below follows from that.
+- **Expiry.** A reader admits while C_r(now) ≤ `valid_until_ms`. Admissions stop no later than *s* after the real
+  expiry instant, and may stop up to *s* early.
 
 **How freshness is established: authority-signed revocation checkpoints.**
 - Each establishing authority (the P2 entitlement table names them per scope) issues a signed
@@ -392,8 +411,23 @@ Under the confined profile, the contract is:
   checkpoint with a lower or equal `seq` adds nothing and cannot refresh freshness.
 - **Silence is not evidence.** Receiving no revocations establishes nothing. Only a checkpoint no older than *F*
   does.
-- **Clock assumptions, stated.** Age is `now − issued_at_ms`, under the same maximum skew *s* as expiry, so the
-  effective bound is *F* − *s*. A checkpoint dated in the future by more than *s* is refused.
+- **The freshness predicate, exactly.** Let *a* = `issued_at_ms` (the authority's clock) and *r* = C_r(now) (the
+  reader's clock). The reader's retained checkpoint for `(authority, scope)` is **fresh** if and only if its
+  signature verified, its `seq` is the highest the reader has retained, and
+
+  &nbsp;&nbsp;&nbsp;&nbsp;(*a* − *r*) ≤ 2*s* **and** (*r* − *a*) ≤ *F* − 2*s*.
+
+  - **Safety:** a checkpoint accepted as fresh has a real age of at most *F*. The measured age *r* − *a* understates
+    the real age by at most 2*s*, so real age ≤ (*r* − *a*) + 2*s* ≤ *F*.
+  - **Liveness:** a checkpoint with a real age of at most *F* − 4*s* is always accepted. The measured age overstates
+    the real age by at most 2*s*, so *r* − *a* ≤ *F* − 2*s*.
+  - **Future-dated:** *a* − *r* > 2*s* cannot happen for an honest checkpoint under the model. It is refused and
+    reported as a clock fault or a forgery attempt.
+- **Required parameters.** *F* > 4*s*, so the guaranteed-acceptance window *F* − 4*s* is positive (*F* > 2*s*
+  alone makes the predicate satisfiable but guarantees nothing). The checkpoint interval must fit inside that
+  window: *I* + *D* ≤ *F* − 4*s*, where *D* is the maximum delivery delay the deployment tolerates before failing
+  closed. Otherwise a connected reader can be denied spuriously at the clock extremes. The profile refuses to start
+  with parameters that break either inequality.
 - **Binding.** A checkpoint covers only its own authority and scope. A fresh checkpoint for scope X says nothing
   about scope Y.
 - This is independent of consensus: it needs only the authority's key and the reader's retained `seq`.
@@ -406,12 +440,25 @@ Under the confined profile, the contract is:
 - A `ReauthorizeAt` task is cancelled at the first checkpoint after expiry.
 - A stale revocation view is denied.
 - **A replayed old checkpoint** (valid signature, lower `seq`, or an old `issued_at_ms` delivered again) does not
-  refresh freshness. Authority is denied once *F* − *s* has passed since the last genuine checkpoint.
-- **A partition with no new revocation messages:** after *F* − *s* the state becomes `Unknown` and protected
-  operations are denied. The lack of messages is never read as "nothing revoked".
+  refresh freshness. Authority is denied as soon as the freshness predicate fails for the last genuine checkpoint.
+- **A partition with no new revocation messages:** once the predicate fails, the state becomes `Unknown` and
+  protected operations are denied. The lack of messages is never read as "nothing revoked".
+- **Both clock extremes**, on the replay clock seam:
+  - *Authority +s, reader −s* (age understated by 2*s*): a checkpoint of real age *F* is accepted, and one of real
+    age *F* + 1 ms is refused. Safety holds at the edge.
+  - *Authority −s, reader +s* (age overstated by 2*s*): a checkpoint of real age *F* − 4*s* is accepted. Liveness
+    holds at the edge.
+  - *Future-dated:* at *a* − *r* = 2*s* it is accepted, and at 2*s* + 1 ms it is refused and reported.
+  - *Expiry:* with the reader at −*s*, admissions end by real expiry + *s*. With the reader at +*s*, they end no
+    earlier than real expiry − *s*.
+- The profile refuses parameters with *F* ≤ 4*s* or *I* + *D* > *F* − 4*s*.
 - A checkpoint for scope X does not refresh scope Y.
 - A reader that restarts keeps its highest retained `seq` and still refuses a replayed checkpoint.
-- T_admit is measured, and so is T_drain, with requested, acknowledged and confirmed stop reported separately.
+- A `RunToCompletion` task stops, confirmed, within *s* + its remaining permitted duration + its confirmation
+  latency.
+- An operation class with no demonstrable bound is reported `Unbounded` and excluded from the T_drain claim.
+- T_admit is measured, and so is T_drain per continuation policy, with requested, acknowledged and confirmed stop
+  reported separately.
 
 ### H3 — Advertisement bound to authority (M; needs P2)
 
@@ -431,8 +478,11 @@ advertiser.
 Rev 0.1's witness record proved only what the witness asserted. A malicious witness could invent a hash and accuse
 an honest node. Rev 0.2 makes every accusation rest on the accused node's own signatures.
 
-- **Checkpoints.** Each node periodically seals `AuditAction::Checkpoint { stream, seq, head_hash }`. This is a
-  separately signed statement by the node itself, recorded in its own chain.
+- **Checkpoints already exist and are reused** (corrected 2026-09-24; earlier revisions proposed a new record
+  type). `AuditCheckpoint { node_id, checkpoint_seq, prev_hash, hlc }` is signed by the node's identity key and kept
+  under `sys/audit-checkpoint/{node}/{seq}`, a namespace separate from the trail so that pruning never touches it.
+  H4 adds no record type. It adds **retention by other members** and the **comparison** that turns two conflicting
+  source-signed statements into a proof.
 - **Retention.** Members retain the source-signed checkpoints they receive, and optionally full source-signed
   records, within a bounded budget. The witness's own record only *refers* to what it holds. The proof is the
   source's signature, never the witness's.
@@ -599,7 +649,7 @@ This programme is **not** entirely additive. The breaking or behaviour-changing 
 | `ReaderPolicy` gains public fields (H5, H1) | Exhaustive struct literals break; `Default` construction is unaffected |
 | Control groups resolve as connected components (H5) | Readers with overlapping configured groups may see lower independence |
 | `KnowledgeStore::put` returns `Result` (K1) | Callers must handle refusal |
-| `AuditAction` gains `Checkpoint` (H4) | Exhaustive `match` breaks if the enum is exhaustive |
+| H4 reuses `AuditCheckpoint`; the equivocation outcome type is new | Additive |
 | Head format gains `seq` and `prev_head_digest` (K2) | Namespace reserved but unused, so low impact; stated anyway |
 | Readers persist per-stream head checkpoints and per-authority revocation `seq` (K2, A1) | New durable reader state; a reader without storage cannot claim rollback or replay protection |
 | `RevocationCheckpoint` and `MandateGrant` types (A1, P2) | Additive |
@@ -685,3 +735,11 @@ policy in its signed batches.
 | R2-4 | Revocation freshness needs an authoritative mechanism | Accepted. Authority-signed revocation checkpoints, issued even when empty, aged by `issued_at_ms`, protected against replay by retained `seq`, with clock skew stated. Tests for a replayed checkpoint and a silent partition | §7 A1, §10 case 8 |
 | R2-5 | "Substantiated facts" conflated verification with trust | Accepted. Mechanically verified invalidation is kept separate from a policy-decisive observer; evidence-citing outside challenges are reported as `evidenced_unadmitted` | §6 H1 |
 | R2-6 | T_drain must include cancellation delay | Accepted. The bound includes checkpoint, cancellation latency and confirmation; requested, acknowledged and confirmed are reported separately; unconfirmable effects are reported as unconfirmed | §7 A1 |
+
+**Round 3 (the same reviewer, on rev 0.3).** Three small corrections were asked to accompany adoption.
+
+| # | Finding | Disposition | Where |
+|---|---|---|---|
+| R3-1 | H1's closing sentence contradicted the `evidenced_unadmitted` rule | Accepted. The reviewer's wording is used: raising the threshold removes the automatic blocking effect of challenges that are neither mechanically verified nor from a decisive source, and their evidence stays visible | §6 H1 |
+| R3-2 | `RunToCompletion` needs its own T_drain bound | Accepted. Its bound is *s* + remaining permitted duration + confirmation latency; `max_duration` must be enforced by the resource; a class with no demonstrable bound is `Unbounded` and excluded | §7 A1 |
+| R3-3 | The revocation clock rule must be executable | Accepted. *s* bounds each clock's deviation from real time (pairwise at most 2*s*). The exact predicate is given with safety and liveness bounds; *F* > 4*s* and *I* + *D* ≤ *F* − 4*s* are required and enforced at start-up; both clock extremes are tested | §7 A1 |
