@@ -34,6 +34,9 @@ on:
       - 'docker/**'
       - 'examples/three_node_demo.rs'
       - 'examples/federation_node.rs'
+      - 'deploy/confined-fleet/**'
+      - 'tests/confined-fleet/**'
+      - 'scripts/test-confined-fleet.sh'
       - '.github/workflows/cluster-suites.yml'
   pull_request:
     paths:
@@ -45,6 +48,9 @@ on:
       - 'docker/**'
       - 'examples/three_node_demo.rs'
       - 'examples/federation_node.rs'
+      - 'deploy/confined-fleet/**'
+      - 'tests/confined-fleet/**'
+      - 'scripts/test-confined-fleet.sh'
       - '.github/workflows/cluster-suites.yml'
   schedule:
     - cron: '0 5 * * *'   # nightly 05:00 UTC — catches drift even with no code change
@@ -75,6 +81,17 @@ jobs:
       #         direct route; verified `make test-overlay` 5/5 clean before this gate landed.
       - name: Overlay suite (make test-overlay)
         run: make test-overlay
+
+  confined-fleet:
+    name: Confined-fleet deployment (Boundary H7, kind + Calico)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Deployment evidence, not replay evidence: a real cluster with a CNI that enforces NetworkPolicy, the reference
+      # manifests applied unchanged (stand-in images), and every blocked path paired with a positive control.
+      - name: Confined-fleet deployment test (make test-confined-fleet)
+        run: make test-confined-fleet
 
   federation:
     name: Federation two-mesh suite (item 2's release gate, Docker)

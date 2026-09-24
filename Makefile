@@ -18,7 +18,7 @@ FED_ALPHA_PUBLIC_KEY ?= d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332
 FED_BETA_PUBLIC_KEY  ?= a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0
 FED_ENV               = ALPHA_PUBLIC_KEY=$(FED_ALPHA_PUBLIC_KEY) BETA_PUBLIC_KEY=$(FED_BETA_PUBLIC_KEY)
 
-.PHONY: build check check-full test test-clean test-scale test-scale-clean test-scale-resilience test-scale-resilience-clean test-scale-entries test-scale-entries-clean test-llm-demo test-llm-agent test-three-node test-overlay llm-agent-interactive help
+.PHONY: build check check-full test test-clean test-scale test-scale-clean test-scale-resilience test-scale-resilience-clean test-scale-entries test-scale-entries-clean test-llm-demo test-llm-agent test-three-node test-overlay test-confined-fleet llm-agent-interactive help
 
 ## test — build the cluster and run all integration scenarios
 test:
@@ -139,6 +139,9 @@ test-three-node:
 
 ## test-overlay — 3-node overlay cluster: task auction, leader election, shared log
 ## Builds Docker images, starts cluster, runs S11/S12/S13. ~3 min on warm cache.
+test-confined-fleet: ## Boundary H7 deployment test: kind + Calico, deploy/confined-fleet (needs docker, kubectl, network)
+	bash scripts/test-confined-fleet.sh
+
 test-overlay:
 	$(COMPOSE_OVERLAY) down -v --remove-orphans 2>/dev/null || true
 	$(COMPOSE_OVERLAY) up -d --build

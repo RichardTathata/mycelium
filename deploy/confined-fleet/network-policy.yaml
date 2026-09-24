@@ -1,0 +1,62 @@
+# Boundary H item H7 — the network half of confinement. Requires a CNI that ENFORCES NetworkPolicy.
+#
+# Agent pods: default-deny in both directions, then allow exactly (a) the gateway's API port and (b) cluster DNS.
+# Nothing else: not the internet, not instance metadata (169.254.169.254), not the Kubernetes API, not the gateway's
+# admin port. A connection these rules block never reaches the gateway, so the gateway cannot record it: observing
+# blocked attempts needs the CNI's own flow telemetry (see the runbook).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agents-default-deny
+  namespace: confined-fleet
+spec:
+  podSelector:
+    matchLabels: { mycelium.dev/role: agent }
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agents-egress-gateway-and-dns-only
+  namespace: confined-fleet
+spec:
+  podSelector:
+    matchLabels: { mycelium.dev/role: agent }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { mycelium.dev/role: gateway }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# The gateway accepts agents on its API port only. The admin port is left to the operator's own ingress rules.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-ingress
+  namespace: confined-fleet
+spec:
+  podSelector:
+    matchLabels: { mycelium.dev/role: gateway }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { mycelium.dev/role: agent }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - podSelector:
+            matchLabels: { mycelium.dev/role: operator }
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 9090 }

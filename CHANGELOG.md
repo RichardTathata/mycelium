@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The confined-fleet profile** (Boundary H plan, item H7; ADR `docs/design/confined-fleet.md`; runbook
+  `docs/operations/confined-fleet.md`). For admitting untrusted agents as members:
+  - **reference manifests** (`deploy/confined-fleet/`): agents and gateways in separate pods, the member key
+    only in the gateway pod, and agent egress restricted to the gateway's API port and DNS;
+  - **a node self-report**, `GossipAgent::confinement_report()` → `ConfinementReport`: each node setting
+    (`egress.allow_hosts`, `require_identity_proofs`, audit sink, evaluator, evidence journal) as `Set`,
+    `Unset` or `NotInBuild`, and network confinement always `Unverified`;
+  - **a deployment test**, `make test-confined-fleet` and a CI job: kind with Calico, the manifests
+    unchanged, and a positive control for every blocked path.
+
+  **Not claimed:** confinement on a CNI that does not enforce NetworkPolicy; instance metadata (kind has
+  none, so the check is reported N/A); recording through the gateway end to end (the test uses a stand-in
+  gateway).
+
 - **Challenge admission** (Boundary H plan, milestone M2, item H1; ADR `docs/design/knowledge-cohorts.md` §4).
   One challenger of any group could jam a verdict, and a population could hold every honest release in
   `Rejected`/`Conflicted`.

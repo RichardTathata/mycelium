@@ -1,0 +1,7 @@
+# kind cluster for the confined-fleet deployment test: no default CNI, so Calico (which enforces NetworkPolicy) can be
+# installed. kindnet does not enforce NetworkPolicy, and a test on it would pass for the wrong reason.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+  podSubnet: 192.168.0.0/16

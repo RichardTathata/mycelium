@@ -90,6 +90,7 @@ mod sharding;
 mod shard_ops;
 mod service_handle;
 mod capability_handle;
+pub(crate) mod confinement;
 // schema_handle moved to mycelium-core (v2 M3); the GossipAgent-driven tests stay here.
 #[cfg(test)]
 mod schema_handle_tests;

@@ -1,0 +1,34 @@
+# Boundary H item H7 — the agent workload. Untrusted code runs here.
+#
+# No Kubernetes API token (automountServiceAccountToken: false, and a service account with no RBAC bindings), no member
+# key, no cloud identity: bind no cloud IAM role to the `agents` service account. Everything an agent does to the world
+# goes through the gateway, which authorises and records it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agents
+  namespace: confined-fleet
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents
+  namespace: confined-fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: agents }
+  template:
+    metadata:
+      labels:
+        app: agents
+        mycelium.dev/role: agent
+    spec:
+      serviceAccountName: agents
+      automountServiceAccountToken: false
+      containers:
+        - name: agent
+          image: AGENT_IMAGE
+          env:
+            - { name: MYCELIUM_GATEWAY, value: "http://gateway.confined-fleet.svc:8080" }

@@ -1,0 +1,15 @@
+# The positive control. It is not selected by the agent policies, so every destination the agent must NOT reach is one
+# this pod CAN reach. Without it, a "blocked" result could mean the destination was simply down.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: control
+  namespace: confined-fleet
+  labels:
+    mycelium.dev/role: operator
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: control
+      image: curlimages/curl:8.10.1
+      command: ["sh", "-c", "sleep 100000"]
