@@ -233,7 +233,8 @@ Entry format:
   is read earlier. Found by a user asking *"is v3 delivered?"* — a question the sweep should have
   been able to answer without a human noticing the stale parenthetical. Sharpening: `docs/plans/` is
   a swept root for §1 and §2, with the *plan of record* checked specifically against the release's
-  changed defaults and surfaces.
+  changed defaults and surfaces. (The specific drift resolved itself — #368 was reverted the next
+  day, making *default-off* right again. The scope gap did not; see the last entry.)
 - 2026-09-24 (full pass): **§1 front-door reserved-prefix list — the FOURTH occurrence, now a gate.**
   Both lists in `building-on-mycelium.md` were missing **all four v3 prefixes** (`knowledge/`,
   `mandate/`, `rights/`, `cn/`), and the blockquote was additionally missing seven older companion
