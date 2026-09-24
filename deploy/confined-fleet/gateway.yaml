@@ -1,0 +1,52 @@
+# Boundary H item H7 — the gateway: the Mycelium member the agents talk to.
+#
+# The member key lives ONLY in this pod (the `member-key` Secret). Agent pods never mount it: an agent that holds a
+# member key signs as that member, and its own audit trail is then its to write (threat model, Boundary A).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  namespace: confined-fleet
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: confined-fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gateway }
+  template:
+    metadata:
+      labels:
+        app: gateway
+        mycelium.dev/role: gateway
+    spec:
+      serviceAccountName: gateway
+      automountServiceAccountToken: false
+      containers:
+        - name: gateway
+          image: GATEWAY_IMAGE
+          ports:
+            - { name: api, containerPort: 8080 }     # the gateway API agents call — the ONLY port open to them
+            - { name: admin, containerPort: 9090 }   # admin / metrics / debug — never reachable from agent pods
+          volumeMounts:
+            - { name: member-key, mountPath: /etc/mycelium/tls, readOnly: true }
+      volumes:
+        - name: member-key
+          secret:
+            secretName: member-key
+            optional: true   # optional so the deployment test's stand-in gateway starts without one
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: confined-fleet
+spec:
+  selector: { app: gateway }
+  ports:
+    - { name: api, port: 8080, targetPort: api }
+    - { name: admin, port: 9090, targetPort: admin }

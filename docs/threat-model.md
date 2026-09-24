@@ -309,6 +309,15 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     `min_challenge_groups` (default 1). The only routes past the threshold are the provider disowning its release
     and a policy-decisive source, each named. Resolution cost is bounded (`max_examined`, `max_reported`). *Gate:*
     `resolution::tests::h1`, including a 100,000-record storm.
+  - **H7, the confined-fleet profile** (#393; ADR `design/confined-fleet.md`; runbook
+    `operations/confined-fleet.md`; manifests `deploy/confined-fleet/`). Agents and gateways run in separate pods,
+    the member key is mounted only in the gateway pod, and agent pods reach only the gateway's API port and DNS: no
+    internet, Kubernetes API, instance metadata or admin port. A node's `confinement_report()` states its own
+    settings and always reports network confinement as `Unverified`. *Limits:* opt-in; requires a CNI that enforces
+    NetworkPolicy; a blocked connection is observed only through the network's own telemetry. The deployment test
+    uses a stand-in gateway, so recording through the gateway is covered by the AE seam's tests, not end to end.
+    *Gate:* **deployment evidence**. The CI job *Confined-fleet deployment* runs kind with Calico and the manifests
+    unchanged, and every blocked path has a positive control.
 - *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
   - **P2:** a signed, portable mandate grant with entitlement, currency and possession. `Mandate` is unsigned
     today, and its signed epoch is checked only by the wiki's pre-receive hook.
@@ -323,12 +332,6 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     unavailable, or insufficient evidence. Only a rewrite that conflicts with retained signed evidence is provable. A
     checkpoint cannot detect a rewrite of the unwitnessed records after it, and that suffix stays unproven.
   - **H6, aggregate budgets.** Provider-side budgets over a declared population, closing plan §6.7's consumer-side gap.
-  - **H7, the confined-fleet profile** (its own ADR). Agents and gateways run in separate pods (containers in one
-    pod share a network namespace, so an in-pod sidecar cannot separate their egress), and the member key is mounted
-    only in the gateway pod. Agent pods reach only the gateway: no instance metadata, no Kubernetes API, no admin
-    routes. A blocked connection never reaches the gateway, so it is observed only through the network's own
-    telemetry. Without that telemetry the claim is "blocked", not "recorded". A node self-report states what it can
-    verify, and states network confinement as `Unverified`.
   - **A1, authority at execution.** Under the profile, every protected operation requires an established mandate,
     checked at the execution boundary. Queued, retried and delegated work keeps the requirement, and long-running
     work declares whether it re-authorises or runs to a stated bound.

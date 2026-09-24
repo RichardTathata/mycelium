@@ -1,0 +1,7 @@
+# Boundary H item H7 — the fleet's namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: confined-fleet
+  labels:
+    mycelium.dev/profile: confined-fleet

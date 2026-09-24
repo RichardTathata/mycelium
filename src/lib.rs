@@ -276,6 +276,7 @@ pub use agent::{
 /// adopter cannot see cannot hold their replacement evaluator to anything.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::ae_contract;
+pub use agent::confinement::{ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{
     read_evidence_journal, read_evidence_journal_from, Appended, EvidenceCursor, EvidenceJournal,
