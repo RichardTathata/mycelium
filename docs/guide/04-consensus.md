@@ -48,8 +48,48 @@ sequenceDiagram
 | `append(stream, entry)` | `kv()` | Append to an ordered log — entries keyed by HLC, so ordering is causal and cluster-wide unique |
 | `scan_log(stream, from, to)` | `kv()` | Range scan the log by HLC window |
 | `distributed_lock(name, ttl)` | `consensus()` | Acquire an exclusive lock (returns a `LockGuard`); TTL prevents deadlock |
-| `elect_leader(group)` | `consensus()` | Nominate one node as leader for the group |
+| `elect_leader(group)` | `consensus()` | Nominate one node as leader — returns the id only, so it cannot tell you *how* it knows |
+| `elect_leader_receipt(group)` | `consensus()` | **Prefer this.** Returns `Leadership { leader, epoch, basis }` — the rung the answer reached, and a fencing token |
+| `join_group(name)` / `leave_group(name)` | `mesh()` | Join or leave a group. **An election needs an electorate**: a group nobody has joined is refused, not decided alone |
 | `emit_reliable(kind, scope, payload)` | `service()` | Signal with explicit ACK |
+
+---
+
+## What a successful election means
+
+**An election needs an electorate.** A group whose roster this node cannot see — unknown, or one
+nobody joined — is **refused** (`ElectorateUnavailable`), not decided alone. Join the group first:
+
+```rust
+agent.mesh().join_group("my-group");            // embedded
+// or over HTTP: POST /gateway/mesh/group {"group":"my-group"}
+```
+
+Before 2026-09-24 an empty roster counted as one member with a quorum of one, satisfied by the
+proposer's own vote — so every node committed its own candidate and the fleet agreed only if gossip
+happened to reconcile before anyone looked. *"I cannot see members"* must not mean *"I have
+authority to decide alone."* An **explicit** one-member group still elects normally; what is refused
+is inferring authority from absence.
+
+**Then read the rung, not just the name:**
+
+```rust
+let l = agent.consensus().elect_leader_receipt("my-group").await?;
+match l.basis {
+    LeadershipBasis::Decided  => { /* a quorum chose us, at this ballot, bound by digest */ }
+    LeadershipBasis::Observed => { /* this is what our replica says; fine for following */ }
+}
+```
+
+**Neither rung is an exclusive grant that stays true**, and no coordinator-free protocol can offer
+one — leadership can be superseded at any later ballot. If you need exclusivity, **fence on
+`l.epoch`** at the resource: it is the commit's HLC, monotonic across successive holders, so a
+resource that refuses a lower token is genuinely fenced. Do not fence on the ballot, which regresses
+under gossip lag.
+
+The distinction is not pedantry. LWW can decide which *record* survives; it cannot undo work two
+callers each performed after being told they had won. *Convergent leader preference* and *exclusive
+ownership* are two capabilities, and only the second needs a fence.
 
 ---
 

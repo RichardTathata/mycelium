@@ -584,26 +584,78 @@ impl ConsensusHandle {
     /// If this node wins, returns its own `NodeId`. If another node committed first,
     /// reads the winner from the committed KV slot and returns it.
     pub async fn elect_leader(&self, group: &str) -> Result<NodeId, ConsistencyError> {
+        self.elect_leader_receipt(group).await.map(|l| l.leader)
+    }
+
+    /// Elect a leader for `group`, returning a [`Leadership`] that **names the rung it reached**
+    /// and carries a fencing token.
+    ///
+    /// Prefer this over [`elect_leader`](Self::elect_leader), which returns a bare `NodeId` and so
+    /// cannot distinguish *"a quorum chose me"* ([`LeadershipBasis::Decided`]) from *"this is what
+    /// my replica currently says"* ([`LeadershipBasis::Observed`]). That distinction decides
+    /// whether two callers can act as leader at once, which is exactly the thing a caller wanted to
+    /// know and the old signature could not express.
+    ///
+    /// ## What a success means, and what it does not
+    ///
+    /// `Decided` is the strongest rung the protocol offers: a quorum of the electorate voted for
+    /// this value at this ballot, **bound to it by digest**, and no other value can have been
+    /// committed at that ballot. `Observed` means only that this node's replica holds a converged
+    /// value — sound for *following* a leader, and not evidence the cluster agrees right now.
+    ///
+    /// **Neither rung is an exclusive grant that stays true.** Leadership can be superseded at any
+    /// later ballot, and no coordinator-free protocol can promise otherwise; the honest instrument
+    /// for exclusivity is to **fence on [`Leadership::epoch`] at the resource**, which is monotonic
+    /// across successive holders. LWW can decide which *record* survives; it cannot undo work two
+    /// callers each performed after being told they had won.
+    ///
+    /// ## Convergence is observed, not assumed
+    ///
+    /// This used to sleep a fixed second and then read the local slot, which the replay inventory
+    /// already flagged as *"the one whose duration is a correctness assumption"*. It now **polls**
+    /// until the slot holds a value, bounded by the same budget — so a fast cluster answers
+    /// immediately, a slow one still gets its second, and the answer is a value that was actually
+    /// there rather than one a timer hoped for. Lengthening a sleep only changes how often the
+    /// difference is visible.
+    pub async fn elect_leader_receipt(
+        &self,
+        group: &str,
+    ) -> Result<crate::agent::overlay_consistent::Leadership, ConsistencyError> {
+        use crate::agent::overlay_consistent::{Leadership, LeadershipBasis};
+
         let slot  = format!("leader/{group}");
         let value = Bytes::from(self.ctx.node_id.to_string().into_bytes());
 
-        // Read the AUTHORITATIVE leader from the converged slot — never assume "I committed → I won".
-        let leader_from_slot = |this: &Self| -> Option<NodeId> {
-            this.consensus_get(&slot)
-                .and_then(|raw| std::str::from_utf8(&raw).ok()?.parse::<NodeId>().ok())
+        // Read the AUTHORITATIVE leader from the converged slot — never assume "I committed → I
+        // won". Carries the commit's HLC, which is the fencing token.
+        let read_slot = |this: &Self| -> Option<(NodeId, u64)> {
+            let (raw, hlc) = crate::consensus::live_committed_with_hlc(
+                &this.ctx.kv_state, &slot, crate::consensus::causal_now_ms(&this.ctx.hlc))?;
+            let id = std::str::from_utf8(&raw).ok()?.parse::<NodeId>().ok()?;
+            Some((id, hlc))
         };
-        match self.group_propose(group, &slot, value, ConsensusConfig::default()).await {
+
+        match self.group_propose(group, &slot, value.clone(), ConsensusConfig::default()).await {
             ConsensusResult::Committed { .. } => {
-                // #164 class: an optimistic `Committed` is NOT mutually exclusive — two proposers
-                // can both commit against their local view. Returning `self` here split-brained the
-                // election (both nodes reported themselves leader). Mirror `distributed_lock`: let
-                // the winning commit converge (the committed key is HLC-LWW resolved), then return
-                // the converged leader — which may not be this node (audit 2026-07-15).
-                mycelium_core::sim_seam::sleep_ms("elect/converge", 1000).await;
-                leader_from_slot(self).ok_or(ConsistencyError::Superseded)
+                // #164 class: an optimistic `Committed` is NOT mutually exclusive on its own — the
+                // binding and one-vote-per-ballot rules are what make it decisive, and the
+                // converged slot is still the authority on *which* value survived. Poll for it
+                // rather than sleeping a fixed second and hoping.
+                let decided = self.await_converged_slot(&read_slot).await;
+                match decided {
+                    // Our value survived: a quorum chose it, so this is the strongest rung.
+                    Some((leader, epoch)) if leader.to_string().as_bytes() == value.as_ref() =>
+                        Ok(Leadership { leader, epoch, basis: LeadershipBasis::Decided }),
+                    // Someone else's did: we are reporting what we see, not what we decided.
+                    Some((leader, epoch)) =>
+                        Ok(Leadership { leader, epoch, basis: LeadershipBasis::Observed }),
+                    None => Err(ConsistencyError::Superseded),
+                }
             }
             ConsensusResult::Superseded { .. } =>
-                leader_from_slot(self).ok_or(ConsistencyError::Superseded),
+                read_slot(self)
+                    .map(|(leader, epoch)| Leadership { leader, epoch, basis: LeadershipBasis::Observed })
+                    .ok_or(ConsistencyError::Superseded),
             ConsensusResult::Timeout { ballots_tried, .. } =>
                 Err(ConsistencyError::Timeout { ballots_tried }),
             ConsensusResult::TopologyUnsatisfied { .. } =>
@@ -613,6 +665,29 @@ impl ConsensusHandle {
             // about, one level down.
             ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
+        }
+    }
+
+    /// Poll for the committed slot to hold a value, bounded by the convergence budget.
+    ///
+    /// Replaces `sleep(1s); read`. The budget is unchanged — what changes is that the answer is a
+    /// value that was **observed to be there**, at whatever moment it arrived, rather than whatever
+    /// happened to be present when a timer fired. A fast cluster answers in milliseconds; a slow
+    /// one still gets its full second before giving up.
+    async fn await_converged_slot(
+        &self,
+        read: &impl Fn(&Self) -> Option<(NodeId, u64)>,
+    ) -> Option<(NodeId, u64)> {
+        const BUDGET_MS: u64 = 1000;
+        const STEP_MS:   u64 = 25;
+        let mut waited = 0;
+        loop {
+            if let Some(found) = read(self) { return Some(found); }
+            if waited >= BUDGET_MS { return None; }
+            // Through the timer seam, so a replay can run this at 0, at the step, or longer —
+            // the same treatment the fixed sleep had (`elect/converge`).
+            mycelium_core::sim_seam::sleep_ms("elect/converge", STEP_MS).await;
+            waited += STEP_MS;
         }
     }
 }

@@ -380,7 +380,7 @@
         <strong>The gossip layer is always available.</strong> Discovery, state propagation, and event routing keep working even when nodes partition. No coordinator needed.
       </div>
       <div class="callout callout-purple">
-        <strong>Consensus is a lightweight opt-in overlay.</strong> Reach for <code>consistent_set</code>, <code>distributed_lock</code>, or <code>elect_leader</code> only where your application actually demands ordering guarantees.
+        <strong>Consensus is a lightweight opt-in overlay.</strong> Reach for <code>consistent_set</code>, <code>distributed_lock</code>, or <code>elect_leader_receipt</code> only where your application actually demands ordering guarantees. A leadership answer names the rung it reached — <em>a quorum chose me</em> or <em>this is what my replica says</em> — and carries a fencing token, because exclusivity is enforced at the resource, never by the fact that a call returned success.
       </div>
     </div>
   </div>

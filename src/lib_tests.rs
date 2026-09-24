@@ -8968,3 +8968,53 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
+
+/// **A leadership answer names the rung it reached.**
+///
+/// `elect_leader` returns a bare `NodeId`, which cannot distinguish *"a quorum chose me"* from
+/// *"this is what my replica currently says"* — and callers read the bare id as an **exclusive
+/// grant**, because nothing in the type said otherwise. Those are different answers, and the
+/// difference decides whether two callers can act as leader at once.
+///
+/// This pins the distinction end to end: a node that proposes into its own one-member electorate
+/// and wins reports `Decided`, and carries a non-zero `epoch` — the fencing token that is the
+/// honest instrument for exclusivity, rather than the leader's identity or the fact that the call
+/// returned `Ok`.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn a_leadership_answer_names_its_rung() {
+    let agent = make_agent();
+    let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+    agent.mesh().join_group("rung");
+
+    let l = agent.consensus().elect_leader_receipt("rung").await.expect("an established electorate elects");
+
+    assert_eq!(l.leader, *agent.node_id(), "a one-member electorate elects its only member");
+    assert_eq!(
+        l.basis, crate::LeadershipBasis::Decided,
+        "our own proposal committed at quorum — that is the strongest rung, and it should say so",
+    );
+    assert!(l.was_decided_here());
+    assert!(l.epoch > 0, "the fencing token is the commit's HLC, and must be usable");
+
+    // The legacy call still works and agrees about *who*; what it cannot tell you is *how*.
+    assert_eq!(
+        agent.consensus().elect_leader("rung").await.expect("legacy call"),
+        l.leader,
+    );
+}
+
+/// **An election with no electorate does not produce a leadership answer at all** — it refuses,
+/// rather than handing back a stale winner from an earlier, differently-constituted election.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn an_unjoined_group_yields_no_leadership() {
+    let agent = make_agent();
+    let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+
+    match agent.consensus().elect_leader_receipt("never-joined").await {
+        Err(crate::ConsistencyError::ElectorateUnavailable { observed_members, .. }) =>
+            assert_eq!(observed_members, 0),
+        other => panic!("expected a refusal with no electorate, got {other:?}"),
+    }
+}

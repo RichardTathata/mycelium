@@ -341,11 +341,38 @@ above, the Dev-facing controls and their Ops runbooks:
 | Audit → SIEM/WORM export | `GossipAgent::with_audit_sink` (`AuditSink`) | [audit](../operations/audit.md) |
 | Audit retention (checkpoint/prune) | `audit_checkpoint` / `audit_prune_to_checkpoint` | [audit](../operations/audit.md) |
 | Compromise remediation | `rotate_identity_on_compromise` · `POST /gateway/identity/revoke` | [cert-rotation](../operations/cert-rotation.md) |
-| Authenticated identity (reject unsigned) | `require_identity_proofs` (`GOSSIP_REQUIRE_IDENTITY_PROOFS`) | [cert-rotation](../operations/cert-rotation.md) |
+| Authenticated identity (reject unsigned) | `require_identity_proofs` (`GOSSIP_REQUIRE_IDENTITY_PROOFS`) — **off by default**, see below | [cert-rotation](../operations/cert-rotation.md) |
+| Sealed identity record (keys + proof in one entry) | `sys/identity-signed/{node}` — written automatically by every TLS node | [cert-rotation](../operations/cert-rotation.md) |
 | GDPR erasure (crypto-shred) | `SubjectKeyRegistry` (`encrypt_for`/`decrypt_for`/`destroy`) | [data-erasure](../operations/data-erasure.md) |
 
 The adopter/auditor control map (what Mycelium provides vs. what you own) is the
 [shared-responsibility matrix](../operations/shared-responsibility-matrix.md).
+
+### Identity proofs: what turning them on actually requires
+
+`require_identity_proofs` rejects an identity entry this node cannot authenticate. It is **off by
+default**, and the reason is worth knowing before you turn it on.
+
+Every TLS node publishes a **sealed** record — `sys/identity-signed/{node}` — carrying its key
+history **and** the proof that authenticates them in **one** KV entry. That matters because the
+older form was *two* entries, `sys/identity/` and `sys/identity-proof/`, which are two gossip
+messages with no ordering between them: a peer requiring proofs could learn the identity first,
+reject it, and hold **no key** for that node until the proof arrived. One entry cannot arrive in two
+parts, so the window is closed **by construction rather than by timing**.
+
+With the flag set, **only the sealed record is accepted** — the legacy pair is refused, not because
+it is invalid but because it is two messages. So the precondition for turning it on is the ordinary
+one: **every node must run a release that writes the sealed record.** Check before you set it:
+
+```bash
+curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'
+```
+
+**And the limit it does not close.** *Proofs required* is **not** *identity authenticated*. First
+sighting of a node you have never seen is still **trust on first use** — there is nothing
+established to chain a self-signed entry to. What closes that is an **anchor**: a direct,
+CA-validated connection. Proofs close the unsigned-mimic residual; anchors close the first-sighting
+one. They are complementary, not alternatives.
 
 **Rolling upgrade window.** Each wire version is backward-compatible with the previous one:
 `read_frame` accepts both `WIRE_VERSION` and `PREV_WIRE_VERSION` (currently **12** and **11**

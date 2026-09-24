@@ -375,3 +375,41 @@ looked. A refusal is the honest answer to a question that has no answer yet.
 
 **An explicit one-member group elects normally** — what is refused is inferring authority from
 absence, never solo authority somebody actually established.
+
+
+## "Who leads this group?" — and what the answer is worth
+
+A leadership answer now says **which rung it reached**, because the two answers people conflate are
+genuinely different:
+
+| `basis` | What a quorum did | Safe to… |
+|---|---|---|
+| **`Decided`** | a quorum voted for **this** value at this ballot, bound to it by digest | act on, **fenced by `epoch`** |
+| **`Observed`** | nothing — this is what *this node's replica* currently holds | *follow* a leader; not to claim exclusivity |
+
+```rust
+let l = agent.consensus().elect_leader_receipt("my-group").await?;
+if l.was_decided_here() {
+    // A quorum chose us. Carry `l.epoch` to the resource.
+    resource.write_fenced(l.epoch, payload)?;
+}
+```
+
+**Neither rung is an exclusive grant that stays true**, and no coordinator-free protocol can offer
+one. Leadership can be superseded at any later ballot. The instrument for exclusivity is the
+**fencing token**, `Leadership::epoch` — the commit's HLC, monotonic across successive holders, so a
+resource that refuses a lower token is genuinely fenced. Do **not** fence on the ballot: it
+regresses under gossip lag.
+
+**The failure this prevents, stated plainly.** LWW can decide which *record* survives. It cannot
+undo work two callers each performed after being told they had won. If your resource cannot refuse a
+stale token, no election result — from this substrate or any other — will save you.
+
+### If the answer is slow
+
+The election polls for the committed slot to converge, bounded by one second. A fast cluster answers
+in milliseconds. If you routinely wait the full budget, the slot is not converging: check roster
+completeness (`GET /gateway/mesh/group?group=G`) on every node, and look for a partition.
+
+This used to be a fixed one-second sleep, so *every* election took a second and a slow cluster
+silently got whatever was present when the timer fired.

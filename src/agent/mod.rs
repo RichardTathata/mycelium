@@ -166,7 +166,7 @@ pub use emergent::{
 #[cfg(feature = "consensus")]
 pub use lock_service::LockService;
 #[cfg(feature = "consensus")]
-pub use overlay_consistent::{ConsistencyError, LockGuard};
+pub use overlay_consistent::{ConsistencyError, Leadership, LeadershipBasis, LockGuard};
 #[cfg(feature = "consensus")]
 pub use consensus_handle::ConsensusHandle;
 pub use service_handle::ServiceHandle;
