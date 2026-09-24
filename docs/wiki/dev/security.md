@@ -77,6 +77,38 @@ the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key select
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
 identity.
 
+## Identity proofs are required by default (2026-09-24)
+
+`require_identity_proofs` defaults to **`true`**. An unsigned `sys/identity/{V}` — the pre-Phase-2
+mimic — is rejected rather than accepted-and-flagged.
+
+**Why the flip is cheap, and why that is also the danger.** Every TLS node has written
+`sys/identity-proof/{self}` unconditionally since Phase 2 (**v2.3.0**, 2026-07-24), so within the
+one-release window a rolling upgrade is supported across, **no honest node is affected** — and
+flipping it broke **no test**, because the tests that exercise the behaviour set the flag
+explicitly. A default that nothing asserts can be flipped back by a merge or a well-meant "restore
+rollout tolerance" with nothing failing, so the value itself is now pinned
+(`config::tests::the_default_requires_identity_proofs`) and the join is pinned separately
+(`lib_tests::identity_proof_default::a_default_configuration_rejects_an_unsigned_identity_entry`) —
+because a default nothing exercises end to end is a default nobody has checked.
+
+**The limit, kept visible on purpose.** *Proofs required* is **not** *identity authenticated*.
+First sighting of a node never seen is still **trust on first use**: a self-signed entry is accepted
+because there is nothing established to chain it to, so an admitted-but-hostile member can still
+introduce a key for a node nobody has met. What closes that is an **anchor** — a direct,
+CA-validated connection (Phase 1b) — after which an unchained key is rejected *and counted* in
+`identity_anchor_conflicts`. Proofs close the unsigned-mimic residual; anchors close the
+first-sighting one; they are complementary, not alternatives.
+
+That boundary has its own test
+(`requiring_proofs_does_not_close_trust_on_first_use`), written so that **if the TOFU window is
+ever closed the test fails and must be rewritten** rather than quietly continuing to pass — the
+alternative being a caveat in prose that rots while the code moves under it.
+
+**Who this matters to beyond the mesh:** `mycelium-commitment`'s offer/award signatures verify
+against keys a caller resolves, and `sys/identity/{node}` is the obvious source for a node
+participant. The strength of *that* chain was the reason this default was worth revisiting.
+
 ## Threat model revision 2 (v3 item 8, 2026-09-13)
 
 `docs/threat-model.md` §5 adds the four boundaries the contracts axis introduces — **D** a foreign principal across a

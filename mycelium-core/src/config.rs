@@ -919,13 +919,30 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_identity_issuer: Option<String>,
 
-    /// **Require signed identity proofs** (identity-auth Phase 3). When `true`, a `sys/identity/{V}`
-    /// entry **without** a valid `sys/identity-proof/{V}` is **rejected** (not merged into
-    /// `peer_keys`) — closing the last poisoning residual (an unsigned entry mimicking a pre-Phase-2
-    /// node). `false` (default) keeps rollout tolerance: unsigned entries are accepted (+ the
-    /// Phase-1b tripwire). **Enable only after every node in the cluster runs the Phase-2 release**
-    /// (writes proofs) — like a `PREV_WIRE_VERSION` window, flipping it before full rollout would
-    /// reject legitimate pre-upgrade nodes. Set via `GOSSIP_REQUIRE_IDENTITY_PROOFS`.
+    /// **Require signed identity proofs** (identity-auth Phase 3). A `sys/identity/{V}` entry
+    /// **without** a valid `sys/identity-proof/{V}` is **rejected** — not merged into `peer_keys` —
+    /// which closes the residual where an unsigned entry mimics a pre-Phase-2 node.
+    ///
+    /// **`true` by default since the release that flipped it.** Every TLS node has written its
+    /// proof unconditionally since Phase 2 (v2.3.0, 2026-07-24): `sys/identity/{self}` and
+    /// `sys/identity-proof/{self}` are written back to back at startup. So within any version range
+    /// this project supports for a rolling upgrade — one release — **no honest node is affected**,
+    /// and what the default now rejects is a node predating v2.3.0, or something imitating one.
+    /// The earlier guidance ("enable only after every node runs the Phase-2 release") was written
+    /// when that rollout was ahead of us rather than ten releases behind.
+    ///
+    /// **Set it to `false`** — or `GOSSIP_REQUIRE_IDENTITY_PROOFS=0` — if you genuinely run nodes
+    /// older than v2.3.0. They will otherwise be unable to join: their identity entries carry no
+    /// proof, and this node will refuse them.
+    ///
+    /// **What it does not close, and the distinction matters.** *Proofs required* is not *identity
+    /// authenticated*. First sighting of a node this one has never seen is still **trust on first
+    /// use**: a self-signed entry is accepted, because there is nothing established to chain it to.
+    /// What closes that is an **anchor** — a direct, CA-validated connection recording the peer's
+    /// key (Phase 1b) — and the two mechanisms are complementary rather than alternatives. Pinned
+    /// by `lib_tests::identity_proof_default::requiring_proofs_does_not_close_trust_on_first_use`,
+    /// which is written to fail if that window is ever closed, so the claim here cannot rot.
+    ///
     /// See `docs/operations/cert-rotation.md`.
     #[serde(default)]
     pub require_identity_proofs: bool,
@@ -1035,7 +1052,7 @@ impl Default for GossipConfig {
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
-            require_identity_proofs:       false,
+            require_identity_proofs:       true,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
             domain_profile:                DomainProfile::Open,
             egress:                        EgressPolicy::default(),
@@ -1627,6 +1644,22 @@ impl GossipConfig {
 mod tests {
     use super::*;
     use crate::node_id::NodeId;
+
+    /// **The default requires identity proofs**, and this pins it.
+    ///
+    /// Flipping it changed no test — every TLS node has written its proof unconditionally since
+    /// Phase 2 (v2.3.0), so honest nodes are unaffected and the suites stayed green. That is
+    /// precisely why the default needs a pin of its own: a value nothing asserts can be flipped
+    /// back by a merge, a refactor or a well-meant "restore rollout tolerance", and **nothing would
+    /// fail**. The behaviour of both arms is tested in `agent::http` (`validate_and_merge_identity`);
+    /// what is tested here is which arm a deployment gets when it says nothing.
+    #[test]
+    fn the_default_requires_identity_proofs() {
+        assert!(
+            GossipConfig::default().require_identity_proofs,
+            "an unsigned sys/identity entry is rejected unless an operator opts out",
+        );
+    }
 
     // ── WS-B M4 fan-out resolution ────────────────────────────────────────
 

@@ -7570,6 +7570,98 @@ fn a_mandate_identifier_from_the_wire_is_never_empty() {
     assert_eq!(p, back);
 }
 
+// ── The identity-proof default (Phase 3, on by default) ──────────────────────
+//
+// `validate_and_merge_identity`'s two arms are unit-tested in `agent::http`, and the default value
+// is pinned in `mycelium-core::config`. What is tested here is the **join**: that a node built from
+// `GossipConfig::default()` actually reaches the rejecting arm, without an operator setting
+// anything — because a default nothing exercises end to end is a default nobody has checked.
+//
+// And the second test states the limit, which matters more than it looks: requiring proofs closes
+// *one* residual (an unsigned entry mimicking a pre-Phase-2 node) and **not** trust-on-first-use.
+// Anyone reading "identity proofs required" as "identity is authenticated" would be wrong, so the
+// boundary gets an executable statement rather than a caveat in prose that can quietly rot.
+#[cfg(feature = "tls")]
+mod identity_proof_default {
+    use super::*;
+    use crate::agent::helpers::{encode_identity_proof, validate_and_merge_identity};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn keys() -> papaya::HashMap<NodeId, Vec<[u8; 32]>> {
+        papaya::HashMap::new()
+    }
+    fn anchors() -> papaya::HashMap<NodeId, std::collections::HashSet<[u8; 32]>> {
+        papaya::HashMap::new()
+    }
+
+    /// A node that configures nothing rejects an unsigned identity entry — the default is what
+    /// decides, not a flag somebody remembered to set.
+    #[test]
+    fn a_default_configuration_rejects_an_unsigned_identity_entry() {
+        let cfg = GossipConfig::default();
+        assert!(cfg.require_identity_proofs, "the default is what this test is about");
+
+        let victim = NodeId::new("127.0.0.1", 7101).unwrap();
+        let attacker_key = SigningKey::from_bytes(&[42u8; 32]).verifying_key().to_bytes();
+        let history = attacker_key.to_vec();
+
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(
+            &pk, &anchor, &counter, &victim, &history, &[attacker_key],
+            None,                              // no proof — the pre-Phase-2 mimic
+            cfg.require_identity_proofs,       // whatever the default says
+        );
+        assert!(pk.pin().get(&victim).is_none(), "an unsigned entry does not enter peer_keys");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "and it is counted, not silently dropped");
+    }
+
+    /// **The limit, stated as a test.** With proofs required, a *self-signed* entry for a node this
+    /// one has never seen is still accepted: first sighting is trust-on-first-use, because there is
+    /// nothing yet to chain to. Proofs close the "unsigned mimic" residual; anchors — a direct,
+    /// CA-validated connection — are what close this one.
+    ///
+    /// The test exists so nobody reads `require_identity_proofs: true` as *identity is
+    /// authenticated*. It is not a defect being enshrined; it is a boundary being kept visible, and
+    /// if the TOFU window is ever closed this test should fail and be rewritten rather than quietly
+    /// keep passing.
+    #[test]
+    fn requiring_proofs_does_not_close_trust_on_first_use() {
+        let stranger = NodeId::new("127.0.0.1", 7102).unwrap();
+        let sk = SigningKey::from_bytes(&[43u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let history = vk.to_vec();
+        // Self-signed: the signer is one of the keys in its own published history.
+        let sig = sk.sign(&history).to_bytes();
+        let proof = encode_identity_proof(&vk, &sig);
+
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(
+            &pk, &anchor, &counter, &stranger, &history, &[vk], Some(&proof), /* require */ true,
+        );
+        assert!(
+            pk.pin().get(&stranger).is_some_and(|v| v.contains(&vk)),
+            "first sighting of an unknown node is TOFU even with proofs required",
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "and it is not flagged, because it is not a conflict");
+
+        // Once a key IS established for that node, the TOFU door shuts: a second, differently-keyed
+        // self-signed entry cannot introduce itself — it must chain to what is already trusted.
+        let usurper = SigningKey::from_bytes(&[44u8; 32]);
+        let u_vk = usurper.verifying_key().to_bytes();
+        let u_history = u_vk.to_vec();
+        let u_sig = usurper.sign(&u_history).to_bytes();
+        let u_proof = encode_identity_proof(&u_vk, &u_sig);
+        validate_and_merge_identity(
+            &pk, &anchor, &counter, &stranger, &u_history, &[u_vk], Some(&u_proof), true,
+        );
+        assert!(
+            !pk.pin().get(&stranger).is_some_and(|v| v.contains(&u_vk)),
+            "an unchained key never joins an established set — this is the poisoning case",
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "and that one IS flagged");
+    }
+}
+
 // ── The federation verbs at the gateway (item 2 row 11) ──────────────────────
 //
 // `/gateway/federation/*` is the consumer side of federation, and the thing the Python and
