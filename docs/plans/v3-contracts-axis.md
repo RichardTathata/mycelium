@@ -2,7 +2,7 @@
 
 **Status:** **delivered — all eight items shipped across v2.5.0 → v2.12.0**, wire v12 unchanged; §10 is the
 state of play and §10.2 names the four things that remain (none blocked on unwritten code). Adopted plan —
-**approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **rev 1.11, 2026-09-13** restores the **coordination sense of "contract"** — the thesis in §1.2 and the **commitment companion** (contract net) in §6.9, D39 · **rev 1.12, 2026-09-13** brings §12 (delivery surfaces) up to date with revs 1.9–1.11: AE, AE-T and CN examples, chapters, runbook rows; the decks lead with the wedge · **rev 1.15, 2026-09-23** rewrites §10 as the delivered state (the queue it replaced was nine releases stale) and records two structural corrections: items 2/3/4/5 shipped in core, not as companions · **Owner:** Mycelium maintainers · **Version of record:** this file
+**approved by the reviewer as the strategic baseline at rev 1.2** · rev 1.3 records their four implementation requirements · rev 1.4 adds §12, the delivery surfaces · rev 1.5 adds item 3's two gates and §13 · rev 1.6 adds the RA slice (§6.7, D29–D32) and records `mycelium-reason` 0.6.2 · rev 1.7 adds the *identifiers in paths* rule (§9) · **rev 1.8, 2026-09-09** records §13's second question — reversible components and the three scopes of undo (§§13.4–13.5, D33–D35) (§11 lists changes) · **rev 1.9, 2026-09-12** adds the authorisation and evidence slice (§6.8, D36), requested by the project owner · **rev 1.10, 2026-09-13** pulls a **thin AE slice (AE-T)** forward to Phase B with the gateway as the first, declared enforcement point (§6.8, D37–D38) · **rev 1.11, 2026-09-13** restores the **coordination sense of "contract"** — the thesis in §1.2 and the **commitment companion** (contract net) in §6.9, D39 · **rev 1.12, 2026-09-13** brings §12 (delivery surfaces) up to date with revs 1.9–1.11: AE, AE-T and CN examples, chapters, runbook rows; the decks lead with the wedge · **rev 1.16, 2026-09-24** records **D40** — *supersede, do not reverse*: §13.4's own replacement transaction smuggled a scope-3 promise, and "drain" has no terminal condition where resolution is by need · **rev 1.15, 2026-09-23** rewrites §10 as the delivered state (the queue it replaced was nine releases stale) and records two structural corrections: items 2/3/4/5 shipped in core, not as companions · **Owner:** Mycelium maintainers · **Version of record:** this file
 (`docs/plans/v3-contracts-axis.md`); `ROADMAP.md § v3.0` carries the index and points here.
 
 **Provenance.** On 2026-09-05 an external reviewer (a) found five defects in v2.4.1 — three P1 persistence
@@ -861,6 +861,7 @@ Every place this plan departs from the reviewer's six documents. "Kept" means we
 | D37 *(rev 1.10, provisional until the AE0 ADR)* | AE | OPA/Rego as the one real adapter | **Cedar**, in-process via the `cedar-policy` crate: deterministic, no sidecar or daemon (philosophy § Not a platform), and the NovusLens export is already engine-checked for it. Rego stays a replaceable integration (the wasm host could run OPA-compiled policies later; not claimed). | The one adapter must not arrive as a process |
 | D38 *(rev 1.10)* | AE | AE-T waits for Phases C–E | A thin slice at the gateway, Phase B, with its guarantee stated as a route-level preflight and `coverage.complete: false` naming the unobserved routes; AE1–AE4 unchanged | Posture rule 6: the composed guarantee is claimed only where the resource enforces |
 | D39 *(rev 1.11)* | CN | Leave contract net as an unscheduled "auction" packaging candidate subsumed by item 1 | The **commitment companion** (§6.9): scheduled after 1·PR2, Phase C exit, named for the model not the price; the executable form of §13.2 and the third coordination model of the epoch | Verification contracts exist to make coordination contracts trustworthy (§1.2); an award that is not a receipt is a KV write with a hopeful name |
+| D40 *(rev 1.16)* | §13.4 | *(our own D35)* A WASM **replacement transaction**: mark the running version draining, switch generation, then **reverse and uninstall** the old one | **Supersede, do not reverse.** No drain, no reverse, no promise about in-flight work — only an atomic generation switch, most of which already exists (provisioner · `withdraw` · evaporation · a consensus slot). Recorded as a decision, not a backlog item | *Drain has no terminal condition here.* Resolution is **by need** against a `CapFilter`, so there is no registry of who resolved what and no way to obtain one without the coordinator this design avoids; a partitioned caller can surface after the drain would have been declared complete. And *"reverse and uninstall"* reads as scope-1 teardown at one dependent and becomes a **scope-3** claim at many — the exact smuggling §13.4 warned about, committed by §13.4 itself. Raised in review, 2026-09-24 |
 
 **Kept without change:** the four-receipt vocabulary; the three trust relationships; the four record types; the three
 lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disappearance; the asymmetric uncertainty rule;
@@ -1504,6 +1505,43 @@ hierarchical slot, §9's tail-capture rule), then reverse and uninstall the old 
 leaves the old version live, which is *detection, not prevention*, done correctly; the artifact being
 content-addressed makes reconstructing it free. The decisive test is a two-version replacement whose second version
 fails during activation, proving the first survives intact.
+
+**⚠ D40 (2026-09-24) — most of the paragraph above is wrong, and the way it is wrong is the thing §13.4 warned
+about.** Raised in review: *trying to run the clock backwards is a mistake; once the mesh dependencies are
+non-trivial it becomes increasingly difficult to remove all effects.* That is not a difficulty. It is a
+**terminal-condition problem**, and it is structural:
+
+- **"Drain" has no terminal condition here.** Resolution is *by need* — a caller matches a `CapFilter` against
+  advertisements whenever it wants one. There is no registry of who resolved what, no reference count, and no way
+  to acquire one without adding the coordinator this design exists to avoid. "Wait for in-flight callers" asks a
+  question the architecture is built not to be able to answer, and a partitioned caller holding a stale resolution
+  can surface *after* the drain would have been declared complete. The set you would wait for is exactly the causal
+  cone §13.4 scope 3 calls unbounded and unknowable **by design**.
+- **"Reverse and uninstall the old one" is scope-1 language wearing a distributed promise.** At one dependent it
+  reads as *undo my local registrations*, which is legitimate. Scale the dependents and the same sentence becomes a
+  claim about unmaking effects other agents already assessed — which is scope 3, and refused. §13.4 says in as many
+  words that *"carrying the word inverse upward is how a component-lifecycle paradigm smuggles in a system-wide
+  rollback"*; this paragraph, written in the same note, did exactly that and nobody noticed for a fortnight.
+
+**The substrate already has the correct answer, and it is not a transaction: supersede, do not reverse.**
+
+- the old advertisement **evaporates** at 3× its refresh interval — needing *nobody alive* to run it, which is
+  precisely the property a drain cannot have (scope 2, posture rule 5);
+- a caller holding a stale resolution fails and **re-resolves**, which is the normal path rather than an error path;
+- dropping the registration tombstones the `cap/` entry, which `withdraw` already does.
+
+**What actually remains** is therefore much smaller than this section described: an **atomic generation switch** —
+instantiate privately, check requirements, commit which generation is current through a consensus slot — and then
+*nothing*. No drain. No reverse. No promise about in-flight work. The failure mode is already right by
+construction: a failure before the switch leaves the old version live. Most of that exists (provisioner,
+`withdraw`, evaporation, and a slot to commit a value in), which is why this is now recorded as a **decision, not a
+backlog item**: the residue is too small to call a feature, and building the rest would mean shipping a promise the
+substrate cannot keep.
+
+**And it sharpens §13.5 rather than replacing it.** The discriminator between a result that transfers and one that
+does not is **not** crash-versus-clean-unload. It is whether **the dependent set is knowable**. In a lexically
+scoped runtime it is, which is why the paper's proofs work. Here it is not, by design — so any result whose proof
+needs to enumerate dependents does not transfer, and that may be most of the temporal metatheory.
 
 **Not adopted:** making the gossip KV the Cordis context; a general-purpose inverse accumulator presented as a
 missing primitive; the word *inverse* for any effect another participant has acted on; any claim that the paper's
