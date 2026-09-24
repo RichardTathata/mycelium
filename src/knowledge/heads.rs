@@ -33,11 +33,10 @@
 //! every advance *before* reporting it. A persist failure is [`HeadVerdict::CheckpointNotPersisted`]
 //! and the checkpoint does not move.
 //!
-//! This module defines the contract and ships only [`MemoryCheckpointStore`], which is **not
-//! durable** and exists for tests. A durable store must go through the filesystem seam
-//! (`mycelium_core::sim_seam`, gated by `scripts/check-sim-seams.sh`); it arrives with K3's durable
-//! record store. Until then, rollback protection across a restart is exactly as durable as the
-//! [`CheckpointStore`] the embedder supplies — said here rather than implied.
+//! This module defines the contract. [`MemoryCheckpointStore`] is **not durable** and exists for
+//! tests. The durable reader is [`super::durable::DurableHeadCheckpoints`] (Boundary H item K3a):
+//! every advance is fsynced to the node-local journal before it is reported, and the journal is
+//! replayed when the reader reopens.
 //!
 //! # Trust on first use, stated
 //!
@@ -265,6 +264,8 @@ impl<S: CheckpointStore> HeadCheckpoints<S> {
     /// **Offer a head**, with whatever intermediate heads the presenter or the reader's own fetch
     /// supplied. The intermediates are only a pool to build the chain from: each one used is
     /// authenticated in turn, and any that do not fit are ignored.
+    ///
+    /// An advance is persisted through this reader's [`CheckpointStore`] before it is reported.
     pub fn offer(
         &mut self,
         offered: &SignedHead,
@@ -272,45 +273,80 @@ impl<S: CheckpointStore> HeadCheckpoints<S> {
         members: &impl MemberKeySource,
         external: &TrustedExternalIssuers,
     ) -> HeadVerdict {
+        match self.evaluate(offered, intermediates, members, external) {
+            Evaluation::Final(verdict) => verdict,
+            Evaluation::Fork(fork, verdict) => {
+                self.forks.push(fork);
+                verdict
+            }
+            Evaluation::Advance(pending) => {
+                let bytes = match self.state_with(&pending) {
+                    Ok(b) => b,
+                    Err(e) => return HeadVerdict::CheckpointNotPersisted(e),
+                };
+                // Persist first: an advance that would not survive a restart is not taken.
+                if let Err(e) = self.store.persist(&bytes) {
+                    return HeadVerdict::CheckpointNotPersisted(e);
+                }
+                self.apply(pending)
+            }
+        }
+    }
+
+    /// **Decide what an offer would do, without doing it** — the first half of a two-phase offer,
+    /// for a durable wrapper that must persist before it applies (Boundary H item K3a).
+    pub(crate) fn evaluate(
+        &self,
+        offered: &SignedHead,
+        intermediates: &[SignedHead],
+        members: &impl MemberKeySource,
+        external: &TrustedExternalIssuers,
+    ) -> Evaluation {
         let head = &offered.head;
         if head.record.issuer != head.issuer {
-            return HeadVerdict::MismatchedRecord;
+            return Evaluation::Final(HeadVerdict::MismatchedRecord);
         }
         if let Some(refusal) = authenticate(offered, members, external) {
-            return refusal;
+            return Evaluation::Final(refusal);
         }
 
         let key = (head.issuer.clone(), head.stream.clone());
         let offered_digest = head.digest();
         let Some(held) = self.checkpoints.get(&key).copied() else {
             // Trust on first use: nothing to check continuity against.
-            return self.advance(key, None, Checkpoint { seq: head.seq, digest: offered_digest });
+            return Evaluation::Advance(PendingAdvance {
+                key,
+                from: None,
+                next: Checkpoint { seq: head.seq, digest: offered_digest },
+            });
         };
 
         if head.seq < held.seq {
-            return HeadVerdict::StaleHead { held: held.seq, offered: head.seq };
+            return Evaluation::Final(HeadVerdict::StaleHead { held: held.seq, offered: head.seq });
         }
         if head.seq == held.seq {
             if offered_digest == held.digest {
-                return HeadVerdict::AlreadyHeld;
+                return Evaluation::Final(HeadVerdict::AlreadyHeld);
             }
-            return self.fork(key, held, offered.clone());
+            return fork(key, held, offered.clone());
         }
 
         // Higher: walk back through `prev` until the checkpoint is met, a divergence is proven, or a
         // link is missing.
+        let unavailable =
+            Evaluation::Final(HeadVerdict::ContinuityUnavailable { held: held.seq, offered: head.seq });
         let mut current = head.clone();
         loop {
             match current.prev {
                 Some(prev) if prev == held.digest => {
-                    return self.advance(
+                    return Evaluation::Advance(PendingAdvance {
                         key,
-                        Some(held.seq),
-                        Checkpoint { seq: head.seq, digest: offered_digest },
-                    );
+                        from: Some(held.seq),
+                        next: Checkpoint { seq: head.seq, digest: offered_digest },
+                    });
                 }
                 // A genesis head above the checkpoint: this history never passes through it.
-                None => return self.fork(key, held, offered.clone()),
+                None => return fork(key, held, offered.clone()),
                 Some(prev) => {
                     let parent = intermediates.iter().find(|c| {
                         c.head.issuer == head.issuer
@@ -318,22 +354,14 @@ impl<S: CheckpointStore> HeadCheckpoints<S> {
                             && c.head.digest() == prev
                             && authenticate(c, members, external).is_none()
                     });
-                    let Some(parent) = parent else {
-                        return HeadVerdict::ContinuityUnavailable {
-                            held: held.seq,
-                            offered: head.seq,
-                        };
-                    };
+                    let Some(parent) = parent else { return unavailable };
                     if parent.head.seq >= current.seq {
                         // Not a descending chain: it proves nothing about continuity.
-                        return HeadVerdict::ContinuityUnavailable {
-                            held: held.seq,
-                            offered: head.seq,
-                        };
+                        return unavailable;
                     }
                     if parent.head.seq <= held.seq {
                         // The chain reached the checkpoint's height without meeting it: it diverged.
-                        return self.fork(key, held, offered.clone());
+                        return fork(key, held, offered.clone());
                     }
                     current = parent.head.clone();
                 }
@@ -341,35 +369,59 @@ impl<S: CheckpointStore> HeadCheckpoints<S> {
         }
     }
 
-    fn advance(
-        &mut self,
-        key: (IssuerId, String),
-        from: Option<u64>,
-        next: Checkpoint,
-    ) -> HeadVerdict {
+    /// The second half: take an advance that has been persisted. Nothing checks again here — the
+    /// caller evaluated it and persisted it, in that order.
+    pub(crate) fn apply(&mut self, pending: PendingAdvance) -> HeadVerdict {
+        let to = pending.next.seq;
+        self.checkpoints.insert(pending.key, pending.next);
+        HeadVerdict::Advanced { from: pending.from, to }
+    }
+
+    /// Record a fork found by [`evaluate`](Self::evaluate).
+    pub(crate) fn record_fork(&mut self, fork: ForkRecord) {
+        self.forks.push(fork);
+    }
+
+    /// Build a reader from checkpoints a durable wrapper has already loaded.
+    pub(crate) fn from_checkpoints(
+        store: S,
+        checkpoints: BTreeMap<(IssuerId, String), Checkpoint>,
+    ) -> Self {
+        Self { store, checkpoints, forks: Vec::new() }
+    }
+
+    /// The whole state with `pending` applied, serialised for a [`CheckpointStore`].
+    fn state_with(&self, pending: &PendingAdvance) -> Result<Vec<u8>, String> {
         let mut proposed = self.checkpoints.clone();
-        proposed.insert(key, next);
+        proposed.insert(pending.key.clone(), pending.next);
         let state = PersistedState {
             version: STATE_VERSION,
             checkpoints: proposed.iter().map(|((i, s), c)| (i.clone(), s.clone(), *c)).collect(),
         };
-        let bytes = match serde_json::to_vec(&state) {
-            Ok(b) => b,
-            Err(e) => return HeadVerdict::CheckpointNotPersisted(e.to_string()),
-        };
-        // Persist first: an advance that would not survive a restart is not taken.
-        if let Err(e) = self.store.persist(&bytes) {
-            return HeadVerdict::CheckpointNotPersisted(e);
-        }
-        self.checkpoints = proposed;
-        HeadVerdict::Advanced { from, to: next.seq }
+        serde_json::to_vec(&state).map_err(|e| e.to_string())
     }
+}
 
-    fn fork(&mut self, key: (IssuerId, String), held: Checkpoint, offered: SignedHead) -> HeadVerdict {
-        let offered_seq = offered.head.seq;
-        self.forks.push(ForkRecord { issuer: key.0, stream: key.1, held, offered });
-        HeadVerdict::ForkedStream { held: held.seq, offered: offered_seq }
-    }
+/// What an offer would do, decided but not yet done.
+pub(crate) enum Evaluation {
+    /// Nothing changes.
+    Final(HeadVerdict),
+    /// A fork to record, and the verdict to report.
+    Fork(ForkRecord, HeadVerdict),
+    /// An advance to persist and then apply.
+    Advance(PendingAdvance),
+}
+
+/// A verified advance, not yet taken.
+pub(crate) struct PendingAdvance {
+    pub(crate) key: (IssuerId, String),
+    pub(crate) from: Option<u64>,
+    pub(crate) next: Checkpoint,
+}
+
+fn fork(key: (IssuerId, String), held: Checkpoint, offered: SignedHead) -> Evaluation {
+    let verdict = HeadVerdict::ForkedStream { held: held.seq, offered: offered.head.seq };
+    Evaluation::Fork(ForkRecord { issuer: key.0, stream: key.1, held, offered }, verdict)
 }
 
 /// `None` if the head is authentic and currently authorised; otherwise the refusal.

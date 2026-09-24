@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Durable knowledge stores** (Boundary H plan, milestone M2, item K3a; ADR
+  `docs/design/knowledge-validity.md` §4). `knowledge::durable::DurableKnowledgeStore` and
+  `DurableHeadCheckpoints` sit on the node-local journal (fsynced, never gossiped), which adds **no new
+  filesystem site** and no lock.
+  - Every verified record and every checkpoint advance is **fsynced before it is reported**, and memory
+    is unchanged if the journal refuses (`PutRefusal::NotPersisted`, `HeadVerdict::CheckpointNotPersisted`).
+  - Reopening replays the journal, restores records with their attributions, and still refuses a
+    rolled-back head.
+  - **An unreadable journal refuses to open**, rather than starting empty and resetting rollback
+    protection.
+  - The in-memory cores gain two-phase methods: `KnowledgeStore::verify_signed`, and `evaluate`/`apply`
+    on `HeadCheckpoints`.
+
+  **Not claimed:** the journal is never compacted, forks are in memory only, and nothing moves between
+  nodes yet (K3b).
+
 - **Signed stream heads with verified ancestry** (Boundary H plan, milestone M2, item K2; ADR
   `docs/design/knowledge-validity.md` §3). Heads were unsigned, and `advance_head` took any higher `seq`,
   so head 12 from a branch that diverged at 9 passed as "newer". Now:
