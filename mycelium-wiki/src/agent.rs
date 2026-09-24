@@ -611,9 +611,11 @@ impl<S: WikiStore + 'static> Wiki<S> {
 
         // Curator sentinel — split-brain reconciliation. The initial election settles on a fixed
         // window, so a lost gossip race can leave *two* nodes self-elected with no recovery (both
-        // write the shared store). Apply "lowest id wins" continuously, not just at election: if a
-        // curator with a lower node-id is visible, this (higher-id) node resigns. Convergence is
-        // deterministic — the lowest always sees itself as lowest and stays; every other steps down.
+        // write the shared store). Apply the ring's election rule continuously, not just at
+        // election: if the rule names a different visible curator, this node resigns. Convergence
+        // is deterministic — the winner sees itself as the winner and stays; every other steps
+        // down. (This said "lowest id wins" until 2026-09-24; the rule below has been rendezvous
+        // since the ring stopped handing one node every job — see the note at the match.)
         let me = Arc::clone(self);
         let sentinel = tokio::spawn(async move {
             let self_id = me.agent.node_id().to_string();

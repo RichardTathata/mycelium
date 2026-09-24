@@ -46,3 +46,34 @@ is a design change.
 the revert's), [`operations.md`](../operations.md) (default + one-line why),
 `docs/operations/cert-rotation.md`, `CHANGELOG.md`, `mycelium-core/src/config.rs`,
 `src/lib_tests.rs`, `src/agent/http.rs` (comments).
+
+---
+
+## Found on the way out: a test that stopped failing and started flipping a coin
+
+The revert's own CI went red on something unrelated —
+`mycelium-tuple-space::failover::auto_election_is_deterministic`, *"lowest candidate id did not win
+the election"*. It is not a regression from the revert. The election rule became **rendezvous** on
+2026-09-20 (`mycelium::election`, PR #369) and that test still asserted the rule it replaced.
+
+**It did not start failing. It started being a coin flip.** The ports are kernel-assigned, so
+whether `hash(ring, node)` favours the lower id is chance. It passed twice on `main` — which is why
+#369 and #370 both merged green — and failed on the next branch that ran it. The branch that caught
+it had nothing to do with elections.
+
+That is the same shape as the bug this log is about, one layer up: **a green run is evidence only
+about the run**. There, a default flip passed every gate that runs before merge because those gates
+cannot host the race. Here, a stale assertion passed because the coin came up heads twice. Neither
+was ever *checked*.
+
+**Fixed by asserting the property that is actually deterministic**, not by pinning the other answer:
+exactly one primary (which never depended on the rule), and the winner is **the node
+`mycelium::election::winner` names**, computed in the test from the same ring name and candidate ids
+the node uses. A future rule change now fails this test honestly, or passes it honestly, instead of
+re-rolling. Verified eight consecutive runs.
+
+Two stale comments went with it — `mycelium-wiki/src/agent.rs`'s sentinel comment said *"lowest id
+wins"* fifteen lines above a `mycelium::election::elect` call, and the wiki failover test's module
+note said the same. Both were only comments: the wiki's assertions are rule-agnostic (`is_curator()
+^ is_curator()`), which is why they survived the rule change. **That is the lesson worth copying** —
+the assertion that does not name the rule is the one that stayed true when the rule changed.

@@ -1,6 +1,6 @@
 //! Phase 2 resilience: live replication to a secondary, capability-TTL
 //! failure detection, promotion with id preservation, and the emergent Auto
-//! election (lowest candidate wins, loser becomes secondary).
+//! election (the ring's negotiated rule picks one, loser becomes secondary).
 
 use bytes::Bytes;
 use mycelium::{GossipAgent, GossipConfig, NodeId};
@@ -17,8 +17,9 @@ fn alloc_port() -> u16 {
     mycelium::test_util::alloc_port()
 }
 
-/// Two distinct free ports, lower first — so "lowest candidate id wins" stays deterministic
-/// without fixed ports.
+/// Two distinct free ports, lower first. The ordering is no longer what decides the election —
+/// rendezvous hashes the ring name into the weight — but it keeps the two ids stable and distinct,
+/// which the tests below still rely on.
 fn alloc_two_sorted_ports() -> (u16, u16) {
     loop {
         let (a, b) = (alloc_port(), alloc_port());
@@ -194,8 +195,16 @@ async fn failover_preserves_items_and_ids() {
     a_secondary.shutdown().await;
 }
 
-/// Two Auto nodes: exactly one becomes primary (the lowest node id), the
-/// other becomes secondary — no coordinator, both conclude from the ring.
+/// Two Auto nodes: exactly one becomes primary, the other secondary — no coordinator, both
+/// conclude from the ring — and the winner is **the one the election rule names**.
+///
+/// This test asserted *lowest node id wins* until 2026-09-24, four days after the rule became
+/// rendezvous (`mycelium::election`). The assertion did not start failing; it started being a
+/// **coin flip**, because the ports are kernel-assigned and `hash(ring, node)` has no reason to
+/// favour the lower one. It passed twice on `main` by luck and failed on the next branch — which is
+/// the only reason it was noticed. So the fix is not to pin the other answer: it is to assert the
+/// property that is actually deterministic — *the fleet agrees with the pure function* — computed
+/// here from the same ring name and candidate ids the node uses.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn auto_election_is_deterministic() {
     let (p_lo, p_hi) = alloc_two_sorted_ports();
@@ -218,10 +227,34 @@ async fn auto_election_is_deterministic() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // Lowest node id (base port) must have won.
-    assert!(ts1.is_primary(), "lowest candidate id did not win the election");
-    assert!(ts2.is_secondary(), "loser did not become secondary");
-    assert!(!ts2.is_primary(), "split brain: both candidates promoted");
+    // Exactly one primary, whichever it is — the property that never depended on the rule.
+    assert!(
+        ts1.is_primary() != ts2.is_primary(),
+        "split brain or no primary: ts1={} ts2={}",
+        ts1.is_primary(),
+        ts2.is_primary(),
+    );
+
+    // And it is the node the rule names. Both candidates are this build, so the negotiated rule is
+    // `Rule::CURRENT`; the ring name is the one `run_election` builds for this namespace, and
+    // hashing it is the whole point — a different ring would legitimately pick the other node.
+    let ids = vec![
+        NodeId::new("127.0.0.1", p_lo).expect("lo id"),
+        NodeId::new("127.0.0.1", p_hi).expect("hi id"),
+    ];
+    let expected = mycelium::election::winner("tuple/elect.primary", &ids, mycelium::election::Rule::CURRENT)
+        .expect("two candidates always elect someone")
+        .clone();
+    let winner_is_lo = expected == ids[0];
+    assert_eq!(
+        ts1.is_primary(), winner_is_lo,
+        "the fleet elected the other node: rule says {expected}, lo={} hi={}",
+        ids[0], ids[1],
+    );
+    assert!(
+        if winner_is_lo { ts2.is_secondary() } else { ts1.is_secondary() },
+        "loser did not become secondary",
+    );
 
     // The elected space actually works.
     let id = ts2.put("s", Bytes::from_static(b"x")).await.expect("put");
