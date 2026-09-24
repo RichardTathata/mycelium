@@ -35,7 +35,32 @@ prior, not a mechanism. Nobody traced a path from the change to the assertion �
 taken one grep — before writing the conclusion into six documents. Recorded as rule 3 on the
 [testing page](../testing/testing.md) §a green run is evidence about that run.
 
-## A traced hypothesis (not a confirmed cause — the distinction is the whole point of this entry)
+## Established: the group has no members, so every node decides alone
+
+**Verified on a live three-node overlay cluster**, not inferred: `GET
+/gateway/kv/keys?prefix=grp/` returns **HTTP 200 `{"keys":[]}`** on all three nodes. Nothing joins
+`s12-demo` — not the scenario (`tests/overlay/scenarios/s12_leader_election.py`), not the demo
+binary (`examples/three_node_demo.rs`).
+
+So `overlay_group_propose` (`src/agent/http.rs:2830`) computes `members.len().max(1)` = **1**,
+`compute_quorum_size(0, 1)` = `1/2+1` = **1**, and the proposer inserts **its own vote** before it
+starts listening (`src/consensus.rs:820`). Each node therefore commits its own candidate unopposed:
+three singleton elections wearing the shape of one. Most runs converge by LWW before anyone reads;
+occasionally a caller reads first, and the scenario sees two answers.
+
+**The API-level defect is the general one, and it is worth stating apart from S12:** *"I cannot see
+members"* silently means *"I have authority to decide alone."* An unknown or empty group should be
+an explicit error; a singleton election should require an explicit, valid singleton membership
+rather than being inferred from absence.
+
+*(Method note: the first attempt at this query returned empty because `wget` is not in the image —
+a missing binary reading as an empty result. Re-run with `curl` and status codes. The same
+failure-looks-like-success shape as everything else in this investigation.)*
+
+**Still unresolved:** that this is what happened in the `8b588c6` run. The roster emptiness is
+established; the causal link to that specific failure is not.
+
+## A secondary hypothesis — the converge sleep (symptom-hider, not cause)
 
 `elect_leader` (`src/agent/consensus_handle.rs:556`) never returns "I committed, therefore I won" —
 that was fixed in the 2026-07-15 audit, because an optimistic `Committed` is not mutually exclusive.
@@ -61,8 +86,11 @@ Two things follow, and both match the observed shape (one node dissenting, two a
    lost a ballot can therefore read its local slot *before* the winner's commit has reached it and
    return whatever is there — including a value from its own earlier optimistic commit.
 
-This is a *mechanism traced to the assertion*, which is what the previous hypothesis lacked. It is
-still **not** a confirmed cause of the `8b588c6` run.
+This is a *mechanism traced to the assertion*, which the first hypothesis lacked — but it is
+**subordinate** to the findings above. The sleep decides how often disagreement is *visible*, not
+whether it can happen. Lengthening it hides the defect; it does not close it. See also
+[votes are not bound to what they voted for](2026-09-24-consensus-vote-binding.md), the
+safety-class defect underneath all of this, which is independent of group membership.
 
 **What would confirm it:** a failing run in which the dissenting node's `leader/s12-demo` slot agrees
 with the majority when read again a few seconds later. That distinguishes "read too early" from
