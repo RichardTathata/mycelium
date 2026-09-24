@@ -73,6 +73,50 @@ while IFS=$'\t' read -r prefix record; do
   fi
 done <<< "$FORBIDDEN"
 
+# ── The reserved-prefix lists on the front door ──────────────────────────────────────────────────
+#
+# WHY THIS IS HERE, and why it is a script rather than a lint checklist item.
+#
+#   `src/lib.rs` § KV namespace ownership is canon. `docs/guide/building-on-mycelium.md` restates it
+#   TWICE — a blockquote an adopter reads first, and a copy-paste bullet they paste into their own
+#   notes — because a downstream integrator acts on it: writing under a reserved prefix puts their
+#   state in a namespace the substrate will overwrite, gossip and anti-entropy.
+#
+#   That restating has drifted FOUR times (wiki-lint calibration ledger: 2026-07-20, 2026-09-04,
+#   2026-09-05, 2026-09-24). Three times the fix was "update the list"; twice the sharpening was
+#   "diff EVERY occurrence, mechanically" — and it drifted again anyway, because nothing ran the
+#   diff. The fourth occurrence lost all four v3 prefixes (`knowledge/`, `mandate/`, `rights/`,
+#   `cn/`) even though the plan's §7 required both lists to be updated at each item's PR 1.
+#
+#   A check that depends on someone remembering to run it has the same failure mode as the thing it
+#   checks. So it runs in `make check` now.
+lib_prefixes=$(grep -oE '^//! \| `[a-z_-]+/' src/lib.rs | grep -oE '`[a-z_-]+/' | tr -d '`' | sort -u)
+front_door="docs/guide/building-on-mycelium.md"
+if [ -f "$front_door" ]; then
+  missing=""
+  while read -r prefix; do
+    [ -z "$prefix" ] && continue
+    # The prefix must appear in the reserved-list region of the front door. Both occurrences live
+    # between the "do not write under them" line and the end of the copy-paste block; requiring it
+    # simply to appear SOMEWHERE in the file would pass on a stray mention in prose, which is how a
+    # list stays short while looking covered.
+    # Counted with a leading non-identifier char so `log/` does not also match `clog/`, and with
+    # no backtick in the pattern (a backtick inside $(...) is command substitution, not a literal).
+    count=$(grep -oE "[^a-z_-]${prefix%/}/" "$front_door" | wc -l | tr -d " ")
+    if [ "$count" -lt 2 ]; then
+      missing="${missing}  ${prefix} (appears ${count}× — the front door states the list twice)\n"
+    fi
+  done <<< "$lib_prefixes"
+  if [ -n "$missing" ]; then
+    echo "FAIL reserved-prefix list on the front door is missing prefixes src/lib.rs owns:"
+    printf "$missing"
+    echo "  fix: docs/guide/building-on-mycelium.md — BOTH the blockquote and the copy-paste bullet"
+    status=1
+  else
+    echo "Reserved-prefix front-door sweep: clean ($(echo "$lib_prefixes" | wc -l | tr -d ' ') prefixes, both lists)."
+  fi
+fi
+
 if [ "$status" -ne 0 ]; then
   cat >&2 <<'MSG'
 

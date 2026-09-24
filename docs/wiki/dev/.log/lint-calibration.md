@@ -234,3 +234,23 @@ Entry format:
   been able to answer without a human noticing the stale parenthetical. Sharpening: `docs/plans/` is
   a swept root for §1 and §2, with the *plan of record* checked specifically against the release's
   changed defaults and surfaces.
+- 2026-09-24 (full pass): **§1 front-door reserved-prefix list — the FOURTH occurrence, now a gate.**
+  Both lists in `building-on-mycelium.md` were missing **all four v3 prefixes** (`knowledge/`,
+  `mandate/`, `rights/`, `cn/`), and the blockquote was additionally missing seven older companion
+  ones. The plan's §7 *required* both front-door lists to be updated at each item's PR 1; that was
+  not done for any of the four. Prior sharpenings (2026-09-04, 2026-09-05) both said "diff **every**
+  occurrence, mechanically" — and the drift shipped anyway, **because nothing ran the diff**. A check
+  that depends on somebody remembering to run it has the same failure mode as the thing it checks.
+  Sharpening (structural, not another point patch): the diff is now a **gate** —
+  `scripts/check-kv-namespaces.sh` extracts the `src/lib.rs` prefix set and requires each prefix to
+  appear **twice** in the front door (once per list), and `make check` already runs that script.
+  Verified by planting a single removed prefix: it fails with the prefix named, and **exits 1**.
+- 2026-09-24 (full pass): **§1 front-door install snippet — pointing at the wrong GitHub account for
+  ~two months.** `building-on-mycelium.md`'s copy-paste block used
+  `github.com/RichardEko/mycelium`; the repository moved to `RichardTathata` around 2026-07-31. It
+  survives today only on GitHub's rename redirect — and an abandoned account name that someone else
+  can later claim is a supply-chain hazard, not a cosmetic error. The same block pinned `tag =
+  "v2.4.4"`, **nine releases stale** (the 2026-09-06 sharpening added the pin check; no pass had run
+  since). Sharpening: the front-door check diffs the install block's **host** against
+  `git remote get-url origin`, not only its tags — a pin can be current and still point at the wrong
+  repository. Also fixed two issue/PR permalinks in guide 14 carrying the old account.

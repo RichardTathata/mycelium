@@ -87,7 +87,7 @@ the local fill and writes the `sys/load/` pheromone.
 signals) to drive its opacity from the outside.
 
 **Why** — Cross-node Individual-scoped **signals** don't currently land in a
-remote node's `signal_rx` handler ([issue #55](https://github.com/RichardEko/mycelium/issues/55)).
+remote node's `signal_rx` handler ([issue #55](https://github.com/RichardTathata/mycelium/issues/55)).
 More fundamentally, stigmergy *is* self-report: a node advertises its own
 saturation; others read the trail and decide locally. Load is never injected
 from outside.
@@ -104,7 +104,7 @@ group.
 **Anti-pattern** — Expecting a governor's `max` / `drain` to hold while the
 always-on emergent auto-join is still free to re-join every eligible node.
 
-**Why** — Until [PR #57](https://github.com/RichardEko/mycelium/pull/57) the
+**Why** — Until [PR #57](https://github.com/RichardTathata/mycelium/pull/57) the
 emergent watcher auto-joined every cap-matching node *unconditionally* and
 re-joined anything the governor shed — so `max` was unenforceable. The fix makes
 a group with a live intent governor-owned; the demo only works because of it.

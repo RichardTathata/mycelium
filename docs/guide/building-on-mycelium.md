@@ -17,15 +17,15 @@ Mycelium is distributed **by git tag, not crates.io** — pin a release tag:
 
 ```toml
 # Full runtime (KV + signals + consensus + capabilities + gateway/MCP/A2A + TLS).
-mycelium = { git = "https://github.com/RichardEko/mycelium", tag = "v2.4.4" }
+mycelium = { git = "https://github.com/RichardTathata/mycelium", tag = "v2.13.0" }
 
 # Or the minimal substrate — Layers I+II only, ~⅓ the dep tree, no Axum:
-mycelium-core = { git = "https://github.com/RichardEko/mycelium", tag = "v2.4.4" }
+mycelium-core = { git = "https://github.com/RichardTathata/mycelium", tag = "v2.13.0" }
 
 # Companion crates — independent version lines, same repo (a git dep on a
 # companion resolves the workspace-internal `mycelium` automatically):
-mycelium-guardrails = { git = "https://github.com/RichardEko/mycelium", tag = "mycelium-guardrails-v1.0.0" }
-mycelium-reason     = { git = "https://github.com/RichardEko/mycelium", tag = "mycelium-reason-v0.6.2", features = ["llm", "gateway"] }
+mycelium-guardrails = { git = "https://github.com/RichardTathata/mycelium", tag = "mycelium-guardrails-v1.0.0" }
+mycelium-reason     = { git = "https://github.com/RichardTathata/mycelium", tag = "mycelium-reason-v0.6.2", features = ["llm", "gateway"] }
 ```
 
 > **Why git, not `cargo add mycelium`.** The `mycelium`/`mycelium-core` names on
@@ -71,7 +71,9 @@ prefixes; **do not write under them:**
 
 > `grp/` · `sys/` · `consensus/` · `cap/` · `req/` · `cap-group/` · `gcap/` · `mailbox/` ·
 > `schemas/` · `tools/` · `agent/` · `svc/` · `log/` · `clog/` · `lock/` · `prompts/` ·
-> `skills/` · `manifest/` · `audit/` (the full authoritative table with per-key semantics is in
+> `skills/` · `manifest/` · `audit/` · `installable/` · `comp/` · `tuple/` · `wiki/` · `ckpt/` ·
+> `ckptw/` · `facts/` · `knowledge/` · `mandate/` · `rights/` · `cn/` (the full authoritative table
+> with per-key semantics is in
 > [`src/lib.rs`](../../src/lib.rs) → *KV namespace ownership*). Note `log/` in particular:
 > `KvHandle::append` writes `log/{stream}/…`, so give your streams an app-scoped name —
 > don't write raw `log/` keys.
@@ -139,7 +141,8 @@ inherits the contract without reading everything:
 - **Our KV keys live under `myapp/…`.** Never write under the substrate's reserved
   prefixes: grp/ sys/ consensus/ cap/ req/ cap-group/ gcap/ mailbox/ schemas/ tools/
   agent/ svc/ log/ clog/ lock/ prompts/ skills/ installable/ comp/ tuple/ wiki/ ckpt/ ckptw/
-  facts/ manifest/ audit/ (authoritative table: mycelium `src/lib.rs` → KV namespace ownership).
+  facts/ manifest/ audit/ knowledge/ mandate/ rights/ cn/ (authoritative table: mycelium
+  `src/lib.rs` → KV namespace ownership).
 - **One compatibility rule, Rust's definition.** The substrate ships compatible additions on the
   2.x line: a public field or type never changes shape. When a verb's answer gains meaning (the
   contracts axis: a typed receipt beside today's `bool` / `persisted`), the new representation is
