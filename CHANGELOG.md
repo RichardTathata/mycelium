@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.14.0] — 2026-09-24
 
-**A coordinator nobody declared, and an identity default that had outlived its caveat.** Wire
+**A coordinator nobody declared — and a default that looked ready and was not.** Wire
 **v12** unchanged (`PREV = 11`); additive on the 2.x line.
 
 The centrepiece began as a question in a design note — *is role accumulation constrained anywhere?*
@@ -27,18 +27,23 @@ it — with the rule **negotiated from the candidate set** rather than flag-daye
 election rule node-by-node would leave two holders each believing itself correct and neither
 resigning.
 
-Beside it, `require_identity_proofs` now defaults to **`true`**. Every TLS node has written its
-proof since v2.3.0, so the two-release rollout the old guidance prescribed finished ten releases
-ago; the caveat had outlived the condition it was written for.
+Beside it, the second story is one that **did not ship**, and is here because the reason is worth
+more than the change would have been. `require_identity_proofs` was flipped to default-`true` — the
+rollout the old guidance prescribed finished ten releases ago — and **reverted a day later**, before
+any release carried it. Identity and proof are two separate gossip writes, so requiring proofs opens
+a window in which a peer holds no key for a node; the key heals itself, and a **leader election
+decided inside the window does not**. It broke no unit test, because the suites that gate a PR have
+no cross-process ordering window to lose a race in. The default stays off, now pinned with its
+reason attached.
 
 **Upgrade notes.** `FleetSnapshot` gained `role_concentration` (an exhaustive struct literal needs
-it). Nodes older than **v2.3.0** write no identity proof and will be refused — set
-`require_identity_proofs = false` if you run any. Election behaviour changes only once every
-candidate advertises `election_rule`, so a mixed fleet keeps the old rule until the upgrade
-completes.
+it). Election behaviour changes only once every candidate advertises `election_rule`, so a mixed
+fleet keeps the old rule until the upgrade completes. **No identity-proof action:** the default is
+unchanged from 2.13.0.
 
 **Not claimed:** rendezvous is a **spread, not a bound** (three rings over three nodes still leave
-~11% chance one node wins all three), and *proofs required* is **not** *identity authenticated* —
+~11% chance one node wins all three), which is why P10 stays — mitigate the cause, keep the ability
+to see the residue. And *proofs required* would **not** have been *identity authenticated* anyway:
 first sighting remains trust-on-first-use, which anchors close, not proofs.
 
 ### Added

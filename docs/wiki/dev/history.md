@@ -63,21 +63,35 @@ candidate advertises what it can compute (`election_rule`, an ordinary capabilit
 gossip), and every elector takes the **minimum across live candidates**. A ring is only as new as
 its oldest member. What remains is a *convergence-length* window (seconds), not a rollout-length one.
 
-**`require_identity_proofs` defaults to `true`.** Every TLS node has written
+**`require_identity_proofs` was flipped to `true`, and reverted before release** — the release's
+second lesson rather than its second feature. The argument was sound: every TLS node has written
 `sys/identity-proof/{self}` unconditionally since Phase 2 (v2.3.0), so the two-release rollout the
-old caveat prescribed finished ten releases ago. Flipping it **broke no test** — which was the
-finding, not the reassurance: nothing asserted which arm a deployment gets when it configures
-nothing, so the default now has pins of its own, and a third test states the boundary it does *not*
-close (first sighting is still trust-on-first-use; anchors close that, not proofs), written to fail
-if that window is ever shut.
+old caveat prescribed finished ten releases ago. What it missed is that identity and proof are
+**two separate `kv_set` calls**, hence two gossip messages with no ordering between them. A peer
+that learns the identity first rejects it and holds no key for that node. The *key* heals itself
+(`start_identity_watcher` subscribes to the broader `sys/identity` prefix precisely so a late proof
+re-validates), so the window is transient — **but a leader election decided inside it is not**, being
+one-shot. The Docker suite split on `S12 leader election … Nodes disagree on leader` after twelve
+consecutive greens.
+
+Flipping it **broke no test**, and that is the transferable part: every test exercising the
+behaviour sets the flag explicitly, and the in-process suites have no cross-process ordering window
+to lose a race in. *A config default whose only failure mode is a race between processes is not
+testable by the suite that gates the PR* — a green `make check` on a default flip is not evidence,
+it is the absence of a gate. What survives the revert: the default is pinned **with its reason**
+(flipping it back means editing a test that explains itself), the end-to-end join is pinned beside
+it, and a third test states the boundary the flag never closed (first sighting is still
+trust-on-first-use; anchors close that, not proofs), written to fail if that window is ever shut.
+A future flip's precondition is an **atomic** identity+proof record, not "every node writes a proof
+anyway".
 
 Also: `RELEASING.md` **step 8** — a tag is not an announcement. The Releases page had said *"Latest:
 v2.4.4"* since 2026-09-12 while eleven tags shipped behind it, four carrying security fixes, because
 **nothing fails when the publish step is skipped**. All eleven were backfilled from their own tag
 messages.
 
-**Upgrade notes:** `FleetSnapshot` gained `role_concentration`; nodes older than v2.3.0 write no
-proof and are refused; election behaviour changes only once every candidate advertises its rule.
+**Upgrade notes:** `FleetSnapshot` gained `role_concentration`; election behaviour changes only
+once every candidate advertises its rule; **no identity-proof action** — the default is unchanged.
 
 ## v2.13.0 release — 2026-09-23 (tag `v2.13.0`) — the axis' last open questions, and a gateway that was not closed
 
