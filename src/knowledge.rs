@@ -36,6 +36,7 @@
 
 pub mod correction;
 pub mod gate;
+pub mod issuer;
 pub mod resolution;
 pub mod store;
 

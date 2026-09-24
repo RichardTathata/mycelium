@@ -8705,3 +8705,100 @@ async fn an_unjoined_group_refuses_to_elect_on_both_surfaces() {
 
     agent.shutdown().await;
 }
+
+/// **Boundary H P1 gate — issuer binding on live nodes.** Two TLS members, A and B.
+///
+/// 1. A signs a knowledge record as itself; B attributes it to A as `Current` on the member path,
+///    using only B's own view of A's keys.
+/// 2. B's signing API refuses to sign a record naming A's issuer.
+/// 3. A record naming A's issuer but signed with B's identity key is `BadSignature` at B: one member
+///    cannot be another issuer.
+/// 4. A rotates and **revokes** the key that signed the first record. B then reports that record as
+///    `Revoked` — still attributable to A as history, no longer current.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn test_boundary_h_p1_issuer_binding_on_live_nodes() {
+    use crate::config::TlsConfig;
+    use crate::knowledge::issuer::{
+        verify_issuer, Authenticity, IssuerPath, SignAsMemberError, TrustedExternalIssuers,
+        UnverifiableReason,
+    };
+    use crate::knowledge::{IssuerId, KnowledgeRecord, RecordKind};
+
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id = |p: u16| NodeId::new("127.0.0.1", p).unwrap();
+    let node_a = id(port_a);
+    let cert_dir = std::env::temp_dir().join(format!("myc-p1-{port_a}-{port_b}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+
+    let mk = |port: u16, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 1;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(id(port), cfg)
+    };
+    let a = Arc::new(mk(port_a, vec![]));
+    let b = Arc::new(mk(port_b, vec![node_a.clone()]));
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+
+    let record = |issuer: IssuerId, at_ms: u64| {
+        KnowledgeRecord::new(issuer, RecordKind::Assessment, at_ms, "release/x/1", b"j".to_vec(), vec![])
+            .expect("well formed")
+    };
+    let external = TrustedExternalIssuers::new();
+
+    // 1. A signs as itself; B attributes it to A once it has learned A's key.
+    let by_a = record(IssuerId::for_node(&node_a), 1_000);
+    let sig_a = a.sign_knowledge_record(&by_a).expect("A signs as itself");
+    let old_key = a.identity_public_key().expect("a has a tls identity");
+    let mut attributed = false;
+    for _ in 0..200 {
+        if verify_issuer(&by_a, &sig_a, &b.knowledge_member_keys(), &external)
+            == (Authenticity::Current { path: IssuerPath::Member(node_a.clone()), key: old_key })
+        {
+            attributed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(attributed, "B should attribute A's record to A on the member path");
+
+    // 2. B's signing API will not sign as A.
+    assert_eq!(
+        b.sign_knowledge_record(&by_a),
+        Err(SignAsMemberError::NotThisMember { issuer: IssuerId::for_node(&node_a) })
+    );
+
+    // 3. Signing A's issuer with B's key does not make B into A.
+    let forged = record(IssuerId::for_node(&node_a), 1_001);
+    let forged_sig = b.sign_with_identity(&forged.canonical_bytes()).expect("B has a key");
+    assert_eq!(
+        verify_issuer(&forged, &forged_sig, &b.knowledge_member_keys(), &external),
+        Authenticity::Unverifiable(UnverifiableReason::BadSignature)
+    );
+
+    // 4. Rotate, then revoke the key that signed `by_a`: attribution survives, currency does not.
+    let new_key = a.rotate_identity(Duration::from_millis(500)).await.expect("rotation");
+    assert_ne!(new_key, old_key);
+    a.revoke_identity_key(old_key).expect("revoke");
+    let mut revoked_seen = false;
+    for _ in 0..200 {
+        let v = verify_issuer(&by_a, &sig_a, &b.knowledge_member_keys(), &external);
+        if v == (Authenticity::Revoked { path: IssuerPath::Member(node_a.clone()), key: old_key }) {
+            assert!(v.is_attributable() && !v.is_current());
+            revoked_seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(revoked_seen, "after revocation B must report A's old record as Revoked, not Current");
+
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
