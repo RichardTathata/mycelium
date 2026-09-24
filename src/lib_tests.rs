@@ -8604,6 +8604,7 @@ async fn gateway_kv_write_requires_an_explicit_value() {
 /// unopposed — *N* singleton elections wearing the shape of one, reconciled afterwards by LWW if at
 /// all. The arithmetic was not the defect. The defect was that **"I cannot see members" silently
 /// meant "I have authority to decide alone."**
+#[cfg(feature = "consensus")]
 #[test]
 fn an_electorate_is_established_not_inferred() {
     use crate::agent::helpers::{resolve_electorate, Electorate};
