@@ -212,6 +212,9 @@ pub(super) async fn run_http_server(
         .route("/govern/tuning",                  post(gw_govern_tuning))
         .route("/govern/timing",                  post(gw_govern_timing))
         .route("/govern/membership",              post(gw_govern_membership))
+        .route("/mesh/group",                     get(gw_group_members)
+                                                  .post(gw_group_join)
+                                                  .delete(gw_group_leave))
         .route("/govern/profile",                 post(gw_govern_profile))
         // ── Legible Emergence Phase 2: the relational fleet snapshot (localize) ─
         .route("/fleet",                          get(gw_fleet_snapshot))
@@ -731,6 +734,10 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/govern/tuning"       => "govern:write",
         "/gateway/govern/timing"       => "govern:write",
         "/gateway/govern/membership"   => "govern:write",
+        // Membership is a node speaking for itself: read the roster with `mesh:read`, join or
+        // leave **this** node with `mesh:write`. There is deliberately no verb for enrolling
+        // another node — see `gw_group_join`.
+        "/gateway/mesh/group"          => if read { "mesh:read" } else { "mesh:write" },
         "/gateway/govern/profile"      => "govern:write",
         // Legible Emergence Phase 2/3: the relational fleet snapshot + causal explain.
         "/gateway/fleet"               => "fleet:read",
@@ -1337,6 +1344,79 @@ async fn gw_govern_timing(
 /// {"group": "workers", "min": 3, "max": 10, "drain": ["10.0.0.5:9000"], "target": null}
 /// ```
 /// `group` + `min` required; `max` `null`/absent = unbounded; `drain` cooperative self-removal.
+#[derive(Deserialize)]
+struct GroupBody { group: String }
+
+/// `POST /gateway/mesh/group` — **this node** joins signal-boundary group `{group}`.
+///
+/// Body: `{"group": "G"}`. Returns `{"ok": true, "group": "G", "members": [...]}`.
+///
+/// **A node joins itself, and there is no verb for enrolling another node.** That is the shape the
+/// substrate already commits to everywhere else — an agent promises only its own behaviour — and it
+/// is why this route takes no node id. Membership is published at `grp/{group}/{self}` and gossips
+/// like any other soft state.
+///
+/// **Why this route exists (2026-09-24).** It did not, and its absence was a finding: the gateway
+/// offered `POST /gateway/overlay/elect` over a group while providing no supported way for an HTTP
+/// caller to *populate* one. The only roster an HTTP client could reach was the empty one — which
+/// was precisely the state that used to confer solo authority
+/// (`ConsensusResult::ElectorateUnavailable`). An election surface without a membership surface is
+/// a surface that can only be used wrongly.
+///
+/// **What this route does not settle.** *Who* may join, *who* may change an electorate, and *which*
+/// membership version an election is decided against are open questions, tracked in
+/// `docs/wiki/dev/.log/2026-09-24-consensus-vote-binding.md`. This is the operation; the governance
+/// of the operation is the agreement repair's business. Today a caller holding `mesh:write` may
+/// join this node to any group, exactly as an embedded caller holding the handle already may.
+#[cfg(feature = "gateway")]
+async fn gw_group_join(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body): Json<GroupBody>,
+) -> impl IntoResponse {
+    if body.group.is_empty() || body.group.contains('/') {
+        return (StatusCode::BAD_REQUEST,
+                Json(json!({"error": "group must be non-empty and contain no '/'"}))).into_response();
+    }
+    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
+        .join_group(body.group.as_str());
+    let members: Vec<String> = crate::agent::helpers::group_members_ctx(&ctx.agent_ctx, &body.group)
+        .iter().map(|n| n.to_string()).collect();
+    Json(json!({ "ok": true, "group": body.group, "members": members })).into_response()
+}
+
+/// `DELETE /gateway/mesh/group?group=G` — **this node** leaves `G`, tombstoning `grp/G/{self}`.
+#[cfg(feature = "gateway")]
+async fn gw_group_leave(
+    Query(q):   Query<GroupQuery>,
+    State(ctx): State<Arc<HttpCtx>>,
+) -> impl IntoResponse {
+    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
+        .leave_group(q.group.as_str());
+    Json(json!({ "ok": true, "group": q.group })).into_response()
+}
+
+/// `GET /gateway/mesh/group?group=G` — the roster this node can see for `G`.
+///
+/// This is the read an operator needs *before* an election: it answers "does this node have an
+/// electorate, and is its view complete?", which is the question a refusal will otherwise answer
+/// for them.
+#[cfg(feature = "gateway")]
+async fn gw_group_members(
+    Query(q):   Query<GroupQuery>,
+    State(ctx): State<Arc<HttpCtx>>,
+) -> impl IntoResponse {
+    let members: Vec<String> = crate::agent::helpers::group_members_ctx(&ctx.agent_ctx, &q.group)
+        .iter().map(|n| n.to_string()).collect();
+    Json(json!({
+        "group":        q.group,
+        "members":      members,
+        "declared_min": crate::agent::helpers::declared_electorate_min(&ctx.agent_ctx, &q.group),
+    })).into_response()
+}
+
+#[derive(Deserialize)]
+struct GroupQuery { group: String }
+
 async fn gw_govern_membership(
     State(ctx): State<Arc<HttpCtx>>,
     Json(body): Json<serde_json::Value>,
@@ -2841,6 +2921,20 @@ async fn overlay_group_propose(
 ) -> crate::consensus::ConsensusResult {
     let prefix  = crate::signal::grp_prefix(group);
     let members = crate::store::scan_kv_prefix(ctx.kv_state.as_ref(), &prefix);
+    // The electorate must be established, not inferred from absence — the HTTP surface enforces
+    // the same contract as the library path (`ConsensusHandle::group_propose`), because a caller
+    // must not get a different answer for reaching the same election through a socket.
+    let declared_min = super::helpers::declared_electorate_min(ctx, group);
+    match super::helpers::resolve_electorate(members.len(), declared_min) {
+        super::helpers::Electorate::Established(_) => {}
+        super::helpers::Electorate::Unavailable { observed, declared_min } =>
+            return crate::consensus::ConsensusResult::ElectorateUnavailable {
+                slot:  Arc::from(slot),
+                group: Arc::from(group),
+                observed_members: observed,
+                declared_min,
+            },
+    }
     // NO `+ 1`: the `grp/{group}/` roster already includes self (a node joins by writing its own
     // member key), so `+ 1` double-counts self and over-sizes the quorum — a solo group `{self}`
     // then needs 2 votes and can only ever cast 1 → spurious Timeout where the library path
@@ -3081,6 +3175,14 @@ async fn gw_overlay_lock_acquire(
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
         crate::consensus::ConsensusResult::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        crate::consensus::ConsensusResult::ElectorateUnavailable {
+            observed_members, declared_min, ..
+        } => (StatusCode::CONFLICT, Json(json!({
+            "ok": false,
+            "error": "electorate_unavailable",
+            "observed_members": observed_members,
+            "declared_min": declared_min,
+        }))).into_response(),
     }
 }
 
@@ -3142,6 +3244,23 @@ async fn gw_overlay_elect(
             (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": format!("timeout after {ballots_tried} ballot(s)") }))).into_response(),
         crate::consensus::ConsensusResult::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        // Nothing was proposed, so there is no leader. Answering from the committed slot here
+        // would hand back a *stale* winner from an earlier, differently-constituted election —
+        // which is the failure this refusal exists to prevent, one level down.
+        crate::consensus::ConsensusResult::ElectorateUnavailable {
+            observed_members, declared_min, ..
+        } => (StatusCode::CONFLICT, Json(json!({
+            "ok": false,
+            "error": "electorate_unavailable",
+            "observed_members": observed_members,
+            "declared_min": declared_min,
+            "detail": if observed_members == 0 {
+                "the group roster is empty (unknown or unjoined group) — an election needs \
+                 members, and absence is not authority"
+            } else {
+                "this node sees fewer members than the group declares; its view is partial"
+            },
+        }))).into_response(),
     }
 }
 

@@ -17,6 +17,11 @@ pub enum ConsistencyError {
     Superseded,
     /// Quorum met in headcount but the Hard topology gate was not satisfied.
     TopologyUnsatisfied,
+    /// **No electorate could be established, so nothing was decided** — the group roster is empty
+    /// (unknown or unjoined), or smaller than a fresh `MembershipIntent { min }` declares, meaning
+    /// this node's view is partial. An explicit one-member group still elects; what is refused is
+    /// inferring authority from absence. See `ConsensusResult::ElectorateUnavailable`.
+    ElectorateUnavailable { observed_members: usize, declared_min: usize },
 }
 
 impl std::fmt::Display for ConsistencyError {
@@ -28,6 +33,12 @@ impl std::fmt::Display for ConsistencyError {
                 write!(f, "another node committed to this slot first"),
             Self::TopologyUnsatisfied =>
                 write!(f, "quorum met but Hard topology gate not satisfied"),
+            Self::ElectorateUnavailable { observed_members: 0, .. } =>
+                write!(f, "no electorate: the group roster is empty (unknown or unjoined group) — \
+                           an election needs members, and absence is not authority"),
+            Self::ElectorateUnavailable { observed_members, declared_min } =>
+                write!(f, "no electorate: this node sees {observed_members} member(s) but the \
+                           group declares at least {declared_min} — the view is partial"),
         }
     }
 }

@@ -195,6 +195,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **rule-agnostic** — which is precisely why they survived the rule change, and is the shape worth
   copying.
 
+### Added
+
+- **A supported way to join a group over HTTP** — `GET`/`POST`/`DELETE /gateway/mesh/group`
+  (`mesh:read` / `mesh:write`).
+
+  Its absence was a finding in its own right. The gateway offered `POST /gateway/overlay/elect`
+  over a group while providing no route that could *populate* one: `grp_prefix` was read in
+  `http.rs` and written nowhere in the surface, and `/gateway/govern/membership` sets a
+  `MembershipIntent { min, max }` — it governs a roster's permitted population, it does not add a
+  member. **The only roster an HTTP caller could reach was the empty one**, which was exactly the
+  state that used to confer solo authority. An election surface without a membership surface is a
+  surface that can only be used wrongly.
+
+  **A node joins itself.** The route takes no node id and there is no verb for enrolling another
+  node — the same shape the substrate commits to everywhere else: an agent promises only its own
+  behaviour. `GET` returns the roster this node can see *and* the group's `declared_min`, which is
+  the read an operator wants **before** an election rather than after a refusal.
+
+  **What it does not settle**, and is tracked rather than implied: *who* may join, *who* may change
+  an electorate, and *which* membership version an election is decided against. This is the
+  operation; governing it belongs with the agreement repair
+  (`.log/2026-09-24-consensus-vote-binding.md`).
+
 ### Fixed
 
 - **`POST /gateway/kv` no longer succeeds at writing nothing.** It reads `value_b64`; when that
@@ -227,6 +250,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   true}`. Every first-party SDK (`mycelium-py`, `mycelium-ts`, `langgraph-checkpoint-mycelium`),
   the AFN scenario and the benches already send `value_b64` and are unaffected; the one caller that
   did not was the test helper fixed alongside this.
+
+### Fixed
+
+- **An election needs an electorate. Absence is not authority.** A group proposal whose roster this
+  node cannot see — an unknown or unjoined group — is now **refused**
+  (`ConsensusResult::ElectorateUnavailable`, `409 electorate_unavailable` at the gateway) instead of
+  being decided alone.
+
+  **What it was.** `members.len().max(1)` — an empty roster counted as **one** member, giving a
+  quorum of **one**, which the proposer's **own self-vote** satisfied before it began listening. So
+  every node committed its own candidate unopposed: *N* singleton elections wearing the shape of
+  one, reconciled afterwards by LWW if at all. The arithmetic was not the defect. The defect was
+  that *"I cannot see members"* silently meant *"I have authority to decide alone."*
+
+  **Partial views too.** A node that sees fewer members than the group declares through a fresh
+  `MembershipIntent { min }` is also refused. A partial view yields a *smaller* quorum — the same
+  defect wearing a plausible number.
+
+  **An explicit singleton still elects.** What is refused is inferring authority from absence, never
+  solo authority somebody actually established. A one-member roster decides normally, and a
+  declaration that has evaporated stops binding, so a stale intent cannot wedge a group shut.
+
+  Both surfaces enforce it — `ConsensusHandle::group_propose` and `POST /gateway/overlay/elect` —
+  because a caller must not get a different answer for reaching the same election through a socket.
+
+  **Upgrade notes.** `ConsensusResult` is now **`#[non_exhaustive]`** and gains
+  `ElectorateUnavailable`; `CommitError` gains `ElectorateUnavailable` (it is already
+  non-exhaustive); `ConsistencyError` gains `ElectorateUnavailable`. A `_` arm is required and
+  **must fail closed** — a refusal read as success is the exact class of bug this variant ends.
+  Same discipline as `CallRefusal`/`CommitmentRefusal` in v2.13.0. A deployment that relied on an
+  unjoined group electing a leader was relying on every node electing itself.
+
+  **This is one of three findings** in `.log/2026-09-24-consensus-vote-binding.md`. The other two —
+  votes not bound to the proposal they voted for, and no supported HTTP route by which a node joins
+  a group — are **not** fixed here and are tracked there.
 
 ## [2.13.0] — 2026-09-23
 

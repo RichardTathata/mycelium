@@ -25,8 +25,7 @@ use super::TaskCtx;
 use super::helpers::{
     cached_group_members_ctx, compute_quorum_size,
     kv_get, kv_scan_prefix, kv_set, kv_subscribe, make_consensus_engine_ctx,
-    suggest_leader_ctx,
-};
+    suggest_leader_ctx, declared_electorate_min, resolve_electorate, Electorate};
 use super::opacity::{
     count_opaque_members_ctx, count_opaque_system_ctx, effective_opacity_ctx,
     peer_load_ctx, count_opaque_members_in_kv, count_opaque_all_in_kv,
@@ -75,6 +74,11 @@ pub(crate) fn receipt_from(
         ConsensusResult::Timeout { slot, ballots_tried, .. } => {
             Err(CommitError::DeliveryUnknown { slot, ballots_tried })
         }
+        // No electorate, so nothing was proposed and nothing can be in flight. This is a *refusal*,
+        // not a `DeliveryUnknown`: the distinction is the contract's own (`contracts-receipts.md`
+        // §1) — a timeout may still commit later, a refusal never will.
+        ConsensusResult::ElectorateUnavailable { slot, observed_members, declared_min, .. } =>
+            Err(CommitError::ElectorateUnavailable { slot, observed_members, declared_min }),
         ConsensusResult::Superseded { slot, ballot } => Err(CommitError::Superseded { slot, ballot }),
         ConsensusResult::TopologyUnsatisfied { slot, distinct_domains, domains_required, .. } => {
             Err(CommitError::TopologyUnsatisfied {
@@ -209,7 +213,21 @@ impl ConsensusHandle {
         let freshness = Duration::from_millis(
             self.ctx.config.health_check_interval_secs * 2 * 1000,
         );
-        let raw_members = member_ids.len().max(1);
+        // The electorate must be **established**, not inferred from absence. An empty roster used
+        // to be counted as one member with a quorum of one, which this proposer's own self-vote
+        // satisfied — so every node committed its own candidate unopposed. See
+        // `helpers::resolve_electorate` and `ConsensusResult::ElectorateUnavailable`.
+        let declared_min = declared_electorate_min(&self.ctx, group);
+        let raw_members = match resolve_electorate(member_ids.len(), declared_min) {
+            Electorate::Established(n) => n,
+            Electorate::Unavailable { observed, declared_min } =>
+                return ConsensusResult::ElectorateUnavailable {
+                    slot:  Arc::from(slot),
+                    group: Arc::from(group),
+                    observed_members: observed,
+                    declared_min,
+                },
+        };
         let active_members = if config.count_opaque_as_absent {
             let opaque_count = count_opaque_members_ctx(&self.ctx, &member_ids, freshness);
             raw_members.saturating_sub(opaque_count).max(1)
@@ -450,6 +468,11 @@ impl ConsensusHandle {
                 Err(ConsistencyError::Superseded),
             ConsensusResult::TopologyUnsatisfied { .. } =>
                 Err(ConsistencyError::TopologyUnsatisfied),
+            // Cluster scope has no roster to be empty, so this is unreachable today — but the arm
+            // fails closed rather than falling through to success, which is the whole reason the
+            // enum became `#[non_exhaustive]`.
+            ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
+                Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
         }
     }
 
@@ -537,6 +560,8 @@ impl ConsensusHandle {
                             token:    hlc,
                             released: false,
                         }),
+                    // Not the converged holder (or nothing converged): no guard. This `_` covers an
+                    // `Option`, not `ConsensusResult` — it is a legitimate catch-all.
                     _ => Err(ConsistencyError::Superseded),
                 }
             }
@@ -546,6 +571,11 @@ impl ConsensusHandle {
                 Err(ConsistencyError::Superseded),
             ConsensusResult::TopologyUnsatisfied { .. } =>
                 Err(ConsistencyError::TopologyUnsatisfied),
+            // Nothing was proposed. Reading the slot here would hand back a *stale* winner from an
+            // earlier, differently-constituted election — the failure mode this whole change is
+            // about, one level down.
+            ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
+                Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
         }
     }
 
@@ -578,6 +608,11 @@ impl ConsensusHandle {
                 Err(ConsistencyError::Timeout { ballots_tried }),
             ConsensusResult::TopologyUnsatisfied { .. } =>
                 Err(ConsistencyError::TopologyUnsatisfied),
+            // Nothing was proposed. Reading the slot here would hand back a *stale* winner from an
+            // earlier, differently-constituted election — the failure mode this whole change is
+            // about, one level down.
+            ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
+                Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
         }
     }
 }

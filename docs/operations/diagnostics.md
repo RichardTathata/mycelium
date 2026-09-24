@@ -343,3 +343,35 @@ KV — the coordinator-free property, end to end, Docker-free. Covered in CI by 
 `src/agent/emergent.rs`; developer view (adding a detector): the wiki's
 [dev/diagnostics](../wiki/dev/diagnostics.md) page and
 [guide/14 · patterns and pitfalls](../guide/14-patterns-and-pitfalls.md).*
+
+
+## An election was refused: `electorate_unavailable`
+
+`POST /gateway/overlay/elect` answering **409 `electorate_unavailable`** means the node **did not
+decide**, deliberately. Two shapes, and the body tells you which:
+
+```json
+{"ok": false, "error": "electorate_unavailable", "observed_members": 0, "declared_min": 0}
+```
+
+- **`observed_members: 0`** — this node sees **no members** in the group. Either nobody has joined
+  it, or the group name is wrong. Join it and retry:
+
+  ```bash
+  curl -s -X POST -H 'content-type: application/json' \
+       -d '{"group":"G"}' localhost:PORT/gateway/mesh/group
+  curl -s 'localhost:PORT/gateway/mesh/group?group=G'   # roster + declared_min
+  ```
+
+- **`observed_members` below `declared_min`** — a fresh `MembershipIntent` says the group should
+  hold at least `declared_min` and this node sees fewer, so its **view is partial**. Wait for the
+  roster to converge (check `GET /gateway/mesh/group` on each node), or investigate why members are
+  missing — a partition, or nodes that have not joined yet.
+
+**This is not a fault to route around.** Before 2026-09-24 the same call returned a leader: an
+empty roster counted as one member with a quorum of one, satisfied by the proposer's own vote, so
+every node elected *itself* and the fleet agreed only if gossip happened to reconcile before anyone
+looked. A refusal is the honest answer to a question that has no answer yet.
+
+**An explicit one-member group elects normally** — what is refused is inferring authority from
+absence, never solo authority somebody actually established.

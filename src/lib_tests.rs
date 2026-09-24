@@ -2538,6 +2538,11 @@ async fn test_group_propose_single_voter() {
 #[cfg(feature = "consensus")]
 async fn test_group_propose_timeout() {
     let agent = make_agent();
+    // The group must exist before it can fail to reach quorum. Without this join the proposal is
+    // refused for having **no electorate**, which is a different answer to the one under test —
+    // and before 2026-09-24 it was a third answer again: an empty roster counted as one member,
+    // so the test was exercising a singleton election it did not mean to create.
+    agent.mesh().join_group("cg2");
     // No listener started — no votes arrive, quorum of 2 is unreachable.
     let config = ConsensusConfig {
         quorum_size:    2,
@@ -2702,6 +2707,8 @@ async fn test_system_propose_commits() {
 async fn test_consensus_rx_fires_on_commit() {
     let agent = make_agent();
     let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+    // An explicit one-member electorate: legitimate, and now required to be explicit.
+    agent.mesh().join_group("rxg");
     let mut rx = agent.consensus().consensus_rx("slRx");
 
     let config = ConsensusConfig { quorum_size: 1, ..ConsensusConfig::default() };
@@ -2721,6 +2728,8 @@ async fn test_consensus_rx_fires_on_commit() {
 async fn test_consensus_get_returns_committed() {
     let agent = make_agent();
     let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+    // An explicit one-member electorate: legitimate, and now required to be explicit.
+    agent.mesh().join_group("cgg");
 
     let config = ConsensusConfig { quorum_size: 1, ..ConsensusConfig::default() };
     let _ = agent.consensus().group_propose("cgg", "slGet", Bytes::from_static(b"gotten"), config).await;
@@ -8580,6 +8589,115 @@ async fn gateway_kv_write_requires_an_explicit_value() {
     assert!(r.status().is_success());
     let after = get_val(key).await;
     assert_eq!(after["value_b64"], "d29ybGQ=", "exact bytes round-trip: {after}");
+
+    agent.shutdown().await;
+}
+
+/// **An electorate must be established, never inferred from absence.**
+///
+/// The three acceptance cases for the empty/partial-roster defect, as pure decisions over
+/// `resolve_electorate` — no timing, no cluster, so they cannot flake and cannot be "fixed" by a
+/// longer sleep.
+///
+/// Until 2026-09-24 an empty roster was counted as `members.len().max(1)`: one member, quorum one,
+/// satisfied by the proposer's **own** self-vote. Every node therefore committed its own candidate
+/// unopposed — *N* singleton elections wearing the shape of one, reconciled afterwards by LWW if at
+/// all. The arithmetic was not the defect. The defect was that **"I cannot see members" silently
+/// meant "I have authority to decide alone."**
+#[cfg(feature = "consensus")]
+#[test]
+fn an_electorate_is_established_not_inferred() {
+    use crate::agent::helpers::{resolve_electorate, Electorate};
+
+    // 1. An empty group cannot elect. No roster, no authority — whatever the declaration says.
+    assert_eq!(
+        resolve_electorate(0, 0),
+        Electorate::Unavailable { observed: 0, declared_min: 0 },
+        "an unknown or unjoined group must refuse, not elect alone",
+    );
+    assert_eq!(
+        resolve_electorate(0, 3),
+        Electorate::Unavailable { observed: 0, declared_min: 3 },
+    );
+
+    // 2. A partial roster cannot silently confer singleton authority. This is the subtle one: the
+    //    node sees a plausible number, computes a plausible quorum from it, and is wrong — the
+    //    same defect wearing better clothes.
+    assert_eq!(
+        resolve_electorate(1, 3),
+        Electorate::Unavailable { observed: 1, declared_min: 3 },
+        "seeing 1 of a declared 3 is a partial view, and a partial view is not a small electorate",
+    );
+    assert_eq!(resolve_electorate(2, 3), Electorate::Unavailable { observed: 2, declared_min: 3 });
+
+    // 3. An EXPLICIT singleton is legitimate and still elects. The rule refuses inference from
+    //    absence, not solo authority that someone actually established.
+    assert_eq!(
+        resolve_electorate(1, 0), Electorate::Established(1),
+        "a genuine one-member group elects; that was never the defect",
+    );
+    assert_eq!(resolve_electorate(1, 1), Electorate::Established(1));
+
+    // 4. A complete or over-complete view decides with what it sees.
+    assert_eq!(resolve_electorate(3, 3), Electorate::Established(3));
+    assert_eq!(resolve_electorate(5, 3), Electorate::Established(5), "the floor is a floor");
+
+    // 5. No declaration ⇒ nothing to be partial against. The floor binds while asserted, and a
+    //    `MembershipIntent` that nobody refreshes evaporates — it must not wedge the group shut.
+    assert_eq!(resolve_electorate(2, 0), Electorate::Established(2));
+}
+
+/// **The same refusal reaches a real caller, through both surfaces.**
+///
+/// `resolve_electorate` is a pure function; this is the join — that a node which has joined no
+/// group gets `ElectorateUnavailable` from the library path and `409 electorate_unavailable` from
+/// the gateway, rather than a leader it elected by itself.
+///
+/// The HTTP half is the half that matters most: the gateway is where the defect was found, because
+/// **there is no gateway route by which a node joins a group** (`grp_prefix` is read in `http.rs`
+/// and written nowhere in the surface), so an HTTP caller's election could only ever reach the
+/// empty-roster path.
+#[cfg(all(feature = "consensus", feature = "gateway"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unjoined_group_refuses_to_elect_on_both_surfaces() {
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    let agent = Arc::new(GossipAgent::new(
+        NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    agent.start().await.expect("start");
+
+    // Library path.
+    let res = agent.consensus()
+        .group_propose("nobody-joined", "leader/nobody-joined",
+                       Bytes::from_static(b"me"), crate::consensus::ConsensusConfig::default())
+        .await;
+    match res {
+        crate::consensus::ConsensusResult::ElectorateUnavailable {
+            observed_members, declared_min, ..
+        } => {
+            assert_eq!(observed_members, 0, "nobody joined, so nobody is visible");
+            assert_eq!(declared_min, 0, "and nothing was declared");
+        }
+        other => panic!("an unjoined group must refuse, got {other:?}"),
+    }
+
+    // Gateway path — the same contract, or the surfaces disagree about who may decide.
+    let client = reqwest::Client::new();
+    let health = format!("http://127.0.0.1:{http_port}/health");
+    for _ in 0..40 {
+        if client.get(&health).send().await.is_ok_and(|r| r.status().is_success()) { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = client.post(format!("http://127.0.0.1:{http_port}/gateway/overlay/elect"))
+        .json(&serde_json::json!({"group": "nobody-joined"}))
+        .send().await.expect("elect request");
+    assert_eq!(r.status(), 409, "the gateway must refuse an election with no electorate");
+    let body: serde_json::Value = r.json().await.expect("json body");
+    assert_eq!(body["error"], "electorate_unavailable", "{body}");
+    assert_eq!(body["observed_members"], 0, "{body}");
 
     agent.shutdown().await;
 }

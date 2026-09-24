@@ -11,10 +11,11 @@ nodes verify they see the same value via consistent_get.
 from __future__ import annotations
 
 import concurrent.futures
+import httpx
 from mycelium import MyceliumAgent
 from .helpers import (
     NODE_A_HOST, NODE_B_HOST, NODE_C_HOST, NODE_HTTP_PORT,
-    wait_for_cluster_ready, poll_until, assert_eq,
+    node_url, wait_for_cluster_ready, poll_until, assert_eq,
 )
 
 GROUP  = "s12-demo"
@@ -36,6 +37,37 @@ def run() -> None:
         NODE_B_HOST: MyceliumAgent(NODE_B_HOST, NODE_HTTP_PORT),
         NODE_C_HOST: MyceliumAgent(NODE_C_HOST, NODE_HTTP_PORT),
     }
+
+    # Step 0 — establish the electorate. This scenario ran for months without it: nothing joined
+    # `s12-demo`, so every node proposed into an EMPTY roster, which used to be counted as one
+    # member with a quorum of one and satisfied by the proposer's own self-vote. Three nodes
+    # therefore held three singleton elections and agreed only by luck of gossip timing.
+    # An election with no electorate is now refused, so the setup is no longer optional — which is
+    # the point: the test could not previously fail for the right reason.
+    for host in agents:
+        r = httpx.post(f"{node_url(host)}/gateway/mesh/group",
+                       json={"group": GROUP}, timeout=5.0)
+        r.raise_for_status()
+
+    # And the roster must be COMPLETE on every node before anyone proposes. A partial view is
+    # refused too, but waiting here means the scenario tests the election rather than the race to
+    # see the roster.
+    def roster_complete() -> bool:
+        for host in agents:
+            r = httpx.get(f"{node_url(host)}/gateway/mesh/group",
+                          params={"group": GROUP}, timeout=3.0)
+            if r.status_code >= 400 or len(r.json().get("members", [])) != len(agents):
+                return False
+        return True
+
+    assert_true = poll_until(roster_complete, timeout=30)
+    if not assert_true:
+        seen = {
+            h: httpx.get(f"{node_url(h)}/gateway/mesh/group",
+                         params={"group": GROUP}, timeout=3.0).json()
+            for h in agents
+        }
+        raise AssertionError(f"group {GROUP} roster never converged on all nodes: {seen}")
 
     # Step 1 — all three nodes call elect_leader concurrently
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
