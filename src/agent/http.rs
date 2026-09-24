@@ -2352,13 +2352,25 @@ async fn gw_kv_set(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing key"}))).into_response(),
     };
-    let value = if let Some(b64) = body["value_b64"].as_str() {
-        match base64::engine::general_purpose::STANDARD.decode(b64) {
-            Ok(v)  => Bytes::from(v),
-            Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid base64"}))).into_response(),
+    // A write must say what it writes. Until 2026-09-24 a missing `value_b64` silently wrote an
+    // EMPTY value and answered `{"ok": true}` — so a misspelled field name erased a key and
+    // reported success. The overlay test helper had been sending `value` since it was written, and
+    // every sentinel it ever wrote was empty; nothing noticed, because the check that consumed them
+    // only counted keys. An explicitly empty value is legitimate (`"value_b64": ""`); an *omitted*
+    // one must not become one. Tombstoning has its own verb (`DELETE`), so silent-empty had no
+    // legitimate caller.
+    let value = match body.get("value_b64") {
+        Some(serde_json::Value::String(b64)) => {
+            match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(v)  => Bytes::from(v),
+                Err(_) => return (StatusCode::BAD_REQUEST,
+                                  Json(json!({"error":"invalid base64 in 'value_b64'"}))).into_response(),
+            }
         }
-    } else {
-        Bytes::new()
+        Some(_) => return (StatusCode::BAD_REQUEST,
+                           Json(json!({"error":"'value_b64' must be a base64 string"}))).into_response(),
+        None    => return (StatusCode::BAD_REQUEST,
+                           Json(json!({"error":"missing 'value_b64' (use \"\" for an empty value, or DELETE to tombstone)"}))).into_response(),
     };
 
     kv_write(&ctx.agent_ctx, key, value, false);

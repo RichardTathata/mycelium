@@ -195,6 +195,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **rule-agnostic** — which is precisely why they survived the rule change, and is the shape worth
   copying.
 
+### Fixed
+
+- **`POST /gateway/kv` no longer succeeds at writing nothing.** It reads `value_b64`; when that
+  field was **absent** it wrote an empty value and answered `{"ok": true}` — so a misspelled or
+  assumed field name (`value`) **erased a key and reported success**.
+
+  This was not hypothetical. The overlay test helper had been posting `{"key": …, "value": …}`
+  since it was written, so every readiness sentinel it ever wrote was empty — and nothing noticed,
+  because the check consuming them only counted keys under a prefix. Two failure-looks-like-success
+  mechanisms stacked, each hiding the other.
+
+  **The contract now**, one route test per row (`gateway_kv_write_requires_an_explicit_value`,
+  verified to fail on the old code):
+
+  | Request | Result |
+  |---|---|
+  | missing `value_b64` | **400**, no mutation |
+  | `value_b64` not a string | **400**, no mutation |
+  | invalid base64 | **400**, no mutation |
+  | explicit `"value_b64": ""` | a valid **zero-length** value |
+  | valid encoded value | exactly those bytes |
+  | `DELETE /gateway/kv?key=` | tombstone, unchanged |
+
+  An explicitly empty value is legitimate; an **omitted** one must not silently become one, and
+  `DELETE` already owns tombstoning — so silent-empty had no legitimate caller. The "no mutation"
+  half is the load-bearing part: a 400 that had already clobbered the key would be the same data
+  loss with a better status code.
+
+  **Upgrade note.** A client that omitted `value_b64` now gets a 400 where it used to get `{"ok":
+  true}`. Every first-party SDK (`mycelium-py`, `mycelium-ts`, `langgraph-checkpoint-mycelium`),
+  the AFN scenario and the benches already send `value_b64` and are unaffected; the one caller that
+  did not was the test helper fixed alongside this.
+
 ## [2.13.0] — 2026-09-23
 
 **The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged

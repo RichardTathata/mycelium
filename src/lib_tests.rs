@@ -8491,3 +8491,95 @@ mod federation_gateway_verbs {
         b.shutdown().await;
     }
 }
+
+/// **A gateway write must say what it writes.** The contract, one assertion per row:
+///
+/// | Request | Result |
+/// |---|---|
+/// | missing `value_b64` | 400, **no mutation** |
+/// | `value_b64` not a string | 400, **no mutation** |
+/// | explicit `"value_b64": ""` | a valid zero-length value |
+/// | valid encoded value | exactly those bytes |
+///
+/// Until 2026-09-24 the first row wrote an **empty value** and answered `{"ok": true}`, so a
+/// misspelled field name erased a key and reported success. The overlay test helper had been
+/// sending `value` since it was written; every sentinel it wrote was empty, and the check that
+/// consumed them only counted keys, so neither defect surfaced the other.
+///
+/// The "no mutation" half is the load-bearing part: a 400 that had already clobbered the key would
+/// be the same data loss with a better status code.
+#[cfg(feature = "gateway")]
+#[tokio::test]
+async fn gateway_kv_write_requires_an_explicit_value() {
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg);
+    agent.start().await.expect("start");
+
+    let client = reqwest::Client::new();
+    let health = format!("http://127.0.0.1:{http_port}/health");
+    for _ in 0..40 {
+        if client.get(&health).send().await.is_ok_and(|r| r.status().is_success()) { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let url = format!("http://127.0.0.1:{http_port}/gateway/kv");
+    let key = "probe/kv-contract";
+    let get_val = |k: &str| {
+        let c = client.clone();
+        let u = format!("http://127.0.0.1:{http_port}/gateway/kv?key={k}");
+        async move { c.get(&u).send().await.unwrap().json::<serde_json::Value>().await.unwrap() }
+    };
+
+    // Establish a known value first, so "no mutation" is observable rather than vacuous.
+    let ok = client.post(&url)
+        .json(&serde_json::json!({"key": key, "value_b64": "aGVsbG8="})) // "hello"
+        .send().await.unwrap();
+    assert!(ok.status().is_success(), "seed write rejected");
+    let seeded = get_val(key).await;
+    assert_eq!(seeded["value_b64"], "aGVsbG8=", "seed value must be readable: {seeded}");
+
+    // Row 1 — missing `value_b64`: 400, and the seeded value survives.
+    let r = client.post(&url).json(&serde_json::json!({"key": key})).send().await.unwrap();
+    assert_eq!(r.status(), 400, "an omitted value must be refused, not treated as empty");
+    let after = get_val(key).await;
+    assert_eq!(after["value_b64"], "aGVsbG8=", "a refused write must not mutate: {after}");
+
+    // Row 2 — wrong type: 400, still no mutation.
+    let r = client.post(&url)
+        .json(&serde_json::json!({"key": key, "value_b64": 42}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 400, "a non-string value_b64 must be refused");
+    let after = get_val(key).await;
+    assert_eq!(after["value_b64"], "aGVsbG8=", "a refused write must not mutate: {after}");
+
+    // Row 3 — invalid base64: 400, still no mutation.
+    let r = client.post(&url)
+        .json(&serde_json::json!({"key": key, "value_b64": "!!!not base64!!!"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 400, "invalid base64 must be refused");
+    let after = get_val(key).await;
+    assert_eq!(after["value_b64"], "aGVsbG8=", "a refused write must not mutate: {after}");
+
+    // Row 4 — an EXPLICIT empty value is legitimate and distinct from an omitted one.
+    let r = client.post(&url)
+        .json(&serde_json::json!({"key": key, "value_b64": ""}))
+        .send().await.unwrap();
+    assert!(r.status().is_success(), "an explicitly empty value is a valid write");
+    let after = get_val(key).await;
+    assert_eq!(after["found"], true, "an explicitly empty value is present, not absent: {after}");
+    assert_eq!(after["value_b64"], "", "and it is zero-length: {after}");
+
+    // Row 5 — a valid encoded value stores exactly those bytes.
+    let r = client.post(&url)
+        .json(&serde_json::json!({"key": key, "value_b64": "d29ybGQ="})) // "world"
+        .send().await.unwrap();
+    assert!(r.status().is_success());
+    let after = get_val(key).await;
+    assert_eq!(after["value_b64"], "d29ybGQ=", "exact bytes round-trip: {after}");
+
+    agent.shutdown().await;
+}
