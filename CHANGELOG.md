@@ -90,37 +90,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`require_identity_proofs` defaults to `true`.** An unsigned `sys/identity/{V}` entry — the
-  pre-Phase-2 mimic — is now **rejected** rather than accepted-and-flagged.
+- **`require_identity_proofs` stays `false` — the flip to `true` was made and reverted before any
+  release carried it.** **No released version's behaviour changes**; nothing to do on upgrade. What
+  ships here is the reason, pinned where the next person to consider the flip will hit it.
 
-  **Why now.** Every TLS node has written `sys/identity-proof/{self}` unconditionally since Phase 2
-  (**v2.3.0**, 2026-07-24) — identity and proof are written back to back at startup. So within the
-  one-release window a rolling upgrade is supported across, **no honest node is affected**; what the
-  default rejects is a node predating v2.3.0, or something imitating one. The old guidance ("enable
-  only after every node runs the Phase-2 release") was written when that rollout was ahead of us
-  rather than ten releases behind. It also matters more than it did: `mycelium-commitment`'s
-  offer/award signatures verify against keys a caller resolves, and `sys/identity/{node}` is the
-  obvious source for a node participant.
+  **The argument for flipping was sound.** Every TLS node has written `sys/identity-proof/{self}`
+  unconditionally since Phase 2 (**v2.3.0**, 2026-07-24), so within the one-release window a rolling
+  upgrade is supported across, no honest node writes an unsigned identity. The rollout precondition
+  the old guidance prescribed had been met ten releases earlier.
 
-  **If you run nodes older than v2.3.0**, set `require_identity_proofs = false` (or
-  `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`). They write no proof, so they will not join a node running the
-  new default. Upgrading them is the better answer; this is the one setting whose tolerance reading
-  has an expiry date attached.
+  **What it missed.** A node's identity and its proof are **two separate `kv_set` calls**, hence two
+  gossip messages with no ordering between them. Requiring proofs means a peer can learn an identity
+  *before* its proof, reject it, and hold no key for that node. The key recovers on its own — the
+  identity watcher subscribes to the broader `sys/identity` prefix precisely so a late proof
+  re-validates its entry — so the window is transient. **A decision taken inside it is not.** A
+  leader election is one-shot: a node that could not verify a peer's signature during the window
+  does not re-run the election when the key lands. The Docker suite failed `S12 leader election …
+  Nodes disagree on leader` intermittently, with the federation two-mesh suite alongside it, after
+  twelve consecutive greens.
 
-  **Flipping it broke no test** — the tests that exercise the behaviour set the flag explicitly —
-  which is exactly why the default now has pins of its own: one on the value
-  (`the_default_requires_identity_proofs`) and one on the join
-  (`a_default_configuration_rejects_an_unsigned_identity_entry`), because a default nothing
-  exercises end to end is a default nobody has checked, and one nothing asserts can be flipped back
-  by a merge with nothing failing.
+  **Flipping it broke no unit test**, because every test that exercises the behaviour sets the flag
+  explicitly and the in-process suites have no cross-process ordering window to lose a race in. The
+  gate that could see it runs after the merge. That is the transferable part: *a config default
+  whose only failure mode is a race between processes is not testable by the suite that gates the
+  PR.*
 
-  **What it does not close, stated as a test rather than a caveat.** *Proofs required* is **not**
-  *identity authenticated*: first sighting of a node never seen is still **trust on first use**,
-  because there is nothing established to chain a self-signed entry to. Anchors — a direct,
-  CA-validated connection — are what close that, after which an unchained key is rejected *and*
-  counted in `identity_anchor_conflicts`. `requiring_proofs_does_not_close_trust_on_first_use`
-  pins the boundary and is written to **fail if the window is ever closed**, so the claim cannot rot
-  the way a prose caveat would.
+  **A future flip's precondition is not "every node writes a proof anyway"** — that is true and it
+  is not the failing condition. It is an **atomic** identity+proof record, or a bounded *pending its
+  proof* state that defers rather than rejects. Until then the flag is an operator opt-in: fine
+  where nodes do not elect during bring-up, not fine where they do. `cert-rotation.md` now says so
+  in those terms instead of prescribing a rollout that is long finished.
+
+  **What the episode leaves behind**, all of it worth keeping: the value is pinned *with its reason*
+  (`config::tests::the_default_requires_identity_proofs` — flipping it back means editing a test
+  that explains itself); the end-to-end join is pinned beside it, renamed
+  `a_default_configuration_rejects_an_unsigned_identity_entry` →
+  **`an_opted_in_configuration_rejects_an_unsigned_identity_entry`** (the one substantive test
+  change here); and the boundary the flag never closed is still stated as a test rather than a
+  caveat — *proofs required* is **not** *identity authenticated*, first sighting of an unseen node
+  remains **trust on first use**, anchors are what close that, and
+  `requiring_proofs_does_not_close_trust_on_first_use` is written to **fail if the window is ever
+  closed** so the claim cannot rot. Full account:
+  [`docs/wiki/dev/security.md`](docs/wiki/dev/security.md).
 
 ## [2.13.0] — 2026-09-23
 
