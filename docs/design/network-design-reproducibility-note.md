@@ -139,10 +139,10 @@ watches coverage *gaps* (here every capability has a provider, merely the same o
 orthogonal axis. A concentrated fleet read as **perfectly healthy by every measurement we had**.
 
 Worse still, concentration was not an accident waiting to happen but the **default behaviour**: the
-tuple space, the blackboard and the wiki each elect by *lowest candidate node id wins*, and the same
-rule over the same candidates returns the same winner. A fleet where every node runs every companion
-put every single-writer job on one node, deterministically, on first election and again after every
-restart.
+tuple space, the blackboard and the wiki each elected by *lowest candidate node id wins* (until
+2026-09-24), and the same rule over the same candidates returns the same winner. A fleet where every
+node ran every companion put every single-writer job on one node, deterministically, on first
+election and again after every restart.
 
 **Q2: accepted threat, or gap?** *Gap* — and now closed on both halves:
 

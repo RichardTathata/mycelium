@@ -194,3 +194,34 @@ Entry format:
   `src/agent/http.rs`, and check the **segment shape** — a `{param}` pattern never matches a slash-bearing
   value. Also added, no miss behind it: the front-door install snippet's `tag = "…"` pins are diffed against
   the newest tag per line (the reason pin sat at 0.6.0 with 0.6.2 current).
+- 2026-09-24: **§3 dead-link sweep — scope gap: `.log/` entries were never swept.** Two ingest
+  entries written 2026-09-22 linked `testing/testing.md` from `dev/.log/`, resolving to
+  `dev/.log/testing/testing.md`. This is the **same one-`../`-too-many shape as the 2026-09-04
+  entry**, in a directory that entry's sharpening did not reach: the fix then was "resolve every
+  link relative to its own file's directory *and include `wiki.md` + the front-door guide docs*",
+  which enumerated the pages a reader browses and quietly excluded the logs. No prior pass declared
+  these clean (the last lint was 2026-09-06, the links landed 09-22), so this is a scope gap rather
+  than a miss — but it is the *second* time the same breakage shape survived a sharpening aimed at
+  it. Sharpening: §3 walks **every `.md` under the swept roots, `.log/` included** — the ingest
+  entries are the most-written and least-read files in the wiki, which is exactly where a link rots
+  unseen. (This pass's script does; it is in the log.)
+- 2026-09-24: **§1 enumeration check — a new detector's gauge reached three docs and missed the
+  one that enumerates them.** P10 shipped the same day with a `diagnostics.md` recipe, a
+  `metrics.md` row and a wiki detector table row, while `dev/operations.md` — the page that
+  *enumerates* the `/stats` and `/metrics` detector gauges — still listed P1, P6, P2, P3, P4 and
+  not P10. Found by this pass grepping the enumeration rather than the new docs. It is the
+  **"audit by category, not by count"** rule applied to gauges rather than examples: the list was
+  not wrong about anything it contained, it was simply short one member, which no count would
+  reveal. Sharpening: when a check adds an observable (gauge, `/stats` field, route, feature),
+  diff the observable set in **code** against every page that *enumerates* it — `dev/operations.md`
+  for `/stats` + `/metrics`, `metrics.md` for the Prometheus names — not merely against the page
+  that *describes* the new thing.
+- 2026-09-24: **§2 staleness — a shipped capability still described as unshipped in the
+  shared-responsibility matrix.** `operations/shared-responsibility-matrix.md` said *"TLS on the
+  federation edge itself is not shipped"* after v2.13.0 shipped exactly that (pinned SPKI,
+  2026-09-23). The release's own docs pass updated the runbook, the guide chapter and the design
+  record — and not the matrix, which is the document an adopter reads to decide what they must
+  provide themselves, i.e. the highest-stakes place for that particular sentence. Sharpening: the
+  staleness check greps the matrix specifically for "not shipped" / "not provided" / "you must"
+  claims against the release's changed surfaces, because it is the one page whose *whole content*
+  is claims about what does and does not exist.

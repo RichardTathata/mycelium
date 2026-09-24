@@ -352,7 +352,7 @@ silently grant that partner access to alpha — an authority decision alpha's op
 cannot see. The cost is real and worth stating: federations grow by **pairs**, not by transitivity.
 That is the price of an authority surface an operator can enumerate.
 
-### The release gate, and what is still to build
+### The release gate, and what it does not claim
 
 **The release gate, and what of it is met.** PR 8 (2026-09-18) put the first bytes across; PR 9 (same day)
 ran the gate's whole choreography over them in one process — every node under the enforced profile,

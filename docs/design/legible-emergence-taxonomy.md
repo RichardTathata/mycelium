@@ -70,10 +70,11 @@ and it is a Phase-1 schema requirement, not a Phase-4 nicety.
 Added 2026-09-24, after a design note asked whether role accumulation is constrained anywhere and
 the answer turned out to be *no, and it is not observed either*.
 
-Every single-writer ring in this substrate elects **independently and deterministically** — the
-lowest candidate node id wins, in the tuple space, the blackboard and the wiki alike. Each election
-is individually correct, and deterministic *on purpose*: it is what lets every reader reach the same
-conclusion with no coordinator, so an outcome can be **checked rather than trusted**.
+Every single-writer ring in this substrate elects **independently and deterministically**, and until
+2026-09-24 it did so by *lowest candidate node id wins* — in the tuple space, the blackboard and the
+wiki alike. Each election was individually correct, and deterministic *on purpose*: that is what lets
+every reader reach the same conclusion with no coordinator, so an outcome can be **checked rather
+than trusted**.
 
 The consequence nobody chose: the same rule over the same candidates returns the **same winner**. A
 fleet where every node runs every companion concentrates every single-writer job on one node — which
@@ -88,8 +89,10 @@ Neither existing detector is looking at that axis:
   it is merely the same one.
 
 So such a fleet reads as **perfectly healthy by every measurement we had**, until the node it all
-depends on goes away. P10 is the reading that makes it visible; the election rule itself is a
-separate question (rendezvous hashing spreads winners, at the cost of a rule change every node must
+depends on goes away. P10 is the reading that makes it visible; the **rule itself was changed the
+same day** (`mycelium::election` — rendezvous ordering, negotiated from the candidate set so a
+mixed fleet still agrees), which spreads winners without bounding them, so the reading stays
+necessary. The wider design question is (rendezvous hashing spreads winners, at the cost of a rule change every node must
 agree on simultaneously — see `docs/design/network-design-reproducibility-note.md`).
 
 **Why a share and not a count.** `roles_held` alone means nothing without the fleet's size: three
