@@ -67,11 +67,18 @@ established; the causal link to that specific failure is not.
 Rust `mesh()` handle. `POST /gateway/govern/membership` sets a `MembershipIntent { min, max }` —
 it governs a roster's permitted *population*, it does not add a member.
 
-So the gateway offers **election over a membership concept it provides no way to populate**, and the
-only roster state reachable over HTTP is the empty one — which is precisely the state that grants
-solo authority. That is why the recommended first fix ("make S12 establish the intended three-member
-group") is not a test-side change: it needs a join/leave route, or a demo that joins in Rust before
-serving.
+So the gateway offers **no supported way for an HTTP client to join a group**, while offering
+election over one. That is why the recommended first fix ("make S12 establish the intended
+three-member group") is not a test-side change: it needs a supported join/leave operation, or a demo
+that joins in Rust before it starts serving.
+
+**Stated carefully, because the first draft of this entry overstated it:** *the empty roster is not
+the only reachable state.* An embedded application joins through the Rust API
+(`agent.mesh().join_group(…)`), and the generic `POST /gateway/kv` route can technically write
+whatever key it is given, membership records included. What is missing is a **supported,
+authenticated membership operation** for HTTP clients. The fix is to add that operation — **not** to
+have tests manufacture internal membership keys through the generic KV route, which would make the
+tests depend on an internal encoding and prove nothing about the contract.
 
 It also sharpens the API finding. This is not "a test forgot to set up its group". It is a surface
 on which *every* HTTP caller's election silently degrades to a singleton, because no other outcome
