@@ -35,7 +35,7 @@ pub(crate) use mycelium_core::ops::{
 /// How long a `MembershipIntent` is honoured as a declared electorate floor. Mirrors the
 /// membership governor's own TTL: an intent nobody is refreshing has evaporated, and an evaporated
 /// floor must not block elections forever (posture rule 5, *roles evaporate*).
-#[cfg(feature = "consensus")]
+#[cfg(any(feature = "consensus", feature = "gateway"))]
 pub(crate) const ELECTORATE_INTENT_TTL_MS: u64 = 30_000;
 
 /// The electorate a group proposal is allowed to decide with.
@@ -78,7 +78,7 @@ pub(crate) fn resolve_electorate(observed: usize, declared_min: usize) -> Electo
 ///
 /// Read from the same key the membership governor writes (`sys/govern/membership/{group}`) and
 /// subject to the same freshness rule, so a stale intent cannot wedge a group shut.
-#[cfg(feature = "consensus")]
+#[cfg(any(feature = "consensus", feature = "gateway"))]
 pub(crate) fn declared_electorate_min(ctx: &crate::agent::TaskCtx, group: &str) -> usize {
     let key = format!("{}{}", crate::agent::membership_governor::MEMBERSHIP_PREFIX, group);
     let Some(bytes) = ctx.kv_state.store.pin().get(key.as_str()).and_then(|e| e.data.clone())
