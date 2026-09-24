@@ -259,7 +259,8 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     population holds the union of what reached each member, and the fabric lets members with different clearances
     share what each holds.
   - **Collective volume.** Each member stays within its own budget while the total overwhelms a shared resource.
-    Per-partner budgets are consumer-side only (plan §6.7, the RA slice; open).
+    Per-partner budgets are consumer-side only (plan §6.7, the RA slice; open). *Mitigated for a declared population:
+    H6, in force below.*
 - *Mitigations in force:*
   - **Attribution.** Every act *on the substrate* is signed by a member key, and mTLS admission names the population.
     Collusion on the substrate is attributable even where it is not preventable.
@@ -318,6 +319,11 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     uses a stand-in gateway, so recording through the gateway is covered by the AE seam's tests, not end to end.
     *Gate:* **deployment evidence**. The CI job *Confined-fleet deployment* runs kind with Calico and the manifests
     unchanged, and every blocked path has a positive control.
+  - **H6, cohort budgets** (#394; ADR `design/knowledge-cohorts.md` §6). `CohortBudget` caps a declared population's
+    calls in flight at a provider. Membership comes from the provider's trusted view, never the caller. A
+    multi-cohort caller must fit every cap, and undeclared callers share one pool. *Limits:* per provider instance,
+    concurrency not rate, only calls admitted through it. *Gate:* `cohort_budget::tests`, including fifty members
+    capped together.
 - *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
   - **P2:** a signed, portable mandate grant with entitlement, currency and possession. `Mandate` is unsigned
     today, and its signed epoch is checked only by the wiki's pre-receive hook.
@@ -331,7 +337,6 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     position, so a witness's assertion alone never accuses anyone. Outcomes are equivocation, consistent, history
     unavailable, or insufficient evidence. Only a rewrite that conflicts with retained signed evidence is provable. A
     checkpoint cannot detect a rewrite of the unwitnessed records after it, and that suffix stays unproven.
-  - **H6, aggregate budgets.** Provider-side budgets over a declared population, closing plan §6.7's consumer-side gap.
   - **A1, authority at execution.** Under the profile, every protected operation requires an established mandate,
     checked at the execution boundary. Queued, retried and delegated work keeps the requirement, and long-running
     work declares whether it re-authorises or runs to a stated bound.

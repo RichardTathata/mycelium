@@ -35,6 +35,7 @@
 //! because LWW may move a pointer, and moving a pointer cannot erase a competing statement.
 
 pub mod cohort;
+pub mod cohort_budget;
 pub mod correction;
 pub mod durable;
 pub mod gate;

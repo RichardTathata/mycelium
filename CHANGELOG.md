@@ -11,6 +11,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cohort budgets** (Boundary H plan, item H6; ADR `docs/design/knowledge-cohorts.md` §6).
+  `knowledge::cohort_budget::CohortBudget::admit(caller, view, now)` gives an RAII `CohortSlot` or
+  `CohortRefusal::AtCapacity`. It caps a **declared population's** calls in flight at a provider, where
+  per-caller caps let a colluding fleet overwhelm it together.
+  - Membership comes from the provider's own trusted `CohortView`, never from the caller.
+  - A caller in several cohorts must fit every cap, and a refusal takes nothing.
+  - Undeclared callers share one pool.
+  - Lock-order row 42.
+
+  **Stated limits:** per provider instance, concurrency not rate, only calls admitted through it.
+
 - **The confined-fleet profile** (Boundary H plan, item H7; ADR `docs/design/confined-fleet.md`; runbook
   `docs/operations/confined-fleet.md`). For admitting untrusted agents as members:
   - **reference manifests** (`deploy/confined-fleet/`): agents and gateways in separate pods, the member key

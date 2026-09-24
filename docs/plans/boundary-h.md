@@ -764,6 +764,7 @@ and in the item's ADR, never silently.
 | K3a, durable stores | #390 | `232a32e` | `durable::tests` |
 | H5, cohorts | #391 | `895dec0` | `resolution::tests::h5`, `cohort::tests` |
 | H1, challenge admission | #392 | `317852b` | `resolution::tests::h1` |
+| H6, cohort budgets | #394 | — | `cohort_budget::tests` |
 
 **Departures:**
 - **K1 is additive, not breaking.** §11 listed `KnowledgeStore::put → Result`. `put` had 72 call sites building
