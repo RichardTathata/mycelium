@@ -1,6 +1,7 @@
-# Knowledge cohorts: control dependence declared at admission (ADR, Boundary H item H5)
+# Knowledge cohorts and challenge admission (ADR, Boundary H items H5 and H1)
 
-**Status:** **adopted and implemented** 2026-09-24 (`src/knowledge/cohort.rs`, `src/knowledge/resolution.rs`). Plan:
+**Status:** H5 **adopted and implemented** 2026-09-24 (`src/knowledge/cohort.rs`, `src/knowledge/resolution.rs`); H1
+**adopted and implemented** 2026-09-24 (§4). Plan:
 [`docs/plans/boundary-h.md`](../plans/boundary-h.md) (rev 0.4, proposed) §6 H5. It builds on the
 [issuer-binding ADR](knowledge-issuer-binding.md) (P1), whose configured-external path authenticates operators, and
 the [validity ADR](knowledge-validity.md) (K1b), whose exclusions H5 extends.
@@ -76,10 +77,53 @@ The confined-fleet profile will require `OneGroup` or `Excluded`.
 - **Durability.** `CohortView` is in memory. A reader that restarts must be offered its declarations again, and
   until then undeclared issuers fall under its `UndeclaredRule`, which is why the confined profile makes that rule
   conservative.
-- **Challenges.** Grouping here counts **support**. H1 applies the same components to challenges. Exclusions
-  already apply to both.
+- **Challenges.** H1 (§4) counts them by the same components.
 
-## 4. Gates
+## 4. H1: challenge admission
+
+**Problem.** One challenge from any non-provider issuer made a verdict `Rejected`, or `Conflicted` when support
+existed. There was no threshold and no grouping of challengers. A colluding population could hold every honest
+release, including an observer's, in `Rejected` or `Conflicted` indefinitely: denial of evidence at population
+scale. The cautious reading for one member became an attack for many.
+
+**Decision.**
+- **A threshold counted by the same components as support.** `ReaderPolicy::min_challenge_groups` defaults to 1,
+  which is exactly the behaviour before H1. A declared cohort's thousand challenges are **one** group.
+  - At or above the threshold, the outcome is as before: `Conflicted` with support, `Rejected` without.
+  - Below it, support decides, and `Classification::challenges` (a `ChallengeReport`) says what the challenges
+    were: records, groups, whether admitted, and a bounded sample.
+- **Two routes past the threshold, kept distinct.** A signature establishes *who*; trust policy establishes *decisive*.
+  1. **Mechanically verified invalidation:** the provider itself, verifiably and currently, challenging its own
+     release (`RejectionReason::DisownedByProvider`). No trust decision is involved. *The plan's other form, a
+     revocation by an authority P2 shows is entitled, waits for P2.*
+  2. **A policy-decisive source:** a challenger in `ReaderPolicy::decisive_sources`
+     (`RejectionReason::DecisiveSource`), named as a policy choice.
+
+  Either one rejects, whatever the support.
+- **Evidence-bearing outsiders are not dismissed.** A below-threshold challenge that cites evidence (a
+  `DerivedFrom` link to a record the store holds) is listed in `evidenced_unadmitted`, apart from bare challenges.
+  It decides nothing alone, and the report shows it.
+- **Bounded cost.** A threshold stops a storm deciding the verdict. It does nothing about the storm's cost, so:
+  - `max_examined` caps the records a resolution reads about one subject. Past it, the verdict is
+    `InsufficientEvidence` and `budget_exhausted` is set: nothing is concluded from a partial count.
+  - `max_reported` (default 64) caps the individually reported exclusions, samples and rejection reasons; totals
+    stay complete.
+  - Rejection reasons are one per challenger, not one per record.
+
+**The cost of raising the threshold, stated.** An isolated honest challenger with no evidence the reader can verify,
+outside the decisive sources, no longer blocks a release alone. Each reader chooses that trade.
+
+**Moved, not dropped.** The plan's per-issuer **ingestion quota and storage cap** belong to the store, which K3a
+restructured on a sibling branch, and to transport. They are recorded under K3c in the
+[validity ADR](knowledge-validity.md).
+
+**Not claimed.**
+- Per-subject budgets bound *examination*, but building the currency index still scans the store. That cost is
+  O(store), not O(subject).
+- Measured: a 100,002-record storm resolves in about 2.9 s in an unoptimised test build. That is a measurement,
+  not a bound.
+
+## 5. Gates
 
 - `resolution::tests::h5`:
   - a declared cohort of fifty is one independent voice;
@@ -89,6 +133,14 @@ The confined-fleet profile will require `OneGroup` or `Excluded`.
     `StaleRule::Exclude` the stale-only issuer is excluded and reported;
   - a removal does not make earlier evidence independent;
   - undeclared issuers follow the reader's rule.
+- `resolution::tests::h1`:
+  - a cohort storm below the threshold is reported, with a bounded sample, and does not decide;
+  - the default threshold still lets any challenge decide;
+  - independent challengers that reach the threshold decide;
+  - the provider disowning its release decides;
+  - a decisive source decides and is named;
+  - an evidence-citing challenge below the threshold is reported separately;
+  - a 100,000-record storm is bounded by budget and in output.
 - `cohort::tests`:
   - an untrusted operator is ignored;
   - a forged declaration is refused;

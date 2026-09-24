@@ -168,7 +168,9 @@ head whose body cannot be fetched is `BodyUnavailable`: insufficient evidence, n
 ### K3c: body authorisation (proposed)
 
 Boundary F's opaque-address rule applies: the content hash checks integrity and is never the access credential.
-Ingestion is bounded per issuer and per cohort, with refusals counted (plan H1).
+Ingestion is bounded per issuer and per cohort, with refusals counted. Per-issuer **storage caps** are enforced in
+`put_signed`, as a counted `PutRefusal`. Both were moved here from H1 (see the
+[cohorts and challenges ADR](knowledge-cohorts.md) §4), because they belong to the store and to transport.
 
 ## 5. Gates
 

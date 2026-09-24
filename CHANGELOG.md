@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Challenge admission** (Boundary H plan, milestone M2, item H1; ADR `docs/design/knowledge-cohorts.md` §4).
+  One challenger of any group could jam a verdict, and a population could hold every honest release in
+  `Rejected`/`Conflicted`.
+  - `ReaderPolicy::min_challenge_groups` (default 1, today's behaviour) counts challenges by the **same
+    components as support**.
+  - Two routes past the threshold, kept distinct: the provider **disowning** its own release
+    (`RejectionReason::DisownedByProvider`, mechanically verified), and a **policy-decisive** source
+    (`decisive_sources`, `RejectionReason::DecisiveSource`).
+  - `Classification` gains `challenges: ChallengeReport` (records, groups, admitted, `evidenced_unadmitted`,
+    a bounded sample), `excluded_total`, and `budget_exhausted`.
+  - `max_examined` caps a resolution's reads (past it the verdict is `InsufficientEvidence`), and
+    `max_reported` caps the reported detail.
+
+  **Behaviour note:** `Rejected` lists one reason per challenger rather than per record, capped at
+  `max_reported`.
+
 - **Knowledge cohorts, declared at admission** (Boundary H plan, milestone M2, item H5; ADR
   `docs/design/knowledge-cohorts.md`). An operator the reader trusts signs a `CohortDeclaration` naming a
   fleet, and `ReaderPolicy::cohorts` (a `CohortView`) makes its members **one control group**.
