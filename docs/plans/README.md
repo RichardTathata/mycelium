@@ -84,8 +84,15 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
-_None._ The SOC 2 audit-gap plan (previously here) shipped complete 2026-07-22 — see the
-execution-records table above.
+[`boundary-h.md`](boundary-h.md) — **Boundary H, a colluding population of admitted members** (proposed
+2026-09-24, rev 0.1, not adopted). It implements threat model revision 3's §5 Boundary H in four phases:
+- prerequisites: issuer binding, signed mandate grants, and the knowledge layer's own deferred PRs;
+- evidence counting;
+- authority and history;
+- a decisive demonstration shaped like the 2026 OpenAI–Hugging Face incident.
+
+The SOC 2 audit-gap plan (previously here) shipped complete 2026-07-22 — see the execution-records table
+above.
 
 Prior proposed plans (Legible Emergence; mycelium-wiki) have shipped — see the execution-records
 table above. The other open engineering slice is the **additive** disconnected KV-native wiki

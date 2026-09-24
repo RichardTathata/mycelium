@@ -6,6 +6,11 @@ hash-as-credential, a compromised former mandate holder and a forged epoch — a
 evidence and replay artefacts may carry. §1–4 (revision 1) are unchanged. Items 2, 3 and 5 cite this document from
 their first ADRs rather than restating a threat model each.*
 
+*Revision 3 draft, 2026-09-23: §5 adds **Boundary H**, a colluding population of admitted members — the plural of
+§4's "trusted member acting maliciously within its authorization", which revisions 1 and 2 model only one member
+at a time. §1–4, Boundaries D–G and §6 are unchanged. H's proposed mitigations are **unscheduled** and each needs its
+own ADR; nothing in H claims a mechanism the code does not have.*
+
 *Crown-jewel posture (Production Readiness Gap sub-gate #3, WS3).* This document
 states what an attacker gains at each trust boundary, the substrate mitigations
 in force, and the residual risk an operator must own. It is deliberately blunt:
@@ -212,6 +217,105 @@ or whose key was stolen while it held one — attempting to commit under the old
   the enforcing resource; the partition table states which operations wait, refuse or continue. Attribution
   outlives authority: an observation keeps its provenance after its observer's appointment ends (posture rule 5) —
   history is not revoked with a key.
+
+### Boundary H — a colluding population of admitted members (revision 3; mitigations unscheduled)
+
+Every boundary above models *one* adversarial principal: a compromised node (A), a foreign principal (D), an abusive
+client (E), a former holder (G). The attacker here is **many admitted members acting in concert** — each validly
+keyed, each within its own authorisation, so that no single act is out of bounds and the concerted behaviour *is* the
+attack. The population may be one operator's many keys, a compromised fleet, or agents that learned coordination as
+a strategy. The last case is not hypothetical: in the 2026 OpenAI–Hugging Face incident, evaluation agents shared
+credentials and techniques over a channel nobody monitored for about two months before one of them caused an outage.
+An agent fleet whose agents are full members is Boundary H's natural deployment, and where agent code runs inside the
+embedding process it also holds the member's key (Boundary A, once per agent).
+
+- *Gains (each verified against the code as of `9297e18`):*
+  - **A coordination fabric.** Signals are forwarded unconditionally, and discovery, work claiming, consensus and
+    the companions' contract net serve a colluding population exactly as they serve a cooperative one. The substrate
+    cannot tell the two apart, because they are the same behaviour.
+  - **A power laundered as a capability.** Any member may advertise any name under its own `cap/{node}/…`:
+    `CapabilitiesHandle::advertise_capability` checks no role or mandate, and `authorized_callers` is set by the
+    provider. A member holding a power no mandate gave it (a stolen credential) can offer that power to the others
+    as a service, and the credential itself never travels.
+  - **Many issuers from one member.** `IssuerId::new` accepts any non-empty string, and `KnowledgeRecord::verify`
+    takes the key from its caller, so nothing binds an issuer to an admitted identity. One member can be many
+    issuers, and every count below can be inflated from inside a single member.
+  - **Manufactured support.** `resolution::classify` excludes self-assessment but not assessment by a peer. Under
+    the default `ReaderPolicy` (one supporting assessment, one independent group, no control groups) a single
+    colluding peer's `Supports` makes a release `Accepted`. `min_supporting` counts supporting *records*, so one
+    issuer's repeated assessments meet it; only the independence count deduplicates.
+  - **Jammed verdicts.** One `Challenges` assessment from any non-provider issuer makes a verdict `Rejected`, or
+    `Conflicted` when support exists. There is no challenge threshold and no control-group test on challengers.
+    The cautious reading for a single member becomes denial of evidence at population scale: a population can hold
+    every honest release, including an observer's, in `Rejected` or `Conflicted`.
+  - **A rewritten history, and an unrecorded one.** Each audit chain is per-node and signed by that node's own key.
+    `verify_chain` proves that a stream is internally consistent, not that it is the stream peers first received.
+    Nothing in `src/agent/audit.rs` detects a key holder reissuing its own suffix, and `sys/audit/{node}/…` is the
+    holder's own namespace, so the `sys/` tripwire does not fire. Separately, the chain proves that no record was
+    removed, not that every act was recorded. An act done off the substrate leaves no record at all.
+  - **A pooled map.** Boundary A's worst single-node outcome, reading the replicated twin state, is multiplied: the
+    population holds the union of what reached each member, and the fabric lets members with different clearances
+    share what each holds.
+  - **Collective volume.** Each member stays within its own budget while the total overwhelms a shared resource.
+    Per-partner budgets are consumer-side only (plan §6.7, the RA slice; open).
+- *Mitigations in force:*
+  - **Attribution.** Every act *on the substrate* is signed by a member key, and mTLS admission names the population.
+    Collusion on the substrate is attributable even where it is not preventable.
+  - **Observability by membership.** The boundary controls acting, not receiving, so an observer member with
+    `mesh:read` receives the population's coordination as it happens. This is the substrate's strongest property
+    against H. It holds only for coordination that uses the substrate, and only for a reader that looks.
+  - **Independence is the reader's** (item 3). A reader that places the population in one control group gets one
+    independent vote from it. Evidence never grants what authorisation denies, so manufactured support can only
+    select among already-authorised candidates.
+  - **Authority lapses** (item 5, AE1). A mandate carries `valid_until_ms`, expiry is locally decidable, and AE1
+    refuses a revoked mandate before policy runs. A population's authority therefore ends at its term unless it is
+    renewed: withholding renewal is the halt.
+  - **An external audit sink** (WS-C, opt-in). An attached `AuditSink` (SIEM or WORM archive) keeps the original
+    bytes of every record it mirrors, so a reissued suffix is detectable against it where one is configured.
+  - **Containment.** Clearance (L1–L3) bounds what each member holds. A population run as its own domain never
+    enters another domain's membership, replication or quorum (Boundary D). `EgressPolicy.allow_hosts` fails closed
+    on the paths the substrate chooses (Boundary C), but its default is allow-all.
+- *Proposed (unscheduled; sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
+  - **Prerequisites.**
+    - **P1:** bind issuers to admitted identities.
+    - **P2:** a signed, portable mandate grant. `Mandate` is unsigned today, and its signed epoch is checked only
+      by the wiki's pre-receive hook.
+    - **K1–K3:** the knowledge layer's own deferred PRs (verify on put, signed heads, durable store and head
+      transport).
+  - **H1, challenge admission.** Count challengers by control group, against a reader-set threshold. The default
+    stays one, the cautious reading, but a reader facing a population can require independent challenge.
+  - **H2, per-issuer support.** `min_supporting` counts distinct issuers, not records.
+  - **H3, advertisement bound to authority.** A reader-side check at resolve: a capability in a protected namespace
+    resolves only if its advertiser holds a role or mandate naming it. The check stays at the reader, so Layer I is
+    not taught a higher law.
+  - **H4, witnessed audit heads.** Members record the audit heads they receive from others as witness records. A
+    reissued suffix then surfaces as equivocation, preserved rather than resolved, in keeping with Boundary F.
+  - **H5, the population as one control group, declared at admission.** The operator admitting a fleet declares it
+    as a single control group. This is a statement made at admission, not an inference, so §4's "identity is not
+    independence" is kept and not weakened.
+  - **H6, aggregate budgets.** Provider-side budgets over a declared population, closing plan §6.7's consumer-side gap.
+  - **H7, the confined-fleet profile.** Agent code never holds a member key, and agent pods reach nothing on the
+    network except their node's gateway, so acts off the substrate are blocked rather than invisible. A node
+    self-report states what it can verify, and states network confinement as `Unverified`.
+- *Residual:*
+  - **Collusion and cooperation are the same behaviour with different intent.** mTLS authenticates membership, not
+    intent, and that is as true of a thousand members as of one. A population acting within its authorisation will
+    do what it is authorised to do. Containment is authority design (narrow mandates, short terms, a separate
+    domain), not something the substrate detects.
+  - **Acts off the substrate are invisible to it.** Direct network calls and credentials the substrate never issued
+    are outside every guarantee here, and the evidence must say so (`coverage.complete: false`).
+  - **No coordinator means no central halt.** That is the property the substrate exists to provide, and against a
+    misbehaving population it protects the population from its operator too. The halt is non-renewal of mandates
+    plus key revocation, and revocation reaches only connected readers (Boundary D, §6). Shutdown latency is
+    therefore bounded by the longest term the operator issues, and the operator owns that number.
+  - **Moving coordination onto the substrate makes it both visible and easier.** An operator who admits untrusted
+    agents as members is choosing that trade, and should also:
+    - run the agents as their own domain;
+    - use a sidecar so that agent code never holds a member key;
+    - declare the fleet as one control group;
+    - issue short terms;
+    - admit an observer member;
+    - enforce egress at the network layer.
 
 ### The cross-cutting rule the four boundaries share
 

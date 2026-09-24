@@ -175,6 +175,22 @@ artefacts may carry: verified claims and scoped attestations, never credentials;
 recording seam with a named protected-artefact class. Items 2, 3 and 5 cite it from their PR 1 ADRs (plan §6.5, done).
 Log: [`.log/2026-09-13-threat-model-rev2.md`](.log/2026-09-13-threat-model-rev2.md).
 
+## Threat model revision 3 draft — Boundary H (2026-09-23)
+
+`docs/threat-model.md` §5 adds **H**, a colluding population of admitted members: the plural of §4's "trusted member
+acting maliciously within its authorization", which revisions 1 and 2 model only one member at a time. Its gains
+are each verified in code:
+- any member may advertise any capability name, so a stolen power can be offered as a service;
+- a single peer's `Supports` accepts a release under the default `ReaderPolicy`, and `min_supporting` counts records;
+- one challenger of any group jams a verdict to `Rejected` or `Conflicted`;
+- a key holder can reissue its own audit suffix undetected, and the chain cannot show acts never recorded.
+
+Mitigations in force are attribution, observation by membership, reader-configured independence, mandate expiry as
+the halt, and domain containment. Six proposals (H1–H6) are **unscheduled**. The residual is stated bluntly:
+collusion and cooperation are the same behaviour, acts off the substrate are invisible, and there is no central halt
+by design. Motivated by the 2026 OpenAI–Hugging Face agent incident.
+Log: [`.log/2026-09-23-threat-model-boundary-h.md`](.log/2026-09-23-threat-model-boundary-h.md).
+
 ## WS2 — tamper-evident audit (`compliance`)
 
 Per-node hash-chained signed records at `sys/audit/{node}/{seq:016x}` (a global chain would
