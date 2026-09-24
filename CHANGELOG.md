@@ -195,6 +195,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **rule-agnostic** — which is precisely why they survived the rule change, and is the shape worth
   copying.
 
+### Added
+
+- **A supported way to join a group over HTTP** — `GET`/`POST`/`DELETE /gateway/mesh/group`
+  (`mesh:read` / `mesh:write`).
+
+  Its absence was a finding in its own right. The gateway offered `POST /gateway/overlay/elect`
+  over a group while providing no route that could *populate* one: `grp_prefix` was read in
+  `http.rs` and written nowhere in the surface, and `/gateway/govern/membership` sets a
+  `MembershipIntent { min, max }` — it governs a roster's permitted population, it does not add a
+  member. **The only roster an HTTP caller could reach was the empty one**, which was exactly the
+  state that used to confer solo authority. An election surface without a membership surface is a
+  surface that can only be used wrongly.
+
+  **A node joins itself.** The route takes no node id and there is no verb for enrolling another
+  node — the same shape the substrate commits to everywhere else: an agent promises only its own
+  behaviour. `GET` returns the roster this node can see *and* the group's `declared_min`, which is
+  the read an operator wants **before** an election rather than after a refusal.
+
+  **What it does not settle**, and is tracked rather than implied: *who* may join, *who* may change
+  an electorate, and *which* membership version an election is decided against. This is the
+  operation; governing it belongs with the agreement repair
+  (`.log/2026-09-24-consensus-vote-binding.md`).
+
 ### Fixed
 
 - **`POST /gateway/kv` no longer succeeds at writing nothing.** It reads `value_b64`; when that
