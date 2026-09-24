@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import time
+import uuid
 import httpx
 
 
@@ -34,44 +36,78 @@ def wait_for_health(host: str, timeout: int = 60) -> None:
 
 
 def wait_for_cluster_ready(hosts: list[str] | None = None, timeout: int = 60) -> None:
-    """Wait until gossip has fully converged across all overlay nodes.
+    """Wait until gossip has *currently* converged across all overlay nodes.
 
-    Writes a sentinel KV key from each node, then polls until every node can
-    read all sentinels — proving bidirectional gossip connectivity.
+    Writes a **freshly-nonced** sentinel from each node, checks the write was
+    accepted, then polls until every node reads every sentinel back with the
+    exact expected value.
+
+    The nonce is the point. This helper used to write the same fixed keys
+    (``test/cluster-ready/{host}``) on every call and then check only that
+    *enough keys existed* under the prefix. Once those keys had propagated,
+    every later call passed — on evidence from the first one — even if
+    connectivity had since degraded. A readiness check that cannot fail after
+    its first success is not a precondition, it is a decoration.
+
+    Note this proves *fresh gossip propagation*, which is a much better
+    precondition than the old version and is still **not** proof of consensus
+    safety — see ``docs/wiki/dev/.log/2026-09-24-consensus-vote-binding.md``.
     """
     if hosts is None:
         hosts = ALL_HOSTS
 
-    sentinel_prefix = "test/cluster-ready/"
+    nonce = f"{time.time_ns():x}-{uuid.uuid4().hex[:8]}"
+    sentinel_prefix = f"test/cluster-ready/{nonce}/"
+    expected_values = {host: f"{host}:{nonce}" for host in hosts}
 
-    # Step 1: write one sentinel per node
+    # Step 1: write one freshly-nonced sentinel per node, and check it was accepted.
     for host in hosts:
         sentinel_key = f"{sentinel_prefix}{host}"
         with httpx.Client(base_url=node_url(host), timeout=5.0) as c:
-            c.post("/gateway/kv", json={"key": sentinel_key, "value": host})
+            # NOTE the field name: the gateway reads `value_b64`, and if it is missing it
+            # writes an EMPTY value and still answers `{"ok": true}`. The previous version of
+            # this helper sent `value`, so every sentinel it ever wrote was empty — and the
+            # check passed anyway, because it only counted keys. See
+            # `docs/wiki/dev/.log/2026-09-24-consensus-vote-binding.md` §the gateway write.
+            payload = base64.b64encode(expected_values[host].encode()).decode()
+            resp = c.post("/gateway/kv", json={"key": sentinel_key, "value_b64": payload})
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"readiness sentinel write rejected by {host}: "
+                    f"HTTP {resp.status_code} {resp.text[:200]}"
+                )
 
-    # Step 2: wait until every node sees all sentinels
-    expected = len(hosts)
-    encoded_prefix = sentinel_prefix.replace("/", "%2F")
+    # Step 2: wait until every node reads back every sentinel with the EXACT expected
+    # value — not merely "enough keys exist under the prefix". A count can be satisfied
+    # by the wrong keys, or by keys from an earlier run; identity and value cannot.
+    def _reads_all(host: str) -> bool:
+        for owner, want in expected_values.items():
+            key = f"{sentinel_prefix}{owner}".replace("/", "%2F")
+            # `GET /gateway/kv?key=` — not `/gateway/kv/get`, which does not exist and
+            # answers 404 (a shape that reads as "no value" if you do not check the status).
+            r = httpx.get(f"{node_url(host)}/gateway/kv?key={key}", timeout=3.0)
+            if r.status_code >= 400:
+                return False
+            body = r.json()
+            if not body.get("found"):
+                return False
+            got = base64.b64decode(body.get("value_b64", "")).decode(errors="replace")
+            if got != want:
+                return False
+        return True
+
     deadline = time.monotonic() + timeout
+    last_error: str | None = None
     while time.monotonic() < deadline:
         try:
-            converged = all(
-                len(
-                    httpx.get(
-                        f"{node_url(h)}/gateway/kv/keys?prefix={encoded_prefix}",
-                        timeout=3.0,
-                    ).json().get("keys", [])
-                ) >= expected
-                for h in hosts
-            )
-            if converged:
+            if all(_reads_all(h) for h in hosts):
                 return
-        except Exception:
-            pass
+            last_error = "sentinels not yet visible with expected values on every node"
+        except Exception as exc:  # transient transport errors are expected while converging
+            last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(1.0)
     raise RuntimeError(
-        f"Cluster did not converge (sentinel propagation) within {timeout}s"
+        f"Cluster did not converge (fresh sentinel {nonce}) within {timeout}s: {last_error}"
     )
 
 

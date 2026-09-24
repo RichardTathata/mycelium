@@ -60,6 +60,23 @@ failure-looks-like-success shape as everything else in this investigation.)*
 **Still unresolved:** that this is what happened in the `8b588c6` run. The roster emptiness is
 established; the causal link to that specific failure is not.
 
+## And the reason S12 cannot simply be "fixed to join the group"
+
+**There is no gateway route by which a node joins a group.** `grp_prefix` is *read* at
+`src/agent/http.rs:2830` and written nowhere in the HTTP surface; `join_group` exists only on the
+Rust `mesh()` handle. `POST /gateway/govern/membership` sets a `MembershipIntent { min, max }` —
+it governs a roster's permitted *population*, it does not add a member.
+
+So the gateway offers **election over a membership concept it provides no way to populate**, and the
+only roster state reachable over HTTP is the empty one — which is precisely the state that grants
+solo authority. That is why the recommended first fix ("make S12 establish the intended three-member
+group") is not a test-side change: it needs a join/leave route, or a demo that joins in Rust before
+serving.
+
+It also sharpens the API finding. This is not "a test forgot to set up its group". It is a surface
+on which *every* HTTP caller's election silently degrades to a singleton, because no other outcome
+is reachable.
+
 ## A secondary hypothesis — the converge sleep (symptom-hider, not cause)
 
 `elect_leader` (`src/agent/consensus_handle.rs:556`) never returns "I committed, therefore I won" —

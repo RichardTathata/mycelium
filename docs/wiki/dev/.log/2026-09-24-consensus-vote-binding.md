@@ -67,3 +67,37 @@ difference is visible — which is why that sleep is a symptom-hider, not the ca
 **The test that settles it**, and that should exist before any fix: two proposers, one slot, the
 same ballot, different values, one shared voter — assert that a vote for A **cannot** contribute to
 B's quorum. Deterministic, no timing.
+
+
+---
+
+## Two more, found while verifying the above
+
+### The gateway write succeeds at writing nothing
+
+`POST /gateway/kv` reads **`value_b64`**. If that field is absent — misspelled, or a caller that
+assumes a plain `value` — it writes `Bytes::new()` and answers **`{"ok": true}`**
+(`src/agent/http.rs:2355`). A typo in a field name therefore *erases* a key and reports success.
+
+This is not hypothetical: `tests/overlay/scenarios/helpers.py` had been posting
+`{"key": …, "value": host}` since it was written, so **every readiness sentinel it ever wrote was
+empty**, and every readiness check passed anyway — because the check only counted keys under a
+prefix. Two failure-looks-like-success mechanisms stacked, each hiding the other.
+
+**Recommendation:** a missing `value_b64` should be `400`, exactly as a missing `key` already is.
+Writing an empty value must be something a caller asks for explicitly (an empty string encodes
+fine), not what happens when the request is not understood. Tombstoning has its own verb
+(`DELETE`), so silent-empty has no legitimate caller.
+
+### The readiness check could not fail after its first success
+
+`wait_for_cluster_ready` wrote fixed sentinel keys (`test/cluster-ready/{host}`) and polled until
+*enough keys existed* under that prefix. Once those keys had propagated — in the first run of the
+first scenario — every later call was satisfied by the residue, regardless of current connectivity,
+and regardless of the writes having been empty. **A precondition that cannot fail after it first
+passes is a decoration.**
+
+Fixed here: a fresh nonce per attempt, the write's status checked, and every node must read back
+every sentinel with its **exact expected value** (`found`, and the decoded `value_b64`). That
+proves fresh bidirectional propagation at the moment of asking — which is a real precondition, and
+still not a statement about consensus safety.
