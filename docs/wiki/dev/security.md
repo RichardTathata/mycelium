@@ -77,84 +77,89 @@ the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key select
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
 identity.
 
-## The identity-proof window, closed by construction (2026-09-24)
+## The identity-proof window, and a diagnosis that was wrong (2026-09-24)
 
-`require_identity_proofs` defaults to **`false`**. Set it, and an unsigned `sys/identity/{V}` — the
-pre-Phase-2 mimic — is rejected rather than accepted-and-flagged. It was flipped to `true` on
-2026-09-23 and **reverted on 2026-09-24**. Read the revert, not the flip: the argument for flipping
-was correct and is still correct, and it was not the argument that mattered.
+`require_identity_proofs` defaults to **`false`**. Set it and an identity entry this node cannot
+authenticate is rejected rather than accepted-and-flagged. It was flipped to `true` on 2026-09-23
+and reverted the next day. **Read the correction first, because the original write-up of this
+section asserted a cause it had not checked.**
 
-**The argument for the flip.** Every TLS node has written `sys/identity-proof/{self}`
-unconditionally since Phase 2 (**v2.3.0**, 2026-07-24), so within the one-release window a rolling
-upgrade is supported across, no honest node writes an unsigned identity. The rollout precondition
-the runbook used to prescribe was ten releases behind us.
+### The correction
 
-**What it missed.** A node's identity and its proof are **two separate `kv_set` calls**
-(`src/agent/lifecycle.rs`), hence two gossip messages with no ordering between them. Requiring
-proofs therefore means a peer can learn an identity *before* its proof, reject it, and hold **no
-key** for that node. The key recovers by itself — `start_identity_watcher` subscribes to the
-broader `sys/identity` prefix, not `sys/identity/`, exactly so a late proof re-validates its
-entry — so the window is transient and self-healing.
+The revert was triggered by an intermittent `S12 leader election … Nodes disagree on leader` in the
+overlay Docker suite, after twelve consecutive greens. That failure was attributed to the flip. **It
+cannot have been caused by it.** Every identity writer and both readers (`prewarm_peer_keys`,
+`start_identity_watcher`) live inside the `if let Some(ref tls_cfg) = self.config.tls` block in
+`src/agent/lifecycle.rs`; the overlay suite's nodes are the demo binary, which configures no TLS,
+and the compose file sets no TLS env. With no TLS there are no `sys/identity/` entries, the
+validator never runs, and **the flag is inert**.
 
-**A decision taken inside the window is not self-healing, and that is the whole lesson.** A leader
-election is one-shot: a node that could not verify a peer's consensus signature while the window
-was open does not re-run the election when the key lands a moment later. The Docker suite failed
-`S12 leader election … Nodes disagree on leader` intermittently — three nodes, two answers — with
-the federation two-mesh suite failing in the same run, after **twelve consecutive greens**. Two
-greens followed, which is what an intermittent race looks like.
+So: S12's intermittency is **unexplained and still open**. It is not the flip, and it is not #369's
+election-rule change either — that landed after the failing commit.
 
-**Why nothing caught it before merge.** Flipping the default broke **no unit test**, because every
-test that exercises the behaviour sets the flag explicitly; the in-process suites have no
-gossip-ordering window to lose a race in. The gate that could see it is the Docker suite, and it is
-the one that runs after the merge. *A config default whose only failure mode is a race across
-processes is not testable by the suite that gates the PR* — worth remembering the next time a
-default looks cheap because the suite stayed green.
+The mistake is worth naming because it is the same one the [testing
+page](testing/testing.md) warns about, run backwards: a red run was taken as evidence about a
+*cause*, on the strength of "it was the only change in that commit", without checking whether the
+mechanism could reach the test. One correlation, six documents.
 
-**The fix: Phase 3b's sealed record (2026-09-24).** `sys/identity-signed/{node}` carries
-`version(1) ‖ history ‖ proof(96)` — the same key history and the same proof, in **one** KV entry.
-One entry cannot arrive in two parts, so the window is closed **by construction rather than by
-timing**, which is the only kind of fix worth having for a race. Every TLS node writes it *and* the
-legacy pair, so a node predating the release still learns keys; readers prefer it; and with
-`require_identity_proofs` set, readers accept **only** it — the pair is refused not because it is
-invalid but because it is two messages, which is the window. A peer publishing only the pair is a
-peer that predates the mechanism, which is what the flag has always refused.
+### What is real
+
+Identity and proof *were* two separate `kv_set` calls — two gossip messages with no ordering
+between them. In a **TLS** fleet a peer could therefore learn an identity before its proof, reject
+it, and hold no key for that node until the proof arrived. The key recovers by itself
+(`start_identity_watcher` subscribes to the broader `sys/identity` prefix, not `sys/identity/`,
+precisely so a late proof re-validates its entry), so the window is transient — but a one-shot
+decision taken inside it would not be.
+
+That is a **hazard, not an observed failure**, and the distinction is the whole point of this
+section. It justifies the fix on its own; it does not justify a story about a cluster splitting.
+
+### The fix: Phase 3b's sealed record
+
+`sys/identity-signed/{node}` carries `version(1) ‖ history ‖ proof(96)` — the same key history and
+the same proof, in **one** KV entry. One entry cannot arrive in two parts, so the hazard is removed
+**by construction rather than by timing**, which is the only kind of removal worth having. Every TLS
+node writes it *and* the legacy pair, so a node predating the release still learns keys; readers
+prefer it; and with `require_identity_proofs` set, readers accept **only** it — the pair is refused
+not because it is invalid but because it is two messages.
 
 Rotation writes the sealed record too. It has to: readers *prefer* it, so a rotation that updated
 only the pair would leave every proof-requiring peer reading the pre-rotation history and never
-learning the new key. That is the kind of bug a preference introduces, and it is worth naming
-because the next reader-preference we add will have the same shape.
+learning the new key. Any time a reader gains a preference, every writer of the old thing is a bug
+until it writes the new one.
 
-**What is pinned.** The value, with its reason, in
-`config::tests::the_default_requires_identity_proofs`. That a sealed record authenticates on its own
-and the legacy pair does not, in `lib_tests::identity_proof_default`
-(`a_sealed_record_is_accepted_when_proofs_are_required`,
-`the_legacy_pair_is_refused_when_proofs_are_required` — if the latter ever stops holding, the window
-is back and the default must not be flipped). And end to end, two proof-requiring nodes still
-authenticating each other, in `test_identity_proofs_required_two_nodes_still_authenticate` — which
-states in its own doc comment that it **cannot** measure the race, only that the sealed path is
-wired and sufficient. The race's gate is the Docker suite.
+### What is pinned
 
-**What remains is a rollout, not a defect.** A node accepts what its peers publish, and a peer on an
-older release publishes only the pair. Turn the flag on once every node writes a sealed record; flip
-the *default* a release later ([cert-rotation](../../operations/cert-rotation.md) has the check).
+The default, with its reason, in `config::tests::the_default_requires_identity_proofs`. That a
+sealed record authenticates on its own and the legacy pair does not, in
+`lib_tests::identity_proof_default` — `the_legacy_pair_is_refused_when_proofs_are_required` is the
+canary: if it ever stops holding, the hazard is back. And end to end,
+`test_identity_proofs_required_two_nodes_still_authenticate`, which states in its own doc that it
+**cannot** measure a cross-process race and proves only that the sealed path is wired and
+sufficient.
 
-**The limit the flag never closed, kept visible on purpose.** *Proofs required* is **not** *identity
-authenticated*. First sighting of a node never seen is still **trust on first use**: a self-signed
-entry is accepted because there is nothing established to chain it to, so an admitted-but-hostile
-member can still introduce a key for a node nobody has met. What closes that is an **anchor** — a
-direct, CA-validated connection (Phase 1b) — after which an unchained key is rejected *and counted*
-in `identity_anchor_conflicts`. Proofs close the unsigned-mimic residual; anchors close the
-first-sighting one; complementary, not alternatives. That boundary has its own test
-(`lib_tests::identity_proof_default::requiring_proofs_does_not_close_trust_on_first_use`), written
-so that **if the TOFU window is ever closed the test fails and must be rewritten** rather than
-quietly continuing to pass. The end-to-end join is pinned beside it
-(`an_opted_in_configuration_rejects_an_unsigned_identity_entry`) — renamed from
-`a_default_configuration_…` by this revert, which is the one substantive test change it made.
+### The limit none of this closes
+
+*Proofs required* is **not** *identity authenticated*. First sighting of a node never seen is still
+**trust on first use**: a self-signed entry is accepted because there is nothing established to
+chain it to, so an admitted-but-hostile member can still introduce a key for a node nobody has met.
+Anchors — a direct, CA-validated connection (Phase 1b) — are what close that, after which an
+unchained key is rejected *and counted* in `identity_anchor_conflicts`. Proofs close the
+unsigned-mimic residual; anchors close the first-sighting one; complementary, not alternatives.
+`requiring_proofs_does_not_close_trust_on_first_use` is written to **fail if the TOFU window is ever
+closed**, so the claim cannot rot.
 
 **Who this matters to beyond the mesh:** `mycelium-commitment`'s offer/award signatures verify
 against keys a caller resolves, and `sys/identity/{node}` is the obvious source for a node
-participant. The strength of *that* chain was the reason this default was worth revisiting — and it
-remains as strong as the caller's key resolution, which on the default configuration is TOFU.
+participant. That chain is as strong as the caller's key resolution, which on the default
+configuration is TOFU.
+
+### What remains
+
+A rollout, not a defect: a node accepts what its peers publish, and a peer on an older release
+publishes only the pair. Turn the flag on once every node writes a sealed record
+([cert-rotation](../../operations/cert-rotation.md) has the check); flip the *default* a release
+later, deliberately.
 
 ## Threat model revision 2 (v3 item 8, 2026-09-13)
 

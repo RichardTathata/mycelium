@@ -102,11 +102,15 @@ history and proof in **one** KV entry — and does *not* accept the older
 
 That is not pedantry. The pair is two gossip messages with no ordering between them, so a peer
 requiring proofs could learn the identity first, reject it, and hold **no key** for that node until
-the proof arrived. The key recovered on its own (the identity watcher subscribes to the broader
-`sys/identity` prefix, so a late proof re-validates its entry) — but a **leader election decided
-inside that window does not**, being one-shot. That is exactly how an attempt to make this the
-default on 2026-09-23 split a four-node cluster: `S12 leader election … Nodes disagree on leader`,
-intermittently, after twelve consecutive green runs. It was reverted the next day.
+the proof arrived. The key recovers on its own (the identity watcher subscribes to the broader
+`sys/identity` prefix, so a late proof re-validates its entry) — but a one-shot decision taken
+inside that window, such as a leader election, would not.
+
+**No deployment has been observed hitting this**, and one claim that it had was wrong: an attempt to
+make the flag default-on (2026-09-23, reverted 2026-09-24) coincided with an intermittent
+`S12 leader election … Nodes disagree on leader` in the test fleet, and the two were connected in
+the write-up. They cannot be: the flag is inert without TLS and those nodes configure none. Treat
+the window as a hazard removed on principle, not a bug you have been living with.
 
 One entry cannot arrive in two parts, so the window is closed by construction rather than by timing.
 

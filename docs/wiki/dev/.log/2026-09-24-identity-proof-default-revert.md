@@ -4,12 +4,27 @@
 2026-09-23 (`8b588c6`, unreleased) and reverted here. No released version carried the flip, so no
 deployment is affected.
 
+> **Correction, appended the same day.** The mechanism below was offered as the leading account of
+> the S12 failure. **It cannot be**: every identity writer and both readers live inside the
+> `config.tls` block in `src/agent/lifecycle.rs`, and the overlay suite's nodes are the demo binary,
+> which configures no TLS. With no TLS there are no `sys/identity/` entries and the validator never
+> runs — **the flag is inert in that suite**. S12's intermittency is unexplained and still open; it
+> is not the flip, and not #369's election-rule change either (that landed after the failing
+> commit). The revert stands on the plainer ground that a default flip nothing had demonstrated safe
+> does not belong on main. The *window* described below is real for a TLS fleet and worth closing —
+> which Phase 3b does — but it is a hazard, not the cause of anything observed.
+>
+> The error is the one this repo's testing page warns about, run backwards: a red run taken as
+> evidence about a **cause**, on the strength of "it was the only change in that commit", without
+> checking whether the mechanism could reach the test.
+
 **Why the revert.** The Docker suite failed `S12 leader election … Nodes disagree on leader`
 intermittently — three nodes, two answers — with the federation two-mesh suite failing in the same
 run, after **twelve consecutive greens** on the preceding commits and two greens after. That
-signature is a race, and the flip is the only change between the greens and it.
+signature is a race, and the flip was the only change between the greens and it — which is where the
+reasoning went wrong, above.
 
-**Mechanism (leading account, not instrumented).** A node's identity and its proof are two separate
+**Mechanism (offered at the time; see the correction above).** A node's identity and its proof are two separate
 `kv_set` calls in `src/agent/lifecycle.rs` — two gossip messages, no ordering between them. With
 proofs required, a peer that learns the identity first rejects it and holds no key for that node.
 The *key* recovers by itself: `start_identity_watcher` subscribes to the broader `sys/identity`

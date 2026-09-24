@@ -93,12 +93,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The sealed identity record (`sys/identity-signed/{node}`, identity-auth Phase 3b)** — key
   history *and* its proof in **one** KV entry: `version(1) ‖ history ‖ proof(96)`.
 
-  **What it fixes.** `require_identity_proofs` could not safely be turned on. A node's identity and
-  its proof were two KV entries, hence two gossip messages with no ordering between them; a peer
-  requiring proofs could learn the identity first, reject it, and hold **no key** for that node
-  until the proof landed. The key recovered on its own — a late proof re-validates its entry — so
-  the window was transient. A **leader election decided inside it is not**, being one-shot. That is
-  how the attempt to make the flag default-on split a four-node cluster.
+  **What it removes.** A node's identity and its proof were two KV entries, hence two gossip
+  messages with no ordering between them; a peer requiring proofs could learn the identity first,
+  reject it, and hold **no key** for that node until the proof landed. The key recovers on its own —
+  a late proof re-validates its entry — so the window is transient, but a one-shot decision taken
+  inside it would not be.
+
+  **Stated precisely: this is a hazard nobody has observed firing, not a diagnosed bug.** An earlier
+  version of this entry said the window split a four-node cluster. It did not: that failure was an
+  intermittent leader election in a test fleet whose nodes run **without TLS**, and every identity
+  writer and reader lives inside the `config.tls` block — the flag is inert there. The correlation
+  was the flip being the only change in its commit; the mechanism was never checked against the
+  test. The window is real and worth removing on its own merits; the cluster split was not its
+  doing, and that failure remains unexplained.
 
   One entry cannot arrive in two parts, so the window is closed **by construction rather than by
   timing**, which is the only kind of fix worth having for a race.
@@ -123,6 +130,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`require_identity_proofs` stays `false` — the flip to `true` was made and reverted before any
   release carried it.** **No released version's behaviour changes**; nothing to do on upgrade. What
   ships here is the reason, pinned where the next person to consider the flip will hit it.
+
+  **Correction to the first version of this entry:** the revert was triggered by an intermittent
+  `S12 leader election … Nodes disagree on leader`, and that failure was attributed to the flip. It
+  cannot have been caused by it — the flag is inert without TLS and the suite's nodes configure
+  none. The revert stands on the plainer ground that the flip was never demonstrated safe. The
+  leader-election intermittency is **unexplained and open**.
 
   **The argument for flipping was sound.** Every TLS node has written `sys/identity-proof/{self}`
   unconditionally since Phase 2 (**v2.3.0**, 2026-07-24), so within the one-release window a rolling

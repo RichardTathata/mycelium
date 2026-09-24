@@ -5,12 +5,18 @@ and the proof that authenticates it in **one** KV entry. Written by every TLS no
 rotation, alongside the legacy `sys/identity/` + `sys/identity-proof/` pair. Readers prefer it; with
 `require_identity_proofs` set, readers accept **only** it.
 
-**Why:** the same day's revert log
-([`2026-09-24-identity-proof-default-revert.md`](2026-09-24-identity-proof-default-revert.md)) ends
-with a precondition — *an atomic identity+proof record, or a bounded pending state*. This is the
-first of those. Two entries are two gossip messages with no ordering between them, so a peer
-requiring proofs could learn the identity first, reject it, and hold no key until the proof landed.
-Transient for the key, permanent for a leader election decided inside the window.
+**Why:** two entries are two gossip messages with no ordering between them, so a peer requiring
+proofs could learn an identity before its proof, reject it, and hold no key for that node until the
+proof landed. Transient for the key (a late proof re-validates), not transient for a one-shot
+decision taken inside the window.
+
+**Said precisely, because the same day's revert log got this wrong and was corrected:** this is a
+**hazard nobody has observed firing**. The revert
+([`2026-09-24-identity-proof-default-revert.md`](2026-09-24-identity-proof-default-revert.md))
+blamed an intermittent `S12 leader election` failure on exactly this window; it could not have been,
+because the flag is inert without TLS and that suite's nodes configure none. The window is still
+worth removing — an ordering dependency nobody can see is worse than one that has bitten — but the
+justification is *design*, not an incident.
 
 **The shape of the fix is the part worth remembering: closed by construction, not by timing.** The
 alternatives on the table were all timing arguments — write the proof first (reduces the odds),

@@ -930,17 +930,23 @@ pub struct GossipConfig {
     /// it would reopen the window described below. A peer publishing only the pair is a peer that
     /// predates the mechanism, which is what this flag has always refused.
     ///
-    /// **`false` by default — one release longer than the mechanism needs.** The history is short
-    /// and worth keeping. It was flipped to `true` on 2026-09-23 and reverted on 2026-09-24,
-    /// because identity and proof were then two separate `kv_set` calls — two gossip messages with
-    /// no ordering between them. A peer that learned the identity first rejected it and held **no
-    /// key** for that peer until the proof landed. The key recovered on its own (the identity
-    /// watcher subscribes to the broader `sys/identity` prefix, so a late proof re-validates its
-    /// entry), so the window was transient — **but a leader election decided inside it is not**,
-    /// being one-shot. The Docker suite split: `S12 leader election … Nodes disagree on leader`,
-    /// intermittently, after twelve consecutive green runs.
+    /// **`false` by default — not yet demonstrated safe, which is a weaker and more honest claim
+    /// than the one this comment made for a day.** It was flipped to `true` on 2026-09-23 and
+    /// reverted on 2026-09-24 after an intermittent `S12 leader election … Nodes disagree on
+    /// leader` in the Docker suite. **That failure was then wrongly attributed to this flag.** It
+    /// could not have been: every identity writer and reader lives inside the `config.tls`
+    /// block, and the overlay suite's nodes configure no TLS, so the flag is *inert* there. S12's
+    /// intermittency remains unexplained and is tracked as its own problem.
     ///
-    /// **Phase 3b closes that window by construction** rather than by timing: the sealed record
+    /// **What is real, and is why the default stays off:** identity and proof *were* two separate
+    /// `kv_set` calls — two gossip messages with no ordering between them — so in a **TLS** fleet a
+    /// peer could learn the identity first, reject it for want of a proof, and hold no key for that
+    /// peer until the proof landed. The key recovers on its own (the identity watcher subscribes to
+    /// the broader `sys/identity` prefix, so a late proof re-validates its entry), so the window is
+    /// transient; a one-shot decision taken inside it would not be. That is a **hazard nobody has
+    /// observed firing**, not a diagnosed bug, and the distinction is the point.
+    ///
+    /// **Phase 3b removes the hazard by construction** rather than by timing: the sealed record
     /// above is one KV entry, and one entry cannot arrive in two parts. There is no ordering left
     /// to lose.
     ///
@@ -1666,13 +1672,14 @@ mod tests {
     /// **The default does not require identity proofs — yet**, and this pins it *with its reason*,
     /// because the reason is the whole value of the test.
     ///
-    /// The default was flipped to `true` on 2026-09-23 and reverted on 2026-09-24. Flipping it
-    /// changed no unit test: the in-process suites have no cross-process ordering window to lose a
-    /// race in, so they stayed green while the **Docker** suite split a leader election. The cause
-    /// — identity and proof arriving as two independent gossip messages — is **fixed**: Phase 3b's
-    /// sealed record (`sys/identity-signed/{node}`) carries both in one entry, and
-    /// `lib_tests::identity_proof_default` pins that a sealed record authenticates on its own while
-    /// the legacy pair does not.
+    /// The default was flipped to `true` on 2026-09-23 and reverted on 2026-09-24, after an
+    /// intermittent Docker leader-election failure that was **wrongly blamed on it** — the flag is
+    /// inert without TLS, and those nodes configure none. The revert still stands, for the
+    /// unglamorous reason that the flip was never demonstrated safe and a default is not the place
+    /// to find out. The *hazard* it would have exposed — identity and proof arriving as two
+    /// independent gossip messages — is real and now removed by Phase 3b's sealed record
+    /// (`sys/identity-signed/{node}`); `lib_tests::identity_proof_default` pins that a sealed
+    /// record authenticates on its own while the legacy pair does not.
     ///
     /// What remains is not a defect but a rollout: a node only accepts what its peers publish, and
     /// a peer on an older release publishes only the pair. **Flip this one release after the sealed

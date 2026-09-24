@@ -235,15 +235,15 @@ still told you nothing — two cases on one day, which is what made the shape vi
 
 | What went green | Why the green was empty |
 |---|---|
-| every pre-merge gate on the `require_identity_proofs` default flip | the failure is a **race between processes**; the in-process suites have no ordering window to lose it in, and every test that exercises the flag sets it explicitly, so none of them was testing the *default* |
+| every pre-merge gate on the `require_identity_proofs` default flip | nothing was testing the *default* — every test that exercises the flag sets it explicitly. (The flip was then reverted for a failure it turned out **not** to have caused; see the third rule below) |
 | `auto_election_is_deterministic` for four days after the rule became rendezvous | the assertion (*lowest id wins*) had become a **coin flip** — kernel-assigned ports, and `hash(ring, node)` favours neither — so two passes on `main` were two heads, not two checks |
 
 **Neither test was wrong about what it asserted. Both were wrong about what their passing implied.**
-The first shipped a default whose only failure mode lives in the Docker suite that runs *after*
-merge. The second passed twice by luck and failed on the next unrelated branch — an identity-proofs
-revert — which is the only reason anybody looked.
+The first shipped a default nothing was checking. The second passed twice by luck and failed on the
+next unrelated branch — an identity-proofs revert — which is the only reason anybody looked.
 
-Two rules come out of it, and the second is the cheap one to apply:
+Three rules come out of it. The third was learned the hard way, hours after the first two were
+written:
 
 1. **A config default whose only failure mode is a race between processes is not testable by the
    suite that gates the PR.** Flipping one needs the Docker suites deliberately, before merge, or
@@ -257,9 +257,18 @@ Two rules come out of it, and the second is the cheap one to apply:
    (`is_curator() ^ is_curator()`) survived the rendezvous change untouched for exactly this reason
    — they never named the rule. The tuple-space one did, and rotted silently.
 
-The failure mode to watch for is specific and easy to name once seen: **an assertion that a rule
-change makes probabilistic rather than false.** It does not go red on the PR that breaks it. It
-goes red later, somewhere unrelated, and looks like a flake.
+3. **A red run is evidence about that run too — including about its cause.** The identity-proofs
+   flip was reverted on the reasoning *it was the only change in that commit, and the suite went
+   red*. That reasoning never checked whether the mechanism could reach the failing test. It could
+   not: the flag is inert without TLS, and the overlay suite's nodes configure none. The conclusion
+   was written into six documents before anyone looked at `lifecycle.rs`. **Before attributing a
+   failure to a change, find the path from the change to the assertion** — "only change in the
+   commit" is a prior, not a mechanism. The leader-election intermittency it was blamed on is still
+   open.
+
+The failure mode to watch for in rule 2 is specific and easy to name once seen: **an assertion that
+a rule change makes probabilistic rather than false.** It does not go red on the PR that breaks it.
+It goes red later, somewhere unrelated, and looks like a flake.
 
 ## Golden on-disk fixtures replay in CI (V2, contracts axis)
 
