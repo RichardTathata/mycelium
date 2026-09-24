@@ -52,6 +52,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | **Coordination & identity integrity** — an election needs an electorate, winning is not a grant, one node quietly holding everything reads as healthy, and a node's identity travels as one record. All *run* in CI | | | | | | | | | |
 | [`coordination_integrity`](../docs/guide/04-consensus.md) | · | · | ● | ○ | Adv | CLI | · | · | · |
 | [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | CLI | · | · | · |
+| [`coordination_viz`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | Web | · | · | ✓ |
 | [`identity_one_record`](../docs/guide/09-security.md) | ● | · | · | ○ | Adv | CLI | · | · | · |
 | [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | |
@@ -128,6 +129,7 @@ links to its walkthrough README.
 | [`wiki_council_viz`](../mycelium-wiki/examples/README.md) ★ | `:8095` | `cargo run -p mycelium-wiki --example wiki_council_viz --features gateway,llm,metrics` |
 | [`guardrail_viz`](../mycelium-guardrails/examples/README.md) ★ | `:8096` | `cargo run -p mycelium-guardrails --example guardrail_viz --features compliance,gateway,metrics-export` |
 | [`conway`](../docs/guide/01-gossip-kv.md) | `:8090` | `cargo run --example conway --features metrics` |
+| [`coordination_viz`](../docs/guide/14-patterns-and-pitfalls.md) | `:8100` | `cargo run --example coordination_viz --features metrics` |
 | [`conway-gpu`](conway-gpu/README.md) | — | `cargo run --release -p conway-gpu` (GPU/wgpu; no gateway) |
 
 `wiki_council_viz` phrases each specialist's grounded answer via a **local model served on the mesh**

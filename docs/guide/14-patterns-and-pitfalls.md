@@ -263,6 +263,18 @@ ring to the old rule, which concentrates by construction.
 > **Mitigate the cause, keep the ability to see the residue.** That is why both shipped together,
 > and why P10 stays now that rendezvous exists.
 
+**Watch it happen.** Two runnable demonstrations, the same property:
+
+```bash
+cargo run --example coordinator_by_accretion              # CLI — asserts, exits, runs in CI
+cargo run --example coordination_viz --features metrics   # browser — :8100, a live three-node fleet
+```
+
+The browser demo flips between the two rules every few seconds against a **real** fleet and the real
+`mycelium::election` API, with a concentration gauge tracking the damage. You will sometimes see
+rendezvous land two rings on one node — roughly an 11% chance of all three. That is not a bug in the
+demo; it is the honest shape of a spread that is not a bound, which is why the detector stays.
+
 ## The meta-pattern
 
 Eight of these ten were found *by building and running the examples*, not by

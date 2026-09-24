@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A coordinator nobody declared — Mycelium</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --text2:#9da7b3;
+    --muted:#6e7681; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+       padding:24px 16px 48px}
+  .wrap{max-width:1020px;margin:0 auto}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:21px;margin:0;letter-spacing:-.2px}
+  .sub{color:var(--text2);font-size:14px;margin:0 0 22px}
+  .opsbtn{margin-left:auto;background:var(--panel);border:1px solid var(--border);
+          color:var(--text2);text-decoration:none;padding:6px 12px;border-radius:7px;font-size:13px}
+  .opsbtn:hover{color:var(--text);border-color:var(--accent)}
+  .rulebar{display:flex;align-items:center;gap:14px;background:var(--panel);
+           border:1px solid var(--border);border-left-width:4px;border-radius:9px;
+           padding:13px 16px;margin-bottom:18px;transition:border-color .3s}
+  .rulebar.bad{border-left-color:var(--bad)} .rulebar.ok{border-left-color:var(--ok)}
+  .rulename{font-weight:650;font-size:15px}
+  .rulewhy{color:var(--text2);font-size:13.5px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .node{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+        padding:14px;min-height:148px;transition:border-color .3s,box-shadow .3s}
+  .node.loaded{border-color:var(--bad);box-shadow:0 0 0 1px rgba(248,81,73,.25)}
+  .node.idle{opacity:.62}
+  .nid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:var(--text2);
+       margin-bottom:10px;letter-spacing:-.2px}
+  .role{display:block;background:#1f2630;border:1px solid var(--border);border-radius:7px;
+        padding:7px 10px;margin-bottom:7px;font-size:13px}
+  .role b{font-weight:600;color:var(--text)}
+  .role span{display:block;color:var(--muted);font-size:11.5px;
+             font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .none{color:var(--muted);font-size:13px;font-style:italic;padding-top:6px}
+  .gauge{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+         padding:16px 18px;margin-bottom:18px}
+  .gtop{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+  .gval{font-size:30px;font-weight:700;letter-spacing:-1px}
+  .glbl{color:var(--text2);font-size:13.5px}
+  .bar{height:9px;background:#21262d;border-radius:5px;overflow:hidden}
+  .fill{height:100%;border-radius:5px;transition:width .5s ease,background .3s}
+  .verdict{margin-top:11px;font-size:13.5px;color:var(--text2)}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px}
+  .panel h2{font-size:13px;text-transform:uppercase;letter-spacing:.7px;color:var(--text2);
+            margin:0 0 11px;font-weight:600}
+  .concept{display:flex;gap:10px;margin-bottom:9px;font-size:13.5px}
+  .tag{flex:none;background:#1f2630;border:1px solid var(--border);border-radius:5px;
+       padding:1px 7px;font-size:11px;color:var(--accent);font-weight:600;height:fit-content}
+  .cname{font-weight:600} .cgloss{color:var(--text2)}
+  .note{font-size:13.5px;color:var(--text2)}
+  .note b{color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>A coordinator nobody declared</h1>
+    __OPS_CONSOLE_LINK__
+  </header>
+  <p class="sub">Three equally-capable nodes. Three single-writer rings, each electing
+     <em>independently</em>. Watch the rule change every few seconds.</p>
+
+  <div class="rulebar" id="rulebar">
+    <div>
+      <div class="rulename" id="rulename">…</div>
+      <div class="rulewhy" id="rulewhy"></div>
+    </div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <div class="gauge">
+    <div class="gtop">
+      <span class="gval" id="pct">–</span>
+      <span class="glbl">of single-writer roles held by one node &nbsp;·&nbsp;
+        <span id="distinct"></span></span>
+    </div>
+    <div class="bar"><div class="fill" id="fill" style="width:0%"></div></div>
+    <div class="verdict" id="verdict"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Why nothing else was complaining</h2>
+    <p class="note"><b>P2</b> watches role <em>churn</em> — and a node calmly holding everything
+      produces none. <b>P6</b> watches coverage <em>gaps</em> — and here every capability has a
+      provider. The same one. Both look down an orthogonal axis, so a maximally concentrated fleet
+      reads as <b>perfectly healthy on every measurement that existed</b>, right up until the node
+      it all depends on goes away. That is why <b>P10</b> exists.</p>
+  </div>
+
+  <div class="panel">
+    <h2>What this does not claim</h2>
+    <p class="note">Rendezvous is a <b>spread, not a bound</b>. Three rings over three nodes still
+      leave roughly an 11% chance one node wins all three — you may well see that above. Concentration
+      becomes unlikely, not impossible, which is exactly why the detector stays: <b>mitigate the
+      cause, keep the ability to see the residue.</b></p>
+  </div>
+
+  <div class="panel">
+    <h2>Mycelium concepts &amp; services this demo exercises</h2>
+    <div id="concepts"></div>
+  </div>
+</div>
+
+<script>
+const CONCEPTS = __CONCEPTS__;
+document.getElementById('concepts').innerHTML = CONCEPTS.map(c =>
+  `<div class="concept"><span class="tag">${c.tag}</span><div>` +
+  `<span class="cname">${c.name}</span> — <span class="cgloss">${c.gloss}</span></div></div>`).join('');
+
+function shortId(id){ return id.replace('127.0.0.1:', 'node :'); }
+
+async function tick(){
+  let s;
+  try { s = await (await fetch('/state')).json(); } catch (e) { return; }
+
+  const bar = document.getElementById('rulebar');
+  bar.className = 'rulebar ' + (s.lowest_id ? 'bad' : 'ok');
+  document.getElementById('rulename').textContent = s.rule;
+  document.getElementById('rulewhy').textContent = s.lowest_id
+    ? 'every ring orders candidates the same way — so the same candidate wins every one of them'
+    : "the ring's own name participates in the order, so different rings pick different winners";
+
+  const byNode = {};
+  s.nodes.forEach(n => byNode[n] = []);
+  s.rings.forEach(r => byNode[r.holder].push(r));
+
+  document.getElementById('grid').innerHTML = s.nodes.map(n => {
+    const held = byNode[n];
+    const cls = held.length >= s.rings.length ? 'node loaded' : (held.length ? 'node' : 'node idle');
+    const body = held.length
+      ? held.map(r => `<span class="role"><b>${r.label}</b><span>${r.ring}</span></span>`).join('')
+      : '<div class="none">holds nothing</div>';
+    return `<div class="${cls}"><div class="nid">${shortId(n)}</div>${body}</div>`;
+  }).join('');
+
+  const pct = s.concentration_pct;
+  document.getElementById('pct').textContent = pct + '%';
+  document.getElementById('distinct').textContent =
+    s.distinct_holders + (s.distinct_holders === 1 ? ' distinct holder' : ' distinct holders');
+  const fill = document.getElementById('fill');
+  fill.style.width = pct + '%';
+  fill.style.background = pct >= 100 ? 'var(--bad)' : (pct > 50 ? 'var(--warn)' : 'var(--ok)');
+  document.getElementById('verdict').textContent = s.verdict;
+}
+tick(); setInterval(tick, 700);
+</script>
+</body>
+</html>
