@@ -42,6 +42,10 @@
 //! This module is the contract that enforcement carries. Keeping them separate is why the contract
 //! could be got right before a write path depended on it.
 
+#[cfg(feature = "tls")]
+pub mod grant;
+#[cfg(feature = "tls")]
+pub mod protected;
 pub mod handover;
 pub mod lock_audit;
 pub mod partition;

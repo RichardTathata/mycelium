@@ -764,7 +764,10 @@ and in the item's ADR, never silently.
 | K3a, durable stores | #390 | `232a32e` | `durable::tests` |
 | H5, cohorts | #391 | `895dec0` | `resolution::tests::h5`, `cohort::tests` |
 | H1, challenge admission | #392 | `317852b` | `resolution::tests::h1` |
+| H7, confined-fleet profile | #393 | `195e0f9` | `agent::confinement::tests`; deployment test (kind + Calico, CI) |
 | H6, cohort budgets | #394 | — | `cohort_budget::tests` |
+| P2, signed mandate grants | #395 | — | `mandate::grant::tests` |
+| H3, advertisement bound to authority | #395 | — | `mandate::protected::tests` |
 
 **Departures:**
 - **K1 is additive, not breaking.** §11 listed `KnowledgeStore::put → Result`. `put` had 72 call sites building

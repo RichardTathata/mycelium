@@ -237,7 +237,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **A power laundered as a capability.** Any member may advertise any name under its own `cap/{node}/…`:
     `CapabilitiesHandle::advertise_capability` checks no role or mandate, and `authorized_callers` is set by the
     provider. A member holding a power no mandate gave it (a stolen credential) can offer that power to the others
-    as a service, and the credential itself never travels.
+    as a service, and the credential itself never travels. *Mitigated for honest readers: H3, in force below.*
   - **Many issuers from one member.** `IssuerId::new` accepts any non-empty string, and `KnowledgeRecord::verify`
     takes the key from its caller, so nothing binds an issuer to an admitted identity. One member can be many
     issuers, and every count below can be inflated from inside a single member. *Mitigated: P1, in force below.*
@@ -324,14 +324,20 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     multi-cohort caller must fit every cap, and undeclared callers share one pool. *Limits:* per provider instance,
     concurrency not rate, only calls admitted through it. *Gate:* `cohort_budget::tests`, including fifty members
     capped together.
+  - **P2, signed mandate grants** (#395; ADR `design/knowledge-issuer-binding.md` §5). An appointment an
+    authority signs, which any reader can check: issued (through P1), entitled (by the reader's **configured**
+    table, never by signature alone), current (window, highest epoch retained per scope, conflicting equal epochs
+    back nothing), and possessed (the holder's signature over the grant and the specific request). *Limits:*
+    entitlement is configuration only until the consensus gate passes; retained epochs are in memory. *Gate:*
+    `mandate::grant::tests`.
+  - **H3, advertisement bound to authority** (#395; same ADR §6). A reader's `filter_protected` keeps a capability in
+    a protected namespace only if the advertiser presents a valid grant naming it as holder, permitting
+    `serve:{ns}/{name}`, with possession bound to that advertisement. Everything else is filtered and **reported**.
+    *Limits:* reader-side, so colluders using their own policy are not stopped, only exposed; the report is not yet
+    wired to metrics or audit. *Gate:* `mandate::protected::tests`.
 - *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
-  - **P2:** a signed, portable mandate grant with entitlement, currency and possession. `Mandate` is unsigned
-    today, and its signed epoch is checked only by the wiki's pre-receive hook.
   - **K3b and K3c:** head transport between nodes; body authorisation; per-issuer storage and ingestion caps (moved
     from H1).
-  - **H3, advertisement bound to authority.** A reader-side check at resolve: a capability in a protected namespace
-    resolves only if its advertiser holds a role or mandate naming it. The check stays at the reader, so Layer I is
-    not taught a higher law.
   - **H4, source-signed audit checkpoints.** Each node seals signed checkpoints of its own stream, and members
     retain the ones they receive. An equivocation proof is two statements *signed by the accused* for the same
     position, so a witness's assertion alone never accuses anyone. Outcomes are equivocation, consistent, history

@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Signed mandate grants (P2) and capability advertisements bound to authority (H3)** (Boundary H;
+  ADR `docs/design/knowledge-issuer-binding.md` §5–6).
+  - **P2.** `mandate::grant`: `Mandate::canonical_bytes`/`digest`, `SignedMandateGrant`,
+    `EntitlementTable`, `GrantVerifier::check`, which checks issuance (through issuer binding), **configured**
+    entitlement, the window, currency (highest epoch retained per scope; conflicting equal epochs back
+    nothing), and **possession** bound to the specific request. Verdicts are `GrantVerdict`.
+  - **H3.** `mandate::protected::filter_protected` keeps a capability in a `ProtectedNamespaces` entry only if
+    its advertiser presents a valid grant (`mycelium.grant`) that names it as holder and permits
+    `serve:{ns}/{name}`, with a possession proof bound to that advertisement (`mycelium.grant.possession`).
+    Everything else is filtered and reported as an `UnbackedCapability`. `attach_grant` is for advertisers.
+
+  **Not claimed:** entitlement beyond configuration (the consensus gate); colluders using their own
+  policy; metric or audit wiring of the report.
+
 - **Cohort budgets** (Boundary H plan, item H6; ADR `docs/design/knowledge-cohorts.md` §6).
   `knowledge::cohort_budget::CohortBudget::admit(caller, view, now)` gives an RAII `CohortSlot` or
   `CohortRefusal::AtCapacity`. It caps a **declared population's** calls in flight at a provider, where
