@@ -11,6 +11,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Knowledge store verifies on storage** (Boundary H plan, milestone M2, item K1; ADR
+  `docs/design/knowledge-validity.md`). `KnowledgeStore::put_signed(SignedRecord, members, external)`
+  checks two things before storing:
+  - **integrity:** the id is the content's digest, and the record satisfies `KnowledgeRecord::new`'s rules.
+    A deserialised record never went through `new`, so it could previously carry a stale id or a smuggled
+    foreign retraction.
+  - **attribution:** through issuer binding's two admissible paths.
+
+  Each record is stored with an `Attribution` snapshot (`Verified { path, key, revoked_at_storage }`) and
+  its signature is retained. Refusals (`PutRefusal`) are counted by label (`refusal_counts`), never
+  silent. A record signed under a since-revoked key is stored as history and flagged.
+
+  **Additive:** `put` is kept, and its records are marked `Attribution::Unchecked`. Whether unchecked
+  records count is K1b's resolver policy, which is not yet built.
+
 - **Knowledge issuer binding** (Boundary H plan, milestone M2, item P1; ADR
   `docs/design/knowledge-issuer-binding.md`). An `IssuerId` was an opaque string and
   `KnowledgeRecord::verify` took the key from its caller, so **one member could be many issuers**.
