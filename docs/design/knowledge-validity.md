@@ -2,7 +2,8 @@
 
 **Status:** K1 **adopted and implemented** 2026-09-24 (`KnowledgeStore::put_signed`, `src/knowledge/store.rs`). K1b
 **adopted and implemented** 2026-09-24 (`classify_eligible`, `src/knowledge/resolution.rs`). K2
-**adopted and implemented** 2026-09-24 (`src/knowledge/heads.rs`). K3 is **proposed**: decisions recorded here, implementation to follow. Plan:
+**adopted and implemented** 2026-09-24 (`src/knowledge/heads.rs`). K3a **adopted and
+implemented** 2026-09-24 (`src/knowledge/durable.rs`). K3b and K3c are **proposed**: decisions recorded here, implementation to follow. Plan:
 [`docs/plans/boundary-h.md`](../plans/boundary-h.md) (rev 0.4, proposed) §6. It builds on the
 [issuer-binding ADR](knowledge-issuer-binding.md) (P1) and the [knowledge-layer ADR](knowledge-layer.md) (item 3).
 
@@ -114,24 +115,60 @@ had no ancestry, so a higher `seq` from a different history passed.
   guaranteed from then on, never before.
 
 **Not claimed.**
-- **The only store shipped is `MemoryCheckpointStore`, which is not durable.** A file-backed store must go through
-  the filesystem seam (`scripts/check-sim-seams.sh`) and arrives with K3's durable record store. Until then,
-  rollback protection across a restart is exactly as durable as the store the embedder supplies.
+- *(Closed by K3a.)* K2 shipped only `MemoryCheckpointStore`, which is not durable. `DurableHeadCheckpoints` (§4)
+  is the durable reader.
 - `KnowledgeStore::advance_head` remains, unsigned and without ancestry, for local use. Its doc comment now says so
   and points to `HeadCheckpoints`.
 - Forks are held in memory, not persisted.
 - `BodyUnavailable` (a head whose record cannot be fetched) belongs to K3's transport. `is_resolvable` already
   reports it locally.
 
-## 4. K3: durable store, head transport, body authorisation (proposed)
+## 4. K3: durable stores (K3a, adopted), head transport and body authorisation (K3b and K3c, proposed)
 
-- **Durability.** Records live in a durable, fsynced store, following the evidence journal's pattern, keyed by
-  `RecordId`, with the `Attribution` and signature stored beside each record.
-- **Transport.** Heads gossip under the reserved `knowledge/head/{issuer}/{stream}`. Record bodies are fetched on
-  demand and enter only through `put_signed`.
-- **Body authorisation.** Boundary F's opaque-address rule applies: the content hash checks integrity and is never
-  the access credential.
-- **Ingestion bounds.** Per issuer and per cohort, with refusals counted (plan H1).
+### K3a: durable stores (adopted)
+
+**Problem.** K1's records and K2's checkpoints lived in memory. A restart lost the records and reset rollback
+protection: a reader that has forgotten its checkpoint accepts a rolled-back head as the first it has ever seen.
+
+**Decision.**
+- **Composition, not a new primitive.** `DurableKnowledgeStore` and `DurableHeadCheckpoints` sit on the substrate's
+  existing node-local journal (`agent::journal`: append-only, length-prefixed, fsynced before it acknowledges,
+  never gossiped, already admitted by the seam gate).
+  - They add **no filesystem call**, so no seam-baseline site, and **no lock**.
+  - Each has its own replay stream: `knowledge/records` and `knowledge/heads`.
+- **Persist, then apply.** The in-memory cores were split into two phases (`KnowledgeStore::verify_signed` /
+  `insert_verified`; `HeadCheckpoints::evaluate` / `apply`).
+  - A decision is appended and **awaited until fsynced**, and only then applied.
+  - A journal that refuses, fails or loses its acknowledgement leaves memory unchanged, and the caller gets
+    `PutRefusal::NotPersisted` or `HeadVerdict::CheckpointNotPersisted`.
+  - A *lost* acknowledgement may mean the entry is on disk. That is safe: everything appended was already
+    verified.
+- **Reopening fails closed.**
+  - An entry that does not decode, or carries an unknown version, refuses the open (`DurableOpenError::Unreadable`),
+    rather than yielding partial or empty state.
+  - A missing journal is a fresh reader.
+- **Records are restored with the attribution they were verified under.** Authenticity is historical, and K1b
+  re-derives present eligibility at every read. A node that restarts before relearning its peers' keys therefore
+  holds what it verified, and counts it only once it can check it again.
+- **Heads are journalled as deltas** (one entry per advance), folded on reopen.
+- **Unchecked records have no durable form.** A record nobody verified is not worth keeping across a restart.
+
+**Not claimed.**
+- The journal is append-only and **never compacted**. It grows by one entry per verified record and per advance.
+  Compaction is not built.
+- Forks are held in memory only.
+- The durable stores are **node-local**. Nothing here moves heads or records between nodes; that is K3b.
+
+### K3b: head transport (proposed)
+
+Heads gossip under the reserved `knowledge/head/{issuer}/{stream}`, as `SignedHead`s. A receiving node offers each
+one to its `DurableHeadCheckpoints`. Record bodies are fetched on demand, enter only through `put_signed`, and a
+head whose body cannot be fetched is `BodyUnavailable`: insufficient evidence, never absence.
+
+### K3c: body authorisation (proposed)
+
+Boundary F's opaque-address rule applies: the content hash checks integrity and is never the access credential.
+Ingestion is bounded per issuer and per cohort, with refusals counted (plan H1).
 
 ## 5. Gates
 
@@ -167,4 +204,11 @@ had no ancestry, so a higher `seq` from a different history passed.
 - a head must point at its own issuer's record;
 - a new genesis above the checkpoint is a fork.
 
-**K3:** as listed in plan §6.
+**K3a (built, `src/knowledge/durable.rs` tests):**
+- head checkpoints survive a reopen and keep refusing rollback;
+- verified records survive a reopen with their attribution and still count;
+- a refused record is not persisted;
+- an unreadable journal refuses to open (both stores);
+- a missing journal opens empty.
+
+**K3b and K3c:** as listed in plan §6.

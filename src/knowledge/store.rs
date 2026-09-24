@@ -212,6 +212,10 @@ pub enum PutRefusal {
     Malformed(RecordError),
     /// No admissible path attributes the record to its issuer.
     Unverifiable(UnverifiableReason),
+    /// Verified, but a durable store could not establish that it was written, so it was **not**
+    /// taken (Boundary H item K3a). If the journal's acknowledgement was lost it may still be on
+    /// disk; it was verified, so finding it there after a restart is safe.
+    NotPersisted(String),
 }
 
 impl PutRefusal {
@@ -226,6 +230,7 @@ impl PutRefusal {
             Self::Unverifiable(UnverifiableReason::MalformedMemberIssuer) => "malformed_member_issuer",
             Self::Unverifiable(UnverifiableReason::UntrustedExternal) => "untrusted_external",
             Self::Unverifiable(UnverifiableReason::BadSignature) => "bad_signature",
+            Self::NotPersisted(_) => "not_persisted",
         }
     }
 }
@@ -236,6 +241,7 @@ impl std::fmt::Display for PutRefusal {
             Self::IdMismatch => write!(f, "the record's id does not match its content"),
             Self::Malformed(e) => write!(f, "malformed record: {e}"),
             Self::Unverifiable(r) => write!(f, "no admissible path attributes this record: {r:?}"),
+            Self::NotPersisted(e) => write!(f, "verified but not persisted: {e}"),
         }
     }
 }
@@ -322,34 +328,58 @@ impl KnowledgeStore {
         members: &impl MemberKeySource,
         external: &TrustedExternalIssuers,
     ) -> Result<Attribution, PutRefusal> {
-        let SignedRecord { record, signature } = signed;
-        let outcome = check_integrity(&record).and_then(|()| {
-            match verify_issuer(&record, &signature, members, external) {
-                Authenticity::Current { path, key } => {
-                    Ok(Attribution::Verified { path, key, revoked_at_storage: false })
-                }
-                Authenticity::Revoked { path, key } => {
-                    Ok(Attribution::Verified { path, key, revoked_at_storage: true })
-                }
-                Authenticity::Unverifiable(reason) => Err(PutRefusal::Unverifiable(reason)),
-            }
-        });
-        let attribution = match outcome {
-            Ok(a) => a,
+        match self.verify_signed(&signed, members, external) {
+            Ok(attribution) => Ok(self.insert_verified(signed, attribution)),
             Err(refusal) => {
-                *self.refusals.entry(refusal.label()).or_insert(0) += 1;
-                return Err(refusal);
+                self.note_refusal(&refusal);
+                Err(refusal)
             }
-        };
+        }
+    }
 
+    /// **Decide what [`put_signed`](Self::put_signed) would store, without storing it** — for a
+    /// durable wrapper that must persist before it inserts (Boundary H item K3a). No side effects.
+    ///
+    /// A record already held as verified returns its existing attribution.
+    pub fn verify_signed(
+        &self,
+        signed: &SignedRecord,
+        members: &impl MemberKeySource,
+        external: &TrustedExternalIssuers,
+    ) -> Result<Attribution, PutRefusal> {
+        let record = &signed.record;
+        check_integrity(record)?;
+        if let Some(existing @ Attribution::Verified { .. }) = self.attributions.get(record.id()) {
+            return Ok(existing.clone());
+        }
+        match verify_issuer(record, &signed.signature, members, external) {
+            Authenticity::Current { path, key } => {
+                Ok(Attribution::Verified { path, key, revoked_at_storage: false })
+            }
+            Authenticity::Revoked { path, key } => {
+                Ok(Attribution::Verified { path, key, revoked_at_storage: true })
+            }
+            Authenticity::Unverifiable(reason) => Err(PutRefusal::Unverifiable(reason)),
+        }
+    }
+
+    /// Insert a record [`verify_signed`](Self::verify_signed) accepted. Idempotent: a record already
+    /// verified keeps its first attribution, which is returned.
+    pub(crate) fn insert_verified(&mut self, signed: SignedRecord, attribution: Attribution) -> Attribution {
+        let SignedRecord { record, signature } = signed;
         let id = record.id().clone();
         if let Some(existing @ Attribution::Verified { .. }) = self.attributions.get(&id) {
-            return Ok(existing.clone());
+            return existing.clone();
         }
         self.records.insert(id.clone(), record);
         self.signatures.insert(id.clone(), signature);
         self.attributions.insert(id, attribution.clone());
-        Ok(attribution)
+        attribution
+    }
+
+    /// Count a refusal.
+    pub(crate) fn note_refusal(&mut self, refusal: &PutRefusal) {
+        *self.refusals.entry(refusal.label()).or_insert(0) += 1;
     }
 
     /// How a record came to be attributed, if it is held.
