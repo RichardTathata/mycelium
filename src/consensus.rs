@@ -917,6 +917,19 @@ impl ConsensusEngine {
                 }
             }
 
+            // **Claim this node's vote before proposing, not after.** Proposing a value *is*
+            // accepting it, so it goes through this node's shared acceptor memory — the same gate
+            // every other vote passes. Order matters as much as the check: claiming after the
+            // broadcast would let this node propose a value it then discovers it may not vote for,
+            // and the acceptors that had already accepted it would be holding that ballot against
+            // the value this node actually owes its vote to.
+            if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value) {
+                // Already committed to a different value at this ballot. Cannot win here; move up
+                // rather than emit a proposal we are not entitled to support.
+                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
+                continue;
+            }
+
             self.set_async(ballot_key.as_str(), encode_ballot(ballot)).await;
 
             // Register before emitting so no vote/nack can arrive before we listen.
@@ -946,16 +959,6 @@ impl ConsensusEngine {
             // threshold is fixed for that ballot's lifetime. A joining member's votes do not
             // count toward this ballot; a leaving member's existing vote remains counted.
             let mut voters: AHashMap<NodeId, Option<LocalityPath>> = AHashMap::new();
-            // **The self-vote obeys the same rule as every other vote.** Proposing a value is
-            // accepting it, so it goes through this node's *shared* acceptor memory. Without this
-            // the node could accept one value as a voter and self-vote for another as a proposer
-            // at the same ballot — equivocating with itself, through the one voter that never has
-            // to send a message to vote, and defeating `VoteForValue`'s binding entirely.
-            if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value) {
-                // Already committed to a different value at this ballot. Cannot win here; move up.
-                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
-                continue;
-            }
             voters.insert(self.task_ctx.node_id.clone(), self.self_locality.clone());
 
             // Single-node quorum check before entering the collect loop.
