@@ -1,7 +1,7 @@
-# Knowledge cohorts and challenge admission (ADR, Boundary H items H5 and H1)
+# Knowledge cohorts, challenge admission and cohort budgets (ADR, Boundary H items H5, H1 and H6)
 
 **Status:** H5 **adopted and implemented** 2026-09-24 (`src/knowledge/cohort.rs`, `src/knowledge/resolution.rs`); H1
-**adopted and implemented** 2026-09-24 (§4). Plan:
+**adopted and implemented** 2026-09-24 (§4); H6 **adopted and implemented** 2026-09-24 (§6). Plan:
 [`docs/plans/boundary-h.md`](../plans/boundary-h.md) (rev 0.4, proposed) §6 H5. It builds on the
 [issuer-binding ADR](knowledge-issuer-binding.md) (P1), whose configured-external path authenticates operators, and
 the [validity ADR](knowledge-validity.md) (K1b), whose exclusions H5 extends.
@@ -146,3 +146,34 @@ restructured on a sibling branch, and to transport. They are recorded under K3c 
   - a forged declaration is refused;
   - a superseding removal applies only to later evidence;
   - an expired declaration keeps membership and reports staleness.
+
+## 6. H6: cohort budgets
+
+**Problem.** Each member stays inside its own cap while the population together overwhelms a provider. In the Hugging
+Face incident, agent load took the artifact repository down. The federation edge meters calls per partner *domain*;
+nothing metered a population *inside* one domain.
+
+**Decision.**
+- **`CohortBudget::admit(caller, view, now)` → an RAII `CohortSlot`**, or `CohortRefusal::AtCapacity { pool, limit }`.
+  It mirrors `max_in_flight_per_partner`, and has one leaf lock (lock-order row 42).
+- **Membership comes from the provider's own `CohortView`,** resolved from the caller's authenticated principal.
+  There is no parameter through which a caller names its cohort, so a caller-supplied label cannot select a budget.
+- **Merge, never split.** A caller in several cohorts takes a place in every one and must fit within each cap.
+  Every pool is checked before any place is taken, so a refusal takes nothing.
+- **Undeclared callers share one pool,** so minted identities buy no room.
+
+**Stated limits, as for `max_in_flight_per_partner`.**
+- The cap is per provider instance: N instances means N × the cap.
+- It bounds concurrency, not rate.
+- It covers only calls the provider admits through it. A resource reached around the provider is H7's problem.
+- It trusts the principal it is given, which must be the one the provider verified.
+- Refusals are not yet recorded in the rights ledger.
+
+**Gates.** `cohort_budget::tests`:
+- fifty members together are capped at the cohort limit;
+- a full cohort does not block another;
+- dropping a slot releases its place;
+- undeclared callers share one pool;
+- a caller's own naming never selects a budget;
+- a caller in two cohorts needs room in both, and a refusal takes nothing.
+
