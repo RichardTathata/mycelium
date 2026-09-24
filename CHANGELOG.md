@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Knowledge issuer binding** (Boundary H plan, milestone M2, item P1; ADR
+  `docs/design/knowledge-issuer-binding.md`). An `IssuerId` was an opaque string and
+  `KnowledgeRecord::verify` took the key from its caller, so **one member could be many issuers**.
+  `knowledge::issuer::verify_issuer` now attributes a record through exactly two admissible paths:
+  - **member:** `IssuerId::for_node`, `node:{node_id}`, checked against the *reader's* retained identity
+    keys for that node;
+  - **configured external:** `TrustedExternalIssuers`, which refuses the reserved `node:` namespace.
+
+  It reports **`Current` / `Revoked` / `Unverifiable`**. A record signed under a since-revoked key is
+  still attributable as history, and carries no present standing. `GossipAgent::knowledge_member_keys`
+  supplies the reader's view, and `GossipAgent::sign_knowledge_record` signs **only as this node**
+  (both `compliance`).
+
+  **Not claimed:** the member path's strength rests on `require_identity_proofs`, which is
+  **default-off**. The store does not yet verify on `put` (K1).
+
 - **P10 reaches the operator** — the half of it that was missing. The detector, the `/stats` field
   and the event ring shipped first; the Prometheus gauge, the `diagnose_fleet` rule and the runbook
   did not, which made it **a mechanism nothing wires** — the exact failure this project keeps

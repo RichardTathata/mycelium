@@ -109,6 +109,8 @@ pub(crate) mod audit;
 #[cfg(feature = "compliance")]
 pub(crate) mod revocation;
 #[cfg(feature = "compliance")]
+mod knowledge_keys;
+#[cfg(feature = "compliance")]
 pub(crate) mod transparency;
 #[cfg(feature = "compliance")]
 pub(crate) mod capauthz;
