@@ -399,6 +399,11 @@ one: **every node must run a release that writes the sealed record.** Check befo
 curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'
 ```
 
+**See it.** `cargo run --example identity_one_record --features tls,compliance` starts two nodes
+that both *require* proofs, prints the byte counts that are the argument — **129 = 1 + 32 + 96** as
+one entry against 32 + 96 as two — and shows one node verifying the other's signed claim, which it
+could only do with the other's key in hand.
+
 **And the limit it does not close.** *Proofs required* is **not** *identity authenticated*. First
 sighting of a node you have never seen is still **trust on first use** — there is nothing
 established to chain a self-signed entry to. What closes that is an **anchor**: a direct,
