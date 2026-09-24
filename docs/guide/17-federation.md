@@ -329,6 +329,29 @@ cargo run --example federated_domains --features tls
 
 The example walks the whole lifecycle and prints what each step decided *and why*.
 
+### Three domains — the question two cannot ask
+
+Two domains cannot ask the question that decides how a federation grows:
+
+> Alpha trusts Beta. Beta trusts Gamma. **Does Alpha trust Gamma?**
+
+```bash
+cargo run --example federation_trust_is_not_transitive --features tls
+```
+
+The answer is **no**, three times over, and each is an assertion rather than a paragraph: a trust
+bundle does not compose (gamma's perfectly good credential is `UnknownDomain` at alpha); a grant you
+hold is not a grant you can re-export (beta cannot mint a credential naming gamma without gamma's
+key); and the per-partner budget is pairwise, so gamma saturating its slots cannot refuse beta's
+calls — a refusal there says `AtCapacity`, which is **transient load**, never `NotPermitted`, which
+is a standing answer about authority that a retry will not change.
+
+**Why this is the right default, not a limitation.** Transitive trust is how one compromised partner
+becomes everybody's compromise: if alpha inherited beta's trust list, beta adding a partner would
+silently grant that partner access to alpha — an authority decision alpha's operator never made and
+cannot see. The cost is real and worth stating: federations grow by **pairs**, not by transitivity.
+That is the price of an authority surface an operator can enumerate.
+
 ### The release gate, and what is still to build
 
 **The release gate, and what of it is met.** PR 8 (2026-09-18) put the first bytes across; PR 9 (same day)

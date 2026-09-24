@@ -46,6 +46,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`control_envelope_viz`](../docs/design/adaptive-stability.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
+| [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | [`procurement_authority`](../docs/guide/20-authorising-actions.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | [`destination_commit`](../docs/operations/companions.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`redistribution_cn`](../docs/guide/24-commitments.md) | · | ● | · | ● | Adv | CLI | · | · | · |
