@@ -925,6 +925,11 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
             .load(std::sync::atomic::Ordering::Relaxed),
         "membership_flaps": ctx.agent_ctx.membership_flaps
             .load(std::sync::atomic::Ordering::Relaxed),
+        // P10 — the largest share of the fleet's single-writer roles on one node. A **percentage,
+        // not a count**: the reading is present whether or not it trips, so an operator can watch
+        // it climb rather than learn about it at the threshold.
+        "role_concentration_pct": ctx.agent_ctx.role_concentration_pct
+            .load(std::sync::atomic::Ordering::Relaxed),
         "opacity_oscillations": ctx.agent_ctx.opacity_oscillations
             .load(std::sync::atomic::Ordering::Relaxed),
         "opaque_node_pct": ctx.agent_ctx.config.emergent_detectors_enabled

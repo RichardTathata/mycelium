@@ -62,7 +62,39 @@ and it is a Phase-1 schema requirement, not a Phase-4 nicety.
 | P4 | **Fleet-wide opacity storm** | **b** | fraction of live nodes with any `sys/load/{node}/… is_opaque=true` | `opaque_fraction > B` (default 0.5) **sustained > T_storm** | **RT2 flagship**: the storm degrades the gossip used to count liveness — the `ViewConfidence` header is *mandatory* here; a low `peers_heard` means "I may be undercounting live nodes," so report the estimate *with* its confidence, never as fact |
 | P5 | **Anti-entropy convergence stall** | **b/c** | max `max_hlc_skew_ms` across self-reporting nodes; optionally a new `sys/health/{self}` (store-size + last-AE stamp) soft-state key | divergence (skew or store-size delta) **not reducing** over K consecutive AE windows | inherently partition-sensitive; a stalled *peer* and an *unreachable* peer look alike from local KV — assert "stall" only with `peers_heard` context, escalate to Phase-3 fan-out to disambiguate |
 | P6 | **Capability-coverage gap** | **b** | a live `req/` requirement (or `CapFilter`) with **zero fresh** `cap/` providers | zero `is_fresh` providers for a required capability **sustained ≥ 3× refresh** | **RT3 flagship**: "retracted" and "merely unheard/GC-paused/partitioned" are *identical in local KV* (both = no fresh key). MUST wait past the full evaporation window before asserting a gap, and label it "no provider *visible from here*," never "no provider exists" |
+| P10 | **Coordinator by accretion** (2026-09-24) | **b** | fresh `cap/{node}/…` entries whose name ends `.primary` / `.curator` — the single-writer roles — grouped by holder | one node's share of live single-writer roles **≥ 60%**, sustained past `CONFIRM_TICKS`; withheld entirely below 3 roles or 2 holders | advertisements evaporate (3× refresh) ⇒ a dead holder stops counting; **the 2-holder floor is the partition guard** — a node that has lost sight of its peers sees only its own roles, which is the pathology's exact shape |
 | P7 | **Consensus livelock** | **a/c** | a `consensus/` ballot open > T without commit; repeated ballot increments without commit; `commit_conflicts` rising | ballot age > T_ballot **and** ≥ M re-ballots without a commit | needs temporal ("did votes arrive?") → tier-c to confirm; locally you see *your* ballot stuck, not why; the Phase-3 ring shows the missing votes |
+
+### P10 — why the other detectors cannot see it
+
+Added 2026-09-24, after a design note asked whether role accumulation is constrained anywhere and
+the answer turned out to be *no, and it is not observed either*.
+
+Every single-writer ring in this substrate elects **independently and deterministically** — the
+lowest candidate node id wins, in the tuple space, the blackboard and the wiki alike. Each election
+is individually correct, and deterministic *on purpose*: it is what lets every reader reach the same
+conclusion with no coordinator, so an outcome can be **checked rather than trusted**.
+
+The consequence nobody chose: the same rule over the same candidates returns the **same winner**. A
+fleet where every node runs every companion concentrates every single-writer job on one node — which
+is a coordinator in every practical sense (its loss moves every role at once, to the *next* lowest
+id, as a block).
+
+Neither existing detector is looking at that axis:
+
+- **P2** watches role **churn** — how often a role changes hands. A node calmly holding everything
+  produces **none**.
+- **P6** watches coverage **gaps** — a capability with *no* provider. Here every capability has one;
+  it is merely the same one.
+
+So such a fleet reads as **perfectly healthy by every measurement we had**, until the node it all
+depends on goes away. P10 is the reading that makes it visible; the election rule itself is a
+separate question (rendezvous hashing spreads winners, at the cost of a rule change every node must
+agree on simultaneously — see `docs/design/network-design-reproducibility-note.md`).
+
+**Why a share and not a count.** `roles_held` alone means nothing without the fleet's size: three
+roles on one node is everything in a three-role fleet and unremarkable in a thirty-role one. The
+gauge is a percentage for the same reason P4's storm is.
 
 ## 4. Diagnostic traffic must be excluded from detector inputs (observer effect)
 

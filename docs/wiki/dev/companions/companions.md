@@ -6,6 +6,17 @@ Each companion depends on `mycelium` **only through its public API** — the com
 proof. Workspace members; scope builds with `-p` (a workspace-wide build pulls `wasmtime`
 via wasm-host).
 
+> **All three single-writer rings elect through `mycelium::election` (2026-09-24).** They used to
+> elect by *lowest candidate node id wins*, independently — which is correct per ring and, across
+> rings, hands **every** single-writer job to one node, because the same rule over the same
+> candidates returns the same winner. That is P10, *a coordinator by accretion*
+> ([taxonomy](../../../design/legible-emergence-taxonomy.md)), and it was both undetected and the
+> default. Rings now order candidates by `hash(ring, node)` so different rings pick different
+> winners, and the rule is **negotiated from the candidate set** (`election_rule`, a capability
+> attribute) rather than flag-dayed — because a node-by-node rule change would leave two holders
+> each believing itself correct, with neither resigning. A companion that adds a ring must pass its
+> **own** ring name, or it orders identically to another and nothing is gained.
+
 > These pages are maintainer-facing (design + rationale + gates). The **operator** runbook —
 > durability/WAL, capability-ring failover, the wiki's node-independent store, teardown — is
 > [operations/companions.md](../../../operations/companions.md). The **cross-cutting coordination

@@ -26,7 +26,8 @@ use crate::store::WikiStore;
 /// A node's intended role in a group's wiki (mirrors `TupleRole` / `BoardRole`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WikiRole {
-    /// Advertise as candidate, settle, then become curator (lowest candidate id) or a reader that
+    /// Advertise as candidate, settle, then become curator (the ring's negotiated election rule —
+    /// `mycelium::election`; rendezvous once every candidate can compute it) or a reader that
     /// watches for the curator to evaporate. No coordinator assigns roles.
     Auto,
     /// Force the curator role (single serving writer) — for a deployment that pins it.
@@ -503,8 +504,14 @@ impl<S: WikiStore + 'static> Wiki<S> {
     // ── roles ─────────────────────────────────────────────────────────────────
 
     fn resolve_role(&self, role: &str) -> Vec<NodeId> {
+        self.resolve_role_pairs(role).into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// The same resolve, keeping each candidate's `Capability` — the election reads the advertised
+    /// rule attribute, which `resolve_role` throws away.
+    fn resolve_role_pairs(&self, role: &str) -> Vec<(NodeId, Capability)> {
         let filter = CapFilter::new("wiki", format!("{}.{role}", self.cfg.group));
-        self.agent.capabilities().resolve(&filter).into_iter().map(|(n, _)| n).collect()
+        self.agent.capabilities().resolve(&filter)
     }
 
     fn become_curator(self: &Arc<Self>) {
@@ -615,10 +622,15 @@ impl<S: WikiStore + 'static> Wiki<S> {
             loop {
                 tick.tick().await;
                 if !me.is_curator() { return; }
-                let mut curators = me.resolve_role("curator");
-                curators.sort_by_key(NodeId::to_string);
-                match curators.first() {
-                    Some(lowest) if lowest.to_string() < self_id => { me.resign().await; return; }
+                // **The sentinel must order curators exactly as the election ordered candidates.**
+                // Its convergence argument is "the winner sees itself as the winner and stays;
+                // every other steps down" — which holds only while both use one ordering. Ordering
+                // curators by node id while electing by rendezvous would leave two curators each
+                // believing itself correct, and neither resigning.
+                let ring = format!("wiki/{}.curator", me.cfg.group);
+                let curators = me.resolve_role_pairs("curator");
+                match mycelium::election::elect(&ring, &curators) {
+                    Some(winner) if winner.to_string() != self_id => { me.resign().await; return; }
                     _ => {}
                 }
             }
@@ -627,7 +639,8 @@ impl<S: WikiStore + 'static> Wiki<S> {
         tracing::info!(group = %self.cfg.group, "wiki: serving as curator");
     }
 
-    /// Step down in favour of a lower-id peer curator (split-brain reconciliation). Stops *this*
+    /// Step down in favour of the peer curator the ring's rule picks (split-brain reconciliation).
+    /// Stops *this*
     /// curatorship's loops, retracts the curator ad, and returns the node to the reader failover-watch
     /// so it can still be promoted later if the surviving curator evaporates. Never touches `tasks`
     /// (the sentinel that called this lives there and ends by returning).
@@ -637,13 +650,16 @@ impl<S: WikiStore + 'static> Wiki<S> {
         for h in &handles { h.abort(); }
         for h in handles { let _ = h.await; } // drop their Arc<Self> before we re-arm the watch
         *self.curator_reg.lock() = None; // retract the curator ad
-        tracing::warn!(group = %self.cfg.group, "wiki: stepped down — a lower-id curator exists");
+        tracing::warn!(group = %self.cfg.group, "wiki: stepped down — another curator wins this ring under the negotiated election rule");
         self.watch_and_promote();
     }
 
     async fn run_election(self: Arc<Self>) {
+        // Which election rules this build can compute, so the ring negotiates rather than
+        // flag-days (`mycelium::election`).
+        let (attr, value) = mycelium::election::rule_attribute();
         let reg = self.agent.capabilities().advertise_capability(
-            Capability::new("wiki", format!("{}.candidate", self.cfg.group)),
+            Capability::new("wiki", format!("{}.candidate", self.cfg.group)).with(attr, value),
             self.cfg.cap_refresh,
         );
         *self.candidate_reg.lock() = Some(reg);
@@ -657,11 +673,13 @@ impl<S: WikiStore + 'static> Wiki<S> {
                 self.watch_and_promote();
                 return;
             }
-            let mut candidates = self.resolve_role("candidate");
-            candidates.sort_by_key(NodeId::to_string);
+            // The ring's own name orders the candidates, so a node that won the tuple-space or
+            // blackboard election does not automatically win this one too (P10).
+            let ring = format!("wiki/{}.curator", self.cfg.group);
+            let candidates = self.resolve_role_pairs("candidate");
             let self_id = self.agent.node_id().to_string();
-            match candidates.first() {
-                Some(lowest) if lowest.to_string() == self_id => { self.become_curator(); return; }
+            match mycelium::election::elect(&ring, &candidates) {
+                Some(winner) if winner.to_string() == self_id => { self.become_curator(); return; }
                 _ => tokio::time::sleep(self.cfg.cap_refresh).await,
             }
         }

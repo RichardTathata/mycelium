@@ -103,14 +103,12 @@ impl CapabilitiesHandle {
     ) -> Vec<(NodeId, Capability)> {
         use super::capability_ops::{scan_prefix_kv_with_ts, is_cap_locality_key, parse_cap_key_or_warn};
         use super::wiring::rank_node_matches;
-        use crate::capability::CapEntry;
         let now_ms_val = now_ms();
         let mut out = Vec::new();
         for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(&self.ctx.kv_state, "cap/") {
             if is_cap_locality_key(&key) { continue; }
             let Some((node_id, _ns, _name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-            let Some(entry) = CapEntry::decode(&bytes)
-                .or_else(|| Capability::decode(&bytes).map(|cap| CapEntry { capability: cap, refresh_interval_ms: 60_000 }))
+            let Some(entry) = super::capability_ops::decode_cap_entry(&bytes)
             else {
                 warn!(key = %key, "malformed Capability — peer sent bytes that did not decode");
                 continue;
@@ -200,8 +198,7 @@ impl CapabilitiesHandle {
                         for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(&kv_state, "cap/") {
                             if is_cap_locality_key(&key) { continue; }
                             let Some((node_id, ns, name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-                            let Some(entry) = CapEntry::decode(&bytes)
-                                .or_else(|| Capability::decode(&bytes).map(|cap| CapEntry { capability: cap, refresh_interval_ms: 60_000 }))
+                            let Some(entry) = super::capability_ops::decode_cap_entry(&bytes)
                             else { continue; };
                             if !entry.is_fresh(hlc_ts, now_ms_v) { continue; }
                             let cap = entry.capability;

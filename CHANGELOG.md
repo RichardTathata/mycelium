@@ -9,6 +9,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **P10 — "a coordinator by accretion", and the election rule that stops producing one.** A
+  discussion note asked whether role accumulation is constrained anywhere. It is not — and the
+  answer turned out to have two halves, neither of which was what the note expected.
+
+  **It was not detected either.** Missing *prevention* is fine here; "detection, not prevention" is
+  the substrate's law, so a cap was never the expectation. A **tripwire** was, and none of the seven
+  pathologies could see this one: **P2** watches role *churn* (a node calmly holding everything
+  produces none) and **P6** watches coverage *gaps* (here every capability has a provider — merely
+  the same one). Both are the orthogonal axis, so a concentrated fleet read as **perfectly healthy
+  by every measurement that existed**, until the node it all depended on went away.
+
+  **And it was the default, not an edge case.** The tuple space, the blackboard and the wiki each
+  elected by *lowest candidate node id wins* — the same rule over the same candidates returns the
+  same winner, so a fleet where every node runs every companion put **every single-writer job on one
+  node**, deterministically, on first election and again after every restart. Losing that node moved
+  every role at once, **as a block**, to the next-lowest id.
+
+  Both halves are closed:
+
+  - **`detect_role_concentration` (P10)** — the share of live single-writer roles (`.primary` /
+    `.curator`) held by one node, hysteresis-confirmed like P1 and P6, exposed on `/stats` as
+    `role_concentration_pct` and recorded in the event ring so `explain` can narrate it. The gauge
+    carries the share **whether or not it trips**, because an operator watching it climb from 40 to
+    55 has a warning a boolean would withhold until it was already true. It has a **partition
+    guard**: a node that has lost sight of its peers sees only its own roles — the pathology's exact
+    shape — so the reading is withheld below two visible holders.
+  - **`mycelium::election`** — rings order candidates by `hash(ring, node)` (rendezvous), so
+    different rings pick different winners and a failover spreads rather than relocating in one
+    block. `LowestId` is kept, because a mixed fleet must still agree.
+
+  **The rollout is negotiated, not flag-dayed**, and this is the part that made the change
+  non-trivial. The companions' safety rests on every node computing the *same* answer — the wiki's
+  split-brain sentinel says so in as many words. Deploy a new rule node-by-node and an old node and
+  a new one would each believe they should hold the role and **neither would resign**: a stable
+  two-holder state lasting as long as the rollout. So each candidate advertises the rules it can
+  compute (`election_rule`, a capability attribute — no new gossip), and every elector uses the
+  **minimum across live candidates**. One old candidate pins the whole ring to the old rule; the
+  ring flips by itself when the last one leaves. What that does *not* remove is a
+  **convergence-length** window where two nodes briefly disagree about the candidate set — bounded
+  by seconds rather than by the rollout, and the same transient the sentinel already exists to
+  resolve.
+
+  **Not claimed:** rendezvous is a spread, **not a bound**. Three rings over three nodes still leave
+  ~11% chance one node wins all three and ~78% chance somebody holds two. That is precisely why P10
+  stays — mitigate the cause, *and* keep the ability to see the residue.
+
+  Gated by `two_rings_over_the_same_candidates_do_not_elect_the_same_node` — three live nodes, two
+  rings chosen **at runtime** from what the rule says this port allocation splits, asserting each
+  landed where the rule names. Reverting the blackboard to lowest-id makes it fail. Plus four pure
+  detector tests (including the partition guard and evaporation) and four election tests (including
+  that **one old candidate pins the whole ring**).
+
+  **One internal fix found on the way:** `cap/` values must be decoded with the *fallback* that
+  accepts the older bare-`Capability` encoding. The first draft of P10 used `CapEntry::decode`
+  alone and would have **silently skipped** legacy entries — reading as *that role is not held*
+  rather than *this reader is too new to parse it*. The fallback is now one named function
+  (`decode_cap_entry`) instead of three inline copies.
+
 ### Changed
 
 - **`require_identity_proofs` defaults to `true`.** An unsigned `sys/identity/{V}` entry — the

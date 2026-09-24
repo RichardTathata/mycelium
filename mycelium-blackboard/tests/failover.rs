@@ -4,7 +4,8 @@
 //! (in-flight, NOT acked); the primary is killed; the secondary promotes when the primary's
 //! capability evaporates; and the in-flight claim **survives** — the fact re-queues on the new
 //! primary and is re-claimable (at-least-once: a claimer that drops mid-work does not strand the
-//! finite fact). Also covers the `Auto` election (lowest candidate becomes primary).
+//! finite fact). Also covers the `Auto` election — that it settles on one primary that serves, and
+//! (P10) that two rings over the same candidates do not both elect the same node.
 
 use bytes::Bytes;
 use mycelium::{GossipAgent, GossipConfig, NodeId};
@@ -118,7 +119,7 @@ async fn inflight_claim_survives_primary_failover() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn auto_election_lowest_candidate_becomes_primary() {
+async fn auto_election_settles_on_one_primary_that_serves() {
     let (p_lo, p_hi) = alloc_two_sorted_ports();
     let agent_lo = start_agent(p_lo, None).await;
     let agent_hi = start_agent(p_hi, Some(p_lo)).await;
@@ -127,7 +128,9 @@ async fn auto_election_lowest_candidate_becomes_primary() {
     let bb_lo = Blackboard::new(Arc::clone(&agent_lo), bb_cfg("elect", BoardRole::Auto)).await.unwrap();
     let bb_hi = Blackboard::new(Arc::clone(&agent_hi), bb_cfg("elect", BoardRole::Auto)).await.unwrap();
 
-    // After the settle window, exactly one primary exists; the lower-port node wins and serves.
+    // After the settle window, exactly one primary exists and serves. *Which* node wins is the
+    // ring's negotiated election rule's business and is asserted separately, by the P10 test below
+    // — this one is about the ring settling at all.
     let pred = Predicate::new();
     let mut posted = false;
     for _ in 0..120 {
@@ -213,4 +216,86 @@ async fn never_seen_primary_promotes_after_orphan_grace() {
     bb2.shutdown().await;
     a2.shutdown().await;
     a1.shutdown().await;
+}
+
+/// **The P10 fix, end to end.** Two rings, the same three candidates — and they must not both
+/// elect the same node.
+///
+/// Under the old rule (*lowest candidate node id wins*) this test could not have passed: every
+/// ring applies the same ordering to the same candidates, so every ring returns the same winner,
+/// and a fleet running several companions puts every single-writer job on one node — a coordinator
+/// nobody declared (`docs/design/legible-emergence-taxonomy.md`, P10).
+///
+/// The namespaces are **chosen at runtime** rather than hard-coded: the test asks
+/// `mycelium::election` which two rings this particular set of ports lands on different nodes, then
+/// runs those two. That keeps the assertion exact and deterministic — it compares against the
+/// winner the rule names, not against a hope — where a fixed pair of names would be a coin flip on
+/// whatever ports the allocator handed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_rings_over_the_same_candidates_do_not_elect_the_same_node() {
+    use mycelium::capability::CapFilter;
+    use mycelium::election::{winner, Rule};
+
+    let ports: Vec<u16> = (0..3).map(|_| alloc_port()).collect();
+    let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+
+    // Find two rings this candidate set splits between different nodes.
+    let ring_of = |ns: &str| format!("blackboard/{ns}.primary");
+    let mut pair: Option<(String, String, NodeId, NodeId)> = None;
+    'outer: for i in 0..40 {
+        for j in (i + 1)..40 {
+            let (a, b) = (format!("ring-{i}"), format!("ring-{j}"));
+            let wa = winner(&ring_of(&a), &ids, Rule::Rendezvous).unwrap().clone();
+            let wb = winner(&ring_of(&b), &ids, Rule::Rendezvous).unwrap().clone();
+            if wa != wb {
+                pair = Some((a, b, wa, wb));
+                break 'outer;
+            }
+        }
+    }
+    let (ns_a, ns_b, want_a, want_b) = pair.expect("some two rings must split three candidates");
+
+    let agents: Vec<Arc<GossipAgent>> = {
+        let mut v = Vec::new();
+        for (i, p) in ports.iter().enumerate() {
+            v.push(start_agent(*p, if i == 0 { None } else { Some(ports[0]) }).await);
+        }
+        v
+    };
+    wait_peered(&agents.iter().collect::<Vec<_>>()).await;
+
+    // Every node is a candidate in BOTH rings — the homogeneous fleet that concentrates.
+    let mut boards = Vec::new();
+    for agent in &agents {
+        for ns in [&ns_a, &ns_b] {
+            boards.push(Blackboard::new(Arc::clone(agent), bb_cfg(ns, BoardRole::Auto)).await.unwrap());
+        }
+    }
+
+    // Poll until both rings have settled on exactly one primary each.
+    let primary_of = |ns: &str| -> Option<NodeId> {
+        let f = CapFilter::new("blackboard", format!("{ns}.primary"));
+        let found = agents[0].capabilities().resolve(&f);
+        (found.len() == 1).then(|| found[0].0.clone())
+    };
+    let mut got: Option<(NodeId, NodeId)> = None;
+    for _ in 0..160 {
+        if let (Some(a), Some(b)) = (primary_of(&ns_a), primary_of(&ns_b)) {
+            got = Some((a, b));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let (got_a, got_b) = got.expect("both rings must elect a primary");
+
+    assert_eq!(got_a, want_a, "ring {ns_a} must land where the rendezvous rule says");
+    assert_eq!(got_b, want_b, "ring {ns_b} must land where the rendezvous rule says");
+    assert_ne!(got_a, got_b, "two rings over one candidate set must not hand both jobs to one node");
+
+    for b in boards.drain(..) {
+        b.shutdown().await;
+    }
+    for a in agents {
+        a.shutdown().await;
+    }
 }

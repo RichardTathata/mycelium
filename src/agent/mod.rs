@@ -438,6 +438,10 @@ pub(crate) struct TaskCtx {
     /// fresh providers visible from this node**, confirmed past hysteresis. Set by the detector
     /// loop; `0` unless `emergent_detectors_enabled`. Relaxed — diagnostic; on `/stats`.
     pub(crate) capability_coverage_gaps: Arc<AtomicU64>,
+    /// **P10** — the largest share (integer percent) of the fleet's live single-writer roles held by
+    /// one node, as last read by the detector loop. `0` when the loop does not run, or when there is
+    /// too little to read; the trip is a *sustained* share, not this instantaneous value.
+    pub(crate) role_concentration_pct: Arc<AtomicU64>,
 
     /// Legible-Emergence Phase-1 gauge (P2): count of (group, node) pairs whose membership is
     /// currently **flapping** (≥ threshold join/leave transitions within the flap window). Set by
@@ -918,6 +922,7 @@ impl GossipAgent {
             event_ring: Arc::new(emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(AtomicU64::new(0)),
             capability_coverage_gaps: Arc::new(AtomicU64::new(0)),
+            role_concentration_pct: Arc::new(AtomicU64::new(0)),
             membership_flaps: Arc::new(AtomicU64::new(0)),
             control_profile: AtomicU8::new(0),
             control_would_hold: Arc::new(AtomicU64::new(0)),

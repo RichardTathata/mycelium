@@ -80,6 +80,19 @@ pub(super) const WATCHER_DEBOUNCE_WINDOW: Duration = Duration::from_millis(50);
 /// Like `parse_cap_key` but emits a `warn!` on the unhappy path. Use at scan
 /// sites where a malformed key is genuinely surprising (we only scan prefixes
 /// whose entries are well-formed by convention).
+/// Decode a `cap/` value into a [`CapEntry`], accepting the **older bare `Capability` encoding**.
+///
+/// An entry written by a node predating `CapEntry` carries no refresh interval, so one is assumed
+/// (60 s — the advertise default). This fallback is the reason a reader must never decode a `cap/`
+/// value with `CapEntry::decode` alone: a legacy entry would come back `None` and be **silently
+/// skipped**, which reads as *that capability is not advertised* rather than *this reader is too
+/// new to parse it*. Extracted 2026-09-24 after the P10 detector was written without it and
+/// undercounted for exactly that reason.
+pub(super) fn decode_cap_entry(bytes: &[u8]) -> Option<CapEntry> {
+    CapEntry::decode(bytes)
+        .or_else(|| Capability::decode(bytes).map(|cap| CapEntry { capability: cap, refresh_interval_ms: 60_000 }))
+}
+
 pub(super) fn parse_cap_key_or_warn(prefix: &str, key: &str) -> Option<(NodeId, Arc<str>, Arc<str>)> {
     let parsed = parse_cap_key(prefix, key);
     if parsed.is_none() {
@@ -198,8 +211,7 @@ pub(super) fn resolve_filter_against_kv(
     for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(kv_state, "cap/") {
         if is_cap_locality_key(&key) { continue; }
         let Some((node_id, _ns, _name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-        let Some(entry) = CapEntry::decode(&bytes)
-            .or_else(|| Capability::decode(&bytes).map(|cap| CapEntry { capability: cap, refresh_interval_ms: 60_000 }))
+        let Some(entry) = decode_cap_entry(&bytes)
         else {
             warn!(key = %key, "malformed Capability — peer sent bytes that did not decode");
             continue;

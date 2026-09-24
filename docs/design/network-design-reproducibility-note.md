@@ -122,6 +122,53 @@ bounded-regime constraint confines it to a stated observation period.
   ambiguity may still be worth naming as a hazard — but on its own merits, not because a theorem in
   another field says so.
 
+## 5a. Answers — questions 1, 2 and 3, resolved 2026-09-24
+
+**Q1: is role accumulation constrained anywhere I did not look?** *No.* Four places were checked:
+`advertise_roles` takes an unbounded iterator and writes one signed claim; `advertise_capability`
+has no count limit and no `max_roles` equivalent exists in the workspace; `MembershipIntent{min,max}`
+bounds a **group's population**, never a node's role count; and `InstallRights::admit_install` — the
+only mechanism that counts a per-node allocation and refuses — bounds *artifact installs*, not roles,
+and only under `EnforceAllocated`. §4.1 stands.
+
+**And it was worse than the note supposed, in a way the note could not have seen.** The absence of
+*prevention* is not the problem — "detection, not prevention" is this substrate's law, so a missing
+cap is expected. What should have existed is a tripwire, and **none of the seven pathologies could
+see this one**: P2 watches role *churn* (a node calmly holding everything produces none) and P6
+watches coverage *gaps* (here every capability has a provider, merely the same one). Both are the
+orthogonal axis. A concentrated fleet read as **perfectly healthy by every measurement we had**.
+
+Worse still, concentration was not an accident waiting to happen but the **default behaviour**: the
+tuple space, the blackboard and the wiki each elect by *lowest candidate node id wins*, and the same
+rule over the same candidates returns the same winner. A fleet where every node runs every companion
+put every single-writer job on one node, deterministically, on first election and again after every
+restart.
+
+**Q2: accepted threat, or gap?** *Gap* — and now closed on both halves:
+
+- **Detection:** **P10, "coordinator by accretion"** (`docs/design/legible-emergence-taxonomy.md`) —
+  the share of live single-writer roles held by one node, hysteresis-confirmed, on `/stats` as
+  `role_concentration_pct` and in the event ring. It carries a **partition guard**: a node that has
+  lost sight of its peers sees only its own roles, which is the pathology's exact shape, so the
+  reading is withheld below two visible holders. Absence of evidence is not evidence.
+- **Mitigation:** `mycelium::election` — rings now order candidates by `hash(ring, node)`
+  (rendezvous), so different rings pick different winners, and a failover spreads instead of moving
+  every role to the next-lowest id **as a block**.
+
+**Q3: would a `RoleIntent{max}` be coherent?** Not needed, and the note's instinct that it "fights
+the capability system's premise" is right — a cap is an *assignment* mechanism in a system whose
+premise is discovery. Rendezvous achieves the spread **without anyone assigning anything**: it is
+still a pure, total, deterministic ordering every node computes from data it already holds. Nothing
+is allocated; the answer is derived, as before.
+
+**What is deliberately *not* claimed.** Rendezvous is a spread, **not a bound**: three rings over
+three nodes still leaves ~11% chance one node wins all three and ~78% chance somebody holds two. It
+makes concentration unlikely, not impossible — which is exactly why P10 stays. Mitigate the cause,
+keep the ability to see the residue.
+
+**Questions 4 and 5 remain open** (bootstrap ordering as an unwritten discipline; SI S5.3 on
+diversity–redundancy). This section answers what the code could answer.
+
 ## 6. Questions for the team
 
 1. **Is role accumulation constrained anywhere I did not look?** If a node cannot in practice hold

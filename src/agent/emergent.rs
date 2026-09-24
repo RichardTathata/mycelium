@@ -187,6 +187,120 @@ pub fn detect_coverage_gaps(kv_state: &crate::store::KvState, now: u64) -> Vec<S
     gaps.into_iter().collect()
 }
 
+/// The capability-name suffixes that mark a **single-writer role** — a job exactly one node in a
+/// ring holds at a time, with every other node deferring to it.
+///
+/// Matched on the *name's* suffix rather than on a list of namespaces, so a companion that ships
+/// later and follows the same convention (`{scope}.primary` / `{scope}.curator`) is counted without
+/// this file learning its name. The cost of that choice is stated plainly: a capability that ends
+/// in `.primary` for some unrelated reason is counted too. Preferring a false *count* to a silent
+/// omission is deliberate — this detector exists to notice accumulation, and a namespace allow-list
+/// would have to be edited by exactly the person who just added the thing worth noticing.
+const SINGLE_WRITER_SUFFIXES: [&str; 2] = [".primary", ".curator"];
+
+/// Below this many live single-writer roles, concentration is not a meaningful reading: with two
+/// roles in the whole fleet, one node holding both is ordinary rather than pathological.
+const MIN_ROLES_FOR_CONCENTRATION: usize = 3;
+
+/// Fewer live role-holding nodes than this and the detector stays silent. **The partition guard**
+/// (RT3): a node that has lost sight of its peers sees itself holding everything, which is exactly
+/// the shape of the pathology — so without this, the first thing a partitioned node does is accuse
+/// itself of being a coordinator. Absence of evidence about other nodes is not evidence that one
+/// node holds everything.
+const MIN_HOLDERS_FOR_CONCENTRATION: usize = 2;
+
+/// One node's share of the fleet's live single-writer roles.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RoleConcentration {
+    /// The node holding the largest share.
+    pub node: String,
+    /// How many live single-writer roles it holds.
+    pub roles_held: usize,
+    /// How many live single-writer roles are visible from here, across all nodes.
+    pub roles_total: usize,
+    /// How many distinct nodes hold at least one.
+    pub holders: usize,
+    /// `roles_held` as an integer percentage of `roles_total`.
+    pub share_percent: u8,
+}
+
+/// **Pure P10 detector** — *a coordinator by accretion*. Count the fresh `cap/` entries whose name
+/// marks a single-writer role, group them by the node holding them, and report the largest share.
+///
+/// # The pathology, and why nothing else sees it
+///
+/// Every single-writer ring in this substrate elects independently and deterministically — the
+/// lowest candidate node id wins, in the tuple space, the blackboard and the wiki alike. Each
+/// election is individually correct and *checkable*, which is why the rule was chosen. But the same
+/// rule over the same candidates returns the same winner, so a fleet where every node runs every
+/// companion concentrates every single-writer job on one node. **Nobody decided that**, and it is a
+/// coordinator in every practical sense: its loss moves every role at once, its slowness is
+/// everyone's, and compromising it compromises every write path.
+///
+/// No other detector can see it. **P2** watches role *churn* — a node calmly holding everything
+/// produces none. **P6** watches coverage *gaps* — here every capability has a provider, it is
+/// merely the same one. By every existing measurement such a fleet reads as perfectly healthy until
+/// the node it all depends on goes away.
+///
+/// # What this returns, and what it does not claim
+///
+/// `None` when there is nothing meaningful to say: fewer than [`MIN_ROLES_FOR_CONCENTRATION`] live
+/// roles, or fewer than [`MIN_HOLDERS_FOR_CONCENTRATION`] holders visible. Otherwise the *largest*
+/// share, **whether or not it is pathological** — the trip threshold belongs to the caller
+/// (`detect_role_concentration_trip`), because a share is a reading and a pathology is a judgement,
+/// and the detector loop's hysteresis is what turns one into the other.
+///
+/// It reads **this node's view**: "the roles visible from here", never "the roles that exist".
+/// Read it beside [`compute_view_confidence`], like every other tier-b reading.
+pub fn detect_role_concentration(kv_state: &crate::store::KvState, now: u64) -> Option<RoleConcentration> {
+    let mut per_node: HashMap<String, usize> = HashMap::new();
+    let mut total = 0usize;
+    for (key, bytes, hlc_ts) in scan_prefix_kv_with_ts(kv_state, "cap/") {
+        let Some((node, _ns, name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
+        if !SINGLE_WRITER_SUFFIXES.iter().any(|sfx| name.ends_with(sfx)) {
+            continue;
+        }
+        // `decode_cap_entry`, never `CapEntry::decode` — a legacy bare-`Capability` entry must be
+        // counted, not silently skipped. See that function for why the distinction matters here.
+        let Some(entry) = super::capability_ops::decode_cap_entry(&bytes) else { continue };
+        if !entry.is_fresh(hlc_ts, now) {
+            continue; // a dead holder's advertisement ages out; it is not still holding the role
+        }
+        *per_node.entry(node.to_string()).or_insert(0) += 1;
+        total += 1;
+    }
+
+    let holders = per_node.len();
+    if total < MIN_ROLES_FOR_CONCENTRATION || holders < MIN_HOLDERS_FOR_CONCENTRATION {
+        return None;
+    }
+    // Ties broken by node id so the reading is deterministic — two nodes holding the same number
+    // must not make this flap between them tick to tick, which would look like churn that is not.
+    let (node, roles_held) = per_node.into_iter().max_by(|(na, a), (nb, b)| a.cmp(b).then(nb.cmp(na)))?;
+    let share_percent = ((roles_held * 100) / total) as u8;
+    Some(RoleConcentration { node, roles_held, roles_total: total, holders, share_percent })
+}
+
+/// The **trip condition** for P10: a share at or above this percentage is pathological.
+///
+/// 60% rather than a majority, and the reason is the small-fleet case this exists for. Three rings
+/// over three nodes should be one each; two on one node is 67% and is already the shape worth
+/// naming, while a simple `> 50%` would also fire at two-of-three in a *four*-role fleet where the
+/// spread is otherwise fine.
+pub const ROLE_CONCENTRATION_TRIP_PERCENT: u8 = 60;
+
+/// **Pure P10 trip** — the judgement on top of [`detect_role_concentration`]'s reading.
+///
+/// Separated so the reading is always available on `/stats` even when it is not pathological: an
+/// operator wants to watch the share move *before* it trips, and a detector that only ever speaks
+/// at the threshold teaches nobody what normal looks like.
+pub fn detect_role_concentration_trip(
+    kv_state: &crate::store::KvState,
+    now: u64,
+) -> Option<RoleConcentration> {
+    detect_role_concentration(kv_state, now).filter(|c| c.share_percent >= ROLE_CONCENTRATION_TRIP_PERCENT)
+}
+
 /// A peer opacity entry older than this is not counted as live for the storm gauge (P4).
 const OPAQUE_MAX_AGE_MS: u64 = 30_000;
 /// A `sys/health/` self-report older than this is not counted for store-convergence.
@@ -725,6 +839,10 @@ pub struct FleetSnapshot {
     pub view_confidence:          ViewConfidence,
     pub governed_groups:          Vec<GroupStatus>,
     pub capability_coverage_gaps: Vec<String>,
+    /// **P10** — the largest share of the fleet's live single-writer roles held by one node, or
+    /// `None` when there is too little to read (see [`detect_role_concentration`]). Present whether
+    /// or not it trips, because an operator needs to watch it move to know what normal looks like.
+    pub role_concentration:       Option<RoleConcentration>,
     pub opaque_node_pct:          u64,
     pub opaque_pairs:             Vec<(String, String)>,
     pub membership_flaps:         u64,
@@ -762,6 +880,7 @@ pub fn compute_fleet_snapshot(ctx: &TaskCtx) -> FleetSnapshot {
         view_confidence:          compute_view_confidence(ctx),
         governed_groups:          governed_group_statuses(&ctx.kv_state, now),
         capability_coverage_gaps: gaps,
+        role_concentration:       detect_role_concentration(&ctx.kv_state, now),
         opaque_node_pct:          opaque_node_pct(&ctx.kv_state, live_nodes, now, OPAQUE_MAX_AGE_MS),
         opaque_pairs,
         membership_flaps:         ctx.membership_flaps.load(Ordering::Relaxed),
@@ -795,9 +914,11 @@ pub async fn run_emergent_detectors(
     );
     let mut conflict_streaks: HashMap<String, u32> = HashMap::new();
     let mut gap_streaks: HashMap<String, u32> = HashMap::new();
+    let mut conc_streaks: HashMap<String, u32> = HashMap::new();
     // P3-explain: record a *significant event* whenever a detector's confirmed count changes
     // (onset/clear), not every tick — the event ring is the state-change history, not a firehose.
     let (mut prev_conf, mut prev_gaps, mut prev_flaps, mut prev_osc) = (0u64, 0u64, 0u64, 0u64);
+    let mut prev_conc_trip = 0u64;
     // P2 flap state: seed prev-membership at spawn so the initial roster is not counted as joins.
     let mut prev_membership = membership_snapshot(&ctx.kv_state);
     let mut flap_tracker = FlapTracker::default();
@@ -819,6 +940,20 @@ pub async fn run_emergent_detectors(
                 let gaps = detect_coverage_gaps(&ctx.kv_state, now);
                 let confirmed_gaps = confirm_by_key(&gaps, &mut gap_streaks, CONFIRM_TICKS);
                 ctx.capability_coverage_gaps.store(confirmed_gaps, Ordering::Relaxed);
+                // P10 — a coordinator by accretion. Hysteresis-confirmed like P1/P6, and for the
+                // same RT3 reason one step further: a node that has just lost sight of its peers
+                // briefly sees itself holding everything. The *sustained* reading is the signal;
+                // the instantaneous one is a view.
+                let concentration = detect_role_concentration_trip(&ctx.kv_state, now);
+                let tripped: Vec<String> = concentration.iter().map(|c| c.node.clone()).collect();
+                let confirmed_conc = confirm_by_key(&tripped, &mut conc_streaks, CONFIRM_TICKS);
+                ctx.role_concentration_pct.store(
+                    // The gauge carries the share whether or not it tripped — an operator watching
+                    // it climb from 40 to 55 has the warning that a boolean would withhold until
+                    // it was already true.
+                    detect_role_concentration(&ctx.kv_state, now).map_or(0, |c| c.share_percent as u64),
+                    Ordering::Relaxed,
+                );
                 // P2 — failover flap: a (group,node) toggling membership faster than a settled
                 // failover (the #56 "node count flapping with no signal why").
                 let curr_membership = membership_snapshot(&ctx.kv_state);
@@ -852,6 +987,20 @@ pub async fn run_emergent_detectors(
                 if confirmed_gaps != prev_gaps {
                     record_event(&ctx, "capability_coverage_gap", format!("coverage gaps {prev_gaps} → {confirmed_gaps}"));
                     prev_gaps = confirmed_gaps;
+                }
+                if confirmed_conc != prev_conc_trip {
+                    // Name the node and the share, so `explain` reads as the sentence an operator
+                    // needs — "one node holds most of the single-writer jobs" — with no code
+                    // knowledge required to interpret a bare count.
+                    let detail = match concentration.as_ref() {
+                        Some(c) => format!(
+                            "{} holds {}/{} single-writer roles ({}%) across {} holder(s) — a coordinator nobody declared",
+                            c.node, c.roles_held, c.roles_total, c.share_percent, c.holders,
+                        ),
+                        None => "role concentration fell back below the trip threshold".to_string(),
+                    };
+                    record_event(&ctx, "role_concentration", detail);
+                    prev_conc_trip = confirmed_conc;
                 }
                 if flaps != prev_flaps {
                     record_event(&ctx, "membership_flap", format!("flapping pairs {prev_flaps} → {flaps}"));
@@ -1283,6 +1432,93 @@ mod tests {
         apply_and_notify(kv, &make_gossip_update(node, 4, key, Capability::new(ns, name).encode(), false, hlc));
     }
 
+    /// **The P10 gate — a coordinator nobody declared.**
+    ///
+    /// Three companions, three single-writer rings, one candidate set. Every ring elects by "lowest
+    /// candidate node id wins", independently and correctly — and the same rule over the same
+    /// candidates returns the same winner, so node-a holds all three. This is the fleet that reads
+    /// as perfectly healthy by every other detector: no churn for P2 to see, no gap for P6.
+    #[test]
+    fn one_node_holding_every_single_writer_role_is_a_concentration() {
+        let kv = KvState::new(0);
+        let hlc = Hlc::new();
+        let a = NodeId::new("127.0.0.1", 41000).unwrap();
+        let b = NodeId::new("127.0.0.1", 41001).unwrap();
+        // a won all three elections; b is a live candidate holding nothing.
+        seed_capability(&kv, &hlc, &a, "tuple", "orders.primary");
+        seed_capability(&kv, &hlc, &a, "blackboard", "work.primary");
+        seed_capability(&kv, &hlc, &a, "wiki", "council.curator");
+        seed_capability(&kv, &hlc, &b, "demo", "worker");   // not a single-writer role
+        let now = mycelium_core::hlc::physical_ms(hlc.tick());
+
+        // Fewer than two *holders* — b holds no role — so the reading is withheld rather than
+        // reported as 100%. One holder is not concentration; it is a fleet with one participant.
+        assert!(detect_role_concentration(&kv, now).is_none(), "one holder is not a distribution");
+
+        // Give b one role: now there is something to compare against, and a holds 3 of 4 = 75%.
+        seed_capability(&kv, &hlc, &b, "tuple", "returns.primary");
+        let c = detect_role_concentration(&kv, now).expect("two holders, four roles");
+        assert_eq!((c.node.as_str(), c.roles_held, c.roles_total, c.holders), (a.to_string().as_str(), 3, 4, 2));
+        assert_eq!(c.share_percent, 75);
+        assert!(detect_role_concentration_trip(&kv, now).is_some(), "75% is over the 60% trip");
+    }
+
+    /// The healthy fleet must **not** trip — otherwise the detector is a permanent alarm and gets
+    /// muted, which is worse than not having it.
+    #[test]
+    fn roles_spread_one_per_node_do_not_trip() {
+        let kv = KvState::new(0);
+        let hlc = Hlc::new();
+        let nodes: Vec<NodeId> = (0..3).map(|i| NodeId::new("127.0.0.1", 42000 + i).unwrap()).collect();
+        seed_capability(&kv, &hlc, &nodes[0], "tuple", "orders.primary");
+        seed_capability(&kv, &hlc, &nodes[1], "blackboard", "work.primary");
+        seed_capability(&kv, &hlc, &nodes[2], "wiki", "council.curator");
+        let now = mycelium_core::hlc::physical_ms(hlc.tick());
+
+        let c = detect_role_concentration(&kv, now).expect("three holders");
+        assert_eq!((c.roles_held, c.roles_total, c.share_percent), (1, 3, 33));
+        assert!(detect_role_concentration_trip(&kv, now).is_none(), "an even spread is not a pathology");
+    }
+
+    /// **The partition guard (RT3).** A node that has lost sight of its peers sees only its own
+    /// roles — which is the exact shape of the pathology. Without the holder floor, the first thing
+    /// a partitioned node would do is accuse itself of being a coordinator, and the operator would
+    /// be sent to the one place the problem is not.
+    #[test]
+    fn a_partitioned_view_does_not_accuse_itself() {
+        let kv = KvState::new(0);
+        let hlc = Hlc::new();
+        let me = NodeId::new("127.0.0.1", 43000).unwrap();
+        for (ns, name) in [("tuple", "a.primary"), ("blackboard", "b.primary"), ("wiki", "c.curator")] {
+            seed_capability(&kv, &hlc, &me, ns, name);
+        }
+        let now = mycelium_core::hlc::physical_ms(hlc.tick());
+        assert!(
+            detect_role_concentration(&kv, now).is_none(),
+            "seeing only your own roles is absence of evidence, not evidence of concentration",
+        );
+    }
+
+    /// A dead holder's advertisement ages out, so the share reflects who holds a role **now** —
+    /// the same evaporation rule every other capability reading obeys.
+    #[test]
+    fn a_stale_role_advertisement_is_not_counted() {
+        let kv = KvState::new(0);
+        let hlc = Hlc::new();
+        let a = NodeId::new("127.0.0.1", 44000).unwrap();
+        let b = NodeId::new("127.0.0.1", 44001).unwrap();
+        seed_capability(&kv, &hlc, &a, "tuple", "orders.primary");
+        seed_capability(&kv, &hlc, &a, "blackboard", "work.primary");
+        seed_capability(&kv, &hlc, &a, "wiki", "council.curator");
+        seed_capability(&kv, &hlc, &b, "tuple", "returns.primary");
+        // Far enough past 3 × the 60 s advertise default that nothing is fresh.
+        let long_after = mycelium_core::hlc::physical_ms(hlc.tick()) + 10 * 60_000;
+        assert!(
+            detect_role_concentration(&kv, long_after).is_none(),
+            "evaporated advertisements are not roles anyone is holding",
+        );
+    }
+
     /// P6 gap gate — a required capability with zero providers is a coverage gap.
     #[test]
     fn coverage_gap_when_no_provider() {
@@ -1618,6 +1854,7 @@ mod tests {
                 observer: "n1".into(), peers_known: 3, peers_heard: 3,
                 max_staleness_ms: 0, self_degraded: false,
             },
+            role_concentration: None,
             governed_groups: vec![],
             capability_coverage_gaps: vec![],
             opaque_node_pct: 0,

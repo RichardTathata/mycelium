@@ -213,6 +213,7 @@ pub mod mesh_manifest;
 /// Federation identity and policy objects (v3 item 2 — `docs/design/federated-domains.md`).
 /// The contract (types, canonical signing bytes) and, under `tls`, the transport's first arm (`edge`,
 /// `client`, item 2 PR 8); no `federation/` KV prefix.
+pub mod election;
 pub mod federation;
 /// The scoped-mandate contract (v3 item 5 — `docs/design/scoped-mandates.md`).
 /// The contract and the epoch check; the enforcement point inside a resource is a later PR.
