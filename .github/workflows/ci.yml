@@ -78,6 +78,10 @@ jobs:
       # printing a nice story about a substrate that no longer behaves that way.
       - run: cargo run --example coordination_integrity
       - run: cargo run --example coordinator_by_accretion
+      # Identity travels as one record; two proof-requiring nodes still authenticate. The race it
+      # prevents needs two processes, so that half stays in the Docker suites — the example says so
+      # rather than narrating a race it never runs.
+      - run: cargo run --example identity_one_record --features tls,compliance
       - run: cargo run --example knowledge_layer --features tls
       - run: cargo run --example federated_domains
       # The third domain: the question two domains cannot ask. Each act asserts, so "trust does

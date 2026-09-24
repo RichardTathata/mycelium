@@ -46,13 +46,14 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`control_envelope_viz`](../docs/design/adaptive-stability.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
-| [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | [`procurement_authority`](../docs/guide/20-authorising-actions.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | [`destination_commit`](../docs/operations/companions.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`redistribution_cn`](../docs/guide/24-commitments.md) | · | ● | · | ● | Adv | CLI | · | · | · |
-| **Coordination integrity** — an election needs an electorate, winning is not a grant, and one node quietly holding everything reads as healthy. Both *run* in CI | | | | | | | | | |
+| **Coordination & identity integrity** — an election needs an electorate, winning is not a grant, one node quietly holding everything reads as healthy, and a node's identity travels as one record. All *run* in CI | | | | | | | | | |
 | [`coordination_integrity`](../docs/guide/04-consensus.md) | · | · | ● | ○ | Adv | CLI | · | · | · |
 | [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | CLI | · | · | · |
+| [`identity_one_record`](../docs/guide/09-security.md) | ● | · | · | ○ | Adv | CLI | · | · | · |
+| [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | |
 | [`mailbox_llm`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
 | [`stigmergy`](coop/README.md) | · | ● | · | ○ | Adv | CLI | · | · | · |
@@ -77,6 +78,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`microgrid_viz`](../mycelium-blackboard/examples/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
 | [`redistribution`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
 | [`redistribution_viz`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
+| [`admission`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
 | [`fluid_pipeline`](fluid_pipeline/README.md) | · | · | · | ● | Adv | CLI | · | · | · |
 | [`wiki_chat`](../mycelium-wiki/examples/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
 | [`wiki_council_viz`](../mycelium-wiki/examples/README.md) ★ | ○ | · | · | ● | Adv | Web | real | · | ✓ |
@@ -84,6 +86,8 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`fleet_reasoning`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | mock | · | · |
 | [`reason_node`](../mycelium-reason/examples/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
 | [`reheal_node`](../mycelium-reason/examples/README.md) | ○ | · | ○ | ● | Adv | CLI | mock | · | · |
+| [`ollama_serve`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | real | · | · |
+| [`openai_serve`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | real | · | · |
 | **Guardrails** — [`mycelium-guardrails/examples/README.md`](../mycelium-guardrails/examples/README.md) | | | | | | | | | |
 | [`guardrail_fleet`](../mycelium-guardrails/examples/README.md) | · | · | · | ● | Adv | CLI | · | ✓ | · |
 | [`guardrail_wedge`](../mycelium-guardrails/examples/README.md) | · | · | · | ● | Adv | CLI | · | ✓ | · |
@@ -92,6 +96,12 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`a2a_langchain`](a2a_langchain/README.md) | · | · | · | ● | Adv | CLI | real | · | · |
 | [`langgraph`](langgraph/README.md) | ○ | · | ○ | ● | Adv | CLI | mock | · | · |
 | [`community`](community/README.md) | · | · | · | ● | Adv | Web | real | ✓ | · |
+
+**Harness binaries — deliberately not rows above.** `federation_node` (the one binary of the
+two-mesh Docker suite), `scrape_fleet_node` and `scrape_worker_node` (launcher + sidecar for the
+analytics-scraper fleet) are *fixtures a suite starts*, not demonstrations you read. They are named
+here so this page is a complete enumeration: a list that is silently short is indistinguishable from
+one that is out of date, and this index has drifted that way before.
 
 ★ **flagship** — the marquee demo of its world. † `ops_console` *observes* every layer and both ops
 surfaces (`/audit`, `/metrics`) rather than emitting them — point it at any node below. Every link above
