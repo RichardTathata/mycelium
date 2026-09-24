@@ -32,6 +32,65 @@ pub(crate) use mycelium_core::ops::{
     kv_subscribe_prefix_with_predicate,
 };
 
+/// How long a `MembershipIntent` is honoured as a declared electorate floor. Mirrors the
+/// membership governor's own TTL: an intent nobody is refreshing has evaporated, and an evaporated
+/// floor must not block elections forever (posture rule 5, *roles evaporate*).
+#[cfg(feature = "consensus")]
+pub(crate) const ELECTORATE_INTENT_TTL_MS: u64 = 30_000;
+
+/// The electorate a group proposal is allowed to decide with.
+#[cfg(feature = "consensus")]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Electorate {
+    /// `n` members may vote; the quorum is computed from this.
+    Established(usize),
+    /// No decision may be attempted — the roster is empty, or smaller than the group declares.
+    Unavailable { observed: usize, declared_min: usize },
+}
+
+/// Decide whether an election may proceed, given what this node can **see** and what the group
+/// **declares**.
+///
+/// Three cases, and the middle one is the whole point:
+///
+/// - `observed == 0` — unknown or unjoined group. **Refuse.** This used to be counted as one
+///   member with a quorum of one, which the proposer's own self-vote satisfied, so every node
+///   committed its own candidate unopposed. *"I cannot see members"* must not mean *"I may decide
+///   alone."*
+/// - `observed < declared_min` — a fresh `MembershipIntent` says the group should hold at least
+///   `declared_min`, and this node sees fewer. Its view is **partial**, and a partial view confers
+///   a *smaller* quorum, which is the same defect wearing a plausible number. **Refuse.**
+/// - otherwise — decide with `observed`. A genuine one-member group elects normally: an explicit
+///   singleton is legitimate, an inferred one is not.
+///
+/// `declared_min == 0` means no fresh intent exists, so there is nothing to be partial against and
+/// only the empty case refuses. That is deliberate: the floor binds while it is asserted, not
+/// after it evaporates.
+#[cfg(feature = "consensus")]
+pub(crate) fn resolve_electorate(observed: usize, declared_min: usize) -> Electorate {
+    if observed == 0 || (declared_min > 0 && observed < declared_min) {
+        return Electorate::Unavailable { observed, declared_min };
+    }
+    Electorate::Established(observed)
+}
+
+/// The electorate floor a group declares through a **fresh** `MembershipIntent`, or `0`.
+///
+/// Read from the same key the membership governor writes (`sys/govern/membership/{group}`) and
+/// subject to the same freshness rule, so a stale intent cannot wedge a group shut.
+#[cfg(feature = "consensus")]
+pub(crate) fn declared_electorate_min(ctx: &crate::agent::TaskCtx, group: &str) -> usize {
+    let key = format!("{}{}", crate::agent::membership_governor::MEMBERSHIP_PREFIX, group);
+    let Some(bytes) = ctx.kv_state.store.pin().get(key.as_str()).and_then(|e| e.data.clone())
+    else { return 0 };
+    let Ok(intent) = mycelium_core::serde_fixint::from_slice::<
+        crate::agent::membership_governor::MembershipIntent>(&bytes)
+    else { return 0 };
+    let now = mycelium_core::sim_seam::mono_now_ns() / 1_000_000;
+    if now.saturating_sub(intent.written_at_ms) > ELECTORATE_INTENT_TTL_MS { return 0; }
+    intent.min
+}
+
 #[cfg(feature = "consensus")]
 pub(crate) fn compute_quorum_size(config_size: usize, member_count: usize) -> usize {
     if config_size > 0 { config_size } else { member_count / 2 + 1 }

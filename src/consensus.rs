@@ -182,7 +182,13 @@ pub struct GroupQuorum {
 
 /// Outcome of a [`group_propose`](crate::GossipAgent::group_propose) or
 /// [`system_propose`](crate::GossipAgent::system_propose) call.
+///
+/// **`#[non_exhaustive]` since 2026-09-24.** A `_` arm is required, and it must **fail closed**:
+/// a future refusal variant read as success is exactly the class of bug
+/// [`ElectorateUnavailable`](Self::ElectorateUnavailable) exists to end. Same discipline as
+/// `CallRefusal` and `CommitmentRefusal` (v2.13.0).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum ConsensusResult {
     /// Quorum reached and the value was committed to the KV store.
     Committed {
@@ -223,6 +229,35 @@ pub enum ConsensusResult {
         slot:   Arc<str>,
         ballot: u64,
     },
+    /// **The electorate could not be established, so no decision was attempted.**
+    ///
+    /// Either the group roster this node can see is **empty** — an unknown group, or one nobody
+    /// has joined — or it holds **fewer members than the group declares** through a fresh
+    /// `MembershipIntent { min }`, meaning this node's view is partial.
+    ///
+    /// **Why this is a refusal and not a singleton election.** Until 2026-09-24 an empty roster
+    /// was counted as `members.len().max(1)` — one member, quorum one — and the proposer's own
+    /// self-vote satisfied it. Every node therefore committed its own candidate unopposed: *N*
+    /// singleton elections wearing the shape of one, converging afterwards by LWW if they
+    /// converged at all. The defect was not the arithmetic; it was that **"I cannot see members"
+    /// silently meant "I have authority to decide alone."**
+    ///
+    /// A singleton election remains entirely legitimate — when the roster **explicitly** holds one
+    /// member. What is refused is inferring that authority from *absence*.
+    ///
+    /// The caller's options are to join the group, wait for the roster to converge, or (if it
+    /// genuinely intends solo authority) establish a one-member group explicitly.
+    ElectorateUnavailable {
+        slot:  Arc<str>,
+        group: Arc<str>,
+        /// Members visible to this node in `grp/{group}/` at proposal time. `0` = unknown or
+        /// unjoined group.
+        observed_members: usize,
+        /// The floor a fresh `MembershipIntent` declares for this group, or `0` when none is
+        /// declared. `observed_members < declared_min` means this node's view is partial.
+        declared_min: usize,
+    },
+
     /// Quorum size was met but the Hard topology gate was not satisfied — too
     /// few distinct domains at `spread_depth`. The proposal is **not** committed.
     /// The caller decides whether to retry, wait for more diverse voters to

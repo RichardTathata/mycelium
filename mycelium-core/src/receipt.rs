@@ -424,6 +424,21 @@ pub enum CommitError {
         /// The ballot observed to have superseded it.
         ballot: u64,
     },
+    /// **No electorate could be established, so nothing was proposed.**
+    ///
+    /// A *refusal*, not a [`DeliveryUnknown`](Self::DeliveryUnknown), and the contract turns on the
+    /// difference (`docs/design/contracts-receipts.md` §1): a timeout may still commit later, a
+    /// refusal never will. The group roster is empty (unknown or unjoined), or holds fewer members
+    /// than the group declares — meaning this node's view is partial and its quorum would be
+    /// correspondingly too small.
+    ElectorateUnavailable {
+        /// The slot.
+        slot: Arc<str>,
+        /// Members visible to this node. `0` = unknown or unjoined group.
+        observed_members: usize,
+        /// The floor a fresh `MembershipIntent` declares, or `0` when none is declared.
+        declared_min: usize,
+    },
     /// The group's topology requirement was not met, so no commit was attempted.
     TopologyUnsatisfied {
         /// The slot.
@@ -445,6 +460,16 @@ impl std::fmt::Display for CommitError {
             CommitError::Superseded { slot, ballot } => {
                 write!(f, "slot {slot} was superseded at ballot {ballot}")
             }
+            CommitError::ElectorateUnavailable { slot, observed_members: 0, .. } => write!(
+                f,
+                "slot {slot}: no electorate — the group roster is empty (unknown or unjoined \
+                 group); an election needs members, and absence is not authority"
+            ),
+            CommitError::ElectorateUnavailable { slot, observed_members, declared_min } => write!(
+                f,
+                "slot {slot}: no electorate — {observed_members} member(s) visible but the group \
+                 declares at least {declared_min}; this node's view is partial"
+            ),
             CommitError::TopologyUnsatisfied { slot, distinct, required } => write!(
                 f,
                 "slot {slot}: {distinct} distinct failure domains answered, {required} required"

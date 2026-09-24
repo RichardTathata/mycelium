@@ -228,6 +228,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the AFN scenario and the benches already send `value_b64` and are unaffected; the one caller that
   did not was the test helper fixed alongside this.
 
+### Fixed
+
+- **An election needs an electorate. Absence is not authority.** A group proposal whose roster this
+  node cannot see — an unknown or unjoined group — is now **refused**
+  (`ConsensusResult::ElectorateUnavailable`, `409 electorate_unavailable` at the gateway) instead of
+  being decided alone.
+
+  **What it was.** `members.len().max(1)` — an empty roster counted as **one** member, giving a
+  quorum of **one**, which the proposer's **own self-vote** satisfied before it began listening. So
+  every node committed its own candidate unopposed: *N* singleton elections wearing the shape of
+  one, reconciled afterwards by LWW if at all. The arithmetic was not the defect. The defect was
+  that *"I cannot see members"* silently meant *"I have authority to decide alone."*
+
+  **Partial views too.** A node that sees fewer members than the group declares through a fresh
+  `MembershipIntent { min }` is also refused. A partial view yields a *smaller* quorum — the same
+  defect wearing a plausible number.
+
+  **An explicit singleton still elects.** What is refused is inferring authority from absence, never
+  solo authority somebody actually established. A one-member roster decides normally, and a
+  declaration that has evaporated stops binding, so a stale intent cannot wedge a group shut.
+
+  Both surfaces enforce it — `ConsensusHandle::group_propose` and `POST /gateway/overlay/elect` —
+  because a caller must not get a different answer for reaching the same election through a socket.
+
+  **Upgrade notes.** `ConsensusResult` is now **`#[non_exhaustive]`** and gains
+  `ElectorateUnavailable`; `CommitError` gains `ElectorateUnavailable` (it is already
+  non-exhaustive); `ConsistencyError` gains `ElectorateUnavailable`. A `_` arm is required and
+  **must fail closed** — a refusal read as success is the exact class of bug this variant ends.
+  Same discipline as `CallRefusal`/`CommitmentRefusal` in v2.13.0. A deployment that relied on an
+  unjoined group electing a leader was relying on every node electing itself.
+
+  **This is one of three findings** in `.log/2026-09-24-consensus-vote-binding.md`. The other two —
+  votes not bound to the proposal they voted for, and no supported HTTP route by which a node joins
+  a group — are **not** fixed here and are tracked there.
+
 ## [2.13.0] — 2026-09-23
 
 **The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged

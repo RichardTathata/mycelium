@@ -2841,6 +2841,20 @@ async fn overlay_group_propose(
 ) -> crate::consensus::ConsensusResult {
     let prefix  = crate::signal::grp_prefix(group);
     let members = crate::store::scan_kv_prefix(ctx.kv_state.as_ref(), &prefix);
+    // The electorate must be established, not inferred from absence — the HTTP surface enforces
+    // the same contract as the library path (`ConsensusHandle::group_propose`), because a caller
+    // must not get a different answer for reaching the same election through a socket.
+    let declared_min = super::helpers::declared_electorate_min(ctx, group);
+    match super::helpers::resolve_electorate(members.len(), declared_min) {
+        super::helpers::Electorate::Established(_) => {}
+        super::helpers::Electorate::Unavailable { observed, declared_min } =>
+            return crate::consensus::ConsensusResult::ElectorateUnavailable {
+                slot:  Arc::from(slot),
+                group: Arc::from(group),
+                observed_members: observed,
+                declared_min,
+            },
+    }
     // NO `+ 1`: the `grp/{group}/` roster already includes self (a node joins by writing its own
     // member key), so `+ 1` double-counts self and over-sizes the quorum — a solo group `{self}`
     // then needs 2 votes and can only ever cast 1 → spurious Timeout where the library path
@@ -3081,6 +3095,14 @@ async fn gw_overlay_lock_acquire(
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
         crate::consensus::ConsensusResult::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        crate::consensus::ConsensusResult::ElectorateUnavailable {
+            observed_members, declared_min, ..
+        } => (StatusCode::CONFLICT, Json(json!({
+            "ok": false,
+            "error": "electorate_unavailable",
+            "observed_members": observed_members,
+            "declared_min": declared_min,
+        }))).into_response(),
     }
 }
 
@@ -3142,6 +3164,23 @@ async fn gw_overlay_elect(
             (StatusCode::GATEWAY_TIMEOUT, Json(json!({ "ok": false, "error": format!("timeout after {ballots_tried} ballot(s)") }))).into_response(),
         crate::consensus::ConsensusResult::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        // Nothing was proposed, so there is no leader. Answering from the committed slot here
+        // would hand back a *stale* winner from an earlier, differently-constituted election —
+        // which is the failure this refusal exists to prevent, one level down.
+        crate::consensus::ConsensusResult::ElectorateUnavailable {
+            observed_members, declared_min, ..
+        } => (StatusCode::CONFLICT, Json(json!({
+            "ok": false,
+            "error": "electorate_unavailable",
+            "observed_members": observed_members,
+            "declared_min": declared_min,
+            "detail": if observed_members == 0 {
+                "the group roster is empty (unknown or unjoined group) — an election needs \
+                 members, and absence is not authority"
+            } else {
+                "this node sees fewer members than the group declares; its view is partial"
+            },
+        }))).into_response(),
     }
 }
 
