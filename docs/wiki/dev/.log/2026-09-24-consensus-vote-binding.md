@@ -132,3 +132,49 @@ this ballot cannot propose at it.
 
 **Stated as the property:** *a node casts at most one vote per ballot, for exactly one value,
 whichever role it is playing when it casts it.*
+
+
+---
+
+## Open: restart recovery (designed, not built)
+
+**The hole.** `TaskCtx::consensus_accepted` is in-process. A node that restarts mid-ballot forgets
+what it accepted, and the property the other three changes establish — *a node casts at most one
+vote per ballot, for exactly one value* — is only true **for the lifetime of the process**. Restart
+it and it can vote again, for a different value, at the same ballot. Every acceptor-side guarantee
+in classical consensus depends on that memory being **durable**, and ours is not.
+
+`consensus/ballot/{slot}` is not the answer: it is a **gossiped, LWW** cluster value ("highest
+ballot anyone has seen"), not this node's own record of what **it** accepted, and it carries no
+value.
+
+**The design.** Persist `(ballot, value_digest)` per slot, node-locally, and prewarm
+`consensus_accepted` from it before the listener starts — the same shape as
+`prewarm_peer_keys`/`start_identity_watcher` for identity.
+
+Three decisions the implementation has to make, recorded because each has a wrong-looking-right
+answer:
+
+1. **Digest, not value.** The in-memory map holds the whole `Bytes`, but the only operation on it is
+   **equality** (`may_cast_vote`). Storing the SHA-256 digest instead makes the record 40 bytes
+   regardless of proposal size, which is what makes persisting it affordable at all. `claim_vote`
+   compares digests; `VoteForValue` already carries one.
+2. **Where it lives.** A `sys/`-prefixed key gossips, which is the wrong instinct to suppress too
+   quickly: an acceptance is **already public** — votes are broadcast to the group scope — so
+   publishing *"I accepted digest D at ballot B for slot S"* leaks nothing the vote did not. The
+   real objection is **LWW**: a peer's write to the same key would clobber this node's own record,
+   so it must be strictly self-owned (`sys/consensus-accepted/{node}/{slot}`) and read back only
+   for `{self}`. A new reserved prefix means a `src/lib.rs` namespace row and the front-door lists
+   the `check-kv-namespaces.sh` gate enforces.
+3. **When it is written.** Before the vote is emitted, never after — a vote that reaches a proposer
+   while the acceptance is unrecorded is precisely the lost memory this exists to prevent. That
+   ordering is the same *"apply to the store, then hand the record to the WAL"* rule the persistence
+   invariant already states, one layer up.
+
+**What it costs, stated honestly:** a durable write on the voting path, which is the hot path. The
+alternative — accepting that a restarted node may equivocate — is what the substrate does today, and
+it is not defensible for a slot anyone builds exclusivity on.
+
+**Not started.** The three changes in this log's earlier sections are sufficient for single-decree
+safety *within a process lifetime*, and that limit should be stated wherever the guarantee is
+claimed until this lands.
