@@ -73,6 +73,11 @@ jobs:
       # demonstrates — which is the thing the gallery is a gate on. They are self-contained, take
       # seconds, and exit non-zero if a step panics.
       - run: cargo run --example receipt_ladder
+      # Coordination integrity (2026-09-24): the electorate rule, the leadership rung and the
+      # fence, as one narrative. Each act asserts, so a regression fails the job rather than
+      # printing a nice story about a substrate that no longer behaves that way.
+      - run: cargo run --example coordination_integrity
+      - run: cargo run --example coordinator_by_accretion
       - run: cargo run --example knowledge_layer --features tls
       - run: cargo run --example federated_domains --features tls
 
