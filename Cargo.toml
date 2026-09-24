@@ -197,6 +197,13 @@ path              = "examples/federation_node.rs"
 required-features = ["gateway", "tls", "a2a", "cli"]
 
 [[example]]
+name              = "auditor_questions"
+path              = "examples/auditor_questions.rs"
+# `tls` because a tamper-evident chain must be signed — an unsigned one is a contradiction in
+# terms; `compliance` for the audit surface and the erasure registry.
+required-features = ["tls", "compliance"]
+
+[[example]]
 name              = "identity_one_record"
 path              = "examples/identity_one_record.rs"
 # `tls` for the identity machinery itself; `compliance` for the signed role claim, which is the

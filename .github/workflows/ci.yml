@@ -82,6 +82,9 @@ jobs:
       # prevents needs two processes, so that half stays in the Docker suites — the example says so
       # rather than narrating a race it never runs.
       - run: cargo run --example identity_one_record --features tls,compliance
+      # The three questions an auditor asks. Each act asserts — including that an edited audit
+      # chain FAILS to verify, which is the one a "trust us" answer cannot make checkable.
+      - run: cargo run --example auditor_questions --features tls,compliance
       - run: cargo run --example knowledge_layer --features tls
       - run: cargo run --example federated_domains
       # The third domain: the question two domains cannot ask. Each act asserts, so "trust does

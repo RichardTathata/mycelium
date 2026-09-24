@@ -348,6 +348,37 @@ above, the Dev-facing controls and their Ops runbooks:
 The adopter/auditor control map (what Mycelium provides vs. what you own) is the
 [shared-responsibility matrix](../operations/shared-responsibility-matrix.md).
 
+### Three questions an auditor asks
+
+```bash
+cargo run --example auditor_questions --features tls,compliance
+```
+
+Not the questions an architecture diagram answers — narrow, awkward ones about **evidence**:
+
+| The question | The mechanism | What a bad answer sounds like |
+|---|---|---|
+| **Who actually did this?** | `GatewayCaller` | *"the gateway node did it"* — true, useless, identical for every client |
+| **Can you prove the log was not edited?** | the sealed chain + `AuditSink` | *"we trust our operators"* |
+| **Can you erase one person?** | `SubjectKeyRegistry` | *"we deleted the row"* — from a mesh that replicated it |
+
+Three details the example makes checkable rather than asserting:
+
+- **`GatewayCaller` cannot be constructed by an application.** It is `#[non_exhaustive]` with no
+  public constructor, so only the gateway's auth layer mints one from a credential it verified. An
+  identity the application can fabricate is one an auditor cannot use.
+- **An edited chain fails to verify — and *how* it fails is the interesting part.** A corrupted
+  record no longer decodes, so it drops out of the stream, and the hole it leaves is a
+  `SequenceGap`. You cannot corrupt a record into invisibility, because the chain counts as well as
+  links. Tamper-*evident*, not tamper-proof: anyone with disk access can change the bytes; what they
+  cannot do is make the chain agree with them afterwards.
+- **Erasure is cryptographic, because deletion would be a lie.** You cannot un-gossip bytes: an
+  entry that propagated is on every replica's disk, and a delete cannot reach a partitioned node.
+  So personal data is envelope-encrypted per subject and erasing the subject **destroys the key**.
+  The ciphertext stays exactly where it is and becomes unreadable *everywhere at once*, including on
+  the node that was offline when the request came in. That is a stronger property than deletion, and
+  it is the only one that is true.
+
 ### Identity proofs: what turning them on actually requires
 
 `require_identity_proofs` rejects an identity entry this node cannot authenticate. It is **off by
