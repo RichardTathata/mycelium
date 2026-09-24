@@ -95,26 +95,37 @@ tolerated:
 require_identity_proofs = true      # or GOSSIP_REQUIRE_IDENTITY_PROOFS=1
 ```
 
-**The rollout argument for making this the default is complete; the default is still off, and the
-gap between those two facts is worth your attention before you set it.** Phase 2 shipped in
-**v2.3.0 (2026-07-24)** and every TLS node has written `sys/identity-proof/{self}` unconditionally
-at startup since, so no node within a supported rolling-upgrade range writes an unsigned identity.
-On that reasoning the default was flipped to `true` on 2026-09-23 — and reverted on 2026-09-24,
-because a node's identity and its proof are **two separate KV writes**, hence two gossip messages
-with no ordering between them.
+**What "proof" means here changed in Phase 3b, and it is the difference between safe and not.**
+With the flag set, this node accepts the **sealed** record `sys/identity-signed/{node}` — key
+history and proof in **one** KV entry — and does *not* accept the older
+`sys/identity/` + `sys/identity-proof/` pair.
 
-A peer that learns the identity *before* the proof rejects it and holds no key for that node until
-the proof arrives. The key recovers on its own — the identity watcher subscribes to the broader
-`sys/identity` prefix precisely so a late proof re-validates its entry — so the window is
-**transient**. A decision taken inside it is not: a leader election is one-shot, and a node that
-could not verify a peer's signature during the window does not re-run the election afterwards. The
-Docker suite showed an intermittent `S12 leader election … Nodes disagree on leader` after twelve
-consecutive green runs. Closing the window properly means an atomic identity+proof record, or a
-bounded "pending its proof" state that defers rather than rejects — a design change, not a default.
+That is not pedantry. The pair is two gossip messages with no ordering between them, so a peer
+requiring proofs could learn the identity first, reject it, and hold **no key** for that node until
+the proof arrived. The key recovers on its own (the identity watcher subscribes to the broader
+`sys/identity` prefix, so a late proof re-validates its entry) — but a one-shot decision taken
+inside that window, such as a leader election, would not.
 
-**So: turn it on** if you want the unsigned-mimic residual closed and your fleet does not elect
-leaders during bring-up. **Leave it off** if nodes join and elect in the same breath, or if you
-genuinely run nodes older than **v2.3.0** (they write no proof and would never join).
+**No deployment has been observed hitting this**, and one claim that it had was wrong: an attempt to
+make the flag default-on (2026-09-23, reverted 2026-09-24) coincided with an intermittent
+`S12 leader election … Nodes disagree on leader` in the test fleet, and the two were connected in
+the write-up. They cannot be: the flag is inert without TLS and those nodes configure none. Treat
+the window as a hazard removed on principle, not a bug you have been living with.
+
+One entry cannot arrive in two parts, so the window is closed by construction rather than by timing.
+
+**The precondition for turning it on** is therefore the ordinary one: **every node in the fleet
+must run a release that writes the sealed record.** A node on an older release publishes only the
+pair, and this node will refuse it — correctly, but you will have removed a healthy peer. Check
+before you set it:
+
+```bash
+# One sealed record per node, or you are not ready.
+curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'
+```
+
+**Leave it off** while any node predates the sealed record, and while any node predates **v2.3.0**
+(those write no proof at all).
 
 **What this does *not* give you, and it is worth being exact.** *Proofs required* is **not**
 *identity authenticated*. First sighting of a node you have never seen is still **trust on first

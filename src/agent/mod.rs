@@ -1298,7 +1298,13 @@ impl GossipAgent {
         if let Some(t) = self.task_ctx.tls.get() {
             let proof = helpers::sign_identity_proof(t, &history);
             let proof_key = format!("sys/identity-proof/{}", self.node_id);
-            let _ = self.kv().set(proof_key, Bytes::from(proof));
+            let _ = self.kv().set(proof_key, Bytes::from(proof.clone()));
+            // Phase 3b: the sealed record carries the history too, and readers **prefer** it — so
+            // a rotation that updated only the pair would leave every proof-requiring peer reading
+            // the pre-rotation history and never learning the new key. Same bytes, one record.
+            let sealed = helpers::encode_sealed_identity(&history, &proof);
+            let sealed_key = format!("sys/identity-signed/{}", self.node_id);
+            let _ = self.kv().set(sealed_key, Bytes::from(sealed));
         }
 
         // 3. Let it propagate.

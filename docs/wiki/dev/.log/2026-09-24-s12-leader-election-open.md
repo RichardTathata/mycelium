@@ -1,0 +1,88 @@
+# Open: S12 leader election disagrees, intermittently, cause unknown — 2026-09-24
+
+**Status: OPEN.** This entry exists because the failure briefly had a wrong owner, and a wrong owner
+is worse than none — it stops people looking.
+
+## The observation
+
+`tests/overlay/scenarios/s12_leader_election.py` asserts that three nodes concurrently calling
+`elect_leader("demo")` converge on one answer. On `8b588c6` it failed:
+
+```
+S12 leader election … AssertionError: Nodes disagree on leader:
+{'overlay-a': '…0.3:57000', 'overlay-b': '…0.4:57000', 'overlay-c': '…0.4:57000'}
+```
+
+Two nodes said one thing, one said another. The federation two-mesh suite failed in the same run.
+**Twelve consecutive greens** preceded it on earlier commits; **two greens** followed on later ones.
+
+## What it is not
+
+- **Not `require_identity_proofs`.** That commit flipped the default, and the failure was attributed
+  to it for most of a day. The flag is only consulted from inside the
+  `if let Some(ref tls_cfg) = self.config.tls` block in `src/agent/lifecycle.rs` — every identity
+  writer and both readers (`prewarm_peer_keys`, `start_identity_watcher`) live there. The overlay
+  nodes run `examples/three_node_demo.rs`, which contains **no TLS configuration at all**, and
+  `tests/overlay/docker-compose.test.yml` sets no TLS env. With no TLS there are no `sys/identity/`
+  entries, the validator never runs, and the flag is **inert**. Whatever `8b588c6` did to this test,
+  it did not do through identity proofs — and `8b588c6` changed nothing else but docs and tests.
+- **Not #369's rendezvous election rule.** That landed *after* the failing commit.
+
+## Why the misattribution happened, since that is the reusable part
+
+The reasoning was: *the flip was the only change in that commit, and the suite went red*. That is a
+prior, not a mechanism. Nobody traced a path from the change to the assertion — which would have
+taken one grep — before writing the conclusion into six documents. Recorded as rule 3 on the
+[testing page](../testing/testing.md) §a green run is evidence about that run.
+
+## A traced hypothesis (not a confirmed cause — the distinction is the whole point of this entry)
+
+`elect_leader` (`src/agent/consensus_handle.rs:556`) never returns "I committed, therefore I won" —
+that was fixed in the 2026-07-15 audit, because an optimistic `Committed` is not mutually exclusive.
+Instead it waits for the winning commit to converge and reads the authoritative slot. The wait is a
+**fixed sleep**:
+
+```rust
+ConsensusResult::Committed { .. } => {
+    mycelium_core::sim_seam::sleep_ms("elect/converge", 1000).await;
+    leader_from_slot(self).ok_or(ConsistencyError::Superseded)
+}
+ConsensusResult::Superseded { .. } =>
+    leader_from_slot(self).ok_or(ConsistencyError::Superseded),
+```
+
+Two things follow, and both match the observed shape (one node dissenting, two agreeing):
+
+1. **The 1 s is a timing assumption, and the project already says so.** The replay-nondeterminism
+   inventory calls this pair *"the one whose duration is a correctness assumption"*
+   (`docs/design/replay-nondeterminism-inventory.md` §2.3/§4). If gossip convergence exceeds 1 s
+   under CI load, the reader returns a value the cluster has not settled on.
+2. **The `Superseded` arm has no converge wait at all.** It reads the slot immediately. A node that
+   lost a ballot can therefore read its local slot *before* the winner's commit has reached it and
+   return whatever is there — including a value from its own earlier optimistic commit.
+
+This is a *mechanism traced to the assertion*, which is what the previous hypothesis lacked. It is
+still **not** a confirmed cause of the `8b588c6` run.
+
+**What would confirm it:** a failing run in which the dissenting node's `leader/s12-demo` slot agrees
+with the majority when read again a few seconds later. That distinguishes "read too early" from
+"genuinely committed two different values". Capture per-node `consensus_get("leader/s12-demo")` at
+failure *and* 5 s after.
+
+**What a fix would look like**, in the order I would attempt it: make the `Superseded` arm wait as
+the `Committed` arm does (small, strictly closer to the existing intent); then replace *both* fixed
+sleeps with a bounded poll for slot stability, so convergence is **observed rather than assumed** —
+the same move as the sealed identity record, closing a race by construction instead of by timing.
+Neither is done here: consensus timing deserves its own change and its own review, not a rider on a
+documentation fix.
+
+## Where to start
+
+- The consensus path, not the identity path: `elect_leader` goes through gossip consensus, so the
+  question is how three proposers converge and whether a node can conclude early on a minority view.
+- The rate looks low (one in ~15 observed runs), so reproduction needs repetition:
+  `make test-overlay` in a loop, capturing each node's view rather than only the assertion.
+- Check whether the two-mesh federation failure in the same run shares a cause or was collateral —
+  one red run, two suites, is itself a hint about the host rather than the code.
+- **Do not assume it is a flake because it is rare.** "Nodes disagree on leader" is a
+  correctness-class assertion; a low rate makes it harder to find, not less real.

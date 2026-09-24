@@ -88,11 +88,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than *this reader is too new to parse it*. The fallback is now one named function
   (`decode_cap_entry`) instead of three inline copies.
 
+### Added
+
+- **The sealed identity record (`sys/identity-signed/{node}`, identity-auth Phase 3b)** — key
+  history *and* its proof in **one** KV entry: `version(1) ‖ history ‖ proof(96)`.
+
+  **What it removes.** A node's identity and its proof were two KV entries, hence two gossip
+  messages with no ordering between them; a peer requiring proofs could learn the identity first,
+  reject it, and hold **no key** for that node until the proof landed. The key recovers on its own —
+  a late proof re-validates its entry — so the window is transient, but a one-shot decision taken
+  inside it would not be.
+
+  **Stated precisely: this is a hazard nobody has observed firing, not a diagnosed bug.** An earlier
+  version of this entry said the window split a four-node cluster. It did not: that failure was an
+  intermittent leader election in a test fleet whose nodes run **without TLS**, and every identity
+  writer and reader lives inside the `config.tls` block — the flag is inert there. The correlation
+  was the flip being the only change in its commit; the mechanism was never checked against the
+  test. The window is real and worth removing on its own merits; the cluster split was not its
+  doing, and that failure remains unexplained.
+
+  One entry cannot arrive in two parts, so the window is closed **by construction rather than by
+  timing**, which is the only kind of fix worth having for a race.
+
+  **Compatibility — nothing to do.** Every TLS node writes the sealed record *and* the legacy pair,
+  so a node predating this release still learns keys exactly as before. Readers prefer the sealed
+  record; with the flag **off** (still the default) the legacy pair is honoured as it always was.
+  With the flag **on**, only the sealed record is accepted — the pair is refused not because it is
+  invalid but because it is two messages, and a peer publishing only the pair is one that predates
+  the mechanism, which is what the flag has always refused.
+
+  **The remaining precondition is a rollout, not a defect:** turn the flag on once every node runs a
+  release that writes the sealed record (`cert-rotation.md` has the one-line check). The *default*
+  should flip a release after that, deliberately — by editing a test that explains why it is there.
+
+  Rotation writes the sealed record too. It has to: readers **prefer** it, so a rotation that
+  updated only the pair would leave every proof-requiring peer reading the pre-rotation history and
+  never learning the new key.
+
 ### Changed
 
 - **`require_identity_proofs` stays `false` — the flip to `true` was made and reverted before any
   release carried it.** **No released version's behaviour changes**; nothing to do on upgrade. What
   ships here is the reason, pinned where the next person to consider the flip will hit it.
+
+  **Correction to the first version of this entry:** the revert was triggered by an intermittent
+  `S12 leader election … Nodes disagree on leader`, and that failure was attributed to the flip. It
+  cannot have been caused by it — the flag is inert without TLS and the suite's nodes configure
+  none. The revert stands on the plainer ground that the flip was never demonstrated safe. The
+  leader-election intermittency is **unexplained and open**.
 
   **The argument for flipping was sound.** Every TLS node has written `sys/identity-proof/{self}`
   unconditionally since Phase 2 (**v2.3.0**, 2026-07-24), so within the one-release window a rolling

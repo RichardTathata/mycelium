@@ -951,6 +951,26 @@ pub mod kv_ns {
     /// Deliberately not a `sys/identity/` sub-prefix so an `IDENTITY` prefix scan never sees it.
     pub const IDENTITY_PROOF: &str = "sys/identity-proof/";
 
+    /// **The sealed identity record** (identity-auth Phase 3b) — key history *and* its proof in
+    /// **one** KV entry, so they can never arrive apart. Key: `sys/identity-signed/{node_id}`.
+    /// Value: `version(1) ‖ history ‖ proof(96)`, where `history` is the same key-history bytes
+    /// [`IDENTITY`] carries and `proof` the same `signer(32) ‖ signature(64)` [`IDENTITY_PROOF`]
+    /// carries, over those bytes.
+    ///
+    /// **Why it exists.** [`IDENTITY`] and [`IDENTITY_PROOF`] are two entries, hence two gossip
+    /// messages with no ordering between them. A peer that requires proofs and learns the identity
+    /// first rejects it and holds no key for that node until the proof lands — self-healing for the
+    /// key, *not* self-healing for a leader election decided inside the window, which is one-shot.
+    /// That window is why `require_identity_proofs` could not be turned on; one record closes it by
+    /// construction rather than by timing.
+    ///
+    /// Every TLS node writes this **and** the legacy pair, so a node that predates this release
+    /// still learns the key. Readers prefer this record; with `require_identity_proofs` set they
+    /// accept **only** this record, because accepting the pair would reopen the window the flag
+    /// exists to close. Deliberately not a `sys/identity/` sub-prefix, so an [`IDENTITY`] scan
+    /// never sees it.
+    pub const IDENTITY_SIGNED: &str = "sys/identity-signed/";
+
     /// Gateway caller-context marker (v3 item 7). Key: `sys/caller-context/{node}`, value: the
     /// envelope version this node enforces (`b"1"`). Written once at start by every node that
     /// strips and verifies the `GatewayCaller` envelope on its RPC receive path; a gateway in the

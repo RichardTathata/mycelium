@@ -4115,6 +4115,93 @@ async fn test_lifecycle_error_contract_and_task_drain() {
 /// real tls-enabled nodes, and provider-side `caller_authorized` admits/denies
 /// correctly based on the *verified* claim.
 ///
+/// **Two nodes that require proofs still learn each other's keys — the Phase 3b gate.**
+///
+/// This is the end-to-end claim the sealed record exists to make, and it is deliberately written
+/// against an *observable behaviour* rather than against `peer_keys` directly: `roles_of` returns
+/// `Some` only once A's signed claim has gossiped to B **and** A's verifying key has reached B's
+/// `peer_keys`, so a key that never arrives shows up here as a missing role.
+///
+/// **What it does not prove, stated plainly.** This is an in-process test: two agents on loopback,
+/// converging in milliseconds. It cannot reproduce the cross-process ordering window that made the
+/// 2026-09-23 default flip split a four-node Docker fleet, and it would very likely pass on the old
+/// two-entry path too. Claiming otherwise would repeat the mistake that caused all this — assuming
+/// a green in-process run says something about a race between processes
+/// (`docs/wiki/dev/testing/testing.md` §a green run is evidence about that run).
+///
+/// So what it *is*: proof that the sealed path is wired, published, parsed and sufficient on its
+/// own — a peer holding nothing but the sealed record authenticates. The absence of the window is a
+/// **structural** argument, not a measured one: one KV entry cannot arrive in two parts, so there
+/// is no ordering left to lose. The gate that can observe the race is the Docker suite.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn test_identity_proofs_required_two_nodes_still_authenticate() {
+    use crate::config::TlsConfig;
+
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id = |p: u16| NodeId::new("127.0.0.1", p).unwrap();
+    let node_a = id(port_a);
+
+    let cert_dir = std::env::temp_dir().join(format!("myc-sealed-{port_a}-{port_b}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+
+    let mk = |port: u16, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 1;
+        // The opt-in under test. Both nodes require it, so neither will accept an identity that
+        // is not sealed — including the other's.
+        cfg.require_identity_proofs = true;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(id(port), cfg)
+    };
+
+    let a = Arc::new(mk(port_a, vec![]));
+    let b = Arc::new(mk(port_b, vec![node_a.clone()]));
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+
+    let mut peered = false;
+    for _ in 0..200 {
+        if !a.peers().is_empty() && !b.peers().is_empty() { peered = true; break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(peered, "two tls nodes failed to peer within the window");
+
+    // The sealed record is actually published — if this is missing, the rest of the test would be
+    // asserting the legacy path and passing for the wrong reason.
+    let sealed_key = format!("sys/identity-signed/{node_a}");
+    let mut sealed = None;
+    for _ in 0..200 {
+        if let Some(v) = a.kv().get(&sealed_key) { sealed = Some(v); break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let sealed = sealed.expect("a TLS node must publish its sealed identity record");
+    assert!(
+        crate::agent::helpers::parse_sealed_identity(&sealed).is_some(),
+        "the published record must parse as version(1) ‖ history ‖ proof(96)",
+    );
+
+    a.advertise_roles(["admin".into()], 3).expect("advertise_roles with a tls identity");
+
+    let mut verified: Option<crate::RoleClaim> = None;
+    for _ in 0..200 {
+        if let Some(claim) = b.roles_of(&node_a) { verified = Some(claim); break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        verified.is_some_and(|c| c.has_role("admin")),
+        "B never verified A's claim: A's key did not reach peer_keys with proofs required",
+    );
+
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
 /// This exercises the whole WS1 path the unit tests stub out: A signs a role
 /// claim with its tls identity key; the claim and A's `sys/identity/` key both
 /// gossip to B; B's identity-watcher mirrors A's verifying key into `peer_keys`;
@@ -7623,6 +7710,135 @@ mod identity_proof_default {
         );
         assert!(pk.pin().get(&victim).is_none(), "an unsigned entry does not enter peer_keys");
         assert_eq!(counter.load(Ordering::SeqCst), 1, "and it is counted, not silently dropped");
+    }
+
+    /// **The sealed record is the point of Phase 3b: one message, so there is no window.**
+    ///
+    /// With proofs required, a sealed `sys/identity-signed/{node}` validates on its own — the keys
+    /// and the proof that authenticates them are the same KV entry, so a peer can never hold one
+    /// without the other. This is what makes the flag safe to enable at all; the 2026-09-23 attempt
+    /// to default it on was reverted precisely because the legacy pair could arrive apart.
+    #[test]
+    fn a_sealed_record_is_accepted_when_proofs_are_required() {
+        let node = NodeId::new("127.0.0.1", 7110).unwrap();
+        let sk = SigningKey::from_bytes(&[51u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let history = vk.to_vec();
+        let sig = sk.sign(&history).to_bytes();
+        let sealed = crate::agent::helpers::encode_sealed_identity(
+            &history, &encode_identity_proof(&vk, &sig));
+
+        // No legacy proof anywhere: the sealed record is the *only* evidence, which is the case
+        // this test exists for.
+        let (h, proof) = crate::agent::helpers::resolve_identity_record(
+            Some(&sealed), &history, None, /* require */ true);
+        assert_eq!(h, &history[..], "the sealed record supplies the history it signs");
+
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(
+            &pk, &anchor, &counter, &node, h, &[vk], proof, true);
+        assert!(
+            pk.pin().get(&node).is_some_and(|v| v.contains(&vk)),
+            "a sealed record authenticates itself with no sibling entry to wait for",
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// **The legacy pair is refused when proofs are required — deliberately, and this is the whole
+    /// mechanism.**
+    ///
+    /// The pair is two independent gossip messages. Accepting it under `require_identity_proofs`
+    /// would reopen the window the flag exists to close: learn the identity, reject it for want of
+    /// a proof, hold no key, and decide a leader election inside the gap. So a peer publishing only
+    /// the pair is treated exactly as the flag already treated a peer publishing no proof — it
+    /// predates the mechanism being required.
+    ///
+    /// If this test ever "fails" because someone made the pair acceptable again, the window is back
+    /// and the default must not be flipped.
+    #[test]
+    fn the_legacy_pair_is_refused_when_proofs_are_required() {
+        let node = NodeId::new("127.0.0.1", 7111).unwrap();
+        let sk = SigningKey::from_bytes(&[52u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let history = vk.to_vec();
+        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+
+        // A *valid* pair — the point is that validity is not the issue; arrival is.
+        let (h, proof) = crate::agent::helpers::resolve_identity_record(
+            None, &history, Some(&legacy_proof), /* require */ true);
+        assert!(proof.is_none(), "the pair is surfaced unproven, so the validator rejects it");
+
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, h, &[vk], proof, true);
+        assert!(pk.pin().get(&node).is_none(), "an un-sealed peer does not enter peer_keys");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "and it is counted, not silently dropped");
+    }
+
+    /// **And nothing changes for a deployment that has not opted in.** With the flag off (the
+    /// default), the legacy pair is still honoured exactly as before — this is the compatibility
+    /// claim that lets the sealed record ship without a rolling-upgrade note.
+    #[test]
+    fn the_legacy_pair_still_works_when_proofs_are_not_required() {
+        let node = NodeId::new("127.0.0.1", 7112).unwrap();
+        let sk = SigningKey::from_bytes(&[53u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let history = vk.to_vec();
+        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+
+        let (h, proof) = crate::agent::helpers::resolve_identity_record(
+            None, &history, Some(&legacy_proof), /* require */ false);
+        assert!(proof.is_some(), "the pair is still the record when nothing requires sealing");
+
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, h, &[vk], proof, false);
+        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)));
+    }
+
+    /// A sealed record is not a way in. Its proof is verified by the same rule as any other, so a
+    /// record signed by a key with no claim to this node is rejected once the node is established.
+    #[test]
+    fn a_sealed_record_cannot_introduce_a_foreign_key_for_an_established_node() {
+        let node = NodeId::new("127.0.0.1", 7113).unwrap();
+        let real = SigningKey::from_bytes(&[54u8; 32]).verifying_key().to_bytes();
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        pk.pin().insert(node.clone(), vec![real]); // established
+
+        let attacker = SigningKey::from_bytes(&[55u8; 32]);
+        let a_vk = attacker.verifying_key().to_bytes();
+        let history = a_vk.to_vec();
+        let sealed = crate::agent::helpers::encode_sealed_identity(
+            &history, &encode_identity_proof(&a_vk, &attacker.sign(&history).to_bytes()));
+
+        let (h, proof) = crate::agent::helpers::resolve_identity_record(
+            Some(&sealed), &history, None, true);
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, h, &[a_vk], proof, true);
+        assert!(
+            !pk.pin().get(&node).is_some_and(|v| v.contains(&a_vk)),
+            "sealing changes how the record travels, never what authorises it",
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    /// Malformed sealed values are *no record*, never a partial one — so a truncated or
+    /// wrong-version entry falls back to the legacy path rather than authenticating anything.
+    #[test]
+    fn a_malformed_sealed_record_is_no_record() {
+        use crate::agent::helpers::{encode_sealed_identity, parse_sealed_identity};
+        let sk = SigningKey::from_bytes(&[56u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let history = vk.to_vec();
+        let good = encode_sealed_identity(&history, &encode_identity_proof(&vk, &sk.sign(&history).to_bytes()));
+        assert!(parse_sealed_identity(&good).is_some(), "the round trip holds");
+
+        let mut wrong_version = good.clone();
+        wrong_version[0] = 2;
+        assert!(parse_sealed_identity(&wrong_version).is_none(), "a future version is not guessed at");
+        assert!(parse_sealed_identity(&good[..good.len() - 1]).is_none(), "a truncated proof is not a proof");
+        assert!(parse_sealed_identity(&[]).is_none());
+        // History that is not key-aligned: one byte inserted, so the split lands mid-key.
+        let mut misaligned = good.clone();
+        misaligned.insert(1, 0xAB);
+        assert!(parse_sealed_identity(&misaligned).is_none(), "a history that is not whole keys is refused");
     }
 
     /// **The limit, stated as a test.** With proofs required, a *self-signed* entry for a node this
