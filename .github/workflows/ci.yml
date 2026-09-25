@@ -86,10 +86,10 @@ jobs:
       # chain FAILS to verify, which is the one a "trust us" answer cannot make checkable.
       - run: cargo run --example auditor_questions --features tls,compliance
       - run: cargo run --example knowledge_layer --features tls
-      - run: cargo run --example federated_domains
+      - run: cargo run --example federated_domains --features tls
       # The third domain: the question two domains cannot ask. Each act asserts, so "trust does
       # not compose" stays a property rather than a paragraph.
-      - run: cargo run --example federation_trust_is_not_transitive --features tls --features tls
+      - run: cargo run --example federation_trust_is_not_transitive --features tls
 
   clippy:
     name: Clippy
