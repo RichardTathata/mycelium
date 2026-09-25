@@ -29,8 +29,20 @@
 //!
 //! A claim that names another node, or a skill this node does not serve, is refused: a mandate for
 //! one resource does not admit a call routed to another.
+//!
+//! # Cohort budgets (closure plan C4)
+//!
+//! With [`GossipAgent::with_cohort_budget`](crate::GossipAgent::with_cohort_budget), a protected call
+//! the node admits also takes a place in H6's [`CohortBudget`](crate::knowledge::cohort_budget::CohortBudget)
+//! for every cohort its **verified** principal belongs to, in this node's own
+//! [`CohortView`](crate::knowledge::cohort::CohortView). The place is held by the [`Admission`] for as
+//! long as the call is in flight: across the handler in the MCP loops, for the request's lifetime
+//! through `rpc_rx`, and until `/gateway/rpc/respond` for the SDK serve stream. A full pool refuses
+//! the call `AtCapacity` (JSON-RPC `-32004`, as the federation edge does), and nothing runs.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -38,6 +50,90 @@ use serde_json::{json, Value};
 use super::gateway_caller::{self, ResolvedPrincipal};
 use super::rpc::RpcRequest;
 use super::TaskCtx;
+use crate::knowledge::cohort::{CohortOffer, CohortView, SignedCohortDeclaration};
+use crate::knowledge::cohort_budget::{CohortBudget, CohortSlot};
+use crate::knowledge::issuer::{MemberKeySource, TrustedExternalIssuers};
+use crate::knowledge::IssuerId;
+use crate::node_id::NodeId;
+
+/// What an admitted protected call holds while it is in flight: its cohort-budget places, if a
+/// budget is attached. Dropping it releases them.
+#[derive(Default)]
+pub(crate) struct Admission {
+    _slot: Option<CohortSlot>,
+}
+
+/// Longest an SDK-served call may hold its places without a reply: the gateway's own RPC ceiling.
+const PARKED_TTL_MS: u64 = 300_000;
+
+/// H6's cohort budget at this provider (closure plan C4), attached with `with_cohort_budget`.
+pub(crate) struct ProviderBudget {
+    budget: Arc<CohortBudget>,
+    /// Lock-order row 45: read to place a caller (µs), written to offer a declaration. The budget's
+    /// own `in_flight` lock (row 42) is taken **under** a read of this one, never the reverse.
+    view: RwLock<CohortView>,
+    external: TrustedExternalIssuers,
+    refusals: AtomicU64,
+    /// Lock-order row 46: admissions for requests streamed to an SDK agent, released by
+    /// `/gateway/rpc/respond` or after `PARKED_TTL_MS`. Leaf.
+    parked: Mutex<HashMap<(NodeId, u64), (u64, Admission)>>,
+}
+
+impl ProviderBudget {
+    pub(crate) fn new(budget: Arc<CohortBudget>, view: CohortView, external: TrustedExternalIssuers) -> Self {
+        Self {
+            budget,
+            view: RwLock::new(view),
+            external,
+            refusals: AtomicU64::new(0),
+            parked: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Offer a signed cohort declaration to this provider's view.
+    pub(crate) fn offer(&self, signed: &SignedCohortDeclaration, members: &impl MemberKeySource) -> CohortOffer {
+        self.view.write().unwrap_or_else(|e| e.into_inner()).offer(signed, members, &self.external)
+    }
+
+    /// Calls refused for want of room since the budget was attached.
+    pub(crate) fn refusals(&self) -> u64 {
+        self.refusals.load(Ordering::Relaxed)
+    }
+
+    fn admit(&self, principal: &str, now_ms: u64) -> Result<CohortSlot, ProviderRefusal> {
+        // A principal that is not a valid issuer id can belong to no declared cohort: it shares the
+        // undeclared pool, like any unplaced caller.
+        let issuer = IssuerId::new(principal).unwrap_or_else(|| IssuerId::new("undeclared:invalid-principal").expect("valid"));
+        let view = self.view.read().unwrap_or_else(|e| e.into_inner());
+        self.budget.admit(&issuer, &view, now_ms).map_err(|refusal| {
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_provider_cohort_refusals_total").increment(1);
+            ProviderRefusal {
+                reason: "at_capacity".into(),
+                message: format!("{refusal}"),
+                code: -32004,
+                data: json!({ "reason": "at_capacity", "detail": refusal.to_string() }),
+            }
+        })
+    }
+}
+
+/// Hold `admission` for a request streamed to an SDK agent until it replies (or `PARKED_TTL_MS`).
+pub(crate) fn park(ctx: &TaskCtx, sender: &NodeId, nonce: u64, admission: Admission) {
+    let Some(b) = ctx.cohort_budget.get() else { return };
+    let now = ctx.hlc.decision_now_ms();
+    let mut parked = b.parked.lock().unwrap_or_else(|e| e.into_inner());
+    parked.retain(|_, (at, _)| now.saturating_sub(*at) <= PARKED_TTL_MS);
+    parked.insert((sender.clone(), nonce), (now, admission));
+}
+
+/// Release what [`park`] held for this request: the SDK agent has replied.
+pub(crate) fn release_parked(ctx: &TaskCtx, sender: &NodeId, nonce: u64) {
+    if let Some(b) = ctx.cohort_budget.get() {
+        b.parked.lock().unwrap_or_else(|e| e.into_inner()).remove(&(sender.clone(), nonce));
+    }
+}
 
 /// The enforcement point a provider's decisions are recorded under.
 pub(crate) const ENFORCEMENT_POINT_PROVIDER: &str = "provider";
@@ -74,18 +170,21 @@ impl ProviderRefusal {
     }
 }
 
-/// **May this node run `req` now?** `Ok(())` for anything that is not protected work, or when
-/// provider enforcement is off. Call it after the caller context has been verified and before any
-/// handler sees the request.
-pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<(), ProviderRefusal> {
-    if !ctx.provider_enforcement.load(std::sync::atomic::Ordering::Acquire) {
-        return Ok(());
+/// **May this node run `req` now?** An empty admission for anything that is not protected work, or
+/// when neither provider enforcement nor a cohort budget is on. Call it after the caller context has
+/// been verified and before any handler sees the request, and keep the [`Admission`] until the call
+/// is done.
+pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<Admission, ProviderRefusal> {
+    let enforcing = ctx.provider_enforcement.load(Ordering::Acquire);
+    let budget = ctx.cohort_budget.get();
+    if !enforcing && budget.is_none() {
+        return Ok(Admission::default());
     }
     let kind: &str = req.kind();
     if !super::http::is_protected_kind(&ctx.config, kind) {
-        return Ok(());
+        return Ok(Admission::default());
     }
-    if ctx.action_evaluator.get().is_none() {
+    if enforcing && ctx.action_evaluator.get().is_none() {
         // Fail closed: enforcement was asked for and nothing can decide.
         return Err(ProviderRefusal::local(
             "no_evaluator",
@@ -101,35 +200,43 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<(), Pr
         None => (gateway_caller::node_principal(req.sender()), Vec::new(), None, None),
     };
 
-    let me = ctx.node_id.to_string();
-    let payload = req.payload();
-    let (operation, resource, arguments) = derive(ctx, kind, &payload, claim.as_deref(), &me)?;
-
-    let resolved = ResolvedPrincipal { principal, scopes };
-    let params = match &mandate {
-        Some(m) => json!({ "_meta": { "mandate": m } }),
-        None => Value::Null,
-    };
-    match super::http::ae_preflight(
-        ctx,
-        Some(&resolved),
-        &operation,
-        &resource,
-        &arguments,
-        &params,
-        ENFORCEMENT_POINT_PROVIDER,
-    )
-    .await
-    {
-        super::http::Preflight::Refuse(refusal) => Err(ProviderRefusal {
-            reason: refusal.reason().to_string(),
-            message: refusal.to_string(),
-            code: refusal.json_rpc_code(),
-            data: refusal.error_data(),
-        }),
+    if enforcing {
+        let me = ctx.node_id.to_string();
+        let payload = req.payload();
+        let (operation, resource, arguments) = derive(ctx, kind, &payload, claim.as_deref(), &me)?;
+        let resolved = ResolvedPrincipal { principal: principal.clone(), scopes };
+        let params = match &mandate {
+            Some(m) => json!({ "_meta": { "mandate": m } }),
+            None => Value::Null,
+        };
+        if let super::http::Preflight::Refuse(refusal) = super::http::ae_preflight(
+            ctx,
+            Some(&resolved),
+            &operation,
+            &resource,
+            &arguments,
+            &params,
+            ENFORCEMENT_POINT_PROVIDER,
+        )
+        .await
+        {
+            return Err(ProviderRefusal {
+                reason: refusal.reason().to_string(),
+                message: refusal.to_string(),
+                code: refusal.json_rpc_code(),
+                data: refusal.error_data(),
+            });
+        }
         // `Inert` cannot happen here (an evaluator is attached), and `Proceed` is admission.
-        _ => Ok(()),
     }
+
+    // C4: a place in every cohort the verified principal belongs to, or a refusal. Taken only after
+    // the policy admitted the call, so a refused call never holds budget.
+    let slot = match budget {
+        Some(b) => Some(b.admit(&principal, ctx.hlc.decision_now_ms())?),
+        None => None,
+    };
+    Ok(Admission { _slot: slot })
 }
 
 /// The operation, resource and arguments of a protected call, derived as the gateway derives them.
@@ -189,4 +296,100 @@ fn advertises(ctx: &TaskCtx, ns: &str, name: &str) -> bool {
                 node == ctx.node_id && n.as_ref() == ns && m.as_ref() == name
             })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TlsConfig;
+    use crate::knowledge::cohort::CohortDeclaration;
+    use crate::{GossipAgent, GossipConfig};
+    use bytes::Bytes;
+    use ed25519_dalek::SigningKey;
+    use std::time::Duration;
+
+    /// **Closure plan C4: a declared cohort is capped together, through a real serve loop.**
+    ///
+    /// Five members of cohort `fleet`, a cap of three, and a serve loop that holds every request it
+    /// receives (so each admitted call stays in flight):
+    /// - exactly three are held, and two are refused `at_capacity` without reaching the loop;
+    /// - an undeclared caller is unaffected by the full cohort, and shares the undeclared pool;
+    /// - a principal *named* like the cohort gets nothing from it: membership comes only from the view;
+    /// - dropping held requests releases their places, and a member is admitted again.
+    #[tokio::test]
+    async fn a_declared_cohort_is_capped_together_and_nothing_else_is_affected() {
+        let operator = SigningKey::from_bytes(&[61u8; 32]);
+        let port = crate::test_util::alloc_port();
+        let dir = std::env::temp_dir().join(format!("c4-budget-{port}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        cfg.protected_rpc_kinds = vec!["depot.custom".into()];
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.start().await.unwrap();
+
+        let acme = IssuerId::new("operator:acme").unwrap();
+        let mut external = TrustedExternalIssuers::new();
+        external.trust(acme.clone(), operator.verifying_key().to_bytes()).unwrap();
+        agent.with_cohort_budget(CohortBudget::new(3, 1), CohortView::trusting([acme.clone()]), external);
+        let wall = agent.task_ctx.hlc.decision_now_ms();
+        let declaration = CohortDeclaration {
+            operator: acme,
+            cohort: "fleet".into(),
+            seq: 1,
+            members: (1..=5).map(|i| IssuerId::new(format!("token:gw/m{i}")).unwrap()).collect(),
+            valid_from_ms: 0,
+            valid_until_ms: wall + 3_600_000,
+        };
+        let signed = SignedCohortDeclaration {
+            signature: crate::tls::sign_bytes(&operator, &declaration.canonical_bytes()).to_vec(),
+            declaration,
+        };
+        assert_eq!(agent.offer_cohort_declaration(&signed), Some(CohortOffer::Accepted));
+
+        let held: Arc<Mutex<Vec<RpcRequest>>> = Arc::default();
+        {
+            let (agent, held) = (Arc::clone(&agent), Arc::clone(&held));
+            let mut rx = agent.service().rpc_rx("depot.custom");
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    held.lock().unwrap().push(req); // never answered: the call stays in flight
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let ctx = Arc::clone(&agent.task_ctx);
+        let me = agent.node_id().clone();
+        let call = |principal: String| {
+            let (ctx, me) = (Arc::clone(&ctx), me.clone());
+            async move {
+                let framed = gateway_caller::frame_with_context(&ctx, &principal, &[], Bytes::from_static(b"go")).unwrap();
+                match super::super::rpc::rpc_call_framed(&ctx, me, Arc::from("depot.custom"), framed, Duration::from_millis(800)).await {
+                    Ok(b) => serde_json::from_slice::<Value>(&b).map(|v| v["reason"].as_str().unwrap_or("").to_string()).unwrap_or_default(),
+                    Err(_) => "held".to_string(), // admitted, and never answered
+                }
+            }
+        };
+
+        let outcomes = futures_util::future::join_all((1..=5).map(|i| call(format!("token:gw/m{i}")))).await;
+        assert_eq!(outcomes.iter().filter(|o| *o == "held").count(), 3, "{outcomes:?}");
+        assert_eq!(outcomes.iter().filter(|o| *o == "at_capacity").count(), 2, "{outcomes:?}");
+        assert_eq!(held.lock().unwrap().len(), 3, "refused calls never reached the serve loop");
+        assert_eq!(agent.cohort_budget_refusals(), 2);
+
+        // The full cohort does not touch the undeclared pool (cap 1): one stranger is admitted, the
+        // next is refused by *its* pool, and one named like the cohort is only a stranger.
+        assert_eq!(call("token:gw/stranger".into()).await, "held");
+        assert_eq!(call("fleet".into()).await, "at_capacity", "a name is not membership");
+        assert_eq!(held.lock().unwrap().len(), 4);
+
+        // Dropping held requests releases their places.
+        held.lock().unwrap().clear();
+        assert_eq!(call("token:gw/m1".into()).await, "held", "a released place admits a member again");
+
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

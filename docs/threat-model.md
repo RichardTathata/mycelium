@@ -321,9 +321,10 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     unchanged, and every blocked path has a positive control.
   - **H6, cohort budgets** (#394; ADR `design/knowledge-cohorts.md` §6). `CohortBudget` caps a declared population's
     calls in flight at a provider. Membership comes from the provider's trusted view, never the caller. A
-    multi-cohort caller must fit every cap, and undeclared callers share one pool. *Limits:* per provider instance,
-    concurrency not rate, only calls admitted through it. *Gate:* `cohort_budget::tests`, including fifty members
-    capped together.
+    multi-cohort caller must fit every cap, and undeclared callers share one pool. **Wired at the provider** (closure plan
+    C4, `with_cohort_budget`): protected calls take their places at the provider's receive boundary. *Limits:* per
+    provider instance, concurrency not rate, only calls admitted through it. *Gate:* `cohort_budget::tests`, including
+    fifty members capped together, and a real serve loop in `provider_enforcement::tests`.
   - **P2, signed mandate grants** (#395; ADR `design/knowledge-issuer-binding.md` §5). An appointment an
     authority signs, which any reader can check: issued (through P1), entitled (by the reader's **configured**
     table, never by signature alone), current (window, highest epoch retained per scope, conflicting equal epochs

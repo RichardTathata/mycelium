@@ -238,7 +238,7 @@ async fn handle_llm_invoke(
     signal:   crate::signal::Signal,
 ) {
     use super::rpc::RpcRequest;
-    let req = RpcRequest(signal);
+    let req = RpcRequest::from(signal);
 
     // Item 7 (review finding 3): the built-in provider verifies the caller context before it
     // touches a backend; a forged / unsigned / malformed / missing context is refused, never

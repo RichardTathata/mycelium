@@ -126,13 +126,18 @@ where
 
         // Closure plan C3: authority is decided here too, not only at a gateway, before the handler
         // sees the call. Inert unless provider enforcement is on.
+        // C4: the admission (a cohort-budget slot, if a budget is attached) is held across the
+        // handler, so the call counts as in flight until it returns.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        if let Err(refusal) = super::provider_enforcement::check(&ctx, &req).await {
-            warn!(tool = %tool_name, sender = %req.sender(), reason = %refusal.reason,
-                  "mcp.invoke: refused by provider enforcement");
-            rpc_respond_ctx(&ctx, &req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
-            continue;
-        }
+        let _admission = match super::provider_enforcement::check(&ctx, &req).await {
+            Ok(a) => a,
+            Err(refusal) => {
+                warn!(tool = %tool_name, sender = %req.sender(), reason = %refusal.reason,
+                      "mcp.invoke: refused by provider enforcement");
+                rpc_respond_ctx(&ctx, &req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
+                continue;
+            }
+        };
 
         let args   = rpc_req["params"]["arguments"].clone();
         let result = handler(principal, args).await;
@@ -224,12 +229,15 @@ pub(super) async fn run_mcp_client_task(
 
         // Closure plan C3: the bridged external server is protected at this node's boundary.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        if let Err(refusal) = super::provider_enforcement::check(&ctx, &req).await {
-            warn!(tool = req_name, sender = %req.sender(), reason = %refusal.reason,
-                  "mcp.invoke (bridged): refused by provider enforcement");
-            rpc_respond_ctx(&ctx, &req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
-            continue;
-        }
+        let _admission = match super::provider_enforcement::check(&ctx, &req).await {
+            Ok(a) => a,
+            Err(refusal) => {
+                warn!(tool = req_name, sender = %req.sender(), reason = %refusal.reason,
+                      "mcp.invoke (bridged): refused by provider enforcement");
+                rpc_respond_ctx(&ctx, &req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
+                continue;
+            }
+        };
 
         let arguments = rpc_req["params"]["arguments"].clone();
         let call_req  = json!({

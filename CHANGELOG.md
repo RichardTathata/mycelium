@@ -11,6 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cohort budgets enforced at the provider** (Boundary H closure plan C4, wiring H6). `with_cohort_budget(budget,
+  view, external)` admits every protected call a node receives through H6's `CohortBudget`, keyed by the verified
+  principal, holding its place while the call is in flight, and refusing a full pool `at_capacity` (`-32004`).
+  `offer_cohort_declaration` feeds the provider's view; `cohort_budget_refusals()` counts refusals. Lock-order rows
+  45 and 46.
 - **Authority decided at the provider** (Boundary H closure plan C3). `GossipAgent::with_provider_enforcement()`
   makes a provider run the gateway's own action preflight, as the enforcement point `provider`, on every protected RPC
   it receives: in the MCP tool loops, in every `rpc_rx` receiver, and in the SDK serve stream. Its own evaluator

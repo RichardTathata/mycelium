@@ -85,6 +85,11 @@ evaluator and execution authority as the gateway, and turn on `agent.with_provid
 is then decided where it runs, so a member that reaches a provider without the gateway is refused just as the
 gateway would refuse it. Feed revocation checkpoints to every such node (`offer_revocation_checkpoint`).
 
+**Cap the fleet together at each provider** (closure plan C4). `agent.with_cohort_budget(CohortBudget::new(per_cohort,
+undeclared), CohortView::trusting([operator]), external)`, then `offer_cohort_declaration` for your fleet's signed
+declaration. A colluding population inside every member's own cap is still held to the cohort's cap; strangers
+share the undeclared pool. Watch `cohort_budget_refusals()`.
+
 Then read what the node itself can confirm:
 
 ```rust
