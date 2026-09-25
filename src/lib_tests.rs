@@ -9182,6 +9182,168 @@ async fn test_c3_provider_enforcement_decides_direct_member_calls() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
+/// **Closure plan C10: work already running stops when its authority lapses.** A provider with
+/// enforcement on admits two calls under an established mandate: an MCP tool that runs until
+/// cancelled, and a cooperative `rpc_rx` skill that races `authority_lapsed()`.
+/// 1. The plant: a sweep with nothing revoked cancels nothing; both keep running.
+/// 2. The authority revokes the appointment; the next sweep cancels both. The tool's future is
+///    dropped and its call answers "cancelled"; the skill observes the lapse and answers itself.
+/// 3. Each stop is recorded with requested, acknowledged and confirmed times, for `drain_report`.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn test_c10_running_work_stops_when_its_authority_lapses() {
+    use crate::agent::gateway_authority::{possession_request, ExecutionAuthority, PresentedMandate};
+    use crate::config::TlsConfig;
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{
+        ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
+    };
+    use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerifier, SignedMandateGrant};
+    use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+    use crate::{ReferenceEvaluator, Rule};
+    use base64::Engine;
+    use ed25519_dalek::SigningKey;
+
+    let authority_key = SigningKey::from_bytes(&[57u8; 32]);
+    let gossip_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("c10-cancel-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    let me = agent.node_id().clone();
+    let tool = format!("tool:slow@{me}");
+    let skill = format!("skill:depot/long@{me}");
+
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-c10")
+            .with_catalogue("cat-c10", "1")
+            .map_action("tools/call", tool.clone())
+            .map_action("skill.invoke", skill.clone())
+            .allow(Rule::new("*", "tools/call", tool.clone()).requiring_mandate("depot"))
+            .allow(Rule::new("*", "skill.invoke", skill.clone()).requiring_mandate("depot")),
+    ));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.trust(IssuerId::new("operator:acme").unwrap(), authority_key.verifying_key().to_bytes()).unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    let authority = Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external));
+    agent.with_execution_authority(Arc::clone(&authority));
+    agent.with_provider_enforcement();
+    agent.start().await.unwrap();
+    let _cap = agent.capabilities().advertise_capability(crate::capability::Capability::new("depot", "long"), Duration::from_secs(30));
+
+    let _tool = agent.mcp().register_mcp_tool("slow", serde_json::json!({}), |_args| async move {
+        std::future::pending::<()>().await; // runs until cancelled
+        Ok(serde_json::json!("finished"))
+    });
+    {
+        let agent = Arc::clone(&agent);
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let agent = Arc::clone(&agent);
+                tokio::spawn(async move {
+                    req.authority_lapsed().await; // the only way this work ends
+                    agent.service().rpc_respond(&req, b"stopped: authority lapsed".to_vec());
+                });
+            }
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let wall_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let checkpoint = |seq: u64, revoked: &[&str]| {
+        let c = RevocationCheckpoint {
+            authority: PrincipalId::new("operator:acme").unwrap(),
+            scope: "depot".into(),
+            seq,
+            issued_at_ms: wall_ms(),
+            revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
+        };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&authority_key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    };
+    agent.offer_revocation_checkpoint(&checkpoint(1, &[])).unwrap();
+
+    let holder = format!("node:{me}");
+    let mandate = Mandate {
+        holder: PrincipalId::new(&holder).unwrap(),
+        established_by: PrincipalId::new("operator:acme").unwrap(),
+        purpose: "depot work".into(),
+        scope: "depot".into(),
+        operations: vec!["tools/call:tool:slow".to_string(), "skill.invoke:skill:depot/long".to_string()],
+        epoch: 1,
+        term: TermId::new("t1").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: wall_ms() + 600_000,
+    };
+    let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&authority_key, &mandate.canonical_bytes()).to_vec(), mandate };
+    let present = |op: &str, res: &str, arguments: &serde_json::Value| {
+        let digest = crate::agent::action_evaluator::arguments_digest(&serde_json::to_vec(arguments).unwrap());
+        let proof = agent.sign_with_identity(&possession_message(&grant.mandate, &possession_request(op, res, &digest))).unwrap();
+        serde_json::to_value(PresentedMandate { grant: grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof) }).unwrap()
+    };
+
+    let tool_args = serde_json::json!({});
+    let tool_call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":tool_args}});
+    let tool_mandate = present("tools/call", &tool, &tool_args);
+    let skill_mandate = present("skill.invoke", &skill, &serde_json::json!({"text": "go"}));
+    let tool_task = {
+        let (agent, me, tool, m) = (Arc::clone(&agent), me.clone(), tool.clone(), tool_mandate.clone());
+        tokio::spawn(async move {
+            agent.service().rpc_call_with_mandate(me, "mcp.invoke", tool_call.to_string().into_bytes(), &m, &tool, Duration::from_secs(30)).await
+        })
+    };
+    let skill_task = {
+        let (agent, me, skill, m) = (Arc::clone(&agent), me.clone(), skill.clone(), skill_mandate.clone());
+        tokio::spawn(async move {
+            agent.service().rpc_call_with_mandate(me, "skill.invoke", b"go".to_vec(), &m, &skill, Duration::from_secs(30)).await
+        })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while authority.running_count() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "both calls should be admitted and running");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 1. The plant: nothing revoked, nothing cancelled.
+    assert_eq!(authority.sweep(wall_ms()), 0);
+    assert_eq!(authority.running_count(), 2, "an authorised call keeps running");
+
+    // 2. Revoked: the next sweep cancels both.
+    agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();
+    assert_eq!(authority.sweep(wall_ms()), 2);
+    let tool_reply: serde_json::Value = serde_json::from_slice(&tool_task.await.unwrap().expect("answered")).unwrap();
+    assert!(tool_reply["error"]["message"].as_str().unwrap_or("").contains("authority lapsed"), "{tool_reply}");
+    let skill_reply = skill_task.await.unwrap().expect("answered");
+    assert_eq!(&skill_reply[..], b"stopped: authority lapsed");
+
+    // 3. Both stops recorded, requested before confirmed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while authority.stop_records().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "both stops are recorded: {:?}", authority.stop_records());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for r in authority.stop_records() {
+        let (req, conf) = (r.requested_ms.expect("requested"), r.confirmed_ms.expect("confirmed"));
+        assert!(req <= conf + 1_000, "requested before confirmed (allowing clock skew): {r:?}");
+        assert!(r.acknowledged_ms.is_some());
+    }
+    assert_eq!(authority.running_count(), 0);
+
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
 /// **A leadership answer names the rung it reached.**
 ///
 /// `elect_leader` returns a bare `NodeId`, which cannot distinguish *"a quorum chose me"* from

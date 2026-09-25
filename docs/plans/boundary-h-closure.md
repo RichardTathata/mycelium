@@ -236,7 +236,7 @@ For the wiki store specifically:
   - a gateway test pauses between preflight and dispatch and shows the provider's own check refusing (needs C3);
   - the ADR states the general limit in one place, and each site's docs link to it.
 
-### C10: Cancelling admitted work (L; addresses F11)
+### C10: Cancelling admitted work (L; addresses F11) — **implemented, see §8**
 
 - **What.** Turn `StopContract` from a model into a mechanism: a running handler holds a cancellation token tied
   to its mandate's term. A revocation, or expiry with `Continuation::ReauthorizeAt`, cancels it, and the
@@ -349,4 +349,5 @@ monotonicity bug (all in #402, merged).
 | C6 | #413 | **The trait moved** from the git-only `mandate_fence` module to `store` (always compiled), re-exported at its old path and at the crate root, so no caller changes. **Asked after the store's own mutation lock**, before anything is written, in all four mutators |
 | C8 | #414 | **Epochs: the gate's installed epoch is persisted, not the verifier's retained epochs.** The gate refuses a mandate below its installed epoch whatever the verifier remembers, so that is what supersession safety needs. **The start is marked where the reader is created**: at `with_execution_authority` for the gateway and provider, and at construction for the wiki store. **The cumulative-checkpoint contract is documented, not checked**: a reader cannot tell a cumulative checkpoint from a partial one |
 | C9 | #416 | **The hook judges the appointment's window, not revocation.** A pre-receive hook has a trustworthy clock but no revocation feed; it refuses pushes past the appointment's `valid_until_ms` recorded on the mandate ref (`appointment.json`), and revocation at the remote stays the fence's job (moving the ref). **The gateway row relies on C3's provider re-check** rather than a separate test of a pause between preflight and dispatch: the provider's check is the later one, and C3's gates cover it |
+| C10 | #417 | **Cancellation rides on the provider check, not a separate hook:** work is registered when C3's check admits a call under an established mandate, and cancelled by a periodic sweep that re-runs A1's check (one mechanism for expiry, revocation, staleness and supersession). **The MCP loop cancels hard** (the handler future is dropped); **`rpc_rx` is cooperative** (`RpcRequest::authority_lapsed()`). **Not built: forwarding cancellation to SDK agents** through the serve stream, and cancelling the bridged external-MCP loop; both stay unconfirmed, as the model already reports |
 

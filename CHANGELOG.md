@@ -11,6 +11,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Work already running stops when its authority lapses** (Boundary H closure plan C10). A provider with enforcement
+  on registers calls acting under an established mandate with its `ExecutionAuthority` (`begin`, `WorkGuard`), and
+  the agent sweeps them every `sweep_interval_ms()`, re-running A1's check. The first failed check cancels the
+  work. MCP tool handlers are dropped and answered; `rpc_rx` loops race the new `RpcRequest::authority_lapsed()`.
+  Stops are recorded as requested, acknowledged and confirmed (`stop_records()`), for `drain_report`. Lock-order rows
+  48 and 49.
 - **The check-then-act window, answered at each site** (Boundary H closure plan C9). `GitStore::late_writes()`
   counts commits that landed after the authority lapsed, since the store now asks again once a commit has landed.
   A reference pre-receive hook, `mycelium-wiki/hooks/pre-receive-mandate-window`, refuses a push once the

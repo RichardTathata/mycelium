@@ -96,6 +96,91 @@ pub struct ExecutionAuthority {
     external: TrustedExternalIssuers,
     /// Closure plan C8: installed epochs that survive a restart, if attached.
     durable: std::sync::OnceLock<std::sync::Arc<crate::mandate::authority::DurableEpochs>>,
+    /// Closure plan C10, lock-order row 48: work admitted under a mandate and still running. Leaf:
+    /// never held while row 43 (`state`) is, and never across a handler.
+    running: Mutex<std::collections::HashMap<u64, Running>>,
+    next_work: std::sync::atomic::AtomicU64,
+    /// Closure plan C10, lock-order row 49: stop records of cancelled work, newest last, bounded. Leaf.
+    stops: Mutex<std::collections::VecDeque<crate::mandate::authority::StopRecord>>,
+}
+
+/// One piece of running work (closure plan C10).
+struct Running {
+    work: AuthorizedWork,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    requested_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// How many stop records an authority keeps for measurement.
+const STOP_RECORDS_KEPT: usize = 1024;
+
+/// **Work running under a mandate** (Boundary H closure plan C10), from
+/// [`ExecutionAuthority::begin`]. While it lives, the authority's sweep re-checks the work's mandate
+/// (A1: epoch, scope, window, operation, revocation standing); the first failed check cancels it.
+/// Dropping the guard ends the work: if it was cancelled, that drop is the **confirmed** stop and is
+/// recorded for [`drain_report`](crate::mandate::authority::drain_report).
+pub struct WorkGuard {
+    authority: std::sync::Arc<ExecutionAuthority>,
+    id: u64,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    requested_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    acknowledged_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    now_ms: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl std::fmt::Debug for WorkGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkGuard").field("id", &self.id).field("cancelled", &self.is_cancelled()).finish()
+    }
+}
+
+impl WorkGuard {
+    /// Has the authority cancelled this work?
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Resolves when the authority cancels this work (at once if it already has), and records that
+    /// the work **acknowledged** the cancellation.
+    pub async fn cancelled(&self) {
+        let notified = self.cancel.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_cancelled() {
+            notified.await;
+        }
+        let _ = self.acknowledged_ms.compare_exchange(
+            0,
+            (self.now_ms)().max(1),
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+}
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        self.authority.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        if self.is_cancelled() {
+            let at = |v: &std::sync::atomic::AtomicU64| match v.load(std::sync::atomic::Ordering::Acquire) {
+                0 => None,
+                t => Some(t),
+            };
+            let now = (self.now_ms)();
+            let record = crate::mandate::authority::StopRecord {
+                requested_ms: at(&self.requested_ms),
+                acknowledged_ms: at(&self.acknowledged_ms).or(Some(now)),
+                confirmed_ms: Some(now),
+            };
+            let mut stops = self.authority.stops.lock().unwrap_or_else(|e| e.into_inner());
+            if stops.len() == STOP_RECORDS_KEPT {
+                stops.pop_front();
+            }
+            stops.push_back(record);
+        }
+    }
 }
 
 impl std::fmt::Debug for ExecutionAuthority {
@@ -121,7 +206,87 @@ impl ExecutionAuthority {
             state: Mutex::new(AuthorityState { gate, verifier, revocations: RevocationView::new() }),
             external,
             durable: std::sync::OnceLock::new(),
+            running: Mutex::new(std::collections::HashMap::new()),
+            next_work: std::sync::atomic::AtomicU64::new(1),
+            stops: Mutex::new(std::collections::VecDeque::new()),
         }
+    }
+
+    /// **Admit running work under this authority** (closure plan C10). Until the returned guard is
+    /// dropped, [`sweep`](Self::sweep) re-checks `work`'s mandate, and cancels it at the first check
+    /// that fails. `now_ms` is the caller's clock, read when the guard records a stop.
+    pub fn begin(
+        self: &std::sync::Arc<Self>,
+        work: AuthorizedWork,
+        now_ms: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
+    ) -> WorkGuard {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let id = self.next_work.fetch_add(1, Ordering::Relaxed);
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let requested_ms = std::sync::Arc::new(AtomicU64::new(0));
+        let acknowledged_ms = std::sync::Arc::new(AtomicU64::new(0));
+        self.running.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            id,
+            Running {
+                work,
+                cancel: std::sync::Arc::clone(&cancel),
+                cancelled: std::sync::Arc::clone(&cancelled),
+                requested_ms: std::sync::Arc::clone(&requested_ms),
+            },
+        );
+        WorkGuard { authority: std::sync::Arc::clone(self), id, cancel, cancelled, requested_ms, acknowledged_ms, now_ms }
+    }
+
+    /// **Re-check every piece of running work now** (closure plan C10): the same A1 check as at
+    /// admission, so expiry, revocation, a stale revocation view and a superseded epoch all stop work
+    /// that is already running. Returns how many were cancelled by this sweep. The agent runs it
+    /// every [`sweep_interval_ms`](Self::sweep_interval_ms).
+    pub fn sweep(&self, now_ms: u64) -> usize {
+        use std::sync::atomic::Ordering;
+        // Snapshot under row 48, check under row 43, cancel under row 48: never both at once.
+        let snapshot: Vec<(u64, AuthorizedWork)> = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, r)| !r.cancelled.load(Ordering::Acquire))
+            .map(|(id, r)| (*id, r.work.clone()))
+            .collect();
+        let denied: Vec<u64> = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            snapshot.into_iter().filter(|(_, w)| st.gate.check(w, &st.revocations, now_ms).is_err()).map(|(id, _)| id).collect()
+        };
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0;
+        for id in denied {
+            if let Some(r) = running.get(&id)
+                && !r.cancelled.swap(true, Ordering::AcqRel)
+            {
+                r.requested_ms.store(now_ms.max(1), Ordering::Release);
+                r.cancel.notify_waiters();
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// How often the agent sweeps running work: a twentieth of the freshness window *F*, within
+    /// 100 ms and 5 s. The drain bound for a cancellable handler is this, plus *s*, plus the
+    /// handler's own time to stop.
+    pub fn sweep_interval_ms(&self) -> u64 {
+        (self.state.lock().unwrap_or_else(|e| e.into_inner()).gate.freshness().freshness_ms / 20).clamp(100, 5_000)
+    }
+
+    /// Stop records of cancelled work (the newest `1024`), for measuring T_drain with
+    /// [`drain_report`](crate::mandate::authority::drain_report).
+    pub fn stop_records(&self) -> Vec<crate::mandate::authority::StopRecord> {
+        self.stops.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect()
+    }
+
+    /// Work currently running under this authority.
+    pub fn running_count(&self) -> usize {
+        self.running.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// **Record when this reader started** (closure plan C8). From here on, only revocation

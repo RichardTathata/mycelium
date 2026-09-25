@@ -61,6 +61,32 @@ use crate::node_id::NodeId;
 #[derive(Default)]
 pub(crate) struct Admission {
     _slot: Option<CohortSlot>,
+    /// Closure plan C10: the running work, when the call acts under an established mandate. The
+    /// authority's sweep cancels it when the mandate lapses; dropping it ends the work.
+    work: Option<super::gateway_authority::WorkGuard>,
+}
+
+impl Admission {
+    /// The running-work guard, if this call acts under an established mandate.
+    pub(crate) fn work(&self) -> Option<&super::gateway_authority::WorkGuard> {
+        self.work.as_ref()
+    }
+}
+
+/// **Run a handler under its admission** (closure plan C10): if the call acts under a mandate and
+/// the authority cancels it while it runs, the handler's future is dropped (a confirmed stop) and
+/// the call answers that its authority lapsed.
+pub(crate) async fn run<F>(admission: &Admission, handler: F) -> Result<Value, String>
+where
+    F: std::future::Future<Output = Result<Value, String>>,
+{
+    match admission.work() {
+        Some(work) => tokio::select! {
+            result = handler => result,
+            _ = work.cancelled() => Err("cancelled: the call's authority lapsed while it ran".to_string()),
+        },
+        None => handler.await,
+    }
 }
 
 /// Longest an SDK-served call may hold its places without a reply: the gateway's own RPC ceiling.
@@ -200,6 +226,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<Admiss
         None => (gateway_caller::node_principal(req.sender()), Vec::new(), None, None),
     };
 
+    let mut work = None;
     if enforcing {
         let me = ctx.node_id.to_string();
         let payload = req.payload();
@@ -228,6 +255,31 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<Admiss
             });
         }
         // `Inert` cannot happen here (an evaluator is attached), and `Proceed` is admission.
+
+        // C10: work acting under an **established** mandate is registered as running, so the
+        // authority's sweep can stop it if the mandate lapses while it runs. Asking the authority
+        // again duplicates one assessment the preflight made; the evidence record does not carry
+        // the binding, and registering work under a mandate that is not established would cancel
+        // work the policy admitted without one.
+        if let (Some(m), Some(authority)) = (&mandate, ctx.execution_authority.get())
+            && let Ok(presented) = serde_json::from_value::<super::gateway_authority::PresentedMandate>(m.clone())
+        {
+            let digest = super::action_evaluator::arguments_digest(&serde_json::to_vec(&arguments).unwrap_or_default());
+            let now = ctx.hlc.decision_now_ms();
+            let assessed = authority.assess(&principal, &operation, &resource, &digest, Some(&presented), now, &super::gateway_member_keys(ctx));
+            if assessed.binding.is_some_and(|b| b.state == super::action_evaluator::MandateState::Established) {
+                let g = &presented.grant.mandate;
+                let clock_ctx = Arc::clone(ctx);
+                work = Some(authority.begin(
+                    crate::mandate::authority::AuthorizedWork::new(
+                        super::gateway_authority::mandate_operation(&operation, &resource),
+                        Some(g.clone()),
+                        g.valid_until_ms,
+                    ),
+                    Arc::new(move || clock_ctx.hlc.decision_now_ms()),
+                ));
+            }
+        }
     }
 
     // C4: a place in every cohort the verified principal belongs to, or a refusal. Taken only after
@@ -236,7 +288,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<Admiss
         Some(b) => Some(b.admit(&principal, ctx.hlc.decision_now_ms())?),
         None => None,
     };
-    Ok(Admission { _slot: slot })
+    Ok(Admission { _slot: slot, work })
 }
 
 /// The operation, resource and arguments of a protected call, derived as the gateway derives them.
