@@ -26,13 +26,17 @@ use super::emit_signal;
 /// `RpcRequest::from`. The nonce is used internally by [`ServiceHandle::rpc_respond`];
 /// callers work only with `payload()` and `sender()`.
 #[derive(Clone, Debug)]
-pub struct RpcRequest(pub(crate) Signal, pub(crate) Held);
+pub struct RpcRequest(
+    pub(crate) Signal,
+    // Held for its `Drop`, never read; only set when the provider check is built in.
+    #[allow(dead_code)] pub(crate) Held,
+);
 
 /// Something an admitted request keeps alive until the last copy of it is dropped: closure plan
 /// C4's cohort-budget slot, so a call counts as in flight for exactly as long as its serve loop
 /// holds it. Opaque to applications.
 #[derive(Clone, Default)]
-pub(crate) struct Held(Option<Arc<dyn std::any::Any + Send + Sync>>);
+pub(crate) struct Held(#[allow(dead_code)] Option<Arc<dyn std::any::Any + Send + Sync>>);
 
 impl Held {
     /// Hold `value` for the request's lifetime.
