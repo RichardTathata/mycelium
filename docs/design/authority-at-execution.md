@@ -169,12 +169,12 @@ under an authority that had since lapsed.
 
 **Not claimed.**
 - `FsStore` has no `WriteAuthority` seam yet.
-- The window between the check and the ref transaction is bounded by local git subprocess time. It is covered for
-  appointment moves by the fence's `verify`, and for expiry and revocation it is the same check-then-act distance
-  any A1 resource has. The ADR's *s* absorbs a clock read. It does not absorb an unbounded stall, and no bound on
-  subprocess time is claimed.
 - The remote's side, which is whether it honours `--atomic` and whether a pre-receive hook re-checks, is unchanged
   from §5 of the scoped-mandates ADR.
+
+**Not a gap: the distance from the check to the ref transaction.** It is local git subprocess time, a few
+milliseconds, against a designed revocation latency of up to *F*. An appointment that moves inside it is caught by
+the fence's `verify`. It is recorded here so that it is not mistaken for an open item.
 
 ## 5. Gates
 
