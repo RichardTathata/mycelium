@@ -11,6 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The check-then-act window, answered at each site** (Boundary H closure plan C9). `GitStore::late_writes()`
+  counts commits that landed after the authority lapsed, since the store now asks again once a commit has landed.
+  A reference pre-receive hook, `mycelium-wiki/hooks/pre-receive-mandate-window`, refuses a push once the
+  appointment on the mandate ref has expired by the remote's clock. It is configured with `mycelium.mandateRef`,
+  fails closed, and allows reappointment. The ADR's new §9 states the limit once, with each site's answer.
 - **A restart no longer restores revoked authority** (Boundary H closure plan C8).
   - `RevocationView::started_at`: a restarted reader refuses, for freshness, checkpoints issued before it started, so
     a replayed pre-revocation checkpoint cannot make a revoked term read as current. It relies on checkpoints being

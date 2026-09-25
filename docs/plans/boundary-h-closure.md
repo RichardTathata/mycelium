@@ -207,7 +207,7 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
     past. `Hlc::new()` seeds from the wall clock, so a test on a freshly created clock passes against a frozen
     implementation too, and proves nothing.
 
-### C9: The check-then-act window, at every A1 site (M; addresses F9 and F13)
+### C9: The check-then-act window, at every A1 site (M; addresses F9 and F13) — **implemented, see §8**
 
 **The general limit, stated once.** Wherever authority is checked and then acted on as two steps, a process that
 pauses between them acts late by the length of the pause. Normal latency is not a bound. No local fix exists
@@ -348,4 +348,5 @@ monotonicity bug (all in #402, merged).
 | C4 | #412 | **Refusals are counted and logged, not written to the rights ledger**: that ledger records governor rights, not per-call admissions (`cohort_budget_refusals()`, metric `mycelium_provider_cohort_refusals_total`). **The place lives as long as the call:** held across the handler in the MCP loops; carried by the `RpcRequest` through `rpc_rx`, so it is released when the serve loop drops the request; parked until `/gateway/rpc/respond` (or 300 s) for the SDK serve stream. **Independent of C3's enforcement**, and after it when both are on, so a refused call never holds budget |
 | C6 | #413 | **The trait moved** from the git-only `mandate_fence` module to `store` (always compiled), re-exported at its old path and at the crate root, so no caller changes. **Asked after the store's own mutation lock**, before anything is written, in all four mutators |
 | C8 | #414 | **Epochs: the gate's installed epoch is persisted, not the verifier's retained epochs.** The gate refuses a mandate below its installed epoch whatever the verifier remembers, so that is what supersession safety needs. **The start is marked where the reader is created**: at `with_execution_authority` for the gateway and provider, and at construction for the wiki store. **The cumulative-checkpoint contract is documented, not checked**: a reader cannot tell a cumulative checkpoint from a partial one |
+| C9 | #416 | **The hook judges the appointment's window, not revocation.** A pre-receive hook has a trustworthy clock but no revocation feed; it refuses pushes past the appointment's `valid_until_ms` recorded on the mandate ref (`appointment.json`), and revocation at the remote stays the fence's job (moving the ref). **The gateway row relies on C3's provider re-check** rather than a separate test of a pause between preflight and dispatch: the provider's check is the later one, and C3's gates cover it |
 

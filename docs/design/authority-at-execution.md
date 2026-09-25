@@ -195,7 +195,7 @@ under an authority that had since lapsed.
 - The remote's side, which is whether it honours `--atomic` and whether a pre-receive hook re-checks, is unchanged
   from §5 of the scoped-mandates ADR.
 
-**A stated limit: the check comes before the transaction, not inside it.** The authority is asked, then git
+**A stated limit: the check comes before the transaction, not inside it** (answered in §9). The authority is asked, then git
 updates the ref. Normally that gap is milliseconds, but **normal latency is not a safety bound**: a process that
 pauses between the two (GC, swap, a stopped process) can write after its mandate expired, or after a revocation
 it would otherwise have seen, by the length of the pause. The fence's `verify` catches only an appointment ref
@@ -244,6 +244,26 @@ it at the gateway and nowhere else.
   the application's.
 - **A node that is both gateway and provider decides twice** and records twice: two enforcement points, by design.
   A policy that counts calls counts both.
+
+## 9. The check-then-act window, everywhere (closure plan C9, 2026-09-25)
+
+**The limit, stated once.** Wherever authority is checked and then acted on as two steps, a process that pauses
+between them acts late by the length of the pause. Normal latency is not a bound: a pause (GC, swap, a stopped
+process) has none. No local fix exists where the effect has no clock of its own, so each site takes the strongest
+answer available to it: **prevent** at a component with a clock the actor does not control, **cancel** work once it
+is running, or **detect** a late act afterwards.
+
+| Site | Check, then act | Answer |
+|---|---|---|
+| Wiki git store, locally | `authorize()`, then `update-ref` | **Detect.** The store asks again after the commit lands; a refusal is a counted, logged late write (`GitStore::late_writes`) |
+| Wiki git store, published | the curator's push | **Prevent.** The reference hook `mycelium-wiki/hooks/pre-receive-mandate-window` refuses the push once the appointment recorded on the mandate ref has expired, by the **remote's** clock |
+| Gateway | `ae_preflight`, then dispatch | **Prevent, later.** With provider enforcement on (§8), the provider re-checks when the call arrives, so the gateway's window closes at the provider's check. The provider's own window is the next row |
+| Provider | the provider check, then the handler | **Cancel** (closure plan C10) |
+| Queued and retried work | a check at dequeue and at each retry | Rule 4 of §2; each attempt has the window of the site it runs at |
+
+**Gates.** `a_pause_after_the_check_is_not_caught_locally` asserts that the late write is **counted**.
+`the_remote_hook_refuses_a_push_after_the_appointment_expired` runs the real hook in a bare remote. The plant: a
+current appointment admits the same push.
 
 ## 5. Gates
 
