@@ -596,6 +596,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Pinned by `acceptor_memory_survives_a_restart`, `a_recovered_acceptance_reports_no_value` and
   `a_malformed_acceptor_record_is_no_record`.
 
+### Added
+
+- **`elect_leader_receipt` — a leadership answer that names the rung it reached.** Returns
+  `Leadership { leader, epoch, basis }` where `basis` is `Decided` or `Observed`.
+
+  `elect_leader` returns a bare `NodeId`, which cannot distinguish *"a quorum chose me"* from
+  *"this is what my replica currently says"* — and callers read the bare id as an **exclusive
+  grant**, because nothing in the type said otherwise. Those are different answers, and the
+  difference decides whether two callers can act as leader at once. This substrate's own rule is
+  that *a receipt names its rung and nothing above it*; leadership was the surface still naming a
+  rung it had not reached.
+
+  - **`Decided`** — this node's proposal committed at a quorum: a quorum voted for this value at
+    this ballot, **bound to it by digest**, and no other value can have been committed at that
+    ballot.
+  - **`Observed`** — read from the converged slot. Sound for *following* a leader; **not** evidence
+    the cluster agrees right now.
+
+  **Neither is an exclusive grant that stays true**, and no coordinator-free protocol can offer one.
+  The honest instrument is to **fence on `Leadership::epoch`** — the commit's HLC, monotonic across
+  successive holders, the same token `LockGuard` already uses. The ballot is unusable for this: it
+  regresses under gossip lag (#164).
+
+  `elect_leader` is unchanged and still returns the `NodeId`; it now delegates, so both agree about
+  *who*. What it cannot tell you is *how*.
+
+### Changed
+
+- **Election convergence is now observed, not assumed.** The fixed `sleep(1s)` before reading the
+  committed slot — which the replay inventory already called *"the one whose duration is a
+  correctness assumption"* — is replaced by a **bounded poll** on the same budget. A fast cluster
+  answers in milliseconds; a slow one still gets its full second; and the answer is a value that was
+  observed to be there rather than whatever happened to be present when a timer fired. Still routed
+  through the timer seam (`elect/converge`), so replay can explore it.
+
+  Lengthening a sleep only ever changed how often the difference was visible.
+
 ## [2.13.0] — 2026-09-23
 
 **The axis' last open questions, and a gateway that was not closed.** Wire **v12** unchanged

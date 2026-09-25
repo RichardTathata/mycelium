@@ -288,7 +288,7 @@ pub use agent::evidence_journal::{
     EvidenceProfile, JournalEntry, JournalError, JournalPage,
 };
 #[cfg(feature = "consensus")]
-pub use agent::{ConsensusHandle, ConsistencyError, LockGuard, LockService};
+pub use agent::{ConsensusHandle, ConsistencyError, Leadership, LeadershipBasis, LockGuard, LockService};
 // WS-C M9: self-managing-metabolism config tuner + governance.
 pub use agent::{accept_all, clamped, reject_all, ConfigPolicy, CONFIG_PREFIX};
 pub use agent::{

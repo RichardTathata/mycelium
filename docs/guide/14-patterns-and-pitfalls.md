@@ -230,6 +230,39 @@ keeps its own `view_confidence`. Full runbook (one entry per pathology + Prometh
 
 ---
 
+## 12 · Expect one node to end up holding every single-writer role
+
+**The pitfall.** A fleet where every node runs every companion will put the tuple-space curator, the
+blackboard primary and the wiki curator **on the same node** — not by accident, and not rarely. Each
+ring elects independently, and if they all order candidates the same way, the same candidate wins
+every time. Restart the fleet and it happens again, identically.
+
+That node is a coordinator. Nobody declared it; it arrived by accretion. And **none of the existing
+detectors could see it**: P2 watches role *churn*, and a node calmly holding everything produces
+none; P6 watches coverage *gaps*, and here every capability has a provider — the same one. A
+concentrated fleet reads as **perfectly healthy on every other measurement**.
+
+**What the substrate does now.** Rings order candidates by `hash(ring, node)` (rendezvous), so
+different rings pick different winners and a failover spreads instead of moving every role to the
+next node as a block. The rule is **negotiated from the candidate set** rather than flag-dayed:
+every candidate advertises what it can compute, and a ring is only as new as its oldest member —
+because changing an election rule node-by-node would leave two holders each believing itself correct
+and neither resigning.
+
+**What you still watch.** Rendezvous is a **spread, not a bound**: three rings over three nodes
+still leave roughly an 11% chance one node wins all three. So **P10** reports the share of live
+single-writer roles held by one node — `role_concentration_pct` on `/stats`, with a `diagnose_fleet`
+finding and a Prometheus alert at `for: 30m`, `warning`. It is a standing structural condition, not
+an incident: notice it at the next review, not at 3am.
+
+The alert says the unusual part out loud — *nothing is failing* — because an operator who sees a
+warning with no symptom will otherwise assume a false positive. And its first suggested action is
+**check the fleet finished upgrading**: one node too old to advertise `election_rule` pins its whole
+ring to the old rule, which concentrates by construction.
+
+> **Mitigate the cause, keep the ability to see the residue.** That is why both shipped together,
+> and why P10 stays now that rendezvous exists.
+
 ## The meta-pattern
 
 Eight of these ten were found *by building and running the examples*, not by

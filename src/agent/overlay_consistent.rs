@@ -45,6 +45,59 @@ impl std::fmt::Display for ConsistencyError {
 
 impl std::error::Error for ConsistencyError {}
 
+/// **How this node came to believe in a leader** — the rung a [`Leadership`] reached, and nothing
+/// above it.
+///
+/// This substrate's rule for acknowledgements is that *a receipt names its rung and nothing above
+/// it* (`docs/design/contracts-receipts.md`). `elect_leader` returned a bare `NodeId`, which names
+/// no rung at all, and callers read it as an **exclusive grant** because nothing in the type said
+/// otherwise. These two answers are different things and always were.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeadershipBasis {
+    /// **This node's own proposal committed at a quorum.** The strongest rung the protocol offers:
+    /// a quorum of the electorate voted for this value, at this ballot, bound to it by digest, and
+    /// no other value can have been committed at that ballot.
+    Decided,
+    /// **Read from the converged slot** — somebody else decided, and this is what this node sees.
+    ///
+    /// Sound for *following* a leader. It is **not** evidence that the cluster currently agrees:
+    /// what this node reads is its own replica, and a newer decision may be in flight. A node that
+    /// needs exclusivity must fence on [`Leadership::epoch`] at the resource rather than trust the
+    /// read.
+    Observed,
+}
+
+/// The answer to "who leads this group", **with the rung it reached and a fencing token**.
+///
+/// Replaces the bare `NodeId` that `elect_leader` returns, which could not distinguish *"a quorum
+/// chose me"* from *"this is what my replica currently says"* — a distinction that decides whether
+/// two callers can act as leader at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leadership {
+    /// The node this answer names as leader.
+    pub leader: crate::node_id::NodeId,
+    /// The commit's HLC — a **monotonic fencing token**, the same one `LockGuard` uses.
+    ///
+    /// Monotonic across successive holders (each observes the prior release), so a resource that
+    /// refuses a lower token is genuinely fenced. The **ballot is not** usable for this: it
+    /// regresses under gossip lag (#164). If you need exclusivity, this is the field that provides
+    /// it — not the leader's identity, and not the fact that the call returned `Ok`.
+    pub epoch: u64,
+    /// Which rung this answer reached.
+    pub basis: LeadershipBasis,
+}
+
+impl Leadership {
+    /// `true` only for [`LeadershipBasis::Decided`] — a quorum chose this node's value.
+    ///
+    /// Deliberately not named `is_leader`: the question *"am I the leader"* has no
+    /// coordinator-free answer that stays true for any length of time, and a method promising one
+    /// would be the same overclaim in a shorter form.
+    pub fn was_decided_here(&self) -> bool {
+        self.basis == LeadershipBasis::Decided
+    }
+}
+
 /// RAII guard for a distributed lock acquired via [`ConsensusHandle::distributed_lock`].
 ///
 /// On drop (or [`release`](Self::release)) it clears the lock's authoritative consensus slot
