@@ -1,6 +1,6 @@
 # Boundary H closure: authority at every door (implementation plan)
 
-**Status:** draft rev 0.1, 2026-09-25. Follows [`boundary-h.md`](boundary-h.md) (rev 0.5), whose items have all
+**Status:** draft rev 0.2, 2026-09-25 (rev 0.2 folds in an external review of #402; see §7). Follows [`boundary-h.md`](boundary-h.md) (rev 0.5), whose items have all
 shipped except K3b, K3c, H4 and D. This plan closes what the A1 wiring (#399 gateway, #402 wiki store) left open,
 and answers one question with evidence: **once an agent's authority is revoked, can it still act?**
 
@@ -24,7 +24,9 @@ Each finding was checked in the code, not inferred from the docs.
 | F6 | **The mandate stops at the gateway.** The gateway forwards `{name, arguments}` to the provider, not `_meta.mandate`; the provider could not check a mandate even if it wanted to | `src/agent/http.rs` `tools/call` dispatch (`tool_req`) |
 | F7 | **An operator cannot cut a member off.** Identity-key revocation lets a node revoke only **its own** key, and it affects signature verification, not whether RPCs are accepted. At the transport, any certificate chaining to the fleet CA is a member: no revocation list or deny-list was found. Removing a member today means rotating the CA | `src/agent/revocation.rs` (module docs, "Validation rule"); `mycelium-core/src/tls.rs` |
 | F8 | The wiki's `FsStore` has neither the mandate fence nor A1. No deployment uses it with authority on the line: the council wiki uses `GitStore`; NovusLens keeps its own Postgres store behind the wiki contract | `mycelium-wiki/src/fs.rs`; Novus-i2 `apps/meaning`, `config/pins.md` |
-| F9 | The distance between the wiki store's A1 check and git's `update-ref` is local subprocess time: milliseconds, against a designed revocation latency of up to *F* (≈ 60 s). Appointment moves inside it are caught by the fence's `verify`. **Not a gap** | `mycelium-wiki/src/git_store.rs` `commit_files` |
+| F9 | **The wiki store checks authority before the git transaction, not inside it.** Normally milliseconds apart, but normal latency is not a safety bound: a process that pauses between the two writes after expiry or revocation, by the pause's length. The fence catches only a moved appointment ref. *(rev 0.1 called this "not a gap"; the external review was right, and it is now pinned by a test)* | `mycelium-wiki/src/git_store.rs` `commit_files`; `a_pause_after_the_check_is_not_caught_locally` |
+| F10 | **A restart can restore revoked authority.** The revocation view is in memory; after a restart an old checkpoint issued before the revocation, and still fresh, is accepted, and the revoked term reads as not revoked, for up to *F* after the revocation | `src/mandate/authority.rs` `RevocationView` |
+| F11 | **Admitted work is checked, not stopped.** A1 re-checks at admission, dequeue, retry and re-authorisation, and `StopContract`/`drain_report` model a stop. Nothing cancels a handler already running when its authority is revoked | `src/mandate/authority.rs` (`StopContract` is a model) |
 
 **What this means for the claim.** Today "revocation stops the fleet" holds only for callers that use `/mcp`, `/a2a`
 or federation calls. It does **not** hold for full-node fleets (F2), and it does **not** fully hold under the
@@ -57,8 +59,8 @@ route changes.
 
 ### C0: Honesty fixes (S, first) — **done in #402**
 
-- ADR `authority-at-execution.md` §7 and PR #402: remove the check-to-transaction distance from "Not claimed",
-  with one sentence saying why (F9).
+- ~~ADR §7 and PR #402: call the check-to-transaction distance "not a gap" (F9)~~. **Reversed in rev 0.2:** it is
+  a stated limit, pinned by a test, and C9 addresses it.
 - `boundary-h.md` §16: H6 is recorded as **primitive only, not wired** until C4 lands (F5).
 - Threat model, A1 entry: state that the fleet-stop claim currently holds **only through `/mcp`, `/a2a` and
   federation**, and name F2 and F3 until C1 and C2 close them.
@@ -177,6 +179,42 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
 
 ---
 
+### C8: Restart-safe revocation state (M; closes F10)
+
+- **Cumulative checkpoints.** The checkpoint format is declared **cumulative**: each lists every revocation in
+  force in its scope, not only new ones. An authority that cannot produce that refuses to start. The view keeps
+  its union of revoked terms as a defence, and stays order-independent (done in #402).
+- **An issued-after-start rule.** After a restart, a reader accepts a checkpoint only if it was issued after the
+  reader started, allowing for skew: `a ≥ start − 2s`. A pre-revocation checkpoint replayed after the restart is
+  then refused, and because the first accepted checkpoint is cumulative, it carries every revocation.
+- **The fallback, if cumulative checkpoints are not acceptable:** persist the view (newest `seq` and the revoked
+  set) in the node-local journal, as K3a did for checkpoints, and reload it on start.
+- **Gate:**
+  - restart, then replay a fresh pre-revocation checkpoint → refused, the term stays revoked;
+  - restart, then a new cumulative checkpoint → accepted and correct;
+  - a plant without the rule fails the first case.
+
+### C9: The check-to-transaction window (M; addresses F9)
+
+- **Record, locally.** After the ref transaction, the store re-checks authority. If it lapsed during the
+  transaction, the commit is recorded as a **late write**, with its commit id and the lapse, in the evidence
+  journal, and the curator raises it. This is detection, not prevention, and the design says so.
+- **Prevent, at the remote.** For published writes, the pre-receive hook checks the pushing curator's mandate
+  window and revocation standing against the **remote's** clock, which the curator does not control. The
+  scoped-mandates ADR already puts a hook there; this gives it the time check.
+- **Gate:** `a_pause_after_the_check_is_not_caught_locally` gains its detection assertion (the late write is
+  recorded). A hook test refuses a push from a curator whose mandate expired before the push arrived.
+
+### C10: Cancelling admitted work (L; addresses F11)
+
+- **What.** Turn `StopContract` from a model into a mechanism: a running handler holds a cancellation token tied
+  to its mandate's term. A revocation, or expiry with `Continuation::ReauthorizeAt`, cancels it, and the
+  handler's confirmation is recorded, so `drain_report` measures a real stop.
+- **Scope.** Rust handlers first (the serve paths from C3); the SDK serve route forwards the cancellation to the
+  agent; handlers that cannot confirm are reported `Unbounded`, as the model already does.
+- **Gate:** a long-running handler is cancelled within its declared bound after revocation, and T_drain is
+  measured end to end.
+
 ## 4. Order
 
 | Step | Items | Why this order |
@@ -186,9 +224,13 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
 | 3 | C4 | Reuses C3's hook |
 | 4 | C5 | ADR and review first; the only item with a real design question |
 | 5 | C6 | Cheap, independent, low value |
-| 6 | C7 | Proves the whole |
+| 6 | C8 | Restart safety; independent, can start now |
+| 7 | C9 | Needs the remote hook's ADR update |
+| 8 | C10 | Needs C3's serve-path hook |
+| 9 | C7 | Proves the whole, including C8–C10's cases |
 
-**Estimate.** Steps 1–3: about two weeks. C5: a week after its ADR is reviewed. C6 and C7: about four days.
+**Estimate.** Steps 1–3: about two weeks. C5: a week after its ADR is reviewed. C6 and C7: about four days. C8 and
+C9: about a week together. C10: a week or more.
 
 ---
 
@@ -206,3 +248,15 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
 
 K3b (head transport), K3c (body authorisation and storage caps), H4 (source-signed audit checkpoints), and demo D.
 The NovusLens pin bump (Novus-i2 is on `mycelium-wiki` 2.4.4) is tracked downstream.
+
+## 7. Review disposition (external review of #402, 2026-09-25)
+
+| Finding | Disposition |
+|---|---|
+| A restart can restore revoked authority | **Accepted.** F10, C8 |
+| Out-of-order checkpoints can lose revocations | **Accepted, fixed in #402.** An authentic revocation is recorded before the replay and future-dating checks; gate `a_revocation_in_a_late_arriving_older_checkpoint_still_revokes` |
+| The wiki's check-to-mutation window | **Accepted; rev 0.1 was wrong** to call it not a gap. F9, C9; pinned by `a_pause_after_the_check_is_not_caught_locally` |
+| The gateway's clock | **Accepted, fixed separately** on `fix/preflight-reads-a-live-clock` (`Hlc::decision_now_ms()`, a live clock that advances nothing, at the three sites that read `Hlc::current()`). #402 briefly carried its own copy of the same fix and dropped it in favour of that branch |
+| The *F* − 2*s* partition bound | **Accepted, corrected in #402.** *F* − 2*s* is the reader-clock threshold; in real time, work stops when the checkpoint is at most *F* old |
+| Fleet-stop coverage is incomplete | **Accepted.** Already C1–C3; runtime cancellation added as F11, C10 |
+

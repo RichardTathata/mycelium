@@ -62,7 +62,9 @@ impl ExecutionGateAuthority {
     /// The mandate must enumerate [`WIKI_WRITE`]. `external` names any configured external issuers
     /// that may sign revocation checkpoints; member authorities verify through the caller's live
     /// member-key view at [`offer_checkpoint`](Self::offer_checkpoint). `now_ms` is the deployment's
-    /// clock.
+    /// clock, and it must be a **wall** clock (the host's wall clock, as `Hlc::decision_now_ms` reads it). A value
+    /// that advances only on events, such as `Hlc::current`, stands still on a quiet node, and then a
+    /// mandate never expires and a checkpoint never goes stale: that fails open.
     pub fn new(
         gate: ExecutionGate,
         mandate: Mandate,

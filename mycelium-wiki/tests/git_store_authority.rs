@@ -301,3 +301,47 @@ async fn a_curator_without_present_authority_keeps_proposals_queued_until_it_has
     }
     wiki.shutdown().await;
 }
+
+/// **A stated limit, pinned so it cannot pass for a closed one.** The authority is asked, then git
+/// updates the ref. A process that pauses between the two writes after its mandate expired, by the
+/// length of the pause. This wrapper passes the real check and then moves the clock past expiry,
+/// which is what a pause does. The write lands: nothing local can refuse it, because git has no clock
+/// the check can sit inside. The next write is refused, so the overrun is bounded by one pause.
+/// Prevention for published writes belongs at the remote (closure plan C9).
+#[test]
+fn a_pause_after_the_check_is_not_caught_locally() {
+    struct PausesAfterTheCheck {
+        inner: Arc<ExecutionGateAuthority>,
+        clock: Arc<AtomicU64>,
+        resume_at_ms: u64,
+    }
+    impl mycelium_wiki::mandate_fence::WriteAuthority for PausesAfterTheCheck {
+        fn authorize_write(&self) -> Result<(), String> {
+            let answer = mycelium_wiki::mandate_fence::WriteAuthority::authorize_write(&*self.inner);
+            self.clock.store(self.resume_at_ms, Ordering::SeqCst); // the pause
+            answer
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(50_000);
+    rig.at(49_000);
+    rig.checkpoint(&[]);
+    let paused = Arc::new(PausesAfterTheCheck {
+        inner: Arc::clone(&rig.authority),
+        clock: Arc::clone(&rig.clock),
+        resume_at_ms: 60_000,
+    });
+    let store = GitStore::open(GitStoreConfig {
+        dir: dir.path().to_path_buf(),
+        subdir: "councils/testville".into(),
+        message_prefix: "wiki(testville)".into(),
+        authority: Some(paused as _),
+        ..Default::default()
+    })
+    .unwrap();
+
+    write(&store, "checked at 49 s, committed at 60 s").expect("the limit: nothing local refuses it");
+    assert!(rig.clock.load(Ordering::SeqCst) > 50_000, "the write landed after the mandate expired");
+    assert_refused_as(&write(&store, "the next one").unwrap_err(), "WorkExpired");
+}

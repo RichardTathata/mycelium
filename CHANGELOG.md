@@ -31,6 +31,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The ADR's "revocation is monotonic" held across time, but not across checkpoints. The view now keeps every revoked
   term apart from the newest checkpoint. This affects the gateway's `ExecutionAuthority` and the wiki store alike.
   Gate: `a_later_checkpoint_that_omits_a_revocation_does_not_reinstate_it`.
+- **A1: a revocation counts whatever order its checkpoint arrives in.** The view discarded an older
+  checkpoint as a replay *before* reading its revocations, so checkpoints delivered out of order could lose
+  one. An authentic revocation is now recorded before the replay and future-dating checks, which decide only
+  whether a checkpoint refreshes freshness. Gate: `a_revocation_in_a_late_arriving_older_checkpoint_still_revokes`.
+- **Docs: two A1 statements corrected.** *F* − 2*s* is the reader-clock threshold, not a real-time partition
+  bound (in real time, work stops when the checkpoint is at most *F* old). The wiki store's check comes before
+  its git transaction; a paused process can write late by the pause. That is now a stated limit pinned by
+  `a_pause_after_the_check_is_not_caught_locally`, not "not a gap". A restart's fail-closed holds only until a
+  checkpoint arrives (closure plan C8). All three from an external review.
 
 ## [2.14.0] — 2026-09-25
 

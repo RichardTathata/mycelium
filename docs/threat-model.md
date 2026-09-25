@@ -352,7 +352,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     can reach a provider through `/gateway/rpc/call`; providers check who is calling, not whether they may. Both
     are closed by [`plans/boundary-h-closure.md`](plans/boundary-h-closure.md) C1–C3. *Limits:* other resources
     apply it only when wired;
-    the revocation view is in memory (a restart fails closed); timing is not yet measured in a deployment. *Gate:* `mandate::authority::tests`, including both clock extremes.
+    the revocation view is in memory, and a restart fails closed only until a checkpoint arrives: a replayed, still-fresh checkpoint from before a revocation is then accepted, for up to *F* (closure plan C8); the wiki store checks before its git transaction, so a paused process can write late by the pause (C9); timing is not yet measured in a deployment. *Gate:* `mandate::authority::tests`, including both clock extremes.
 - *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
   - **K3b and K3c:** head transport between nodes; body authorisation; per-issuer storage and ingestion caps (moved
     from H1).

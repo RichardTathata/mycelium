@@ -28,7 +28,8 @@
 //! clock's deviation from real time). **Revocation** needs delivery: present authority requires an
 //! authority-signed [`RevocationCheckpoint`] that is fresh by the exact predicate
 //! `(a − r) ≤ 2s ∧ (r − a) ≤ F − 2s`. Silence is never "nothing revoked", a replayed old checkpoint
-//! never refreshes freshness, and a partition longer than *F* − 2*s* stops protected work — the
+//! never refreshes freshness, and a partition stops protected work once the newest checkpoint is at
+//! most *F* old in real time (*F* − 2*s* is the reader-clock threshold that guarantees it) — the
 //! intended failure direction.
 //!
 //! # Time is passed in
@@ -237,16 +238,22 @@ impl RevocationView {
             Authenticity::Revoked { .. } => return CheckpointOffer::Unverifiable(UnverifiableReason::BadSignature),
             Authenticity::Unverifiable(r) => return CheckpointOffer::Unverifiable(r),
         }
+        let key = (c.authority.clone(), c.scope.clone());
+        // An authentic revocation counts **whatever order it arrives in**, and whether or not its
+        // checkpoint can refresh freshness. Replay and future-dating decide whether a checkpoint may
+        // say "nothing else is revoked, as of now"; neither makes its signed "this term is revoked"
+        // untrue. Recording it before those checks is what makes the view order-independent: a
+        // late-arriving older checkpoint still revokes. (Found by an external review, 2026-09-25:
+        // the view discarded an older checkpoint before reading its revocations.)
+        self.revoked.entry(key.clone()).or_default().extend(c.revoked.iter().cloned());
         if policy.is_future_dated(clock, c.issued_at_ms, now_ms) {
             return CheckpointOffer::FutureDated;
         }
-        let key = (c.authority.clone(), c.scope.clone());
         if let Some(held) = self.newest.get(&key)
             && c.seq <= held.seq
         {
             return CheckpointOffer::Replayed { held: held.seq };
         }
-        self.revoked.entry(key.clone()).or_default().extend(c.revoked.iter().cloned());
         self.newest.insert(key, c.clone());
         CheckpointOffer::Accepted
     }
@@ -642,6 +649,38 @@ mod tests {
         let other = TermId::new("t2").unwrap();
         let op = PrincipalId::new("operator:acme").unwrap();
         assert_eq!(v.standing(&op, "cap/fleet", &other, &policy(), clock(), 2_500), RevocationStanding::NotRevoked);
+    }
+
+    /// **Order-independent.** Checkpoints delivered newest first: the older one, which carries the
+    /// revocation, is refused as a replay for freshness, yet its revocation still stands.
+    #[test]
+    fn a_revocation_in_a_late_arriving_older_checkpoint_still_revokes() {
+        let w = world();
+        let mut v = RevocationView::new();
+        v.offer(&checkpoint(&w, 3, 3_000, &[]), &policy(), clock(), 3_000, &w.members, &w.external);
+        let late = v.offer(&checkpoint(&w, 2, 2_000, &["t1"]), &policy(), clock(), 3_000, &w.members, &w.external);
+        assert_eq!(late, CheckpointOffer::Replayed { held: 3 }, "it refreshes nothing");
+        assert_eq!(gate().check(&work(&w), &v, 3_500), Err(ExecutionDenial::Revoked), "but its revocation stands");
+    }
+
+    /// A future-dated checkpoint is refused for freshness, but an authentic revocation in it
+    /// still stands; a forged one (the plant) revokes nothing.
+    #[test]
+    fn a_future_dated_checkpoints_revocation_stands_and_a_forged_one_does_not() {
+        let w = world();
+        let mut v = view_with(&w, &[checkpoint(&w, 1, 1_000, &[])], 1_000);
+        let future = checkpoint(&w, 2, 1_000 + 10 * F, &["t1"]);
+        assert_eq!(v.offer(&future, &policy(), clock(), 2_000, &w.members, &w.external), CheckpointOffer::FutureDated);
+        assert_eq!(gate().check(&work(&w), &v, 2_000), Err(ExecutionDenial::Revoked));
+
+        let mut clean = view_with(&w, &[checkpoint(&w, 1, 1_000, &[])], 1_000);
+        let mut forged = checkpoint(&w, 2, 1_500, &["t1"]);
+        forged.signature[0] ^= 0xff;
+        assert!(matches!(
+            clean.offer(&forged, &policy(), clock(), 2_000, &w.members, &w.external),
+            CheckpointOffer::Unverifiable(_)
+        ));
+        assert!(gate().check(&work(&w), &clean, 2_000).is_ok(), "a forged revocation revokes nothing");
     }
 
     #[test]

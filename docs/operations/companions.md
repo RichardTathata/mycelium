@@ -159,7 +159,7 @@ The wiki has a genuinely different operational model: a **node-independent store
     must enumerate `wiki.write`), and feed it the authority's signed revocation checkpoints with
     `offer_checkpoint`. Every commit and push attempt is then re-checked: an expired, revoked, or
     out-of-touch curator writes and publishes nothing, and its proposals stay queued. **Fails
-    closed:** until the first checkpoint arrives, and whenever the newest is older than *F* − 2*s*,
+    closed:** until the first checkpoint arrives, and whenever the newest is older than *F* − 2*s* by the node's clock (at most *F* in real time),
     nothing is written. Watch for `apply refused, no present authority` in the curator's log.
     Design: [`authority-at-execution.md`](../design/authority-at-execution.md) §7.
   - **Bulk ingest**: workers stage a batch (one **meeting** per batch — the sizing contract) in
