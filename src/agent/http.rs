@@ -2149,7 +2149,10 @@ pub(crate) async fn ae_preflight(
     // Canonical arguments: serde_json's object serialization is key-ordered for `Map` in its
     // default (BTreeMap) configuration, so the digest is stable for equal arguments.
     let canonical = serde_json::to_vec(arguments).unwrap_or_default();
-    let now_ms = crate::hlc::physical_ms(ctx.hlc.current());
+    // `decision_now_ms`, not `current()`: this value decides whether a mandate has expired and
+    // whether a checkpoint is stale. `current()` never reads the wall clock, so on a node whose
+    // gossip has gone quiet — the partition case — it freezes and both checks fail OPEN.
+    let now_ms = ctx.hlc.decision_now_ms();
     let arguments_digest = ae::arguments_digest(&canonical);
 
     // Boundary H A1: with an execution authority attached, a presented grant
