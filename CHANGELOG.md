@@ -11,6 +11,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The gateway's raw routes refuse protected work** (Boundary H closure plan C1). `rpc/call`, `scatter`,
+  `signal/emit`, `mailbox/deliver`, `shard/emit` and `overlay/emit_reliable` take an RPC kind from the body, and a
+  client with `mesh:write` could send `mcp.invoke` or `skill.invoke` through them straight to a provider, skipping
+  the action evaluator and mandate checks `/mcp` and `/a2a` run (and `llm.invoke` around `llm:invoke`). These
+  kinds, and any in the new `protected_rpc_kinds` (`GOSSIP_PROTECTED_RPC_KINDS`), are now refused
+  `403 protected_kind`, naming the door to use. **New scope `mesh:serve`** for `rpc/serve` and `rpc/respond`, so a
+  serving agent needs no power to call; for one release a `mesh:read` or `mesh:write` token is still admitted
+  there, with a warning. **SDKs:** `ProtectedKindError` in `mycelium-py` and `mycelium-ts`.
 - **Authority at execution at the wiki's git store** (Boundary H A1; ADR `docs/design/authority-at-execution.md` §7).
   The mandate fence stopped a *superseded* curator inside the git transaction. It could not stop an expired, revoked
   or out-of-touch one. Now:
@@ -33,6 +41,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`mycelium-ts`: `rpcCall` sent `kind` where the gateway reads `method`**, so every call failed `400`. The
+  live test that would have shown it only runs against a gateway. Now sends `method`, pinned by a stub test.
 - **A1: a revocation now stands against later checkpoints that omit it.** `RevocationView` kept only the newest
   checkpoint per `(authority, scope)`, so a later fresh checkpoint without the term reinstated a revoked appointment.
   The ADR's "revocation is monotonic" held across time, but not across checkpoints. The view now keeps every revoked
