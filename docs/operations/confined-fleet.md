@@ -46,6 +46,7 @@ satisfied, and satisfied only by current, unrevoked, possessed appointments:
 use mycelium::mandate::authority::{ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier};
 use mycelium::mandate::grant::{EntitlementTable, GrantVerifier};
 use mycelium::mandate::{PrincipalId, ResourceAuthority};
+use mycelium::ExecutionAuthority; // re-exported; tests/gateway_mandate_external.rs keeps it constructible
 
 let mut entitled = EntitlementTable::new();
 entitled.entitle("depot", PrincipalId::new("operator:acme").unwrap()); // who may appoint for "depot"
