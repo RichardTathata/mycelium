@@ -41,6 +41,8 @@ pub struct FsStore {
     /// processes the CAS versioning remains the (weaker) backstop, and erasure
     /// stays idempotent so a torn cross-process race is repaired by retrying.
     mutate:     Mutex<()>,
+    /// Optional authority at execution (closure plan C6), asked before each mutation.
+    authority:  Option<std::sync::Arc<dyn crate::store::WriteAuthority>>,
 }
 
 /// Parse a versioned object filename `{base}.v{N}.json` → `(base, N)`. `None` if it doesn't match
@@ -63,7 +65,24 @@ impl FsStore {
     pub fn open(root: impl AsRef<Path>, group: &str) -> Result<Self, WikiError> {
         let group_root = root.as_ref().join(group);
         fs::create_dir_all(group_root.join("pages"))?;
-        Ok(Self { group_root, tmp_seq: AtomicU64::new(0), mutate: Mutex::new(()) })
+        Ok(Self { group_root, tmp_seq: AtomicU64::new(0), mutate: Mutex::new(()), authority: None })
+    }
+
+    /// **Authority at execution** (Boundary H closure plan C6): ask `authority` before every
+    /// mutation (`write_section`, `update_manifest`, `write_page`, `remove_page`), after this
+    /// store's own mutation lock is taken and before anything is written. A refusal writes nothing
+    /// and returns [`WikiError::authority_refused`]. The same seam as `GitStore`'s; there is no
+    /// appointment fence here, so the authority is the whole check.
+    pub fn with_authority(mut self, authority: std::sync::Arc<dyn crate::store::WriteAuthority>) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
+    fn authorize(&self) -> Result<(), WikiError> {
+        match &self.authority {
+            Some(a) => a.authorize_write().map_err(WikiError::authority_refused),
+            None => Ok(()),
+        }
     }
 
     fn pages_root(&self) -> PathBuf { self.group_root.join("pages") }
@@ -287,6 +306,7 @@ impl WikiStore for FsStore {
 
     fn write_section(&self, page: &str, section: &Section, expected: Option<u64>) -> Result<u64, WikiError> {
         let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
+        self.authorize()?;
         let sec_dir = Self::sec_dir(&self.page_dir(page)?);
         self.write_object_cas(&sec_dir, &section.id, expected, &serde_json::to_vec_pretty(section)?)
     }
@@ -295,6 +315,7 @@ impl WikiStore for FsStore {
         &self, page: &str, order: &[SectionId], attributes: &BTreeMap<String, String>, expected: Option<u64>,
     ) -> Result<u64, WikiError> {
         let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
+        self.authorize()?;
         let dir = self.page_dir(page)?;
         let manifest = Manifest { order: order.to_vec(), attributes: attributes.clone() };
         self.write_object_cas(&dir, "manifest", expected, &serde_json::to_vec_pretty(&manifest)?)
@@ -304,6 +325,7 @@ impl WikiStore for FsStore {
         &self, page: &str, sections: &[Section], attributes: &BTreeMap<String, String>,
     ) -> Result<(), WikiError> {
         let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
+        self.authorize()?;
         let dir = self.page_dir(page)?;
         let sec_dir = Self::sec_dir(&dir);
         // 1. Section objects first (each force-published) — so the manifest's referents all exist.
@@ -335,6 +357,7 @@ impl WikiStore for FsStore {
     fn remove_page(&self, page: &str, label: &str) -> Result<bool, WikiError> {
         let _ = label; // the filesystem records no provenance; the caller's audit trail does
         let _guard = self.mutate.lock().unwrap_or_else(|e| e.into_inner());
+        self.authorize()?;
         let dir = self.page_dir(page)?;
         let existed = self.highest(&dir, "manifest")?.is_some();
         // Erasure is strict, unlike GC: every deletion error propagates so the caller knows the

@@ -170,3 +170,32 @@ pub trait WikiStore: Send + Sync {
         Ok(())
     }
 }
+
+/// **Authority at execution** (Boundary H item A1, `docs/design/authority-at-execution.md`).
+///
+/// The fence above answers one question inside the git transaction: *is the appointment ref still
+/// the one this writer was configured with?* It cannot answer the time questions, because git has
+/// no clock it trusts: *has the mandate's window closed? Has it been revoked? Does this writer even
+/// know, or has it heard nothing from the authority for too long?*
+///
+/// A `WriteAuthority` answers those. `GitStore` asks it **on every commit
+/// attempt, immediately before the ref transaction**, and **before every push attempt**. So a
+/// queued round applied an hour after it was proposed, a compare-and-swap retry, and a publish of
+/// commits made while the writer was still authorised are each checked afresh. Authority is
+/// re-established at the point of the write, never inherited from when the work was accepted.
+///
+/// The two checks compose rather than overlap: this one is made just before the transaction, and
+/// the fence's `verify` holds through it. Neither alone is the whole contract.
+///
+/// [`FsStore`](crate::FsStore) asks it too, before each of its mutations, once one is attached with
+/// [`FsStore::with_authority`](crate::FsStore::with_authority) (closure plan C6). It has no
+/// appointment fence, so for it this is the whole check: the window, the epoch and revocation.
+///
+/// This crate's data plane has no Mycelium dependency, so the trait is the seam. The Mycelium
+/// implementation, over `mycelium::mandate::authority::ExecutionGate`, is
+/// `mycelium_wiki::ExecutionGateAuthority` (feature `execution-authority`).
+pub trait WriteAuthority: Send + Sync {
+    /// May a write proceed **now**? `Err` carries a human-readable reason, surfaced as
+    /// [`WikiError::authority_refused`](crate::WikiError::authority_refused).
+    fn authorize_write(&self) -> Result<(), String>;
+}

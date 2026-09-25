@@ -161,7 +161,8 @@ The wiki has a genuinely different operational model: a **node-independent store
     out-of-touch curator writes and publishes nothing, and its proposals stay queued. **Fails
     closed:** until the first checkpoint arrives, and whenever the newest is older than *F* − 2*s* by the node's clock (at most *F* in real time),
     nothing is written. Watch for `apply refused, no present authority` in the curator's log.
-    Design: [`authority-at-execution.md`](../design/authority-at-execution.md) §7.
+    Design: [`authority-at-execution.md`](../design/authority-at-execution.md) §7. The filesystem store takes the
+    same authority: `FsStore::open(root, group)?.with_authority(Arc::new(authority))` (closure plan C6).
   - **Bulk ingest**: workers stage a batch (one **meeting** per batch — the sizing contract) in
     your `BatchSource` (S3), then submit the *reference* via `Wiki::submit_batch`, the
     `wiki.{group}.ingest` RPC, or **`POST /gateway/wiki/ingest`** (+ `ingest` on the py/ts SDKs) —

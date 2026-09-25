@@ -25,7 +25,7 @@ use mycelium::mandate::authority::{
 use mycelium::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
 use mycelium::{GossipAgent, GossipConfig, NodeId};
 use mycelium_wiki::{
-    mint_section_id, ExecutionGateAuthority, GitStore, GitStoreConfig, Section, Wiki, WikiConfig, WikiError,
+    mint_section_id, ExecutionGateAuthority, FsStore, GitStore, GitStoreConfig, Section, Wiki, WikiConfig, WikiError,
     WikiRole, WikiStore, WIKI_WRITE,
 };
 
@@ -117,7 +117,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn write(store: &GitStore, body: &str) -> Result<(), WikiError> {
+fn write(store: &impl WikiStore, body: &str) -> Result<(), WikiError> {
     store.write_page("minutes", &[minutes(body)], &BTreeMap::new()).map(|_| ())
 }
 
@@ -345,3 +345,34 @@ fn a_pause_after_the_check_is_not_caught_locally() {
     assert!(rig.clock.load(Ordering::SeqCst) > 50_000, "the write landed after the mandate expired");
     assert_refused_as(&write(&store, "the next one").unwrap_err(), "WorkExpired");
 }
+
+/// **Closure plan C6: the filesystem store takes the same authority.** `FsStore` has no appointment
+/// fence, so the authority is its whole check. The cases that do not depend on git: silence, the
+/// plant, expiry and revocation, each writing nothing when refused.
+#[test]
+fn the_fs_store_asks_the_same_authority_and_writes_nothing_when_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(50_000);
+    let store = FsStore::open(dir.path(), "testville").unwrap().with_authority(Arc::clone(&rig.authority) as _);
+
+    assert_refused_as(&write(&store, "no news yet").unwrap_err(), "RevocationUnknown");
+    assert_eq!(store.read("minutes").unwrap(), None, "silence writes nothing");
+
+    rig.checkpoint(&[]);
+    write(&store, "the council met").expect("the plant: with present authority the write lands");
+    let written = store.read("minutes").unwrap();
+
+    rig.at(50_001);
+    rig.checkpoint(&[]);
+    assert_refused_as(&write(&store, "after hours").unwrap_err(), "WorkExpired");
+
+    let fresh = Rig::new(1_000_000);
+    let store2 = FsStore::open(dir.path(), "other").unwrap().with_authority(Arc::clone(&fresh.authority) as _);
+    fresh.checkpoint(&[]);
+    fresh.at(2_000);
+    fresh.checkpoint(&["t1"]);
+    assert_refused_as(&write(&store2, "sell the hall").unwrap_err(), "Revoked");
+    assert_eq!(store2.read("minutes").unwrap(), None);
+    assert_eq!(store.read("minutes").unwrap(), written, "the refused writes changed nothing");
+}
+

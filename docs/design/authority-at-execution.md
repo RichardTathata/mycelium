@@ -73,7 +73,7 @@ clock extremes are testable exactly.
 
 - **That every resource uses it.** A1 is the contract a resource applies at its effect boundary by calling
   `ExecutionGate::check`. The **gateway** applies it (§6), so do the **wiki's git store** (§7) and, when enabled, the **provider** (§8). Other
-  resources (provider admission, the `FsStore`) apply it only when wired, and until then keep "expiry stops new admissions" only.
+  resources apply it only when wired, and until then keep "expiry stops new admissions" only.
 - **Durable state, and restart.** The revocation view and its retained `seq` are in memory. A restarted
   reader starts at `Unknown`, which fails closed **until a checkpoint arrives**, and there is the gap: an old
   checkpoint issued *before* a revocation, and still fresh, is then accepted, and the revoked appointment reads
@@ -187,7 +187,8 @@ under an authority that had since lapsed.
   once the checkpoint arrives.
 
 **Not claimed.**
-- `FsStore` has no `WriteAuthority` seam yet.
+- `FsStore` takes the same seam since closure plan C6 (`FsStore::with_authority`); it has no appointment fence, so
+  there the authority is the whole check.
 - The remote's side, which is whether it honours `--atomic` and whether a pre-receive hook re-checks, is unchanged
   from §5 of the scoped-mandates ADR.
 
