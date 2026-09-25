@@ -402,7 +402,7 @@ pub(crate) struct TaskCtx {
     /// therefore retry-safe, per the `compute` rule in
     /// [lock-free-and-atomics](../../docs/wiki/dev/concurrency/lock-free-and-atomics.md).
     #[cfg(feature = "consensus")]
-    pub(crate) consensus_accepted: Arc<papaya::HashMap<Arc<str>, (u64, bytes::Bytes)>>,
+    pub(crate) consensus_accepted: Arc<papaya::HashMap<Arc<str>, (u64, crate::consensus::Accepted)>>,
     /// Short-lived cache of group membership lists keyed by group name.
     /// Invalidated generation-based: `KvState::grp_generation` is bumped (Release)
     /// whenever a `grp/` key changes; the cache reader loads it with Acquire so it
