@@ -429,3 +429,37 @@ fn concurrent_erase_and_write_never_leave_a_torn_page() {
         }
     }
 }
+
+/// **Closure plan C6.** With an authority attached, every one of `FsStore`'s four mutations asks it
+/// first; a refusal is `authority_refused`, and nothing is written or removed. The plant: the same
+/// operations with the authority granting succeed, so the refusals are the authority's doing.
+#[test]
+fn every_mutation_asks_the_authority_and_a_refusal_writes_nothing() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Switch(AtomicBool);
+    impl crate::store::WriteAuthority for Switch {
+        fn authorize_write(&self) -> Result<(), String> {
+            if self.0.load(Ordering::SeqCst) { Ok(()) } else { Err("revoked".into()) }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let switch = Arc::new(Switch(AtomicBool::new(true)));
+    let s = FsStore::open(dir.path(), "testville").unwrap().with_authority(switch.clone() as _);
+    let a = sec("s1", "H", "kept", &[]);
+    s.write_page("p", std::slice::from_ref(&a), &BTreeMap::new()).expect("granted: the plant writes");
+    let before = s.read("p").unwrap();
+
+    switch.0.store(false, Ordering::SeqCst);
+    let refused = |r: Result<(), WikiError>, what: &str| {
+        let e = r.expect_err(what);
+        assert_eq!(e.as_authority_refused(), Some("revoked"), "{what}: refused as an authority refusal: {e}");
+    };
+    refused(s.write_page("p", &[sec("s1", "H", "changed", &[])], &BTreeMap::new()).map(|_| ()), "write_page");
+    refused(s.write_section("p", &sec("s2", "H", "new", &[]), None).map(|_| ()), "write_section");
+    refused(s.update_manifest("p", &[SectionId::from("s1")], &BTreeMap::new(), None).map(|_| ()), "update_manifest");
+    refused(s.remove_page("p", "erase").map(|_| ()), "remove_page");
+    assert_eq!(s.read("p").unwrap(), before, "nothing was written or removed");
+
+    switch.0.store(true, Ordering::SeqCst);
+    assert!(s.remove_page("p", "erase").unwrap(), "granted again: the same removal proceeds");
+}

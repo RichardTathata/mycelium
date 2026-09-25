@@ -154,7 +154,7 @@ route changes.
 - **Gate:** a revoked member's RPC, gossip write and reconnect are each refused; an unrevoked member is
   unaffected; a forged revocation is ignored.
 
-### C6: `FsStore` gets the `WriteAuthority` seam (S; lowest priority)
+### C6: `FsStore` gets the `WriteAuthority` seam (S; lowest priority) — **implemented, see §8**
 
 - `FsStore` asks the same `WriteAuthority` before each mutating publish (`write_section`, `update_manifest`,
   `write_page`, `remove_page`). It gets A1's time and revocation checks; it still has no appointment fence,
@@ -346,4 +346,5 @@ monotonicity bug (all in #402, merged).
 | C2 | #410 | **No provider marker.** The plan had the gateway dispatch a mandate-bearing call only to a provider whose marker says it verifies mandates. Dropped: an older provider ignores the new envelope field, which is exactly today's behaviour, so dispatching to it is no regression, and C3 is where a provider starts to rely on the field. **The possession proof still binds the resource before `@`**, not the resolved provider: a caller cannot know the provider in advance, so binding it would change what every SDK signs; the provider recomputes the same bytes. **Found on the way:** the streaming door (`tasks/sendSubscribe`) passed no params to the preflight, so a mandate on a stream was never read (a #399 defect); fixed and gated |
 | C3 | #411 | **The provider runs the gateway's own preflight** rather than a separate check, as the enforcement point `provider`: one policy, one mandate assessment, one evidence journal. Opt-in with `with_provider_enforcement()`, failing closed without an evaluator. **A resource claim travels in the envelope** (field `r`): a skill's payload is only its text, so the provider cannot name the skill itself; it accepts the claim only as `…@{self}` for a capability it advertises. `rpc_call_with_mandate` gained a `resource` argument (C2's API, unreleased). **`llm.invoke` is not checked at the provider**: its loop registers its own receiver and no LLM door carries mandates. **Decision recorded, not outcome**, for `rpc_rx` work |
 | C4 | #412 | **Refusals are counted and logged, not written to the rights ledger**: that ledger records governor rights, not per-call admissions (`cohort_budget_refusals()`, metric `mycelium_provider_cohort_refusals_total`). **The place lives as long as the call:** held across the handler in the MCP loops; carried by the `RpcRequest` through `rpc_rx`, so it is released when the serve loop drops the request; parked until `/gateway/rpc/respond` (or 300 s) for the SDK serve stream. **Independent of C3's enforcement**, and after it when both are on, so a refused call never holds budget |
+| C6 | this PR | **The trait moved** from the git-only `mandate_fence` module to `store` (always compiled), re-exported at its old path and at the crate root, so no caller changes. **Asked after the store's own mutation lock**, before anything is written, in all four mutators |
 

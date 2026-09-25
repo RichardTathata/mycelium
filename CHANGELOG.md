@@ -11,6 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`FsStore` takes the authority-at-execution seam** (Boundary H closure plan C6). `FsStore::with_authority` asks a
+  `WriteAuthority` (for example `ExecutionGateAuthority`) before each of its four mutations; a refusal writes nothing.
+  `WriteAuthority` moved to the always-compiled store module and is re-exported at `mandate_fence::WriteAuthority`
+  and the crate root.
 - **Cohort budgets enforced at the provider** (Boundary H closure plan C4, wiring H6). `with_cohort_budget(budget,
   view, external)` admits every protected call a node receives through H6's `CohortBudget`, keyed by the verified
   principal, holding its place while the call is in flight, and refusing a full pool `at_capacity` (`-32004`).
