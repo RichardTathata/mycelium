@@ -110,6 +110,9 @@ impl RpcRequestRx {
 pub enum RpcError {
     /// No reply arrived before the timeout elapsed.
     Timeout,
+    /// The caller envelope, with the mandate it carries, would exceed the size a provider accepts;
+    /// nothing was sent ([`ServiceHandle::rpc_call_with_mandate`](super::service_handle::ServiceHandle::rpc_call_with_mandate)).
+    ContextTooLarge,
 }
 
 /// Registers a one-shot receiver in `ctx.rpc_pending` and awaits the first
@@ -143,6 +146,7 @@ impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RpcError::Timeout => f.write_str("rpc call timed out — no reply from target"),
+            RpcError::ContextTooLarge => f.write_str("rpc call not sent — the caller envelope with its mandate is over the size limit"),
         }
     }
 }

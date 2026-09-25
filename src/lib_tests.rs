@@ -8818,6 +8818,11 @@ async fn test_boundary_h_p1_issuer_binding_on_live_nodes() {
 ///    **established**, the policy permits, and the skill answers.
 /// 3. The authority revokes the appointment: the same call is refused, and the skill is not reached
 ///    again.
+///
+/// Closure plan C2 adds two things. The provider receives, in the caller envelope, **exactly the
+/// mandate the client presented**, for it to verify for itself; and the streaming door
+/// (`tasks/sendSubscribe`) honours a presented mandate too. Before C2 it passed no params to the
+/// preflight, so a mandate on a stream was never read.
 #[cfg(all(feature = "compliance", feature = "a2a"))]
 #[tokio::test]
 async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
@@ -8880,12 +8885,14 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
         Duration::from_secs(30),
     );
     let reached = Arc::new(AtomicUsize::new(0));
+    let carried: Arc<std::sync::Mutex<Option<serde_json::Value>>> = Arc::new(std::sync::Mutex::new(None));
     {
-        let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));
+        let (agent, reached, carried) = (Arc::clone(&agent), Arc::clone(&reached), Arc::clone(&carried));
         let mut rx = agent.service().rpc_rx("skill.invoke");
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 reached.fetch_add(1, Ordering::SeqCst);
+                *carried.lock().unwrap() = agent.presented_mandate(&req).expect("a verified context");
                 agent.service().rpc_respond(&req, b"dispatched".to_vec());
             }
         });
@@ -8958,12 +8965,37 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
     let body = send(Some(serde_json::json!({ "mandate": presented }))).await;
     assert!(body.get("error").is_none(), "an established mandate satisfies the policy: {body}");
     assert_eq!(reached.load(Ordering::SeqCst), 1);
+    // C2: the provider received exactly what the client presented, to verify for itself.
+    assert_eq!(
+        carried.lock().unwrap().clone(),
+        Some(serde_json::to_value(&presented).unwrap()),
+        "the presented mandate travels to the provider in the caller envelope",
+    );
+
+    // C2: the streaming door reads the mandate too, and dispatches under it.
+    let stream_body = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/a2a"))
+        .bearer_auth("s3cret")
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tasks/sendSubscribe", "params": {
+            "id": format!("task-{}", fastrand::u32(..)),
+            "skillId": "depot/dispatch",
+            "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+            "_meta": { "mandate": presented },
+        }}))
+        .send()
+        .await
+        .expect("tasks/sendSubscribe")
+        .text()
+        .await
+        .unwrap();
+    assert!(stream_body.contains("completed"), "a stream call under an established mandate completes: {stream_body}");
+    assert_eq!(reached.load(Ordering::SeqCst), 2, "and reaches the skill");
 
     // 3. The authority revokes the appointment: refused, and the skill is not reached again.
     agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();
     let body = send(Some(serde_json::json!({ "mandate": presented }))).await;
     assert!(body.get("error").is_some(), "a revoked appointment is not established: {body}");
-    assert_eq!(reached.load(Ordering::SeqCst), 1);
+    assert_eq!(reached.load(Ordering::SeqCst), 2);
 
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);

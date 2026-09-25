@@ -1640,13 +1640,15 @@ async fn mcp_handler(
 
             // Item 7: the call carries the auth layer's caller context (never anything the
             // client put in `params`), or is refused — it is never dispatched as the node.
-            let dispatched = gateway_caller::gateway_rpc_call(
+            // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
+            let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
                 &ctx.agent_ctx,
                 caller.as_ref(),
                 provider_node_id,
                 std::sync::Arc::from(crate::signal::signal_kind::MCP_INVOKE),
                 Bytes::from(tool_req.to_string().into_bytes()),
                 Duration::from_secs(30),
+                gateway_caller::presented_mandate(&req["params"]),
             ).await;
 
             // What this gateway actually observed. A timeout is **unknown**, never a negative: the

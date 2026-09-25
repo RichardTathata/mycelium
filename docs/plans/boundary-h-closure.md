@@ -89,7 +89,7 @@ route changes.
   - a `mesh:serve` token can serve and respond, and cannot call;
   - in the confined-fleet deployment test, an agent pod's attempt is refused.
 
-### C2: Carry the mandate to the provider (M; needs nothing)
+### C2: Carry the mandate to the provider (M; needs nothing) — **implemented, see §8**
 
 - **Through the gateway.** The gateway puts the presented grant and possession proof into the caller envelope
   it already signs (`gateway_caller`), next to the principal. Its own assessment stays as evidence; it is not
@@ -343,4 +343,5 @@ monotonicity bug (all in #402, merged).
 |---|---|---|
 | C0 | #402 | none |
 | C1 | #409 | **Six routes, not one.** Reading the gateway found the same hole in `scatter` and `overlay/emit_reliable` (both dispatch an arbitrary kind through `gateway_rpc_call`), and `signal/emit`, `mailbox/deliver` and `shard/emit` take a kind too; all six refuse. **`llm.invoke` is protected by default**, because the raw routes also walked around `llm:invoke`. **The deployment variant of the gate moved to C7/C12**: the confined-fleet deployment test runs `busybox` in place of the gateway (it tests the network policy), so a real-gateway refusal needs the gateway image C7 and C12 need anyway. **Found on the way:** the TypeScript SDK's `rpcCall` sent `kind` where the route reads `method`, so every call was a `400`; fixed and pinned |
+| C2 | #410 | **No provider marker.** The plan had the gateway dispatch a mandate-bearing call only to a provider whose marker says it verifies mandates. Dropped: an older provider ignores the new envelope field, which is exactly today's behaviour, so dispatching to it is no regression, and C3 is where a provider starts to rely on the field. **The possession proof still binds the resource before `@`**, not the resolved provider: a caller cannot know the provider in advance, so binding it would change what every SDK signs; the provider recomputes the same bytes. **Found on the way:** the streaming door (`tasks/sendSubscribe`) passed no params to the preflight, so a mandate on a stream was never read (a #399 defect); fixed and gated |
 

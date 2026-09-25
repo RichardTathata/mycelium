@@ -152,6 +152,13 @@ pub struct GatewayCaller {
     pub issued_at_ms: u64,
     /// How the context was attested.
     pub attestation: CallerAttestation,
+    /// The mandate the caller presented (`params._meta.mandate` at the gateway, or a member's own
+    /// grant on a direct call), **carried, not verified** (closure plan C2). It is not covered by the
+    /// gateway's signature and needs not be: the grant is signed by its establishing authority and the
+    /// possession proof by the holder over this call's operation, resource and arguments, so a relay
+    /// that strips it only causes a refusal, and one that swaps it fails verification. A provider
+    /// verifies it for itself (C3); it never takes a gateway's word that a mandate was established.
+    pub mandate: Option<serde_json::Value>,
 }
 
 /// How a [`GatewayCaller`] was attested.
@@ -378,6 +385,21 @@ pub(crate) async fn gateway_rpc_call(
     payload: Bytes,
     timeout: Duration,
 ) -> Result<Bytes, GatewayDispatchError> {
+    gateway_rpc_call_with_mandate(ctx, caller, target, kind, payload, timeout, None).await
+}
+
+/// [`gateway_rpc_call`], carrying the mandate the caller presented to the provider (closure plan C2).
+/// Under the `Legacy` profile there is no envelope, so nothing is carried.
+#[cfg(any(feature = "gateway", test))]
+pub(crate) async fn gateway_rpc_call_with_mandate(
+    ctx: &TaskCtx,
+    caller: Option<&ResolvedPrincipal>,
+    target: NodeId,
+    kind: Arc<str>,
+    payload: Bytes,
+    timeout: Duration,
+    mandate: Option<&serde_json::Value>,
+) -> Result<Bytes, GatewayDispatchError> {
     use crate::config::GatewayCallerProfile;
     match ctx.config.gateway_caller_profile {
         // Legacy: a bare frame — the node's own action, as before item 7. `rpc_call_framed` (not
@@ -394,7 +416,7 @@ pub(crate) async fn gateway_rpc_call(
                 refused("provider_without_caller_context");
                 return Err(GatewayDispatchError::ProviderWithoutContext(target));
             }
-            let Some(framed) = frame_with_context(ctx, &caller.principal, &caller.scopes, payload) else {
+            let Some(framed) = frame_with_context_and_mandate(ctx, &caller.principal, &caller.scopes, payload, mandate) else {
                 refused("caller_context_too_large");
                 return Err(GatewayDispatchError::ContextTooLarge);
             };
@@ -403,6 +425,13 @@ pub(crate) async fn gateway_rpc_call(
                 .map_err(GatewayDispatchError::Rpc)
         }
     }
+}
+
+/// The mandate a caller presented in `params._meta.mandate`, if any, to carry to the provider
+/// (closure plan C2). Carried as sent; the provider verifies it.
+#[cfg(feature = "gateway")]
+pub(crate) fn presented_mandate(params: &serde_json::Value) -> Option<&serde_json::Value> {
+    params.get("_meta").and_then(|m| m.get("mandate")).filter(|v| !v.is_null())
 }
 
 #[cfg(any(feature = "gateway", test))]
@@ -432,6 +461,10 @@ struct Envelope {
     /// base64 Ed25519 signature (64 bytes)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sig: Option<String>,
+    /// The presented mandate, as JSON (closure plan C2). Absent on the wire when there is none, so
+    /// an envelope without one is byte-identical to before, and an older provider ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    m: Option<serde_json::Value>,
 }
 
 /// Build the framed payload: magic ‖ len ‖ envelope ‖ application payload. Signs under a `tls`
@@ -439,6 +472,18 @@ struct Envelope {
 /// `None` when the envelope would exceed the bound a receiver accepts (`MAX_ENVELOPE_BYTES`) —
 /// the producer never truncates (review finding 4).
 pub(crate) fn frame_with_context(ctx: &TaskCtx, principal: &str, scopes: &[String], app: Bytes) -> Option<Bytes> {
+    frame_with_context_and_mandate(ctx, principal, scopes, app, None)
+}
+
+/// [`frame_with_context`], carrying a presented mandate for the provider to verify (closure plan C2).
+/// `None` when the envelope, mandate included, would exceed `MAX_ENVELOPE_BYTES`.
+pub(crate) fn frame_with_context_and_mandate(
+    ctx: &TaskCtx,
+    principal: &str,
+    scopes: &[String],
+    app: Bytes,
+    mandate: Option<&serde_json::Value>,
+) -> Option<Bytes> {
     // A caller envelope's issue time is checked against a lifetime by whoever receives it, so it
     // must come from a clock that moves. See `Hlc::decision_now_ms`.
     let issued_at_ms = ctx.hlc.decision_now_ms();
@@ -452,6 +497,7 @@ pub(crate) fn frame_with_context(ctx: &TaskCtx, principal: &str, scopes: &[Strin
         t: issued_at_ms,
         k,
         sig,
+        m: mandate.cloned(),
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
     if env_bytes.len() > MAX_ENVELOPE_BYTES {
@@ -722,6 +768,7 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         scopes: env.s,
         issued_at_ms: env.t,
         attestation,
+        mandate: env.m,
     }))
 }
 
@@ -765,6 +812,17 @@ impl crate::GossipAgent {
     /// context is present, otherwise the sending node. `Err` means refuse.
     pub fn request_principal(&self, req: &RpcRequest) -> Result<RequestPrincipal, CallerError> {
         request_principal(&self.task_ctx, req)
+    }
+
+    /// The mandate presented with `req`, **as carried and not yet verified** (Boundary H closure
+    /// plan C2): from a gateway client's `params._meta.mandate`, or from a member's
+    /// [`rpc_call_with_mandate`](crate::ServiceHandle::rpc_call_with_mandate). `Ok(None)`: none was
+    /// presented. `Err`: the caller context itself failed verification, so refuse.
+    ///
+    /// Verify it before relying on it: the grant's holder must be the request's principal, and the
+    /// grant and its possession proof must verify (P2), and the appointment must be current (A1).
+    pub fn presented_mandate(&self, req: &RpcRequest) -> Result<Option<serde_json::Value>, CallerError> {
+        Ok(verify(&self.task_ctx, req)?.and_then(|c| c.mandate))
     }
 }
 
@@ -883,6 +941,80 @@ mod tests {
         assert!(matches!(split_frame(&Bytes::from(v2)), Frame::Malformed(_)));
     }
 
+    /// **Closure plan C2.** A presented mandate travels in the envelope and comes out of `verify`
+    /// exactly as sent; an envelope without one carries no `m` key at all, so it is byte-for-byte
+    /// what it was before C2 and an older provider sees nothing new.
+    #[tokio::test]
+    async fn a_mandate_travels_in_the_envelope_and_one_without_is_unchanged() {
+        let a = agent(false);
+        let mandate = serde_json::json!({"grant": {"mandate": {"holder": "token:gw/a"}, "signature": [1, 2, 3]},
+                                         "possession": "cHJvb2Y="});
+        let framed = frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::from_static(b"app"), Some(&mandate)).unwrap();
+        let req = request_from(a.node_id(), "skill.invoke", framed);
+        let c = verify(&a.task_ctx, &req).unwrap().unwrap();
+        assert_eq!(c.mandate, Some(mandate), "carried exactly as presented");
+        assert_eq!(req.payload(), Bytes::from_static(b"app"), "the application payload is untouched");
+
+        let plain = frame_with_context(&a.task_ctx, "token:gw/a", &[], Bytes::from_static(b"app")).unwrap();
+        let Frame::Framed { envelope, .. } = split_frame(&plain) else { panic!("framed") };
+        let env: serde_json::Value = serde_json::from_slice(&envelope).unwrap();
+        assert!(env.get("m").is_none(), "no mandate, no key: the pre-C2 envelope, unchanged");
+        let req = request_from(a.node_id(), "skill.invoke", plain);
+        assert_eq!(verify(&a.task_ctx, &req).unwrap().unwrap().mandate, None);
+    }
+
+    /// A mandate that would push the envelope over `MAX_ENVELOPE_BYTES` is refused at the producer,
+    /// never truncated (the same rule as an oversized principal).
+    #[tokio::test]
+    async fn an_oversized_mandate_is_refused_not_truncated() {
+        let a = agent(false);
+        let huge = serde_json::json!({"grant": "x".repeat(MAX_ENVELOPE_BYTES), "possession": ""});
+        assert!(frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::new(), Some(&huge)).is_none());
+    }
+
+    /// **A member acting under its own mandate** calls a provider directly: the provider sees the
+    /// member itself as the principal (`RequestPrincipal::Node`) and the mandate it presented.
+    #[tokio::test]
+    async fn a_member_call_carries_its_mandate_as_the_node() {
+        let (pa, pb) = (crate::test_util::alloc_port(), crate::test_util::alloc_port());
+        let (ida, idb) = (NodeId::new("127.0.0.1", pa).unwrap(), NodeId::new("127.0.0.1", pb).unwrap());
+        let mut ca = GossipConfig::default();
+        ca.bind_port = pa;
+        ca.bootstrap_peers = vec![idb.clone()];
+        let mut cb = GossipConfig::default();
+        cb.bind_port = pb;
+        cb.bootstrap_peers = vec![ida.clone()];
+        let (a, b) = (Arc::new(GossipAgent::new(ida, ca)), Arc::new(GossipAgent::new(idb, cb)));
+        a.start().await.unwrap();
+        b.start().await.unwrap();
+        let mandate = serde_json::json!({"grant": {"mandate": {"holder": format!("node:{}", a.node_id())}}, "possession": "cA=="});
+        type Seen = Option<(RequestPrincipal, Option<serde_json::Value>)>;
+        let seen: Arc<std::sync::Mutex<Seen>> = Arc::default();
+        {
+            let (b2, seen) = (Arc::clone(&b), Arc::clone(&seen));
+            let mut rx = b.service().rpc_rx("depot.dispatch");
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    *seen.lock().unwrap() = Some((b2.request_principal(&req).unwrap(), b2.presented_mandate(&req).unwrap()));
+                    b2.service().rpc_respond(&req, b"ok".to_vec());
+                }
+            });
+        }
+        let mut reply = None;
+        for _ in 0..50 {
+            if let Ok(r) = a.service().rpc_call_with_mandate(b.node_id().clone(), "depot.dispatch", b"go".to_vec(), &mandate, std::time::Duration::from_millis(500)).await {
+                reply = Some(r);
+                break;
+            }
+        }
+        assert_eq!(reply.as_deref(), Some(&b"ok"[..]), "the call completes");
+        let (principal, carried) = seen.lock().unwrap().clone().expect("the provider was reached");
+        assert!(matches!(principal, RequestPrincipal::Node(ref n) if n == a.node_id()), "the member is the principal: {principal:?}");
+        assert_eq!(carried, Some(mandate));
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
     /// Review finding 4 (the parser downgrade): every malformed shape is refused by `verify`
     /// and yields an **empty** application payload — never admitted as the node's own call.
     #[tokio::test]
@@ -996,7 +1128,7 @@ mod tests {
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
         let mk = |via: &NodeId, p: String| GatewayCaller {
             principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
-            attestation: CallerAttestation::UnauthenticatedMesh,
+            attestation: CallerAttestation::UnauthenticatedMesh, mandate: None,
         };
         let a = mk(&g1, positional_token_principal(&g1.to_string(), 0));
         let b = mk(&g2, positional_token_principal(&g2.to_string(), 0));
@@ -1037,6 +1169,7 @@ mod tests {
         // Unsigned envelope on an authenticated node: refused.
         let unsigned = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
+            m: None,
         }).unwrap();
         let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
@@ -1051,6 +1184,7 @@ mod tests {
                 v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0,
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
+                m: None,
             }).unwrap();
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
@@ -1071,6 +1205,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let env = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
+            m: None,
         }).unwrap();
         let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
         let req = request_from(a.node_id(), "llm.invoke", bytes.clone());

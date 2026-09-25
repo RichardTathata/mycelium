@@ -11,6 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A presented mandate travels to the provider** (Boundary H closure plan C2). The caller envelope carries the
+  mandate a client presented (`params._meta.mandate` on `/mcp` `tools/call` and `/a2a`), so a provider can verify it
+  for itself rather than trust the gateway's word. A member acting under its own grant calls a provider directly with
+  the new `ServiceHandle::rpc_call_with_mandate`. Providers read it with `GossipAgent::presented_mandate(&req)`,
+  carried, not verified. The envelope field is absent when no mandate is presented, so older providers see no change.
 - **The gateway's raw routes refuse protected work** (Boundary H closure plan C1). `rpc/call`, `scatter`,
   `signal/emit`, `mailbox/deliver`, `shard/emit` and `overlay/emit_reliable` take an RPC kind from the body, and a
   client with `mesh:write` could send `mcp.invoke` or `skill.invoke` through them straight to a provider, skipping
@@ -41,6 +46,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`/a2a` `tasks/sendSubscribe` ignored a presented mandate.** The streaming path passed no params to the action
+  preflight, so a mandate-requiring rule refused every stream call even though both SDKs offer `mandate=` on
+  `stream`. It now passes the request's params, exactly as `tasks/send` does.
 - **`mycelium-ts`: `rpcCall` sent `kind` where the gateway reads `method`**, so every call failed `400`. The
   live test that would have shown it only runs against a gateway. Now sends `method`, pinned by a stub test.
 - **A1: a revocation now stands against later checkpoints that omit it.** `RevocationView` kept only the newest
