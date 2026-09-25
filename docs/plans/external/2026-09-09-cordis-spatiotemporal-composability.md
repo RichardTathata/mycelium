@@ -77,6 +77,16 @@ result whose proof most plausibly requires an inverse that reaches beyond one co
 therefore the first to test against §13.4's scope 3. **Spatial composability** (4.3.3) is the one
 Mycelium's existing coeffect surface already embodies.
 
+**The discriminator, sharpened 2026-09-24 (D40).** It is *not* crash-versus-clean-unload, which was
+§13.5's first guess. It is whether **the dependent set is knowable**. The paper's runtime holds the
+component graph, so a teardown can enumerate who depends on what and wait for them; that is what
+makes its proofs go through. This substrate resolves **by need** — a caller matches a `CapFilter`
+against advertisements whenever it wants one, with no registry of who resolved what — so the set
+cannot be enumerated without adding the coordinator the design exists to avoid.
+
+Any result whose proof needs to enumerate dependents therefore **does not transfer**, and that may be
+most of the temporal metatheory. Applying it to §4.3.2 first is the cheapest way to find out.
+
 ## Why this is in `plans/external/` and not a design record
 
 The assessment already exists and is **not** neutral about the paper — §13.4 adopts the spatial
