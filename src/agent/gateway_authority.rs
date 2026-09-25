@@ -94,6 +94,8 @@ struct AuthorityState {
 pub struct ExecutionAuthority {
     state: Mutex<AuthorityState>,
     external: TrustedExternalIssuers,
+    /// Closure plan C8: installed epochs that survive a restart, if attached.
+    durable: std::sync::OnceLock<std::sync::Arc<crate::mandate::authority::DurableEpochs>>,
 }
 
 impl std::fmt::Debug for ExecutionAuthority {
@@ -118,7 +120,39 @@ impl ExecutionAuthority {
         Self {
             state: Mutex::new(AuthorityState { gate, verifier, revocations: RevocationView::new() }),
             external,
+            durable: std::sync::OnceLock::new(),
         }
+    }
+
+    /// **Record when this reader started** (closure plan C8). From here on, only revocation
+    /// checkpoints issued since `now_ms` (less 2*s*) may refresh freshness, so an old checkpoint
+    /// replayed after a restart cannot make a revoked appointment read as current.
+    /// `GossipAgent::with_execution_authority` calls it at attach time. It resets the revocation view,
+    /// which at attach time holds nothing anyway.
+    pub fn mark_started(&self, now_ms: u64) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).revocations = RevocationView::started_at(now_ms);
+    }
+
+    /// **Keep installed epochs across restarts** (closure plan C8). The journal's floor for this
+    /// gate's scope is installed now, if it is higher than what is configured; later epochs go through
+    /// [`install_epoch_durably`](Self::install_epoch_durably). Set once.
+    pub fn with_durable_epochs(&self, durable: std::sync::Arc<crate::mandate::authority::DurableEpochs>) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(floor) = durable.floor(st.gate.scope()) {
+            st.gate.install_epoch(floor);
+        }
+        drop(st);
+        let _ = self.durable.set(durable);
+    }
+
+    /// Install a later epoch, **journalled first** when durable epochs are attached, so a restart
+    /// cannot fall back below it. Without them, the same as [`install_epoch`](Self::install_epoch).
+    pub async fn install_epoch_durably(&self, epoch: u64) -> Result<bool, crate::agent::journal::JournalError> {
+        if let Some(d) = self.durable.get() {
+            let scope = self.state.lock().unwrap_or_else(|e| e.into_inner()).gate.scope().to_string();
+            d.record(&scope, epoch).await?;
+        }
+        Ok(self.install_epoch(epoch))
     }
 
     /// Offer a revocation checkpoint, at `now_ms`.

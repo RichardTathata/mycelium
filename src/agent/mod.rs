@@ -1164,6 +1164,9 @@ impl GossipAgent {
     /// and the envelope's window is clamped to the mandate's. Without one, the gateway binds no
     /// mandate, exactly as before. Set once; a second call is ignored with a warning.
     pub fn with_execution_authority(&self, authority: Arc<gateway_authority::ExecutionAuthority>) {
+        // Closure plan C8: this reader starts now, so a checkpoint replayed from before the start
+        // cannot refresh its revocation view.
+        authority.mark_started(self.task_ctx.hlc.decision_now_ms());
         if self.task_ctx.execution_authority.set(authority).is_err() {
             tracing::warn!("with_execution_authority: an execution authority is already attached; ignoring");
         }

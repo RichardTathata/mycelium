@@ -244,6 +244,11 @@ impl ResourceAuthority {
         self.installed_epoch
     }
 
+    /// The scope this resource guards.
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
     /// Install a later epoch. **Never goes backwards** — the decisive invariant is about what
     /// happens *after* an installation, so an installation that could be undone would undo it.
     ///

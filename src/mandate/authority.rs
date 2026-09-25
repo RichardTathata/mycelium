@@ -183,6 +183,13 @@ pub enum CheckpointOffer {
     },
     /// Dated further in the future than any honest clock allows: a clock fault or a forgery.
     FutureDated,
+    /// Issued before this reader started (closure plan C8), allowing for skew: a reader that has
+    /// restarted cannot tell a replay of an old checkpoint from news, so only checkpoints issued since
+    /// it started may say "nothing else is revoked". Any revocation it lists still counts.
+    IssuedBeforeStart {
+        /// When this reader started, on its own clock.
+        started_at_ms: u64,
+    },
     /// The signature does not verify for the named authority.
     Unverifiable(UnverifiableReason),
 }
@@ -199,6 +206,8 @@ pub enum CheckpointOffer {
 pub struct RevocationView {
     newest: BTreeMap<(PrincipalId, String), RevocationCheckpoint>,
     revoked: BTreeMap<(PrincipalId, String), BTreeSet<TermId>>,
+    /// When this reader started (closure plan C8). `None`: no start rule (a view built with `new`).
+    started_at_ms: Option<u64>,
 }
 
 /// Where a reader stands on revocation for one appointment.
@@ -217,6 +226,20 @@ impl RevocationView {
     /// An empty view: every standing is `Unknown` until a checkpoint arrives.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// **A view that knows when its reader started** (closure plan C8). Its memory is in-process, so a
+    /// restart forgets every revocation it saw; without this, an old checkpoint issued *before* a
+    /// revocation, still fresh and replayed after the restart, would be accepted and the revoked term
+    /// would read as not revoked. With it, only checkpoints issued since `started_at_ms` (less 2*s*
+    /// for skew) may refresh freshness, so the reader stays `Unknown`, and denies, until the
+    /// authority's next checkpoint.
+    ///
+    /// That is sound only if **checkpoints are cumulative**: each lists every revocation in force in
+    /// its scope, not only new ones. It is the authority's contract (`authority-at-execution.md` §3);
+    /// a reader cannot check it.
+    pub fn started_at(started_at_ms: u64) -> Self {
+        Self { started_at_ms: Some(started_at_ms), ..Self::default() }
     }
 
     /// Offer a signed checkpoint.
@@ -248,6 +271,11 @@ impl RevocationView {
         self.revoked.entry(key.clone()).or_default().extend(c.revoked.iter().cloned());
         if policy.is_future_dated(clock, c.issued_at_ms, now_ms) {
             return CheckpointOffer::FutureDated;
+        }
+        if let Some(t0) = self.started_at_ms
+            && c.issued_at_ms.saturating_add(2 * clock.skew_ms) < t0
+        {
+            return CheckpointOffer::IssuedBeforeStart { started_at_ms: t0 };
         }
         if let Some(held) = self.newest.get(&key)
             && c.seq <= held.seq
@@ -463,6 +491,95 @@ impl ExecutionGate {
     /// Install a later epoch at the protected resource. Never goes backwards.
     pub fn install_epoch(&mut self, epoch: u64) -> bool {
         self.resource.install(epoch)
+    }
+
+    /// The scope of the resource this gate protects.
+    pub fn scope(&self) -> &str {
+        self.resource.scope()
+    }
+
+    /// The epoch installed at the protected resource.
+    pub fn installed_epoch(&self) -> u64 {
+        self.resource.installed_epoch()
+    }
+}
+
+// ── durable epochs (closure plan C8) ────────────────────────────────────────────────────────
+
+/// The journal's error, as [`DurableEpochs::record`] returns it.
+pub use crate::agent::journal::JournalError;
+/// The error [`DurableEpochs::open`] returns.
+pub use crate::knowledge::durable::DurableOpenError;
+
+const EPOCHS_STREAM: &str = "mandate/epochs";
+const EPOCH_ENTRY_VERSION: u8 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct EpochEntry {
+    v: u8,
+    scope: String,
+    epoch: u64,
+}
+
+/// **Installed epochs that survive a restart** (Boundary H closure plan C8).
+///
+/// A resource's installed epoch lives in memory, so after a restart it falls back to whatever is
+/// configured, and a mandate from a **superseded** epoch passes again until an operator reinstalls
+/// the newer one. `DurableEpochs` keeps, per scope, the highest epoch ever installed, in the
+/// node-local journal (fsynced, no new filesystem site). An epoch is **journalled before it takes
+/// effect**, and on start the journal is a **floor**: the configured epoch can raise it, never lower
+/// it.
+///
+/// An unreadable journal does not open. Starting with partial state would reset what the journal
+/// exists to keep, so the caller fails closed (the gate is not attached) until an operator acts.
+pub struct DurableEpochs {
+    journal: std::sync::Arc<crate::agent::journal::Journal>,
+    /// Lock-order row 47: leaf, µs, never held across the journal write.
+    floors: std::sync::Mutex<BTreeMap<String, u64>>,
+}
+
+impl DurableEpochs {
+    /// Open (or create) the journal at `path` and read the floors it holds.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<std::sync::Arc<Self>, crate::knowledge::durable::DurableOpenError> {
+        use crate::knowledge::durable::DurableOpenError;
+        let path = path.as_ref();
+        let entries = match crate::agent::journal::read_journal(path) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(DurableOpenError::Io(e)),
+        };
+        let mut floors = BTreeMap::new();
+        for (i, bytes) in entries.iter().enumerate() {
+            let e: EpochEntry = serde_json::from_slice(bytes)
+                .map_err(|err| DurableOpenError::Unreadable { entry: i, why: err.to_string() })?;
+            if e.v != EPOCH_ENTRY_VERSION {
+                return Err(DurableOpenError::Unreadable { entry: i, why: format!("version {}", e.v) });
+            }
+            let f: &mut u64 = floors.entry(e.scope).or_insert(0);
+            *f = (*f).max(e.epoch);
+        }
+        let journal = crate::agent::journal::Journal::open(path, EPOCHS_STREAM).map_err(DurableOpenError::Io)?;
+        Ok(std::sync::Arc::new(Self { journal, floors: std::sync::Mutex::new(floors) }))
+    }
+
+    /// The highest epoch ever installed for `scope`, if any was recorded.
+    pub fn floor(&self, scope: &str) -> Option<u64> {
+        self.floors.lock().unwrap_or_else(|e| e.into_inner()).get(scope).copied()
+    }
+
+    /// Record `epoch` for `scope`, fsynced, **before** the caller installs it. A value at or below the
+    /// floor records nothing: epochs never go backwards.
+    pub async fn record(&self, scope: &str, epoch: u64) -> Result<(), crate::agent::journal::JournalError> {
+        if self.floor(scope).is_some_and(|f| f >= epoch) {
+            return Ok(());
+        }
+        let entry = EpochEntry { v: EPOCH_ENTRY_VERSION, scope: scope.to_string(), epoch };
+        let bytes = serde_json::to_vec(&entry).map_err(|e| crate::agent::journal::JournalError::Failed(e.to_string()))?;
+        self.journal.append(bytes).await?;
+        let mut floors = self.floors.lock().unwrap_or_else(|e| e.into_inner());
+        let f = floors.entry(scope.to_string()).or_insert(0);
+        *f = (*f).max(epoch);
+        Ok(())
     }
 }
 
@@ -681,6 +798,72 @@ mod tests {
             CheckpointOffer::Unverifiable(_)
         ));
         assert!(gate().check(&work(&w), &clean, 2_000).is_ok(), "a forged revocation revokes nothing");
+    }
+
+    /// **Closure plan C8: a restart does not restore revoked authority.** A reader that started at
+    /// 10 s refuses, for freshness, a checkpoint issued at 5 s: the replay of an old, still-fresh,
+    /// pre-revocation checkpoint leaves it `Unknown`, which denies. The authority's next (cumulative)
+    /// checkpoint names the revocation, and it stands. The plant: a view without the start rule
+    /// accepts the same replay and reads the revoked term as current.
+    #[test]
+    fn after_a_restart_a_replayed_pre_revocation_checkpoint_does_not_refresh() {
+        let w = world();
+        let replay = checkpoint(&w, 1, 5_000, &[]);
+
+        let mut restarted = RevocationView::started_at(10_000);
+        assert_eq!(
+            restarted.offer(&replay, &policy(), clock(), 10_500, &w.members, &w.external),
+            CheckpointOffer::IssuedBeforeStart { started_at_ms: 10_000 }
+        );
+        assert_eq!(gate().check(&long_work(&w), &restarted, 10_500), Err(ExecutionDenial::RevocationUnknown));
+        let next = checkpoint(&w, 2, 10_600, &["t1"]);
+        assert_eq!(restarted.offer(&next, &policy(), clock(), 10_700, &w.members, &w.external), CheckpointOffer::Accepted);
+        assert_eq!(gate().check(&long_work(&w), &restarted, 10_800), Err(ExecutionDenial::Revoked));
+
+        // The plant: no start rule, and the replay makes the (really revoked) term read as current.
+        let mut forgetful = RevocationView::new();
+        forgetful.offer(&replay, &policy(), clock(), 10_500, &w.members, &w.external);
+        assert!(gate().check(&long_work(&w), &forgetful, 10_500).is_ok(), "without the rule the replay is believed");
+    }
+
+    /// A pre-start checkpoint refreshes nothing, but an authentic revocation in it still counts.
+    #[test]
+    fn a_pre_start_checkpoints_revocation_still_counts() {
+        let w = world();
+        let mut v = RevocationView::started_at(10_000);
+        let old = checkpoint(&w, 1, 5_000, &["t1"]);
+        assert!(matches!(v.offer(&old, &policy(), clock(), 10_500, &w.members, &w.external), CheckpointOffer::IssuedBeforeStart { .. }));
+        assert_eq!(gate().check(&long_work(&w), &v, 10_500), Err(ExecutionDenial::Revoked));
+    }
+
+    /// **Closure plan C8: an installed epoch survives a restart.** Recorded before it takes effect,
+    /// read back as a floor: a gate configured at epoch 1 after the restart still refuses a mandate
+    /// from epoch 1 once epoch 2 was installed. A lower record is a no-op.
+    #[tokio::test]
+    async fn an_installed_epoch_survives_a_restart_as_a_floor() {
+        let w = world();
+        let dir = std::env::temp_dir().join(format!("c8-epochs-{}-{}", std::process::id(), fastrand::u64(..)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("epochs.journal");
+        {
+            let d = DurableEpochs::open(&path).unwrap();
+            d.record("cap/fleet", 2).await.unwrap();
+            d.record("cap/fleet", 1).await.unwrap();
+            assert_eq!(d.floor("cap/fleet"), Some(2), "epochs never go backwards");
+        }
+        let reopened = DurableEpochs::open(&path).unwrap();
+        assert_eq!(reopened.floor("cap/fleet"), Some(2));
+        assert_eq!(reopened.floor("cap/other"), None);
+
+        let mut g = gate(); // configured at epoch 1, as after a restart
+        g.install_epoch(reopened.floor(g.scope()).unwrap());
+        let v = view_with(&w, &[checkpoint(&w, 1, 1_000, &[])], 1_000);
+        assert!(matches!(
+            g.check(&work(&w), &v, 2_000),
+            Err(ExecutionDenial::Refused(crate::mandate::MandateRefusal::Superseded { .. }))
+        ), "a superseded mandate stays refused after the restart");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

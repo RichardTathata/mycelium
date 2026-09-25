@@ -11,6 +11,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A restart no longer restores revoked authority** (Boundary H closure plan C8).
+  - `RevocationView::started_at`: a restarted reader refuses, for freshness, checkpoints issued before it started, so
+    a replayed pre-revocation checkpoint cannot make a revoked term read as current. It relies on checkpoints being
+    cumulative, which is the authority's contract.
+  - `DurableEpochs` keeps installed epochs in the node-local journal, journalled before they take effect and
+    reloaded as a floor, via `ExecutionAuthority::with_durable_epochs` / `install_epoch_durably` and the wiki's
+    `ExecutionGateAuthority` equivalents.
+  - `CheckpointOffer::IssuedBeforeStart`. Lock-order row 47.
 - **`FsStore` takes the authority-at-execution seam** (Boundary H closure plan C6). `FsStore::with_authority` asks a
   `WriteAuthority` (for example `ExecutionGateAuthority`) before each of its four mutations; a refusal writes nothing.
   `WriteAuthority` moved to the always-compiled store module and is re-exported at `mandate_fence::WriteAuthority`

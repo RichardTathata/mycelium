@@ -184,7 +184,7 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
 
 ---
 
-### C8: Restart-safe authority state (M; closes F10 and F12)
+### C8: Restart-safe authority state (M; closes F10 and F12) — **implemented, see §8**
 
 - **Cumulative checkpoints.** The checkpoint format is declared **cumulative**: each lists every revocation in
   force in its scope, not only new ones. An authority that cannot produce that refuses to start. The view keeps
@@ -347,4 +347,5 @@ monotonicity bug (all in #402, merged).
 | C3 | #411 | **The provider runs the gateway's own preflight** rather than a separate check, as the enforcement point `provider`: one policy, one mandate assessment, one evidence journal. Opt-in with `with_provider_enforcement()`, failing closed without an evaluator. **A resource claim travels in the envelope** (field `r`): a skill's payload is only its text, so the provider cannot name the skill itself; it accepts the claim only as `…@{self}` for a capability it advertises. `rpc_call_with_mandate` gained a `resource` argument (C2's API, unreleased). **`llm.invoke` is not checked at the provider**: its loop registers its own receiver and no LLM door carries mandates. **Decision recorded, not outcome**, for `rpc_rx` work |
 | C4 | #412 | **Refusals are counted and logged, not written to the rights ledger**: that ledger records governor rights, not per-call admissions (`cohort_budget_refusals()`, metric `mycelium_provider_cohort_refusals_total`). **The place lives as long as the call:** held across the handler in the MCP loops; carried by the `RpcRequest` through `rpc_rx`, so it is released when the serve loop drops the request; parked until `/gateway/rpc/respond` (or 300 s) for the SDK serve stream. **Independent of C3's enforcement**, and after it when both are on, so a refused call never holds budget |
 | C6 | #413 | **The trait moved** from the git-only `mandate_fence` module to `store` (always compiled), re-exported at its old path and at the crate root, so no caller changes. **Asked after the store's own mutation lock**, before anything is written, in all four mutators |
+| C8 | #414 | **Epochs: the gate's installed epoch is persisted, not the verifier's retained epochs.** The gate refuses a mandate below its installed epoch whatever the verifier remembers, so that is what supersession safety needs. **The start is marked where the reader is created**: at `with_execution_authority` for the gateway and provider, and at construction for the wiki store. **The cumulative-checkpoint contract is documented, not checked**: a reader cannot tell a cumulative checkpoint from a partial one |
 
