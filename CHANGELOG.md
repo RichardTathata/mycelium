@@ -352,6 +352,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Nodes sharing a certificate directory could each generate their own cluster CA** (`mycelium-core`
+  TLS). `load_or_generate` checked whether a CA existed and generated one if not. So nodes starting
+  together on one `auto_cert_dir` (one volume, several containers, as the federation compose does)
+  could each generate a CA, trust different roots, and **never peer**. That is the root cause of the
+  federation suite's intermittent "b1 sees its one peer" failures. A node could also read a half-written
+  CA file and fail to start. Now an exclusive-create lock (`ca.lock`) gives exactly one process the right
+  to generate. It re-checks under the lock and publishes each file by rename; every other process waits
+  (bounded, 30 s) and loads that CA. A lock left by a crash is an **error naming the lock**, never a
+  second CA. The regression test starts 8 nodes on one empty directory at the same instant, 20 times; it
+  fails on the old logic and passes on the new.
+
 - **`auto_election_is_deterministic` was asserting the rule we replaced** — *"lowest candidate id
   wins"*, four days after the election became rendezvous (`mycelium::election`). It did not start
   failing; it started being a **coin flip**, because the test's ports are kernel-assigned and
