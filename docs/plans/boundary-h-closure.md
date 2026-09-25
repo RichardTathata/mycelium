@@ -89,7 +89,7 @@ route changes.
   - a `mesh:serve` token can serve and respond, and cannot call;
   - in the confined-fleet deployment test, an agent pod's attempt is refused.
 
-### C2: Carry the mandate to the provider (M; needs nothing)
+### C2: Carry the mandate to the provider (M; needs nothing) — **implemented, see §8**
 
 - **Through the gateway.** The gateway puts the presented grant and possession proof into the caller envelope
   it already signs (`gateway_caller`), next to the principal. Its own assessment stays as evidence; it is not
@@ -336,6 +336,7 @@ Asked whether rev 0.2 fully addressed the review, a re-read found four gaps:
 
 Three items rev 0.2 marked done stay done: order-independent revocation, the *F* − 2*s* correction, and `main`'s
 monotonicity bug (all in #402, merged).
+| C2 | this PR | **No provider marker.** The plan had the gateway dispatch a mandate-bearing call only to a provider whose marker says it verifies mandates. Dropped: an older provider ignores the new envelope field, which is exactly today's behaviour, so dispatching to it is no regression, and C3 is where a provider starts to rely on the field. **The possession proof still binds the resource before `@`**, not the resolved provider: a caller cannot know the provider in advance, so binding it would change what every SDK signs; the provider recomputes the same bytes. **Found on the way:** the streaming door (`tasks/sendSubscribe`) passed no params to the preflight, so a mandate on a stream was never read (a #399 defect); fixed and gated |
 
 ## 8. Delivery record
 

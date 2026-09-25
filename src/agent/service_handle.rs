@@ -58,6 +58,36 @@ impl ServiceHandle {
         rpc_call_ctx(&self.ctx, target, kind.into(), payload.into(), timeout).await
     }
 
+    /// [`rpc_call`](Self::rpc_call), **acting under a mandate** (Boundary H closure plan C2).
+    ///
+    /// For a member that calls a provider directly, not through a gateway. The request carries a
+    /// self envelope (`principal = node:{self}`) with `mandate`, the JSON of a presented mandate
+    /// (`{"grant": …, "possession": …}`: the grant naming this node as holder, and the possession
+    /// proof signed with this node's identity key over the call's operation, resource and arguments
+    /// digest). A provider that checks mandates (C3) verifies it for itself.
+    ///
+    /// Always framed, whatever this node's gateway profile: a mandate needs an envelope to travel
+    /// in. `Err(RpcError::ContextTooLarge)` if it would not fit; nothing is sent.
+    pub async fn rpc_call_with_mandate(
+        &self,
+        target:  NodeId,
+        kind:    impl Into<Arc<str>>,
+        payload: impl Into<Bytes>,
+        mandate: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Bytes, RpcError> {
+        use super::gateway_caller::{frame_with_context_and_mandate, node_principal};
+        let framed = frame_with_context_and_mandate(
+            &self.ctx,
+            &node_principal(&self.ctx.node_id),
+            &[],
+            payload.into(),
+            Some(mandate),
+        )
+        .ok_or(RpcError::ContextTooLarge)?;
+        super::rpc::rpc_call_framed(&self.ctx, target, kind.into(), framed, timeout).await
+    }
+
     /// Sends a reply to an incoming RPC request.
     ///
     /// Echoes the correlation nonce from `request` back to the caller and emits
@@ -187,7 +217,9 @@ impl ServiceHandle {
         use super::overlay_reliable::AckResult;
         match rpc_call_ctx(&self.ctx, target, kind.into(), payload.into(), timeout).await {
             Ok(_)                  => AckResult::Acknowledged,
-            Err(RpcError::Timeout) => AckResult::Timeout,
+            // `rpc_call_ctx` never returns `ContextTooLarge` (only `rpc_call_with_mandate` can); an
+            // unsent call is unacknowledged either way.
+            Err(RpcError::Timeout | RpcError::ContextTooLarge) => AckResult::Timeout,
         }
     }
 

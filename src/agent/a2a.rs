@@ -402,9 +402,10 @@ async fn handle_tasks_send(
 
     // Item 7: the skill provider is told who called (the resolved bearer principal, or
     // `anonymous`), never just "the gateway node".
-    let dispatched = gateway_caller::gateway_rpc_call(
+    // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
+    let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
         &state.task_ctx, caller, target,
-        "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout,
+        "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, gateway_caller::presented_mandate(params),
     ).await;
 
     // A timeout is *unknown*, never a negative — a long-running skill may well have completed.
@@ -469,6 +470,7 @@ pub(crate) async fn tasks_send_subscribe(
     task_id:  String,
     skill_id: String,
     text:     String,
+    params:   Value,
 ) -> impl IntoResponse {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
 
@@ -516,7 +518,10 @@ pub(crate) async fn tasks_send_subscribe(
             "skill.invoke",
             &format!("skill:{skill_id}@{target}"),
             &json!({ "text": text }),
-            &Value::Null,
+            // The request's own params, so a presented `_meta.mandate` is assessed here exactly as
+            // on `tasks/send`. This passed `Null` until 2026-09-25 (closure plan C2), so a stream
+            // call's mandate was never read and a mandate-requiring rule refused every stream.
+            &params,
             super::http::ENFORCEMENT_POINT_A2A,
         )
         .await;
@@ -534,9 +539,11 @@ pub(crate) async fn tasks_send_subscribe(
         }
 
         let timeout = Duration::from_secs(30);
-        let dispatched = gateway_caller::gateway_rpc_call(
+        // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
+        let mandate = gateway_caller::presented_mandate(&params);
+        let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
             &state2.task_ctx, caller.as_ref(), target,
-            "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout,
+            "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, mandate,
         ).await;
 
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -642,7 +649,7 @@ pub(crate) async fn a2a_jsonrpc_full(
             .unwrap_or("")
             .to_string();
         let text     = text_from_message(params.get("message").unwrap_or(&Value::Null));
-        return tasks_send_subscribe(state, caller, id, task_id, skill_id, text).await.into_response();
+        return tasks_send_subscribe(state, caller, id, task_id, skill_id, text, params.clone()).await.into_response();
     }
 
     let result: Value = match method.as_str() {
