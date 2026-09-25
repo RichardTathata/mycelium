@@ -46,6 +46,37 @@ impl Held {
     }
 }
 
+/// Closure plan C10: cooperative cancellation for work served through `rpc_rx`.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+impl RpcRequest {
+    /// **Resolves when the authority this request runs under lapses** (Boundary H closure plan C10):
+    /// its mandate expired, was revoked, went stale or was superseded, as the node's authority sweep
+    /// found. Never resolves for a request that acts under no established mandate, or on a node
+    /// without provider enforcement. A serve loop that does long work should race it:
+    ///
+    /// ```ignore
+    /// tokio::select! {
+    ///     out = do_the_work(&req) => agent.service().rpc_respond(&req, out),
+    ///     _ = req.authority_lapsed() => agent.service().rpc_respond(&req, b"stopped: authority lapsed".to_vec()),
+    /// }
+    /// ```
+    ///
+    /// Awaiting it records that the work **acknowledged** the cancellation; dropping the request
+    /// records the stop as **confirmed**.
+    pub async fn authority_lapsed(&self) {
+        let work = self
+            .1
+            .0
+            .as_ref()
+            .and_then(|a| a.downcast_ref::<super::provider_enforcement::Admission>())
+            .and_then(|a| a.work());
+        match work {
+            Some(w) => w.cancelled().await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
 impl std::fmt::Debug for Held {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(if self.0.is_some() { "Held(slot)" } else { "Held(none)" })

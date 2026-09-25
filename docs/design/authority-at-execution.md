@@ -264,6 +264,40 @@ is running, or **detect** a late act afterwards.
 **Gates.** `a_pause_after_the_check_is_not_caught_locally` asserts that the late write is **counted**.
 `the_remote_hook_refuses_a_push_after_the_appointment_expired` runs the real hook in a bare remote. The plant: a
 current appointment admits the same push.
+## 10. Cancelling admitted work (closure plan C10, 2026-09-25)
+
+**The gap.** A1 checked authority at admission, dequeue and retry, and `StopContract` modelled a stop, but nothing
+stopped a handler already running when its mandate lapsed. Revocation stopped new work; old work ran on.
+
+**The mechanism.** `StopContract`'s `ReauthorizeAt` continuation, made real:
+- **Registration.** When the provider check (§8) admits a call acting under an **established** mandate, the
+  node's `ExecutionAuthority` registers it as running (`begin`) and returns a `WorkGuard`.
+- **The sweep.** The agent sweeps running work every `sweep_interval_ms()` (*F*/20, within 100 ms and 5 s), re-running
+  A1's check on each item. One sweep catches expiry, revocation, a stale revocation view and a superseded epoch alike.
+  The first failed check **cancels** the work.
+- **Where cancellation lands:**
+  - **MCP tool handlers:** the handler's future is **dropped**, a confirmed stop, and the call answers that its
+    authority lapsed;
+  - **`rpc_rx` serve loops:** cooperative. `RpcRequest::authority_lapsed()` resolves, and a loop that races it stops
+    and answers. A loop that ignores it runs on, and its stop is unconfirmed until it drops the request.
+- **Measurement.** Each stop is recorded as requested (the sweep), acknowledged (the work observed it) and confirmed
+  (the guard dropped), kept apart as §2 requires. `stop_records()` feeds `drain_report`.
+
+**The drain bound**, for a cancellable handler: the sweep interval, plus *s*, plus the handler's own time to stop.
+For a cooperative loop it is that **only if the loop races `authority_lapsed()`**; otherwise it is `Unbounded`, as the
+model already says of a continuation that cannot confirm.
+
+**Gates.** `test_c10_running_work_stops_when_its_authority_lapses`:
+- the plant: a sweep with nothing revoked cancels nothing;
+- after revocation, the next sweep cancels an MCP handler (its future dropped, the call answered) and a cooperative
+  skill (which observes the lapse and answers);
+- both stops are recorded with requested, acknowledged and confirmed times.
+
+**Not claimed.**
+- **The SDK serve stream does not forward cancellation** to the agent behind it: work handed to an SDK agent is
+  unconfirmed. Forwarding it needs an SDK change on both sides.
+- **The bridged external-MCP loop is not cancelled**: the external server is outside the node.
+- Spawned tasks a handler starts are its own to stop: dropping the handler's future stops only that future.
 
 ## 5. Gates
 

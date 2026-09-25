@@ -1167,6 +1167,22 @@ impl GossipAgent {
         // Closure plan C8: this reader starts now, so a checkpoint replayed from before the start
         // cannot refresh its revocation view.
         authority.mark_started(self.task_ctx.hlc.decision_now_ms());
+        // Closure plan C10: re-check running work periodically, so work admitted under a mandate
+        // stops when the mandate expires, is revoked, goes stale or is superseded.
+        {
+            let (ctx, sweeper) = (Arc::clone(&self.task_ctx), Arc::clone(&authority));
+            let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
+            self.task_ctx.spawn_task(async move {
+                loop {
+                    let interval = sweeper.sweep_interval_ms();
+                    tokio::select! {
+                        _ = capability_ops::await_shutdown(&mut shutdown) => break,
+                        _ = mycelium_core::sim_seam::sleep_ms("authority/sweep", interval) => {}
+                    }
+                    sweeper.sweep(ctx.hlc.decision_now_ms());
+                }
+            });
+        }
         if self.task_ctx.execution_authority.set(authority).is_err() {
             tracing::warn!("with_execution_authority: an execution authority is already attached; ignoring");
         }

@@ -140,6 +140,10 @@ where
         };
 
         let args   = rpc_req["params"]["arguments"].clone();
+        // C10: under a mandate, the handler is cancelled if the mandate lapses while it runs.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let result = super::provider_enforcement::run(&_admission, handler(principal, args)).await;
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let result = handler(principal, args).await;
 
         let response = match result {
