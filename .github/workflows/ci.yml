@@ -89,6 +89,10 @@ jobs:
       # argument value, denied by remit, and twice INDETERMINATE — which refuses. The fourth act
       # is the gate: an unmapped tool must never fall through to permit.
       - run: cargo run --example mcp_tool_authority --features tls,compliance
+      # The OTHER door, and the unguarded one: `/a2a` requires no bearer, so the evaluator is the
+      # whole gate there. Seven acts, including the streaming path — a refusal must arrive as a
+      # `failed` task event and CLOSE the stream, not leave a subscriber waiting on silence.
+      - run: cargo run --example a2a_skill_authority --features tls,a2a
       - run: cargo run --example knowledge_layer --features tls
       - run: cargo run --example federated_domains --features tls
       # The third domain: the question two domains cannot ask. Each act asserts, so "trust does
