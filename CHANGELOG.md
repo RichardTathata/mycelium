@@ -23,6 +23,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   `None`, the default, is unchanged behaviour. **Upgrade note:** a `GitStoreConfig` built as a struct literal
   without `..Default::default()` needs the new field. Lock-order row 44.
+- **`examples/a2a_skill_authority`** (#406) — the `/a2a` enforcement demonstration, and the gallery's counterpart to
+  `mcp_tool_authority`. Seven acts against a real gateway with a real provider behind it: `/mcp` answers 401 without
+  a bearer while `/a2a` answers the same caller; a permitted dispatch, a denial on an argument value, a denial by
+  remit, an **indeterminate** refusal, a `-32001` that fires *before* the evaluator (so no evidence record claims a
+  policy decided it), and a refusal over `tasks/sendSubscribe`. The point it exists to make: an enforcement point
+  that can be walked around by choosing a different door is not an enforcement point. `docs/guide/20` gains the
+  matching section; CI runs it.
 
 ### Fixed
 
@@ -40,6 +47,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its git transaction; a paused process can write late by the pause. That is now a stated limit pinned by
   `a_pause_after_the_check_is_not_caught_locally`, not "not a gap". A restart's fail-closed holds only until a
   checkpoint arrives (closure plan C8). All three from an external review.
+- **Authorization decisions read a live clock, not a frozen one** (#405). Three sites deciding whether something
+  had **expired** read `physical_ms(hlc.current())`. `Hlc::current()` is a bare atomic load: it never consults the
+  wall clock and advances only when `tick()` runs, which happens on gossip traffic. On a quiet or partitioned node
+  it therefore freezes at whenever the node last heard from anyone — and each site failed **open**: a mandate never
+  expired (the AE preflight's `now_ms`), an issuance timestamp stayed fresh (`GatewayCaller::issued_at_ms`), and a
+  checkpoint never went stale (`offer_checkpoint`). A partition is exactly when an expiry check must keep counting.
+  New `Hlc::decision_now_ms()` = `wall_now_ms().max(physical_ms(current()))` — deliberately **not** `tick()`, so
+  taking a reading never mutates the HLC, and floored by the HLC so a peer that has seen the future cannot make this
+  node see the past. `wall_now_ms` is the sim seam, so replay determinism is unchanged. Gates:
+  `hlc::decision_clock_tests`.
+- **`/a2a` warns when it mounts as an open surface** (#403). Unlike `/mcp`, which requires the `mcp:invoke` scope,
+  `/a2a` has **no scope floor** — it is public by design, which is what makes it an interoperable A2A endpoint. With
+  neither an action evaluator nor any gateway bearer configured, an anonymous caller reaches skill dispatch.
+  `with_a2a()` now says so at mount time rather than leaving it to be discovered. An open surface is a deployment
+  decision; it must not be an accident.
+- **A terminal task state is the last thing an A2A subscriber hears** (#408). `tasks/sendSubscribe` spawns a
+  detached task that sleeps 100 ms then emits `working`. It was spawned *before* the outcome was known and nothing
+  cancelled it, so an outcome reached inside 100 ms was overtaken by its own progress report: an AE refusal resolves
+  in about a millisecond, and the stream read `submitted → failed → working` — a terminal state followed by a
+  non-terminal one, which reads as a task recovering from failure. The success path had it too (`completed →
+  working` for any dispatch under 100 ms), so this predates the AE seam and is not about refusals. The handle is now
+  aborted before every terminal event. Gate: `no_event_follows_a_terminal_task_state_on_the_stream`, which asserts
+  the **order** of states rather than forbidding the event — `working` before a terminal state is correct on a slow
+  skill. Found by `examples/a2a_skill_authority` on its first CI run.
+- **The replay forbidden-call gate never exempted `#[cfg(all(test, …))]` modules** (#408). The test-module skip
+  matched the literal `#[cfg(test)]` only, so the nine modules written that way were counted as **production** and
+  their clock and filesystem calls sat in `scripts/sim-seams-baseline.txt` as if they were admitted replay debt.
+  A gate that fires on correct code teaches people to bump the baseline without reading it, which is the mirror of
+  the false pass the first fix addressed. `src/agent/http.rs` 38 → 15, total 181 → 158; **no production site
+  changed**. Recorded as §6's third gap of this family, and the first to over-count.
 
 ## [2.14.0] — 2026-09-25
 
