@@ -18,8 +18,13 @@ left blank. The obligations every companion owes are the
 **The shared shape** (true of the four stateful ones):
 
 - **Failover is the capability ring, not consensus.** Each serving role advertises a capability
-  (`{ns}.primary` / `.curator`); a watcher promotes when that capability *evaporates*. Lowest-node-id
-  wins, reconciled continuously — there is no leader-election consensus and no distributed lock.
+  (`{ns}.primary` / `.curator`); a watcher promotes when that capability *evaporates*. The ring's
+  **negotiated election rule** picks the holder, reconciled continuously — there is no
+  leader-election consensus and no distributed lock. Since 2026-09-24 that rule is **rendezvous**
+  (`hash(ring, node)`), so two rings do not hand the same node both jobs; a fleet whose candidates
+  cannot all compute it stays on the older *lowest-node-id* rule until the upgrade completes, which
+  is why a half-upgraded fleet can still look concentrated
+  ([diagnostics](diagnostics.md#a-coordinator-by-accretion-p10)).
   Promotion latency ≈ the capability refresh/evaporation window (`cap_refresh`): failover is
   **seconds**, not instantaneous. *Why the ring and not the (CP) distributed lock — and how the
   eventual-single election is made safe rather than merely convergent:*
@@ -90,9 +95,10 @@ The wiki has a genuinely different operational model: a **node-independent store
   last for torn-read safety; dropped sections become orphans and there is **no GC yet** — orphan
   growth is unbounded, so schedule a periodic prune.)
 - **Curator election / failover.** Each `Auto` node advertises `{group}.candidate`; the **lowest
-  node-id** self-elects and advertises `{group}.curator`. A reader promotes after two consecutive
+  rule** picks it and it advertises `{group}.curator`. A reader promotes after two consecutive
   empty `curator` resolves one `cap_refresh` apart (split-brain guard). A `sentinel` task applies
-  lowest-id-wins *continuously*, so a superseded curator `resign`s. Promotion latency ≈ the capability
+  **the same rule** *continuously*, so a superseded curator `resign`s — the same rule, because a
+  sentinel ordering curators differently from the election would leave two that never converge. Promotion latency ≈ the capability
   evaporation window.
 - **Who is the curator?** `is_curator()` locally; cluster-wide, resolve the `{group}.curator`
   capability on any node. `request_store_access` returns `NoCurator` when none is elected — a usable

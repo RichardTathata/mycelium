@@ -1,6 +1,6 @@
 ## [2026-09-22] ingest | the fuzz gate that had never run — four defects, and three ways a gate can be hollow
 
-Up: [dev](../dev.md) · [testing](testing/testing.md) §Trust-edge fuzz gate · release `v2.11.1`
+Up: [dev](../dev.md) · [testing](../testing/testing.md) §Trust-edge fuzz gate · release `v2.11.1`
 (`CHANGELOG.md`) · PRs #347, #349, #350, #351.
 
 **The shape of it.** §12.6 shipped eight trust-edge fuzz targets in v2.10.0 and called the gate done.

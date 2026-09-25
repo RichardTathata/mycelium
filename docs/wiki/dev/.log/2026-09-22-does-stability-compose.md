@@ -1,6 +1,6 @@
 ## [2026-09-22] ingest | does stability compose? — two isolations, neither of which can ask
 
-Up: [dev](../dev.md) · [testing](testing/testing.md) §Replay scenario C · record
+Up: [dev](../dev.md) · [testing](../testing/testing.md) §Replay scenario C · record
 `docs/design/adaptive-stability.md` §5 · code `src/control/scenario_c.rs`.
 
 **The claim under test.** The adaptive-stability ADR's sharper sentence: *loops that oscillate

@@ -9,7 +9,82 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.14.0] — 2026-09-25
+
+**Coordination that says what it means.** Wire **v12** unchanged (`PREV = 11`); additive on the 2.x
+line throughout.
+
+The release began with a question in a design note — *is role accumulation constrained anywhere?* —
+and the answer was **no**, twice over. Not prevented, which is the design working: *detection, not
+prevention* is the law here. But **not detected either**, which is not. Every single-writer ring
+elected by *lowest candidate node id wins*, so the same rule over the same candidates put **every
+single-writer job on one node**, and the seven existing detectors all watched other axes — P2 churn,
+P6 gaps. A concentrated fleet read as **perfectly healthy by every measurement that existed**, until
+the node it all depended on went away. **P10** makes it visible; **`mycelium::election`** stops
+producing it, with the rule **negotiated from the candidate set** rather than flag-dayed.
+
+**Then a harder question, and it turned over a rock.** An attempt to make
+`require_identity_proofs` default-on was reverted a day later, and the failure it was blamed on
+turned out not to be its doing — which sent us to look at the election path properly. What was found
+there is the substance of this release:
+
+- an election over a roster a node **cannot see** was counted as one member with a quorum of one,
+  satisfied by the proposer's own vote, so **every node elected itself**;
+- a **vote did not say what it voted for**, and ballots come from a shared key, so two proposers
+  could count the same voter and commit **different values at one ballot**;
+- a node could **equivocate with itself**, because its proposer and acceptor roles kept separate
+  memories;
+- a proposer at a higher ballot **overwrote** a value a quorum had already accepted;
+- and none of that memory **survived a restart**.
+
+All five are closed. Beside them, a node's identity and its proof now travel as **one record**, so
+they cannot arrive apart; a leadership answer **names the rung it reached** and carries a fencing
+token; and `POST /gateway/kv` no longer succeeds at writing nothing.
+
+**The honest limit, stated on the tin.** None of this makes leadership an exclusive grant that stays
+true — no coordinator-free protocol can promise that. LWW decides which *record* survives; it cannot
+undo work two callers each performed after being told they had won. **Exclusivity is enforced at the
+resource**, by refusing a stale token, and the substrate's job is to give you a token worth
+refusing.
+
+**Upgrade notes.** `ConsensusResult` is now **`#[non_exhaustive]`**; `CommitError` and
+`ConsistencyError` gain variants — a `_` arm is required and **must fail closed**. `FleetSnapshot`
+gained `role_concentration`. A client that omitted `value_b64` on `POST /gateway/kv` now gets a
+**400** where it used to get `{"ok": true}` (every first-party SDK already sends it). Election
+behaviour changes only once every candidate advertises `election_rule`. **No identity-proof
+action** — the default is unchanged from 2.13.0.
+
+**Rolling upgrade.** While any voter is un-upgraded, group proposals from an upgraded proposer
+**time out** rather than commit: fail-closed and visible, instead of committing two values quietly.
+
+**Not claimed:** rendezvous is a **spread, not a bound** (three rings over three nodes still leave
+~11% chance one node wins all three), which is why P10 stays. *Proofs required* is **not** *identity
+authenticated* — first sighting remains trust-on-first-use, which anchors close, not proofs. And the
+agreement repair establishes single-decree safety; it is not a proof of the whole protocol.
+
 ### Added
+
+- **Seven runnable demonstrations of everything above — and CI *runs* them, it does not merely build
+  them.** Building an example proves the API still compiles; running it proves the demonstration
+  still demonstrates, which is the thing a gallery is a gate on. CI-run examples went from 6 to 12.
+
+  | Example | The claim it makes checkable |
+  |---|---|
+  | `coordination_integrity` | absence is not authority · an answer names its rung · exclusivity is fenced **at the resource** |
+  | `coordinator_by_accretion` | one rule over one candidate set has one winner, every ring; rendezvous spreads; a spread is **not a bound** |
+  | `coordination_viz` (`:8100`) | the same, watchable — a real three-node fleet and a live concentration gauge |
+  | `federation_trust_is_not_transitive` | a trust bundle does not compose · a grant you hold is not re-exportable · budgets are pairwise |
+  | `identity_one_record` | two entries are two messages; one entry cannot arrive in two parts |
+  | `auditor_questions` | who asked · whether the record stands · whether one person can leave |
+  | `mcp_tool_authority` | which **tools** an agent may actually call, per call, including the undecided case |
+
+  `receipt_ladder` also gains the rung production actually hits: a **lost acknowledgement**, where
+  `prepare_write`/`commit_prepared` lets a retry lose LWW instead of undoing a newer value.
+
+  The Ops Console gains an **Integrity** tab. The coordination and identity properties are
+  *refusals*, and you cannot watch a thing not happen — so it shows the **preconditions** (can this
+  fleet elect? is it safe to require proofs yet? is one node holding everything?), composed entirely
+  from endpoints the console already read.
 
 - **Mandates established at the gateway** (Boundary H A1, gateway wiring; ADR
   `docs/design/authority-at-execution.md` §6). The gateway always bound `mandate: None`, so a policy rule

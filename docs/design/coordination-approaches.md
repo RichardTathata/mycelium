@@ -77,7 +77,9 @@ property; correctness rides on the fencing, not on the election being instantane
 
 ## Why the three companions reject the lock
 
-**Tuple space + blackboard** — lowest-node-id ring self-election of a **primary** + a local
+**Tuple space + blackboard** — ring self-election of a **primary** (by the ring's negotiated
+election rule — `mycelium::election`; **rendezvous** since 2026-09-24, lowest-node-id before it and
+still, in a fleet whose candidates cannot all compute the newer rule) + a local
 `Mutex` that serialises within it + a WAL, with **id-fencing** (`put_with_id`/`fetch_max`) so a
 promoted secondary never re-issues an id the old primary assigned, and idempotent replay so a doubled
 apply is harmless (the [exactly-once-effect contract](exactly-once-effect.md);
@@ -87,7 +89,9 @@ lock **serialises** where a queue must **distribute** ([04-consensus.md](../guid
 says exactly this: *"don't build a queue from one lock"*). A quorum-blocking acquire would stall the
 pipeline the moment a partition costs quorum — the opposite of what a work buffer is for.
 
-**Wiki** — lowest-node-id ring self-election of a **curator** + **section-granular compare-and-swap**
+**Wiki** — ring self-election of a **curator** (same negotiated rule; its split-brain sentinel
+**must** order curators exactly as the election ordered candidates, or two curators each believe
+themselves correct and neither resigns) + **section-granular compare-and-swap**
 on the store (`read_versioned` → reconcile → `write_section`/`update_manifest`, each keyed on the
 version read; a stale write returns `WikiError::Conflict` and the curator re-reads + re-reconciles;
 the idempotent reconcile makes the retry lossless — [wiki-concurrent-edit.md §3.5](wiki-concurrent-edit.md),
@@ -125,7 +129,9 @@ the better tool, and cheaper.
 Building a new coordinated service on Mycelium? Start from the companion pattern, not the lock:
 
 1. **Elect a single writer on the capability ring** (advertise a `{ns}.primary`/`.owner` capability;
-   lowest-node-id self-elects; a watcher promotes when it evaporates — [companions.md](../operations/companions.md)).
+   the ring's election rule picks one — `mycelium::election`, **rendezvous** since 2026-09-24 so two
+   rings do not hand the same node both jobs; a watcher promotes when it evaporates —
+   [companions.md](../operations/companions.md)).
    Coordinator-free and AP.
 2. **Make the eventual-single election safe with a fencing discipline**, not with a lock — id-fencing
    + idempotent replay if you hold your own state (the [exactly-once-effect contract](exactly-once-effect.md)),

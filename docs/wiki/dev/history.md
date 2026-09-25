@@ -22,6 +22,87 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.14.0 release — 2026-09-25 (tag `v2.14.0`) — coordination that says what it means
+
+Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line.
+
+**Read this entry as two halves.** The first is what the release set out to do — P10 and the
+election rule, below. The second is what it found on the way, and is much the larger: an attempt to
+flip `require_identity_proofs` was reverted, the failure it was blamed on turned out **not to be its
+doing** (the flag is inert without TLS, and the suite's nodes configure none), and going back to
+read the election path properly turned over five defects in the agreement protocol — an election
+with no electorate deciding alone, votes not bound to what they voted for, a node equivocating with
+itself, a higher ballot overwriting an accepted value, and none of that memory surviving a restart.
+All five are closed here. The wrong diagnosis is recorded alongside the right one, because it is the
+more instructive of the two: *"it was the only change in that commit"* is a prior, not a mechanism.
+
+**The centrepiece started as a question in a design note** — *is role accumulation constrained
+anywhere I did not look?* The answer was **no**, twice over, and the second half is the one that
+mattered. *Not prevented* is the design working: **detection, not prevention** is this substrate's
+law, so a missing `max_roles` is expected. **Not detected** is not. Every single-writer ring elected
+by *lowest candidate node id wins*, so the same rule over the same candidates put **every
+single-writer job on one node** — deterministically, on first election and again after every
+restart — and the seven existing detectors were all watching other axes: **P2 churn** (a node calmly
+holding everything produces none), **P6 gaps** (everything has a provider, merely the same one).
+A concentrated fleet read as **perfectly healthy by every measurement that existed**, until the node
+it all depended on went away, taking every role with it *as a block*.
+
+The general lesson, worth more than the fix: **a catalogue of pathologies is not a catalogue of
+axes.** Seven detectors over two axes leave every other axis unwatched, and nothing in the catalogue
+says which axes it covers.
+
+Both halves shipped together, deliberately — because **rendezvous spreads but does not bound**:
+
+- **P10** makes it visible: `detect_role_concentration`, hysteresis-confirmed, with the
+  **partition guard** that is the subtle part (a node which has lost sight of its peers sees only
+  its own roles, *the pathology's exact shape*, so the reading is withheld below two visible
+  holders — otherwise a partitioned node's first act is to accuse itself). Plus the operator half:
+  `mycelium_emergent_role_concentration_pct`, a `diagnose_fleet` finding that says *"nothing is
+  failing: this reads as healthy on every other detector, which is why it is easy to miss"*, a
+  `narrate` gloss, a runbook recipe and a `for: 30m` warning alert — a standing structural
+  condition, not a page.
+- **`mycelium::election`** stops producing it: rendezvous ordering (`hash(ring, node)`), so
+  different rings pick different winners and a failover relocates one role rather than all of them.
+
+**The rollout was the real difficulty**, and it is the part to remember. The companions' safety
+rests on every node computing the *same* answer — the wiki's sentinel says so outright. Deploy a new
+rule node-by-node and an old node and a new one each believe they are the winner and **neither
+resigns**: a *stable* two-holder state for the length of the rollout, in the one place the design
+has no coordinator to break the tie. So the rule is **negotiated from the candidate set**: each
+candidate advertises what it can compute (`election_rule`, an ordinary capability attribute — no new
+gossip), and every elector takes the **minimum across live candidates**. A ring is only as new as
+its oldest member. What remains is a *convergence-length* window (seconds), not a rollout-length one.
+
+**`require_identity_proofs` was flipped to `true`, and reverted before release** — the release's
+second lesson rather than its second feature. The argument was sound: every TLS node has written
+`sys/identity-proof/{self}` unconditionally since Phase 2 (v2.3.0), so the two-release rollout the
+old caveat prescribed finished ten releases ago. What it missed is that identity and proof are
+**two separate `kv_set` calls**, hence two gossip messages with no ordering between them. A peer
+that learns the identity first rejects it and holds no key for that node. The *key* heals itself
+(`start_identity_watcher` subscribes to the broader `sys/identity` prefix precisely so a late proof
+re-validates), so the window is transient — **but a leader election decided inside it is not**, being
+one-shot. The Docker suite split on `S12 leader election … Nodes disagree on leader` after twelve
+consecutive greens.
+
+Flipping it **broke no test**, and that is the transferable part: every test exercising the
+behaviour sets the flag explicitly, and the in-process suites have no cross-process ordering window
+to lose a race in. *A config default whose only failure mode is a race between processes is not
+testable by the suite that gates the PR* — a green `make check` on a default flip is not evidence,
+it is the absence of a gate. What survives the revert: the default is pinned **with its reason**
+(flipping it back means editing a test that explains itself), the end-to-end join is pinned beside
+it, and a third test states the boundary the flag never closed (first sighting is still
+trust-on-first-use; anchors close that, not proofs), written to fail if that window is ever shut.
+A future flip's precondition is an **atomic** identity+proof record, not "every node writes a proof
+anyway".
+
+Also: `RELEASING.md` **step 8** — a tag is not an announcement. The Releases page had said *"Latest:
+v2.4.4"* since 2026-09-12 while eleven tags shipped behind it, four carrying security fixes, because
+**nothing fails when the publish step is skipped**. All eleven were backfilled from their own tag
+messages.
+
+**Upgrade notes:** `FleetSnapshot` gained `role_concentration`; election behaviour changes only
+once every candidate advertises its rule; **no identity-proof action** — the default is unchanged.
+
 ## v2.13.0 release — 2026-09-23 (tag `v2.13.0`) — the axis' last open questions, and a gateway that was not closed
 
 > **Published to the Releases page 2026-09-23, along with the ten tags before it.** The page had

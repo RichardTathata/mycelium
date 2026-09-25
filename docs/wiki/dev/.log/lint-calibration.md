@@ -194,3 +194,76 @@ Entry format:
   `src/agent/http.rs`, and check the **segment shape** — a `{param}` pattern never matches a slash-bearing
   value. Also added, no miss behind it: the front-door install snippet's `tag = "…"` pins are diffed against
   the newest tag per line (the reason pin sat at 0.6.0 with 0.6.2 current).
+- 2026-09-24: **§3 dead-link sweep — scope gap: `.log/` entries were never swept.** Two ingest
+  entries written 2026-09-22 linked `testing/testing.md` from `dev/.log/`, resolving to
+  `dev/.log/testing/testing.md`. This is the **same one-`../`-too-many shape as the 2026-09-04
+  entry**, in a directory that entry's sharpening did not reach: the fix then was "resolve every
+  link relative to its own file's directory *and include `wiki.md` + the front-door guide docs*",
+  which enumerated the pages a reader browses and quietly excluded the logs. No prior pass declared
+  these clean (the last lint was 2026-09-06, the links landed 09-22), so this is a scope gap rather
+  than a miss — but it is the *second* time the same breakage shape survived a sharpening aimed at
+  it. Sharpening: §3 walks **every `.md` under the swept roots, `.log/` included** — the ingest
+  entries are the most-written and least-read files in the wiki, which is exactly where a link rots
+  unseen. (This pass's script does; it is in the log.)
+- 2026-09-24: **§1 enumeration check — a new detector's gauge reached three docs and missed the
+  one that enumerates them.** P10 shipped the same day with a `diagnostics.md` recipe, a
+  `metrics.md` row and a wiki detector table row, while `dev/operations.md` — the page that
+  *enumerates* the `/stats` and `/metrics` detector gauges — still listed P1, P6, P2, P3, P4 and
+  not P10. Found by this pass grepping the enumeration rather than the new docs. It is the
+  **"audit by category, not by count"** rule applied to gauges rather than examples: the list was
+  not wrong about anything it contained, it was simply short one member, which no count would
+  reveal. Sharpening: when a check adds an observable (gauge, `/stats` field, route, feature),
+  diff the observable set in **code** against every page that *enumerates* it — `dev/operations.md`
+  for `/stats` + `/metrics`, `metrics.md` for the Prometheus names — not merely against the page
+  that *describes* the new thing.
+- 2026-09-24: **§2 staleness — a shipped capability still described as unshipped in the
+  shared-responsibility matrix.** `operations/shared-responsibility-matrix.md` said *"TLS on the
+  federation edge itself is not shipped"* after v2.13.0 shipped exactly that (pinned SPKI,
+  2026-09-23). The release's own docs pass updated the runbook, the guide chapter and the design
+  record — and not the matrix, which is the document an adopter reads to decide what they must
+  provide themselves, i.e. the highest-stakes place for that particular sentence. Sharpening: the
+  staleness check greps the matrix specifically for "not shipped" / "not provided" / "you must"
+  claims against the release's changed surfaces, because it is the one page whose *whole content*
+  is claims about what does and does not exist.
+- 2026-09-24: **§1 scope gap — `docs/plans/` was never a swept root.** The plan of record's §10.2
+  called `require_identity_proofs` *default-off* hours after the default was flipped, and the same
+  day's lint pass did not look: it swept `docs/wiki`, `guide`, `operations` and `design`, which are
+  the roots habit supplies. But `plans/` **restates code facts** exactly as the front-door docs do
+  (it is the document a session reads to decide what to work on next), so it drifts the same way and
+  is read earlier. Found by a user asking *"is v3 delivered?"* — a question the sweep should have
+  been able to answer without a human noticing the stale parenthetical. Sharpening: `docs/plans/` is
+  a swept root for §1 and §2, with the *plan of record* checked specifically against the release's
+  changed defaults and surfaces. (The specific drift resolved itself — #368 was reverted the next
+  day, making *default-off* right again. The scope gap did not; see the last entry.)
+- 2026-09-24 (full pass): **§1 front-door reserved-prefix list — the FOURTH occurrence, now a gate.**
+  Both lists in `building-on-mycelium.md` were missing **all four v3 prefixes** (`knowledge/`,
+  `mandate/`, `rights/`, `cn/`), and the blockquote was additionally missing seven older companion
+  ones. The plan's §7 *required* both front-door lists to be updated at each item's PR 1; that was
+  not done for any of the four. Prior sharpenings (2026-09-04, 2026-09-05) both said "diff **every**
+  occurrence, mechanically" — and the drift shipped anyway, **because nothing ran the diff**. A check
+  that depends on somebody remembering to run it has the same failure mode as the thing it checks.
+  Sharpening (structural, not another point patch): the diff is now a **gate** —
+  `scripts/check-kv-namespaces.sh` extracts the `src/lib.rs` prefix set and requires each prefix to
+  appear **twice** in the front door (once per list), and `make check` already runs that script.
+  Verified by planting a single removed prefix: it fails with the prefix named, and **exits 1**.
+- 2026-09-24 (full pass): **§1 front-door install snippet — pointing at the wrong GitHub account for
+  ~two months.** `building-on-mycelium.md`'s copy-paste block used
+  `github.com/RichardEko/mycelium`; the repository moved to `RichardTathata` around 2026-07-31. It
+  survives today only on GitHub's rename redirect — and an abandoned account name that someone else
+  can later claim is a supply-chain hazard, not a cosmetic error. The same block pinned `tag =
+  "v2.4.4"`, **nine releases stale** (the 2026-09-06 sharpening added the pin check; no pass had run
+  since). Sharpening: the front-door check diffs the install block's **host** against
+  `git remote get-url origin`, not only its tags — a pin can be current and still point at the wrong
+  repository. Also fixed two issue/PR permalinks in guide 14 carrying the old account.
+- 2026-09-24 (same pass, self-inflicted): **§1 verified a claim against a HEAD the post-merge gates
+  had not passed.** The pass corrected the plan's stale *default-off* parenthetical by reading
+  `config.rs` at `main` and writing "default-on since 2026-09-24" into the plan — settled prose,
+  present tense. The flip was reverted the next day (#372) when the Docker suite split a leader
+  election, so the "fix" was drift within hours, and the *prior* wording would have been right again
+  by the time it merged. The check was not wrong about the code; it was wrong about the code's
+  standing. Sharpening: §1 confirms code, but a claim about a **default or a behaviour changed on an
+  unreleased commit** is recorded with its status — *flipped on <date>, unreleased* — not as settled
+  fact, until a release or the post-merge suites carry it. The signal is cheap to get: `git tag
+  --contains <commit>` empty, or a `[Unreleased]` CHANGELOG entry, means the claim is provisional.
+  The general form, which is the part worth keeping: **a lint pass inherits the confidence of the
+  gate that last ran, and `make check` is not the gate for a cross-process default.**
