@@ -2758,11 +2758,15 @@ async fn gw_rpc_serve(
         };
         // Closure plan C3: a refused protected call is answered here and never streamed.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        if let Err(refusal) = super::provider_enforcement::check(&agent_ctx, &req).await {
-            warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
-                  "rpc/serve: refused by provider enforcement");
-            super::rpc::rpc_respond_ctx(&agent_ctx, &req, Bytes::from(refusal.rpc_body()));
-            return None;
+        match super::provider_enforcement::check(&agent_ctx, &req).await {
+            // C4: the admission is parked until the SDK agent replies through `/rpc/respond`.
+            Ok(admission) => super::provider_enforcement::park(&agent_ctx, req.sender(), req.nonce(), admission),
+            Err(refusal) => {
+                warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
+                      "rpc/serve: refused by provider enforcement");
+                super::rpc::rpc_respond_ctx(&agent_ctx, &req, Bytes::from(refusal.rpc_body()));
+                return None;
+            }
         }
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(req.payload());
         let mut data = json!({
@@ -2813,6 +2817,10 @@ async fn gw_rpc_respond(
     } else {
         Bytes::new()
     };
+
+    // Closure plan C4: the SDK agent has replied, so the call is no longer in flight.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    super::provider_enforcement::release_parked(&ctx.agent_ctx, &sender, nonce);
 
     let mut buf = BytesMut::with_capacity(8 + result.len());
     buf.put_u64_le(nonce);

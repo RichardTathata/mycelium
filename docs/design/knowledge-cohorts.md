@@ -167,7 +167,22 @@ nothing metered a population *inside* one domain.
 - It bounds concurrency, not rate.
 - It covers only calls the provider admits through it. A resource reached around the provider is H7's problem.
 - It trusts the principal it is given, which must be the one the provider verified.
-- Refusals are not yet recorded in the rights ledger.
+- Refusals are counted and logged at the provider (`cohort_budget_refusals()`, metric
+  `mycelium_provider_cohort_refusals_total`), not recorded in the rights ledger: that ledger records governor rights,
+  not per-call admissions.
+
+**Wired at the provider (closure plan C4, 2026-09-25).** `GossipAgent::with_cohort_budget(budget, view, external)`
+admits every protected call the node receives (`mcp.invoke`, `skill.invoke`, `protected_rpc_kinds`) through the
+budget, keyed by the **verified** principal, at the same boundary as C3's provider check and after it. The place is
+held for as long as the call is in flight:
+- across the handler, in the MCP tool loops;
+- for the request's lifetime, through `rpc_rx` (the request carries it, so it is released when the serve loop drops
+  the request);
+- until `/gateway/rpc/respond`, for the SDK serve stream (or 300 s, the gateway's RPC ceiling).
+
+A full pool refuses the call `at_capacity` (JSON-RPC `-32004`), and nothing runs. Declarations reach the view with
+`offer_cohort_declaration`. Gate: `provider_enforcement::tests::a_declared_cohort_is_capped_together_and_nothing_else_is_affected`,
+through a real serve loop.
 
 **Gates.** `cohort_budget::tests`:
 - fifty members together are capped at the cohort limit;

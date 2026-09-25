@@ -765,7 +765,7 @@ and in the item's ADR, never silently.
 | H5, cohorts | #391 | `895dec0` | `resolution::tests::h5`, `cohort::tests` |
 | H1, challenge admission | #392 | `317852b` | `resolution::tests::h1` |
 | H7, confined-fleet profile | #393 | `195e0f9` | `agent::confinement::tests`; deployment test (kind + Calico, CI) |
-| H6, cohort budgets (**primitive only, not wired**: no provider admits against it yet; closure plan C4) | #394 | — | `cohort_budget::tests` |
+| H6, cohort budgets (primitive in #394; **wired at the provider by closure plan C4**) | #394 | — | `cohort_budget::tests`; `provider_enforcement::tests` |
 | P2, signed mandate grants | #395 | — | `mandate::grant::tests` |
 | H3, advertisement bound to authority | #395 | — | `mandate::protected::tests` |
 | A1, authority at execution | #398 | — | `mandate::authority::tests`; `a1_policy_tests` |

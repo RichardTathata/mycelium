@@ -26,7 +26,31 @@ use super::emit_signal;
 /// `RpcRequest::from`. The nonce is used internally by [`ServiceHandle::rpc_respond`];
 /// callers work only with `payload()` and `sender()`.
 #[derive(Clone, Debug)]
-pub struct RpcRequest(pub(crate) Signal);
+pub struct RpcRequest(
+    pub(crate) Signal,
+    // Held for its `Drop`, never read; only set when the provider check is built in.
+    #[allow(dead_code)] pub(crate) Held,
+);
+
+/// Something an admitted request keeps alive until the last copy of it is dropped: closure plan
+/// C4's cohort-budget slot, so a call counts as in flight for exactly as long as its serve loop
+/// holds it. Opaque to applications.
+#[derive(Clone, Default)]
+pub(crate) struct Held(#[allow(dead_code)] Option<Arc<dyn std::any::Any + Send + Sync>>);
+
+impl Held {
+    /// Hold `value` for the request's lifetime.
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+    pub(crate) fn new(value: impl std::any::Any + Send + Sync) -> Self {
+        Self(Some(Arc::new(value)))
+    }
+}
+
+impl std::fmt::Debug for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Held(slot)" } else { "Held(none)" })
+    }
+}
 
 impl RpcRequest {
     /// Application payload with the 8-byte nonce prefix stripped — and, when a gateway
@@ -69,7 +93,7 @@ impl RpcRequest {
 }
 
 impl From<Signal> for RpcRequest {
-    fn from(s: Signal) -> Self { RpcRequest(s) }
+    fn from(s: Signal) -> Self { RpcRequest(s, Held::default()) }
 }
 
 /// A signal receiver that yields [`RpcRequest`] values.
@@ -90,18 +114,25 @@ impl RpcRequestRx {
     /// Receives the next **verified** RPC request. Returns `None` when the agent shuts down.
     pub async fn recv(&mut self) -> Option<RpcRequest> {
         loop {
-            let req = RpcRequest(self.rx.recv().await?);
+            #[allow(unused_mut)] // mutated only when the provider check can attach a budget slot
+            let mut req = RpcRequest::from(self.rx.recv().await?);
             match super::gateway_caller::verify(&self.ctx, &req) {
                 Ok(_) => {
                     // Closure plan C3: protected work is decided at this boundary, so every serve
                     // loop built on `rpc_rx`, in this crate or a companion, gets it without calling
                     // anything. Inert unless provider enforcement is on.
                     #[cfg(all(feature = "gateway", feature = "tls"))]
-                    if let Err(refusal) = super::provider_enforcement::check(&self.ctx, &req).await {
-                        tracing::warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
-                            "rpc_rx: refused by provider enforcement");
-                        rpc_respond_ctx(&self.ctx, &req, Bytes::from(refusal.rpc_body()));
-                        continue;
+                    match super::provider_enforcement::check(&self.ctx, &req).await {
+                        // C4: the admission (a cohort-budget slot, if a budget is attached) lives as
+                        // long as the request does, so the call counts as in flight until the serve
+                        // loop drops it.
+                        Ok(admission) => req.1 = Held::new(admission),
+                        Err(refusal) => {
+                            tracing::warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
+                                "rpc_rx: refused by provider enforcement");
+                            rpc_respond_ctx(&self.ctx, &req, Bytes::from(refusal.rpc_body()));
+                            continue;
+                        }
                     }
                     return Some(req);
                 }

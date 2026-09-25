@@ -535,6 +535,9 @@ pub(crate) struct TaskCtx {
     /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) provider_enforcement: std::sync::atomic::AtomicBool,
+    /// Closure plan C4: H6's cohort budget at this provider, set via `with_cohort_budget`.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) cohort_budget: std::sync::OnceLock<Arc<provider_enforcement::ProviderBudget>>,
     /// The federation edge (item 2 PR 8), set via `with_federation_edge`. Absent = this gateway
     /// serves no federated calls: a presented credential is refused, never anonymised.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -983,6 +986,8 @@ impl GossipAgent {
             #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(feature = "gateway", feature = "tls"))]
+            cohort_budget: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_edge: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_clients: std::sync::OnceLock::new(),
@@ -1108,6 +1113,48 @@ impl GossipAgent {
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn with_provider_enforcement(&self) {
         self.task_ctx.provider_enforcement.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// **Cap a declared population together** at this provider (Boundary H closure plan C4, H6).
+    ///
+    /// Every protected call this node admits takes a place in `budget` for each cohort its
+    /// **verified** principal belongs to in `view` (declarations from operators this node trusts,
+    /// verified through `external`), or in the single undeclared pool. The place is held while the
+    /// call is in flight; a full pool refuses the call `AtCapacity` (JSON-RPC `-32004`) and nothing
+    /// runs. A caller cannot name its cohort: membership comes only from `view`.
+    ///
+    /// Independent of [`with_provider_enforcement`](Self::with_provider_enforcement); with both on, a
+    /// call takes budget only once the policy has admitted it. Stated limits, as H6's: per provider
+    /// instance, and concurrency, not rate. Set once; a second call is ignored with a warning.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_cohort_budget(
+        &self,
+        budget: Arc<crate::knowledge::cohort_budget::CohortBudget>,
+        view: crate::knowledge::cohort::CohortView,
+        external: crate::knowledge::issuer::TrustedExternalIssuers,
+    ) {
+        let b = Arc::new(provider_enforcement::ProviderBudget::new(budget, view, external));
+        if self.task_ctx.cohort_budget.set(b).is_err() {
+            tracing::warn!("with_cohort_budget: a cohort budget is already attached; ignoring");
+        }
+    }
+
+    /// Offer a signed cohort declaration to the provider's budget view. `None` if no budget is
+    /// attached.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn offer_cohort_declaration(
+        &self,
+        signed: &crate::knowledge::cohort::SignedCohortDeclaration,
+    ) -> Option<crate::knowledge::cohort::CohortOffer> {
+        let b = self.task_ctx.cohort_budget.get()?;
+        Some(b.offer(signed, &gateway_member_keys(&self.task_ctx)))
+    }
+
+    /// Protected calls this provider refused for want of room in a cohort budget, since the budget
+    /// was attached. `0` without one.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn cohort_budget_refusals(&self) -> u64 {
+        self.task_ctx.cohort_budget.get().map_or(0, |b| b.refusals())
     }
 
     #[cfg(all(feature = "gateway", feature = "tls"))]

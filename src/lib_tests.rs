@@ -176,6 +176,8 @@ fn spawn_handler(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        cohort_budget: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_clients: std::sync::OnceLock::new(),
@@ -1161,6 +1163,8 @@ async fn test_subscribe_notified_via_gossip() {
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        cohort_budget: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
