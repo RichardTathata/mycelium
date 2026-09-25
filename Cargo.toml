@@ -197,6 +197,13 @@ path              = "examples/federation_node.rs"
 required-features = ["gateway", "tls", "a2a", "cli"]
 
 [[example]]
+name              = "mcp_tool_authority"
+path              = "examples/mcp_tool_authority.rs"
+# The AE preflight on the MCP path is `gateway` + `tls`-gated; `compliance` gives the evidence
+# journal, without which the gateway enforces but cannot attribute.
+required-features = ["tls", "compliance"]
+
+[[example]]
 name              = "auditor_questions"
 path              = "examples/auditor_questions.rs"
 # `tls` because a tamper-evident chain must be signed — an unsigned one is a contradiction in

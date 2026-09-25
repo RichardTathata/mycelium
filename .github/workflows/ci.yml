@@ -85,6 +85,10 @@ jobs:
       # The three questions an auditor asks. Each act asserts — including that an edited audit
       # chain FAILS to verify, which is the one a "trust us" answer cannot make checkable.
       - run: cargo run --example auditor_questions --features tls,compliance
+      # Policy at the gateway, per MCP tool call. Five acts: permitted-and-executed, denied on an
+      # argument value, denied by remit, and twice INDETERMINATE — which refuses. The fourth act
+      # is the gate: an unmapped tool must never fall through to permit.
+      - run: cargo run --example mcp_tool_authority --features tls,compliance
       - run: cargo run --example knowledge_layer --features tls
       - run: cargo run --example federated_domains --features tls
       # The third domain: the question two domains cannot ask. Each act asserts, so "trust does
