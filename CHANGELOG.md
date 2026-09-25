@@ -64,6 +64,28 @@ agreement repair establishes single-decree safety; it is not a proof of the whol
 
 ### Added
 
+- **Seven runnable demonstrations of everything above — and CI *runs* them, it does not merely build
+  them.** Building an example proves the API still compiles; running it proves the demonstration
+  still demonstrates, which is the thing a gallery is a gate on. CI-run examples went from 6 to 12.
+
+  | Example | The claim it makes checkable |
+  |---|---|
+  | `coordination_integrity` | absence is not authority · an answer names its rung · exclusivity is fenced **at the resource** |
+  | `coordinator_by_accretion` | one rule over one candidate set has one winner, every ring; rendezvous spreads; a spread is **not a bound** |
+  | `coordination_viz` (`:8100`) | the same, watchable — a real three-node fleet and a live concentration gauge |
+  | `federation_trust_is_not_transitive` | a trust bundle does not compose · a grant you hold is not re-exportable · budgets are pairwise |
+  | `identity_one_record` | two entries are two messages; one entry cannot arrive in two parts |
+  | `auditor_questions` | who asked · whether the record stands · whether one person can leave |
+  | `mcp_tool_authority` | which **tools** an agent may actually call, per call, including the undecided case |
+
+  `receipt_ladder` also gains the rung production actually hits: a **lost acknowledgement**, where
+  `prepare_write`/`commit_prepared` lets a retry lose LWW instead of undoing a newer value.
+
+  The Ops Console gains an **Integrity** tab. The coordination and identity properties are
+  *refusals*, and you cannot watch a thing not happen — so it shows the **preconditions** (can this
+  fleet elect? is it safe to require proofs yet? is one node holding everything?), composed entirely
+  from endpoints the console already read.
+
 - **Mandates established at the gateway** (Boundary H A1, gateway wiring; ADR
   `docs/design/authority-at-execution.md` §6). The gateway always bound `mandate: None`, so a policy rule
   requiring a mandate could never be satisfied there. `GossipAgent::with_execution_authority` (plus
