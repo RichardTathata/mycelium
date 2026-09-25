@@ -199,6 +199,55 @@ reached another way is not covered — which is why [`procurement_authority`](..
 spends an act on a misconfigured route that denied a call **and it happened anyway**, with the
 evidence saying both.
 
+## The other door, and why it is the one that matters
+
+`/mcp` is where your own agent code calls in, and it is gated: a bearer carrying `mcp:invoke` is
+required before the evaluator is ever consulted. **`/a2a` is not.** An A2A client discovers
+`/.well-known/agent.json` and calls; the gateway resolves a bearer if one is offered and calls the
+caller `anonymous` if not, but it does **not refuse for want of one**. The route is public by design
+— that is what makes it an interoperable A2A endpoint.
+
+So at that door the per-call decision is the *whole* of the gate, and the consequence is worth
+stating plainly: **an enforcement point that can be walked around by choosing a different door is
+not an enforcement point.** A remit enforced on `tools/call` and not on `skill.invoke` is a remit an
+agent escapes by speaking A2A instead of MCP — and the evidence journal would have gone on recording
+true sentences about the guarded door while the remit went unenforced at the other one.
+
+The preflight therefore runs on **both** A2A paths, `tasks/send` and the `tasks/sendSubscribe`
+stream, with the same refusal body `/mcp` sends:
+
+```bash
+cargo run --example a2a_skill_authority --features tls,a2a
+```
+
+| # | Call | Verdict |
+|---|---|---|
+| 0 | `tools/list` and `tasks/send`, neither with a bearer | `/mcp` → **401**; `/a2a` → answered, caller `anonymous` |
+| 1 | `depot/dispatch`, in-area | **permitted** — the skill ran, and the remit names `anonymous` explicitly |
+| 2 | `depot/dispatch`, out-of-area | **denied** — decided on the message text |
+| 3 | `ledger/export` | **denied** — `-32030`, with `data.reason` and `data.policy_revision` |
+| 4 | `weather/lookup` | **indeterminate → refused** — advertised, covered by no clause |
+| 5 | `depot/teleport` | **`-32001` skill not found** — refused *before* the evaluator ran |
+| 6 | `ledger/export` over `tasks/sendSubscribe` | **denied** — arrives as a `failed` task-status event, and the stream closes |
+
+Act 1 is the one that changes how you write policy here. Permitting `anonymous` **by name** is a
+decision; permitting it because no clause mentioned it is an accident, and act 4 is what the second
+one would have looked like had the profile not refused.
+
+Act 5 is in the demonstration on purpose. Skill resolution precedes the evaluator, so an
+unadvertised skill is refused as *not found* and **no evidence record claims a policy decided it** —
+a refusal that is a fact about discovery, not about authority. A gallery in which every refusal
+looks alike teaches the wrong thing.
+
+Act 6 is the failure mode a streaming edge invites. A refusal that simply dropped the subscription
+would leave the client waiting on silence, which is indistinguishable from a slow skill; instead it
+learns exactly what a unary caller learns.
+
+**What this does not cover:** authentication. Every act runs as `anonymous`, because that is what the
+door hands the evaluator by default. `anonymous` is a *principal*, not a bypass. An operator wanting
+named principals here configures `gateway_named_tokens` and the client presents a bearer — nothing
+in the seam changes, and [`gateway_caller`](09-security.md) is where that half is described.
+
 ## Three refusals, and the one that refuses a permit
 
 ```rust
