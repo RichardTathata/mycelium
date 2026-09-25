@@ -11,6 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Authority decided at the provider** (Boundary H closure plan C3). `GossipAgent::with_provider_enforcement()`
+  makes a provider run the gateway's own action preflight, as the enforcement point `provider`, on every protected RPC
+  it receives: in the MCP tool loops, in every `rpc_rx` receiver, and in the SDK serve stream. Its own evaluator
+  decides, and its own `ExecutionAuthority` verifies any presented mandate. A member calling a provider directly is
+  now decided where the work runs, not only at a gateway. Fails closed without an evaluator. The caller envelope
+  carries a resource claim, which the provider accepts only for itself and only for what it serves.
+  `rpc_call_with_mandate` takes the resource it acts on.
 - **A presented mandate travels to the provider** (Boundary H closure plan C2). The caller envelope carries the
   mandate a client presented (`params._meta.mandate` on `/mcp` `tools/call` and `/a2a`), so a provider can verify it
   for itself rather than trust the gateway's word. A member acting under its own grant calls a provider directly with

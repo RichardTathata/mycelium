@@ -1640,7 +1640,9 @@ async fn mcp_handler(
 
             // Item 7: the call carries the auth layer's caller context (never anything the
             // client put in `params`), or is refused — it is never dispatched as the node.
-            // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
+            // Closure plan C2/C3: the presented mandate, and the resource it is presented for, travel
+            // to the provider, which verifies them itself.
+            let resource_claim = format!("tool:{name}@{provider_node_id}");
             let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
                 &ctx.agent_ctx,
                 caller.as_ref(),
@@ -1649,6 +1651,7 @@ async fn mcp_handler(
                 Bytes::from(tool_req.to_string().into_bytes()),
                 Duration::from_secs(30),
                 gateway_caller::presented_mandate(&req["params"]),
+                Some(&resource_claim),
             ).await;
 
             // What this gateway actually observed. A timeout is **unknown**, never a negative: the
@@ -2729,7 +2732,11 @@ async fn gw_rpc_serve(
     );
 
     let agent_ctx = Arc::clone(&ctx.agent_ctx);
-    let stream = ReceiverStream::new(rx).filter_map(move |sig: crate::signal::Signal| {
+    // Async, because closure plan C3's provider check runs the action preflight (and its journal
+    // write) before a request is streamed to the SDK agent that serves it.
+    let stream = futures_util::StreamExt::filter_map(ReceiverStream::new(rx), move |sig: crate::signal::Signal| {
+      let agent_ctx = Arc::clone(&agent_ctx);
+      async move {
         use base64::Engine as _;
         if sig.payload.len() < 8 { return None; }
         let req = super::rpc::RpcRequest::from(sig);
@@ -2749,6 +2756,14 @@ async fn gw_rpc_serve(
                 return None;
             }
         };
+        // Closure plan C3: a refused protected call is answered here and never streamed.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if let Err(refusal) = super::provider_enforcement::check(&agent_ctx, &req).await {
+            warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
+                  "rpc/serve: refused by provider enforcement");
+            super::rpc::rpc_respond_ctx(&agent_ctx, &req, Bytes::from(refusal.rpc_body()));
+            return None;
+        }
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(req.payload());
         let mut data = json!({
             "nonce_hex":   format!("{:016x}", req.nonce()),
@@ -2761,6 +2776,7 @@ async fn gw_rpc_serve(
         Some(Ok(Event::default()
             .event(req.kind().as_ref())
             .data(data.to_string())))
+      }
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())

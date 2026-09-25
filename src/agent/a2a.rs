@@ -402,10 +402,13 @@ async fn handle_tasks_send(
 
     // Item 7: the skill provider is told who called (the resolved bearer principal, or
     // `anonymous`), never just "the gateway node".
-    // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
+    // Closure plan C2/C3: the presented mandate, and the resource it is presented for, travel to the
+    // provider, which verifies them itself.
+    let resource_claim = format!("skill:{skill_id}@{target}");
     let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
         &state.task_ctx, caller, target,
         "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, gateway_caller::presented_mandate(params),
+        Some(&resource_claim),
     ).await;
 
     // A timeout is *unknown*, never a negative — a long-running skill may well have completed.
@@ -541,9 +544,11 @@ pub(crate) async fn tasks_send_subscribe(
         let timeout = Duration::from_secs(30);
         // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
         let mandate = gateway_caller::presented_mandate(&params);
+        let resource_claim = format!("skill:{skill_id}@{target}");
         let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
             &state2.task_ctx, caller.as_ref(), target,
             "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, mandate,
+            Some(&resource_claim),
         ).await;
 
         #[cfg(all(feature = "gateway", feature = "tls"))]

@@ -66,15 +66,21 @@ impl ServiceHandle {
     /// proof signed with this node's identity key over the call's operation, resource and arguments
     /// digest). A provider that checks mandates (C3) verifies it for itself.
     ///
+    /// `resource` names what the call acts on, as the possession proof names it, with the
+    /// provider after `@` (e.g. `skill:depot/dispatch@10.0.0.2:7000`). A provider checking mandates
+    /// (closure plan C3) derives the resource from the payload where it can (an MCP tool call names
+    /// its tool) and otherwise uses this, after confirming it names itself.
+    ///
     /// Always framed, whatever this node's gateway profile: a mandate needs an envelope to travel
     /// in. `Err(RpcError::ContextTooLarge)` if it would not fit; nothing is sent.
     pub async fn rpc_call_with_mandate(
         &self,
-        target:  NodeId,
-        kind:    impl Into<Arc<str>>,
-        payload: impl Into<Bytes>,
-        mandate: &serde_json::Value,
-        timeout: Duration,
+        target:   NodeId,
+        kind:     impl Into<Arc<str>>,
+        payload:  impl Into<Bytes>,
+        mandate:  &serde_json::Value,
+        resource: &str,
+        timeout:  Duration,
     ) -> Result<Bytes, RpcError> {
         use super::gateway_caller::{frame_with_context_and_mandate, node_principal};
         let framed = frame_with_context_and_mandate(
@@ -83,6 +89,7 @@ impl ServiceHandle {
             &[],
             payload.into(),
             Some(mandate),
+            Some(resource),
         )
         .ok_or(RpcError::ContextTooLarge)?;
         super::rpc::rpc_call_framed(&self.ctx, target, kind.into(), framed, timeout).await

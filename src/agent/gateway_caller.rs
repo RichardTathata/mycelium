@@ -159,6 +159,12 @@ pub struct GatewayCaller {
     /// that strips it only causes a refusal, and one that swaps it fails verification. A provider
     /// verifies it for itself (C3); it never takes a gateway's word that a mandate was established.
     pub mandate: Option<serde_json::Value>,
+    /// The resource the caller says this call acts on (closure plan C3), e.g.
+    /// `skill:depot/dispatch@{provider}`: what the gateway resolved, or what a member names with
+    /// [`rpc_call_with_mandate`](crate::ServiceHandle::rpc_call_with_mandate). A **claim**: a
+    /// provider checking mandates uses it only where the payload cannot name the resource itself,
+    /// and only after confirming it names this node and something this node serves.
+    pub resource: Option<String>,
 }
 
 /// How a [`GatewayCaller`] was attested.
@@ -385,7 +391,7 @@ pub(crate) async fn gateway_rpc_call(
     payload: Bytes,
     timeout: Duration,
 ) -> Result<Bytes, GatewayDispatchError> {
-    gateway_rpc_call_with_mandate(ctx, caller, target, kind, payload, timeout, None).await
+    gateway_rpc_call_with_mandate(ctx, caller, target, kind, payload, timeout, None, None).await
 }
 
 /// [`gateway_rpc_call`], carrying the mandate the caller presented to the provider (closure plan C2).
@@ -399,6 +405,7 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
     payload: Bytes,
     timeout: Duration,
     mandate: Option<&serde_json::Value>,
+    resource: Option<&str>,
 ) -> Result<Bytes, GatewayDispatchError> {
     use crate::config::GatewayCallerProfile;
     match ctx.config.gateway_caller_profile {
@@ -416,7 +423,7 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
                 refused("provider_without_caller_context");
                 return Err(GatewayDispatchError::ProviderWithoutContext(target));
             }
-            let Some(framed) = frame_with_context_and_mandate(ctx, &caller.principal, &caller.scopes, payload, mandate) else {
+            let Some(framed) = frame_with_context_and_mandate(ctx, &caller.principal, &caller.scopes, payload, mandate, resource) else {
                 refused("caller_context_too_large");
                 return Err(GatewayDispatchError::ContextTooLarge);
             };
@@ -465,6 +472,9 @@ struct Envelope {
     /// an envelope without one is byte-identical to before, and an older provider ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     m: Option<serde_json::Value>,
+    /// The resource the call claims to act on (closure plan C3). Absent when not named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    r: Option<String>,
 }
 
 /// Build the framed payload: magic ‖ len ‖ envelope ‖ application payload. Signs under a `tls`
@@ -472,7 +482,7 @@ struct Envelope {
 /// `None` when the envelope would exceed the bound a receiver accepts (`MAX_ENVELOPE_BYTES`) —
 /// the producer never truncates (review finding 4).
 pub(crate) fn frame_with_context(ctx: &TaskCtx, principal: &str, scopes: &[String], app: Bytes) -> Option<Bytes> {
-    frame_with_context_and_mandate(ctx, principal, scopes, app, None)
+    frame_with_context_and_mandate(ctx, principal, scopes, app, None, None)
 }
 
 /// [`frame_with_context`], carrying a presented mandate for the provider to verify (closure plan C2).
@@ -483,6 +493,7 @@ pub(crate) fn frame_with_context_and_mandate(
     scopes: &[String],
     app: Bytes,
     mandate: Option<&serde_json::Value>,
+    resource: Option<&str>,
 ) -> Option<Bytes> {
     // A caller envelope's issue time is checked against a lifetime by whoever receives it, so it
     // must come from a clock that moves. See `Hlc::decision_now_ms`.
@@ -498,6 +509,7 @@ pub(crate) fn frame_with_context_and_mandate(
         k,
         sig,
         m: mandate.cloned(),
+        r: resource.map(str::to_string),
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
     if env_bytes.len() > MAX_ENVELOPE_BYTES {
@@ -769,6 +781,7 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         issued_at_ms: env.t,
         attestation,
         mandate: env.m,
+        resource: env.r,
     }))
 }
 
@@ -949,10 +962,11 @@ mod tests {
         let a = agent(false);
         let mandate = serde_json::json!({"grant": {"mandate": {"holder": "token:gw/a"}, "signature": [1, 2, 3]},
                                          "possession": "cHJvb2Y="});
-        let framed = frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::from_static(b"app"), Some(&mandate)).unwrap();
+        let framed = frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::from_static(b"app"), Some(&mandate), Some("skill:depot/dispatch@x")).unwrap();
         let req = request_from(a.node_id(), "skill.invoke", framed);
         let c = verify(&a.task_ctx, &req).unwrap().unwrap();
         assert_eq!(c.mandate, Some(mandate), "carried exactly as presented");
+        assert_eq!(c.resource.as_deref(), Some("skill:depot/dispatch@x"), "the named resource travels too (C3)");
         assert_eq!(req.payload(), Bytes::from_static(b"app"), "the application payload is untouched");
 
         let plain = frame_with_context(&a.task_ctx, "token:gw/a", &[], Bytes::from_static(b"app")).unwrap();
@@ -969,7 +983,7 @@ mod tests {
     async fn an_oversized_mandate_is_refused_not_truncated() {
         let a = agent(false);
         let huge = serde_json::json!({"grant": "x".repeat(MAX_ENVELOPE_BYTES), "possession": ""});
-        assert!(frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::new(), Some(&huge)).is_none());
+        assert!(frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::new(), Some(&huge), None).is_none());
     }
 
     /// **A member acting under its own mandate** calls a provider directly: the provider sees the
@@ -1002,7 +1016,7 @@ mod tests {
         }
         let mut reply = None;
         for _ in 0..50 {
-            if let Ok(r) = a.service().rpc_call_with_mandate(b.node_id().clone(), "depot.dispatch", b"go".to_vec(), &mandate, std::time::Duration::from_millis(500)).await {
+            if let Ok(r) = a.service().rpc_call_with_mandate(b.node_id().clone(), "depot.dispatch", b"go".to_vec(), &mandate, &format!("depot:dispatch@{}", b.node_id()), std::time::Duration::from_millis(500)).await {
                 reply = Some(r);
                 break;
             }
@@ -1128,7 +1142,7 @@ mod tests {
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
         let mk = |via: &NodeId, p: String| GatewayCaller {
             principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
-            attestation: CallerAttestation::UnauthenticatedMesh, mandate: None,
+            attestation: CallerAttestation::UnauthenticatedMesh, mandate: None, resource: None,
         };
         let a = mk(&g1, positional_token_principal(&g1.to_string(), 0));
         let b = mk(&g2, positional_token_principal(&g2.to_string(), 0));
@@ -1170,6 +1184,7 @@ mod tests {
         let unsigned = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
+            r: None,
         }).unwrap();
         let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
@@ -1185,6 +1200,7 @@ mod tests {
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
                 m: None,
+                r: None,
             }).unwrap();
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
@@ -1206,6 +1222,7 @@ mod tests {
         let env = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
+            r: None,
         }).unwrap();
         let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
         let req = request_from(a.node_id(), "llm.invoke", bytes.clone());
