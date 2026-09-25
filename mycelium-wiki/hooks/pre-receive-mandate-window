@@ -1,0 +1,50 @@
+#!/bin/sh
+# Mycelium wiki — reference pre-receive hook (Boundary H closure plan C9).
+#
+# WHAT IT DOES
+#   Refuses a push once the curator's appointment has expired, judged by THIS machine's clock (the
+#   remote's), which the pushing curator does not control. The curator's own store checks its mandate
+#   before each commit and push, but a process that pauses between that check and the push acts late
+#   by the pause; this is the check that sits where the write actually lands.
+#
+# CONFIGURATION (on the remote repository)
+#   git config mycelium.mandateRef refs/mycelium/mandate/<scope>
+#   The mandate ref must point at a commit whose tree holds `appointment.json` with a numeric
+#   `valid_until_ms` (epoch milliseconds). Install as hooks/pre-receive (executable).
+#
+# RULES
+#   - Not configured: this hook decides nothing (exit 0).
+#   - Configured, and the mandate ref or its `valid_until_ms` is missing: refused (fail closed).
+#   - A push that updates the mandate ref itself is allowed: that is the operator reappointing, and
+#     who may push it is the remote's permission model, not this hook's.
+#   - Otherwise: refused if now > valid_until_ms.
+set -eu
+
+ref=$(git config --get mycelium.mandateRef || true)
+[ -n "$ref" ] || exit 0
+
+touches_mandate=0
+while read -r _old _new name; do
+    [ "$name" = "$ref" ] && touches_mandate=1
+done
+[ "$touches_mandate" -eq 1 ] && exit 0
+
+oid=$(git rev-parse --verify --quiet "$ref") || {
+    echo "mycelium: mandate ref $ref is missing; push refused" >&2
+    exit 1
+}
+json=$(git cat-file -p "$oid:appointment.json" 2>/dev/null) || {
+    echo "mycelium: $ref records no appointment.json; push refused" >&2
+    exit 1
+}
+until_ms=$(printf '%s' "$json" | tr -d '\n' | sed -n 's/.*"valid_until_ms"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+[ -n "$until_ms" ] || {
+    echo "mycelium: appointment.json on $ref has no valid_until_ms; push refused" >&2
+    exit 1
+}
+now_ms=$(( $(date +%s) * 1000 ))
+if [ "$now_ms" -gt "$until_ms" ]; then
+    echo "mycelium: the appointment on $ref expired at $until_ms (remote clock $now_ms); push refused" >&2
+    exit 1
+fi
+exit 0

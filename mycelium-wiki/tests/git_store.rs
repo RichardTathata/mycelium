@@ -968,3 +968,55 @@ fn a_stale_version_under_a_valid_appointment_is_still_a_conflict() {
     assert!(err.as_mandate_revoked().is_none(), "the appointment is valid — this is not a revocation");
     assert!(matches!(err, WikiError::Conflict), "a lost CAS race is a retry signal: {err}");
 }
+
+// ── closure plan C9: the remote's own check ────────────────────────────────────────────────────
+
+fn git_in(dir: &Path, args: &[&str], stdin: &str) -> String {
+    use std::io::Write;
+    let mut child = std::process::Command::new("git")
+        .args(["-c", "user.name=operator", "-c", "user.email=operator@test.invalid"])
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// **The reference pre-receive hook refuses a push once the appointment has expired, by the
+/// remote's clock** (closure plan C9). A curator's own store checks before it commits and pushes,
+/// but a paused process acts late by the pause; this check sits where the write lands, on a clock
+/// the curator does not control. The plant: a current appointment admits the same push.
+#[test]
+fn the_remote_hook_refuses_a_push_after_the_appointment_expired() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    let hook = origin.join("hooks").join("pre-receive");
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("hooks/pre-receive-mandate-window"), &hook).unwrap();
+    git(&origin, &["config", "mycelium.mandateRef", "refs/mycelium/mandate/c0"]);
+
+    let appoint = |valid_until_ms: u64| {
+        let blob = git_in(&origin, &["hash-object", "-w", "--stdin"], &format!("{{\"term\":\"t1\",\"valid_until_ms\":{valid_until_ms}}}"));
+        let tree = git_in(&origin, &["mktree"], &format!("100644 blob {blob}\tappointment.json\n"));
+        let commit = git_in(&origin, &["commit-tree", &tree, "-m", "appoint"], "");
+        git_in(&origin, &["update-ref", "refs/mycelium/mandate/c0", &commit], "");
+    };
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let remote = origin.to_string_lossy().into_owned();
+    let store = GitStore::open(GitStoreConfig::for_group(tmp.path().join("clone"), "c0").with_remote(&remote)).unwrap();
+    store.write_page("minutes", &[sec("s1", "H", "the council met", &[])], &BTreeMap::new()).unwrap();
+
+    appoint(now_ms - 60_000);
+    assert!(store.publish().is_err(), "an expired appointment: the remote refuses the push");
+    assert_eq!(git(&origin, &["for-each-ref", "refs/heads"]).trim(), "", "nothing reached the remote's branches");
+
+    appoint(now_ms + 3_600_000);
+    store.publish().expect("a current appointment admits the same push");
+    assert!(!git(&origin, &["for-each-ref", "refs/heads"]).trim().is_empty());
+}

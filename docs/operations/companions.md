@@ -163,6 +163,10 @@ The wiki has a genuinely different operational model: a **node-independent store
     nothing is written. Watch for `apply refused, no present authority` in the curator's log.
     Design: [`authority-at-execution.md`](../design/authority-at-execution.md) §7. The filesystem store takes the
     same authority: `FsStore::open(root, group)?.with_authority(Arc::new(authority))` (closure plan C6).
+  - **At the remote** (closure plan C9): install `mycelium-wiki/hooks/pre-receive-mandate-window` as the shared
+    repo's `hooks/pre-receive`, set `git config mycelium.mandateRef refs/mycelium/mandate/<scope>`, and record the
+    appointment as `appointment.json` (`{"term": …, "valid_until_ms": …}`) in the commit the mandate ref points at.
+    Pushes after expiry are then refused by the remote's clock. Locally, watch `GitStore::late_writes()`.
   - **Bulk ingest**: workers stage a batch (one **meeting** per batch — the sizing contract) in
     your `BatchSource` (S3), then submit the *reference* via `Wiki::submit_batch`, the
     `wiki.{group}.ingest` RPC, or **`POST /gateway/wiki/ingest`** (+ `ingest` on the py/ts SDKs) —

@@ -353,6 +353,8 @@ fn a_pause_after_the_check_is_not_caught_locally() {
 
     write(&store, "checked at 49 s, committed at 60 s").expect("the limit: nothing local refuses it");
     assert!(rig.clock.load(Ordering::SeqCst) > 50_000, "the write landed after the mandate expired");
+    // C9: what cannot be prevented locally is detected: the store asked again after the commit.
+    assert_eq!(store.late_writes(), 1, "the late write is counted, not silently accepted");
     assert_refused_as(&write(&store, "the next one").unwrap_err(), "WorkExpired");
 }
 

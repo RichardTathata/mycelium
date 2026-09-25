@@ -196,6 +196,8 @@ pub struct GitStore {
     /// local head — a force-push-permitting or concurrently-written remote. Detection, never
     /// auto-fixed.
     push_divergences: AtomicU64,
+    /// Closure plan C9: commits that landed after the authority had lapsed (detected, not prevented).
+    late_writes: AtomicU64,
     tmp_seq: AtomicU64,
 }
 
@@ -388,7 +390,7 @@ impl GitStore {
     /// Open (creating + `git init -b {branch}` if needed) the store.
     pub fn open(cfg: GitStoreConfig) -> Result<Self, WikiError> {
         std::fs::create_dir_all(&cfg.dir)?;
-        let me = Self { cfg, write_lock: Mutex::new(()), cat_file: Mutex::new(None), push_divergences: AtomicU64::new(0), tmp_seq: AtomicU64::new(0) };
+        let me = Self { cfg, write_lock: Mutex::new(()), cat_file: Mutex::new(None), push_divergences: AtomicU64::new(0), late_writes: AtomicU64::new(0), tmp_seq: AtomicU64::new(0) };
         if !me.cfg.dir.join(".git").exists() {
             // Tolerate losing an init race (P6.4 finding: N stores opening one shared checkout
             // concurrently): a failed init is fine iff someone else.s init landed.
@@ -412,6 +414,16 @@ impl GitStore {
     /// tripwire — a force-push-permitting or concurrently-written remote; detection, never fixed).
     pub fn push_divergences(&self) -> u64 {
         self.push_divergences.load(Ordering::Relaxed)
+    }
+
+    /// **Late writes** (closure plan C9): commits that landed although the authority, asked again
+    /// just after the ref transaction, no longer granted. The check comes before the transaction, not
+    /// inside it (git has no clock it can sit inside), so a process that pauses between the two
+    /// writes late by the pause. This counts it, and each one is logged at `warn!` with its commit
+    /// id. Detection, not prevention: for published writes, prevention belongs to the remote's
+    /// pre-receive hook (`mycelium-wiki/hooks/pre-receive-mandate-window`).
+    pub fn late_writes(&self) -> u64 {
+        self.late_writes.load(Ordering::Relaxed)
     }
 
     fn refname(&self) -> String {
@@ -713,6 +725,14 @@ impl GitStore {
                     }
                 }
                 return Ok(CommitOutcome::RefMoved);
+            }
+            // Closure plan C9: ask again now that the commit has landed. A refusal here means the
+            // authority lapsed during the transaction: the write is late, and nothing local can undo
+            // it, so it is counted and named rather than silently accepted.
+            if let Err(e) = self.authorize() {
+                self.late_writes.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(commit = %commit, reason = %e,
+                    "wiki git-store: a write landed after its authority lapsed (late write)");
             }
             // Sync the worktree copies (temp + rename — atomic, never torn) so direct readers and
             // external validators see current files; truth remains the committed blobs.
