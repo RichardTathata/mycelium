@@ -44,6 +44,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 |---|---|
 | `kv:read` / `kv:write` | `GET /gateway/kv*` / `POST`,`DELETE /gateway/kv*`, `/kv/quorum` |
 | `cap:read` / `cap:write` | capability resolve, shard owner / advertise, drop |
+| *(none)* — `/a2a` | **No scope is required on this route.** Auth is *optional*: a federation credential names the partner; a bearer resolves to a principal but its **scopes are dropped**; nothing presented is anonymous. Authority here comes from an `ActionEvaluator`, not the scope table — and with no evaluator attached an anonymous caller reaches skill dispatch. `with_a2a()` warns in that configuration |
 | `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox/rpc-serve, demand / signal emit, rpc call, scatter, **group membership** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node) |
 | `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |

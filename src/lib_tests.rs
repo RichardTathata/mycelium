@@ -9018,3 +9018,36 @@ async fn an_unjoined_group_yields_no_leadership() {
         other => panic!("expected a refusal with no electorate, got {other:?}"),
     }
 }
+
+/// **`/a2a` has no scope floor, and the open configuration warns.**
+///
+/// Unlike `/mcp`, which requires `mcp:invoke`, `/a2a` uses *optional* auth: a federation credential
+/// names a partner, a bearer resolves to a principal whose scopes are deliberately dropped, and
+/// nothing at all is anonymous. With an `ActionEvaluator` attached that is by design — the
+/// evaluator decides per call, a finer instrument than a scope. With **no** evaluator the seam is
+/// inert, and a probe on 2026-09-25 confirmed the consequence: an anonymous `tasks/send` returned
+/// `skill not found`, meaning it had passed every gate and failed only on resolution.
+///
+/// This pins the *condition* the warning is computed from. It cannot assert the log line itself
+/// without a subscriber, so it asserts the thing that would make the line wrong — if a scope floor
+/// is ever added to `/a2a`, or `with_a2a` starts requiring auth, this test should be revisited
+/// rather than quietly left passing.
+#[cfg(all(feature = "a2a", feature = "gateway"))]
+#[test]
+fn a2a_mounted_without_evaluator_or_bearer_is_the_open_configuration() {
+    // The bare configuration the warning is for.
+    let bare = GossipConfig::default();
+    assert!(bare.gateway_auth_token.is_none(), "no legacy bearer by default");
+    assert!(bare.gateway_scoped_tokens.is_empty(), "no scoped tokens by default");
+    assert!(bare.gateway_named_tokens.is_empty(), "no named tokens by default");
+
+    // And the configuration that silences it: any one bearer is enough to close the anonymous path.
+    let mut with_token = GossipConfig::default();
+    with_token.gateway_auth_token = Some("s3cret".into());
+    assert!(with_token.gateway_auth_token.is_some());
+
+    // The other way to close it is an evaluator, which is checked at `with_a2a` time via
+    // `task_ctx.action_evaluator`. That half is exercised by `procurement_authority` and
+    // `mcp_tool_authority`; what matters here is that BOTH doors exist, so an operator has a
+    // choice rather than an instruction.
+}

@@ -1244,8 +1244,53 @@ impl GossipAgent {
         self
     }
 
+    /// Mount the A2A (agent-to-agent) surface at `POST /a2a`.
+    ///
+    /// **`/a2a` uses *optional* authentication, and that is the thing to understand before calling
+    /// this.** Three cases:
+    ///
+    /// - a **federation credential** is presented → the caller is that partner, authenticated here
+    ///   and authorised for its export in the handler (present-and-refused is a refusal, never
+    ///   anonymous);
+    /// - a **bearer token** is presented → it resolves to a named principal, but its **scopes are
+    ///   deliberately dropped**: authority on this surface comes from policy, not the scope table;
+    /// - **nothing** is presented → the caller is anonymous.
+    ///
+    /// Unlike `/mcp`, which requires the `mcp:invoke` scope, `/a2a` has **no scope floor**. With an
+    /// [`ActionEvaluator`](action_evaluator::ActionEvaluator) attached, that is by design — the
+    /// evaluator decides per call, which is a finer instrument than a scope. With **no** evaluator
+    /// attached the AE seam is inert, and an anonymous caller reaches skill dispatch.
+    ///
+    /// That is fine on a trusted LAN and is not fine on an untrusted network, so this warns when it
+    /// mounts into the second configuration rather than leaving it to be discovered.
     #[cfg(feature = "a2a")]
     pub fn with_a2a(self) -> Self {
+        // An open surface is a deployment decision; it must not be an accident. `/a2a` has no scope
+        // floor, so with neither an evaluator nor any bearer configured, an anonymous caller
+        // reaches skill dispatch. Verified by probe (2026-09-25): `tasks/send` from an
+        // unauthenticated client returned `skill not found` rather than a refusal — it had passed
+        // every gate and failed only on resolution.
+        // The AE seam only EXISTS under `gateway` + `tls` — the field is cfg'd out otherwise. In a
+        // build without them there cannot be an evaluator, so the seam is inert by construction,
+        // which makes this warning more warranted rather than less. (Caught by CI's Demo smoke,
+        // which builds `--features a2a` on default features: gateway, no tls.)
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let no_evaluator = self.task_ctx.action_evaluator.get().is_none();
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let no_evaluator = true;
+        let no_bearer = self.task_ctx.config.gateway_auth_token.is_none()
+            && self.task_ctx.config.gateway_scoped_tokens.is_empty()
+            && self.task_ctx.config.gateway_named_tokens.is_empty();
+        if no_evaluator && no_bearer {
+            tracing::warn!(
+                "with_a2a: /a2a is mounted with NO action evaluator and NO gateway bearer \
+                 configured. Unlike /mcp there is no scope floor on this route, so an ANONYMOUS \
+                 caller can reach skill dispatch. Attach an evaluator (`with_action_evaluator`), \
+                 configure a bearer, or require a federation credential before exposing this node \
+                 beyond a trusted network."
+            );
+        }
+
         let ctx   = Arc::clone(&self.task_ctx);
         let tasks = Arc::new(papaya::HashMap::<String, a2a::A2aTask>::new());
         a2a::spawn_cleanup(Arc::clone(&tasks));
