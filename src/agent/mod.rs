@@ -1082,6 +1082,7 @@ impl GossipAgent {
         }
     }
 
+    #[cfg(all(feature = "gateway", feature = "tls"))]
     /// **Establish mandates at this gateway** (Boundary H A1). With an authority attached, a call
     /// that presents a signed grant in `params._meta.mandate` gets a real mandate finding in its
     /// action envelope — established, refused or unknown — after P2's checks and A1's execution gate,
@@ -1093,6 +1094,7 @@ impl GossipAgent {
         }
     }
 
+    #[cfg(all(feature = "gateway", feature = "tls"))]
     /// Offer a revocation checkpoint to this gateway's execution authority. `None` if none is attached.
     pub fn offer_revocation_checkpoint(
         &self,
