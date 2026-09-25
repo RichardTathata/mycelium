@@ -344,7 +344,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     unconfirmed stops never counted as stopped. The profile refuses bad *F*/*s*/*I*/*D* and advisory resources.
     **Wired at the gateway** (#399): a grant presented in `params._meta.mandate` by the **authenticated** caller,
     possessed for that call, becomes an established, refused or unknown mandate in every action envelope, so
-    mandate-requiring policy rules are finally decidable there. **Wired at the wiki's git store** (#400): every
+    mandate-requiring policy rules are finally decidable there. **Wired at the wiki's git store** (#402): every
     commit attempt and every push attempt re-checks the curator's window, epoch and revocation standing, so an
     expired, revoked or out-of-touch curator writes and publishes nothing, and its queued proposals wait for one
     that has authority. *Limits:* other resources apply it only when wired;
