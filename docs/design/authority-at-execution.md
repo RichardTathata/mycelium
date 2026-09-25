@@ -64,16 +64,62 @@ clock extremes are testable exactly.
 
 ## 4. What this does not claim
 
-- **That any resource uses it.** A1 is the contract a resource applies at its effect boundary by calling
-  `ExecutionGate::check`. Wiring it into specific resources (the wiki's mandate fence, gateway tool dispatch through
-  AE2) is per-resource work and not done here. A resource that does not call it keeps "expiry stops new admissions"
-  only.
+- **That every resource uses it.** A1 is the contract a resource applies at its effect boundary by calling
+  `ExecutionGate::check`. The **gateway** applies it (§6). Other resources (the wiki's mandate fence, for instance)
+  apply it only when wired, and until then keep "expiry stops new admissions" only.
 - **Durable state.** The revocation view and its retained `seq` are in memory. A restarted reader starts at
   `Unknown`, which fails closed.
 - **Timing by deployment.** T_admit and T_drain are measured by the caller's clock. Their *logic* is tested here;
   measuring them in a deployment is a follow-up.
 - **The Cedar adapter.** `allowances_without_mandate` checks the reference evaluator only. The private Cedar adapter
   needs the same check over its own policy.
+
+## 6. Wired at the gateway (2026-09-25)
+
+**The gap.** AE1 gave the action envelope a slot for the enforcement point's finding about a mandate, and the
+gateway always filled it with `None`, because it held nothing it could verify. A policy rule that **requires** a
+mandate could therefore never be satisfied at the gateway: it always answered `Indeterminate`.
+
+**The wiring.**
+- `GossipAgent::with_execution_authority(ExecutionAuthority)` attaches A1's `ExecutionGate` and P2's
+  `GrantVerifier`. `offer_revocation_checkpoint` feeds the revocation view.
+- In `ae_preflight`, the one function all three doors (`/mcp`, `/a2a`, federation calls) go through, a grant
+  presented in `params._meta.mandate` is assessed:
+  1. the grant's **holder must be the authenticated caller**, as the auth layer resolved it, never what the request
+     asserts;
+  2. P2 checks it: issued, entitled by configuration, current, and possessed. The possession proof is bound to
+     **this call** by `possession_request(operation, resource, arguments_digest)`, which binds the operation, the
+     resource before `@`, and the arguments digest;
+  3. A1's gate checks it at dispatch: the resource's epoch, scope, window and operation, and fresh revocation
+     standing;
+  4. the result is bound as `Established`, `Refused` or `Unknown`, and the envelope's `not_after_ms` is clamped to
+     the mandate's window.
+- The operation a grant enumerates is `{operation}:{resource before @}`, e.g. `skill.invoke:skill:depot/dispatch`.
+  The resolved provider after `@` is not something a caller can know in advance, so neither the grant nor the proof
+  binds it.
+- **No authority attached: exactly the behaviour before.**
+
+**SDK parity.** `mycelium-py` and `mycelium-ts` accept `mandate=` on `A2aClient.send`/`stream`, and export
+`arguments_digest` and `mandate_request_bytes`, so a holder can compute exactly what to sign. The SDKs do not sign.
+**Golden vectors** (the canonical arguments digest, and the request bytes) are pinned identically in the gateway's
+Rust tests and both SDKs.
+
+**Gates.**
+- `gateway_authority::tests`: no presentation binds nothing; a valid grant is established; a grant held by someone
+  else is not; a proof for other arguments does not carry; no fresh revocation view means not established; a
+  superseded appointment is refused; a revoked one is not established; both golden vectors.
+- `test_boundary_h_a1_gateway_establishes_mandates_end_to_end`, through the real `/a2a` door with a bearer token
+  and a mandate-requiring policy:
+  - no grant → not established, and **the skill is never reached**;
+  - a valid grant → established, permitted, dispatched;
+  - after a signed revocation checkpoint → refused, and the skill is not reached again.
+- `mycelium-py/tests/test_mandate.py` and `mycelium-ts/tests/mandate.test.ts`: the same vectors.
+
+**Not claimed.**
+- The gateway is a route-level enforcement point (AE0 §7). An effect reached without passing through it is outside
+  this, which is H7's job.
+- The member-key view is the live identity view only under `compliance`. Without it, holders and authorities must
+  be configured external issuers.
 
 ## 5. Gates
 

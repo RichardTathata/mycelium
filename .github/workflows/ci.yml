@@ -350,7 +350,7 @@ jobs:
             sleep 1
           done
       - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
-      - run: pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests/test_typed.py mycelium-py/tests/test_reason.py mycelium-py/tests/test_connection_reuse.py mycelium-py/tests/test_commit_result.py mycelium-py/tests/test_federation.py -v
+      - run: pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests/test_typed.py mycelium-py/tests/test_reason.py mycelium-py/tests/test_connection_reuse.py mycelium-py/tests/test_commit_result.py mycelium-py/tests/test_federation.py mycelium-py/tests/test_mandate.py -v
         env:
           MYCELIUM_TEST_PORT: 8101
           MYCELIUM_TEST_PORT_B: 8102

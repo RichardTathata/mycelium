@@ -342,8 +342,10 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     never "not revoked", and a replay never refreshes freshness. Delegated work cannot outlive its parent; a
     continuation class without a demonstrable bound is `Unbounded`; T_admit and T_drain are reported apart, with
     unconfirmed stops never counted as stopped. The profile refuses bad *F*/*s*/*I*/*D* and advisory resources.
-    *Limits:* a resource must call it; the revocation view is in memory (a restart fails closed); timing is not
-    yet measured in a deployment. *Gate:* `mandate::authority::tests`, including both clock extremes.
+    **Wired at the gateway** (#399): a grant presented in `params._meta.mandate` by the **authenticated** caller,
+    possessed for that call, becomes an established, refused or unknown mandate in every action envelope, so
+    mandate-requiring policy rules are finally decidable there. *Limits:* other resources apply it only when wired;
+    the revocation view is in memory (a restart fails closed); timing is not yet measured in a deployment. *Gate:* `mandate::authority::tests`, including both clock extremes.
 - *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
   - **K3b and K3c:** head transport between nodes; body authorisation; per-issuer storage and ingestion caps (moved
     from H1).

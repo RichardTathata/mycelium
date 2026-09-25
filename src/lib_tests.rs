@@ -172,6 +172,8 @@ fn spawn_handler(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        execution_authority: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_clients: std::sync::OnceLock::new(),
@@ -1153,6 +1155,8 @@ async fn test_subscribe_notified_via_gossip() {
         deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -8800,5 +8804,167 @@ async fn test_boundary_h_p1_issuer_binding_on_live_nodes() {
 
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
     b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **Boundary H A1 at the gateway — end to end, through the real `/a2a` door.**
+///
+/// A policy allows `skill.invoke` on `depot/dispatch` **only with a mandate for `depot`**. The
+/// gateway has an execution authority attached, and the caller authenticates with a named bearer
+/// token (`token:gw/agent-1`).
+///
+/// 1. No grant presented: authority not established, and the skill is **never reached**.
+/// 2. A valid grant, possessed for this call, with a fresh revocation checkpoint: the mandate is
+///    **established**, the policy permits, and the skill answers.
+/// 3. The authority revokes the appointment: the same call is refused, and the skill is not reached
+///    again.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
+    use crate::agent::gateway_authority::{possession_request, ExecutionAuthority, PresentedMandate};
+    use crate::config::{GatewayNamedToken, TlsConfig};
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{
+        ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
+    };
+    use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerifier, SignedMandateGrant};
+    use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+    use crate::{ReferenceEvaluator, Rule};
+    use base64::Engine;
+    use ed25519_dalek::SigningKey;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const CALLER: &str = "token:gw/agent-1";
+    let authority_key = SigningKey::from_bytes(&[51u8; 32]);
+    let holder_key = SigningKey::from_bytes(&[52u8; 32]);
+
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("a1-gateway-{http_port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.gateway_identity_issuer = Some("gw".into());
+    cfg.gateway_named_tokens =
+        vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a());
+    let me = agent.node_id().clone();
+    let resource = format!("skill:depot/dispatch@{me}");
+
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-a1")
+            .with_catalogue("cat-a1", "1")
+            .map_action("skill.invoke", resource.clone())
+            .allow(Rule::new("*", "skill.invoke", resource.clone()).requiring_mandate("depot")),
+    ));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.trust(IssuerId::new("operator:acme").unwrap(), authority_key.verifying_key().to_bytes()).unwrap();
+    external.trust(IssuerId::new(CALLER).unwrap(), holder_key.verifying_key().to_bytes()).unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    agent.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external)));
+    agent.start().await.unwrap();
+
+    let _reg = agent.capabilities().advertise_capability(
+        crate::capability::Capability::new("depot", "dispatch"),
+        Duration::from_secs(30),
+    );
+    let reached = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                reached.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"dispatched".to_vec());
+            }
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let wall_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let checkpoint = |seq: u64, revoked: &[&str]| {
+        let c = RevocationCheckpoint {
+            authority: PrincipalId::new("operator:acme").unwrap(),
+            scope: "depot".into(),
+            seq,
+            issued_at_ms: wall_ms(),
+            revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
+        };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&authority_key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    };
+    agent.offer_revocation_checkpoint(&checkpoint(1, &[])).expect("an authority is attached");
+
+    let text = "dispatch";
+    let canonical = serde_json::to_vec(&serde_json::json!({ "text": text })).unwrap();
+    let digest = crate::agent::action_evaluator::arguments_digest(&canonical);
+    let mandate = Mandate {
+        holder: PrincipalId::new(CALLER).unwrap(),
+        established_by: PrincipalId::new("operator:acme").unwrap(),
+        purpose: "dispatch".into(),
+        scope: "depot".into(),
+        operations: vec!["skill.invoke:skill:depot/dispatch".into()],
+        epoch: 1,
+        term: TermId::new("t1").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: wall_ms() + 600_000,
+    };
+    let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&authority_key, &mandate.canonical_bytes()).to_vec(), mandate };
+    let proof = mycelium_core::tls::sign_bytes(
+        &holder_key,
+        &possession_message(&grant.mandate, &possession_request("skill.invoke", &resource, &digest)),
+    );
+    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof) };
+
+    let send = |meta: Option<serde_json::Value>| {
+        let mut params = serde_json::json!({
+            "id": format!("task-{}", fastrand::u32(..)),
+            "skillId": "depot/dispatch",
+            "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+        });
+        if let Some(m) = meta {
+            params["_meta"] = m;
+        }
+        async move {
+            reqwest::Client::new()
+                .post(format!("http://127.0.0.1:{http_port}/a2a"))
+                .bearer_auth("s3cret")
+                .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tasks/send", "params": params}))
+                .send()
+                .await
+                .expect("tasks/send")
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // 1. No grant: authority not established, and the skill is never reached.
+    let body = send(None).await;
+    assert_eq!(body["error"]["data"]["reason"], "authority_not_established", "{body}");
+    assert_eq!(reached.load(Ordering::SeqCst), 0);
+
+    // 2. A valid, possessed grant with a fresh revocation view: established, permitted, dispatched.
+    let body = send(Some(serde_json::json!({ "mandate": presented }))).await;
+    assert!(body.get("error").is_none(), "an established mandate satisfies the policy: {body}");
+    assert_eq!(reached.load(Ordering::SeqCst), 1);
+
+    // 3. The authority revokes the appointment: refused, and the skill is not reached again.
+    agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();
+    let body = send(Some(serde_json::json!({ "mandate": presented }))).await;
+    assert!(body.get("error").is_some(), "a revoked appointment is not established: {body}");
+    assert_eq!(reached.load(Ordering::SeqCst), 1);
+
+    agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
 }

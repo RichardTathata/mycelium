@@ -29,31 +29,8 @@ impl GossipAgent {
     /// Includes this node itself, with its current key, even before its own `sys/identity` write has
     /// cycled back through the watcher.
     pub fn knowledge_member_keys(&self) -> HashMap<NodeId, MemberKeys> {
-        let ctx = &self.task_ctx;
-        let revoked = super::revocation::revoked_key_set(ctx);
-
-        let mut out: HashMap<NodeId, MemberKeys> = HashMap::new();
-        for (node, keys) in ctx.peer_keys.pin().iter() {
-            let entry = out.entry(node.clone()).or_default();
-            for k in keys {
-                if !entry.retained.contains(k) {
-                    entry.retained.push(*k);
-                }
-            }
-        }
-        if let Some(t) = ctx.tls.get() {
-            let entry = out.entry(self.node_id.clone()).or_default();
-            let cur = t.verifying_key_bytes();
-            if !entry.retained.contains(&cur) {
-                entry.retained.insert(0, cur);
-            }
-        }
-        for entry in out.values_mut() {
-            entry.revoked = entry.retained.iter().filter(|k| revoked.contains(*k)).copied().collect();
-        }
-        out
+        member_keys_of(&self.task_ctx)
     }
-
     /// Sign `record` with this node's identity key — **only if the record is issued by this node**
     /// ([`IssuerId::for_node`] of this node's id).
     ///
@@ -71,4 +48,30 @@ impl GossipAgent {
         }
         self.sign_with_identity(&record.canonical_bytes()).ok_or(SignAsMemberError::NoIdentity)
     }
+}
+
+/// The member-key snapshot behind [`GossipAgent::knowledge_member_keys`], from a task context.
+pub(crate) fn member_keys_of(ctx: &super::TaskCtx) -> HashMap<NodeId, MemberKeys> {
+    let revoked = super::revocation::revoked_key_set(ctx);
+
+    let mut out: HashMap<NodeId, MemberKeys> = HashMap::new();
+    for (node, keys) in ctx.peer_keys.pin().iter() {
+        let entry = out.entry(node.clone()).or_default();
+        for k in keys {
+            if !entry.retained.contains(k) {
+                entry.retained.push(*k);
+            }
+        }
+    }
+    if let Some(t) = ctx.tls.get() {
+        let entry = out.entry(ctx.node_id.clone()).or_default();
+        let cur = t.verifying_key_bytes();
+        if !entry.retained.contains(&cur) {
+            entry.retained.insert(0, cur);
+        }
+    }
+    for entry in out.values_mut() {
+        entry.revoked = entry.retained.iter().filter(|k| revoked.contains(*k)).copied().collect();
+    }
+    out
 }

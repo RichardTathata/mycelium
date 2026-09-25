@@ -2150,6 +2150,32 @@ pub(crate) async fn ae_preflight(
     // default (BTreeMap) configuration, so the digest is stable for equal arguments.
     let canonical = serde_json::to_vec(arguments).unwrap_or_default();
     let now_ms = crate::hlc::physical_ms(ctx.hlc.current());
+    let arguments_digest = ae::arguments_digest(&canonical);
+
+    // Boundary H A1: with an execution authority attached, a presented grant
+    // (`params._meta.mandate`) becomes a real mandate finding for this call — checked against the
+    // **authenticated** caller, P2's grant checks and A1's execution gate — instead of `None`.
+    let assessment = match ctx.execution_authority.get() {
+        Some(authority) => {
+            let presented: Option<super::gateway_authority::PresentedMandate> =
+                serde_json::from_value(params["_meta"]["mandate"].clone()).ok();
+            authority.assess(
+                &actor,
+                operation,
+                resource,
+                &arguments_digest,
+                presented.as_ref(),
+                now_ms,
+                &super::gateway_member_keys(ctx),
+            )
+        }
+        None => super::gateway_authority::Assessment { binding: None, valid_until_ms: None },
+    };
+    // A1 rule 3: the envelope can never outlive the mandate it acts under.
+    let not_after_ms = match assessment.valid_until_ms {
+        Some(until) => now_ms.saturating_add(60_000).min(until),
+        None => now_ms.saturating_add(60_000),
+    };
 
     let envelope = ae::ActionEnvelope {
         operation_id,
@@ -2159,7 +2185,7 @@ pub(crate) async fn ae_preflight(
         scopes,
         operation: operation.to_string(),
         resource: resource.to_string(),
-        arguments_digest: ae::arguments_digest(&canonical),
+        arguments_digest,
         selected_arguments: selected,
         mapping,
         // The expected policy revision comes from the deployment report an operator filed, via
@@ -2168,13 +2194,11 @@ pub(crate) async fn ae_preflight(
         // gateway running a superseded policy cannot be detected.
         expected_policy_revision: ctx.deployed_policy_revision.load_full().map(|r| (*r).clone()),
         issued_at_ms: now_ms,
-        not_after_ms: now_ms.saturating_add(60_000),
-        // AE1: the gateway is a route-level preflight and holds no mandate fence of its own, so it
-        // binds no mandate. `None` is *claims none*, which is not *claimed one and it failed* — a
-        // rule that requires a mandate therefore reads this as **authority not established** and
-        // answers `Indeterminate`, never a denial. Resource-side enforcement, where a fence exists
-        // to consult, is AE2.
-        mandate: None,
+        not_after_ms,
+        // AE1 + Boundary H A1: `None` when no execution authority is attached or no grant was
+        // presented — *claims none*, which a rule requiring a mandate reads as **authority not
+        // established** (`Indeterminate`), never a denial. With an authority, the finding above.
+        mandate: assessment.binding,
     };
 
     // Decide, then record, *then* dispatch. Both outcomes are sealed: a permit with no record of

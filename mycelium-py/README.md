@@ -148,6 +148,21 @@ async for sig in agent.on_signal("render-job"):
 
 ---
 
+### Presenting a mandate (Boundary H, A1)
+
+A gateway with an execution authority establishes a mandate you present, so policy rules that require one
+can be satisfied. You hold a grant signed by the appointing authority, and sign a possession proof with your
+own key over the exact request bytes. The SDK computes those bytes, and does not sign:
+
+```python
+from mycelium import A2aClient, arguments_digest, mandate_request_bytes
+
+request = mandate_request_bytes("skill.invoke", "skill:depot/dispatch", arguments_digest({"text": message}))
+# The holder signs mycelium::mandate::grant::possession_message(grant, request) with its own key,
+# using the Rust crate or an equivalent implementation; this SDK computes `request` and does not sign.
+client.send("depot/dispatch", message, mandate={"grant": grant, "possession": base64_signature})
+```
+
 ### RPC
 
 #### `rpc_call(target, method, payload, *, timeout_secs) → bytes`
