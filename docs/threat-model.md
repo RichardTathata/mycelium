@@ -273,7 +273,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **Authority lapses** (item 5, AE1). A mandate carries `valid_until_ms`, expiry is locally decidable, and AE1
     refuses a revoked mandate before policy runs. A population's authority therefore ends at its term unless it is
     renewed. Expiry stops **new admissions** at an enforcement point that checks the mandate. Stopping *admitted*
-    work needs the authority-at-execution contract (plan A1), which is proposed, not built.
+    work is A1, in force below, at resources that apply it.
   - **An external audit sink** (WS-C, opt-in). An attached `AuditSink` (SIEM or WORM archive) keeps the original
     bytes of every record it mirrors, so a reissued suffix is detectable against it where one is configured.
   - **Containment.** Clearance (L1–L3) bounds what each member holds. A population run as its own domain never
@@ -335,6 +335,15 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     `serve:{ns}/{name}`, with possession bound to that advertisement. Everything else is filtered and **reported**.
     *Limits:* reader-side, so colluders using their own policy are not stopped, only exposed; the report is not yet
     wired to metrics or audit. *Gate:* `mandate::protected::tests`.
+  - **A1, authority at execution** (#398; ADR `design/authority-at-execution.md`). `ExecutionGate::check`
+    re-establishes authority at every point where work acts: admission, dequeue, retry, and re-authorisation
+    checkpoints. It re-runs the resource's own `ResourceAuthority::check` and requires fresh revocation standing
+    from authority-signed checkpoints, under the exact predicate `(a − r) ≤ 2s ∧ (r − a) ≤ F − 2s`. Silence is
+    never "not revoked", and a replay never refreshes freshness. Delegated work cannot outlive its parent; a
+    continuation class without a demonstrable bound is `Unbounded`; T_admit and T_drain are reported apart, with
+    unconfirmed stops never counted as stopped. The profile refuses bad *F*/*s*/*I*/*D* and advisory resources.
+    *Limits:* a resource must call it; the revocation view is in memory (a restart fails closed); timing is not
+    yet measured in a deployment. *Gate:* `mandate::authority::tests`, including both clock extremes.
 - *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*
   - **K3b and K3c:** head transport between nodes; body authorisation; per-issuer storage and ingestion caps (moved
     from H1).
@@ -343,9 +352,6 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     position, so a witness's assertion alone never accuses anyone. Outcomes are equivocation, consistent, history
     unavailable, or insufficient evidence. Only a rewrite that conflicts with retained signed evidence is provable. A
     checkpoint cannot detect a rewrite of the unwitnessed records after it, and that suffix stays unproven.
-  - **A1, authority at execution.** Under the profile, every protected operation requires an established mandate,
-    checked at the execution boundary. Queued, retried and delegated work keeps the requirement, and long-running
-    work declares whether it re-authorises or runs to a stated bound.
   - **The consensus boundary.** No H claim rests on exclusive authority until the election and lock repairs pass
     their acceptance gate. Until then, a signed grant proves who issued it, and entitlement comes from
     configuration.
@@ -359,7 +365,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **No coordinator means no central halt.** That is the property the substrate exists to provide, and against a
     misbehaving population it protects the population from its operator too. The nearest thing to a halt is expiry
     plus revocation. Expiry is decided locally under a clock bound and stops *new admissions*. Admitted work stops
-    only where the resource re-checks authority at execution (A1). Revocation reaches only connected readers
+    where the resource re-checks authority at execution (A1), within its class's declared drain bound. Revocation reaches only connected readers
     (Boundary D, §6), or fails closed under a freshness bound. The operator owns the term lengths, the clock bound
     and the freshness bound.
   - **Moving coordination onto the substrate makes it both visible and easier.** An operator who admits untrusted

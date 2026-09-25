@@ -1296,6 +1296,23 @@ impl ReferenceEvaluator {
         self
     }
 
+    /// **The confined profile's first rule, checked** (Boundary H item A1): every allowance that
+    /// could permit a protected `(operation, resource)` must require a mandate.
+    ///
+    /// Returns the allowances that would permit a protected operation **without** one — each a hole
+    /// in the profile. An allowance matches a protected pair if its operation and resource are equal
+    /// or `*`. Empty means the policy satisfies the rule. This checks the reference evaluator only;
+    /// any other evaluator (the Cedar adapter) needs the same check over its own policy.
+    pub fn allowances_without_mandate(&self, protected: &[(&str, &str)]) -> Vec<Rule> {
+        let covers = |pattern: &str, value: &str| pattern == "*" || pattern == value;
+        self.allowances
+            .iter()
+            .filter(|r| r.requires_mandate.is_none())
+            .filter(|r| protected.iter().any(|(op, res)| covers(&r.operation, op) && covers(&r.resource, res)))
+            .cloned()
+            .collect()
+    }
+
     /// Carry a reviewed catalogue's identity and revision — the evidence consumer's own object,
     /// never re-minted here (AE0 §6, handover seam 1).
     pub fn with_catalogue(mut self, catalogue: impl Into<String>, revision: impl Into<String>) -> Self {
@@ -2374,3 +2391,26 @@ mod tests {
         assert_eq!(r.decision().verdict, Verdict::Indeterminate);
     }
 }
+
+#[cfg(test)]
+mod a1_policy_tests {
+    use super::{ReferenceEvaluator, Rule};
+
+    /// An allowance permitting a protected operation without a mandate is reported — including one
+    /// that reaches it through `*` — and one that requires a mandate is not.
+    #[test]
+    fn allowances_that_permit_protected_work_without_a_mandate_are_reported() {
+        let e = ReferenceEvaluator::new("r1")
+            .allow(Rule::new("*", "tools/call", "deploy").requiring_mandate("cap/fleet"))
+            .allow(Rule::new("*", "*", "deploy"))
+            .allow(Rule::new("*", "tools/call", "search"));
+        let holes = e.allowances_without_mandate(&[("tools/call", "deploy")]);
+        assert_eq!(holes.len(), 1, "only the wildcard allowance is a hole: {holes:?}");
+        assert_eq!(holes[0].operation, "*");
+        assert!(ReferenceEvaluator::new("r2")
+            .allow(Rule::new("*", "tools/call", "deploy").requiring_mandate("cap/fleet"))
+            .allowances_without_mandate(&[("tools/call", "deploy")])
+            .is_empty());
+    }
+}
+

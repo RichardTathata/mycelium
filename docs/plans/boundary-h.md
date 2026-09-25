@@ -768,6 +768,7 @@ and in the item's ADR, never silently.
 | H6, cohort budgets | #394 | — | `cohort_budget::tests` |
 | P2, signed mandate grants | #395 | — | `mandate::grant::tests` |
 | H3, advertisement bound to authority | #395 | — | `mandate::protected::tests` |
+| A1, authority at execution | #398 | — | `mandate::authority::tests`; `a1_policy_tests` |
 
 **Departures:**
 - **K1 is additive, not breaking.** §11 listed `KnowledgeStore::put → Result`. `put` had 72 call sites building
