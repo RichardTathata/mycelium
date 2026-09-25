@@ -408,6 +408,21 @@ three that go through the alias; closed by counting `<alias>::sleep|interval|tim
 such an import, which admitted **19 pre-existing sites in eight files (166 → 185)**. The signal both times was
 the same: *a baseline that moves when no site moved, or fails to move when one did.*
 
+**A third, 2026-09-25, and this one over-counted rather than under-counted.** The test-module skip matched the
+literal `#[cfg(test)]` only, so the nine modules written `#[cfg(all(test, feature = "…"))]` were counted as
+**production** — their clock and filesystem calls sat in the baseline as if they were admitted debt. The EXEMPT
+rule always said *a test that reads the real clock is doing its job*; the pattern just never implemented it for
+that spelling. Noticed the way the header says these are noticed: a new test in `http.rs`'s
+`#[cfg(all(test, tls, compliance))]` module failed the gate (+4) for `tokio::time` calls in its own setup — a
+**false** failure, which is the mirror of the false pass that started this paragraph and no less corrosive, because
+a gate that fires on correct code teaches people to update the baseline without reading it. The pattern now also
+matches `#[cfg(all(test` followed by `,` or `)`, which cannot catch `feature = "test-util"`. One file moved:
+`src/agent/http.rs` **38 → 15**, and the total **181 → 158**. No production site changed.
+
+So the count in this section is the count *the checker can see*, and it has now been wrong in both directions.
+That is the argument for the baseline rather than for a number: what it makes visible is **movement**, and a
+movement nobody can explain is the finding.
+
 ## 7. What this record does not decide
 
 The kernel's API (PR 2), the adapter traits' exact shapes (PR 3), the minimiser (PR 4+), and whether the
