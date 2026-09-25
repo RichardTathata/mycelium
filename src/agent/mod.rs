@@ -1101,7 +1101,9 @@ impl GossipAgent {
         signed: &crate::mandate::authority::SignedRevocationCheckpoint,
     ) -> Option<crate::mandate::authority::CheckpointOffer> {
         let authority = self.task_ctx.execution_authority.get()?;
-        let now_ms = crate::hlc::physical_ms(self.task_ctx.hlc.current());
+        // Checkpoint freshness is a deadline comparison, so it needs a live clock — a frozen
+        // one would make a stale checkpoint look current forever. See `Hlc::decision_now_ms`.
+        let now_ms = self.task_ctx.hlc.decision_now_ms();
         Some(authority.offer_checkpoint(signed, now_ms, &gateway_member_keys(&self.task_ctx)))
     }
 

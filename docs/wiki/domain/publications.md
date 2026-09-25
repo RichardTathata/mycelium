@@ -79,8 +79,22 @@ and an effect another participant has acted on — which is **not undoable at al
 promise given and observed cannot be negated and the downstream state belongs to another autonomous agent. **The
 discriminator is observation, not failure.** Method: state the three scopes precisely, classify each of the paper's
 results by the widest scope its proof needs, and draw the line where teardown ends and compensation begins. No code required, and independent
-of the four-arm composition experiment above. **The paper is not in the repository — vendor the reference and cite
-it properly before writing.**
+of the four-arm composition experiment above.
+
+**Sharpened 2026-09-24 by [D40](../../plans/v3-contracts-axis.md) — *supersede, do not reverse*.** Trying to write
+the classification's own worked example (a WASM component replacement) found that the example smuggled a scope-3
+promise: "drain the in-flight work first" has **no terminal condition** in a mesh where resolution is by need and
+dependents arrive unannounced. That failure supplies the discriminator the method was missing, and it is **not**
+crash-versus-clean-unload: it is whether **the dependent set is knowable**. A lexically scoped runtime knows it,
+which is why the paper's proofs work there; a coordinator-free mesh does not, by design. So **any result whose proof
+enumerates dependents does not transfer**, and that is the hypothesis the classification should test first — it may
+account for most of the temporal metatheory. Crash-versus-clean-unload survives only as a secondary discriminator,
+separating scopes 1 and 2.
+
+**The reference is vendored** (it was not when this was recorded): the citation, abstract, stated contributions and
+a section map are at [`docs/plans/external/2026-09-09-cordis-spatiotemporal-composability.md`](../../plans/external/2026-09-09-cordis-spatiotemporal-composability.md)
+— arXiv:2608.25512v1, Peking University · DeepSeek-AI, 84 pp. The PDF itself is deliberately **not** in the
+repository; cite from the reference note.
 
 ## Pending: the "Blood Money → Monetary Ecology" article revision (planned, not started)
 

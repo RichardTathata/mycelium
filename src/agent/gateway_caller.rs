@@ -439,7 +439,9 @@ struct Envelope {
 /// `None` when the envelope would exceed the bound a receiver accepts (`MAX_ENVELOPE_BYTES`) —
 /// the producer never truncates (review finding 4).
 pub(crate) fn frame_with_context(ctx: &TaskCtx, principal: &str, scopes: &[String], app: Bytes) -> Option<Bytes> {
-    let issued_at_ms = crate::hlc::physical_ms(ctx.hlc.current());
+    // A caller envelope's issue time is checked against a lifetime by whoever receives it, so it
+    // must come from a clock that moves. See `Hlc::decision_now_ms`.
+    let issued_at_ms = ctx.hlc.decision_now_ms();
     let via = ctx.node_id.to_string();
     let (k, sig) = attest(ctx, principal, &via, scopes, issued_at_ms, &app);
     let env = Envelope {

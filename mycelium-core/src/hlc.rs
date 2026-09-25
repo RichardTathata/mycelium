@@ -166,6 +166,27 @@ impl Hlc {
         self.state.load(Ordering::Acquire)
     }
 
+    /// **The current time, in the HLC's own frame, without advancing the clock.**
+    ///
+    /// Use this — not [`current`](Self::current) — wherever a *decision* depends on the time:
+    /// whether a mandate has expired, whether a checkpoint is stale, when a credential was issued.
+    ///
+    /// `current()` is a bare load of the last value the clock was **ticked to**. It never reads the
+    /// wall clock, so on a node whose gossip has gone quiet — which is exactly the partition case —
+    /// it **freezes**. Anything comparing a deadline against it then fails *open*: an expired
+    /// mandate never expires, a superseded policy never goes stale. That is the wrong direction for
+    /// a authorization decision to fail in.
+    ///
+    /// This reads the wall clock and floors it at any peer time already observed, so both sides of
+    /// a comparison sit in one frame — the same reasoning as the consensus lease read (audit
+    /// 2026-07-15, BUG 8), which shrinks the disagreement window to true unsynchronised skew.
+    ///
+    /// It does **not** advance the clock. `tick()` would also read the wall clock, but it mutates
+    /// shared state and consumes logical-counter space on what is a read path.
+    pub fn decision_now_ms(&self) -> u64 {
+        wall_now_ms().max(physical_ms(self.current()))
+    }
+
     /// Advances the clock for a local event and returns the new packed
     /// timestamp.
     pub fn tick(&self) -> u64 {
@@ -518,5 +539,63 @@ mod prop_tests {
             prop_assert!(result >= remote,
                 "observe must return >= remote: result={} remote={}", result, remote);
         }
+    }
+}
+
+#[cfg(test)]
+mod decision_clock_tests {
+    use super::*;
+
+    /// **A decision clock must move even when nothing has ticked it.**
+    ///
+    /// `current()` is a bare load of the last value the clock was *ticked to*. On a node whose
+    /// gossip has gone quiet — which is exactly the partition case — nothing ticks it, and any
+    /// deadline compared against it fails **open**: a mandate never expires, a checkpoint never
+    /// goes stale, a credential never ages out. That is the wrong direction for an authorization
+    /// decision to fail in, and it was live in `ae_preflight`, the gateway caller envelope and the
+    /// checkpoint offer until 2026-09-25 (found by review).
+    #[test]
+    fn a_quiet_clock_still_answers_with_the_time() {
+        // A node that has been quiet for an hour: its HLC was last ticked then, and nothing since
+        // has moved it. `Hlc::new()` seeds from the wall clock, so the clock must be pushed BACK
+        // to reproduce the condition — the first version of this test used a fresh clock and
+        // passed against the frozen implementation too, which made it worthless.
+        let hlc = Hlc::new();
+        let an_hour_ago = wall_now_ms() - 3_600_000;
+        hlc.state.store(pack(an_hour_ago, 0), std::sync::atomic::Ordering::Release);
+
+        let frozen = physical_ms(hlc.current());
+        assert_eq!(frozen, an_hour_ago, "precondition: the clock is stale");
+
+        let decided = hlc.decision_now_ms();
+        assert!(
+            decided >= frozen + 3_500_000,
+            "decision_now_ms read a FROZEN clock ({decided} vs {frozen}): a deadline compared \
+             against this never fires, so an expired mandate never expires and a stale checkpoint \
+             never goes stale — it fails OPEN",
+        );
+    }
+
+    /// It does not advance the clock — a read path must not consume logical-counter space or
+    /// reorder anything.
+    #[test]
+    fn reading_the_decision_clock_does_not_tick_it() {
+        let hlc = Hlc::new();
+        let before = hlc.current();
+        let _ = hlc.decision_now_ms();
+        assert_eq!(hlc.current(), before, "a read must not mutate the clock");
+    }
+
+    /// And it stays in the HLC's frame: a peer time already observed pulls it **forward**, so two
+    /// nodes comparing the same deadline are in one frame rather than two.
+    #[test]
+    fn an_observed_future_peer_time_pulls_the_decision_clock_forward() {
+        let hlc = Hlc::new();
+        let ahead = physical_ms(hlc.tick()) + 60_000;
+        hlc.observe(pack(ahead, 0));
+        assert!(
+            hlc.decision_now_ms() >= ahead,
+            "an observed peer time must floor the decision clock, not be ignored",
+        );
     }
 }
