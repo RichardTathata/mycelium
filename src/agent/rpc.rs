@@ -92,7 +92,19 @@ impl RpcRequestRx {
         loop {
             let req = RpcRequest(self.rx.recv().await?);
             match super::gateway_caller::verify(&self.ctx, &req) {
-                Ok(_) => return Some(req),
+                Ok(_) => {
+                    // Closure plan C3: protected work is decided at this boundary, so every serve
+                    // loop built on `rpc_rx`, in this crate or a companion, gets it without calling
+                    // anything. Inert unless provider enforcement is on.
+                    #[cfg(all(feature = "gateway", feature = "tls"))]
+                    if let Err(refusal) = super::provider_enforcement::check(&self.ctx, &req).await {
+                        tracing::warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
+                            "rpc_rx: refused by provider enforcement");
+                        rpc_respond_ctx(&self.ctx, &req, Bytes::from(refusal.rpc_body()));
+                        continue;
+                    }
+                    return Some(req);
+                }
                 Err(e) => {
                     tracing::warn!(kind = %req.kind(), sender = %req.sender(),
                         "rpc_rx: caller context refused, answering with an error: {e}");

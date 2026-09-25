@@ -174,6 +174,8 @@ fn spawn_handler(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_clients: std::sync::OnceLock::new(),
@@ -1157,6 +1159,8 @@ async fn test_subscribe_notified_via_gossip() {
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -8991,11 +8995,184 @@ async fn test_boundary_h_a1_gateway_establishes_mandates_end_to_end() {
     assert!(stream_body.contains("completed"), "a stream call under an established mandate completes: {stream_body}");
     assert_eq!(reached.load(Ordering::SeqCst), 2, "and reaches the skill");
 
+    // C3: with provider enforcement on as well, the same call passes **both** doors: the gateway
+    // carried enough (the mandate and the resource claim) for the provider to verify it for itself.
+    agent.with_provider_enforcement();
+    let body = send(Some(serde_json::json!({ "mandate": presented }))).await;
+    assert!(body.get("error").is_none(), "established at the gateway and at the provider: {body}");
+    assert_eq!(reached.load(Ordering::SeqCst), 3);
+
     // 3. The authority revokes the appointment: refused, and the skill is not reached again.
     agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();
     let body = send(Some(serde_json::json!({ "mandate": presented }))).await;
     assert!(body.get("error").is_some(), "a revoked appointment is not established: {body}");
-    assert_eq!(reached.load(Ordering::SeqCst), 2);
+    assert_eq!(reached.load(Ordering::SeqCst), 3);
+
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **Closure plan C3: authority where the work happens.** One node with provider enforcement on,
+/// a policy requiring a mandate for `depot`, and its own execution authority.
+///
+/// 1. A member calls the node's MCP tool **directly**, no gateway, with no grant: refused at the
+///    provider, and the tool never runs. Before C3 this ran: only a gateway asked.
+/// 2. The same member, under its own grant (holder `node:{id}`, possession signed with its identity
+///    key): established at the provider, and the tool runs.
+/// 3. The authority revokes the appointment: refused again.
+/// 4. A skill call claiming another node's resource, or a skill this node does not serve, is refused
+///    before any policy question: a mandate for one resource does not admit a call routed to another.
+/// 5. An operator-listed protected kind served through `rpc_rx` is refused at the receiver, and the
+///    serve loop never sees it.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn test_c3_provider_enforcement_decides_direct_member_calls() {
+    use crate::agent::gateway_authority::{possession_request, ExecutionAuthority, PresentedMandate};
+    use crate::config::TlsConfig;
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{
+        ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
+    };
+    use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerifier, SignedMandateGrant};
+    use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+    use crate::{ReferenceEvaluator, Rule};
+    use base64::Engine;
+    use ed25519_dalek::SigningKey;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let authority_key = SigningKey::from_bytes(&[53u8; 32]);
+    let gossip_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("c3-provider-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.protected_rpc_kinds = vec!["depot.custom".into()];
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    let me = agent.node_id().clone();
+    let tool = format!("tool:count@{me}");
+
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-c3")
+            .with_catalogue("cat-c3", "1")
+            .map_action("tools/call", tool.clone())
+            .allow(Rule::new("*", "tools/call", tool.clone()).requiring_mandate("depot")),
+    ));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.trust(IssuerId::new("operator:acme").unwrap(), authority_key.verifying_key().to_bytes()).unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    agent.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external)));
+    agent.with_provider_enforcement();
+    agent.start().await.unwrap();
+
+    let ran = Arc::new(AtomicUsize::new(0));
+    let r2 = Arc::clone(&ran);
+    let _tool = agent.mcp().register_mcp_tool("count", serde_json::json!({}), move |_args| {
+        let r = Arc::clone(&r2);
+        async move { r.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!("ran")) }
+    });
+    let skill_seen = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, seen) = (Arc::clone(&agent), Arc::clone(&skill_seen));
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"dispatched".to_vec());
+            }
+        });
+    }
+    let custom_seen = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, seen) = (Arc::clone(&agent), Arc::clone(&custom_seen));
+        let mut rx = agent.service().rpc_rx("depot.custom");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"served".to_vec());
+            }
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let wall_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let checkpoint = |seq: u64, revoked: &[&str]| {
+        let c = RevocationCheckpoint {
+            authority: PrincipalId::new("operator:acme").unwrap(),
+            scope: "depot".into(),
+            seq,
+            issued_at_ms: wall_ms(),
+            revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
+        };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&authority_key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    };
+    agent.offer_revocation_checkpoint(&checkpoint(1, &[])).expect("an authority is attached");
+
+    let arguments = serde_json::json!({"n": 1});
+    let call = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"count","arguments":arguments}});
+    let payload = call.to_string().into_bytes();
+    let reply = |b: bytes::Bytes| serde_json::from_slice::<serde_json::Value>(&b).unwrap();
+
+    // 1. Direct, no grant: refused at the provider, the tool never runs.
+    let r = reply(agent.service().rpc_call(me.clone(), "mcp.invoke", payload.clone(), Duration::from_secs(5)).await.unwrap());
+    assert_eq!(r["error"]["data"]["reason"], "authority_not_established", "{r}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool never ran");
+
+    // 2. Under its own grant: established at the provider, and the tool runs.
+    let holder = format!("node:{me}");
+    let mandate = Mandate {
+        holder: PrincipalId::new(&holder).unwrap(),
+        established_by: PrincipalId::new("operator:acme").unwrap(),
+        purpose: "count".into(),
+        scope: "depot".into(),
+        operations: vec!["tools/call:tool:count".to_string()],
+        epoch: 1,
+        term: TermId::new("t1").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: wall_ms() + 600_000,
+    };
+    let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&authority_key, &mandate.canonical_bytes()).to_vec(), mandate };
+    let digest = crate::agent::action_evaluator::arguments_digest(&serde_json::to_vec(&arguments).unwrap());
+    let proof = agent
+        .sign_with_identity(&possession_message(&grant.mandate, &possession_request("tools/call", &tool, &digest)))
+        .expect("a tls identity");
+    let presented = serde_json::to_value(PresentedMandate {
+        grant,
+        possession: base64::engine::general_purpose::STANDARD.encode(proof),
+    })
+    .unwrap();
+    let r = reply(agent.service().rpc_call_with_mandate(me.clone(), "mcp.invoke", payload.clone(), &presented, &tool, Duration::from_secs(5)).await.unwrap());
+    assert!(r.get("error").is_none(), "an established mandate is admitted at the provider: {r}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+    // 3. Revoked: refused again.
+    agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();
+    let r = reply(agent.service().rpc_call_with_mandate(me.clone(), "mcp.invoke", payload.clone(), &presented, &tool, Duration::from_secs(5)).await.unwrap());
+    assert!(r.get("error").is_some(), "a revoked appointment is refused at the provider: {r}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+    // 4. A skill claim naming another node, or a skill not served here: refused on the claim.
+    let other = "skill:depot/dispatch@10.9.9.9:1".to_string();
+    let r = reply(agent.service().rpc_call_with_mandate(me.clone(), "skill.invoke", b"go".to_vec(), &presented, &other, Duration::from_secs(5)).await.unwrap());
+    assert_eq!(r["reason"], "resource_not_here", "{r}");
+    let unserved = format!("skill:depot/unknown@{me}");
+    let r = reply(agent.service().rpc_call_with_mandate(me.clone(), "skill.invoke", b"go".to_vec(), &presented, &unserved, Duration::from_secs(5)).await.unwrap());
+    assert_eq!(r["reason"], "resource_not_served", "{r}");
+    assert_eq!(skill_seen.load(Ordering::SeqCst), 0, "the skill loop never saw either");
+
+    // 5. An operator-listed protected kind: refused at `rpc_rx`, the serve loop never sees it.
+    let r = reply(agent.service().rpc_call(me.clone(), "depot.custom", b"x".to_vec(), Duration::from_secs(5)).await.unwrap());
+    assert_eq!(r["reason"], "resource_unnamed", "{r}");
+    assert_eq!(custom_seen.load(Ordering::SeqCst), 0, "the serve loop never saw the refused call");
 
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);

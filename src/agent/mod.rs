@@ -45,6 +45,9 @@ pub(crate) mod gateway_caller;
 pub(crate) mod action_evaluator;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod gateway_authority;
+/// Closure plan C3: the action preflight, mandates included, at the provider's receive boundary.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod provider_enforcement;
 /// AE4's contract fixtures: what the seam requires of *any* evaluator behind it, stated once so a
 /// replacement evaluator is held to the same bar as the reference one. Same gate as the seam.
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -528,6 +531,10 @@ pub(crate) struct TaskCtx {
     /// Absent = the gateway binds no mandate, exactly as before.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) execution_authority: std::sync::OnceLock<Arc<gateway_authority::ExecutionAuthority>>,
+    /// Closure plan C3: whether this node, as a **provider**, runs the action preflight on protected
+    /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) provider_enforcement: std::sync::atomic::AtomicBool,
     /// The federation edge (item 2 PR 8), set via `with_federation_edge`. Absent = this gateway
     /// serves no federated calls: a presented credential is refused, never anonymised.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -974,6 +981,8 @@ impl GossipAgent {
             #[cfg(all(feature = "gateway", feature = "tls"))]
             execution_authority: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
+            provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_edge: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_clients: std::sync::OnceLock::new(),
@@ -1080,6 +1089,25 @@ impl GossipAgent {
         if self.task_ctx.evidence_journal.set(journal).is_err() {
             tracing::warn!("with_evidence_journal: a journal is already attached; ignoring");
         }
+    }
+
+    /// **Enforce authority where the work happens** (Boundary H closure plan C3).
+    ///
+    /// With this on, every **protected** RPC this node receives (`mcp.invoke`, `skill.invoke`, and
+    /// any kind in `protected_rpc_kinds`) runs the same action preflight a gateway runs, as the
+    /// enforcement point `provider`, before any handler sees it: in the MCP tool loop, in every
+    /// [`rpc_rx`](crate::ServiceHandle::rpc_rx) receiver, and in the SDK serve stream. The node's
+    /// action evaluator decides; a presented mandate is verified by the node's own
+    /// [`ExecutionAuthority`](crate::ExecutionAuthority) (P2 and A1), never taken from a gateway;
+    /// the decision is recorded in the node's evidence journal. A refusal is answered with an error
+    /// and the handler never runs.
+    ///
+    /// **Fails closed:** with enforcement on and no action evaluator attached, protected work is
+    /// refused. Direct member calls are checked the same as gateway calls, which is the point: the
+    /// gateway is no longer the only door that asks.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn with_provider_enforcement(&self) {
+        self.task_ctx.provider_enforcement.store(true, std::sync::atomic::Ordering::Release);
     }
 
     #[cfg(all(feature = "gateway", feature = "tls"))]

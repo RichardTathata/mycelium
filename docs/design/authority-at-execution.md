@@ -72,7 +72,7 @@ clock extremes are testable exactly.
 ## 4. What this does not claim
 
 - **That every resource uses it.** A1 is the contract a resource applies at its effect boundary by calling
-  `ExecutionGate::check`. The **gateway** applies it (§6), and so does the **wiki's git store** (§7). Other
+  `ExecutionGate::check`. The **gateway** applies it (§6), so do the **wiki's git store** (§7) and, when enabled, the **provider** (§8). Other
   resources (provider admission, the `FsStore`) apply it only when wired, and until then keep "expiry stops new admissions" only.
 - **Durable state, and restart.** The revocation view and its retained `seq` are in memory. A restarted
   reader starts at `Unknown`, which fails closed **until a checkpoint arrives**, and there is the gap: an old
@@ -199,6 +199,47 @@ that moved. `a_pause_after_the_check_is_not_caught_locally` pins this limit as a
 for a closed one. Git has no clock this check can sit inside; the closure plan's C9 records late writes after
 the fact and moves prevention to the remote's pre-receive hook. (Corrected 2026-09-25 after an external review;
 an earlier revision of this section called the gap "not a gap".)
+
+## 8. Wired at the provider (closure plan C3, 2026-09-25)
+
+**The gap.** A provider checked *who* was calling and ran the call. Whether the caller *may* was decided only at
+the gateway, so a member calling `rpc_call` directly skipped the decision, and revoking an agent's mandate stopped
+it at the gateway and nowhere else.
+
+**The wiring.**
+- **Opt-in:** `GossipAgent::with_provider_enforcement()`. With it on, every **protected** RPC the node receives
+  (`mcp.invoke`, `skill.invoke`, and any kind in `protected_rpc_kinds`) runs **the gateway's own preflight**, as the
+  enforcement point `provider`, before any handler sees it. The node's action evaluator decides, the node's own
+  `ExecutionAuthority` verifies a presented mandate (P2 and A1), and the decision goes to the node's evidence journal.
+- **Where it runs:**
+  - the MCP tool loop, and the bridged external-MCP loop;
+  - every `rpc_rx` receiver, so any serve loop in this crate or a companion gets it without calling anything;
+  - the SDK serve stream (`/gateway/rpc/serve`), which never streams a refused request.
+- **What the call is,** derived as the gateway derives it, so policy and proof mean the same at both doors:
+  - `mcp.invoke`: the tool from the payload;
+  - `skill.invoke`: the envelope's resource claim (C2 carries it), confirmed as `skill:{ns}/{name}@{self}` for a
+    capability this node advertises;
+  - any other protected kind: the claim, confirmed as `…@{self}`.
+- **Fails closed:** with enforcement on and no evaluator, protected work is refused. A claim that names another
+  node, or a skill this node does not serve, is refused before any policy question.
+
+**Gates.**
+- `test_c3_provider_enforcement_decides_direct_member_calls`:
+  - a direct member call with no grant is refused and the tool never runs;
+  - under the member's own grant it runs;
+  - after revocation it is refused;
+  - a skill claim for another node, or an unserved skill, is refused;
+  - an operator-listed kind is refused at `rpc_rx` and the serve loop never sees it.
+- The `/a2a` end-to-end test: with enforcement on at the provider as well, an established call passes both doors,
+  which shows the gateway carries enough for the provider to verify for itself.
+
+**Not claimed.**
+- **`llm.invoke` is not checked at the provider.** The LLM provider loop registers its own receiver, and neither the
+  LLM gateway route nor its SDK carries mandates. It is protected on the raw routes (C1) and gated by `llm:invoke`.
+- **The provider records its decision, not the execution outcome.** For work served through `rpc_rx`, the handler is
+  the application's.
+- **A node that is both gateway and provider decides twice** and records twice: two enforcement points, by design.
+  A policy that counts calls counts both.
 
 ## 5. Gates
 

@@ -80,6 +80,11 @@ possession proof they sign over `mandate_request_bytes(...)`.
 cannot carry protected work around `/mcp` and `/a2a`. List every kind your own providers serve as protected work in
 `protected_rpc_kinds` (`GOSSIP_PROTECTED_RPC_KINDS`).
 
+**Enforce at the provider too** (closure plan C3). On every node that serves tools or skills, attach the same action
+evaluator and execution authority as the gateway, and turn on `agent.with_provider_enforcement()`. Protected work
+is then decided where it runs, so a member that reaches a provider without the gateway is refused just as the
+gateway would refuse it. Feed revocation checkpoints to every such node (`offer_revocation_checkpoint`).
+
 Then read what the node itself can confirm:
 
 ```rust
