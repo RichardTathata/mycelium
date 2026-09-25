@@ -133,6 +133,9 @@ jobs:
       # The static forbidden-call check (item 6 PR 3, D12). Runs in the same job as clippy
       # because it is the same kind of claim: the seams cannot erode while PR 4-7 are built.
       - run: ./scripts/check-sim-seams.sh
+      # Closure plan C11: no new unclassified read of Hlc::current(), which stands still on a quiet
+      # node and fails a deadline check open.
+      - run: ./scripts/check-hlc-current.sh
       # The KV namespace sweep (item 2 PR 1, D7). The plan asserted this check existed before it did;
       # an invariant nothing runs is a sentence. Foreign state never enters the gossip medium.
       - run: ./scripts/check-kv-namespaces.sh

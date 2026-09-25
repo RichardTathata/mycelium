@@ -246,7 +246,7 @@ For the wiki store specifically:
 - **Gate:** a long-running handler is cancelled within its declared bound after revocation, and T_drain is
   measured end to end.
 
-### C11: Audit every time-based decision for a frozen clock (S–M; addresses F14; after #405)
+### C11: Audit every time-based decision for a frozen clock (S–M; addresses F14; after #405) — **implemented, see §8**
 
 - **What.** Every read of `hlc.current()` is classified: a **decision** (a deadline, an expiry, a freshness or
   replay window), which must read `Hlc::decision_now_ms()` (#405), or a **stamp** (an ordering or record
@@ -350,4 +350,5 @@ monotonicity bug (all in #402, merged).
 | C8 | #414 | **Epochs: the gate's installed epoch is persisted, not the verifier's retained epochs.** The gate refuses a mandate below its installed epoch whatever the verifier remembers, so that is what supersession safety needs. **The start is marked where the reader is created**: at `with_execution_authority` for the gateway and provider, and at construction for the wiki store. **The cumulative-checkpoint contract is documented, not checked**: a reader cannot tell a cumulative checkpoint from a partial one |
 | C9 | #416 | **The hook judges the appointment's window, not revocation.** A pre-receive hook has a trustworthy clock but no revocation feed; it refuses pushes past the appointment's `valid_until_ms` recorded on the mandate ref (`appointment.json`), and revocation at the remote stays the fence's job (moving the ref). **The gateway row relies on C3's provider re-check** rather than a separate test of a pause between preflight and dispatch: the provider's check is the later one, and C3's gates cover it |
 | C10 | #417 | **Cancellation rides on the provider check, not a separate hook:** work is registered when C3's check admits a call under an established mandate, and cancelled by a periodic sweep that re-runs A1's check (one mechanism for expiry, revocation, staleness and supersession). **The MCP loop cancels hard** (the handler future is dropped); **`rpc_rx` is cooperative** (`RpcRequest::authority_lapsed()`). **Not built: forwarding cancellation to SDK agents** through the serve stream, and cancelling the bridged external-MCP loop; both stay unconfirmed, as the model already reports |
+| C11 | this PR | **The seen-set sites stay on `current()`, classified**: a decision, but one that fails closed on a frozen clock (entries age slower), on the per-message hot path, where a wall-clock read per message is a cost with no safety gain. **The regression guard is a per-file count** (`scripts/check-hlc-current.sh`, like the sim-seam gate), not an allowlist of lines. **The quiet-node test's plant is an assertion on the mandate** (it *is* current at the frozen time) rather than a planted code path |
 

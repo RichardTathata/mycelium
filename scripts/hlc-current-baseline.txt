@@ -1,0 +1,13 @@
+# Reads of Hlc::current() per file, each classified (closure plan C11). A new read needs a class and a
+# `// C11:` comment on its line before this count goes up.
+#
+# mycelium-core/src/connection.rs: the nonce seen-set TTL, four sites. A decision, but it fails
+#   closed on a frozen clock (entries age slower, so nonces are remembered longer, never shorter).
+#   Kept on the atomic load: this is the per-message hot path.
+mycelium-core/src/connection.rs 4
+# mycelium-core/src/ops.rs: the same seen-set TTL on local emission, three sites. Fails closed.
+mycelium-core/src/ops.rs 3
+# mycelium-core/src/persistence.rs: a `written_at_ms` stamp and a snapshot ordering stamp.
+mycelium-core/src/persistence.rs 2
+# src/consensus.rs: a test that sanity-checks the HLC's own reading.
+src/consensus.rs 1

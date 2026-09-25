@@ -326,7 +326,7 @@ mod tests {
         drop(g1);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let held = crate::consensus::live_committed_value(
-            &a.task_ctx.kv_state, "lock/z", crate::consensus::wall_now_ms()).is_some();
+            &a.task_ctx.kv_state, "lock/z", mycelium_core::sim_seam::wall_now_ms()).is_some();
         assert!(held, "stale guard's drop cleared the live holder's claim");
         std::mem::forget(g2);
         a.shutdown().await;

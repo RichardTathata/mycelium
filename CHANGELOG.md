@@ -11,6 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Every read of `Hlc::current()` classified, and guarded** (Boundary H closure plan C11).
+  - The seen-set TTL sites fail closed on a frozen clock; the rest are stamps.
+  - `consensus::causal_now_ms` uses `decision_now_ms`.
+  - New `scripts/check-hlc-current.sh` (CI) fails on an unclassified new read.
+  - `ConfinementReport::clock_sync` (always `Unverified`).
+  - `Hlc::force_state_for_tests` (test support).
+  - An end-to-end test: a gateway whose HLC is an hour behind still refuses an expired mandate.
 - **Work already running stops when its authority lapses** (Boundary H closure plan C10). A provider with enforcement
   on registers calls acting under an established mandate with its `ExecutionAuthority` (`begin`, `WorkGuard`), and
   the agent sweeps them every `sweep_interval_ms()`, re-running A1's check. The first failed check cancels the
