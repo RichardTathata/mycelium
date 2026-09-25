@@ -116,6 +116,104 @@ mod imp {
     };
     use std::{fs, path::Path, sync::Arc};
 
+    /// How long a node waits for another process that is generating the shared CA: 300 × 100 ms.
+    const CA_WAIT_STEPS: u32 = if cfg!(test) { 5 } else { 300 };
+
+    /// **Load the cluster CA, or create it — exactly once, however many nodes start together.**
+    ///
+    /// Nodes that share `auto_cert_dir` (one volume, several containers) used to race here: each
+    /// checked "does a CA exist?", found none, and generated **its own**. Each then trusted a
+    /// different root, so mTLS between them never succeeded and they never peered — the federation
+    /// suite's intermittent "b1 sees its one peer" failures. The files on disk could even end up as
+    /// one node's certificate with another's key.
+    ///
+    /// Now: an exclusive-create lock (`ca.lock`) gives exactly one process the right to generate.
+    /// It re-checks under the lock (another may have finished in between), writes each file to a
+    /// temporary name and renames it into place (so no reader sees half a file), then removes the
+    /// lock. Every other process waits, bounded, for both files and loads them. A lock that outlives
+    /// its holder (a crash mid-generation) is an **error naming the lock**, never a silently
+    /// different CA.
+    ///
+    /// Startup-only filesystem setup, like the rest of this function; the wait is a count-bounded
+    /// sleep, not a clock read.
+    pub(crate) fn load_or_create_ca(
+        cfg: &TlsConfig,
+    ) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let dir = &cfg.auto_cert_dir;
+        let auto_ca_cert_path = dir.join("ca-cert.pem");
+        let auto_ca_key_path = dir.join("ca-key.pem");
+        let ca_cert_path = cfg.ca_cert_pem.clone().unwrap_or(auto_ca_cert_path.clone());
+        let lock_path = dir.join("ca.lock");
+
+        let load = || -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
+            let pem = fs::read_to_string(&ca_cert_path).map_err(|e| err(format!("TLS: read CA cert: {e}")))?;
+            let der = pem_cert_to_der(&pem)?;
+            let key_pem = fs::read_to_string(&auto_ca_key_path).map_err(|e| err(format!("TLS: read CA key: {e}")))?;
+            let key = KeyPair::from_pem(&key_pem).map_err(|e| err(format!("TLS: parse CA key: {e}")))?;
+            Ok((der, key))
+        };
+        let present = || ca_cert_path.exists() && auto_ca_key_path.exists();
+
+        let mut waited = 0u32;
+        loop {
+            if present() {
+                return load();
+            }
+            match fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+                Ok(_) => {
+                    let result = if present() {
+                        load()
+                    } else {
+                        generate_and_publish_ca(dir, &auto_ca_cert_path, &auto_ca_key_path)
+                    };
+                    let _ = fs::remove_file(&lock_path);
+                    return result;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if waited >= CA_WAIT_STEPS {
+                        return Err(err(format!(
+                            "TLS: another process holds {lock_path:?} and no CA appeared within 30s; \
+                             if that process crashed while generating the CA, remove the lock and restart"
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    waited += 1;
+                }
+                Err(e) => return Err(err(format!("TLS: cannot take CA lock {lock_path:?}: {e}"))),
+            }
+        }
+    }
+
+    /// Generate a CA and publish it: each file written under a temporary name, then renamed into
+    /// place. Called only while holding `ca.lock`.
+    fn generate_and_publish_ca(
+        dir: &Path,
+        cert_path: &Path,
+        key_path: &Path,
+    ) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let ca_key_pair = KeyPair::generate_for(&PKCS_ED25519).map_err(|e| err(format!("TLS: generate CA key: {e}")))?;
+        let mut ca_params = CertificateParams::new(vec![]).map_err(|e| err(format!("TLS: CA params: {e}")))?;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        let ca_cert = ca_params.self_signed(&ca_key_pair).map_err(|e| err(format!("TLS: self-sign CA: {e}")))?;
+        let ca_cert_der = CertificateDer::from(ca_cert.der().to_vec());
+
+        let pid = std::process::id();
+        let publish = |path: &Path, contents: String, what: &str| -> Result<(), GossipError> {
+            let tmp = dir.join(format!(".{what}.tmp-{pid}"));
+            fs::write(&tmp, contents).map_err(|e| err(format!("TLS: write CA {what}: {e}")))?;
+            fs::rename(&tmp, path).map_err(|e| err(format!("TLS: publish CA {what}: {e}")))
+        };
+        publish(key_path, ca_key_pair.serialize_pem(), "key")?;
+        publish(cert_path, cert_der_to_pem(ca_cert_der.as_ref()), "cert")?;
+
+        tracing::info!("TLS: generated new cluster CA in {dir:?} — distribute ca-cert.pem to all nodes");
+        Ok((ca_cert_der, ca_key_pair))
+    }
+
     pub fn load_or_generate(
         cfg: &TlsConfig,
         node_id: &NodeId,
@@ -141,50 +239,7 @@ mod imp {
         };
 
         // ── 2. CA cert + key ──────────────────────────────────────────────
-        let auto_ca_cert_path = cfg.auto_cert_dir.join("ca-cert.pem");
-        let auto_ca_key_path  = cfg.auto_cert_dir.join("ca-key.pem");
-
-        let ca_cert_path = cfg.ca_cert_pem.clone().unwrap_or(auto_ca_cert_path.clone());
-        let ca_cert_der: CertificateDer<'static>;
-        let ca_key_pair: KeyPair;
-
-        if ca_cert_path.exists() && auto_ca_key_path.exists() {
-            // Load existing CA
-            let pem = fs::read_to_string(&ca_cert_path)
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: read CA cert: {e}") })?;
-            ca_cert_der = pem_cert_to_der(&pem)?;
-            let key_pem = fs::read_to_string(&auto_ca_key_path)
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: read CA key: {e}") })?;
-            ca_key_pair = KeyPair::from_pem(&key_pem)
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: parse CA key: {e}") })?;
-        } else {
-            // Generate new CA
-            ca_key_pair = KeyPair::generate_for(&PKCS_ED25519)
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: generate CA key: {e}") })?;
-            let mut ca_params = CertificateParams::new(vec![])
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: CA params: {e}") })?;
-            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-            ca_params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
-            let ca_cert = ca_params
-                .self_signed(&ca_key_pair)
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: self-sign CA: {e}") })?;
-
-            ca_cert_der = CertificateDer::from(ca_cert.der().to_vec());
-
-            // Save CA cert as PEM for peer distribution
-            let pem_str = cert_der_to_pem(ca_cert_der.as_ref());
-            fs::write(&auto_ca_cert_path, pem_str)
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: write CA cert: {e}") })?;
-            let key_pem = ca_key_pair.serialize_pem();
-            fs::write(&auto_ca_key_path, key_pem)
-                .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: write CA key: {e}") })?;
-
-            tracing::info!(
-                "TLS: generated new cluster CA in {:?} — distribute ca-cert.pem to all nodes",
-                cfg.auto_cert_dir
-            );
-        }
+        let (ca_cert_der, ca_key_pair) = load_or_create_ca(cfg)?;
 
         // ── 3. Node cert (regenerated every startup, signed by CA) ───────
         let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
@@ -439,7 +494,7 @@ mod imp {
         Ok((server_config, client_config, gateway_server_config))
     }
 
-    fn pem_cert_to_der(pem: &str) -> Result<CertificateDer<'static>, GossipError> {
+    pub(crate) fn pem_cert_to_der(pem: &str) -> Result<CertificateDer<'static>, GossipError> {
         let mut cursor = std::io::Cursor::new(pem.as_bytes());
         let certs: Vec<CertificateDer<'static>> =
             rustls_pemfile::certs(&mut cursor)
@@ -512,3 +567,72 @@ mod key_extract_tests {
         assert_eq!(ed25519_key_from_cert_der(&[]), None);
     }
 }
+
+/// The shared-CA race (federation suite: "b1 sees its one peer"): nodes that share `auto_cert_dir`
+/// and start together must all end up with **one** CA.
+#[cfg(test)]
+#[cfg(feature = "tls")]
+mod ca_race_tests {
+    use super::imp::load_or_create_ca;
+    use crate::config::TlsConfig;
+    use std::sync::{Arc, Barrier};
+
+    fn fresh_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("myc-ca-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Eight nodes start at the same instant on one empty directory, twenty times over. Every one
+    /// must hold the same CA, and it must be the CA on disk. Before the fix, each could generate its
+    /// own — the root cause of the intermittent federation peering failures.
+    #[test]
+    fn nodes_starting_together_on_a_shared_dir_all_get_one_ca() {
+        for round in 0..20 {
+            let dir = fresh_dir(&format!("race-{round}"));
+            let cfg = Arc::new(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+            let barrier = Arc::new(Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let (cfg, barrier) = (Arc::clone(&cfg), Arc::clone(&barrier));
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        load_or_create_ca(&cfg).expect("CA").0.as_ref().to_vec()
+                    })
+                })
+                .collect();
+            let cas: Vec<Vec<u8>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            assert!(cas.windows(2).all(|w| w[0] == w[1]), "round {round}: nodes hold different CAs");
+            let on_disk = super::imp::pem_cert_to_der(&std::fs::read_to_string(dir.join("ca-cert.pem")).unwrap()).unwrap();
+            assert_eq!(on_disk.as_ref(), cas[0].as_slice(), "round {round}: the CA on disk differs");
+            assert!(!dir.join("ca.lock").exists(), "round {round}: the lock was left behind");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An existing CA is loaded, never replaced.
+    #[test]
+    fn an_existing_ca_is_loaded_not_replaced() {
+        let dir = fresh_dir("existing");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let first = load_or_create_ca(&cfg).unwrap().0.as_ref().to_vec();
+        let second = load_or_create_ca(&cfg).unwrap().0.as_ref().to_vec();
+        assert_eq!(first, second);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lock left by a process that died mid-generation is an **error naming the lock** — never a
+    /// second, different CA.
+    #[test]
+    fn a_stale_lock_is_an_error_not_a_second_ca() {
+        let dir = fresh_dir("stale");
+        std::fs::write(dir.join("ca.lock"), b"").unwrap();
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let Err(e) = load_or_create_ca(&cfg) else { panic!("a stale lock must not yield a CA") };
+        assert!(e.to_string().contains("ca.lock"), "{e}");
+        assert!(!dir.join("ca-cert.pem").exists(), "no CA was generated behind the lock");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
