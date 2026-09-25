@@ -9344,6 +9344,138 @@ async fn test_c10_running_work_stops_when_its_authority_lapses() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
+/// **Closure plan C11: a quiet gateway's clock does not stand still for its decisions.** The
+/// gateway's HLC is forced an hour into the past, as on a node that has heard nothing for an hour. A
+/// mandate that expired thirty minutes ago is presented through `/a2a`.
+/// - The plant: at the frozen HLC's time the mandate **is** inside its window, so a gateway that
+///   decided on `Hlc::current()` would admit the call.
+/// - The gateway refuses it, and the skill is never reached: it decides on `decision_now_ms`.
+/// (#405's trap, heeded: a freshly created clock seeds from the wall clock and would prove nothing.)
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
+    use crate::agent::gateway_authority::{possession_request, ExecutionAuthority, PresentedMandate};
+    use crate::config::{GatewayNamedToken, TlsConfig};
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{
+        ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
+    };
+    use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerifier, SignedMandateGrant};
+    use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+    use crate::{ReferenceEvaluator, Rule};
+    use base64::Engine;
+    use ed25519_dalek::SigningKey;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const CALLER: &str = "token:gw/agent-1";
+    let authority_key = SigningKey::from_bytes(&[58u8; 32]);
+    let holder_key = SigningKey::from_bytes(&[59u8; 32]);
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("c11-quiet-{http_port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.gateway_identity_issuer = Some("gw".into());
+    cfg.gateway_named_tokens =
+        vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a());
+    let me = agent.node_id().clone();
+    let resource = format!("skill:depot/dispatch@{me}");
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-c11")
+            .with_catalogue("cat-c11", "1")
+            .map_action("skill.invoke", resource.clone())
+            .allow(Rule::new("*", "skill.invoke", resource.clone()).requiring_mandate("depot")),
+    ));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.trust(IssuerId::new("operator:acme").unwrap(), authority_key.verifying_key().to_bytes()).unwrap();
+    external.trust(IssuerId::new(CALLER).unwrap(), holder_key.verifying_key().to_bytes()).unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    agent.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external)));
+    agent.start().await.unwrap();
+    let _cap = agent.capabilities().advertise_capability(crate::capability::Capability::new("depot", "dispatch"), Duration::from_secs(30));
+    let reached = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                reached.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"dispatched".to_vec());
+            }
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let c = RevocationCheckpoint {
+        authority: PrincipalId::new("operator:acme").unwrap(),
+        scope: "depot".into(),
+        seq: 1,
+        issued_at_ms: wall,
+        revoked: Default::default(),
+    };
+    agent
+        .offer_revocation_checkpoint(&SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&authority_key, &c.canonical_bytes()).to_vec(), checkpoint: c })
+        .unwrap();
+
+    let text = "dispatch";
+    let digest = crate::agent::action_evaluator::arguments_digest(&serde_json::to_vec(&serde_json::json!({ "text": text })).unwrap());
+    let mandate = Mandate {
+        holder: PrincipalId::new(CALLER).unwrap(),
+        established_by: PrincipalId::new("operator:acme").unwrap(),
+        purpose: "dispatch".into(),
+        scope: "depot".into(),
+        operations: vec!["skill.invoke:skill:depot/dispatch".into()],
+        epoch: 1,
+        term: TermId::new("t1").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: wall - 1_800_000, // expired thirty minutes ago
+    };
+    let an_hour_ago = wall - 3_600_000;
+    // The plant: at the frozen clock's time, this mandate is inside its window.
+    assert!(mandate.is_current(an_hour_ago), "a decision on the frozen clock would admit it");
+    assert!(!mandate.is_current(wall));
+
+    let grant = SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&authority_key, &mandate.canonical_bytes()).to_vec(), mandate };
+    let proof = mycelium_core::tls::sign_bytes(&holder_key, &possession_message(&grant.mandate, &possession_request("skill.invoke", &resource, &digest)));
+    let presented = PresentedMandate { grant, possession: base64::engine::general_purpose::STANDARD.encode(proof) };
+
+    // A node that has heard nothing for an hour.
+    agent.task_ctx.hlc.force_state_for_tests(mycelium_core::hlc::pack(an_hour_ago, 0));
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/a2a"))
+        .bearer_auth("s3cret")
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tasks/send", "params": {
+            "id": "task-c11", "skillId": "depot/dispatch",
+            "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+            "_meta": { "mandate": presented },
+        }}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body.get("error").is_some(), "an expired mandate is refused however quiet the node: {body}");
+    assert_eq!(reached.load(Ordering::SeqCst), 0, "the skill was never reached");
+
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
 /// **A leadership answer names the rung it reached.**
 ///
 /// `elect_leader` returns a bare `NodeId`, which cannot distinguish *"a quorum chose me"* from

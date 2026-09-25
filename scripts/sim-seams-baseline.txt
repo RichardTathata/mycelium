@@ -43,6 +43,6 @@
 1 src/bin/skillrunner/main.rs
 2 src/bin/skillrunner/runner.rs
 2 src/capability_config.rs
-10 src/consensus.rs
+9 src/consensus.rs
 1 src/federation/catalog.rs
 1 src/mesh_manifest.rs

@@ -666,7 +666,7 @@ async fn do_snapshot(
     let opaque_val = crate::signal::encode_load_state(&crate::signal::LoadState {
         fill_ratio:    1.0,
         is_opaque:     true,
-        written_at_ms: crate::hlc::physical_ms(hlc.current()),
+        written_at_ms: crate::hlc::physical_ms(hlc.current()), // C11: a stamp, not a decision
     });
     let raise_upd = crate::framing::make_gossip_update(
         node_id, default_ttl, Arc::clone(&opacity_key), opaque_val, false, hlc,
@@ -674,7 +674,7 @@ async fn do_snapshot(
     apply_and_notify(kv_state, &raise_upd);
 
     // 2. Scan store.
-    let snapshot_hlc = hlc.current();
+    let snapshot_hlc = hlc.current(); // C11: an ordering stamp, not a decision
     let mut entries: Vec<SyncEntry> = {
         let guard = kv_state.store.pin();
         guard.iter()

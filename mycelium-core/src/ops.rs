@@ -62,7 +62,7 @@ pub fn emit_signal(
     payload: Bytes,
 ) -> bool {
     let nonce = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
-    let ts = crate::hlc::physical_ms(ctx.hlc.current());
+    let ts = crate::hlc::physical_ms(ctx.hlc.current()); // C11: dedup TTL, fails closed
     ctx.seen.mark_and_check(nonce, ts);
     let sig = Signal {
         kind: Arc::clone(&kind), scope: scope.clone(),
@@ -100,7 +100,7 @@ pub fn emit_signal_ordered(
     payload: Bytes,
 ) -> bool {
     let nonce   = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
-    let ts      = crate::hlc::physical_ms(ctx.hlc.current());
+    let ts      = crate::hlc::physical_ms(ctx.hlc.current()); // C11: dedup TTL, fails closed
     let hlc_seq = ctx.hlc.tick();
     ctx.seen.mark_and_check(nonce, ts);
     let sig = Signal {
@@ -135,7 +135,7 @@ pub async fn emit_signal_async(
     payload: Bytes,
 ) -> bool {
     let nonce = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
-    let ts = crate::hlc::physical_ms(ctx.hlc.current());
+    let ts = crate::hlc::physical_ms(ctx.hlc.current()); // C11: dedup TTL, fails closed
     ctx.seen.mark_and_check(nonce, ts);
     let handler_fill = ctx.signal_handlers.fill_ratio(&kind);
     let combined = handler_fill.max(crate::framing::gossip_shard_fill(&ctx.gossip_txs));

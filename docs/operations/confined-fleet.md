@@ -90,6 +90,10 @@ undeclared), CohortView::trusting([operator]), external)`, then `offer_cohort_de
 declaration. A colluding population inside every member's own cap is still held to the cohort's cap; strangers
 share the undeclared pool. Watch `cohort_budget_refusals()`.
 
+**Keep every node's clock in sync** (closure plan C11). Every expiry and freshness check assumes each node's wall
+clock is within *s* of real time: run NTP (or equivalent) and monitor it. The node's report says
+`clock_sync: Unverified`, because a node cannot vouch for its own clock.
+
 Then read what the node itself can confirm:
 
 ```rust

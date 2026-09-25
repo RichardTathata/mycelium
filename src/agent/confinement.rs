@@ -48,6 +48,16 @@ pub enum NetworkConfinement {
     Unverified,
 }
 
+/// Whether this node's wall clock is within the bound *s* the authority checks assume (closure plan
+/// C11). A node cannot verify its own clock against real time.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum ClockSync {
+    /// Not verifiable from inside the node. Evidence for it is the deployment's time-sync monitoring
+    /// (NTP or equivalent), never this report.
+    Unverified,
+}
+
 /// What this node can state about the confined-fleet profile's node-level requirements.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ConfinementReport {
@@ -65,6 +75,9 @@ pub struct ConfinementReport {
     pub evidence_journal: Setting,
     /// Always [`NetworkConfinement::Unverified`].
     pub network_confinement: NetworkConfinement,
+    /// Always [`ClockSync::Unverified`] (closure plan C11): every expiry and freshness check assumes
+    /// the wall clock is within *s* of real time, and a node cannot vouch for its own clock.
+    pub clock_sync: ClockSync,
 }
 
 impl ConfinementReport {
@@ -113,6 +126,7 @@ impl GossipAgent {
             action_evaluator,
             evidence_journal,
             network_confinement: NetworkConfinement::Unverified,
+            clock_sync: ClockSync::Unverified,
         }
     }
 }
@@ -135,6 +149,7 @@ mod tests {
         assert_eq!(r.egress_allow_list, Setting::Unset);
         assert_eq!(r.identity_proofs_required, Setting::Unset);
         assert_eq!(r.network_confinement, NetworkConfinement::Unverified);
+        assert_eq!(r.clock_sync, ClockSync::Unverified, "a node cannot vouch for its own clock");
         assert!(r.unmet().contains(&"egress_allow_list"));
     }
 

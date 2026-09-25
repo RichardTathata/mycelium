@@ -140,6 +140,14 @@ covering `ae_preflight`, the caller envelope's `issued_at_ms` and `offer_revocat
 The wiki store's `ExecutionGateAuthority` takes the deployment's clock as a closure, and the same rule applies to
 it: a wall clock, never a value that advances only on events.
 
+**The audit (closure plan C11).** Every remaining read of `Hlc::current()` was classified. The nonce seen-set's
+TTL (seven sites) is a decision that **fails closed** on a frozen clock: entries age slower, so nonces are
+remembered longer, never shorter. It stays on the atomic load because it is the per-message hot path. The rest are
+stamps. `consensus::causal_now_ms` now calls `decision_now_ms`. `scripts/check-hlc-current.sh` (in CI) fails on a
+new read that is not classified. The node's confinement report states `clock_sync: Unverified`, since a node
+cannot vouch for its own clock. Gate: `test_c11_a_quiet_gateway_still_sees_a_mandate_expire`, where the HLC is
+forced an hour into the past and an expired mandate is still refused.
+
 **Not claimed.**
 - The gateway is a route-level enforcement point (AE0 §7). An effect reached without passing through it is outside
   this, which is H7's job.

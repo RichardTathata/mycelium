@@ -161,7 +161,21 @@ impl Hlc {
         }
     }
 
+    /// **Test support only** (closure plan C11): set the packed state directly, to reproduce a node
+    /// whose clock was last ticked long ago. `Hlc::new()` seeds from the wall clock, so a test that
+    /// does not force the state into the past cannot tell a live clock from a frozen one.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn force_state_for_tests(&self, packed: u64) {
+        self.state.store(packed, Ordering::Release);
+    }
+
     /// Returns the current packed HLC value without advancing it.
+    ///
+    /// **Not for decisions** (closure plan C11): this is the last value the clock was *ticked* to,
+    /// and it stands still on a node with no traffic. A deadline, an expiry or a freshness check
+    /// reads [`decision_now_ms`](Self::decision_now_ms). `scripts/check-hlc-current.sh` keeps new
+    /// reads of this from appearing unclassified.
     pub fn current(&self) -> u64 {
         self.state.load(Ordering::Acquire)
     }

@@ -212,6 +212,8 @@ pub async fn handle_connection(
             // Seen-set TTL eviction is keyed by physical milliseconds — extract
             // the high 48 bits of the packed HLC so the "age" math the seen-set
             // does internally still maps to real time.
+            // C11: a decision that fails closed on a frozen clock (entries age slower, so the node
+            // remembers nonces longer, never shorter); kept on the atomic load for the hot path.
             if seen.mark_and_check(nonce, crate::hlc::physical_ms(hlc.current())) {
                 continue;
             }
@@ -501,7 +503,7 @@ pub async fn handle_connection(
             }
 
             WireMessage::Signal { ttl, nonce, sender, scope, kind, payload, hlc_seq } => {
-                let ts = crate::hlc::physical_ms(hlc.current());
+                let ts = crate::hlc::physical_ms(hlc.current()); // C11: dedup TTL, fails closed
                 if seen.mark_and_check(nonce, ts) {
                     continue;
                 }
@@ -709,7 +711,7 @@ pub async fn handle_connection(
 
             WireMessage::SignedData { mut update, signer, signature } => {
                 // Dedup by nonce (no early fast-path — SignedData has a non-zero variant tag).
-                let ts = crate::hlc::physical_ms(hlc.current());
+                let ts = crate::hlc::physical_ms(hlc.current()); // C11: dedup TTL, fails closed
                 if seen.mark_and_check(update.nonce, ts) {
                     continue;
                 }

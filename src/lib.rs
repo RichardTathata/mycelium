@@ -277,7 +277,7 @@ pub use agent::{
 /// adopter cannot see cannot hold their replacement evaluator to anything.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::ae_contract;
-pub use agent::confinement::{ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
+pub use agent::confinement::{ClockSync, ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
     mandate_operation, possession_request, resource_key, Assessment, ExecutionAuthority, PresentedMandate,

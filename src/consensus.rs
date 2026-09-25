@@ -446,13 +446,6 @@ pub(crate) fn decode_lease_ms(bytes: &Bytes) -> Option<u64> {
     (bytes.len() >= 8).then(|| u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0u8; 8])))
 }
 
-/// Wall-clock now in milliseconds (same basis as HLC physical time).
-pub(crate) fn wall_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 
 /// The reader's **causal now** on the HLC physical domain: `max(wall clock, HLC physical)`.
 ///
@@ -465,7 +458,8 @@ pub(crate) fn wall_now_ms() -> u64 {
 /// (which the fencing token then covers). It never reads *behind* wall time, so single-node lease
 /// timing is unchanged; the HLC term only ever pulls it forward toward a peer the node has heard from.
 pub(crate) fn causal_now_ms(hlc: &crate::hlc::Hlc) -> u64 {
-    wall_now_ms().max(crate::hlc::physical_ms(hlc.current()))
+    // The same formula as `Hlc::decision_now_ms`, which now exists for exactly this (C11).
+    hlc.decision_now_ms()
 }
 
 /// Returns the **live** committed value for `slot`, applying the epoch-lease
@@ -2099,7 +2093,7 @@ mod lease_tests {
         // observed. Simulate hearing a peer ~1 h ahead and assert the reader's lease clock jumps to
         // the peer's frame rather than staying on this node's (relatively lagging) wall clock.
         use crate::hlc::{Hlc, pack, physical_ms};
-        let wall = wall_now_ms();
+        let wall = mycelium_core::sim_seam::wall_now_ms();
         let peer_ahead_ms = 3_600_000; // 1 h ahead of this node's wall clock
         let hlc = Hlc::with_max_drift(86_400_000); // 24 h drift budget: accept the observe unclamped
         hlc.observe(pack(wall + peer_ahead_ms, 0)); // hear a peer from the (near) future
