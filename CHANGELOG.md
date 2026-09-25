@@ -25,7 +25,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   No authority attached means unchanged behaviour. **SDKs:** `mycelium-py` and `mycelium-ts` gain
   `mandate=` on `A2aClient.send`/`stream`, and `arguments_digest`/`argumentsDigest` and
   `mandate_request_bytes`/`mandateRequestBytes`, with golden vectors shared across Rust, Python and
-  TypeScript. Lock-order row 43.
+  TypeScript. Lock-order row 43. `ExecutionAuthority`, `PresentedMandate`, `possession_request`,
+  `mandate_operation` and `resource_key` are re-exported at the crate root, and an external-crate test
+  (`tests/gateway_mandate_external.rs`) keeps them constructible from outside.
 
 - **Authority at execution** (Boundary H plan, item A1; ADR `docs/design/authority-at-execution.md`).
   Letting a mandate expire stopped new admissions, but not work already admitted. `mandate::authority`:
