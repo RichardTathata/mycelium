@@ -354,7 +354,7 @@
       </div>
       <div class="card card-accent-green">
         <div class="card-title">Fleet-level legibility — shipped</div>
-        <div class="card-body"><strong>Legible Emergence</strong> (complete): <em>Detect → Localize → Explain → Intervene</em> for the whole fleet — computed from each node's local view + HLC causal order, with <strong>no central collector</strong>, so the diagnostics stay coordinator-free too. <code>GET /gateway/diagnose</code> narrates why the fleet is in its state; <code>/gateway/explain</code> reconstructs a key's cross-node causal history.</div>
+        <div class="card-body"><strong>Legible Emergence</strong> (complete): <em>Detect → Localize → Explain → Intervene</em> for the whole fleet — computed from each node's local view + HLC causal order, with <strong>no central collector</strong>, so the diagnostics stay coordinator-free too. <code>GET /gateway/diagnose</code> narrates why the fleet is in its state; <code>/gateway/explain</code> reconstructs a key's cross-node causal history.<br><br>Including the failure that <em>looks</em> like health: when one node quietly ends up holding every single-writer role, nothing is erring — no churn, no coverage gap — so conventional monitoring reports a green fleet with a hidden single point of failure. We detect that specifically (<code>role_concentration_pct</code>), and the election rule now spreads the roles rather than stacking them.</div>
       </div>
     </div>
     <div class="callout callout-green">The fear is real — and it is already answered. Not "the plan to close the gap": the gap is closed, at node <em>and</em> fleet level, and the diagnostics never needed a control plane to see the fleet either.</div>

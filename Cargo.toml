@@ -197,6 +197,27 @@ path              = "examples/federation_node.rs"
 required-features = ["gateway", "tls", "a2a", "cli"]
 
 [[example]]
+name              = "auditor_questions"
+path              = "examples/auditor_questions.rs"
+# `tls` because a tamper-evident chain must be signed — an unsigned one is a contradiction in
+# terms; `compliance` for the audit surface and the erasure registry.
+required-features = ["tls", "compliance"]
+
+[[example]]
+name              = "identity_one_record"
+path              = "examples/identity_one_record.rs"
+# `tls` for the identity machinery itself; `compliance` for the signed role claim, which is the
+# observable this example uses to prove a key actually reached a peer's `peer_keys` — a key that
+# never arrived shows up as a missing role rather than a silent success.
+required-features = ["tls", "compliance"]
+
+[[example]]
+name              = "federation_trust_is_not_transitive"
+path              = "examples/federation_trust_is_not_transitive.rs"
+# Signature verification across three domains.
+required-features = ["tls"]
+
+[[example]]
 name              = "knowledge_layer"
 path              = "examples/knowledge_layer.rs"
 # `knowledge` is behind `tls` — the record types verify Ed25519 signatures.

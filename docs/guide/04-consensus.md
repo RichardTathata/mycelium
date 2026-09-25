@@ -91,6 +91,17 @@ The distinction is not pedantry. LWW can decide which *record* survives; it cann
 callers each performed after being told they had won. *Convergent leader preference* and *exclusive
 ownership* are two capabilities, and only the second needs a fence.
 
+**Run it.** All three claims as one narrative, each act asserting:
+
+```bash
+cargo run --example coordination_integrity
+```
+
+It elects on a group nobody joined (refused), joins and elects (`Decided`, with an epoch), then has
+a *stale* holder — one whose own call also returned `Ok` and which never learned it was
+superseded — try to write. The fence stops it. The election did not, and was never going to: those
+are different jobs.
+
 ---
 
 ## The Example

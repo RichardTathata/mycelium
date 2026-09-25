@@ -60,7 +60,7 @@
 <main id="view"><p class="muted">Loading…</p></main>
 
 <script>
-const TABS = ["Overview","Fleet","Diagnose","Audit","KV","Metrics"];
+const TABS = ["Overview","Fleet","Diagnose","Integrity","Audit","KV","Metrics"];
 const esc = s => String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 let active = "Overview";
 const $ = s => document.querySelector(s);
@@ -238,6 +238,107 @@ function metrics(t){
   return `<pre class="metrics">${t.replace(/</g,"&lt;")}</pre>`;
 }
 
+// ── Integrity ─────────────────────────────────────────────────────────────────────────────
+//
+// The coordination and identity properties are **refusals**: the substrate declining to decide
+// alone, to trust transitively, or to accept an identity it cannot authenticate. A refusal has no
+// dashboard of its own — you cannot watch a thing not happen — so what an operator actually needs
+// is the *preconditions*, before the refusal surprises them.
+//
+// Everything here composes endpoints the console already reads. Nothing new is emitted for it.
+function integrity(stats, grpKeys, idKeys, fleet){
+  const nodes = (fleet && fleet.nodes) ? fleet.nodes.length : (stats && stats.peers != null ? stats.peers + 1 : 0);
+
+  // 1 — Electorates. An election in a group with no visible members is REFUSED, not decided
+  //     alone. This is the read that answers "would an election here work?" before you try.
+  const rosters = {};
+  (grpKeys||[]).forEach(k=>{
+    const m = /^grp\/([^/]+)\//.exec(k);
+    if(m) rosters[m[1]] = (rosters[m[1]]||0) + 1;
+  });
+  const groups = Object.keys(rosters).sort();
+  const grpRows = groups.length
+    ? groups.map(g=>`<tr><td><code>${esc(g)}</code></td><td>${rosters[g]}</td>
+        <td>${rosters[g] >= 1 ? '<span class="ok">can elect</span>'
+                              : '<span class="bad">no electorate</span>'}</td></tr>`).join("")
+    : `<tr><td colspan="3" class="muted">no groups joined on this node — an election would be
+         refused with <code>electorate_unavailable</code>, which is the substrate declining to
+         decide alone rather than a fault</td></tr>`;
+
+  // 2 — Sealed identity coverage. This is the readiness check cert-rotation.md prescribes before
+  //     turning `require_identity_proofs` on: every node must publish the one-entry record.
+  const sealed = (idKeys||[]).filter(k=>k.startsWith("sys/identity-signed/")).length;
+  const legacy = (idKeys||[]).filter(k=>k.startsWith("sys/identity/")).length;
+  // Three states, not two. A fleet with no identities at all is not "not ready" — it is running
+  // without TLS, and identity proofs are a TLS-only mechanism. Saying "some node has not upgraded"
+  // there would send an operator looking for a node that does not exist.
+  const idState = (sealed === 0 && legacy === 0)
+    ? ["", "no TLS identities on this fleet — proofs are a TLS-only mechanism"]
+    : (sealed > 0 && sealed >= legacy)
+      ? ["ok",  "yes — every identity seen here is sealed"]
+      : ["bad", "not yet — an identity without a sealed record means a node has not upgraded"];
+
+  // 3 — The tripwires. Detection, not prevention: these count what was refused or flagged.
+  const trip = [
+    ["identity_anchor_conflicts", stats.identity_anchor_conflicts, "an identity that did not chain to a trusted key — poisoning signal"],
+    ["sys_namespace_violations",  stats.sys_namespace_violations,  "a remote write to a `sys/` key this node owns"],
+    ["commit_conflicts",          stats.commit_conflicts,          "two values committed for one consensus slot"],
+  ];
+  const pct = stats.role_concentration_pct;
+
+  return `
+  <div class="card">
+    <h3>Electorates — can this fleet decide?</h3>
+    <p class="muted">An election over a group whose roster this node cannot see is <b>refused</b>
+      (<code>electorate_unavailable</code>), never decided alone. Before 2026-09-24 an empty roster
+      counted as one member with a quorum of one, satisfied by the proposer's own vote — so every
+      node elected <i>itself</i>.</p>
+    <table><thead><tr><th>group</th><th>members visible here</th><th></th></tr></thead>
+      <tbody>${grpRows}</tbody></table>
+  </div>
+
+  <div class="card">
+    <h3>Sealed identity coverage</h3>
+    <p class="muted">A node's key history and the proof that authenticates it travel as
+      <b>one</b> KV entry (<code>sys/identity-signed/</code>). Two entries would be two gossip
+      messages with no ordering between them. This is the readiness check to run
+      <i>before</i> setting <code>require_identity_proofs</code>.</p>
+    <div class="trip">
+      <div class="row"><span>nodes publishing a sealed record</span><b>${sealed}</b></div>
+      <div class="row"><span>legacy identity entries</span><b>${legacy}</b></div>
+      <div class="row"><span>safe to require proofs?</span>
+        <b class="${idState[0]}">${idState[1]}</b></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Role concentration (P10)</h3>
+    <p class="muted">The share of live single-writer roles held by one node. Withheld below two
+      visible holders: a partitioned node sees only its own roles, which is the pathology's exact
+      shape, so absence of evidence is not evidence.</p>
+    <div class="trip"><div class="row"><span>role_concentration_pct</span>
+      <b class="${pct>=60?'bad':(pct>0?'':'ok')}">${pct==null?'—':pct+'%'}</b></div></div>
+  </div>
+
+  <div class="card">
+    <h3>Tripwires — detection, not prevention</h3>
+    <p class="muted">Layer I is never taught a higher layer's law. These count what was refused or
+      flagged, so a violation is <i>legible</i> rather than impossible.</p>
+    <div class="trip">${trip.map(([k,v,why])=>
+      `<div class="row"><span><code>${k}</code><br><span class="muted">${why}</span></span>
+       <b class="${v>0?'bad':'ok'}">${v==null?'—':v}</b></div>`).join("")}</div>
+  </div>
+
+  <div class="card">
+    <h3>What has no panel, and why</h3>
+    <p class="muted">Trust non-transitivity and leadership fencing are <b>refusals at a boundary</b>,
+      not fleet state — there is nothing to plot, because the property is that something did not
+      happen. They are demonstrated by running
+      <code>federation_trust_is_not_transitive</code> and <code>coordination_integrity</code>.
+      A tile claiming "no breaches" would assert far more than this node can see.</p>
+  </div>`;
+}
+
 async function refresh(){
   const view = $("#view");
   try{
@@ -245,6 +346,15 @@ async function refresh(){
     if(active==="Overview"){ data = await api("/stats"); html = overview(data); }
     else if(active==="Fleet"){ data = await api("/gateway/fleet"); html = fleet(data); }
     else if(active==="Diagnose"){ data = await api("/gateway/diagnose"); html = diagnose(data); }
+    else if(active==="Integrity"){
+      data = await api("/stats");
+      const [g,i,f] = await Promise.all([
+        api("/gateway/kv/keys?prefix=grp%2F"),
+        api("/gateway/kv/keys?prefix=sys%2Fidentity"),
+        api("/gateway/fleet"),
+      ]);
+      html = integrity(data, (g&&g.keys)||[], (i&&i.keys)||[], f);
+    }
     else if(active==="Audit"){ data = await api("/gateway/audit"); html = audit(data); }
     else if(active==="KV"){ data = await api("/gateway/kv/keys"); html = kv(data); }
     else if(active==="Metrics"){ data = await api("/metrics"); html = metrics(data); }

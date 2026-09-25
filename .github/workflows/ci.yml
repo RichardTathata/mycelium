@@ -73,8 +73,23 @@ jobs:
       # demonstrates — which is the thing the gallery is a gate on. They are self-contained, take
       # seconds, and exit non-zero if a step panics.
       - run: cargo run --example receipt_ladder
+      # Coordination integrity (2026-09-24): the electorate rule, the leadership rung and the
+      # fence, as one narrative. Each act asserts, so a regression fails the job rather than
+      # printing a nice story about a substrate that no longer behaves that way.
+      - run: cargo run --example coordination_integrity
+      - run: cargo run --example coordinator_by_accretion
+      # Identity travels as one record; two proof-requiring nodes still authenticate. The race it
+      # prevents needs two processes, so that half stays in the Docker suites — the example says so
+      # rather than narrating a race it never runs.
+      - run: cargo run --example identity_one_record --features tls,compliance
+      # The three questions an auditor asks. Each act asserts — including that an edited audit
+      # chain FAILS to verify, which is the one a "trust us" answer cannot make checkable.
+      - run: cargo run --example auditor_questions --features tls,compliance
       - run: cargo run --example knowledge_layer --features tls
       - run: cargo run --example federated_domains --features tls
+      # The third domain: the question two domains cannot ask. Each act asserts, so "trust does
+      # not compose" stays a property rather than a paragraph.
+      - run: cargo run --example federation_trust_is_not_transitive --features tls
 
   clippy:
     name: Clippy

@@ -215,6 +215,36 @@ See [deployment.md §Choosing a sync mode](deployment.md).
 fallen behind the evidence journal, and there is no exporter in the public tree to be behind — the
 gauge would measure nothing. It lands with the exporter, not before it.
 
+## The Ops Console, and the Integrity tab
+
+`examples/ops_console` is a zero-dependency single-page console you point at any node's gateway —
+it *observes* the layers rather than adding to them, so it needs nothing installed on the fleet.
+Tabs: **Overview · Fleet · Diagnose · Integrity · Audit · KV · Metrics**.
+
+```bash
+cargo run --example ops_console          # :8099, then set the target host in the header
+```
+
+The **Integrity** tab is the one to know about, because the coordination and identity properties are
+**refusals** — the node declining to decide alone, to trust transitively, or to accept an identity
+it cannot authenticate. A refusal has no dashboard of its own: *you cannot watch a thing not
+happen.* So the tab shows the **preconditions**, before a refusal surprises someone:
+
+| Panel | The question | Composed from |
+|---|---|---|
+| Electorates | would an election here work, or be refused? | `/gateway/kv/keys?prefix=grp/` |
+| Sealed identity coverage | is it safe to set `require_identity_proofs` yet? | `/gateway/kv/keys?prefix=sys/identity` |
+| Role concentration (P10) | is one node quietly holding everything? | `/stats` |
+| Tripwires | what has been refused or flagged? | `/stats` |
+
+Every panel composes endpoints listed above — **nothing new is emitted for it**. And one panel names
+what deliberately has *no* panel: trust non-transitivity and leadership fencing are refusals at a
+boundary rather than fleet state, so a tile reading "no breaches" would assert far more than one
+node can see.
+
+Nodes advertise their own dashboards at `ui/viz` + `ui/label`, so the console discovers and links
+them; each showcase links back with a **⚙ Ops Console** button.
+
 ## Logs & tracing
 
 Mycelium uses `tracing`. Set `RUST_LOG=mycelium=info` (or `debug`). Build with

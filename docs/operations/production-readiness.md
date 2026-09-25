@@ -22,6 +22,15 @@ this page is the index + the gate.
   in staging. → [cert-rotation.md](cert-rotation.md)
 - ☐ **KV write signing** decided — Ed25519-signed gossip frames (`SignedData`, wire v10+) if writes
   must be attributable/tamper-evident on the wire.
+- ☐ **Sealed-identity coverage checked** *before* considering `require_identity_proofs` — every node
+  must publish `sys/identity-signed/{node}` (key history and proof in **one** entry). The flag
+  accepts only that form, so a node still on the two-entry pair is refused. The Ops Console's
+  **Integrity** tab answers this, or:
+  `curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'`
+  → [cert-rotation.md](cert-rotation.md), `cargo run --example identity_one_record`
+- ☐ **Understood what proofs do *not* give you** — *proofs required* is **not** *identity
+  authenticated*: first sighting of an unseen node is still trust-on-first-use, and **anchors** are
+  what close that. → [cert-rotation.md](cert-rotation.md)
 
 ## 2 · Authorization & the gateway edge
 
@@ -95,6 +104,25 @@ this page is the index + the gate.
   enabled and access-gated; an operator can answer "why is the *fleet* in this state" without a central
   collector. → [diagnostics.md](diagnostics.md)
 - ☐ **Alerts** — the per-pathology Prometheus alert recipes are loaded. → [diagnostics.md](diagnostics.md)
+- ☐ **Role concentration watched (P10)** — `role_concentration_pct` is scraped and alerting at
+  `for: 30m`, `warning`. A fleet where one node holds every single-writer role reads as **healthy on
+  every other detector** (P2 watches churn, P6 watches gaps, and concentration produces neither), so
+  this is the only thing looking down that axis. → [diagnostics.md](diagnostics.md),
+  `cargo run --example coordination_viz --features metrics`
+
+## 5a · Coordination integrity
+
+- ☐ **Groups are joined before they are elected in** — an election over a roster this node cannot see
+  is **refused** (`electorate_unavailable`), not decided alone. Join via `mesh().join_group(..)` or
+  `POST /gateway/mesh/group`, and check the roster is complete on *every* node before relying on a
+  result. → [diagnostics.md §electorate_unavailable](diagnostics.md)
+- ☐ **Exclusivity is fenced at the resource, not assumed from the election** — carry
+  `Leadership::epoch` (the commit's HLC, monotonic across holders) to whatever the leader writes, and
+  refuse a lower token there. A successful election is a decision about a value at a ballot; it is
+  **not** a lease, and nothing keeps it true. → `cargo run --example coordination_integrity`
+- ☐ **Understood the limit** — LWW decides which *record* survives; it cannot undo work two callers
+  each performed after being told they had won. If your resource cannot refuse a stale token, no
+  election result from any system will save you.
 
 ## 6 · Evolution & supply chain
 

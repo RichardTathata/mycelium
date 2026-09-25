@@ -17,6 +17,7 @@
 //! | `set_with_receipt`, no persistence | `NotConfigured` | nothing was promised, so nothing is claimed |
 //! | `set_with_receipt`, buffered persistence | `Buffered` | the WAL took it; the bytes are in the OS page cache |
 //! | `set_requiring_sync` | `OnDisk` | an `fdatasync` returned. **The one state that establishes durability** |
+//! | `prepare_write` + `commit_prepared` | the same stamp, re-asserted | a retry after a lost acknowledgement **loses** LWW instead of undoing a newer value |
 //! | `set_with_replica_sync` | rung 3 | *another node* answered that it holds the record |
 //!
 //! And the ladder's point is the negative direction: a receipt that says `Buffered` is **not** a
@@ -251,8 +252,48 @@ async fn main() {
     note("receipt says `Buffered` and not something warmer.");
     reborn.shutdown().await;
 
-    // ── 9. What this did not show ─────────────────────────────────────────────────────────────
-    step(9, "what this demonstration does not establish");
+    // ── 9. The retry that must not win ────────────────────────────────────────────────────────
+    //
+    // Every rung above answers "what happened to my write". This one answers the question that
+    // follows it in production: **what do I do when I never got the answer at all.**
+    step(9, "a lost acknowledgement — `prepare_write` / `commit_prepared`");
+    note("The caller writes, and the response is lost. It has no receipt. It must retry — and the");
+    note("retry must not undo whatever the world has done in the meantime.");
+
+    let op_retry = OperationId::new("op-dispatch-4471");
+    // The token is minted *before* dispatch and kept by the caller. It carries the stamp, so the
+    // commit is a re-assertion of one decision rather than a fresh one.
+    let prepared = plain.kv().prepare_write(&op_retry, "ladder/retry", b"original");
+    let first = plain.kv().commit_prepared(&prepared, b"original".to_vec()).await
+        .expect("the first commit applies");
+    note(format!("first commit  → {:?}", first.application));
+
+    // The acknowledgement never arrives. Meanwhile something newer legitimately takes the key.
+    drop(first);
+    let _ = plain.kv().set("ladder/retry", b"newer".to_vec());
+    note("…response lost. Something newer then writes the same key.");
+
+    let retry = plain.kv().commit_prepared(&prepared, b"original".to_vec()).await
+        .expect("the retry is answered");
+    note(format!("retry         → {:?}  (stamp reused, so it loses LWW and says so)",
+                 retry.application));
+    assert_eq!(retry.stamp, prepared.stamp, "the prepared stamp is reused, never re-ticked");
+    assert_eq!(plain.kv().get("ladder/retry").as_deref(), Some(&b"newer"[..]),
+               "the newer value survives the retry");
+    note("✓ the newer value survived — the retry was refused by LWW, not by luck");
+
+    // And the contrast, which is the reason the token exists at all.
+    let reissued = plain.kv().set_with_receipt(&op_retry, "ladder/retry", b"original".to_vec())
+        .await.expect("re-issue by operation id");
+    assert_ne!(reissued.stamp, prepared.stamp, "a fresh call mints a fresh stamp");
+    assert_eq!(plain.kv().get("ladder/retry").as_deref(), Some(&b"original"[..]));
+    note(format!("re-issued by operation id alone → {:?}, and it CLOBBERED the newer value",
+                 reissued.application));
+    note("The operation id gives you idempotence of *intent*. Only the prepared token gives you");
+    note("idempotence of *position in time* — which is what a retry actually needs.");
+
+    // ── 10. What this did not show ────────────────────────────────────────────────────────────
+    step(10, "what this demonstration does not establish");
     note("· power-failure loss for `Buffered` — a property of the OS, not stageable in one process");
     note("· a peer crashing mid-write, which is the interesting race rather than this clean one");
     note("· the gateway and SDK surfaces of the same receipts (item 1 PR 7 carries those)");
