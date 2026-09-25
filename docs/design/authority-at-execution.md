@@ -74,11 +74,14 @@ clock extremes are testable exactly.
 - **That every resource uses it.** A1 is the contract a resource applies at its effect boundary by calling
   `ExecutionGate::check`. The **gateway** applies it (§6), so do the **wiki's git store** (§7) and, when enabled, the **provider** (§8). Other
   resources apply it only when wired, and until then keep "expiry stops new admissions" only.
-- **Durable state, and restart.** The revocation view and its retained `seq` are in memory. A restarted
-  reader starts at `Unknown`, which fails closed **until a checkpoint arrives**, and there is the gap: an old
-  checkpoint issued *before* a revocation, and still fresh, is then accepted, and the revoked appointment reads
-  as not revoked. Its window is at most *F* after the revocation. The closure plan's C8 closes it (cumulative
-  checkpoints plus an issued-after-start rule, or durable state). Found by an external review, 2026-09-25.
+- **Restart** (closure plan C8). The revocation view is in memory, so a restarted reader starts at `Unknown`. It now
+  also knows when it started (`RevocationView::started_at`; the gateway marks it at `with_execution_authority`,
+  the wiki store at construction), and refuses for freshness any checkpoint issued before then (less 2*s*). A replayed
+  pre-revocation checkpoint therefore leaves it `Unknown`, which denies, until the authority's next checkpoint. This
+  rests on **checkpoints being cumulative**: each lists every revocation in force in its scope. That is the
+  authority's contract, and a reader cannot check it. **Installed epochs** survive a restart through
+  `DurableEpochs` (the node-local journal): journalled before they take effect, reloaded as a floor.
+  Found by an external review, 2026-09-25.
 - **Order.** An authentic revocation counts whatever order its checkpoint arrives in, and even when the
   checkpoint is refused as replayed or future-dated for freshness (fixed 2026-09-25, same review).
 - **Timing by deployment.** T_admit and T_drain are measured by the caller's clock. Their *logic* is tested here;

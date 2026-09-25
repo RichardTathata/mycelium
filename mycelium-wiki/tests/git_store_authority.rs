@@ -44,6 +44,11 @@ struct Rig {
 impl Rig {
     /// A curator term `t1` at epoch 1, valid from 0 until `valid_until_ms`. The clock starts at 1 s.
     fn new(valid_until_ms: u64) -> Self {
+        Self::starting_at(valid_until_ms, 1_000)
+    }
+
+    /// The same, with the clock (and so the authority's start) at `start_ms`: a restarted curator.
+    fn starting_at(valid_until_ms: u64, start_ms: u64) -> Self {
         let key = SigningKey::from_bytes(&[71u8; 32]);
         let mut external = TrustedExternalIssuers::new();
         external.trust(IssuerId::new(AUTHORITY).unwrap(), key.verifying_key().to_bytes()).unwrap();
@@ -65,7 +70,7 @@ impl Rig {
             valid_from_ms: 0,
             valid_until_ms,
         };
-        let clock = Arc::new(AtomicU64::new(1_000));
+        let clock = Arc::new(AtomicU64::new(start_ms));
         let c = Arc::clone(&clock);
         let authority =
             Arc::new(ExecutionGateAuthority::new(gate, mandate, external, move || c.load(Ordering::SeqCst)));
@@ -78,11 +83,16 @@ impl Rig {
 
     /// Offer a checkpoint issued now, revoking `revoked`.
     fn checkpoint(&self, revoked: &[&str]) -> CheckpointOffer {
+        self.checkpoint_issued_at(self.clock.load(Ordering::SeqCst), revoked)
+    }
+
+    /// Offer a checkpoint issued at `issued_at_ms` (a replay, when that is in the past).
+    fn checkpoint_issued_at(&self, issued_at_ms: u64, revoked: &[&str]) -> CheckpointOffer {
         let c = RevocationCheckpoint {
             authority: PrincipalId::new(AUTHORITY).unwrap(),
             scope: SCOPE.into(),
             seq: self.seq.fetch_add(1, Ordering::SeqCst) + 1,
-            issued_at_ms: self.clock.load(Ordering::SeqCst),
+            issued_at_ms,
             revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
         };
         let signed = SignedRevocationCheckpoint {
@@ -374,5 +384,25 @@ fn the_fs_store_asks_the_same_authority_and_writes_nothing_when_refused() {
     assert_refused_as(&write(&store2, "sell the hall").unwrap_err(), "Revoked");
     assert_eq!(store2.read("minutes").unwrap(), None);
     assert_eq!(store.read("minutes").unwrap(), written, "the refused writes changed nothing");
+}
+
+/// **Closure plan C8: a restart does not restore a revoked curator.** Before the restart the curator
+/// was revoked (at 2 s). After it (the process starts at 5 s), its memory of that is gone, and a
+/// checkpoint from 1 s, before the revocation and still fresh, is replayed at it. That checkpoint
+/// refreshes nothing, so the curator writes nothing; the authority's next, cumulative checkpoint
+/// names the revocation, and it still writes nothing.
+#[test]
+fn a_restarted_curator_is_not_restored_by_a_replayed_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::starting_at(1_000_000, 5_000);
+    let store = rig.store(dir.path());
+
+    assert!(matches!(rig.checkpoint_issued_at(1_000, &[]), CheckpointOffer::IssuedBeforeStart { .. }));
+    assert_refused_as(&write(&store, "restored?").unwrap_err(), "RevocationUnknown");
+
+    rig.at(5_100);
+    assert_eq!(rig.checkpoint(&["t1"]), CheckpointOffer::Accepted);
+    assert_refused_as(&write(&store, "restored?").unwrap_err(), "Revoked");
+    assert_eq!(store.read("minutes").unwrap(), None, "nothing was written");
 }
 

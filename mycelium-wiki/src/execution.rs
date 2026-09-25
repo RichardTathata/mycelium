@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex};
 
 use mycelium::knowledge::issuer::{MemberKeySource, TrustedExternalIssuers};
 use mycelium::mandate::authority::{
-    AuthorizedWork, CheckpointOffer, ExecutionDenial, ExecutionGate, RevocationView, SignedRevocationCheckpoint,
+    AuthorizedWork, CheckpointOffer, DurableEpochs, ExecutionDenial, ExecutionGate, RevocationView,
+    SignedRevocationCheckpoint,
 };
 use mycelium::mandate::Mandate;
 
@@ -54,6 +55,7 @@ pub struct ExecutionGateAuthority {
     work: AuthorizedWork,
     external: TrustedExternalIssuers,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+    durable: std::sync::OnceLock<Arc<DurableEpochs>>,
 }
 
 impl ExecutionGateAuthority {
@@ -72,12 +74,37 @@ impl ExecutionGateAuthority {
         now_ms: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
         let not_after = mandate.valid_until_ms;
+        // Closure plan C8: this reader starts now, so a checkpoint replayed from before a restart
+        // cannot make a revoked curator read as current.
+        let started = now_ms();
         Self {
-            state: Mutex::new(State { gate, revocations: RevocationView::new() }),
+            state: Mutex::new(State { gate, revocations: RevocationView::started_at(started) }),
             work: AuthorizedWork::new(WIKI_WRITE, Some(mandate), not_after),
             external,
             now_ms: Arc::new(now_ms),
+            durable: std::sync::OnceLock::new(),
         }
+    }
+
+    /// **Keep installed epochs across restarts** (closure plan C8): the journal's floor for this
+    /// store's scope is installed now; later epochs go through
+    /// [`install_epoch_durably`](Self::install_epoch_durably). Set once.
+    pub fn with_durable_epochs(&self, durable: Arc<DurableEpochs>) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(floor) = durable.floor(st.gate.scope()) {
+            st.gate.install_epoch(floor);
+        }
+        drop(st);
+        let _ = self.durable.set(durable);
+    }
+
+    /// Install a later epoch, journalled first when durable epochs are attached.
+    pub async fn install_epoch_durably(&self, epoch: u64) -> Result<bool, mycelium::mandate::authority::JournalError> {
+        if let Some(d) = self.durable.get() {
+            let scope = self.state.lock().unwrap_or_else(|e| e.into_inner()).gate.scope().to_string();
+            d.record(&scope, epoch).await?;
+        }
+        Ok(self.install_epoch(epoch))
     }
 
     /// Offer a signed revocation checkpoint. Until one is accepted and while it stays fresh, every
