@@ -64,6 +64,19 @@ agreement repair establishes single-decree safety; it is not a proof of the whol
 
 ### Added
 
+- **Authority at execution at the wiki's git store** (Boundary H A1; ADR `docs/design/authority-at-execution.md` §7).
+  The mandate fence stopped a *superseded* curator inside the git transaction. It could not stop an expired, revoked
+  or out-of-touch one. Now:
+  - `GitStoreConfig::authority` holds an optional `mandate_fence::WriteAuthority`. It is asked on every commit
+    attempt, immediately before the ref transaction, and before every push attempt;
+  - `ExecutionGateAuthority` (new feature `execution-authority`) implements it over A1's `ExecutionGate` for a
+    mandate enumerating `wiki.write`;
+  - a refusal is `WikiError::authority_refused`, and the curator **leaves the proposals queued** rather than
+    dropping them.
+
+  `None`, the default, is unchanged behaviour. **Upgrade note:** a `GitStoreConfig` built as a struct literal
+  without `..Default::default()` needs the new field. Lock-order row 44.
+
 - **Seven runnable demonstrations of everything above — and CI *runs* them, it does not merely build
   them.** Building an example proves the API still compiles; running it proves the demonstration
   still demonstrates, which is the thing a gallery is a gate on. CI-run examples went from 6 to 12.
@@ -339,6 +352,14 @@ agreement repair establishes single-decree safety; it is not a proof of the whol
   alone and would have **silently skipped** legacy entries — reading as *that role is not held*
   rather than *this reader is too new to parse it*. The fallback is now one named function
   (`decode_cap_entry`) instead of three inline copies.
+
+### Fixed
+
+- **A1: a revocation now stands against later checkpoints that omit it.** `RevocationView` kept only the newest
+  checkpoint per `(authority, scope)`, so a later fresh checkpoint without the term reinstated a revoked appointment.
+  The ADR's "revocation is monotonic" held across time, but not across checkpoints. The view now keeps every revoked
+  term apart from the newest checkpoint. This affects the gateway's `ExecutionAuthority` and the wiki store alike.
+  Gate: `a_later_checkpoint_that_omits_a_revocation_does_not_reinstate_it`.
 
 ### Added
 

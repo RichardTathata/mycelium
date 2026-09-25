@@ -186,10 +186,18 @@ pub enum CheckpointOffer {
     Unverifiable(UnverifiableReason),
 }
 
-/// A reader's revocation view: the newest verified checkpoint per `(authority, scope)`.
+/// A reader's revocation view: the newest verified checkpoint per `(authority, scope)`, and every
+/// term any accepted checkpoint has ever revoked there.
+///
+/// The second is kept separately because **revocation is monotonic**. A later checkpoint that
+/// omits a term, whether the authority issues deltas, loses state, or is misconfigured, must not
+/// silently reinstate an appointment the reader has already seen revoked. (Found 2026-09-25 when the
+/// wiki store's tests first exercised a revocation followed by a later checkpoint: the view kept
+/// only the newest checkpoint, so the omission restored the curator.)
 #[derive(Clone, Debug, Default)]
 pub struct RevocationView {
     newest: BTreeMap<(PrincipalId, String), RevocationCheckpoint>,
+    revoked: BTreeMap<(PrincipalId, String), BTreeSet<TermId>>,
 }
 
 /// Where a reader stands on revocation for one appointment.
@@ -238,6 +246,7 @@ impl RevocationView {
         {
             return CheckpointOffer::Replayed { held: held.seq };
         }
+        self.revoked.entry(key.clone()).or_default().extend(c.revoked.iter().cloned());
         self.newest.insert(key, c.clone());
         CheckpointOffer::Accepted
     }
@@ -252,13 +261,15 @@ impl RevocationView {
         clock: ClockModel,
         now_ms: u64,
     ) -> RevocationStanding {
-        let Some(c) = self.newest.get(&(authority.clone(), scope.to_string())) else {
-            return RevocationStanding::Unknown;
-        };
-        if c.revoked.contains(term) {
-            // A revocation, once seen, stands whatever the freshness: revocation is monotonic.
+        let key = (authority.clone(), scope.to_string());
+        if self.revoked.get(&key).is_some_and(|r| r.contains(term)) {
+            // A revocation, once seen, stands whatever the freshness and whatever later
+            // checkpoints omit: revocation is monotonic.
             return RevocationStanding::Revoked;
         }
+        let Some(c) = self.newest.get(&key) else {
+            return RevocationStanding::Unknown;
+        };
         if !policy.is_fresh(clock, c.issued_at_ms, now_ms) {
             return RevocationStanding::Unknown;
         }
@@ -618,6 +629,19 @@ mod tests {
         let w = world();
         let v = view_with(&w, &[checkpoint(&w, 1, 1_000, &["t1"])], 1_000);
         assert_eq!(gate().check(&work(&w), &v, 2_000), Err(ExecutionDenial::Revoked));
+    }
+
+    /// **Monotonic across checkpoints**, not only across time. A later, fresh checkpoint that omits
+    /// a term already seen revoked does not reinstate it; the plant is a term never revoked, which
+    /// the same later checkpoint leaves standing.
+    #[test]
+    fn a_later_checkpoint_that_omits_a_revocation_does_not_reinstate_it() {
+        let w = world();
+        let v = view_with(&w, &[checkpoint(&w, 1, 1_000, &["t1"]), checkpoint(&w, 2, 2_000, &[])], 2_000);
+        assert_eq!(gate().check(&work(&w), &v, 2_500), Err(ExecutionDenial::Revoked));
+        let other = TermId::new("t2").unwrap();
+        let op = PrincipalId::new("operator:acme").unwrap();
+        assert_eq!(v.standing(&op, "cap/fleet", &other, &policy(), clock(), 2_500), RevocationStanding::NotRevoked);
     }
 
     #[test]

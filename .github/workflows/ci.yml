@@ -257,6 +257,10 @@ jobs:
       # suite mirrored + the curator-to-scoped-commits end-to-end.
       - run: ./scripts/ci-retest.sh -p mycelium-wiki --features "git-store,control-plane"
       - run: cargo clippy -p mycelium-wiki --features "git-store,control-plane" --all-targets -- -D warnings
+      # Authority at execution at the git store (Boundary H A1): expired, revoked and out-of-touch
+      # curators write and publish nothing; queued proposals wait. Needs mycelium's `tls`.
+      - run: ./scripts/ci-retest.sh -p mycelium-wiki --features execution-authority
+      - run: cargo clippy -p mycelium-wiki --features execution-authority --all-targets -- -D warnings
       # Item 5's decisive demonstration (plan §12.1), run rather than only built. It is also the
       # fence's only end-to-end exercise outside the tests above — building it is what found the
       # fence reporting a revoked appointment as a retryable conflict.

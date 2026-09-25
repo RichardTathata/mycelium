@@ -2383,6 +2383,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "bytes",
+ "ed25519-dalek",
  "mycelium",
  "mycelium-tuple-space",
  "parking_lot",
