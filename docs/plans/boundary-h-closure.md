@@ -336,7 +336,6 @@ Asked whether rev 0.2 fully addressed the review, a re-read found four gaps:
 
 Three items rev 0.2 marked done stay done: order-independent revocation, the *F* − 2*s* correction, and `main`'s
 monotonicity bug (all in #402, merged).
-| C2 | this PR | **No provider marker.** The plan had the gateway dispatch a mandate-bearing call only to a provider whose marker says it verifies mandates. Dropped: an older provider ignores the new envelope field, which is exactly today's behaviour, so dispatching to it is no regression, and C3 is where a provider starts to rely on the field. **The possession proof still binds the resource before `@`**, not the resolved provider: a caller cannot know the provider in advance, so binding it would change what every SDK signs; the provider recomputes the same bytes. **Found on the way:** the streaming door (`tasks/sendSubscribe`) passed no params to the preflight, so a mandate on a stream was never read (a #399 defect); fixed and gated |
 
 ## 8. Delivery record
 
@@ -344,4 +343,5 @@ monotonicity bug (all in #402, merged).
 |---|---|---|
 | C0 | #402 | none |
 | C1 | #409 | **Six routes, not one.** Reading the gateway found the same hole in `scatter` and `overlay/emit_reliable` (both dispatch an arbitrary kind through `gateway_rpc_call`), and `signal/emit`, `mailbox/deliver` and `shard/emit` take a kind too; all six refuse. **`llm.invoke` is protected by default**, because the raw routes also walked around `llm:invoke`. **The deployment variant of the gate moved to C7/C12**: the confined-fleet deployment test runs `busybox` in place of the gateway (it tests the network policy), so a real-gateway refusal needs the gateway image C7 and C12 need anyway. **Found on the way:** the TypeScript SDK's `rpcCall` sent `kind` where the route reads `method`, so every call was a `400`; fixed and pinned |
+| C2 | this PR | **No provider marker.** The plan had the gateway dispatch a mandate-bearing call only to a provider whose marker says it verifies mandates. Dropped: an older provider ignores the new envelope field, which is exactly today's behaviour, so dispatching to it is no regression, and C3 is where a provider starts to rely on the field. **The possession proof still binds the resource before `@`**, not the resolved provider: a caller cannot know the provider in advance, so binding it would change what every SDK signs; the provider recomputes the same bytes. **Found on the way:** the streaming door (`tasks/sendSubscribe`) passed no params to the preflight, so a mandate on a stream was never read (a #399 defect); fixed and gated |
 
