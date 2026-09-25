@@ -49,6 +49,15 @@ this page is the index + the gate.
 - ☐ **Audit trail** enabled if you need a tamper-evident record (`--features compliance`, hash-chained).
   → [audit.md](audit.md)
 
+- ☐ **`/a2a` is not an open surface** — unlike `/mcp` (which requires `mcp:invoke`), the A2A route
+  has **no scope floor**: a federation credential names a partner, a bearer resolves to a principal
+  whose *scopes are dropped*, and nothing at all is anonymous. With **no** `ActionEvaluator`
+  attached the seam is inert and an anonymous caller reaches **skill dispatch** — confirmed by
+  probe, not inferred. Attach an evaluator, configure a bearer, or require a federation credential
+  before exposing an `a2a` node beyond a trusted network. `with_a2a()` warns when it mounts into
+  exactly this configuration. → [rbac.md](rbac.md),
+  `cargo run --example mcp_tool_authority --features tls,compliance`
+
 ## 3 · Persistence & restart
 
 - ☐ **Persistence enabled** with a `sync_mode` matched to your durability need; consensus committed
