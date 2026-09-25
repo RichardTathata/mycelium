@@ -47,7 +47,7 @@ let policy = DomainPolicy {
 
 // 3. The edge itself. `with_federation_edge` CONSUMES the agent and returns it, and must be
 //    called BEFORE start() — the catalogue route is merged into the gateway's routes at start.
-let edge = FederationEdge::new(our_domain, exports, CallPolicy::default())
+let edge = FederationEdge::new(our_domain, exports, policy, bundle, CallPolicy::default())
     .with_signing_key(catalogue_signing_key);   // so partners can verify the catalogue
 let agent = agent.with_federation_edge(Arc::new(edge));
 agent.start().await?;
@@ -215,6 +215,15 @@ Do **both**. Revoking trust stops you accepting their credentials; revoking the 
 serving them. Either alone leaves half the relationship live.
 
 `is_revoked` is the check to assert in a post-change smoke test.
+
+**Revocation is per partner**, and so is everything else on this page. One edge serves any number of
+partners from one bundle and one policy: each gets a catalogue filtered to its own grants, each is
+authenticated against **its own** key (a partner's key never authenticates a credential naming another
+partner), and revoking one leaves the others serving. Gated by
+`three_domains_one_edge_and_the_middle_domain_is_not_a_bridge` and four edge tests.
+
+Capacity is per partner too: `max_in_flight_per_partner` (above) holds each partner to its own share of
+the edge, so one partner's burst does not refuse another's calls.
 
 ## Partitions, and why some answers are "unknown"
 

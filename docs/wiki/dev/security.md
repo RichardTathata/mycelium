@@ -336,6 +336,15 @@ the safe direction — gated by a test that it equals the structural read of a r
 `lib_tests.rs` → `a_pinned_federation_link_talks_only_to_the_key_the_bundle_names`, two gateways running the
 *same* edge and differing only in their TLS key.
 
+**Two partners on one edge (2026-09-23, landed 2026-09-25).** Every per-partner claim was tested with
+**one** partner configured, where a claim about *this partner* cannot be told apart from a claim about the
+edge. Planting `acceptable_keys` to return every key in the bundle, instead of the claimed origin's, left
+all 24 federation tests of the day green and let one partner mint credentials in another's name: a `200`
+where a `401` belongs. Now gated at two partners: per-partner catalogues, grants that do not cross, **a
+trusted partner cannot speak for another trusted partner**, per-partner revocation, and **the common
+neighbour is not a bridge**. No production change. `lib_tests.rs` →
+`three_domains_one_edge_and_the_middle_domain_is_not_a_bridge`, plus four tests in `federation/edge.rs`.
+
 **The budget runs both ways (2026-09-23) — the Phase-C audit's last finding, closed as a decision
 with a mechanism.** `GatewayPool` metered slots per partner on the *consumer* side only: it bounded
 what we send a partner, and nothing bounded what a partner sends us. The threat is not an anonymous

@@ -7420,6 +7420,176 @@ mod federation_transport {
         let _ = std::fs::remove_dir_all(&ca_b);
     }
 
+
+    /// **Three domains, one edge (item 2 row 11: more than two domains).**
+    ///
+    /// Alpha serves beta and gamma, who have no relationship with each other and never exchange a
+    /// byte. Everything item 2 claims per-partner is stated against *a* partner; with one partner
+    /// those claims cannot be distinguished from claims about the edge as a whole, and this is the
+    /// configuration where the difference shows.
+    ///
+    /// The legs, and what each would look like if it were wrong:
+    /// 1. Each partner's catalogue is **its own grants**, over real HTTP. A shared or union
+    ///    catalogue would tell beta that `demo/secret` exists — enumerating what you may not call is
+    ///    already being told something.
+    /// 2. The other partner's grant is not yours. Beta is refused `demo/secret` **locally**, with no
+    ///    HTTP, because it is not in beta's catalogue; the provider's counter proves nothing was
+    ///    dispatched.
+    /// 3. A **trusted** partner cannot mint a credential in the other trusted partner's name. This
+    ///    is the leg that only exists at two partners: a verifier trying every key in the bundle
+    ///    instead of the keys for the claimed origin would pass every single-partner test in the
+    ///    tree and be a total authentication bypass between partners.
+    /// 4. Revoking one partner leaves the other working.
+    /// 5. **Alpha is a common neighbour and not a bridge.** Non-merger is asserted for all three
+    ///    pairs — and the beta/gamma pair is the new one, two domains that never spoke, sharing a
+    ///    partner that spoke to both.
+    ///
+    /// This complements `three_domains_compose_without_trust_composing`, which is a *chain* (alpha to
+    /// beta to gamma). This is a *star*: one edge, two partners who must not be able to act for each
+    /// other. Capacity per partner is `max_in_flight_per_partner`'s gate, not asserted again here.
+    #[tokio::test]
+    async fn three_domains_one_edge_and_the_middle_domain_is_not_a_bridge() {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let gamma = DomainId::new("gamma.example").unwrap();
+        let (beta_sk, beta_vk) = keypair(31);
+        let (gamma_sk, gamma_vk) = keypair(32);
+        let (alpha_sk, alpha_vk) = keypair(33);
+
+        // One policy, two partners, different grants. One bundle, two keys.
+        let edge = Arc::new(
+            FederationEdge::new(
+                alpha.clone(),
+                ["demo/whoami", "demo/secret"],
+                DomainPolicy {
+                    domain: alpha.clone(),
+                    revision: 1,
+                    grants: vec![
+                        (beta.clone(), "demo/whoami".into()),
+                        (gamma.clone(), "demo/secret".into()),
+                    ],
+                },
+                TrustBundle::trusting([(beta.clone(), beta_vk), (gamma.clone(), gamma_vk)]),
+                CallPolicy::default(),
+            )
+            .with_signing_key(alpha_sk),
+        );
+
+        let http = alloc_port();
+        let mut a = mesh(2, Some((http, Arc::clone(&edge)))).await;
+        let a0 = Arc::new(a.remove(0));
+        let a_rest = a;
+        let b = mesh(1, None).await;
+        let g = mesh(1, None).await;
+        {
+            // Only alpha is a multi-node mesh; beta and gamma are single nodes with nobody to peer
+            // with, which is the point — they are separate domains, not a partitioned one.
+            let (a0, a_rest) = (&a0, &a_rest);
+            poll_until(|| !a0.peers().is_empty() && a_rest.iter().all(|x| !x.peers().is_empty()), 3_000).await;
+        }
+
+        // Both exports live on alpha's gateway node; the same responder answers either.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _reg_w = a0.capabilities().advertise_capability(whoami(), Duration::from_secs(5));
+        let _reg_s = a0
+            .capabilities()
+            .advertise_capability(crate::capability::Capability::new("demo", "secret"), Duration::from_secs(5));
+        whoami_provider(Arc::clone(&a0), Arc::clone(&calls));
+        let k_w = format!("cap/{}/demo/whoami", a0.node_id());
+        let k_s = format!("cap/{}/demo/secret", a0.node_id());
+        poll_until(|| a0.kv().get(&k_w).is_some() && a0.kv().get(&k_s).is_some(), 5_000).await;
+
+        let endpoint = || {
+            vec![GatewayEndpoint { id: "gw-a0".into(), base_url: format!("http://127.0.0.1:{http}") }]
+        };
+        let beta_client = FederationClient::new(
+            beta.clone(), "svc/billing", beta_sk.clone(), alpha.clone(), endpoint(), 2, Duration::from_secs(30),
+        )
+        .with_partner_key(alpha_vk);
+        let gamma_client = FederationClient::new(
+            gamma.clone(), "svc/audit", gamma_sk.clone(), alpha.clone(), endpoint(), 2, Duration::from_secs(30),
+        )
+        .with_partner_key(alpha_vk);
+
+        // ── 1. Each partner's catalogue is its own grants. ────────────────────────────────────
+        assert_eq!(beta_client.connect().await.expect("beta discovers"), vec!["demo/whoami".to_string()]);
+        assert_eq!(gamma_client.connect().await.expect("gamma discovers"), vec!["demo/secret".to_string()]);
+
+        // And each call reaches the provider as its *own* principal, not as "the gateway" and not
+        // as the other partner.
+        assert_eq!(
+            beta_client.call("demo/whoami", "?", Repeatability::AtMostOnce).await.expect("beta calls"),
+            crate::federation_principal("beta.example", "svc/billing"),
+        );
+        assert_eq!(
+            gamma_client.call("demo/secret", "?", Repeatability::AtMostOnce).await.expect("gamma calls"),
+            crate::federation_principal("gamma.example", "svc/audit"),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // ── 2. The other partner's grant is not yours — refused locally, no HTTP. ─────────────
+        assert!(matches!(
+            beta_client.call("demo/secret", "?", Repeatability::AtMostOnce).await,
+            Err(ClientError::Resolve(_)),
+        ));
+        assert!(matches!(
+            gamma_client.call("demo/whoami", "?", Repeatability::AtMostOnce).await,
+            Err(ClientError::Resolve(_)),
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "neither refusal reached a provider");
+
+        // ── 3. A trusted partner cannot speak for the other trusted partner. ─────────────────
+        // Beta's key, gamma's name, gamma's grant. Every field is individually legitimate.
+        let raw = reqwest::Client::new();
+        let a2a = format!("http://127.0.0.1:{http}/a2a");
+        let now = now_ms();
+        let forged = PresentedCall::sign(
+            &FederatedCaller {
+                body_sha256: None,
+                origin_domain: gamma.clone(),
+                principal: "svc/audit".into(),
+                export: "demo/secret".into(),
+                issued_at_ms: now,
+                expires_at_ms: now + 60_000,
+            },
+            &beta_sk,
+        );
+        let r = raw
+            .post(&a2a)
+            .header(HEADER_FEDERATED_CALL, forged.to_header_value())
+            .json(&task_body("demo/secret"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "one partner's key must not authenticate another partner's name");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a forged origin reaches no provider");
+
+        // ── 4. Revoking gamma leaves beta working. ────────────────────────────────────────────
+        edge.revoke(&gamma);
+        assert!(gamma_client.connect().await.is_err(), "a revoked partner is refused");
+        assert_eq!(
+            beta_client.call("demo/whoami", "?", Repeatability::AtMostOnce).await.expect("beta unaffected"),
+            crate::federation_principal("beta.example", "svc/billing"),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // ── 5. Alpha is a common neighbour, not a bridge. ─────────────────────────────────────
+        let alpha_nodes: Vec<&GossipAgent> = std::iter::once(a0.as_ref()).chain(a_rest.iter()).collect();
+        let beta_nodes: Vec<&GossipAgent> = b.iter().collect();
+        let gamma_nodes: Vec<&GossipAgent> = g.iter().collect();
+        assert_never_merged(&alpha_nodes, &beta_nodes);
+        assert_never_merged(&alpha_nodes, &gamma_nodes);
+        // The new pair: two domains that never spoke to each other, both of which spoke to alpha.
+        assert_never_merged(&beta_nodes, &gamma_nodes);
+
+        for n in alpha_nodes {
+            n.shutdown().await;
+        }
+        for n in b.iter().chain(g.iter()) {
+            n.shutdown().await;
+        }
+    }
+
     /// A single-node agent serving its gateway over **HTTPS** (the node-cert reuse path), with the
     /// A2A and federation edges attached. Returns the agent, its port and its cert directory.
     async fn https_gateway(tag: &str, edge: Arc<FederationEdge>) -> (Arc<GossipAgent>, u16, std::path::PathBuf) {

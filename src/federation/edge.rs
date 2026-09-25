@@ -746,6 +746,163 @@ mod tests {
         assert_ne!(TAG_CATALOG, super::super::call::TAG_CALL);
     }
 
+
+    /// An edge that trusts **two** partners and grants them different exports — the configuration
+    /// every claim below needs, and the one a single-partner test cannot express.
+    fn edge_two_partners(beta_key: [u8; 32], gamma_key: [u8; 32]) -> FederationEdge {
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let gamma = DomainId::new("gamma.example").unwrap();
+        FederationEdge::new(
+            alpha.clone(),
+            ["invoice.submit", "invoice.status", "ledger.audit"],
+            DomainPolicy {
+                domain: alpha,
+                revision: 3,
+                grants: vec![
+                    (beta.clone(), "invoice.submit".into()),
+                    (gamma.clone(), "ledger.audit".into()),
+                ],
+            },
+            TrustBundle::trusting([(beta, beta_key), (gamma, gamma_key)]),
+            CallPolicy::default(),
+        )
+    }
+
+    fn presented_as(
+        sk: &ed25519_dalek::SigningKey,
+        origin: &str,
+        export: &str,
+        now: u64,
+    ) -> PresentedCall {
+        PresentedCall::sign(
+            &FederatedCaller {
+                body_sha256: Some(FederatedCaller::digest_of(TEST_BODY)),
+                origin_domain: DomainId::new(origin).unwrap(),
+                principal: "svc/billing".into(),
+                export: export.into(),
+                issued_at_ms: now,
+                expires_at_ms: now + 60_000,
+            },
+            sk,
+        )
+    }
+
+    /// **A trusted partner cannot speak for another trusted partner** (item 2 row 11, more than two
+    /// domains).
+    ///
+    /// The module's rule is *the bundle decides which key* — and with **one** partner in the bundle
+    /// that rule is unfalsifiable, because the only acceptable key is the only key there is. The
+    /// existing `an_untrusted_key_is_refused_before_anything_else` covers a key belonging to nobody.
+    /// Neither notices the failure that matters here: a verifier that tried **every** key in the
+    /// bundle rather than the keys for the *claimed origin* would pass both, and would let any
+    /// partner mint credentials in any other partner's name — a total authentication bypass between
+    /// partners, from an edge whose every existing test is green.
+    ///
+    /// So: beta is fully trusted, gamma is fully trusted, and beta signs a credential claiming to be
+    /// gamma. It must be refused, and refused as `BadSignature` — *someone is forging* — rather than
+    /// `UnknownDomain`, because gamma **is** known. The refusal names the right problem.
+    #[test]
+    fn a_trusted_partner_cannot_speak_for_another_trusted_partner() {
+        let (beta_sk, beta_vk) = keypair(7);
+        let (gamma_sk, gamma_vk) = keypair(11);
+        let e = edge_two_partners(beta_vk, gamma_vk);
+        let now = 1_789_000_000_000;
+
+        // The control: each partner authenticates as itself, so the bundle really does trust both.
+        assert!(e.authenticate(&presented_as(&beta_sk, "beta.example", "invoice.submit", now), now).is_ok());
+        assert!(e.authenticate(&presented_as(&gamma_sk, "gamma.example", "ledger.audit", now), now).is_ok());
+
+        // Beta's key, gamma's name. Both domains are trusted; only the pairing is wrong.
+        let impersonation = presented_as(&beta_sk, "gamma.example", "ledger.audit", now);
+        assert_eq!(
+            e.authenticate(&impersonation, now),
+            Err(CallRefusal::BadSignature),
+            "a trusted key must not authenticate a credential claiming a different trusted domain",
+        );
+
+        // And the other direction, so this is not an artefact of which key was listed first.
+        let other_way = presented_as(&gamma_sk, "beta.example", "invoice.submit", now);
+        assert_eq!(e.authenticate(&other_way, now), Err(CallRefusal::BadSignature));
+    }
+
+    /// Each partner's catalogue is **its own grants**, not the union and not the export list.
+    ///
+    /// `filtered_catalog` is unit-tested per partner; what is checked here is the join — that the
+    /// edge filters with the **authenticated** origin of the asker rather than with anything
+    /// configured, which is only observable once two partners ask the same edge and get different
+    /// answers. The reply also names who it was filtered for, so a catalogue cannot be replayed to
+    /// the other partner.
+    #[test]
+    fn two_partners_asking_one_edge_get_their_own_catalogues() {
+        let (beta_sk, beta_vk) = keypair(7);
+        let (gamma_sk, gamma_vk) = keypair(11);
+        let e = edge_two_partners(beta_vk, gamma_vk);
+        let now = 1_789_000_000_000;
+
+        let for_beta = e
+            .catalog_for(&presented_as(&beta_sk, "beta.example", CATALOG_EXPORT, now), now)
+            .expect("beta may ask");
+        let for_gamma = e
+            .catalog_for(&presented_as(&gamma_sk, "gamma.example", CATALOG_EXPORT, now), now)
+            .expect("gamma may ask");
+
+        assert_eq!(for_beta.exports, vec!["invoice.submit".to_string()]);
+        assert_eq!(for_gamma.exports, vec!["ledger.audit".to_string()]);
+        assert_eq!(for_beta.for_partner, DomainId::new("beta.example").unwrap());
+        assert_eq!(for_gamma.for_partner, DomainId::new("gamma.example").unwrap());
+        assert!(
+            !for_beta.exports.contains(&"ledger.audit".to_string()),
+            "beta must not learn that ledger.audit exists — enumerating what you may not call is \
+             already being told something",
+        );
+    }
+
+    /// An export granted to the **other** partner is refused, and refused as a policy decision.
+    ///
+    /// The partner is authentic, the credential is for the export it names, and the export exists —
+    /// every step but the grant succeeds, which is what makes this worth a test rather than an
+    /// assumption. Refused as `NotPermitted` and not as `UnknownExport`: the difference is whether
+    /// an operator goes looking for a missing service or for a missing grant.
+    #[test]
+    fn one_partners_grant_is_not_anothers() {
+        let (beta_sk, beta_vk) = keypair(7);
+        let (_, gamma_vk) = keypair(11);
+        let e = edge_two_partners(beta_vk, gamma_vk);
+        let now = 1_789_000_000_000;
+
+        let refusal = e
+            .authorize(&presented_as(&beta_sk, "beta.example", "ledger.audit", now), "ledger.audit", TEST_BODY, now)
+            .expect_err("gamma's grant must not serve beta");
+        assert!(
+            matches!(refusal, CallRefusal::NotPermitted),
+            "refused as a grant decision, not as a missing export: {refusal:?}",
+        );
+    }
+
+    /// Revoking one partner leaves the other working. A shared bundle is one object, and revocation
+    /// is the operation most likely to be written against the wrong scope.
+    #[test]
+    fn revoking_one_partner_does_not_revoke_the_other() {
+        let (beta_sk, beta_vk) = keypair(7);
+        let (gamma_sk, gamma_vk) = keypair(11);
+        let e = edge_two_partners(beta_vk, gamma_vk);
+        let now = 1_789_000_000_000;
+        let gamma = DomainId::new("gamma.example").unwrap();
+
+        e.revoke(&gamma);
+
+        assert_eq!(
+            e.authenticate(&presented_as(&gamma_sk, "gamma.example", "ledger.audit", now), now),
+            Err(CallRefusal::UnknownDomain),
+            "a revoked partner has no acceptable keys at all",
+        );
+        assert!(
+            e.authenticate(&presented_as(&beta_sk, "beta.example", "invoice.submit", now), now).is_ok(),
+            "revoking gamma must not touch beta",
+        );
+    }
+
     /// A key the bundle does not trust signs a well-formed credential: refused as
     /// `UnknownDomain` for an unlisted domain, `BadSignature` for a listed domain under the wrong
     /// key. Both before any export or grant is consulted.
