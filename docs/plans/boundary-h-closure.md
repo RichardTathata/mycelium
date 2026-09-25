@@ -1,6 +1,7 @@
 # Boundary H closure: authority at every door (implementation plan)
 
-**Status:** draft rev 0.2, 2026-09-25 (rev 0.2 folds in an external review of #402; see §7). Follows [`boundary-h.md`](boundary-h.md) (rev 0.5), whose items have all
+**Status:** draft rev 0.3, 2026-09-25. Rev 0.2 folded in an external review of #402; rev 0.3 closes the gaps a
+re-read found in rev 0.2's own answers (§7). Follows [`boundary-h.md`](boundary-h.md) (rev 0.5), whose items have all
 shipped except K3b, K3c, H4 and D. This plan closes what the A1 wiring (#399 gateway, #402 wiki store) left open,
 and answers one question with evidence: **once an agent's authority is revoked, can it still act?**
 
@@ -27,6 +28,10 @@ Each finding was checked in the code, not inferred from the docs.
 | F9 | **The wiki store checks authority before the git transaction, not inside it.** Normally milliseconds apart, but normal latency is not a safety bound: a process that pauses between the two writes after expiry or revocation, by the pause's length. The fence catches only a moved appointment ref. *(rev 0.1 called this "not a gap"; the external review was right, and it is now pinned by a test)* | `mycelium-wiki/src/git_store.rs` `commit_files`; `a_pause_after_the_check_is_not_caught_locally` |
 | F10 | **A restart can restore revoked authority.** The revocation view is in memory; after a restart an old checkpoint issued before the revocation, and still fresh, is accepted, and the revoked term reads as not revoked, for up to *F* after the revocation | `src/mandate/authority.rs` `RevocationView` |
 | F11 | **Admitted work is checked, not stopped.** A1 re-checks at admission, dequeue, retry and re-authorisation, and `StopContract`/`drain_report` model a stop. Nothing cancels a handler already running when its authority is revoked | `src/mandate/authority.rs` (`StopContract` is a model) |
+| F12 | **A restart also forgets epochs.** The resource's installed epoch and the grant verifier's highest verified epoch per scope are in memory. After a restart they fall back to what is configured, so a mandate from a superseded epoch passes again until an operator reinstalls the newer one | `src/mandate.rs` `ResourceAuthority::installed_epoch`; `src/mandate/grant.rs` `GrantVerifier::highest` |
+| F13 | **Every check-then-act site has the pause window, not only the wiki.** The gateway checks in `ae_preflight`, then dispatches; C3's provider check will run before the handler. A process that pauses in between acts late by the pause | `src/agent/http.rs` (`ae_preflight` → `gateway_rpc_call`); C3 |
+| F14 | **Frozen-clock decisions beyond the three #405 fixes are unaudited.** `hlc.current()` is still read at eleven sites, including a nonce replay window (`mycelium-core/src/connection.rs:215`). The wall-clock helpers (`intent::now_ms`, `capability_ops::now_ms`, `federation::edge::now_ms`) read the wall clock and are not affected | `grep "hlc.current()"` |
+| F15 | **Stop times are modelled, never measured.** `drain_report` computes T_admit and T_drain from the caller's timestamps; no deployment measures them | ADR `authority-at-execution.md` §4 |
 
 **What this means for the claim.** Today "revocation stops the fleet" holds only for callers that use `/mcp`, `/a2a`
 or federation calls. It does **not** hold for full-node fleets (F2), and it does **not** fully hold under the
@@ -179,7 +184,7 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
 
 ---
 
-### C8: Restart-safe revocation state (M; closes F10)
+### C8: Restart-safe authority state (M; closes F10 and F12)
 
 - **Cumulative checkpoints.** The checkpoint format is declared **cumulative**: each lists every revocation in
   force in its scope, not only new ones. An authority that cannot produce that refuses to start. The view keeps
@@ -189,24 +194,47 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
   then refused, and because the first accepted checkpoint is cumulative, it carries every revocation.
 - **The fallback, if cumulative checkpoints are not acceptable:** persist the view (newest `seq` and the revoked
   set) in the node-local journal, as K3a did for checkpoints, and reload it on start.
+- **Epochs survive a restart too (F12).** The resource's installed epoch and the grant verifier's highest
+  verified epoch per scope are persisted in the node-local journal, written **before** the new epoch takes
+  effect, and reloaded on start. The configured epoch becomes a floor, never a reset. A journal that cannot be
+  read fails closed: the gate refuses until an operator installs an epoch.
 - **Gate:**
   - restart, then replay a fresh pre-revocation checkpoint → refused, the term stays revoked;
   - restart, then a new cumulative checkpoint → accepted and correct;
+  - install epoch 2, restart with epoch 1 configured → a mandate at epoch 1 is still refused;
   - a plant without the rule fails the first case;
   - **the trap to avoid** (from #405): any freshness or clock test must force the clock's state into the
     past. `Hlc::new()` seeds from the wall clock, so a test on a freshly created clock passes against a frozen
     implementation too, and proves nothing.
 
-### C9: The check-to-transaction window (M; addresses F9)
+### C9: The check-then-act window, at every A1 site (M; addresses F9 and F13)
 
+**The general limit, stated once.** Wherever authority is checked and then acted on as two steps, a process that
+pauses between them acts late by the length of the pause. Normal latency is not a bound. No local fix exists
+where the effect has no clock of its own, so each site gets the strongest of three answers it can have:
+**prevent** at a component with a trusted clock, **cancel** the action once it is running, or **detect** a late
+act afterwards.
+
+| Site | Check → act | Answer |
+|---|---|---|
+| Wiki git store | `authorize()` → `update-ref` | Detect locally; prevent at the remote hook for published writes (below) |
+| Gateway | `ae_preflight` → dispatch | Carry the deadline in the caller envelope (C2) so the provider re-checks (C3): the provider's check is later, which shrinks the window; it does not remove it |
+| Provider (C3) | check → handler | Cancel: the handler holds C10's token, so a lapse during the run cancels it |
+| Queued and retried work | dequeue check → run | Already re-checked at dequeue and retry (A1 rule 4); the window per attempt is as above |
+
+
+For the wiki store specifically:
 - **Record, locally.** After the ref transaction, the store re-checks authority. If it lapsed during the
   transaction, the commit is recorded as a **late write**, with its commit id and the lapse, in the evidence
   journal, and the curator raises it. This is detection, not prevention, and the design says so.
 - **Prevent, at the remote.** For published writes, the pre-receive hook checks the pushing curator's mandate
   window and revocation standing against the **remote's** clock, which the curator does not control. The
   scoped-mandates ADR already puts a hook there; this gives it the time check.
-- **Gate:** `a_pause_after_the_check_is_not_caught_locally` gains its detection assertion (the late write is
-  recorded). A hook test refuses a push from a curator whose mandate expired before the push arrived.
+- **Gate:**
+  - `a_pause_after_the_check_is_not_caught_locally` gains its detection assertion (the late write is recorded);
+  - a hook test refuses a push from a curator whose mandate expired before the push arrived;
+  - a gateway test pauses between preflight and dispatch and shows the provider's own check refusing (needs C3);
+  - the ADR states the general limit in one place, and each site's docs link to it.
 
 ### C10: Cancelling admitted work (L; addresses F11)
 
@@ -217,6 +245,36 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
   agent; handlers that cannot confirm are reported `Unbounded`, as the model already does.
 - **Gate:** a long-running handler is cancelled within its declared bound after revocation, and T_drain is
   measured end to end.
+
+### C11: Audit every time-based decision for a frozen clock (S–M; addresses F14; after #405)
+
+- **What.** Every read of `hlc.current()` is classified: a **decision** (a deadline, an expiry, a freshness or
+  replay window), which must read `Hlc::decision_now_ms()` (#405), or a **stamp** (an ordering or record
+  timestamp), which may keep `current()`. The eleven remaining sites are the starting list:
+  - `src/consensus.rs:2107`;
+  - `mycelium-core/src/connection.rs:215` (the nonce replay window), `:504`, `:619`, `:712`;
+  - `mycelium-core/src/ops.rs:65`, `:103`, `:138`;
+  - `mycelium-core/src/persistence.rs:669`, `:677`;
+  - `src/consensus.rs:468`, which already floors at the wall clock.
+- **A guard against regressions.** A check script, like `check-sim-seams.sh`, that fails the build on a new
+  `hlc.current()` read outside an allowlist of classified stamp sites.
+- **End to end (the reviewer's request).** A quiet node: a gateway whose gossip is stopped, with its HLC state
+  forced an hour into the past (#405's trap: a freshly created clock proves nothing). A mandate that expires
+  during the silence is refused, and a checkpoint that goes stale is `Unknown`. The same test with a planted
+  `current()` read passes the call, which proves the test can fail.
+- **The assumption, made explicit.** The clock model's *s* bounds the host wall clock's error. The operator
+  runbooks state the NTP (or equivalent) requirement, and the confinement self-report gains a `clock_sync`
+  line it reports as `Unverified`, as it does for the network, because a node cannot vouch for its own clock.
+
+### C12: Measure the stop in a deployment (M; addresses F15; after C10)
+
+- **What.** The confined-fleet deployment test gains a stop measurement: start long-running work under a
+  mandate, revoke it, and record T_admit (revocation to the last admission) and T_drain (revocation to the last
+  **confirmed** stop) from the CNI's and the journal's own timestamps, not the caller's.
+- **The pass condition.** Both within the declared bounds (`StopContract::drain_bound` plus *F*), unconfirmed
+  stops reported as unconfirmed, never as stopped.
+- **Why after C10.** Without cancellation, T_drain is "when the work happened to finish"; measuring it first
+  would record the absence of a mechanism as a number.
 
 ## 4. Order
 
@@ -230,10 +288,12 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
 | 6 | C8 | Restart safety; independent, can start now |
 | 7 | C9 | Needs the remote hook's ADR update |
 | 8 | C10 | Needs C3's serve-path hook |
-| 9 | C7 | Proves the whole, including C8–C10's cases |
+| 9 | C11 | After #405 merges; the audit and guard are independent of everything else |
+| 10 | C12 | Needs C10 |
+| 11 | C7 | Proves the whole, including C8–C12's cases |
 
 **Estimate.** Steps 1–3: about two weeks. C5: a week after its ADR is reviewed. C6 and C7: about four days. C8 and
-C9: about a week together. C10: a week or more.
+C9: about a week and a half together. C10: a week or more. C11: two to three days. C12: two to three days.
 
 ---
 
@@ -262,4 +322,18 @@ The NovusLens pin bump (Novus-i2 is on `mycelium-wiki` 2.4.4) is tracked downstr
 | The gateway's clock | **Accepted, fixed separately** in #405 (`fix/preflight-reads-a-live-clock`) (`Hlc::decision_now_ms()`, a live clock that advances nothing, at the three sites that read `Hlc::current()`). #402 briefly carried its own copy of the same fix and dropped it in favour of that branch |
 | The *F* − 2*s* partition bound | **Accepted, corrected in #402.** *F* − 2*s* is the reader-clock threshold; in real time, work stops when the checkpoint is at most *F* old |
 | Fleet-stop coverage is incomplete | **Accepted.** Already C1–C3; runtime cancellation added as F11, C10 |
+
+### Rev 0.3: gaps in rev 0.2's own answers
+
+Asked whether rev 0.2 fully addressed the review, a re-read found four gaps:
+
+| Gap | Change |
+|---|---|
+| C8 covered the revocation view but not epochs; a restart also forgets superseded epochs (F12) | C8 renamed *restart-safe authority state*, with persisted epochs as a floor and a gate case |
+| C9 treated the check-then-act window as a wiki problem; it exists at every A1 site (F13) | C9 generalised, with a per-site table of prevent, cancel or detect |
+| The clock fix (#405) covers three sites; nothing audits the rest, and no end-to-end test covers a quiet node (F14) | New C11: classification, a regression guard, the quiet-node test, and the wall-clock assumption made explicit |
+| Stop times are modelled, never measured (F15) | New C12: T_admit and T_drain measured in the confined-fleet deployment, after C10 |
+
+Three items rev 0.2 marked done stay done: order-independent revocation, the *F* − 2*s* correction, and `main`'s
+monotonicity bug (all in #402, merged).
 
