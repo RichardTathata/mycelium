@@ -194,6 +194,11 @@ fn jsonrpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
 /// Used for AE refusals, which a caller has to be able to *act on* differently: a denial and an
 /// authority that was never established call for opposite responses, and neither is legible from a
 /// prose message without parsing English.
+///
+/// Its only call site is the AE preflight's refusal branch, which is itself `cfg`'d on
+/// `gateway` + `tls` — so in an `a2a`-without-`tls` build (CI's Demo smoke) this is dead, and
+/// the gate must say so rather than leave a standing warning.
+#[cfg(all(feature = "gateway", feature = "tls"))]
 fn jsonrpc_error_with_data(
     id: Option<Value>,
     code: i32,

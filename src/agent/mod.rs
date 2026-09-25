@@ -1268,7 +1268,14 @@ impl GossipAgent {
         // reaches skill dispatch. Verified by probe (2026-09-25): `tasks/send` from an
         // unauthenticated client returned `skill not found` rather than a refusal — it had passed
         // every gate and failed only on resolution.
+        // The AE seam only EXISTS under `gateway` + `tls` — the field is cfg'd out otherwise. In a
+        // build without them there cannot be an evaluator, so the seam is inert by construction,
+        // which makes this warning more warranted rather than less. (Caught by CI's Demo smoke,
+        // which builds `--features a2a` on default features: gateway, no tls.)
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         let no_evaluator = self.task_ctx.action_evaluator.get().is_none();
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let no_evaluator = true;
         let no_bearer = self.task_ctx.config.gateway_auth_token.is_none()
             && self.task_ctx.config.gateway_scoped_tokens.is_empty()
             && self.task_ctx.config.gateway_named_tokens.is_empty();
