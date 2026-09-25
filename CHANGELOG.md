@@ -64,6 +64,26 @@ agreement repair establishes single-decree safety; it is not a proof of the whol
 
 ### Added
 
+- **`with_a2a()` warns when it mounts an open surface.** `/a2a` has **no scope floor** — unlike
+  `/mcp`, which requires `mcp:invoke`. Its auth is *optional* by design: a federation credential
+  names a partner, a bearer resolves to a principal whose **scopes are deliberately dropped**
+  (authority on that route comes from policy, not the scope table), and nothing presented is
+  anonymous.
+
+  With an `ActionEvaluator` attached that is a finer instrument than a scope. With **no** evaluator
+  the seam is inert, and an anonymous caller reaches **skill dispatch** — established by probing a
+  live node rather than by reading the auth branch: an unauthenticated `tasks/send` came back
+  `skill not found`, meaning it had passed every gate and failed only on resolution.
+
+  That is fine on a trusted LAN and is not fine on an untrusted network, and nothing said so where
+  an operator would look. `with_a2a()` now warns when it mounts with **neither** an evaluator
+  **nor** any bearer configured, naming both ways to close it — the same pattern
+  `with_action_evaluator` already uses for a missing evidence journal (*enforcement without
+  attribution is not governance*).
+
+  One mitigation already existed and is worth knowing: `/a2a` is mounted **only** by an explicit
+  `with_a2a()` call, never by the `a2a` feature alone.
+
 - **Seven runnable demonstrations of everything above — and CI *runs* them, it does not merely build
   them.** Building an example proves the API still compiles; running it proves the demonstration
   still demonstrates, which is the thing a gallery is a gate on. CI-run examples went from 6 to 12.
