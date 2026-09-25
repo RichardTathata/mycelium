@@ -1,4 +1,70 @@
+import { createHash } from "node:crypto";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
+
+/**
+ * A presented mandate (Boundary H, A1 at the gateway): a grant signed by its establishing authority,
+ * and the holder's base64 possession proof. Sent as `params._meta.mandate`; a gateway with an
+ * execution authority establishes it for the call. This SDK does not sign — see
+ * {@link mandateRequestBytes} for exactly what the holder signs.
+ */
+export interface PresentedMandate {
+  grant: unknown;
+  possession: string;
+}
+
+/** Options for {@link A2aClient.send} and {@link A2aClient.stream}. */
+export interface SendOptions {
+  mandate?: PresentedMandate;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * SHA-256 of `args` as the gateway canonicalises them: sorted keys, no whitespace, UTF-8. For `/a2a`
+ * the arguments are `{ text: message }`.
+ */
+export function argumentsDigest(args: unknown): Uint8Array {
+  return new Uint8Array(createHash("sha256").update(canonicalJson(args), "utf8").digest());
+}
+
+/**
+ * The exact request bytes a presented mandate's possession proof binds to. Only the part of
+ * `resource` before `@` is bound. Pinned by a golden vector shared with the gateway and the Python SDK.
+ */
+export function mandateRequestBytes(operation: string, resource: string, digest: Uint8Array): Uint8Array {
+  if (digest.length !== 32) throw new Error("the arguments digest is 32 bytes");
+  const enc = new TextEncoder();
+  const parts = [enc.encode(operation), enc.encode(resource.split("@")[0])];
+  const chunks: Uint8Array[] = [enc.encode("mycelium.gateway/mandate-request/1")];
+  for (const p of parts) {
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, p.length, true);
+    chunks.push(len, p);
+  }
+  chunks.push(digest);
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+/** @internal The `params` of a task request, with `_meta.mandate` when one is presented. */
+export function taskParams(taskId: string, skillId: string, message: string, opts?: SendOptions): Record<string, unknown> {
+  const params: Record<string, unknown> = {
+    id:      taskId,
+    skillId,
+    message: { role: "user", parts: [{ type: "text", text: message }] },
+  };
+  if (opts?.mandate) params._meta = { mandate: opts.mandate };
+  return params;
+}
 /**
  * A2A (Agent-to-Agent) protocol client for Mycelium.
  *
@@ -193,17 +259,13 @@ export class A2aClient {
    * @returns First text part of the completed task's first artifact.
    * @throws {Error} On JSON-RPC error or HTTP failure.
    */
-  async send(skillId: string, message: string): Promise<string> {
+  async send(skillId: string, message: string, opts?: SendOptions): Promise<string> {
     const taskId  = crypto.randomUUID();
     const payload = {
       jsonrpc: "2.0",
       id:      1,
       method:  "tasks/send",
-      params:  {
-        id:       taskId,
-        skillId,
-        message:  { role: "user", parts: [{ type: "text", text: message }] },
-      },
+      params:  taskParams(taskId, skillId, message, opts),
     };
 
     const resp = await fetch(`${this.baseUrl}/a2a`, {
@@ -233,17 +295,13 @@ export class A2aClient {
    * @param skillId  Skill ID in `"ns/name"` format.
    * @param message  Plain-text input.
    */
-  async *stream(skillId: string, message: string): AsyncGenerator<TaskStatusUpdate> {
+  async *stream(skillId: string, message: string, opts?: SendOptions): AsyncGenerator<TaskStatusUpdate> {
     const taskId  = crypto.randomUUID();
     const payload = {
       jsonrpc: "2.0",
       id:      1,
       method:  "tasks/sendSubscribe",
-      params:  {
-        id:      taskId,
-        skillId,
-        message: { role: "user", parts: [{ type: "text", text: message }] },
-      },
+      params:  taskParams(taskId, skillId, message, opts),
     };
 
     const resp = await fetch(`${this.baseUrl}/a2a`, {

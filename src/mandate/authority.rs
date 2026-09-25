@@ -436,6 +436,16 @@ impl ExecutionGate {
     pub fn clock(&self) -> ClockModel {
         self.clock
     }
+
+    /// The freshness policy this gate runs under.
+    pub fn freshness(&self) -> FreshnessPolicy {
+        self.freshness
+    }
+
+    /// Install a later epoch at the protected resource. Never goes backwards.
+    pub fn install_epoch(&mut self, epoch: u64) -> bool {
+        self.resource.install(epoch)
+    }
 }
 
 // ── measuring the stop ──────────────────────────────────────────────────────────────────────

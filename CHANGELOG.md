@@ -11,6 +11,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Mandates established at the gateway** (Boundary H A1, gateway wiring; ADR
+  `docs/design/authority-at-execution.md` §6). The gateway always bound `mandate: None`, so a policy rule
+  requiring a mandate could never be satisfied there. `GossipAgent::with_execution_authority` (plus
+  `offer_revocation_checkpoint`) makes `ae_preflight` assess a grant presented in `params._meta.mandate`
+  for `/mcp`, `/a2a` and federation calls:
+  - its holder must be the **authenticated caller**;
+  - P2 checks it, with possession bound to this call's operation, resource and arguments digest;
+  - A1's gate checks it at dispatch;
+  - the result is bound as `Established`, `Refused` or `Unknown`, and the envelope window is clamped to
+    the mandate.
+
+  No authority attached means unchanged behaviour. **SDKs:** `mycelium-py` and `mycelium-ts` gain
+  `mandate=` on `A2aClient.send`/`stream`, and `arguments_digest`/`argumentsDigest` and
+  `mandate_request_bytes`/`mandateRequestBytes`, with golden vectors shared across Rust, Python and
+  TypeScript. Lock-order row 43. `ExecutionAuthority`, `PresentedMandate`, `possession_request`,
+  `mandate_operation` and `resource_key` are re-exported at the crate root, and an external-crate test
+  (`tests/gateway_mandate_external.rs`) keeps them constructible from outside.
+
 - **Authority at execution** (Boundary H plan, item A1; ADR `docs/design/authority-at-execution.md`).
   Letting a mandate expire stopped new admissions, but not work already admitted. `mandate::authority`:
   - `ExecutionGate::check` re-establishes authority at admission, dequeue, retry and each

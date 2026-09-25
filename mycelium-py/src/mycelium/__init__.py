@@ -9,7 +9,7 @@ from .agent import (
     LockGuard,
     CommitResult,
 )
-from .a2a import A2aClient
+from .a2a import A2aClient, arguments_digest, mandate_request_bytes
 from .federation import Federation, FederationError, DeliveryUnknown
 from .prompt_skill import PromptTemplate, PromptSkillClient
 from .reason import (
@@ -33,6 +33,8 @@ __all__ = [
     "LogEntry",
     "LockGuard",
     "A2aClient",
+    "arguments_digest",
+    "mandate_request_bytes",
     "Federation",
     "FederationError",
     "DeliveryUnknown",

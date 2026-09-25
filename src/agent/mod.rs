@@ -43,6 +43,8 @@ pub(crate) mod gateway_caller;
 /// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod action_evaluator;
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod gateway_authority;
 /// AE4's contract fixtures: what the seam requires of *any* evaluator behind it, stated once so a
 /// replacement evaluator is held to the same bar as the reference one. Same gate as the seam.
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -522,6 +524,10 @@ pub(crate) struct TaskCtx {
     /// which `with_action_evaluator` warns about.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) evidence_journal: std::sync::OnceLock<Arc<evidence_journal::EvidenceJournal>>,
+    /// The gateway's execution authority (Boundary H A1), set via `with_execution_authority`.
+    /// Absent = the gateway binds no mandate, exactly as before.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) execution_authority: std::sync::OnceLock<Arc<gateway_authority::ExecutionAuthority>>,
     /// The federation edge (item 2 PR 8), set via `with_federation_edge`. Absent = this gateway
     /// serves no federated calls: a presented credential is refused, never anonymised.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -966,6 +972,8 @@ impl GossipAgent {
             #[cfg(all(feature = "gateway", feature = "tls"))]
             evidence_journal: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
+            execution_authority: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_edge: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_clients: std::sync::OnceLock::new(),
@@ -1072,6 +1080,29 @@ impl GossipAgent {
         if self.task_ctx.evidence_journal.set(journal).is_err() {
             tracing::warn!("with_evidence_journal: a journal is already attached; ignoring");
         }
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    /// **Establish mandates at this gateway** (Boundary H A1). With an authority attached, a call
+    /// that presents a signed grant in `params._meta.mandate` gets a real mandate finding in its
+    /// action envelope — established, refused or unknown — after P2's checks and A1's execution gate,
+    /// and the envelope's window is clamped to the mandate's. Without one, the gateway binds no
+    /// mandate, exactly as before. Set once; a second call is ignored with a warning.
+    pub fn with_execution_authority(&self, authority: Arc<gateway_authority::ExecutionAuthority>) {
+        if self.task_ctx.execution_authority.set(authority).is_err() {
+            tracing::warn!("with_execution_authority: an execution authority is already attached; ignoring");
+        }
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    /// Offer a revocation checkpoint to this gateway's execution authority. `None` if none is attached.
+    pub fn offer_revocation_checkpoint(
+        &self,
+        signed: &crate::mandate::authority::SignedRevocationCheckpoint,
+    ) -> Option<crate::mandate::authority::CheckpointOffer> {
+        let authority = self.task_ctx.execution_authority.get()?;
+        let now_ms = crate::hlc::physical_ms(self.task_ctx.hlc.current());
+        Some(authority.offer_checkpoint(signed, now_ms, &gateway_member_keys(&self.task_ctx)))
     }
 
     /// Record the policy revision an operator has reported as **deployed**.
@@ -1611,3 +1642,21 @@ mod rbac_agent_tests {
         assert!(agent.caller_authorized(&caller, &[caller_str]));
     }
 }
+
+/// The member-key view the gateway's execution authority verifies member-path principals against:
+/// the live identity view under `compliance`, and none without it (configured-external only).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn gateway_member_keys(
+    ctx: &TaskCtx,
+) -> std::collections::HashMap<crate::node_id::NodeId, crate::knowledge::issuer::MemberKeys> {
+    #[cfg(feature = "compliance")]
+    {
+        knowledge_keys::member_keys_of(ctx)
+    }
+    #[cfg(not(feature = "compliance"))]
+    {
+        let _ = ctx;
+        std::collections::HashMap::new()
+    }
+}
+

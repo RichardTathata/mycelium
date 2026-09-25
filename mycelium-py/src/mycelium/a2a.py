@@ -16,7 +16,9 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import json
+import struct
 import uuid
 from typing import Dict, Iterator, Optional
 
@@ -116,6 +118,45 @@ def _raise_for_error(error: Dict) -> None:
     raise A2aError(code, message, data)
 
 
+def arguments_digest(arguments: Dict) -> bytes:
+    """SHA-256 of ``arguments`` as the gateway canonicalises them: sorted keys, no whitespace, UTF-8.
+
+    For ``/a2a`` the arguments are ``{"text": message}``. This is the digest a mandate holder's
+    possession proof binds to (Boundary H, A1 at the gateway).
+    """
+    canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).digest()
+
+
+def mandate_request_bytes(operation: str, resource: str, digest: bytes) -> bytes:
+    """The exact request bytes a presented mandate's possession proof binds to.
+
+    ``resource`` may include the resolved provider (``skill:ns/name@node``); only the part before
+    ``@`` is bound. The holder signs ``possession_message(grant, these bytes)`` with its own key and
+    passes the grant and base64 signature as ``mandate=`` — this SDK does not sign. The format is
+    pinned by a golden vector shared with the gateway and the TypeScript SDK.
+    """
+    if len(digest) != 32:
+        raise ValueError("the arguments digest is 32 bytes")
+    out = bytearray(b"mycelium.gateway/mandate-request/1")
+    for part in (operation.encode("utf-8"), resource.split("@", 1)[0].encode("utf-8")):
+        out += struct.pack("<I", len(part)) + part
+    out += digest
+    return bytes(out)
+
+
+def _task_params(task_id: str, skill_id: str, message: str, mandate: Optional[Dict]) -> Dict:
+    params: Dict = {
+        "id":       task_id,
+        "skillId":  skill_id,
+        "message":  {"role": "user", "parts": [{"type": "text", "text": message}]},
+    }
+    if mandate is not None:
+        # {"grant": <SignedMandateGrant>, "possession": <base64>} — see mandate_request_bytes.
+        params["_meta"] = {"mandate": mandate}
+    return params
+
+
 class A2aClient:
     """HTTP client for A2A-protocol nodes (requires the ``a2a`` cargo feature).
 
@@ -162,6 +203,7 @@ class A2aClient:
         *,
         timeout_secs: Optional[float] = None,
         task_id: Optional[str] = None,
+        mandate: Optional[Dict] = None,
     ) -> str:
         """Send a ``tasks/send`` request and return the reply text.
 
@@ -175,6 +217,10 @@ class A2aClient:
             Override the per-client default timeout.
         task_id:
             Optional explicit task ID; auto-generated if omitted.
+        mandate:
+            Optional presented mandate, ``{"grant": ..., "possession": ...}``, sent as
+            ``params._meta.mandate``. A gateway with an execution authority establishes it for this
+            call (Boundary H A1); see :func:`mandate_request_bytes` for what the holder signs.
 
         Returns
         -------
@@ -192,11 +238,7 @@ class A2aClient:
             "jsonrpc": "2.0",
             "id":      1,
             "method":  "tasks/send",
-            "params":  {
-                "id":       tid,
-                "skillId":  skill_id,
-                "message":  {"role": "user", "parts": [{"type": "text", "text": message}]},
-            },
+            "params":  _task_params(tid, skill_id, message, mandate),
         }
         with self._pool.sync(timeout=timeout + 5.0) as c:  # network headroom
             resp = c.post("/a2a", json=payload)
@@ -216,6 +258,7 @@ class A2aClient:
         *,
         timeout_secs: Optional[float] = None,
         task_id: Optional[str] = None,
+        mandate: Optional[Dict] = None,
     ) -> Iterator[Dict]:
         """Send a ``tasks/sendSubscribe`` request and yield SSE status events.
 
@@ -246,11 +289,7 @@ class A2aClient:
             "jsonrpc": "2.0",
             "id":      1,
             "method":  "tasks/sendSubscribe",
-            "params":  {
-                "id":       tid,
-                "skillId":  skill_id,
-                "message":  {"role": "user", "parts": [{"type": "text", "text": message}]},
-            },
+            "params":  _task_params(tid, skill_id, message, mandate),
         }
         with httpx.stream(
             "POST",

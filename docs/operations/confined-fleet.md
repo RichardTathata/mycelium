@@ -39,6 +39,33 @@ A "blocked" result with no positive control proves nothing.
 | An audit sink | Attached (`with_audit_sink`) | Keeps original bytes; a reissued audit suffix is detectable |
 | An action evaluator **and** an evidence journal | Both attached | Everything an agent does through the gateway is authorised and recorded, fsynced, before dispatch |
 
+**Establish mandates at the gateway** (Boundary H A1), so that policy rules requiring a mandate can actually be
+satisfied, and satisfied only by current, unrevoked, possessed appointments:
+
+```rust
+use mycelium::mandate::authority::{ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier};
+use mycelium::mandate::grant::{EntitlementTable, GrantVerifier};
+use mycelium::mandate::{PrincipalId, ResourceAuthority};
+use mycelium::ExecutionAuthority; // re-exported; tests/gateway_mandate_external.rs keeps it constructible
+
+let mut entitled = EntitlementTable::new();
+entitled.entitle("depot", PrincipalId::new("operator:acme").unwrap()); // who may appoint for "depot"
+let gate = ExecutionGate::strict(
+    ResourceAuthority::new("depot", 1),
+    ResourceTier::Serialised,
+    ClockModel { skew_ms: 500 },                                        // your time-sync bound s
+    FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 }, // F, I, D
+)?;                                                                      // refuses F ≤ 4s or I + D > F − 4s
+agent.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitled), external)));
+// Feed the authority's signed revocation checkpoints (at least every I, even when nothing is revoked):
+agent.offer_revocation_checkpoint(&checkpoint);
+```
+
+Policy rules for protected operations must require the mandate (`Rule::requiring_mandate("depot")`).
+`ReferenceEvaluator::allowances_without_mandate(&[("skill.invoke", "skill:depot/dispatch@…")])` lists any
+allowance that would not, and it must be empty. Callers present `mandate=` from the SDKs (`A2aClient.send`), with a
+possession proof they sign over `mandate_request_bytes(...)`.
+
 Then read what the node itself can confirm:
 
 ```rust

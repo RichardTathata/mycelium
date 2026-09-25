@@ -22,6 +22,10 @@ export {
   TaskStatusUpdate,
   A2aError,
   ActionRefusedError,
+  argumentsDigest,
+  mandateRequestBytes,
+  PresentedMandate,
+  SendOptions,
 } from "./a2a";
 export { PromptSkillClient, PromptTemplate, CallResult } from "./prompt_skill";
 export {
