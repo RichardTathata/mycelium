@@ -397,6 +397,7 @@ pub(crate) async fn gateway_rpc_call(
 /// [`gateway_rpc_call`], carrying the mandate the caller presented to the provider (closure plan C2).
 /// Under the `Legacy` profile there is no envelope, so nothing is carried.
 #[cfg(any(feature = "gateway", test))]
+#[allow(clippy::too_many_arguments)] // one call's facts: who, where, what, and under which mandate
 pub(crate) async fn gateway_rpc_call_with_mandate(
     ctx: &TaskCtx,
     caller: Option<&ResolvedPrincipal>,

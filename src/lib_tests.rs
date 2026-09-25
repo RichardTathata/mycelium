@@ -9134,7 +9134,7 @@ async fn test_c3_provider_enforcement_decides_direct_member_calls() {
         established_by: PrincipalId::new("operator:acme").unwrap(),
         purpose: "count".into(),
         scope: "depot".into(),
-        operations: vec![format!("tools/call:tool:count")],
+        operations: vec!["tools/call:tool:count".to_string()],
         epoch: 1,
         term: TermId::new("t1").unwrap(),
         valid_from_ms: 0,
@@ -9161,7 +9161,7 @@ async fn test_c3_provider_enforcement_decides_direct_member_calls() {
     assert_eq!(ran.load(Ordering::SeqCst), 1);
 
     // 4. A skill claim naming another node, or a skill not served here: refused on the claim.
-    let other = format!("skill:depot/dispatch@10.9.9.9:1");
+    let other = "skill:depot/dispatch@10.9.9.9:1".to_string();
     let r = reply(agent.service().rpc_call_with_mandate(me.clone(), "skill.invoke", b"go".to_vec(), &presented, &other, Duration::from_secs(5)).await.unwrap());
     assert_eq!(r["reason"], "resource_not_here", "{r}");
     let unserved = format!("skill:depot/unknown@{me}");
