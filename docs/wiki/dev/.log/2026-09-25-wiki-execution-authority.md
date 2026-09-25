@@ -23,7 +23,7 @@ own unit gate. The fix covers the gateway too.
 
 **An external review, the same day, and what it changed.** Six findings, all accepted:
 - out-of-order checkpoints could lose a revocation: fixed, since the revocation is recorded before the replay check;
-- the gateway read `Hlc::current()`, which stands still on a quiet node and fails open: fixed on its own branch
+- the gateway read `Hlc::current()`, which stands still on a quiet node and fails open: fixed in #405
   (`fix/preflight-reads-a-live-clock`, `Hlc::decision_now_ms()`), which another session had written the same day;
   this PR's copy of the fix was dropped;
 - the *F* − 2*s* partition bound was stated as real time: corrected;

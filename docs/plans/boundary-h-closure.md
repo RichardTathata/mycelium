@@ -192,7 +192,10 @@ an error. The deployment variant runs in the confined-fleet CI job, so the netwo
 - **Gate:**
   - restart, then replay a fresh pre-revocation checkpoint → refused, the term stays revoked;
   - restart, then a new cumulative checkpoint → accepted and correct;
-  - a plant without the rule fails the first case.
+  - a plant without the rule fails the first case;
+  - **the trap to avoid** (from #405): any freshness or clock test must force the clock's state into the
+    past. `Hlc::new()` seeds from the wall clock, so a test on a freshly created clock passes against a frozen
+    implementation too, and proves nothing.
 
 ### C9: The check-to-transaction window (M; addresses F9)
 
@@ -256,7 +259,7 @@ The NovusLens pin bump (Novus-i2 is on `mycelium-wiki` 2.4.4) is tracked downstr
 | A restart can restore revoked authority | **Accepted.** F10, C8 |
 | Out-of-order checkpoints can lose revocations | **Accepted, fixed in #402.** An authentic revocation is recorded before the replay and future-dating checks; gate `a_revocation_in_a_late_arriving_older_checkpoint_still_revokes` |
 | The wiki's check-to-mutation window | **Accepted; rev 0.1 was wrong** to call it not a gap. F9, C9; pinned by `a_pause_after_the_check_is_not_caught_locally` |
-| The gateway's clock | **Accepted, fixed separately** on `fix/preflight-reads-a-live-clock` (`Hlc::decision_now_ms()`, a live clock that advances nothing, at the three sites that read `Hlc::current()`). #402 briefly carried its own copy of the same fix and dropped it in favour of that branch |
+| The gateway's clock | **Accepted, fixed separately** in #405 (`fix/preflight-reads-a-live-clock`) (`Hlc::decision_now_ms()`, a live clock that advances nothing, at the three sites that read `Hlc::current()`). #402 briefly carried its own copy of the same fix and dropped it in favour of that branch |
 | The *F* − 2*s* partition bound | **Accepted, corrected in #402.** *F* − 2*s* is the reader-clock threshold; in real time, work stops when the checkpoint is at most *F* old |
 | Fleet-stop coverage is incomplete | **Accepted.** Already C1–C3; runtime cancellation added as F11, C10 |
 

@@ -131,7 +131,7 @@ Rust tests and both SDKs.
 `Hlc::current()`, the last value the clock *ticked* to. A node with no event traffic stops ticking, so a check
 against `current` sees time stand still: a mandate never expires and a checkpoint never goes stale, which fails
 **open**. An external review found it on 2026-09-25, and the fix, `Hlc::decision_now_ms()` (the later of the wall
-clock and the HLC's physical time, advancing nothing), lands separately on `fix/preflight-reads-a-live-clock`,
+clock and the HLC's physical time, advancing nothing), lands separately in #405 (`fix/preflight-reads-a-live-clock`),
 covering `ae_preflight`, the caller envelope's `issued_at_ms` and `offer_revocation_checkpoint`. The clock model's
 *s* is therefore a bound on the **host wall clock's** error (NTP or equivalent), which a deployment must provide.
 The wiki store's `ExecutionGateAuthority` takes the deployment's clock as a closure, and the same rule applies to
