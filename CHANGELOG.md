@@ -11,6 +11,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Authority at execution** (Boundary H plan, item A1; ADR `docs/design/authority-at-execution.md`).
+  Letting a mandate expire stopped new admissions, but not work already admitted. `mandate::authority`:
+  - `ExecutionGate::check` re-establishes authority at admission, dequeue, retry and each
+    re-authorisation checkpoint, re-running `ResourceAuthority::check`. `strict` refuses advisory
+    resources, and parameters that break *F* > 4*s* or *I* + *D* ≤ *F* − 4*s*.
+  - `AuthorizedWork` clamps work to its mandate's window, and `delegate` never extends it.
+  - Authority-signed `RevocationCheckpoint`s, issued even when empty, feed a `RevocationView` under the exact
+    freshness predicate. Replays are refused, silence and stale views deny, and a revocation stands once seen.
+  - `Continuation` and `StopContract::drain_bound` give a bound or `Unbounded`; `drain_report` keeps
+    T_admit and T_drain apart, and counts unconfirmed stops as unconfirmed.
+  - `ReferenceEvaluator::allowances_without_mandate` lists policy holes.
+
+  **Not claimed:** resources must call the gate (none is wired yet); the revocation view is in memory;
+  timing is not measured in a deployment.
+
 - **Signed mandate grants (P2) and capability advertisements bound to authority (H3)** (Boundary H;
   ADR `docs/design/knowledge-issuer-binding.md` §5–6).
   - **P2.** `mandate::grant`: `Mandate::canonical_bytes`/`digest`, `SignedMandateGrant`,

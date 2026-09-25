@@ -43,6 +43,8 @@
 //! could be got right before a write path depended on it.
 
 #[cfg(feature = "tls")]
+pub mod authority;
+#[cfg(feature = "tls")]
 pub mod grant;
 #[cfg(feature = "tls")]
 pub mod protected;
