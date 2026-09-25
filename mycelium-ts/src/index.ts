@@ -1,4 +1,4 @@
-export { MyceliumAgent } from "./agent";
+export { MyceliumAgent, ProtectedKindError } from "./agent";
 export {
   CapabilityHandle,
   CommitResult,

@@ -66,6 +66,20 @@ Policy rules for protected operations must require the mandate (`Rule::requiring
 allowance that would not, and it must be empty. Callers present `mandate=` from the SDKs (`A2aClient.send`), with a
 possession proof they sign over `mandate_request_bytes(...)`.
 
+**Issue agents the narrowest tokens** (closure plan C1). Use named tokens (`gateway_named_tokens`), never the legacy
+`gateway_auth_token`, which holds `*`:
+
+| Agent role | Scopes |
+|---|---|
+| Calls skills and tools | none on the raw routes: skills go through `/a2a`, tools through `/mcp` (`mcp:invoke`) |
+| Serves skills through the gateway | `mesh:serve` only (the serve stream and `rpc/respond`) |
+| Emits coordination signals | `mesh:write`, and only if it must |
+
+`mesh:write` opens the raw routes (`rpc/call`, `scatter`, `signal/emit`, …). Those refuse protected kinds
+(`mcp.invoke`, `skill.invoke`, `llm.invoke`, and any in `protected_rpc_kinds`) with `403 protected_kind`, so they
+cannot carry protected work around `/mcp` and `/a2a`. List every kind your own providers serve as protected work in
+`protected_rpc_kinds` (`GOSSIP_PROTECTED_RPC_KINDS`).
+
 Then read what the node itself can confirm:
 
 ```rust

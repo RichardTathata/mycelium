@@ -349,8 +349,9 @@ embedding process it also holds the member's key (Boundary A, once per agent).
     expired, revoked or out-of-touch curator writes and publishes nothing, and its queued proposals wait for one
     that has authority. **Scope of the fleet-stop claim, today:** it holds only for calls through `/mcp`, `/a2a`
     and federation. A member can call a provider directly with `rpc_call`, and a gateway client with `mesh:write`
-    can reach a provider through `/gateway/rpc/call`; providers check who is calling, not whether they may. Both
-    are closed by [`plans/boundary-h-closure.md`](plans/boundary-h-closure.md) C1–C3. *Limits:* other resources
+    could reach a provider through `/gateway/rpc/call`; providers check who is calling, not whether they may. The
+    raw-route walk-around is **closed** (C1: protected kinds are refused on every raw route, and serving has its own
+    `mesh:serve` scope); the direct member path waits on [`plans/boundary-h-closure.md`](plans/boundary-h-closure.md) C2–C3. *Limits:* other resources
     apply it only when wired;
     the revocation view is in memory, and a restart fails closed only until a checkpoint arrives: a replayed, still-fresh checkpoint from before a revocation is then accepted, for up to *F* (closure plan C8); the wiki store checks before its git transaction, so a paused process can write late by the pause (C9); timing is not yet measured in a deployment. *Gate:* `mandate::authority::tests`, including both clock extremes.
 - *Proposed (sequenced in [`plans/boundary-h.md`](plans/boundary-h.md)):*

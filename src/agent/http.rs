@@ -512,6 +512,12 @@ async fn gateway_auth(
         ).into_response();
     };
 
+    // Closure plan C1, the compatibility window: a token issued before `mesh:serve` existed served
+    // with `mesh:read` and responded with `mesh:write`. For one release it is still admitted to the
+    // serve routes, and told, once per request, that it should be reissued with `mesh:serve`.
+    #[cfg(feature = "compliance")]
+    let scopes = legacy_mesh_serve(scopes, required_scope_for_route);
+
     #[cfg(feature = "compliance")]
     if !scope_admits(&scopes, required_scope_for_route) {
         return (
@@ -665,6 +671,20 @@ fn resolve_token(cfg: &crate::config::GossipConfig, issuer: &str, presented: &st
     None
 }
 
+/// The `mesh:serve` compatibility window (closure plan C1). A token that lacks `mesh:serve` but holds
+/// `mesh:read` or `mesh:write` is admitted to the serve routes for one release, with a warning.
+#[cfg(feature = "compliance")]
+fn legacy_mesh_serve(mut scopes: Vec<String>, required: &str) -> Vec<String> {
+    if required == "mesh:serve"
+        && !scope_admits(&scopes, "mesh:serve")
+        && scopes.iter().any(|s| s == "mesh:read" || s == "mesh:write")
+    {
+        warn!("gateway: a token without `mesh:serve` used a serve route; admitted for one release — reissue it with `mesh:serve` (and without `mesh:write` if it only serves)");
+        scopes.push("mesh:serve".to_string());
+    }
+    scopes
+}
+
 /// True if `scopes` grants `required` (exact match or the `"*"` wildcard).
 #[cfg(feature = "compliance")]
 fn scope_admits(scopes: &[String], required: &str) -> bool {
@@ -696,8 +716,10 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/signal/sse/{kind}" => "mesh:read",
         "/gateway/demand"          => "mesh:read",
         "/gateway/rpc/call"        => "mesh:write",
-        "/gateway/rpc/serve/{kind}" => "mesh:read",
-        "/gateway/rpc/respond"     => "mesh:write",
+        // Closure plan C1: serving is its own scope, so an agent that serves skills needs no power
+        // to *call* (`mesh:write` also opens `rpc/call`). See `legacy_mesh_serve`.
+        "/gateway/rpc/serve/{kind}" => "mesh:serve",
+        "/gateway/rpc/respond"     => "mesh:serve",
         "/gateway/scatter"         => "mesh:write",
         "/gateway/mailbox/deliver" => "mesh:write",
         "/gateway/mailbox/{kind}"  => "mesh:read",
@@ -1897,6 +1919,10 @@ async fn gw_signal_emit(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing kind"}))).into_response(),
     };
+    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
 
     let scope_str = body["scope"].as_str().unwrap_or("cluster");
     // "cluster" is the name; "system" stays accepted as a deprecated alias (2026-07-10 rename).
@@ -2015,6 +2041,51 @@ async fn gw_demand(
     })).into_response()
 }
 
+/// RPC kinds that are **protected work**: each has a door of its own where authority is checked.
+/// `mcp.invoke` is `/mcp` `tools/call` (AE preflight, mandates); `skill.invoke` is `/a2a` (the same);
+/// `llm.invoke` is `/gateway/llm/call` (scope `llm:invoke`). Operators add more with
+/// `GossipConfig::protected_rpc_kinds`.
+pub const BUILTIN_PROTECTED_RPC_KINDS: &[&str] = &[
+    crate::signal::signal_kind::MCP_INVOKE,
+    "skill.invoke",
+    crate::signal::signal_kind::LLM_INVOKE,
+];
+
+/// Is `kind` protected work on this node?
+pub(crate) fn is_protected_kind(cfg: &crate::config::GossipConfig, kind: &str) -> bool {
+    BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || cfg.protected_rpc_kinds.iter().any(|k| k == kind)
+}
+
+/// **Closure plan C1.** The gateway's raw routes (`rpc/call`, `scatter`, `signal/emit`,
+/// `mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`) take the RPC kind from the request
+/// body. Before this, a client with `mesh:write` could send `mcp.invoke` or `skill.invoke` straight
+/// to a provider through them, framed with its own principal, and the AE preflight that `/mcp` and
+/// `/a2a` run, mandates included, never ran. `llm.invoke` the same, around `llm:invoke`.
+///
+/// A protected kind is refused `403` with the door to use instead. It is refused whatever the
+/// token's scopes (the legacy token holds `*`), and whether or not `compliance` is built in.
+fn refuse_protected_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
+    if !is_protected_kind(cfg, kind) {
+        return None;
+    }
+    let door = match kind {
+        k if k == crate::signal::signal_kind::MCP_INVOKE => "/mcp (tools/call)",
+        "skill.invoke" => "/a2a",
+        k if k == crate::signal::signal_kind::LLM_INVOKE => "/gateway/llm/call",
+        _ => "the route your operator publishes for it",
+    };
+    warn!(kind, "gateway: protected RPC kind refused on a raw route");
+    Some((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "ok": false,
+            "error": "protected_kind",
+            "kind": kind,
+            "message": format!("`{kind}` is protected work and is not accepted on raw mesh routes; use {door}"),
+        })),
+    ).into_response())
+}
+
 /// `POST /gateway/rpc/call`
 ///
 /// Sends a blocking RPC call to a named node. `payload_b64` is base64.
@@ -2040,6 +2111,10 @@ async fn gw_rpc_call(
         Some(m) => Arc::from(m),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing method"}))).into_response(),
     };
+    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &method) {
+        return refused;
+    }
 
     let payload = if let Some(b64) = body["payload_b64"].as_str() {
         match base64::engine::general_purpose::STANDARD.decode(b64) {
@@ -2768,6 +2843,10 @@ async fn gw_scatter(
         Some(m) => Arc::from(m),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing method"}))).into_response(),
     };
+    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &method) {
+        return refused;
+    }
     let payload = if let Some(b64) = body["payload_b64"].as_str() {
         match base64::engine::general_purpose::STANDARD.decode(b64) {
             Ok(v)  => Bytes::from(v),
@@ -2878,6 +2957,10 @@ async fn gw_mailbox_deliver(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing kind"}))).into_response(),
     };
+    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
     let payload = if let Some(b64) = body["payload_b64"].as_str() {
         match base64::engine::general_purpose::STANDARD.decode(b64) {
             Ok(v)  => Bytes::from(v),
@@ -3625,6 +3708,10 @@ async fn gw_overlay_emit_reliable(
     };
     let timeout = Duration::from_secs(body.timeout_secs.unwrap_or(5).clamp(1, 300));
     let kind: Arc<str> = Arc::from(body.kind.as_str());
+    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
 
     match gateway_caller::gateway_rpc_call(&ctx.agent_ctx, caller.as_ref(), target, kind, payload, timeout).await {
         Ok(_)                                                    => Json(json!({ "ack": "acknowledged" })).into_response(),
@@ -3688,6 +3775,10 @@ async fn gw_shard_emit(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing kind"}))).into_response(),
     };
+    // Closure plan C1: a raw route never carries protected work around the door that checks it.
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
     let ns   = match body["ns"].as_str()   { Some(s) => s.to_string(), None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing ns"}))).into_response() };
     let name = match body["name"].as_str() { Some(s) => s.to_string(), None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing name"}))).into_response() };
     let shard_key = match body["shard_key"].as_str() {
@@ -4958,6 +5049,9 @@ mod tests {
         // resource families.
         assert_eq!(required_scope(&Method::GET,  "/gateway/capability/resolve"), "cap:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/signal/emit"), "mesh:write");
+        assert_eq!(required_scope(&Method::GET,  "/gateway/rpc/serve/{kind}"), "mesh:serve");
+        assert_eq!(required_scope(&Method::POST, "/gateway/rpc/respond"), "mesh:serve");
+        assert_eq!(required_scope(&Method::POST, "/gateway/rpc/call"), "mesh:write");
         assert_eq!(required_scope(&Method::POST, "/gateway/overlay/consistent/set"), "consensus:write");
         assert_eq!(required_scope(&Method::GET,  "/gateway/overlay/consistent/get"), "consensus:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/llm/call"), "llm:invoke");
@@ -5221,6 +5315,124 @@ mod tests {
             .send().await.unwrap();
         assert_eq!(r.status(), 403, "mcp:invoke must not reach /signals");
 
+        agent.shutdown().await;
+    }
+
+    /// **Closure plan C1.** Every raw route that takes an RPC kind from the body refuses protected
+    /// work, whatever the token holds (the legacy token holds `*`). A counting MCP tool on the target
+    /// proves the refusal happens before dispatch: nothing reaches the handler through any of the six.
+    /// The plant is a non-protected kind on `rpc/call`, which is not refused.
+    #[tokio::test]
+    async fn raw_routes_refuse_protected_kinds_and_the_handler_is_never_reached() {
+        use axum::http::header::AUTHORIZATION;
+        use base64::Engine as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+        cfg.protected_rpc_kinds = vec!["depot.dispatch".into()];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+
+        let reached = Arc::new(AtomicUsize::new(0));
+        let r2 = Arc::clone(&reached);
+        let _tool = agent.mcp().register_mcp_tool("count", serde_json::json!({}), move |_args| {
+            let r = Arc::clone(&r2);
+            async move { r.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!("ran")) }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                                      "params":{"name":"count","arguments":{}}});
+        let b64 = base64::engine::general_purpose::STANDARD.encode(call.to_string());
+        let target = id.to_string();
+
+        for kind in ["mcp.invoke", "skill.invoke", "llm.invoke", "depot.dispatch"] {
+            let routes: Vec<(&str, serde_json::Value)> = vec![
+                ("rpc/call", serde_json::json!({"target": target, "method": kind, "payload_b64": b64, "timeout_secs": 1})),
+                ("scatter", serde_json::json!({"targets": [target], "method": kind, "payload_b64": b64, "timeout_secs": 1})),
+                ("signal/emit", serde_json::json!({"kind": kind, "scope": format!("node:{target}"), "payload_b64": b64})),
+                ("mailbox/deliver", serde_json::json!({"target": target, "kind": kind, "payload_b64": b64})),
+                ("shard/emit", serde_json::json!({"kind": kind, "ns": "x", "name": "y", "shard_key": "k", "payload_b64": b64})),
+                ("overlay/emit_reliable", serde_json::json!({"target": target, "kind": kind, "payload_b64": b64, "timeout_secs": 1})),
+            ];
+            for (route, body) in routes {
+                let r = client.post(format!("{base}/gateway/{route}")).header(AUTHORIZATION, "Bearer secret")
+                    .json(&body).send().await.unwrap();
+                assert_eq!(r.status(), 403, "{route} must refuse `{kind}`");
+                let v: serde_json::Value = r.json().await.unwrap();
+                assert_eq!(v["error"], "protected_kind", "{route} names the refusal for `{kind}`: {v}");
+            }
+        }
+
+        // The plant: an ordinary kind is not refused (nothing serves it, so it times out).
+        let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer secret")
+            .json(&serde_json::json!({"target": target, "method": "echo", "payload_b64": b64, "timeout_secs": 1}))
+            .send().await.unwrap();
+        assert_ne!(r.status(), 403, "a non-protected kind still passes the raw route");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(reached.load(Ordering::SeqCst), 0, "no raw route reached the tool");
+        agent.shutdown().await;
+    }
+
+    /// **Closure plan C1, the scope split.** `mesh:serve` serves and responds, and cannot call; a
+    /// `mesh:write` token is refused on the serve routes unless the compatibility window admits it,
+    /// which it does, for one release, for a token holding `mesh:read` or `mesh:write`. A token with
+    /// neither is refused.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn mesh_serve_serves_and_responds_but_cannot_call() {
+        use axum::http::header::AUTHORIZATION;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "serve-tok".into(),  scopes: vec!["mesh:serve".into()] },
+            crate::GatewayToken { token: "legacy-tok".into(), scopes: vec!["mesh:read".into()] },
+            crate::GatewayToken { token: "kv-tok".into(),     scopes: vec!["kv:read".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let respond = serde_json::json!({"nonce_hex": "0000000000000001", "sender": id.to_string(), "result_b64": ""});
+
+        let r = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer serve-tok")
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "mesh:serve opens the serve stream");
+        drop(r);
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-tok")
+            .json(&respond).send().await.unwrap();
+        assert_eq!(r.status(), 200, "mesh:serve responds");
+        let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer serve-tok")
+            .json(&serde_json::json!({"target": id.to_string(), "method": "echo", "timeout_secs": 1}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 403, "mesh:serve cannot call");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["required_scope"], "mesh:write");
+
+        let r = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer legacy-tok")
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "the compatibility window admits a mesh:read token to serve");
+        drop(r);
+        let r = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer kv-tok")
+            .send().await.unwrap();
+        assert_eq!(r.status(), 403, "a token with no mesh scope is refused");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["required_scope"], "mesh:serve");
         agent.shutdown().await;
     }
 

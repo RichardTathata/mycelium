@@ -55,6 +55,29 @@ import httpx
 from httpx_sse import aconnect_sse
 
 from ._pool import ClientPool
+
+
+class ProtectedKindError(PermissionError):
+    """The gateway refused a **protected** RPC kind on a raw mesh route (HTTP 403 ``protected_kind``).
+
+    ``mcp.invoke``, ``skill.invoke`` and ``llm.invoke`` (plus any kind the operator lists in
+    ``protected_rpc_kinds``) are work with a door of their own, where authority is checked: use
+    ``/mcp``, :class:`~mycelium.A2aClient` or the LLM client instead. ``kind`` names the refused kind.
+    """
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def _raise_if_protected(resp: httpx.Response) -> None:
+    if resp.status_code == 403:
+        try:
+            data = resp.json()
+        except ValueError:
+            return
+        if data.get("error") == "protected_kind":
+            raise ProtectedKindError(str(data.get("kind", "")), str(data.get("message", "protected kind")))
 from .federation import Federation
 
 
@@ -449,6 +472,7 @@ class MyceliumAgent:
         }
         with self._pool.sync() as c:
             resp = c.post("/gateway/signal/emit", json=body)
+            _raise_if_protected(resp)
             resp.raise_for_status()
             return bool(resp.json().get("ok", False))
 
@@ -513,7 +537,10 @@ class MyceliumAgent:
 
         Args:
             target:       Node ID string (``"IP:PORT"``).
-            method:       Signal kind used for the RPC (e.g. ``"mcp.invoke"``).
+            method:       Signal kind used for the RPC. **Protected kinds** (``mcp.invoke``,
+                          ``skill.invoke``, ``llm.invoke``, and any the operator lists) are refused
+                          with :class:`ProtectedKindError`: call tools through ``/mcp`` and skills
+                          through :class:`~mycelium.A2aClient`, where authority is checked.
             payload:      Request payload bytes.
             timeout_secs: Maximum wait time.
 
@@ -532,6 +559,7 @@ class MyceliumAgent:
         }
         with self._pool.sync(timeout=timeout_secs + 5.0) as c:
             resp = c.post("/gateway/rpc/call", json=body)
+            _raise_if_protected(resp)
             if resp.status_code == 504:
                 raise TimeoutError(f"rpc_call to {target} timed out after {timeout_secs}s")
             resp.raise_for_status()
@@ -670,6 +698,10 @@ class MyceliumAgent:
             async for req in agent.rpc_serve("my.method"):
                 result = process(req.payload)
                 agent.rpc_respond(req, result)
+
+        On a scoped gateway, serving needs the ``mesh:serve`` scope (for this stream and for
+        :meth:`rpc_respond`). A serving agent should not hold ``mesh:write``, which also opens
+        :meth:`rpc_call`.
         """
         url = f"{self._base_url}/gateway/rpc/serve/{kind}"
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers) as client:
@@ -737,6 +769,7 @@ class MyceliumAgent:
         }
         with self._pool.sync(timeout=timeout_secs + 5.0) as c:
             resp = c.post("/gateway/scatter", json=body)
+            _raise_if_protected(resp)
             if resp.status_code == 504:
                 raise TimeoutError(
                     f"scatter_gather: fewer than {min_ok} replies in {timeout_secs}s"
@@ -803,7 +836,9 @@ class MyceliumAgent:
             "payload_b64": base64.b64encode(payload).decode(),
         }
         with self._pool.sync() as c:
-            c.post("/gateway/mailbox/deliver", json=body).raise_for_status()
+            resp = c.post("/gateway/mailbox/deliver", json=body)
+            _raise_if_protected(resp)
+            resp.raise_for_status()
 
     # ── Overlay: consistent KV ─────────────────────────────────────────────
 
@@ -1034,6 +1069,7 @@ class MyceliumAgent:
         }
         with self._pool.sync() as c:
             r = c.post("/gateway/shard/emit", json=body)
+            _raise_if_protected(r)
             if r.status_code == 404:
                 raise KeyError(f"no providers for {ns}/{name}")
             r.raise_for_status()

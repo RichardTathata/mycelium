@@ -43,6 +43,19 @@ function commitResult(data: {
  * No native extension — the HTTP gateway sidecar adds ~1 ms per call,
  * invisible next to LLM inference latency.
  */
+/**
+ * The gateway refused a **protected** RPC kind on a raw mesh route (HTTP 403 `protected_kind`).
+ * `mcp.invoke`, `skill.invoke` and `llm.invoke` (plus any kind the operator lists in
+ * `protected_rpc_kinds`) are work with a door of their own, where authority is checked: use `/mcp`,
+ * `A2aClient` or the LLM client instead.
+ */
+export class ProtectedKindError extends Error {
+  constructor(public readonly kind: string, message: string) {
+    super(message);
+    this.name = "ProtectedKindError";
+  }
+}
+
 export class MyceliumAgent {
   private readonly base: string;
   private readonly timeout: number;
@@ -90,6 +103,13 @@ export class MyceliumAgent {
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
+      if (resp.status === 403) {
+        let body: { error?: string; kind?: string; message?: string } = {};
+        try { body = JSON.parse(text); } catch { /* not JSON: fall through */ }
+        if (body.error === "protected_kind") {
+          throw new ProtectedKindError(body.kind ?? "", body.message ?? "protected kind");
+        }
+      }
       throw new Error(`POST ${path} failed: ${resp.status} ${text}`);
     }
     return resp.json();
@@ -333,6 +353,10 @@ export class MyceliumAgent {
 
   /**
    * Blocking point-to-point RPC call. Throws `TimeoutError` if no reply arrives.
+   *
+   * Protected kinds (`mcp.invoke`, `skill.invoke`, `llm.invoke`, and any the operator lists) are
+   * refused with `ProtectedKindError`: call tools through `/mcp` and skills through `A2aClient`,
+   * where authority is checked.
    */
   async rpcCall(
     target: string,
@@ -340,9 +364,10 @@ export class MyceliumAgent {
     payload: Buffer | Uint8Array = Buffer.alloc(0),
     options: { timeoutSecs?: number } = {},
   ): Promise<Buffer> {
+    // The route reads `method`. This sent `kind` until 2026-09-25, so every call was a 400.
     const data = await this._post("/gateway/rpc/call", {
       target,
-      kind: method,
+      method,
       payload_b64: b64(payload),
       timeout_secs: options.timeoutSecs ?? 5,
     }) as { ok: boolean; result_b64?: string; error?: string };
@@ -353,6 +378,9 @@ export class MyceliumAgent {
   /**
    * Async generator yielding incoming RPC requests of `kind`.
    * Call `rpcRespond` for each request to complete the round-trip.
+   *
+   * On a scoped gateway, serving needs the `mesh:serve` scope (for this stream and for
+   * `rpcRespond`). A serving agent should not hold `mesh:write`, which also opens `rpcCall`.
    */
   async *rpcServe(kind: string): AsyncGenerator<RpcRequest> {
     const url = this._sseUrl(`/gateway/rpc/serve/${encodeURIComponent(kind)}`);

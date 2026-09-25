@@ -979,6 +979,16 @@ pub struct GossipConfig {
     #[serde(default)]
     pub gateway_caller_profile: GatewayCallerProfile,
 
+    /// **Protected RPC kinds, beyond the built-in ones** (Boundary H closure plan C1). A protected
+    /// kind is work that has a door of its own, where authority is checked: `mcp.invoke` (the `/mcp`
+    /// route), `skill.invoke` (`/a2a`) and `llm.invoke` (`/gateway/llm/call`) are always protected.
+    /// The gateway's raw routes (`rpc/call`, `scatter`, `signal/emit`, `mailbox/deliver`,
+    /// `shard/emit`, `overlay/emit_reliable`) refuse a protected kind, so they cannot be used to walk
+    /// around that door's checks. List any further kinds your own providers serve as protected work
+    /// here. Set via `GOSSIP_PROTECTED_RPC_KINDS` (comma-separated).
+    #[serde(default)]
+    pub protected_rpc_kinds: Vec<String>,
+
     /// Domain profile (v3 item 2 PR 1). `Open` (default) is today's behaviour. `Enforced` requires
     /// TLS and refuses SWIM — see [`DomainProfile`]; `validate()` enforces it.
     pub domain_profile: DomainProfile,
@@ -1078,6 +1088,7 @@ impl Default for GossipConfig {
             gateway_identity_issuer:       None,
             require_identity_proofs:       false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
+            protected_rpc_kinds:           Vec::new(),
             domain_profile:                DomainProfile::Open,
             egress:                        EgressPolicy::default(),
             #[cfg(feature = "compliance")]
@@ -1624,6 +1635,14 @@ impl GossipConfig {
                 field:  "gateway_caller_profile",
                 reason,
             })?;
+        }
+        if let Ok(v) = env::var("GOSSIP_PROTECTED_RPC_KINDS") {
+            self.protected_rpc_kinds = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
         }
         if let Ok(v) = env::var("GOSSIP_DOMAIN_PROFILE") {
             self.domain_profile = v.parse().map_err(|reason| GossipError::InvalidField {

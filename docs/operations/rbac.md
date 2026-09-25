@@ -45,7 +45,8 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `kv:read` / `kv:write` | `GET /gateway/kv*` / `POST`,`DELETE /gateway/kv*`, `/kv/quorum` |
 | `cap:read` / `cap:write` | capability resolve, shard owner / advertise, drop |
 | *(none)* — `/a2a` | **No scope is required on this route.** Auth is *optional*: a federation credential names the partner; a bearer resolves to a principal but its **scopes are dropped**; nothing presented is anonymous. Authority here comes from an `ActionEvaluator`, not the scope table — and with no evaluator attached an anonymous caller reaches skill dispatch. `with_a2a()` warns in that configuration |
-| `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox/rpc-serve, demand / signal emit, rpc call, scatter, **group membership** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node) |
+| `mesh:serve` | the RPC serve stream (`/gateway/rpc/serve/{kind}`) and `/gateway/rpc/respond`: **serving without the power to call**. Added 2026-09-25 (closure plan C1). For one release a token holding `mesh:read` or `mesh:write` is still admitted here, with a warning; reissue it |
+| `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox subscribe, demand / signal emit, rpc call, scatter, **group membership** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node) |
 | `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
@@ -80,6 +81,14 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 > nothing. Shipped in 2.10.0 and fixed here; **check any deployment on 2.10.0–2.12.0 that
 > configures named tokens only** (a request with no `Authorization` header should now be 401).
 > `gateway_scoped_tokens`-only and `gateway_auth_token` deployments were never affected.
+
+**Protected RPC kinds are refused on the raw routes** (closure plan C1, 2026-09-25). `rpc/call`, `scatter`,
+`signal/emit`, `mailbox/deliver`, `shard/emit` and `overlay/emit_reliable` take an RPC kind from the request body.
+`mcp.invoke`, `skill.invoke`, `llm.invoke`, and any kind in `protected_rpc_kinds` (`GOSSIP_PROTECTED_RPC_KINDS`), are
+refused there `403` with `{"error": "protected_kind", "kind": …, "message": …}` naming the door to use, whatever the
+token's scopes and whether or not `compliance` is built. Before this, a client with `mesh:write` could send
+`mcp.invoke` or `skill.invoke` straight to a provider and skip the action evaluator and mandate checks that `/mcp`
+and `/a2a` run. The SDKs raise `ProtectedKindError`.
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`, `/stats`, `/metrics`,
 the A2A descriptor (`/.well-known/agent.json`), `POST /a2a` (an A2A peer needs no Mycelium

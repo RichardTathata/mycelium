@@ -8,6 +8,7 @@ from .agent import (
     LogEntry,
     LockGuard,
     CommitResult,
+    ProtectedKindError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
 from .federation import Federation, FederationError, DeliveryUnknown
@@ -25,6 +26,7 @@ from ._pool import TOKEN_ENV, auth_headers, resolve_token
 
 __all__ = [
     "MyceliumAgent",
+    "ProtectedKindError",
     "CapabilityHandle",
     "Signal",
     "DemandStatus",

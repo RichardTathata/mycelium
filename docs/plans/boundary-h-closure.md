@@ -71,7 +71,7 @@ route changes.
   federation**, and name F2 and F3 until C1 and C2 close them.
 - **Gate:** documentation review. No code.
 
-### C1: Close `/gateway/rpc/call` to protected work (S–M, urgent: it breaks H7)
+### C1: Close `/gateway/rpc/call` to protected work (S–M, urgent: it breaks H7) — **implemented, see §8**
 
 - **Protected kinds.** A registry of RPC kinds that are protected work: `mcp.invoke`, `skill.invoke`, and any
   kind an operator registers (`GossipConfig::protected_rpc_kinds`). `/gateway/rpc/call` **refuses** a protected
@@ -336,4 +336,11 @@ Asked whether rev 0.2 fully addressed the review, a re-read found four gaps:
 
 Three items rev 0.2 marked done stay done: order-independent revocation, the *F* − 2*s* correction, and `main`'s
 monotonicity bug (all in #402, merged).
+
+## 8. Delivery record
+
+| Item | PR | Departures |
+|---|---|---|
+| C0 | #402 | none |
+| C1 | #409 | **Six routes, not one.** Reading the gateway found the same hole in `scatter` and `overlay/emit_reliable` (both dispatch an arbitrary kind through `gateway_rpc_call`), and `signal/emit`, `mailbox/deliver` and `shard/emit` take a kind too; all six refuse. **`llm.invoke` is protected by default**, because the raw routes also walked around `llm:invoke`. **The deployment variant of the gate moved to C7/C12**: the confined-fleet deployment test runs `busybox` in place of the gateway (it tests the network policy), so a real-gateway refusal needs the gateway image C7 and C12 need anyway. **Found on the way:** the TypeScript SDK's `rpcCall` sent `kind` where the route reads `method`, so every call was a `400`; fixed and pinned |
 
