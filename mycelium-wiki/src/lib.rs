@@ -42,6 +42,9 @@ mod git_store;
 /// one remote transaction.
 #[cfg(feature = "git-store")]
 pub mod mandate_fence;
+/// A1 for the wiki store: Mycelium's `ExecutionGate` as the store's `WriteAuthority`.
+#[cfg(feature = "execution-authority")]
+mod execution;
 #[cfg(feature = "control-plane")]
 mod agent;
 #[cfg(feature = "control-plane")]
@@ -73,6 +76,13 @@ pub use ingest::{apply_batch, BatchSource, FsBatchSource, IngestBatch, IngestPag
 /// `docs/design/transparency-council-substrate.md` for the first (council-wiki).
 #[cfg(feature = "git-store")]
 pub use git_store::{GitStore, GitStoreConfig, MyceliumFormat, PageFormat};
+
+/// **Authority at execution** for the git store (Boundary H item A1): every commit attempt and every
+/// push attempt re-checks the curator's mandate window, epoch and revocation standing at that
+/// moment. Configure via `GitStoreConfig::authority`. Feature `execution-authority` (it needs
+/// Mycelium's `tls`, where the mandate and signature code lives).
+#[cfg(feature = "execution-authority")]
+pub use execution::{ExecutionGateAuthority, WIKI_WRITE};
 
 /// The Mycelium **control plane** (Phase 2) — the curator role, election + ring-failover, the
 /// evaporating proposal queue, and the single-writer apply. Behind the `control-plane` feature so the

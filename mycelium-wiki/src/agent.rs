@@ -749,6 +749,13 @@ impl<S: WikiStore + 'static> Wiki<S> {
                         for key in batch.keys {
                             let _ = self.agent.kv().delete(key);
                         }
+                    } else if let Some(reason) = e.as_authority_refused() {
+                        // A1: this curator holds no present authority. The content is not at
+                        // fault, so the proposals stay queued for a curator that does; and every
+                        // later group would be refused the same way, so stop this round here.
+                        tracing::warn!(%page, section = %section, reason,
+                            "wiki: apply refused, no present authority — proposals left queued");
+                        break;
                     }
                     // Any other error (contention, transient store trouble): leave the proposals
                     // queued — the next drain re-reads and re-reconciles (idempotent).

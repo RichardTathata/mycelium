@@ -9,6 +9,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Authority at execution at the wiki's git store** (Boundary H A1; ADR `docs/design/authority-at-execution.md` §7).
+  The mandate fence stopped a *superseded* curator inside the git transaction. It could not stop an expired, revoked
+  or out-of-touch one. Now:
+  - `GitStoreConfig::authority` holds an optional `mandate_fence::WriteAuthority`. It is asked on every commit
+    attempt, immediately before the ref transaction, and before every push attempt;
+  - `ExecutionGateAuthority` (new feature `execution-authority`) implements it over A1's `ExecutionGate` for a
+    mandate enumerating `wiki.write`;
+  - a refusal is `WikiError::authority_refused`, and the curator **leaves the proposals queued** rather than
+    dropping them.
+
+  `None`, the default, is unchanged behaviour. **Upgrade note:** a `GitStoreConfig` built as a struct literal
+  without `..Default::default()` needs the new field. Lock-order row 44.
+
+### Fixed
+
+- **A1: a revocation now stands against later checkpoints that omit it.** `RevocationView` kept only the newest
+  checkpoint per `(authority, scope)`, so a later fresh checkpoint without the term reinstated a revoked appointment.
+  The ADR's "revocation is monotonic" held across time, but not across checkpoints. The view now keeps every revoked
+  term apart from the newest checkpoint. This affects the gateway's `ExecutionAuthority` and the wiki store alike.
+  Gate: `a_later_checkpoint_that_omits_a_revocation_does_not_reinstate_it`.
+- **A1: a revocation counts whatever order its checkpoint arrives in.** The view discarded an older
+  checkpoint as a replay *before* reading its revocations, so checkpoints delivered out of order could lose
+  one. An authentic revocation is now recorded before the replay and future-dating checks, which decide only
+  whether a checkpoint refreshes freshness. Gate: `a_revocation_in_a_late_arriving_older_checkpoint_still_revokes`.
+- **Docs: two A1 statements corrected.** *F* − 2*s* is the reader-clock threshold, not a real-time partition
+  bound (in real time, work stops when the checkpoint is at most *F* old). The wiki store's check comes before
+  its git transaction; a paused process can write late by the pause. That is now a stated limit pinned by
+  `a_pause_after_the_check_is_not_caught_locally`, not "not a gap". A restart's fail-closed holds only until a
+  checkpoint arrives (closure plan C8). All three from an external review.
+
 ## [2.14.0] — 2026-09-25
 
 **Coordination that says what it means.** Wire **v12** unchanged (`PREV = 11`); additive on the 2.x

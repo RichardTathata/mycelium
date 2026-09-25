@@ -53,10 +53,17 @@ the real expiry instant.
 - **The profile refuses to start** unless *F* > 4*s* and *I* + *D* ≤ *F* − 4*s* (`FreshnessPolicy::validate`).
 - **Replay protection:** the reader retains the newest `seq` per `(authority, scope)`. A lower or equal `seq` is
   `Replayed`, and cannot refresh freshness.
-- **Silence is not evidence.** No checkpoint, or no fresh one, means `Unknown`, which is denied. Under a partition
-  longer than *F* − 2*s*, protected work stops. That is the intended failure direction.
+- **Silence is not evidence.** No checkpoint, or no fresh one, means `Unknown`, which is denied. So a partition
+  stops protected work, which is the intended failure direction. **When, exactly:** the reader stops once the
+  newest checkpoint is more than *F* − 2*s* old **by its own clock**. In real time that is when the checkpoint is
+  **at most *F* old** (the safety bound) and **at least *F* − 4*s* old** (the liveness bound), depending on the two
+  clocks' errors. *F* − 2*s* is the reader-clock threshold, not a real-time bound. (Corrected 2026-09-25 after an
+  external review; the earlier text stated it as a real-time partition bound.)
 - **Future-dated:** `a − r > 2s` is refused as a clock fault or forgery.
-- **A revocation, once seen, stands** regardless of later freshness: revocation is monotonic.
+- **A revocation, once seen, stands** regardless of later freshness, and regardless of later checkpoints that omit
+  it: revocation is monotonic. The view keeps every revoked term per `(authority, scope)` apart from the newest
+  checkpoint. It kept only the newest until 2026-09-25, when the wiki store's tests found that a later checkpoint
+  omitting a term reinstated it.
 - **Scope binding:** a checkpoint for scope X says nothing about scope Y.
 
 **Nothing here reads a clock.** Every `now_ms` is the caller's, so the contract replays deterministically and both
@@ -65,10 +72,15 @@ clock extremes are testable exactly.
 ## 4. What this does not claim
 
 - **That every resource uses it.** A1 is the contract a resource applies at its effect boundary by calling
-  `ExecutionGate::check`. The **gateway** applies it (§6). Other resources (the wiki's mandate fence, for instance)
-  apply it only when wired, and until then keep "expiry stops new admissions" only.
-- **Durable state.** The revocation view and its retained `seq` are in memory. A restarted reader starts at
-  `Unknown`, which fails closed.
+  `ExecutionGate::check`. The **gateway** applies it (§6), and so does the **wiki's git store** (§7). Other
+  resources (provider admission, the `FsStore`) apply it only when wired, and until then keep "expiry stops new admissions" only.
+- **Durable state, and restart.** The revocation view and its retained `seq` are in memory. A restarted
+  reader starts at `Unknown`, which fails closed **until a checkpoint arrives**, and there is the gap: an old
+  checkpoint issued *before* a revocation, and still fresh, is then accepted, and the revoked appointment reads
+  as not revoked. Its window is at most *F* after the revocation. The closure plan's C8 closes it (cumulative
+  checkpoints plus an issued-after-start rule, or durable state). Found by an external review, 2026-09-25.
+- **Order.** An authentic revocation counts whatever order its checkpoint arrives in, and even when the
+  checkpoint is refused as replayed or future-dated for freshness (fixed 2026-09-25, same review).
 - **Timing by deployment.** T_admit and T_drain are measured by the caller's clock. Their *logic* is tested here;
   measuring them in a deployment is a follow-up.
 - **The Cedar adapter.** `allowances_without_mandate` checks the reference evaluator only. The private Cedar adapter
@@ -115,15 +127,82 @@ Rust tests and both SDKs.
   - after a signed revocation checkpoint → refused, and the skill is not reached again.
 - `mycelium-py/tests/test_mandate.py` and `mycelium-ts/tests/mandate.test.ts`: the same vectors.
 
+**Which clock.** A1's decisions need a clock that moves when nothing else does. The gateway read
+`Hlc::current()`, the last value the clock *ticked* to. A node with no event traffic stops ticking, so a check
+against `current` sees time stand still: a mandate never expires and a checkpoint never goes stale, which fails
+**open**. An external review found it on 2026-09-25, and the fix, `Hlc::decision_now_ms()` (the later of the wall
+clock and the HLC's physical time, advancing nothing), lands separately in #405 (`fix/preflight-reads-a-live-clock`),
+covering `ae_preflight`, the caller envelope's `issued_at_ms` and `offer_revocation_checkpoint`. The clock model's
+*s* is therefore a bound on the **host wall clock's** error (NTP or equivalent), which a deployment must provide.
+The wiki store's `ExecutionGateAuthority` takes the deployment's clock as a closure, and the same rule applies to
+it: a wall clock, never a value that advances only on events.
+
 **Not claimed.**
 - The gateway is a route-level enforcement point (AE0 §7). An effect reached without passing through it is outside
   this, which is H7's job.
 - The member-key view is the live identity view only under `compliance`. Without it, holders and authorities must
   be configured external issuers.
 
+## 7. Wired at the wiki's git store (2026-09-25)
+
+**The gap.** The wiki's mandate fence (`mycelium-wiki::mandate_fence`, scoped-mandates ADR §5) puts one check inside the
+git transaction: is the appointment ref still the one this curator was configured with? That stops a **superseded**
+curator. It cannot stop the others, because git has no clock it trusts:
+- a curator whose mandate has **expired**;
+- a curator **revoked** by a checkpoint, when nobody has moved the appointment ref yet;
+- a curator that has **heard nothing** from its authority for longer than the freshness bound.
+
+All three kept writing. The queue drained, compare-and-swap retries retried, and a publish pushed commits made earlier
+under an authority that had since lapsed.
+
+**The wiring.**
+- **The seam** is `mandate_fence::WriteAuthority`, a one-method trait in the wiki's data plane, which has no Mycelium
+  dependency. `GitStoreConfig::authority` holds one, and `None`, the default, is today's behaviour exactly.
+- **Where it is asked.** `GitStore` asks it:
+  - on **every commit attempt**, after the commit object is built and immediately before the `update-ref`
+    transaction;
+  - before **every push attempt**, including after a splice.
+
+  So a retry, a round drained long after its proposals were queued, and a publish of earlier commits are each checked
+  afresh. A commit made under authority does not carry that authority to the shared remote.
+- **The implementation** is `ExecutionGateAuthority` (feature `execution-authority`): A1's `ExecutionGate` over the
+  curator's mandate, which must enumerate `wiki.write`, plus a `RevocationView` fed by `offer_checkpoint`. The
+  deployment supplies `now_ms`, so nothing reads a clock.
+- **The refusal names itself.** `WikiError::authority_refused` is neither a conflict (retrying will not help) nor a
+  gate refusal (the content is not at fault). The curator therefore **leaves the proposals queued** for a curator
+  that does hold authority, and stops the round.
+- **It composes with the fence.** The time check is made just before the transaction, and the fence's `verify`
+  holds through it. Neither alone is the contract.
+
+**Gates** (`mycelium-wiki/tests/git_store_authority.rs`):
+- with no checkpoint, nothing is written, and no commit reaches any ref;
+- the plant: with present authority, the same write lands;
+- an expired mandate writes nothing, even with a fresh checkpoint;
+- a revoked curator writes nothing, and a later checkpoint that omits the revocation restores nothing;
+- silence past the freshness bound stops writes (at the bound it still writes, one millisecond past it does not), and
+  the next checkpoint restores them;
+- a superseded epoch writes nothing;
+- a commit made under authority is not published after revocation, and the remote never receives it;
+- end to end through the curator, proposals stay queued, not dropped, while there is no present authority, and land
+  once the checkpoint arrives.
+
+**Not claimed.**
+- `FsStore` has no `WriteAuthority` seam yet.
+- The remote's side, which is whether it honours `--atomic` and whether a pre-receive hook re-checks, is unchanged
+  from §5 of the scoped-mandates ADR.
+
+**A stated limit: the check comes before the transaction, not inside it.** The authority is asked, then git
+updates the ref. Normally that gap is milliseconds, but **normal latency is not a safety bound**: a process that
+pauses between the two (GC, swap, a stopped process) can write after its mandate expired, or after a revocation
+it would otherwise have seen, by the length of the pause. The fence's `verify` catches only an appointment ref
+that moved. `a_pause_after_the_check_is_not_caught_locally` pins this limit as a test, so it cannot be mistaken
+for a closed one. Git has no clock this check can sit inside; the closure plan's C9 records late writes after
+the fact and moves prevention to the remote's pre-receive hook. (Corrected 2026-09-25 after an external review;
+an earlier revision of this section called the gap "not a gap".)
+
 ## 5. Gates
 
-`mandate::authority::tests` (16) and `a1_policy_tests` (1):
+`mandate::authority::tests` (19) and `a1_policy_tests` (1):
 - the profile refuses bad parameters and advisory resources;
 - safety at the extreme that understates age;
 - liveness at the extreme that overstates age;
@@ -131,7 +210,9 @@ Rust tests and both SDKs.
 - a replayed checkpoint does not refresh freshness;
 - silence and partition deny;
 - a checkpoint for one scope does not refresh another;
-- a revoked appointment is denied;
+- a revoked appointment is denied, and a later checkpoint that omits it does not reinstate it;
+- a revocation in a late-arriving older checkpoint still revokes; a future-dated checkpoint's authentic revocation
+  stands, and a forged one revokes nothing;
 - a forged checkpoint is not accepted;
 - a protected operation without a mandate is refused;
 - queued and retried work is refused after expiry;

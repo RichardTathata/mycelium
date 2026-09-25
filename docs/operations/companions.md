@@ -154,6 +154,14 @@ The wiki has a genuinely different operational model: a **node-independent store
   - **The write gate** (`validate_cmd`): your validator command runs once per batch with the
     candidate file list; nonzero exit refuses the **whole batch** (nothing commits — no partial
     meetings). Wrap warnings-only exits to 0 if your validator distinguishes them.
+  - **Authority at execution** (feature `execution-authority`, optional). Set
+    `GitStoreConfig::authority` to an `ExecutionGateAuthority` built from the curator's mandate (it
+    must enumerate `wiki.write`), and feed it the authority's signed revocation checkpoints with
+    `offer_checkpoint`. Every commit and push attempt is then re-checked: an expired, revoked, or
+    out-of-touch curator writes and publishes nothing, and its proposals stay queued. **Fails
+    closed:** until the first checkpoint arrives, and whenever the newest is older than *F* − 2*s* by the node's clock (at most *F* in real time),
+    nothing is written. Watch for `apply refused, no present authority` in the curator's log.
+    Design: [`authority-at-execution.md`](../design/authority-at-execution.md) §7.
   - **Bulk ingest**: workers stage a batch (one **meeting** per batch — the sizing contract) in
     your `BatchSource` (S3), then submit the *reference* via `Wiki::submit_batch`, the
     `wiki.{group}.ingest` RPC, or **`POST /gateway/wiki/ingest`** (+ `ingest` on the py/ts SDKs) —

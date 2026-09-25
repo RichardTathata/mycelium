@@ -156,6 +156,28 @@ impl std::fmt::Display for MandateRevoked {
 }
 impl std::error::Error for MandateRevoked {}
 
+/// A write refused by the store's **execution authority** (Boundary H item A1,
+/// `docs/design/authority-at-execution.md`): at the moment of the write, the writer could not
+/// show present authority. The mandate's window closed, its epoch was superseded, it was revoked,
+/// or the writer had no fresh revocation checkpoint and so could not know it was not revoked.
+///
+/// Distinct from both neighbours. Not a [`WikiError::Conflict`]: re-reading and re-applying will
+/// not help. Not a [`GateRefusal`]: the content is not at fault, so the proposals it came from must
+/// stay queued for a writer that does hold authority, never be dropped. And not a
+/// [`MandateRevoked`]: that is the fence finding the appointment ref moved inside the git
+/// transaction, whereas this is the time and revocation check made just before it.
+///
+/// Carried inside [`WikiError::Io`] like the others, so adding it breaks no downstream match.
+#[derive(Debug)]
+pub struct AuthorityRefused(pub String);
+
+impl std::fmt::Display for AuthorityRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "write refused: no present authority at execution ({})", self.0)
+    }
+}
+impl std::error::Error for AuthorityRefused {}
+
 impl WikiError {
     /// A gate refusal carrying the validator's findings. **Not a retry signal**: unlike
     /// [`Conflict`](WikiError::Conflict), re-applying the same content will refuse again — the
@@ -180,6 +202,20 @@ impl WikiError {
             std::io::ErrorKind::PermissionDenied,
             MandateRevoked { refname: refname.into(), expected: expected.into(), found },
         ))
+    }
+
+    /// The store's execution authority refused the write (A1). **Not a retry signal and not a
+    /// content fault** — see [`AuthorityRefused`].
+    pub fn authority_refused(reason: impl Into<String>) -> Self {
+        WikiError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, AuthorityRefused(reason.into())))
+    }
+
+    /// The reason, when this error is an [`authority_refused`](WikiError::authority_refused).
+    pub fn as_authority_refused(&self) -> Option<&str> {
+        match self {
+            WikiError::Io(e) => e.get_ref().and_then(|r| r.downcast_ref::<AuthorityRefused>()).map(|a| a.0.as_str()),
+            _ => None,
+        }
     }
 
     /// The fence details, when this error is a [`mandate_revoked`](WikiError::mandate_revoked).

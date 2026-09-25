@@ -77,6 +77,11 @@ pub struct GitStoreConfig {
     /// `--force-with-lease` on every push — including pushes that change only content, which is the
     /// case an earlier hook-time read would miss.
     pub mandate: Option<crate::mandate_fence::MandateFence>,
+    /// **Optional execution authority** (Boundary H item A1). `None` (the default) is today's
+    /// behaviour exactly. `Some` is asked on every commit attempt, immediately before the ref
+    /// transaction, and before every push attempt; a refusal writes and pushes nothing and returns
+    /// [`WikiError::authority_refused`]. See [`WriteAuthority`](crate::mandate_fence::WriteAuthority).
+    pub authority: Option<std::sync::Arc<dyn crate::mandate_fence::WriteAuthority>>,
     /// The checkout root. Created (and `git init -b {branch}`ed) if absent.
     pub dir: PathBuf,
     /// The branch the store commits to.
@@ -125,6 +130,7 @@ impl std::fmt::Debug for GitStoreConfig {
             .field("remote", &self.remote)
             .field("validate_cmd", &self.validate_cmd)
             .field("format", &"<PageFormat>")
+            .field("authority", &self.authority.as_ref().map(|_| "<WriteAuthority>"))
             .finish()
     }
 }
@@ -135,6 +141,7 @@ impl Default for GitStoreConfig {
             // No fence by default: opting in is opting in, and every existing deployment keeps
             // exactly the behaviour it has.
             mandate:        None,
+            authority:      None,
             dir:            PathBuf::from("wiki-repo"),
             branch:         "main".to_string(),
             subdir:         "pages".to_string(),
@@ -411,6 +418,14 @@ impl GitStore {
         format!("refs/heads/{}", self.cfg.branch)
     }
 
+    /// Ask the configured [`WriteAuthority`](crate::mandate_fence::WriteAuthority), if any.
+    fn authorize(&self) -> Result<(), WikiError> {
+        match &self.cfg.authority {
+            Some(a) => a.authorize_write().map_err(WikiError::authority_refused),
+            None => Ok(()),
+        }
+    }
+
     /// Run git in the checkout; `Ok(stdout)` on success, `Err` carrying stderr on failure.
     fn git_ok(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>, WikiError> {
         match self.git_raw(args, stdin)? {
@@ -664,6 +679,11 @@ impl GitStore {
             };
             // The atomic compare-and-swap: advance the ref iff it still points at `head`
             // (old-value "" asserts creation for the unborn branch).
+            // A1: present authority, checked as late as it can be — after the commit object is built,
+            // immediately before the ref transaction. Every attempt asks afresh, so a retry or a
+            // queued round cannot ride on an earlier answer. A refusal leaves only an unreferenced
+            // commit object behind, which git collects.
+            self.authorize()?;
             let refname = self.refname();
             let old = head.unwrap_or("");
             // One ref transaction: with a fence configured, the mandate is verified *through
@@ -1115,6 +1135,9 @@ impl WikiStore for GitStore {
             // §5(ii): `--atomic` plus `--force-with-lease` on EVERY push, including this one if it
             // changes only content — that "including" is what makes the mandate check part of the
             // same remote ref transaction rather than an earlier read.
+            // A1: a commit made while authorised is not thereby authorised to reach the shared
+            // remote later. Asked before every push attempt, including after a splice.
+            self.authorize()?;
             let push = crate::mandate_fence::push_args(&refspec, self.cfg.mandate.as_ref());
             let push_argv: Vec<&str> = push.iter().map(String::as_str).collect();
             let (_, pushed) = self.git_raw(&push_argv, None)?;
