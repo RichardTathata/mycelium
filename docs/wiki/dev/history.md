@@ -22,9 +22,19 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## v2.14.0 release — 2026-09-24 (tag `v2.14.0`) — a coordinator nobody declared
+## v2.14.0 release — 2026-09-25 (tag `v2.14.0`) — coordination that says what it means
 
 Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line.
+
+**Read this entry as two halves.** The first is what the release set out to do — P10 and the
+election rule, below. The second is what it found on the way, and is much the larger: an attempt to
+flip `require_identity_proofs` was reverted, the failure it was blamed on turned out **not to be its
+doing** (the flag is inert without TLS, and the suite's nodes configure none), and going back to
+read the election path properly turned over five defects in the agreement protocol — an election
+with no electorate deciding alone, votes not bound to what they voted for, a node equivocating with
+itself, a higher ballot overwriting an accepted value, and none of that memory surviving a restart.
+All five are closed here. The wrong diagnosis is recorded alongside the right one, because it is the
+more instructive of the two: *"it was the only change in that commit"* is a prior, not a mechanism.
 
 **The centrepiece started as a question in a design note** — *is role accumulation constrained
 anywhere I did not look?* The answer was **no**, twice over, and the second half is the one that

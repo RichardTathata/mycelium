@@ -9,42 +9,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.14.0] — 2026-09-24
+## [2.14.0] — 2026-09-25
 
-**A coordinator nobody declared — and a default that looked ready and was not.** Wire
-**v12** unchanged (`PREV = 11`); additive on the 2.x line.
+**Coordination that says what it means.** Wire **v12** unchanged (`PREV = 11`); additive on the 2.x
+line throughout.
 
-The centrepiece began as a question in a design note — *is role accumulation constrained anywhere?*
-— and the answer was **no**, twice over. Not prevented, which is the design working: *detection, not
-prevention* is the law here. But **not detected either**, which is not: every single-writer ring
+The release began with a question in a design note — *is role accumulation constrained anywhere?* —
+and the answer was **no**, twice over. Not prevented, which is the design working: *detection, not
+prevention* is the law here. But **not detected either**, which is not. Every single-writer ring
 elected by *lowest candidate node id wins*, so the same rule over the same candidates put **every
-single-writer job on one node**, and the seven existing detectors were all looking at other axes —
-P2 at churn, P6 at gaps. A concentrated fleet read as **perfectly healthy by every measurement that
-existed**, until the node it all depended on went away.
+single-writer job on one node**, and the seven existing detectors all watched other axes — P2 churn,
+P6 gaps. A concentrated fleet read as **perfectly healthy by every measurement that existed**, until
+the node it all depended on went away. **P10** makes it visible; **`mycelium::election`** stops
+producing it, with the rule **negotiated from the candidate set** rather than flag-dayed.
 
-Both halves ship together: **P10** makes it visible, and **`mycelium::election`** stops producing
-it — with the rule **negotiated from the candidate set** rather than flag-dayed, because changing an
-election rule node-by-node would leave two holders each believing itself correct and neither
-resigning.
+**Then a harder question, and it turned over a rock.** An attempt to make
+`require_identity_proofs` default-on was reverted a day later, and the failure it was blamed on
+turned out not to be its doing — which sent us to look at the election path properly. What was found
+there is the substance of this release:
 
-Beside it, the second story is one that **did not ship**, and is here because the reason is worth
-more than the change would have been. `require_identity_proofs` was flipped to default-`true` — the
-rollout the old guidance prescribed finished ten releases ago — and **reverted a day later**, before
-any release carried it. Identity and proof are two separate gossip writes, so requiring proofs opens
-a window in which a peer holds no key for a node; the key heals itself, and a **leader election
-decided inside the window does not**. It broke no unit test, because the suites that gate a PR have
-no cross-process ordering window to lose a race in. The default stays off, now pinned with its
-reason attached.
+- an election over a roster a node **cannot see** was counted as one member with a quorum of one,
+  satisfied by the proposer's own vote, so **every node elected itself**;
+- a **vote did not say what it voted for**, and ballots come from a shared key, so two proposers
+  could count the same voter and commit **different values at one ballot**;
+- a node could **equivocate with itself**, because its proposer and acceptor roles kept separate
+  memories;
+- a proposer at a higher ballot **overwrote** a value a quorum had already accepted;
+- and none of that memory **survived a restart**.
 
-**Upgrade notes.** `FleetSnapshot` gained `role_concentration` (an exhaustive struct literal needs
-it). Election behaviour changes only once every candidate advertises `election_rule`, so a mixed
-fleet keeps the old rule until the upgrade completes. **No identity-proof action:** the default is
-unchanged from 2.13.0.
+All five are closed. Beside them, a node's identity and its proof now travel as **one record**, so
+they cannot arrive apart; a leadership answer **names the rung it reached** and carries a fencing
+token; and `POST /gateway/kv` no longer succeeds at writing nothing.
+
+**The honest limit, stated on the tin.** None of this makes leadership an exclusive grant that stays
+true — no coordinator-free protocol can promise that. LWW decides which *record* survives; it cannot
+undo work two callers each performed after being told they had won. **Exclusivity is enforced at the
+resource**, by refusing a stale token, and the substrate's job is to give you a token worth
+refusing.
+
+**Upgrade notes.** `ConsensusResult` is now **`#[non_exhaustive]`**; `CommitError` and
+`ConsistencyError` gain variants — a `_` arm is required and **must fail closed**. `FleetSnapshot`
+gained `role_concentration`. A client that omitted `value_b64` on `POST /gateway/kv` now gets a
+**400** where it used to get `{"ok": true}` (every first-party SDK already sends it). Election
+behaviour changes only once every candidate advertises `election_rule`. **No identity-proof
+action** — the default is unchanged from 2.13.0.
+
+**Rolling upgrade.** While any voter is un-upgraded, group proposals from an upgraded proposer
+**time out** rather than commit: fail-closed and visible, instead of committing two values quietly.
 
 **Not claimed:** rendezvous is a **spread, not a bound** (three rings over three nodes still leave
-~11% chance one node wins all three), which is why P10 stays — mitigate the cause, keep the ability
-to see the residue. And *proofs required* would **not** have been *identity authenticated* anyway:
-first sighting remains trust-on-first-use, which anchors close, not proofs.
+~11% chance one node wins all three), which is why P10 stays. *Proofs required* is **not** *identity
+authenticated* — first sighting remains trust-on-first-use, which anchors close, not proofs. And the
+agreement repair establishes single-decree safety; it is not a proof of the whole protocol.
 
 ### Added
 
