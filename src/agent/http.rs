@@ -6565,6 +6565,108 @@ mod ae_seam_tests {
         let _ = std::fs::remove_dir_all(&cert_dir);
     }
 
+    /// **A terminal task state is the last thing a subscriber hears.**
+    ///
+    /// `tasks/sendSubscribe` spawns a detached task that sleeps 100 ms and then emits `working`,
+    /// to show progress while an RPC runs. It was spawned *before* the outcome was known and
+    /// nothing cancelled it, so an outcome reached inside 100 ms was overtaken by its own progress
+    /// report: an AE refusal resolves in about a millisecond, and the stream read
+    /// `submitted → failed → working`.
+    ///
+    /// That is not cosmetic. A client tracking task state sees a task recover from failing, and a
+    /// terminal state it can act on is the whole reason the streaming edge emits one — the same
+    /// argument that put the refusal on this path at all rather than dropping the subscription.
+    /// The success path had it too (`completed → working` for any dispatch under 100 ms), so it
+    /// predates the AE seam and is not about refusals.
+    ///
+    /// Asserted on the **order of states as received**, not on their presence: `working` before a
+    /// terminal state is correct and expected on a slow skill, and a test that merely forbade the
+    /// event would forbid the feature.
+    ///
+    /// Found by `examples/a2a_skill_authority`'s first CI run (2026-09-25), which is what that
+    /// example exists for.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn no_event_follows_a_terminal_task_state_on_the_stream() {
+        use crate::capability::Capability;
+
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("a2a-terminal-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(
+            GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a(),
+        );
+        let me = agent.node_id().clone();
+
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-a2a-terminal")
+                .with_catalogue("cat-test", "1")
+                .map_action("skill.invoke", format!("skill:depot/dispatch@{me}"))
+                .prohibit(Rule::new("*", "skill.invoke", format!("skill:depot/dispatch@{me}"))),
+        ));
+        agent.start().await.unwrap();
+
+        // The skill must resolve, or the stream takes the `skill not found` path — which returns
+        // *before* the progress task is spawned and so could never have shown this.
+        let _reg = agent
+            .capabilities()
+            .advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{http_port}/a2a"))
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tasks/sendSubscribe",
+                "params": {
+                    "id": "task-terminal",
+                    "skillId": "depot/dispatch",
+                    "message": {"role": "user", "parts": [{"type": "text", "text": "dispatch"}]},
+                },
+            }))
+            .send()
+            .await
+            .expect("sendSubscribe");
+
+        // The stream must END once the outcome is known; a hang here is its own failure, and the
+        // bound is generous enough that it can only mean the sender was never dropped.
+        let body = tokio::time::timeout(Duration::from_secs(10), resp.text())
+            .await
+            .expect("the stream must end after a terminal state")
+            .expect("stream body");
+
+        let states: Vec<String> = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+            .filter_map(|v| v["status"]["state"].as_str().map(str::to_owned))
+            .collect();
+
+        assert!(
+            states.contains(&"failed".to_string()),
+            "a prohibited skill must fail the streamed task: {states:?}\n{body}",
+        );
+        let terminal = |s: &str| matches!(s, "failed" | "completed" | "canceled");
+        let first_terminal = states
+            .iter()
+            .position(|s| terminal(s))
+            .expect("a terminal state");
+        assert_eq!(
+            first_terminal,
+            states.len() - 1,
+            "a terminal state must be the LAST state a subscriber receives, and {:?} follows it: \
+             a client tracking this task sees it recover from failing.\n{states:?}",
+            &states[first_terminal + 1..],
+        );
+
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
     /// An attached evaluator refuses at the gateway: the provider's tool never runs, the client
     /// gets the decision, and a permitted call on the same node still works.
     #[tokio::test]

@@ -126,6 +126,13 @@ count_in() {
   local file="$1"
   awk '
     /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1 }
+    # ...and the `all(...)` spelling. `#[cfg(all(test, feature = "x"))]` is a test module by every
+    # meaning the EXEMPT section gives, but the bare pattern above never matched it, so nine such
+    # modules were counted as production and their sites sat in the baseline as if admitted. Found
+    # 2026-09-25 when a new test in the `http.rs` module `#[cfg(all(test, feature = "tls", feature =
+    # "compliance"))]` module tripped the gate (+4) for `tokio::time` calls in test setup.
+    # `test` must be followed by `,` or `)` so `feature = "test-util"` cannot match.
+    /^[[:space:]]*#\[cfg\(all\(test[,)]/ { skip = 1 }
     skip && /^}/                       { skip = 0; next }
     # Comments are prose, not calls. A doc comment that *names* `SystemTime::now` to explain why it
     # is no longer called would otherwise count as a call — which it did, on this very file.

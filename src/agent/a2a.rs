@@ -490,9 +490,17 @@ pub(crate) async fn tasks_send_subscribe(
         };
 
         // Emit "working" after a short delay while the RPC runs.
+        //
+        // The handle is kept and **aborted before every terminal event**, because this task
+        // outlives the outcome it was announcing. It sleeps a fixed 100 ms, and an AE refusal
+        // resolves in about one, so a refused subscriber used to receive
+        // `submitted → failed → working`: a terminal state followed by a non-terminal one, which
+        // reads as a task that recovered from failing. The same held for any dispatch that
+        // completed inside 100 ms — `completed → working` — so this predates the AE seam and is
+        // not confined to refusals. Found by `examples/a2a_skill_authority`'s first CI run.
         let tx2      = tx.clone();
         let task_id3 = task_id2.clone();
-        tokio::spawn(async move {
+        let working = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let _ = tx2.try_send(Ok(Event::default()
                 .event("task_status_update")
@@ -514,6 +522,7 @@ pub(crate) async fn tasks_send_subscribe(
         .await;
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if let super::http::Preflight::Refuse(refusal) = &preflight {
+            working.abort();
             let _ = tx
                 .send(Ok(Event::default().event("task_status_update").data(
                     json!({ "id": &task_id2, "status": { "state": "failed" },
@@ -535,6 +544,9 @@ pub(crate) async fn tasks_send_subscribe(
             let observed = super::http::observed_execution(&dispatched);
             super::http::ae_record_execution(&state2.task_ctx, &preflight, observed).await;
         }
+
+        // Whatever the outcome, it is terminal: no "working" may follow it.
+        working.abort();
 
         match dispatched {
             Ok(reply) => {

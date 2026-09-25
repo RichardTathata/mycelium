@@ -24,7 +24,7 @@
 4 src/agent/emergent_groups.rs
 1 src/agent/emergent.rs
 1 src/agent/helpers.rs
-38 src/agent/http.rs
+15 src/agent/http.rs
 1 src/agent/intent.rs
 5 src/agent/journal.rs
 1 src/agent/kv_quorum_ext.rs
