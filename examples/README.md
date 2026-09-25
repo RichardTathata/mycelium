@@ -47,6 +47,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
 | [`procurement_authority`](../docs/guide/20-authorising-actions.md) | · | · | · | ● | Adv | CLI | · | · | · |
+| [`mcp_tool_authority`](../docs/guide/20-authorising-actions.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · |
 | [`destination_commit`](../docs/operations/companions.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`redistribution_cn`](../docs/guide/24-commitments.md) | · | ● | · | ● | Adv | CLI | · | · | · |
 | **Coordination & identity integrity** — an election needs an electorate, winning is not a grant, one node quietly holding everything reads as healthy, and a node's identity travels as one record. All *run* in CI | | | | | | | | | |

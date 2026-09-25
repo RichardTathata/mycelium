@@ -161,6 +161,44 @@ the condition the check exists for. Set it to the same string your deployment re
 
 ---
 
+## Which tools an agent may actually call
+
+The MCP path is where this is most often wanted, because a scope is such a coarse answer there.
+`POST /mcp` requires `mcp:invoke` — binary. An agent granted *"can use tools"* can use **every**
+tool the fleet advertises.
+
+The preflight sits in `mcp_handler`, between the auth layer and the dispatch, and decides per call:
+
+```bash
+cargo run --example mcp_tool_authority --features tls,compliance
+```
+
+Five acts against a real gateway, one agent, three real tools and one purchasing remit:
+
+| # | Call | Verdict |
+|---|---|---|
+| 1 | `purchase.place`, £120 | **permitted** — dispatched, the tool ran, it answered |
+| 2 | `purchase.place`, £900 | **denied** — over the ceiling, decided on an argument *value* |
+| 3 | `ledger.export` | **denied** — outside the remit; a standing answer a retry will not change |
+| 4 | `weather.lookup` | **indeterminate → refused** — no clause covers it |
+| 5 | `purchase.place`, no amount | **indeterminate → refused** — a rule that cannot be applied |
+
+Act 4 is the one to read twice. The policy has *no opinion* about `weather.lookup`, so authority was
+never established — and the gateway **refuses** rather than falling through to allow because nothing
+said no. The evidence records *could not decide*, not *denied*. Those are different facts, and an
+engine that conflates them lies in both directions: reporting a gap as a prohibition, or admitting a
+call nobody authorised.
+
+**The evaluator sees only what it declares.** The envelope carries a **digest** of the whole argument
+set plus the values named in `security_relevant_arguments` — here just `amount_pence`, because a
+ceiling is not something a digest can check. Attaching a policy is therefore not a licence to read
+every payload crossing the gateway; declaring less is seeing less.
+
+**And it remains a route-level preflight.** It governs what *this gateway* dispatches. A provider
+reached another way is not covered — which is why [`procurement_authority`](../../examples/coop/README.md)
+spends an act on a misconfigured route that denied a call **and it happened anyway**, with the
+evidence saying both.
+
 ## Three refusals, and the one that refuses a permit
 
 ```rust
