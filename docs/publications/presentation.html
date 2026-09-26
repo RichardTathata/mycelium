@@ -755,7 +755,7 @@
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card card-accent-green" style="padding:14px 16px;">
           <div class="card-title">Beyond the demo</div>
-          <div class="card-body">The demo uses identical workers that each carry all stage logic — vivid, but it <em>undersells</em> the model. In production: specialist workers advertising only one stage, heterogeneous teams shipping independent capability sets, zero-downtime rollout of <code>score_v2</code> alongside <code>score_v1</code>. The mesh assembles the topology from whatever is running. No operator involvement.</div>
+          <div class="card-body">The demo uses identical workers that each carry all stage logic — vivid, but it <em>undersells</em> the model. In a real deployment: specialist workers advertising only one stage, heterogeneous teams shipping independent capability sets, zero-downtime rollout of <code>score_v2</code> alongside <code>score_v1</code>. The mesh assembles the topology from whatever is running. No operator involvement.</div>
         </div>
         <div class="callout callout-blue" style="margin:0;">
           <strong>Demo assumption ≠ Mycelium's requirement.</strong> Fluid allocation works across a fully heterogeneous fleet — different images, different teams, different capabilities. Topology emerges bottom-up.
@@ -875,7 +875,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
 
 <!-- V4 The contracts axis (v3) -->
 <div class="slide" id="sV4">
-  <div class="slide-top"><span class="eyebrow"><span class="eyebrow-accent">v3</span> · Contracts</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-top"><span class="eyebrow"><span class="eyebrow-accent">v3 axis</span> · Contracts · shipped 2.8.0–2.15.1</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title">An answer that <em>means what it says.</em></div>
     <div class="slide-sub">A coordinator-free substrate cannot afford answers that read stronger than they are — there is no coordinator to ask. The second epoch makes every acknowledgement name exactly what it established, and gives you a way to check it later.</div>
@@ -1439,7 +1439,7 @@ agent.<span class="cs">kv</span>().<span class="cs">set_with_min_acks</span>(<sp
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card card-accent-blue">
           <div class="card-title">Three scopes</div>
-          <div class="card-body"><strong>Broadcast</strong> — all reachable nodes<br><strong>Group</strong> — capability-group members only<br><strong>Individual</strong> — single named node</div>
+          <div class="card-body"><strong>Cluster</strong> — all reachable nodes<br><strong>Group</strong> — capability-group members only<br><strong>Individual</strong> — single named node</div>
         </div>
         <div class="card card-accent-purple">
           <div class="card-title">Opacity composition</div>
@@ -1453,7 +1453,7 @@ agent.<span class="cs">kv</span>().<span class="cs">set_with_min_acks</span>(<sp
       <div>
         <div class="code-block" style="font-size:11.5px;">
 <span class="cm">// Three scopes</span>
-agent.<span class="cs">mesh</span>().<span class="cs">emit</span>(<span class="cv">"task"</span>, Broadcast, payload).await;
+agent.<span class="cs">mesh</span>().<span class="cs">emit</span>(<span class="cv">"task"</span>, SignalScope::Cluster, payload).await;
 agent.<span class="cs">mesh</span>().<span class="cs">emit</span>(<span class="cv">"task"</span>, Group(<span class="cv">"gpu-workers"</span>), payload).await;
 agent.<span class="cs">mesh</span>().<span class="cs">emit</span>(<span class="cv">"task"</span>, Individual(node_id), payload).await;
 

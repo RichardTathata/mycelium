@@ -907,8 +907,8 @@ not by the first available worker.
 once, with no duplicate execution under any failure scenario.
 \emph{Complex DAG dependencies}---fan-in joins (a stage consuming the join of
 two upstream outputs) are not expressible in exactly-named lanes today; the
-keyed-exact-match \texttt{take} discussed below covers pairwise joins and is
-roadmapped, and arbitrary cross-stage predicates belong to the blackboard
+keyed-exact-match \texttt{take} discussed below (\texttt{take\_by\_key}, shipped as
+M13 in v2.0, 2026-06-20) covers pairwise joins, and arbitrary cross-stage predicates belong to the blackboard
 companion (Future Work). An orchestrated DAG engine (Airflow, Dagster) remains
 right where centralised control is itself the requirement---human approval
 gates, one pane for dependency state---a coordinator adopted deliberately.
@@ -929,7 +929,7 @@ well-defined per-lane depth and therefore backpressure, and the single-record
 stage transition). Most workloads decompose along that line: match to select a
 lane, pull from the lane. Four do not, and they mark the realisation's boundary
 of validity: (i)~\emph{fan-in joins} degenerate lanes to one item per
-correlation key---a keyed-exact-match \texttt{take} would cover this without
+correlation key---the keyed-exact-match \texttt{take\_by\_key} covers this without
 general matching; (ii)~\emph{contract-net claiming}, where a multi-dimensional
 predicate lives on the item, makes per-item matching irreducible;
 (iii)~\emph{blackboard working memory}---opportunistic reasoning over shared
