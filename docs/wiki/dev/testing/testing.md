@@ -181,6 +181,18 @@ Three lessons, each paid for:
   adapter never used a mandate. **When a seam's promise is "another crate can implement this", the
   test that proves it must exercise every new surface**, or it certifies the surfaces it happens to
   touch and nothing else. Deleting the `pub use` now fails it with `unresolved imports`.
+- **A `tests/` binary that CI compiles and never runs is not a gate, and a freshness rule without an
+  expiry test is not covered.** Two public regressions in the same two releases, both found by an
+  external review (2026-09-26): `tests/gateway_mandate_external.rs` was added in #399 and broken the
+  same day by #417 (attaching an authority now spawns the C10 sweeper, which needs a runtime), and
+  nothing noticed through the v2.15.0 tag because `ci.yml` ran only the *other* root integration
+  binary — `cargo check --all-targets` proves it compiles, not that it passes. And
+  `declared_electorate_min` (#377) compared a Unix-ms stamp against the *monotonic* seam, whose
+  origin is a year of nanoseconds, so the saturating subtraction was always `0` and the 30 s TTL
+  never fired — a stale intent could wedge a group shut while the governor, reading the same key
+  with wall time, had let it evaporate. The rule from both: **every `tests/*.rs` binary has a `run`
+  line in `ci.yml`**, and **a documented expiry has a test that crosses it** — written first and
+  seen to fail. [log](../.log/2026-09-26-review-f7-f9-doc-drift.md).
 - **A test whose name outruns what it can detect is worse than no test.** The journal's allocation
   bound has no failing test: `vec![0u8; want]` goes through `alloc_zeroed`, which the OS satisfies
   with lazy zero pages, so a 4 GiB request succeeds instantly, the next `read_exact` fails, and the
@@ -560,6 +572,12 @@ Socket-binding / multi-node suites run in CI through `scripts/ci-retest.sh`, not
 `cargo test`: on failure the wrapper re-runs **only the failed tests, individually, once**. A
 test that fails twice is a real failure and reds the build; a test that passes on isolated
 retry keeps the build green **but emits a loud per-test flake annotation + step-summary line**.
+**Except on the security gate:** the `compliance,a2a` lib suite (the audit chain and both gateway
+enforcement points) runs with `CI_RETEST_STRICT=1`, under which a pass-on-retry is a **failure** —
+the rerun still happens, because it is diagnostic, and is still annotated, but the job reds. An
+external review (2026-09-26) put it plainly: an intermittent *correctness* failure passes on the
+second try just as a port race does, and for a gate that carries a security claim "eventually
+green" is not deterministic correctness. The other suites keep the flake tier as designed.
 The policy that makes this safe against the Run-37 masking failure mode: **a flake annotation
 is a bug report** — recurring annotations get a root-cause dig (the wiki port race and the
 opacity shed bug were both found that way), and "fixing" a flake by widening a timeout is
