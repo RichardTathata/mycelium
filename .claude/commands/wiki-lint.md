@@ -83,7 +83,9 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   them). Verify: the reserved-KV-prefix list matches the `src/lib.rs` namespace-ownership
   table (top-level prefixes — grep `\| \`` rows, diff the sets); `WIRE_VERSION`; the eight
   sub-handle names; the `Cargo.toml` feature flags; **the install snippet's `tag = "…"` pins are the newest tag
-  on each line** (`git tag -l 'v*' | sort -V | tail -1`; `git tag -l 'mycelium-<crate>-*'`). A mismatch = a finding (fix the doc). The
+  on each line** (`git tag -l 'v*' | sort -V | tail -1`; `git tag -l 'mycelium-<crate>-*'`). A mismatch = a finding (fix the doc) —
+  and since 2026-09-26 the pin is also a **release-runbook anchor** (`RELEASING.md` §6), so a pin found stale here means
+  a release skipped that step, which is a second finding to record. The
   *linking* front-doors (the FAQ's routing tables) need only the dead-link check in §3.
 
 Numbers the wiki deliberately does NOT pin (test counts, dep counts) are exempt — the
@@ -147,7 +149,10 @@ Ops Console link, or the metrics feature is a finding. Enumerate them the tree-d
 *documented exception*. An **unclassified** hit is itself a finding: the earlier check verified a known
 list of 9 + named 2 exceptions but never reconciled against the full grep, so `ops_console` (a browser
 example that is the *consumer* of `ui/viz`, not an advertiser) sat unclassified until its 2026-07-15
-move re-ran the enumeration (ledger).
+move re-ran the enumeration (ledger). **Diff the hit count against the count written on the
+contract page's classification line** — the page pins it for exactly this; two compliant examples
+(`control_envelope_viz`, `coordination_viz`) sat unclassified through the 2026-09-24 pass because the
+enumeration was run and the list was not reconciled against it (ledger 2026-09-26).
 
 ## Output
 
