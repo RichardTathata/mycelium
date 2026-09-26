@@ -9,6 +9,65 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.15.0] — 2026-09-26
+
+**Authority at every door.** Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line throughout.
+
+**CHECK BEFORE YOU UPGRADE.** A client holding `mesh:write` could put `mcp.invoke` or `skill.invoke`
+in the body of `POST /gateway/rpc/call` — or `scatter`, `signal/emit`, `mailbox/deliver`,
+`shard/emit`, `overlay/emit_reliable` — and reach a provider **directly**, skipping the action
+evaluator and every mandate check that `/mcp` and `/a2a` run. Same for `llm.invoke` around
+`llm:invoke`. Those kinds now answer **`403 protected_kind`**, naming the door to use. If you have an
+evaluator attached and a `mesh:write` token in circulation, that token had a way past it.
+
+**Why this release exists.** v2.14.0 shipped a gateway that decides authority per call, and said so
+honestly: it is *a route-level preflight at this gateway*, and **a provider reached another way is not
+covered**. That sentence was a boundary, and this release closes it — the Boundary H closure plan,
+C1–C12. The question throughout was not *can we enforce* but **where**: an enforcement point that can
+be walked around by choosing a different door is not an enforcement point, and the only way to know
+which doors exist is to enumerate them and try each one.
+
+- **C1–C4, the doors.** The raw routes refuse protected kinds; a presented mandate **travels to the
+  provider** so it can verify for itself rather than trust the gateway's word; a provider can run the
+  gateway's own preflight as the enforcement point `provider`, deciding **where the work runs**; and
+  cohort budgets are admitted at the provider, keyed by the verified principal.
+- **C7, the matrix.** After a revocation, every door the code has runs nothing — `/mcp`, `/a2a` send
+  *and* stream, the raw routes, a member's direct call, the SDK serve stream — by the handlers' **own
+  counters**, with a plant proving the front doors reach those handlers beforehand.
+- **C8–C12, the awkward cases.** A restart no longer restores revoked authority. The check-then-act
+  window is answered **at each site**, with the limit stated once rather than denied. Work **already
+  running** stops when its authority lapses, and the stop is **measured** against the bound its class
+  declares — `examples/authority_drain`, in CI. Every read of `Hlc::current()` is classified and
+  guarded, with a CI script that fails on an unclassified new one.
+- **C5, the operator's answer.** A signed member removal from a configured authority names the node
+  and every key it has held; an accepting node drops its pings, signals and gossip writes and refuses
+  its certificate at the handshake. It spreads by gossip under `sys/membership/removed/` and is
+  monotonic. `ConfinementReport::ca_key_off_node` reports **unmet** for a node holding the fleet CA's
+  private key, because it could mint a removed member a new identity.
+
+**And the clock, which was failing open.** Three sites deciding whether something had **expired** read
+`physical_ms(hlc.current())` — a bare atomic load that never consults the wall clock and advances only
+on gossip traffic. On a quiet or partitioned node it froze, so a mandate never expired and a checkpoint
+never went stale. A partition is exactly when an expiry check must keep counting. `Hlc::decision_now_ms()`
+is the fix, and C11 then classified **every remaining read** rather than leaving the next one to be found
+the same way.
+
+**Upgrade notes.** **New scope `mesh:serve`** for `rpc/serve` and `rpc/respond`, so a serving agent
+needs no power to call — for **one release** a `mesh:read` or `mesh:write` token is still admitted
+there, with a warning; move serving agents over now. Protected kinds on the raw routes answer `403`
+(above). `GitStoreConfig` gained `authority`, so a struct literal without `..Default::default()`
+breaks. `[[bin]] mycelium` now requires the `cli` feature, so `--no-default-features` builds skip it
+rather than failing. `mycelium-ts` users on `rpcCall` were failing `400` before this release and are
+not after.
+
+**Not claimed.** The check-then-act window is **narrowed and stated, not eliminated**: a process
+paused after its check can still write late by the length of the pause, which is why C9's answer is
+per-site and why the wiki store counts `late_writes()` rather than promising zero. `clock_sync` in the
+confinement report is always `Unverified` — the substrate cannot attest to an operator's time source.
+Provider enforcement **fails closed without an evaluator**, which means a provider that attaches none
+enforces nothing; and a mandate carried to a provider is *carried, not verified*, until that provider
+verifies it.
+
 ### Added
 
 - **The bypass matrix and the stop, in the cluster** (Boundary H closure plan C7 and C12, deployment variants).
