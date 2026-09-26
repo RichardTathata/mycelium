@@ -116,6 +116,9 @@ phase2() {
   local provider="$provider_ip:57000"
 
   echo "== phase 2: the gateway and the agent on the node image"
+  # The pods phase 1 ran. `rollout status` can report the old ReplicaSet as rolled out before the controller has
+  # seen the patch, so wait for these to be gone rather than trusting it alone.
+  local old_pods; old_pods="$(kubectl $ns get pod -l 'app in (gateway,agents)' -o name)"
   kubectl $ns patch deployment gateway --type=json -p="[
     {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$img\"},
     {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Never\"},
@@ -132,9 +135,15 @@ phase2() {
     {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Never\"},
     {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/command\",\"value\":[\"sh\",\"-c\",\"sleep 100000\"]},
     {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/env/-\",\"value\":{\"name\":\"HOLDER_SEED\",\"value\":\"$holder_seed\"}}]" >/dev/null
+  # shellcheck disable=SC2086
+  kubectl $ns wait --for=delete $old_pods --timeout=180s >/dev/null
   kubectl $ns rollout status deployment/gateway --timeout=180s >/dev/null
   kubectl $ns rollout status deployment/agents --timeout=180s >/dev/null
+  kubectl $ns wait --for=condition=Ready pod -l 'app in (gateway,agents)' --timeout=180s >/dev/null
   local agent; agent="$(kubectl $ns get pod -l app=agents --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+  if ! kubectl $ns exec "$agent" -- sh -c 'command -v confined_fleet_node' >/dev/null 2>&1; then
+    echo "FAIL  phase 2: agent pod $agent is not running the node image"; FAIL=1; return
+  fi
 
   report() { kubectl $ns exec provider -- curl -s "http://127.0.0.1:9100/report?revoked_at=${1:-0}"; }
   field() { python3 -c "import json,sys; v=json.loads(sys.argv[1]).get(sys.argv[2]); print('null' if v is None else v)" "$1" "$2"; }
