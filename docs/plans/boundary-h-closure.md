@@ -139,7 +139,7 @@ route changes.
 
 ### C5: Cutting a member off (L; needs its own ADR and review)
 
-**ADR proposed: [`design/member-removal.md`](../design/member-removal.md), awaiting review.** It recommends failing
+**ADR adopted 2026-09-26: [`design/member-removal.md`](../design/member-removal.md).** It recommends failing
 *open* on stale membership for transport and gossip (protected work already fails closed through A1 and C3), and
 requires the CA key to be off member nodes in the strict profile.
 

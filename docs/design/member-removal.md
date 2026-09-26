@@ -1,6 +1,6 @@
 # Removing a member (ADR, Boundary H closure plan C5)
 
-**Status:** **proposed** 2026-09-25, for review before any code. Plan:
+**Status:** **adopted** 2026-09-26 on its recommendations (§5 answered below). Plan:
 [`plans/boundary-h-closure.md`](../plans/boundary-h-closure.md) C5 (finding F7). It builds on the issuer-binding ADR
 ([`knowledge-issuer-binding.md`](knowledge-issuer-binding.md), P1's external-issuer path), the A1 ADR
 ([`authority-at-execution.md`](authority-at-execution.md), whose revocation view this mirrors), and the confined-fleet
@@ -107,3 +107,12 @@ key is in its own certificate directory), reported `Present` or `Absent`. `Prese
    shares it?
 3. Should a removal also **revoke the removed node's outstanding mandates** at every authority, or is "the holder is
    removed" at A1 enough?
+
+## 6. Review outcome (2026-09-26)
+
+1. **Stale membership: option C, split by layer.** Presence (gossip, liveness, peering) fails open; protected work
+   already fails closed through A1 and C3.
+2. **The strict profile requires the CA key off member nodes**, reported by the confinement report's
+   `ca_key_on_node`.
+3. **Removal refuses the removed node's mandates at A1** (the holder is removed); no separate revocation is issued.
+
