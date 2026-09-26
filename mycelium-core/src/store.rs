@@ -1466,4 +1466,42 @@ mod prop_tests {
             let _ = hlc.tick();          // pack/carry wrap path after a poisoned observe
         }
     }
+
+    /// **Run 62 probe (P1).** Order-independence claimed for the LWW tie-break, tested here over
+    /// *every* permutation of four updates that mix an equal-timestamp data tie, a tombstone at the
+    /// same timestamp, and an older write — not the two-order case the sibling test covers. The
+    /// tombstone must win the tie in all 24 orders, and the older write must never resurrect.
+    #[test]
+    fn lww_converges_under_every_apply_order_with_a_tombstone_in_the_tie() {
+        let updates = [
+            GossipUpdate { sender: 1, key: "k".into(), value: Bytes::from_static(b"a"),
+                           timestamp: 100, nonce: 1, ttl: 1, is_tombstone: false },
+            GossipUpdate { sender: 2, key: "k".into(), value: Bytes::from_static(b"b"),
+                           timestamp: 100, nonce: 2, ttl: 1, is_tombstone: false },
+            GossipUpdate { sender: 3, key: "k".into(), value: Bytes::new(),
+                           timestamp: 100, nonce: 3, ttl: 1, is_tombstone: true },
+            GossipUpdate { sender: 4, key: "k".into(), value: Bytes::from_static(b"zzz"),
+                           timestamp: 99, nonce: 4, ttl: 1, is_tombstone: false },
+        ];
+        fn permutations(n: usize) -> Vec<Vec<usize>> {
+            if n == 1 { return vec![vec![0]]; }
+            let mut out = Vec::new();
+            for p in permutations(n - 1) {
+                for i in 0..=p.len() {
+                    let mut q = p.clone(); q.insert(i, n - 1); out.push(q);
+                }
+            }
+            out
+        }
+        let mut hashes = std::collections::BTreeSet::new();
+        for order in permutations(4) {
+            let store: papaya::HashMap<Arc<str>, StoreEntry> = papaya::HashMap::new();
+            for i in order { apply_to_store(&store, &updates[i]); }
+            let e = store.pin().get("k").cloned().expect("the key exists in every order");
+            assert_eq!(e.data, None, "the tombstone wins the equal-timestamp tie in every order");
+            assert_eq!(e.timestamp, 100, "the older write never resurrects");
+            hashes.insert(store_hash(&store));
+        }
+        assert_eq!(hashes.len(), 1, "24 apply orders, one store hash");
+    }
 }

@@ -3389,6 +3389,86 @@ async fn probe_garbage_on_gossip_port_survives() {
     agent.shutdown().await;
 }
 
+/// **Run 62 probe (P2).** The garbage probe above announces a huge frame and disconnects. This
+/// one *delivers* it: a header claiming `MAX_FRAME_BYTES + 1`, then that many bytes streamed in
+/// earnest, so the reader's bound is exercised against a peer that keeps sending rather than one
+/// that goes away. The node must refuse the frame, keep every shard alive, stay serviceable, and
+/// accept a fresh connection afterwards.
+#[tokio::test]
+async fn probe_a_fully_delivered_oversized_frame_is_refused_and_the_node_stays_serviceable() {
+    use crate::framing::MAX_FRAME_BYTES;
+    use tokio::io::AsyncWriteExt;
+
+    let port = alloc_port();
+    let id   = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let agent = GossipAgent::new(id, cfg);
+    agent.start().await.unwrap();
+
+    let claimed = (MAX_FRAME_BYTES + 1) as u32;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let _ = s.write_all(&claimed.to_be_bytes()).await;
+    let _ = s.write_all(&[crate::framing::WIRE_VERSION]).await;
+    // Stream the whole claimed payload; the peer may close on us part-way, which is the point.
+    let chunk = vec![0xABu8; 64 * 1024];
+    let mut sent = 0usize;
+    while sent < MAX_FRAME_BYTES + 1 {
+        if s.write_all(&chunk).await.is_err() { break; }
+        sent += chunk.len();
+    }
+    let _ = s.shutdown().await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    assert!(agent.kv().set("probe/after-oversized", Bytes::from_static(b"ok")));
+    assert_eq!(agent.kv().get("probe/after-oversized").as_deref(), Some(b"ok".as_slice()));
+    assert_eq!(agent.system_stats().dead_shards, 0, "no gossip shard may die from an oversized frame");
+    TcpStream::connect(("127.0.0.1", port)).await.expect("the gossip port still accepts a connection");
+    agent.shutdown().await;
+}
+
+/// **Run 62 probe (P3).** `validate()` refuses a family-wildcard scope — but a config built in
+/// code never calls `validate()` itself; `start()` does. So the guarantee an operator gets is
+/// only as good as the lifecycle's own call, which this probe exercises end to end: an agent
+/// whose token table carries `llm:*` must refuse to **start**, naming the field, rather than
+/// start with a credential that admits nothing.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn probe_a_family_wildcard_scope_refuses_to_start_not_just_to_validate() {
+    let port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.gateway_scoped_tokens = vec![crate::GatewayToken { token: "t".into(), scopes: vec!["llm:*".into()] }];
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    match agent.start().await {
+        Err(crate::error::GossipError::InvalidField { field, reason }) => {
+            assert_eq!(field, "gateway_scoped_tokens");
+            assert!(reason.contains("llm:*"), "{reason}");
+        }
+        other => panic!("start() must refuse a family-wildcard scope by name, got {other:?}"),
+    }
+}
+
+/// **Run 62 probe (P4) — the finding was environmental, and this is its record.** Every test
+/// that constructs a `GossipAgent` on the development Mac reported "has been running for over 60
+/// seconds", including ones that never call `start()`, and this probe measured `new()` at 86 s.
+/// The cause is not the constructor: launching the *freshly built* test binary with a filter that
+/// matched **no** test took 93 s wall, and the same binary a second time took 0 s. A debug test
+/// binary paged in from the external volume on first launch is the minute and a half, and the
+/// first test to run pays it. Kept ignored, with the 5 s bound, as the way to re-check: run it
+/// twice; if the *second* run fails, the constructor really did get slow.
+#[test]
+#[ignore = "first-launch page-in of the debug binary from a slow volume dominates on the dev Mac; run twice"]
+fn probe_constructing_an_agent_takes_milliseconds_not_a_minute() {
+    let started = std::time::Instant::now();
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", 0).unwrap(), GossipConfig::default());
+    let built = started.elapsed();
+    drop(agent);
+    let dropped = started.elapsed();
+    assert!(built < std::time::Duration::from_secs(5), "GossipAgent::new took {built:?}");
+    assert!(dropped < std::time::Duration::from_secs(5), "construct + drop took {dropped:?}");
+}
+
 /// Resource-management probe: after `shutdown_with_timeout`, every tracked
 /// background task must have exited and the gossip port must be rebindable.
 #[tokio::test]
