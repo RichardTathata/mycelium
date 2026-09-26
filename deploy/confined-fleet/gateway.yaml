@@ -32,6 +32,7 @@ spec:
           ports:
             - { name: api, containerPort: 8080 }     # the gateway API agents call — the ONLY port open to them
             - { name: admin, containerPort: 9090 }   # admin / metrics / debug — never reachable from agent pods
+            - { name: gossip, containerPort: 57000 } # the mesh: other members only (network-policy.yaml)
           volumeMounts:
             - { name: member-key, mountPath: /etc/mycelium/tls, readOnly: true }
       volumes:

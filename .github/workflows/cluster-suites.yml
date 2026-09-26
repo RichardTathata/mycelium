@@ -37,6 +37,8 @@ on:
       - 'deploy/confined-fleet/**'
       - 'tests/confined-fleet/**'
       - 'scripts/test-confined-fleet.sh'
+      - 'examples/confined_fleet_node.rs'
+      - 'docker/Dockerfile.confined-fleet'
       - '.github/workflows/cluster-suites.yml'
   pull_request:
     paths:
@@ -51,6 +53,8 @@ on:
       - 'deploy/confined-fleet/**'
       - 'tests/confined-fleet/**'
       - 'scripts/test-confined-fleet.sh'
+      - 'examples/confined_fleet_node.rs'
+      - 'docker/Dockerfile.confined-fleet'
       - '.github/workflows/cluster-suites.yml'
   schedule:
     - cron: '0 5 * * *'   # nightly 05:00 UTC — catches drift even with no code change
@@ -83,13 +87,16 @@ jobs:
         run: make test-overlay
 
   confined-fleet:
-    name: Confined-fleet deployment (Boundary H7, kind + Calico)
+    name: Confined-fleet deployment (Boundary H7 + closure plan C7/C12, kind + Calico)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Phase 2 builds the node image (a debug build of examples/confined_fleet_node) inside this job.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       # Deployment evidence, not replay evidence: a real cluster with a CNI that enforces NetworkPolicy, the reference
       # manifests applied unchanged (stand-in images), and every blocked path paired with a positive control.
+      # Phase 2 then runs the real node image as the authority, a provider and the gateway, and checks from the agent
+      # pod that revoked work runs through no door (C7) and that running work stops within its bound (C12).
       - name: Confined-fleet deployment test (make test-confined-fleet)
         run: make test-confined-fleet
 

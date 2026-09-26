@@ -15,6 +15,18 @@
 #   - that a request through the gateway is recorded: the stand-in gateway is not a Mycelium node. The AE seam's own
 #     tests cover recording.
 #
+# Phase 2 (closure plan C7 and C12, deployment variants) then replaces the stand-ins with the real node image
+# (docker/Dockerfile.confined-fleet, built here unless NODE_IMAGE names one already built): a mandate authority, a
+# provider member and the gateway, and the agent pod running the agent's subcommands. From the agent pod, through
+# the gateway only:
+#   - C7: with a valid mandate every front door (/mcp, /a2a send and stream) reaches the provider's handlers (the
+#     plant); after the authority revokes the term, none does, and the raw routes refuse protected kinds (403). The
+#     member plane (the provider's gossip port) is not reachable from the agent pod at all; the control reaches it;
+#   - C12: calls to a long-running tool are admitted under the mandate, the authority revokes, and T_admit and
+#     T_drain from the provider's own records are within the class's declared bound plus the checkpoint delivery
+#     allowance. The pods share one kind node and so one clock: the clock bound is declared, not exercised.
+# SKIP_NODES=1 runs phase 1 only.
+#
 # Needs: docker, kubectl, network access (images, Calico manifest). Uses `kind` from PATH, or $KIND, or downloads it.
 set -euo pipefail
 
@@ -76,6 +88,125 @@ check_blocked() { # name, url — blocked for the agent, reachable for the contr
   else echo "PASS  agent blocked from $1; control reaches it ($ctl)"; fi
 }
 
+# ── Phase 2: the real nodes (C7 and C12, deployment variants) ────────────────────────────────────────────────
+NODE_IMAGE="${NODE_IMAGE:-}"
+phase2() {
+  local ns="-n confined-fleet" img="$NODE_IMAGE"
+  if [ -z "$img" ]; then
+    img="mycelium-confined-node:ci"
+    echo "== phase 2: build the node image ($img)"
+    DOCKER_BUILDKIT=1 docker build -q -f "$HERE/docker/Dockerfile.confined-fleet" -t "$img" "$HERE" >/dev/null
+  fi
+  "$KIND" load docker-image "$img" --name "$CLUSTER" >/dev/null
+
+  echo "== phase 2: keys, the fleet CA, the authority and a provider"
+  local auth_seed holder_seed auth_pub holder_pub
+  auth_seed="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  holder_seed="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  auth_pub="$(docker run --rm "$img" pubkey "$auth_seed")"
+  holder_pub="$(docker run --rm "$img" pubkey "$holder_seed")"
+  mkdir -p "$WORK/ca"
+  docker run --rm --entrypoint sh "$img" -c 'confined_fleet_node ca-init /tmp/ca >/dev/null 2>&1 && tar -C /tmp/ca -cf - ca-cert.pem ca-key.pem' \
+    | tar -C "$WORK/ca" -xf -
+  kubectl $ns create secret generic member-key --from-file="$WORK/ca/ca-cert.pem" --from-file="$WORK/ca/ca-key.pem" >/dev/null
+  sed -e "s|NODE_IMAGE|$img|" -e "s|AUTHORITY_SEED_HEX|$auth_seed|" -e "s|AUTHORITY_PUB_HEX|$auth_pub|" \
+      -e "s|HOLDER_PUB_HEX|$holder_pub|" "$HERE/tests/confined-fleet/nodes.yaml" | kubectl apply -f - >/dev/null
+  kubectl $ns wait --for=condition=Ready pod/authority pod/provider --timeout=180s >/dev/null
+  local provider_ip; provider_ip="$(kubectl $ns get pod provider -o jsonpath='{.status.podIP}')"
+  local provider="$provider_ip:57000"
+
+  echo "== phase 2: the gateway and the agent on the node image"
+  # The pods phase 1 ran. `rollout status` can report the old ReplicaSet as rolled out before the controller has
+  # seen the patch, so wait for these to be gone rather than trusting it alone.
+  local old_pods; old_pods="$(kubectl $ns get pod -l 'app in (gateway,agents)' -o name)"
+  kubectl $ns patch deployment gateway --type=json -p="[
+    {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$img\"},
+    {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Never\"},
+    {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/command\",\"value\":[\"confined_fleet_node\"]},
+    {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/env\",\"value\":[
+      {\"name\":\"ROLE\",\"value\":\"gateway\"},
+      {\"name\":\"POD_IP\",\"valueFrom\":{\"fieldRef\":{\"fieldPath\":\"status.podIP\"}}},
+      {\"name\":\"PROVIDER_NODE\",\"value\":\"$provider\"},
+      {\"name\":\"OPERATOR_URL\",\"value\":\"http://authority.confined-fleet.svc:8400\"},
+      {\"name\":\"AUTHORITY_PUB\",\"value\":\"$auth_pub\"},
+      {\"name\":\"HOLDER_PUB\",\"value\":\"$holder_pub\"}]}]" >/dev/null
+  kubectl $ns patch deployment agents --type=json -p="[
+    {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$img\"},
+    {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Never\"},
+    {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/command\",\"value\":[\"sh\",\"-c\",\"sleep 100000\"]},
+    {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/env/-\",\"value\":{\"name\":\"HOLDER_SEED\",\"value\":\"$holder_seed\"}}]" >/dev/null
+  # shellcheck disable=SC2086
+  kubectl $ns wait --for=delete $old_pods --timeout=180s >/dev/null
+  kubectl $ns rollout status deployment/gateway --timeout=180s >/dev/null
+  kubectl $ns rollout status deployment/agents --timeout=180s >/dev/null
+  kubectl $ns wait --for=condition=Ready pod -l 'app in (gateway,agents)' --timeout=180s >/dev/null
+  local agent; agent="$(kubectl $ns get pod -l app=agents --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+  if ! kubectl $ns exec "$agent" -- sh -c 'command -v confined_fleet_node' >/dev/null 2>&1; then
+    echo "FAIL  phase 2: agent pod $agent is not running the node image"; FAIL=1; return
+  fi
+
+  report() { kubectl $ns exec provider -- curl -s "http://127.0.0.1:9100/report?revoked_at=${1:-0}"; }
+  field() { python3 -c "import json,sys; v=json.loads(sys.argv[1]).get(sys.argv[2]); print('null' if v is None else v)" "$1" "$2"; }
+  local grant; grant="$(kubectl $ns exec authority -- curl -s http://127.0.0.1:8400/grant)"
+  doors() { printf '%s' "$grant" | kubectl $ns exec -i "$agent" -- confined_fleet_node agent-doors "$1" "$provider"; }
+
+  echo "== phase 2 checks from agent pod $agent"
+  # The member plane: an agent cannot reach a member's gossip port; the control can.
+  local tc_agent tc_ctl
+  tc_agent="$(kubectl $ns exec "$agent" -- curl -s -o /dev/null --connect-timeout 4 --max-time 5 -w '%{time_connect}' "http://$provider/" 2>/dev/null || true)"
+  tc_ctl="$(kubectl $ns exec control -- curl -s -o /dev/null --connect-timeout 4 --max-time 5 -w '%{time_connect}' "http://$provider/" 2>/dev/null || true)"
+  if [ "${tc_ctl:-0}" = "0" ] || [ "${tc_ctl:-0}" = "0.000000" ]; then echo "FAIL  control cannot reach the provider's gossip port either: the check would prove nothing"; FAIL=1
+  elif [ -n "$tc_agent" ] && [ "$tc_agent" != "0" ] && [ "$tc_agent" != "0.000000" ]; then echo "FAIL  agent reaches the provider's gossip port — the member plane is open"; FAIL=1
+  else echo "PASS  agent blocked from the member plane (provider :57000); control reaches it"; fi
+
+  # C7 plant: the front doors reach the handlers. Retried while the gateway learns the provider's tools and skill.
+  local r0 ok=0
+  for _ in $(seq 1 20); do
+    doors plant >/dev/null 2>&1 || true
+    r0="$(report)"
+    if [ "$(field "$r0" work)" -ge 1 ] 2>/dev/null && [ "$(field "$r0" skill)" -ge 2 ] 2>/dev/null; then ok=1; break; fi
+    sleep 3
+  done
+  if [ "$ok" = 1 ]; then echo "PASS  C7 plant: with a valid mandate, /mcp and /a2a (send, stream) reach the provider's handlers"
+  else echo "FAIL  C7 plant: the front doors never reached the handlers ($r0)"; FAIL=1; doors plant || true; return; fi
+
+  # C12: load the long-running tool, revoke while it runs, keep loading.
+  printf '%s' "$grant" | kubectl $ns exec -i "$agent" -- confined_fleet_node agent-load 4000 >/dev/null 2>&1 &
+  local load=$!
+  sleep 2
+  local revoked_at; revoked_at="$(kubectl $ns exec authority -- curl -s -X POST http://127.0.0.1:8400/revoke | python3 -c 'import json,sys; print(json.load(sys.stdin)["revoked_at_ms"])')"
+  wait "$load" || true
+  sleep 2
+
+  # C7 after revocation: no door reaches a handler, and the raw routes refuse protected kinds.
+  local before_work before_skill; r0="$(report)"; before_work="$(field "$r0" work)"; before_skill="$(field "$r0" skill)"
+  if doors revoked; then echo "PASS  C7: the raw routes refuse protected kinds (403)"; else echo "FAIL  C7: a raw route accepted a protected kind"; FAIL=1; fi
+  sleep 1
+  local r1; r1="$(report "$revoked_at")"
+  if [ "$(field "$r1" work)" = "$before_work" ] && [ "$(field "$r1" skill)" = "$before_skill" ]; then
+    echo "PASS  C7: after revocation no door ran the tool or the skill (work $before_work, skill $before_skill)"
+  else echo "FAIL  C7: a door ran revoked work ($r0 -> $r1)"; FAIL=1; fi
+
+  # C12: the stop, from the provider's own records.
+  echo "      C12 report: $r1"
+  python3 - "$r1" <<'PY' || FAIL=1
+import json, sys
+r = json.loads(sys.argv[1])
+bound, d, s = r["bound_ms"], r["delivery_ms"], r["skew_ms"]
+fails = []
+if r["slow_admitted_before"] < 1: fails.append("no call was running when the term was revoked (the plant)")
+if (r["t_admit_ms"] or 0) > s + d: fails.append(f"a call was admitted {r['t_admit_ms']} ms after the revocation (allowed s + D = {s + d})")
+if r["t_drain_ms"] is None: fails.append("no stop was confirmed")
+elif r["t_drain_ms"] > bound + d: fails.append(f"T_drain {r['t_drain_ms']} ms exceeds the bound {bound} + delivery {d} ms")
+if r["unconfirmed"]: fails.append(f"{r['unconfirmed']} stop(s) unconfirmed")
+if r["stops"] != r["slow_admitted_before"]: fails.append(f"{r['slow_admitted_before']} call(s) running at revocation, {r['stops']} stop(s) recorded")
+for f in fails: print("FAIL  C12:", f)
+admit = "none admitted after the revocation" if r["t_admit_ms"] is None else f"{r['t_admit_ms']} ms"
+if not fails: print(f"PASS  C12: T_admit {admit}; T_drain {r['t_drain_ms']} ms, within {bound} + {d} ms; every stop confirmed")
+sys.exit(1 if fails else 0)
+PY
+}
+
 echo "== checks from agent pod $AGENT"
 sleep 5 # let Calico program the policies for the new pods
 check_reachable "gateway API :8080" "http://gateway.confined-fleet.svc:8080/"
@@ -90,5 +221,6 @@ if connected "$m_agent"; then echo "FAIL  agent reaches instance metadata ($m_ag
 elif connected "$m_ctl"; then echo "PASS  agent blocked from instance metadata; control reaches it ($m_ctl)"
 else echo "N/A   instance metadata: absent in this cluster (control $m_ctl) — not discriminating; covered by default-deny"; fi
 
+[ "${SKIP_NODES:-0}" = 1 ] || phase2
 if [ "$FAIL" = 0 ]; then echo "== confined-fleet deployment test: PASS"; else echo "== confined-fleet deployment test: FAIL"; fi
 exit "$FAIL"

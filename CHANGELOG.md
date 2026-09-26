@@ -11,6 +11,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The bypass matrix and the stop, in the cluster** (Boundary H closure plan C7 and C12, deployment variants).
+  - The confined-fleet job now builds a node image (`docker/Dockerfile.confined-fleet`, `examples/confined_fleet_node`).
+  - Its phase 2 runs that image as a mandate authority, a provider member and the reference gateway.
+  - From the agent pod, the checks are:
+    - revoked work runs through no door, by the provider's own counters;
+    - the raw routes refuse protected kinds;
+    - the member plane is unreachable;
+    - running work stops within its declared bound plus checkpoint delivery.
+  - The reference network policy lets other members reach the gateway's gossip port.
+  - `.dockerignore` skips local worktrees and nested build outputs.
 - **The stop, measured** (Boundary H closure plan C12). `examples/authority_drain` (run in CI) admits calls under a
   mandate on a live node, revokes the term, and checks T_admit and T_drain from the node's own records against the
   bound the class declares. **`mycelium::arguments_digest`**: the canonical arguments digest, public in Rust as it
