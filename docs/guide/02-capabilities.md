@@ -357,9 +357,10 @@ use std::time::Duration;
 agent.define_capability_group(
     "gpu-pool",
     CapabilityGroupDef {
-        filter:   CapFilter::new("compute", "gpu"),
-        provides: vec![Capability::new("compute", "gpu")],
-        requires: vec![],
+        filter:          CapFilter::new("compute", "gpu"),
+        topology_policy: None,   // or Some(GroupTopologyPolicy { .. }) — see chapter 13
+        provides:        vec![Capability::new("compute", "gpu")],
+        requires:        vec![],
     },
     Duration::from_secs(60),  // reassert interval
 );

@@ -113,9 +113,13 @@ every other day would turn a refusal into a permit — and for
 a superseded mandate is not a `Conflict`. A retry loop must not be able to launder a revocation, and
 neither must a policy engine.
 
-**The gateway binds no mandate.** It is a route-level preflight and holds no fence to consult, so it
-passes `None` and a mandated rule reads that as authority not established. Enforcement at the
-resource, where a fence exists, is a later and stronger claim than this chapter makes.
+**The gateway establishes a *presented* mandate — when an authority is attached.** Since 2.15.0 a
+caller may present a signed grant in `params._meta.mandate` (`/mcp`) or the A2A message metadata;
+with `with_execution_authority` attached the gateway verifies the grant, checks revocation freshness
+and binds the result into the envelope, so `Rule::requiring_mandate` reads *established* rather than
+*not established*. With no authority attached the envelope carries `None`, as before. The mandate
+also **travels to the provider**, carried not verified, so the provider can decide again where the
+work runs — chapter [21](21-mandates.md) § *Presenting and enforcing a mandate*.
 
 ---
 
@@ -194,8 +198,11 @@ set plus the values named in `security_relevant_arguments` — here just `amount
 ceiling is not something a digest can check. Attaching a policy is therefore not a licence to read
 every payload crossing the gateway; declaring less is seeing less.
 
-**And it remains a route-level preflight.** It governs what *this gateway* dispatches. A provider
-reached another way is not covered — which is why [`procurement_authority`](../../examples/coop/README.md)
+**And it is a route-level preflight — with the other doors now closed (2.15.0).** It governs what
+*this gateway* dispatches; the raw routes refuse protected kinds (`403 protected_kind`), and a
+provider that runs `with_provider_enforcement()` decides again where the work runs, so a member
+reaching a provider directly is refused as the gateway would refuse it. What a *misconfigured* route
+still shows is the evidence rule, which is why [`procurement_authority`](../../examples/coop/README.md)
 spends an act on a misconfigured route that denied a call **and it happened anyway**, with the
 evidence saying both.
 

@@ -157,3 +157,8 @@ adjusts the default; the *decision* — always-on-within-the-feature — is fixe
   spike decides; this record only classifies P5 as b/c and partition-sensitive.
 - The `diagnostics` feature-gate name/shape (`GOSSIP_EMERGENT_DETECTORS` vs folding into `gateway`)
   — Phase 1 mechanics.
+
+**Addendum (2026-09-20, design record, no code):** [`legible-emergence-content-plane.md`](legible-emergence-content-plane.md)
+adds P8 (adoption cascade) and P9 (unfalsifiable propagated claim) — the content plane's pathologies,
+catalogued but **not detected**; the P1–P7 (+P10) list above is the detected set.
+

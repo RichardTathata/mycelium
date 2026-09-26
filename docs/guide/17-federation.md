@@ -181,7 +181,10 @@ absence. Design record: [`design/federated-domains.md`](../design/federated-doma
 | `federation::client` (`gateway` + `tls`) | the consumer side: `FederationClient` drives link → resolver → pool → HTTP, and turns a silent gateway into `DeliveryUnknown` or a failover by repeatability |
 | `federation::pinning` (`tls`) | the transport's **confidentiality** half: TLS anchored on a key pinned in the trust bundle, because this design has no CA to anchor it on |
 
-Serve federated calls from a node:
+Serve federated calls from a node. Every node of the domain first runs the **enforced domain
+profile** — `cfg.domain_profile = DomainProfile::Enforced` (or `GOSSIP_DOMAIN_PROFILE=enforced`),
+which makes TLS mandatory at `validate()`; the default `Open` is what a non-federated cluster runs
+(`examples/federation_node.rs` is the runnable form):
 
 ```rust
 let edge = Arc::new(FederationEdge::new(

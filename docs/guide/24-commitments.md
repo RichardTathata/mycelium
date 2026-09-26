@@ -102,7 +102,7 @@ the substrate's standing posture.
 pub enum CommitmentRefusal {
     NotAnnounced,
     NoOffers,
-    AlreadyAwarded(Award),
+    AlreadyAwarded(Box<Award>),   // the enum is #[non_exhaustive] (2.13.0): match with a `_` arm that fails closed
     Receipt(ReceiptError),
     AwardUnknown { ballots_tried },
     NotCommitted(String),

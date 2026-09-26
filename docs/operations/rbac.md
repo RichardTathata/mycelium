@@ -28,6 +28,18 @@ cfg.gateway_scoped_tokens = vec![
     GatewayToken { token: "readonly".into(),
                    scopes: vec!["kv:read".into()] },
 ];
+// Prefer NAMED tokens (2.13.0): the principal a provider sees is `token:{issuer}/{name}`
+// instead of a positional `token:{issuer}/#{i}`, so rotating one token does not renumber
+// the rest. Fields: name · token · scopes (`GatewayNamedToken`, mycelium-core/src/config.rs).
+cfg.gateway_named_tokens = vec![
+    GatewayNamedToken { name: "ci-bot".into(), token: "…".into(),
+                        scopes: vec!["mcp:invoke".into()] },
+    GatewayNamedToken { name: "skill-server".into(), token: "…".into(),
+                        scopes: vec!["mesh:serve".into()] },   // serves RPC kinds; cannot call them
+];
+// There is NO environment variable for the named table (only `gateway_auth_token` has
+// GOSSIP_GATEWAY_AUTH_TOKEN). Set it in code, or in the TOML file `GossipConfig::load_from_file`
+// reads; the issuer prefix is `gateway_identity_issuer` (default: this node's id).
 ```
 
 Distribute the auto-generated `./mycelium-tls/ca-cert.pem` to every node (shared
@@ -98,6 +110,10 @@ the serving peer fetches it node-to-node with no shared bearer. **That is the wh
 surface**; the routing code asserts the same list.
 
 ---
+
+**Scopes match exactly, or `*`.** `scope_admits` accepts the literal scope or the single wildcard
+`"*"`; a token scoped `llm:*` admits **nothing** — the runbooks' phrase *"the `llm:*` family"* is
+prose for `llm:read` · `llm:write` · `llm:invoke`, each listed by name.
 
 ## 3. Advertise & verify roles
 

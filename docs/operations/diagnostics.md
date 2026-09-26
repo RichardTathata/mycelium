@@ -326,10 +326,14 @@ bundle with no witness replays a run in which nothing went wrong, and reproducin
 that the harness works. In the witness, a `null` toggle means *the failure needs no toggle* — it does
 **not** mean nobody checked.
 
-**Capture is not on by default, and does not ship enabled.** The seam routes through the kernel only
-under the `sim` feature, which is off in every shipped build; without it the seam's body is the call
-it replaced. Capturing from a production process therefore means running a build that has it on, and
-that is a deliberate act with a cost, not a flag you leave set.
+**Capture is not on by default, does not ship enabled — and is not an operator's verb.** The seam
+routes through the kernel only under the `sim` feature, off in every shipped build; there is **no**
+CLI flag, config field or route that starts a recording on a running node. A bundle is produced by
+an integrator's harness: a `sim`-enabled build that calls `sim_seam::install` on the node's thread
+before start and `take()` after — guide [19 § Recording a node](../guide/19-replay-and-simulation.md).
+An earlier version of this paragraph read as if an operator could capture from production with a
+build switch; they cannot (doc-coverage run 17). What an operator *can* do is hand the harness the
+config and inputs it needs, redacted as above.
 
 ## See it: the induce-and-diagnose demo
 
@@ -363,8 +367,10 @@ decide**, deliberately. Two shapes, and the body tells you which:
   curl -s 'localhost:PORT/gateway/mesh/group?group=G'   # roster + declared_min
   ```
 
-- **`observed_members` below `declared_min`** — a fresh `MembershipIntent` says the group should
-  hold at least `declared_min` and this node sees fewer, so its **view is partial**. Wait for the
+- **`observed_members` below `declared_min`** — a fresh `MembershipIntent` (fresh = written within
+  the last **30 s**, `ELECTORATE_INTENT_TTL_MS`; the governor's own TTL on the same key is 5 min)
+  says the group should hold at least `declared_min` and this node sees fewer, so its **view is
+  partial**. Before v2.15.1 that intent never expired on this reader. Wait for the
   roster to converge (check `GET /gateway/mesh/group` on each node), or investigate why members are
   missing — a partition, or nodes that have not joined yet.
 

@@ -193,7 +193,7 @@ not retry an at-most-once operation on the strength of it. Full contract:
 
 Mycelium tolerates a **mixed-version cluster** during an upgrade: `read_frame` accepts both the
 current and previous wire version (`WIRE_VERSION` / `PREV_WIRE_VERSION`, currently **12 / 11** in
-`src/framing.rs`). There is no cluster-wide upgrade command — it's a library, so rolling a fleet is
+`mycelium-core/src/framing.rs`). There is no cluster-wide upgrade command — it's a library, so rolling a fleet is
 your orchestrator's job (restart the processes); Mycelium's contract is that the mixed window is
 safe. The procedure:
 
@@ -212,6 +212,11 @@ safe. The procedure:
 The back-compat this relies on is regression-gated — the wire corpus + `decode_wire_v11_*` gate
 (see the [testing page](../wiki/dev/testing/testing.md)) — so a release that would break the mixed
 window fails CI, not your rollout.
+
+**Client-facing changes that are not wire changes** still need a plan. Since 2.14.0 a
+`POST /gateway/kv` without `value_b64` answers **400 and writes nothing** (it used to store an empty
+value); an HTTP client or an old SDK that relied on the silent default breaks at upgrade, not at the
+wire. The list is [deprecations.md](../guide/deprecations.md) (§12 for this one).
 
 ## Backup & restore
 

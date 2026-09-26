@@ -105,4 +105,4 @@ is the gate. Notably:
 These manifests are **rendered and structurally validated offline** (`kubectl kustomize` → 7
 well-formed resources). They have **not** been applied to a live cluster in CI — apply them to
 kind or a cloud cluster to exercise them end-to-end. If you hit an issue, the node config surface
-is the `MYCELIUM_*`/`GOSSIP_*` table in [`deployment.md`](../../docs/operations/deployment.md).
+is the `GOSSIP_*` table in [`tuning.md`](../../docs/operations/tuning.md) (the demo image's `MYCELIUM_*` vars are documented in `examples/three_node_demo.rs`).

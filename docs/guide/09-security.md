@@ -81,10 +81,13 @@ cfg.tls = Some(TlsConfig::default());
 // TlsConfig::default() generates an ephemeral Ed25519 keypair.
 // To persist the identity across restarts, provide a key path:
 cfg.tls = Some(TlsConfig {
-    key_path:  Some(PathBuf::from("/etc/mycelium/node.key")),
-    cert_path: Some(PathBuf::from("/etc/mycelium/node.crt")),
+    key_pem:  Some(PathBuf::from("/etc/mycelium/node.key")),
+    cert_pem: Some(PathBuf::from("/etc/mycelium/node.crt")),
     ..Default::default()
 });
+// (The fields are `cert_pem` / `key_pem` / `ca_cert_pem` / `auto_cert_dir` —
+// `mycelium-core/src/config.rs`. An earlier version of this snippet used `key_path` /
+// `cert_path`, which do not exist and did not compile; doc-coverage run 17.)
 ```
 
 All gossip TCP connections between nodes now require mutual TLS. A node
@@ -117,7 +120,7 @@ node that doesn't hold the private key.
 ## Wire-level KV signing (v10)
 
 Wire version 10 added `WireMessage::SignedData` (the wire is at **v12** now; signing has
-been present since v10). When a node writes a KV entry with `set_signed()`, the wire message
+been present since v10). When a node that holds a `tls` identity writes a KV entry, the wire message
 includes:
 
 ```
@@ -185,7 +188,9 @@ match agent.request_authorized(&req, &authorized_callers) {
 Empty allowlist = open. A direct in-mesh call is admitted if the (signature-verified)
 sender is listed by NodeId or holds a listed role. A call a **gateway** dispatched for an
 HTTP/SDK client carries a node-attested `GatewayCaller` (v3 item 7) and is judged by the
-*client's principal* — `oidc:{subject}`, `token:#{i}`, `token:legacy`, `anonymous` — so
+*client's principal* — issuer-qualified: `oidc:{issuer}/{subject}`, `token:{issuer}/#{i}`,
+`token:{issuer}/legacy`, `token:{issuer}/{name}` for a named token, or `anonymous`
+(`src/agent/gateway_caller.rs`; the issuer is `gateway_identity_issuer`, default this node's id) — so
 listing the gateway node admits none of its clients (that was the confused deputy the
 `/mcp` finding exposed). `caller_authorized(req.sender(), …)` still exists for direct calls;
 `request_authorized` is the one to use anywhere a gateway can reach. SkillRunner wires
@@ -208,6 +213,15 @@ edge (`/health`, `/ready`, `/stats`, `/metrics`, descriptor, and the nonce-capab
 `/bulk/{id}`) is never scope-gated. Everything else is — including the node-level `/mcp`
 (`mcp:invoke`), `/signals/{kind}` (`mesh:read`) and `/consensus/{slot}` (`consensus:read`),
 gated since 2026-09-05; before that they answered without a bearer.
+
+**Serving is not calling (2.15.0).** Registering to *serve* an RPC kind (`POST /gateway/rpc/serve/{kind}`,
+`/gateway/rpc/respond`) needs the scope **`mesh:serve`**; a `mesh:read`/`mesh:write` token is admitted
+there for one release with a warning and then refused. And the raw routes (`rpc/call`, `scatter`,
+`signal/emit`, `mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`) answer **`403 {"error":
+"protected_kind"}`** for `mcp.invoke`, `skill.invoke` and `llm.invoke` (plus anything in
+`protected_rpc_kinds` / `GOSSIP_PROTECTED_RPC_KINDS`): those kinds go through `/mcp`, `/a2a` or
+`/gateway/llm`, where the evaluator and mandate checks run. A Dev who hits either learns why here
+rather than from the operator runbook ([rbac.md §2](../operations/rbac.md)).
 
 **4. The `sys/` namespace tripwire** (core — on without `compliance`). A remote
 write naming *this* node in a self-owned `sys/` prefix (`identity`, `load`,
@@ -412,7 +426,7 @@ one. They are complementary, not alternatives.
 
 **Rolling upgrade window.** Each wire version is backward-compatible with the previous one:
 `read_frame` accepts both `WIRE_VERSION` and `PREV_WIRE_VERSION` (currently **12** and **11**
-in `src/framing.rs`), so nodes one step apart interoperate. A node that receives a frame type or
+in `mycelium-core/src/framing.rs`), so nodes one step apart interoperate. A node that receives a frame type or
 version it can't decode simply drops it — it doesn't crash or corrupt its state (this back-compat
 is regression-gated: `decode_wire_v11_*`). Operator procedure:
 [operations/deployment.md § Rolling upgrades](../operations/deployment.md#rolling-upgrades).
