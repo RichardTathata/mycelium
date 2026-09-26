@@ -77,7 +77,12 @@ pub(crate) fn resolve_electorate(observed: usize, declared_min: usize) -> Electo
 /// The electorate floor a group declares through a **fresh** `MembershipIntent`, or `0`.
 ///
 /// Read from the same key the membership governor writes (`sys/govern/membership/{group}`) and
-/// subject to the same freshness rule, so a stale intent cannot wedge a group shut.
+/// subject to the same freshness rule **on the same clock**, so a stale intent cannot wedge a
+/// group shut. `written_at_ms` is Unix ms (`FleetIntent::stamp`), so the comparison is against
+/// the wall-clock seam, not the monotonic one: the monotonic seam's origin is `MONO_ORIGIN_NS`
+/// (a year in ns, ~3.15e10 ms), three orders below any Unix timestamp, so `now - written_at`
+/// saturated to `0` for every intent and the TTL never fired (external review F7, 2026-09-26;
+/// shipped in #377). `electorate_intent_tests` below crosses the TTL and failed before this.
 #[cfg(any(feature = "consensus", feature = "gateway"))]
 pub(crate) fn declared_electorate_min(ctx: &crate::agent::TaskCtx, group: &str) -> usize {
     let key = format!("{}{}", crate::agent::membership_governor::MEMBERSHIP_PREFIX, group);
@@ -86,7 +91,7 @@ pub(crate) fn declared_electorate_min(ctx: &crate::agent::TaskCtx, group: &str) 
     let Ok(intent) = mycelium_core::serde_fixint::from_slice::<
         crate::agent::membership_governor::MembershipIntent>(&bytes)
     else { return 0 };
-    let now = mycelium_core::sim_seam::mono_now_ns() / 1_000_000;
+    let now = mycelium_core::sim_seam::wall_now_ms();
     if now.saturating_sub(intent.written_at_ms) > ELECTORATE_INTENT_TTL_MS { return 0; }
     intent.min
 }
@@ -640,5 +645,48 @@ mod ws5_identity_key_tests {
                 THREADS * ITERS - stored.len(),
             );
         }
+    }
+}
+
+#[cfg(all(test, any(feature = "consensus", feature = "gateway")))]
+mod electorate_intent_tests {
+    //! **F7 (external review, 2026-09-26): the electorate floor never expired.** The reader
+    //! compared a Unix-ms stamp against the *monotonic* seam, whose origin is a year of
+    //! nanoseconds — three orders of magnitude below any Unix timestamp — so the saturating
+    //! subtraction was always `0` and the TTL never fired. A stale intent could wedge a group
+    //! shut indefinitely while the membership governor, reading the same key with wall time,
+    //! had long since let it evaporate. This test failed before the fix.
+    use super::{declared_electorate_min, ELECTORATE_INTENT_TTL_MS};
+    use crate::agent::membership_governor::{MembershipIntent, MEMBERSHIP_PREFIX};
+    use crate::{GossipAgent, GossipConfig, NodeId};
+    use std::sync::Arc;
+
+    fn seed(agent: &GossipAgent, group: &str, min: usize, written_at_ms: u64) {
+        let mut intent = MembershipIntent::new(group, min, None);
+        intent.written_at_ms = written_at_ms;
+        agent.task_ctx.kv_state.store.pin().insert(
+            Arc::from(format!("{MEMBERSHIP_PREFIX}{group}").as_str()),
+            crate::store::StoreEntry {
+                data:      Some(bytes::Bytes::from(mycelium_core::serde_fixint::to_vec(&intent).unwrap())),
+                timestamp: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn a_stale_membership_intent_stops_declaring_a_floor() {
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", 0).unwrap(), GossipConfig::default());
+        let now = mycelium_core::sim_seam::wall_now_ms();
+
+        seed(&agent, "fresh", 5, now);
+        assert_eq!(declared_electorate_min(&agent.task_ctx, "fresh"), 5, "a fresh intent binds");
+
+        seed(&agent, "stale", 5, now - 4 * ELECTORATE_INTENT_TTL_MS);
+        assert_eq!(
+            declared_electorate_min(&agent.task_ctx, "stale"), 0,
+            "an intent four TTLs old must have evaporated — the floor binds while asserted, not after"
+        );
+
+        assert_eq!(declared_electorate_min(&agent.task_ctx, "absent"), 0, "no intent, no floor");
     }
 }

@@ -127,9 +127,15 @@ impl ConsensusHandle {
 
     /// Declares this node's quorum trust slice for `group` (SCP §3.1).
     ///
-    /// Stored at `consensus/trust/{group}/{node_id}` and gossip-synced to all
-    /// peers. The current protocol uses simple majority regardless of slices;
-    /// this stores intent for future slice-aware quorum extensions.
+    /// Stored at `consensus/trust/{group}/{node_id}` and gossip-synced to all peers.
+    ///
+    /// With `ConsensusConfig::use_trust_slices` set, a proposer on this node counts **only**
+    /// votes from the declared peers — the ballot loop in `consensus.rs` filters the tally on
+    /// this set — which makes it a fixed *eligible* voter set. The quorum **size** is unchanged:
+    /// simple majority over the observed roster, or `quorum_size`. Without the flag the
+    /// declaration is stored and never consulted. Slice-based quorum *intersection* (SCP §3.1
+    /// proper) is not implemented. (This comment used to say the protocol ignored slices
+    /// entirely; the tally filter has existed alongside it — doc drift found 2026-09-26.)
     pub fn declare_trust(&self, group: &str, trusted_peers: &[NodeId]) {
         let key = format!("{}{}/{}", consensus_ns::TRUST, group, self.ctx.node_id);
         if let Ok(encoded) = mycelium_core::serde_fixint::to_vec(trusted_peers) {

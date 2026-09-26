@@ -13,8 +13,9 @@ it de-risks the engagement instead of stress-testing the newest code in producti
 ## The framing (say this out loud with the customer)
 
 - The **substrate** (Layers I–III, security, SDKs) is mature and heavily tested.
-- Some **companions are new** — the `mycelium-wiki` crate and its access broker are days old and have
-  been audited once, by the team that built them. A pilot is their first real-world exercise.
+- Some **companions are newer than the substrate** — the `mycelium-wiki` crate and its access broker
+  shipped in v2.4.0 (2026-08-16) and have been audited once, by the team that built them. A pilot is
+  their first real-world exercise.
 - Therefore: **bounded scope + engineering in the loop + explicit success criteria.** Treat findings as
   the point, not a surprise.
 

@@ -413,7 +413,9 @@ let _ = agent.cluster_propose("global/epoch", Bytes::from("42"), ConsensusConfig
 // Subscribe to a slot — fires whenever the slot is committed.
 let mut rx = agent.consensus_rx("coordinator");
 
-// Quorum trust slices (SCP §3.1 — optional, stored for future slice-aware extensions).
+// Quorum trust slices (SCP §3.1). With `use_trust_slices: true` this proposer counts only
+// votes from the declared set — the fixed eligible voter set a safety-sensitive profile needs.
+// (The quorum *size* is unchanged; slice-based intersection is not implemented.)
 agent.declare_trust("workers", &[peer_a, peer_b]);
 let slices = agent.group_trust("workers");
 ```
