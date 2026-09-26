@@ -150,7 +150,7 @@ impl GossipAgent {
         // Initialise TLS context if configured.
         #[cfg(feature = "tls")]
         if let Some(ref tls_cfg) = self.config.tls {
-            match crate::tls::load_or_generate(tls_cfg, &self.node_id) {
+            match crate::tls::load_or_generate(tls_cfg, &self.node_id, std::sync::Arc::clone(&self.task_ctx.removed)) {
                 Ok(node_tls) => {
                     let arc_tls = Arc::new(node_tls);
                     // Publish Ed25519 verifying key so peers can verify signed consensus

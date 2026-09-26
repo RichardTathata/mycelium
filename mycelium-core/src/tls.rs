@@ -217,6 +217,7 @@ mod imp {
     pub fn load_or_generate(
         cfg: &TlsConfig,
         node_id: &NodeId,
+        removed: Arc<crate::removal::RemovedSet>,
     ) -> Result<NodeTls, GossipError> {
         fs::create_dir_all(&cfg.auto_cert_dir).map_err(|e| {
             GossipError::InvalidField { field: "tls", reason: format!("TLS: cannot create cert dir {:?}: {e}", cfg.auto_cert_dir) }
@@ -246,7 +247,7 @@ mod imp {
 
         // ── 4. Build rustls configs ───────────────────────────────────────
         let (server_config, client_config, gateway_server_config) =
-            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der)?;
+            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed)?;
 
         Ok(NodeTls {
             server_config: arc_swap::ArcSwap::from_pointee(server_config),
@@ -266,6 +267,7 @@ mod imp {
     pub fn generate_rotation(
         cfg: &TlsConfig,
         node_id: &NodeId,
+        removed: Arc<crate::removal::RemovedSet>,
     ) -> Result<super::RotationMaterial, GossipError> {
         let signing_key = generate_key()?;
         let verifying_key = signing_key.verifying_key().to_bytes();
@@ -278,7 +280,7 @@ mod imp {
         let (ca_cert_der, ca_key_pair) = load_existing_ca(cfg)?;
         let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
         let (server_config, client_config, gateway_server_config) =
-            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der)?;
+            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed)?;
 
         Ok(super::RotationMaterial {
             verifying_key,
@@ -449,6 +451,7 @@ mod imp {
         node_cert_der: CertificateDer<'static>,
         signing_key: &SigningKey,
         ca_cert_der: CertificateDer<'static>,
+        removed: Arc<crate::removal::RemovedSet>,
     ) -> Result<(ServerConfig, ClientConfig, ServerConfig), GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
@@ -473,6 +476,9 @@ mod imp {
             .build()
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build client verifier: {e}") })?;
 
+        // Closure plan C5: a removed member's certificate is refused at the handshake.
+        let verifier: Arc<dyn rustls::server::danger::ClientCertVerifier> =
+            Arc::new(RemovalAwareClientVerifier { inner: verifier, removed: Arc::clone(&removed) });
         let server_config = ServerConfig::builder()
             .with_client_cert_verifier(verifier)
             .with_single_cert(vec![node_cert_der.clone()], key_der.clone_key())
@@ -486,12 +492,119 @@ mod imp {
             .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: build server config: {e}") })?;
 
         // Client config: present node cert, verify server against CA
+        let server_verifier = rustls::client::WebPkiServerVerifier::builder(Arc::clone(&root_store))
+            .build()
+            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build server verifier: {e}") })?;
         let client_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(RemovalAwareServerVerifier { inner: server_verifier, removed }))
             .with_client_auth_cert(vec![node_cert_der], key_der)
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build client config: {e}") })?;
 
         Ok((server_config, client_config, gateway_server_config))
+    }
+
+    /// Refuse a certificate whose identity key belongs to a removed member (closure plan C5).
+    fn refuse_if_removed(
+        removed: &crate::removal::RemovedSet,
+        end_entity: &CertificateDer<'_>,
+    ) -> Result<(), rustls::Error> {
+        if !removed.is_empty()
+            && let Some(key) = ed25519_key_from_cert_der(end_entity.as_ref())
+            && removed.is_key_removed(&key)
+        {
+            return Err(rustls::Error::General("mycelium: this identity has been removed from the mesh".into()));
+        }
+        Ok(())
+    }
+
+    /// The CA check, then the removal check, for certificates peers present to this node's server.
+    #[derive(Debug)]
+    struct RemovalAwareClientVerifier {
+        inner: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+        removed: Arc<crate::removal::RemovedSet>,
+    }
+
+    impl rustls::server::danger::ClientCertVerifier for RemovalAwareClientVerifier {
+        fn offer_client_auth(&self) -> bool {
+            self.inner.offer_client_auth()
+        }
+        fn client_auth_mandatory(&self) -> bool {
+            self.inner.client_auth_mandatory()
+        }
+        fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+            self.inner.root_hint_subjects()
+        }
+        fn verify_client_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+            let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
+            refuse_if_removed(&self.removed, end_entity)?;
+            Ok(verified)
+        }
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            self.inner.verify_tls12_signature(message, cert, dss)
+        }
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            self.inner.verify_tls13_signature(message, cert, dss)
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.inner.supported_verify_schemes()
+        }
+    }
+
+    /// The CA check, then the removal check, for certificates the servers this node dials present.
+    #[derive(Debug)]
+    struct RemovalAwareServerVerifier {
+        inner: Arc<rustls::client::WebPkiServerVerifier>,
+        removed: Arc<crate::removal::RemovedSet>,
+    }
+
+    impl rustls::client::danger::ServerCertVerifier for RemovalAwareServerVerifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            server_name: &rustls::pki_types::ServerName<'_>,
+            ocsp_response: &[u8],
+            now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            let verified = self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+            refuse_if_removed(&self.removed, end_entity)?;
+            Ok(verified)
+        }
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            self.inner.verify_tls12_signature(message, cert, dss)
+        }
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            self.inner.verify_tls13_signature(message, cert, dss)
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.inner.supported_verify_schemes()
+        }
     }
 
     pub(crate) fn pem_cert_to_der(pem: &str) -> Result<CertificateDer<'static>, GossipError> {

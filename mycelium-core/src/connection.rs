@@ -243,6 +243,10 @@ pub async fn handle_connection(
 
         match msg {
             WireMessage::Ping { sender, known_peers } => {
+                // Closure plan C5: a removed member is not a peer, however it announces itself.
+                if task_ctx.removed.is_node_removed(&sender) {
+                    continue;
+                }
                 let now = std::time::Instant::now();
                 let sender_is_new = {
                     let guard = peers.pin();
@@ -503,6 +507,10 @@ pub async fn handle_connection(
             }
 
             WireMessage::Signal { ttl, nonce, sender, scope, kind, payload, hlc_seq } => {
+                // Closure plan C5: a removed member's signals are dropped, not delivered or forwarded.
+                if task_ctx.removed.is_node_removed(&sender) {
+                    continue;
+                }
                 let ts = crate::hlc::physical_ms(hlc.current()); // C11: dedup TTL, fails closed
                 if seen.mark_and_check(nonce, ts) {
                     continue;
@@ -615,6 +623,10 @@ pub async fn handle_connection(
             }
 
             WireMessage::Data(mut update) => {
+                // Closure plan C5: a write originated by a removed member is not applied or forwarded.
+                if task_ctx.removed.is_hash_removed(update.sender) {
+                    continue;
+                }
                 // Nonce was already checked and inserted by the early-dedup path above
                 // for FrameVersion::Current. For FrameVersion::Previous, check now.
                 if frame_version == FrameVersion::Previous {
@@ -710,6 +722,10 @@ pub async fn handle_connection(
             }
 
             WireMessage::SignedData { mut update, signer, signature } => {
+                // Closure plan C5: a write originated or signed by a removed member is not applied.
+                if task_ctx.removed.is_hash_removed(update.sender) || task_ctx.removed.is_hash_removed(signer) {
+                    continue;
+                }
                 // Dedup by nonce (no early fast-path — SignedData has a non-zero variant tag).
                 let ts = crate::hlc::physical_ms(hlc.current()); // C11: dedup TTL, fails closed
                 if seen.mark_and_check(update.nonce, ts) {

@@ -164,6 +164,10 @@ pub struct CoreCtx {
     /// connection handler (Layer I transport) is the sole writer.
     pub sys_namespace_violations: Arc<AtomicU64>,
 
+    /// **Removed members** (closure plan C5): consulted on the per-message path and by the TLS
+    /// handshake. Empty until an operator removes someone.
+    pub removed: Arc<crate::removal::RemovedSet>,
+
     // ── Networking ───────────────────────────────────────────────────────────────
     /// Live peer table shared with the HTTP gateway for peer-count-based quorum sizing. The value
     /// is when the peer was last heard from.

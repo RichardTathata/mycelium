@@ -1,6 +1,6 @@
 # Removing a member (ADR, Boundary H closure plan C5)
 
-**Status:** **adopted** 2026-09-26 on its recommendations (§5 answered below). Plan:
+**Status:** **implemented** 2026-09-26 (adopted the same day on its recommendations, §6; as built, §7). Plan:
 [`plans/boundary-h-closure.md`](../plans/boundary-h-closure.md) C5 (finding F7). It builds on the issuer-binding ADR
 ([`knowledge-issuer-binding.md`](knowledge-issuer-binding.md), P1's external-issuer path), the A1 ADR
 ([`authority-at-execution.md`](authority-at-execution.md), whose revocation view this mirrors), and the confined-fleet
@@ -116,3 +116,23 @@ key is in its own certificate directory), reported `Present` or `Absent`. `Prese
    `ca_key_on_node`.
 3. **Removal refuses the removed node's mandates at A1** (the holder is removed); no separate revocation is issued.
 
+## 7. As built (2026-09-26)
+
+- **Configured by call, not config field:** `agent.with_membership_authorities(authorities, external)`, the way C4's
+  cohort view is. `offer_member_removal` applies and publishes; `removed_members` lists them.
+- **The confinement line is `ca_key_off_node`**, a `Setting` like the report's others: `Set` when the CA key is
+  absent from `auto_cert_dir`, `Unset` when it is present or there is no TLS. Same fact as §2.4's `ca_key_on_node`,
+  phrased so that `Set` is the strict profile.
+- **Knowledge verifies the removed node's signatures as `Revoked`**, not a new `Removed` variant: its keys join
+  the revoked set, which is what makes A1 refuse its mandates too (§6.3). Attributable history, never current, as
+  §2.2 asks.
+- **Membership/SWIM is covered by the connection loop:** a removed node's pings, signals and gossip writes are
+  dropped there (by node, and for writes by origin and signer), and it leaves the peer table and the outbound
+  writers.
+- **Keys named are extended with what the node has seen:** the removal's keys, plus every current and anchored key
+  the applying node holds for that member.
+- **Not covered:** an HTTP client of some gateway that holds a token issued to the removed member's agents. Tokens
+  are a gateway credential, not a mesh identity; revoke them in the gateway's token configuration.
+- **Gate:** `lib_tests::member_removal` (three TLS nodes: refusal of untrusted and forged removals, monotonic repeat,
+  keys revoked, gossip spread, writes refused, no rejoin, the unremoved member unaffected);
+  `membership::tests`, `removal::tests`, `confinement::tests::a_ca_key_on_the_node_is_an_unmet_setting`.
