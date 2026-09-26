@@ -157,7 +157,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --lib --no-default-features -- -D warnings
+      # --bins --tests too: the `mycelium` binary once failed to compile without `cli` (its tracing-subscriber) and
+      # this line, being --lib only, never saw it.
+      - run: cargo clippy --lib --bins --tests --no-default-features -- -D warnings
 
   wasm-host:
     # WS-E M12 companion crate. Its own job: it pulls wasmtime (large first
