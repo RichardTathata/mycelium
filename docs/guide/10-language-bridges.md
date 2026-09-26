@@ -218,6 +218,20 @@ for the full reference including SSE streaming and error types.
 
 ---
 
+## The HTTP surface behind the SDKs — and what it does not return
+
+A raw-HTTP client (or an SDK reader checking what a verb really does) needs the routes and their
+shapes; the SDK READMEs carry the receipt narrative, this table carries the wire (`src/agent/http.rs`):
+
+| Route | Body → answer | What it proves |
+|---|---|---|
+| `GET /gateway/kv?key=K` | → `{"found": true, "value_b64": "…"}` or `{"found": false}` | a local read |
+| `POST /gateway/kv` | `{"key", "value_b64"}` → `{"ok": true}` | **rung 1 only, and no receipt is returned** — the route discards the write's receipt (a recorded code gap); a missing `value_b64` is **400 and no mutation** since 2.14.0 (before it, the write silently stored an empty value); `""` writes an empty value |
+| `POST /gateway/kv/quorum` | `{"key", "value_b64", "min_acks", "timeout_secs"}` → `{"ok", "acks_received"}` or `{"ok": false, "error": "timeout", "acks_received", "unknown_peers"}` | rung 3: `unknown_peers` is *silence*, not refusal — `DeliveryUnknown` in the receipt vocabulary |
+| consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why |
+
+Scopes: `kv:read` for the GET, `kv:write` for both POSTs ([rbac.md §2](../operations/rbac.md)).
+
 ## Authenticating to a token-protected gateway
 
 Any node exposed beyond loopback should carry `gateway_auth_token` (or scoped tokens / OIDC —

@@ -50,7 +50,7 @@ which reading you are looking at.
    traces show the rules are right*. Watch, for at least the longest cycle your fleet has (a membership
    cooldown, a tuner interval, the slowest install):
    - `control_would_hold_count` rising steadily → the predicate would be holding routine actions on a view
-     it considers stale: either the fleet really is that partitioned, or `ConfidenceBound` is too strict for
+     it considers stale: either the fleet really is that partitioned, or `ConfidenceBound` is too strict — and it is **not tunable**: every governor uses `ConfidenceBound::default()`, `{ max_staleness_ms: 30_000, min_peers_heard: 1 }` (`src/control.rs`), so the lever is your `health_check_interval_secs` fitting inside 30 s, not a knob (a setter is a recorded code gap, doc-coverage run 17) for
      your health-check interval. Loosen the bound *on evidence*, not the rule.
    - `held_by_spacing` rising fast → the advisor recommends faster than the spacing admits; that is the
      spacing doing its job. `held_by_settling` rising → knobs are slow to read back; check the applier.
@@ -61,7 +61,17 @@ which reading you are looking at.
    mean held — and for the effects: a group that stops leaving on a partition, a knob that changes at most
    every other tick, a boundary that releases no sooner than its spacing.
 4. **Move to `EnforceAllocated` only where rights have been allocated** (`RightsLedger::allocate`, the
-   provisioner's `with_install_rights`). An unallocated node under this profile is refused every install —
+   provisioner's `with_install_rights`).
+   The setup, which no other page shows: open the node-local journal, allocate a right, hand the
+   ledger to the actuator —
+   ```rust
+   let mut ledger = RightsLedger::open(data_dir.join("rights.journal"))?;   // src/control/ledger.rs
+   ledger.allocate(Right { holder: holder.clone(), resource: "installs".into(), units,
+                           allocated_by, term, state: RightState::Serving, valid_until_ms }).await?;
+   provisioner.with_install_rights(ledger, holder, "installs", signing_key);   // mycelium-wasm-host
+   ```
+   The journal is **node-local, never gossiped**, and belongs in the backup set beside
+   `auto_cert_dir` ([deployment.md § Backup & restore](deployment.md#backup--restore)). An unallocated node under this profile is refused every install —
    visibly, which is the point, and not what you want by surprise.
 
 ## Rollback

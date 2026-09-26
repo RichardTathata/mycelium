@@ -173,7 +173,7 @@ curl -X POST http://localhost:8400/gateway/overlay/log/append \
 - Kill one overlay node and re-run the consistent_set — it still succeeds
   (2-of-3 quorum). Kill two and it blocks (no quorum).
 - Watch `ballot/` keys appear in the KV dump (`curl
-  http://localhost:8400/gateway/kv/scan?prefix=consensus/`) as votes propagate.
+  http://localhost:8400/gateway/kv/keys?prefix=consensus/`) as votes propagate.
 
 ---
 
@@ -384,12 +384,12 @@ use mycelium::{ConsensusConfig, ConsensusResult};
 use bytes::Bytes;
 
 // Every node that should vote calls this once.
-let _listener = agent.start_consensus_listener();
+let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
 
 // Propose within a group — blocks until quorum or timeout.
 let cfg = ConsensusConfig { quorum_size: 0, ..ConsensusConfig::default() };
-match agent.group_propose("workers", "coordinator", Bytes::from("node-7"), cfg).await {
-    ConsensusResult::Committed { slot, value, ballot, persisted } => {
+match agent.consensus().group_propose("workers", "coordinator", Bytes::from("node-7"), cfg).await {
+    ConsensusResult::Committed { slot, value, ballot, persisted, .. } => {
         println!("committed: {} = {:?} @ ballot {}", slot, value, ballot);
         if !persisted {
             // Committed cluster-wide and applied here, but this node's WAL append failed
@@ -403,9 +403,17 @@ match agent.group_propose("workers", "coordinator", Bytes::from("node-7"), cfg).
     }
     ConsensusResult::Superseded { slot, ballot } => {
         // Another node reached quorum first; read the committed value.
-        let v = agent.consensus_get(&slot).unwrap();
+        let v = agent.consensus().consensus_get(&slot).unwrap();
         println!("superseded at ballot {}: {:?}", ballot, v);
     }
+    ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } => {
+        // This node cannot see an established electorate (2.14.0): an empty roster, or fewer
+        // members than a fresh MembershipIntent declares. Not a vote against — no ballot ran.
+        eprintln!("no electorate: saw {observed_members}, declared min {declared_min}");
+    }
+    // `ConsensusResult` is `#[non_exhaustive]` (2.14.0). A variant this build does not know
+    // is *not committed* — fail closed, never treat the unknown arm as success.
+    _ => eprintln!("consensus: unrecognised outcome — treating as not committed"),
 }
 
 // `persisted` (since v2.4.2) reports *local* durability of the committed slot: the WAL append is
@@ -418,16 +426,16 @@ match agent.group_propose("workers", "coordinator", Bytes::from("node-7"), cfg).
 // `cluster_propose_receipt` / `group_propose_receipt` for the same receipt instead of the bool.
 
 // System-wide proposal (all known peers vote).
-let _ = agent.cluster_propose("global/epoch", Bytes::from("42"), ConsensusConfig::default()).await;
+let _ = agent.consensus().cluster_propose("global/epoch", Bytes::from("42"), ConsensusConfig::default()).await;
 
 // Subscribe to a slot — fires whenever the slot is committed.
-let mut rx = agent.consensus_rx("coordinator");
+let mut rx = agent.consensus().consensus_rx("coordinator");
 
 // Quorum trust slices (SCP §3.1). With `use_trust_slices: true` this proposer counts only
 // votes from the declared set — the fixed eligible voter set a safety-sensitive profile needs.
 // (The quorum *size* is unchanged; slice-based intersection is not implemented.)
-agent.declare_trust("workers", &[peer_a, peer_b]);
-let slices = agent.group_trust("workers");
+agent.consensus().declare_trust("workers", &[peer_a, peer_b]);
+let slices = agent.consensus().group_trust("workers");
 ```
 
 #### Key design decisions
@@ -442,8 +450,8 @@ let slices = agent.group_trust("workers");
 | No ordering log | Each slot is an independent KV entry (CASPaxos-style); no WAL required |
 | Signing | With `tls` feature: all consensus payloads are Ed25519-signed; forged ballots are dropped. Without: trusted-domain only; Byzantine fault tolerance is out of scope |
 
-`quorum_size = 0` uses `floor(N/2) + 1` (simple majority). `max_peers` cap and
-`phase1_timeout` are tunable via `ConsensusConfig`.
+`quorum_size = 0` uses `floor(N/2) + 1` (simple majority). `phase1_timeout` is tunable via
+`ConsensusConfig`; the `max_peers` cap is a `GossipConfig` field.
 
 ---
 
@@ -478,7 +486,7 @@ on drop. The `token` field is a monotonic fencing token drawn from the commit's 
 ballot, which can regress under gossip lag — see the fencing-token discipline above).
 
 ```rust
-let guard = agent.distributed_lock("job-42", Duration::from_secs(30)).await?;
+let guard = agent.consensus().distributed_lock("job-42", Duration::from_secs(30)).await?;
 println!("fencing token: {}", guard.token);
 // exclusive work here
 drop(guard); // or guard.release()
@@ -490,7 +498,7 @@ One-shot election per group. If this node loses it reads the committed winner an
 that `NodeId` — so all nodes converge on the same answer.
 
 ```rust
-let leader = agent.elect_leader("shard-0").await?;
+let leader = agent.consensus().elect_leader("shard-0").await?;
 if leader == *agent.node_id() {
     // I won — start serving shard-0
 }
@@ -537,5 +545,5 @@ Send a payload to a specific node and wait for an explicit application-level ACK
 receiver calls `rpc_respond`). Returns `AckResult::Acknowledged` or `AckResult::Timeout`.
 
 ```rust
-let ack = agent.emit_reliable(target, "task.assign", payload, Duration::from_secs(5)).await;
+let ack = agent.service().emit_reliable(target, "task.assign", payload, Duration::from_secs(5)).await;
 ```

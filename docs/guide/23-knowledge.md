@@ -131,6 +131,54 @@ that control, or it measures caution rather than correctness.
 
 ---
 
+## Who signed it: issuer binding (Boundary H, 2.14.0)
+
+A record's issuer is a **claim** until the record is *signed* by that issuer and the signature is
+verified against a key the reader trusts. Two kinds of issuer, two key sources:
+
+- a **member** — `IssuerId::for_node(&node_id)` — signs with its mesh identity, verified through
+  the `sys/identity` records the substrate already gossips (`MemberKeys`);
+- an **external** issuer (an operator, a partner, a catalogue owner) — a name you trust explicitly:
+  `TrustedExternalIssuers::trust(issuer, key)`; a `node:`-namespaced name is refused there, so an
+  external key can never impersonate a member.
+
+```rust
+let signature = agent.sign_knowledge_record(&record)?;       // this node, as a member
+let signed = SignedRecord { record, signature: signature.to_vec() };
+let attribution = store.put_signed(signed, &members, &external)?;  // verified, or a PutRefusal
+// `store.refusal_counts()` tells you what was refused and why, by class.
+```
+
+`put_signed` is the verified path; the legacy `put` accepts an unsigned record and `classify_eligible`
+reports which records may be *presented* to a reader under the configured rules. The strength of the
+member path rests on `require_identity_proofs` (default **off**): with proofs off, a member's key is
+trust-on-first-use. Design records: [`knowledge-issuer-binding.md`](../design/knowledge-issuer-binding.md),
+[`knowledge-validity.md`](../design/knowledge-validity.md).
+
+## Cohorts and budgets
+
+A **cohort** is a population declared *at admission* by an operator — `CohortDeclaration { operator,
+cohort, seq, members, valid_from_ms, valid_until_ms }`, signed — and read through a
+`CohortView::trusting([operator])`. Two things use it: challenge admission (a threshold *by group*,
+not by member, so a colluding population inside every member's own cap is still one population) and
+the **cohort budget** at a provider: `CohortBudget::new(per_cohort, undeclared)` returns an `Arc`;
+`admit(..)` hands back an RAII slot or refuses; strangers share the `undeclared` pool. On the
+provider: `agent.with_cohort_budget(budget, view, external)` then `offer_cohort_declaration(..)`;
+watch `cohort_budget_refusals()`. Design record: [`knowledge-cohorts.md`](../design/knowledge-cohorts.md).
+
+## Durable stores
+
+`DurableKnowledgeStore::open(path)` and `DurableHeadCheckpoints::open(path)` persist through the
+node-local journal — **persist, then apply** — so a restart does not forget a verified record or a
+signed stream head. Both are files an operator backs up beside `auto_cert_dir`; neither is gossiped.
+
+## Run it
+
+```bash
+cargo run --example knowledge_layer --features tls     # required-features = ["tls"] — not default
+make gate-knowledge                                    # the semantic-gate tests
+```
+
 ## What this does not establish
 
 - **Not that evidence-aware resolution improves outcomes.** The gate shows three things are
@@ -146,6 +194,10 @@ that control, or it measures caution rather than correctness.
 ---
 
 ## Where to go next
+
+Boundary H's three design records — [issuer binding](../design/knowledge-issuer-binding.md),
+[cohorts](../design/knowledge-cohorts.md), [validity](../design/knowledge-validity.md) — and the
+operator's side of the same features in [companions.md § Knowledge](../operations/companions.md).
 
 | You want | Read |
 |---|---|

@@ -19,6 +19,76 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-09-26 (run 17)** — diff-gated over **283 commits since run 16** (v2.5.0 → v2.15.1: the whole
+  v3 contracts axis, Boundary H C1–C12, the election rewrite, three external reviews). Four parallel
+  auditors (contracts axis · authority and evidence · stability/knowledge/federation · the carried rows),
+  each opening the docs and diffing must-work instructions against code; the run-16 structural check
+  (the literal-vs-struct sweep) reproduced across every guide chapter and the three operations pages.
+  **Twelve new rows** (below). **Floor before fixes: 2 ✗ cells, 5 non-compiling or silently-failing
+  HOW instructions, 11 Thin; after: 0 ✗, 0 non-compiling, 4 Thin that are code gaps rather than doc
+  gaps.** Moves:
+  - **Security · HOW·Dev was ✗ in effect** (carried ✓ᴿ¹³): `09-security.md`'s `TlsConfig { key_path,
+    cert_path }` literal — neither field exists (`cert_pem`/`key_pem`); did not compile. Fixed; the
+    chapter's own later snippet had it right. Calibration entry (the config-literal class, **third
+    hit**; the run-16 sweep covered `PersistenceConfig` and missed this one because it swept the
+    operations pages and guides 01/13 by name rather than every chapter — now every chapter).
+  - **Layer III · HOW·Dev ✓ → Thin → ✓**: `04-consensus.md`'s two reference blocks called ten methods
+    on `agent.` that live on `agent.consensus()` / `agent.service()`, called
+    `start_consensus_listener()` without its `ConsensusConfig`, matched a `#[non_exhaustive]`
+    `ConsensusResult` without a `_` arm (the release note says the arm must fail closed; the chapter
+    showed the opposite), named `max_peers` as a `ConsensusConfig` field (it is `GossipConfig`'s), and
+    cited a `/gateway/kv/scan` route that does not exist. All fixed. Calibration entry.
+  - **Capabilities · HOW·Dev**: `02-capabilities.md`'s `CapabilityGroupDef { filter, provides,
+    requires }` omits `topology_policy` with no `..` — did not compile. Fixed (found by the sweep, not
+    a cluster). Calibration entry.
+  - **Persistence · HOW·Ops ✓ → Thin → ✓**: `production-readiness.md` §3 still prescribed *"restore =
+    put the dirs back + restart"*, the exact wording `deployment.md` retracted the same morning;
+    rewritten to the quiesce/snapshot rule and the back-up-together set. Calibration entry (same-day
+    drift inside one funnel: the runbook moved, the checklist that links it did not).
+  - **Security · HOW·Ops (A2A)**: the readiness checklist's negative probe, written 2026-09-26, named
+    `message/send` — a method the handler does not know, so it passed vacuously; now `tasks/send`.
+    And `cargo run --example identity_one_record` bare, where the demonstration needs
+    `--features tls,compliance`. Calibration entries (both in text hours old).
+  - **New rows, audited across all five cells** — Contracts & receipts ✓✓✓✓✓ (HOW·Dev gained
+    `prepare_write`/`commit_prepared`) · Effects companion (WHAT/HOW·Dev were **Missing** outside
+    rustdoc; guide 18 § *Rung 4 in practice*, a glossary row, a cookbook entry) · Replay & simulation
+    (HOW·Dev **Thin**: the node-recording recipe lived only in a companion's test — guide 19
+    § *Recording a node*; HOW·Ops **Thin**: diagnostics.md implied an operator capture path that does
+    not exist — reworded; code gap recorded) · Commitments ✓ (README and guide 24 drifts fixed) ·
+    Gateway/SDK receipt parity (WHAT/HOW·Dev **Thin** for raw HTTP: no doc described the routes, the
+    2.14.0 400, or that the plain write returns no receipt — guide 10 § *The HTTP surface*; deprecations
+    §12; code gap recorded) · Gateway caller identity (HOW·Ops **Thin**: named tokens recommended three
+    times and shown nowhere — rbac.md §1; guide 09's principal forms were un-qualified) · Action
+    evaluator + evidence ✓ (guide 20's two stale 2.14.0 paragraphs rewritten; AE3 corrections still
+    only in the ADRs — Tier 3) · Scoped mandates + authority at execution (WHAT/HOW·Dev **Thin**: guide
+    21 stopped at the wiki fence — new § *Presenting and enforcing a mandate*; HOW·Ops: readiness item
+    added; `mesh:serve` window → deprecations §11) · Member removal (WHAT/HOW·Ops were **stale**:
+    cert-rotation.md said force-removal was *not yet provided* — new § *Removing a member*; readiness
+    item) · Confined fleet (HOW·Ops: the runbook was unreachable from the operations funnel — README
+    row added) · Adaptive stability / control (HOW·Ops **Thin**: step 2 told operators to loosen a bound
+    that has no setter — reworded, code gap recorded; step 4 gained the `RightsLedger` setup) ·
+    Knowledge layer (WHAT/HOW·Ops were **Missing**, WHAT/HOW·Dev Thin: nothing after item 3 had a Dev
+    or Ops landing — guide 23 gained three sections and the run command's required feature;
+    companions.md gained the operator's section) · Federated domains (HOW·Ops **hole**: the enforced
+    domain profile was never told to the operator; `GOSSIP_DOMAIN_PROFILE` now in federation.md step 0,
+    guide 17, tuning.md; the SDK version gate named an unreleased 0.2.5) · Public discovery /
+    AgentFacts (HOW·Ops Thin: rotation behaviour — cert-rotation.md paragraph) · Election / leadership ✓
+    (the 30 s floor TTL now stated in diagnostics.md).
+  - Also: threat-model §7 was inserted before §6 (2026-09-26, mine) — moved; `08-a2a-interop.md` had no
+    word on optional auth or the evaluator — a callout; the legible-emergence taxonomy now links its
+    content-plane addendum; `mycelium-sim`'s crate doc and `mycelium-commitment`'s README each carried
+    a "not yet" that had been true for weeks; `production-readiness.md` §7's companion list omitted
+    four crates; `rbac.md` says scopes match exactly or `*` (a token scoped `llm:*` admits nothing).
+  **Code gaps surfaced (not papered):** (1) `ConfidenceBound` has no setter — every governor hardcodes
+  the default, so the control runbook's "loosen the bound" could never be followed; (2) `POST
+  /gateway/kv` discards the write's receipt and answers `{"ok":true}`, so an HTTP/SDK client cannot
+  get rung 2 for an ordinary set; (3) no operator bundle-capture path exists (`sim_seam::install` is a
+  per-thread API call); (4) `gateway_named_tokens` — the credential model the docs say to prefer — has
+  no env var, unlike `gateway_auth_token`; (5) `scope_admits` is exact-or-`*`; (6) three examples
+  (`identity_one_record`, `auditor_questions`, `coordination_viz`) declare no `required-features`
+  though their headers need them, so the bare command runs a hollow demo; (7) two TTLs read one
+  `sys/govern/membership/{group}` key (governor 5 min, electorate floor 30 s) — probably intended,
+  stated nowhere but diagnostics.md now. **Floor after fixes: 0 ✗ cells; Tier-1 open: 0 doc, 4 code.**
 - **2026-09-05 (run 16)** — diff-gated over **20 commits since run 15**: the reason 0.6.0 PAIR imports
   (OpenAI façade, router reservations, `llm_meta` + Ollama collector, `openai_serve`), two gateway-auth
   fixes (companion routes 09-04; node-level `/mcp` `/signals` `/consensus/{slot}` 09-05), the three P1
@@ -266,10 +336,10 @@ closed it.
 | Concept | WHY | WHAT·Dev | HOW·Dev | WHAT·Ops | HOW·Ops |
 |---|:--:|:--:|:--:|:--:|:--:|
 | Layer I — Gossip KV | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ |
-| KV persistence (WAL + snapshot) — split from Layer I, run 16 | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ |
+| KV persistence (WAL + snapshot) — split from Layer I, run 16 | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ ᴿ¹⁷ |
 | Layer II — Signal mesh | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Layer III — Consensus | ✓ | ✓ | ✓ ᵀ² ᴿ¹⁶ | ✓ ᵀ¹ | ✓ ᵀ¹ |
-| Capabilities / groups | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Layer III — Consensus | ✓ | ✓ | ✓ ᵀ² ᴿ¹⁶ ᴿ¹⁷ | ✓ ᵀ¹ | ✓ ᵀ¹ |
+| Capabilities / groups | ✓ | ✓ | ✓ ᴿ¹⁷ | ✓ | ✓ |
 | Distributed locks | ✓ | ✓ | ✓ | ✓ ᵀ¹ | ✓ ᵀ¹ |
 | Services / RPC | — | ✓ | ✓ ᵀ² | ✓ | ✓ |
 | Schema lifecycle | ✓ | ✓ | ✓ | ✓ | ✓ ᵀ¹ |
@@ -277,15 +347,29 @@ closed it.
 | Membership + cluster_name | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Groups (three kinds) | ✓ | ✓ ᵀ³ | ✓ | ✓ | ✓ |
 | Legible Emergence | ✓ ᵀ³ | ✓ | ✓ ᵀ³ | ✓ | ✓ |
-| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ | ✓ | ✓ |
+| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ ᴿ¹⁷ | ✓ | ✓ ᴿ¹⁷ |
 | Data erasure (crypto-shred) | ✓ | ✓ ᴿ¹³ | ✓ ᴿ¹³ | ✓ | ✓ |
 | Artifacts / library | ✓ | ✓ | ✓ ᵀ² ᴿ⁹ | ✓ | ✓ |
-| Federation / AgentFacts | ✓ | ✓ | ✓ ᵀ¹ | ✓ | ✓ |
+| Federation / AgentFacts (public discovery) | ✓ | ✓ | ✓ ᵀ¹ | ✓ | ✓ ᴿ¹⁷ |
 | Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ ᴿ¹⁶ |
-| Companions | ✓ | ✓ | ✓ | ✓ | ✓ ᵀ² |
+| Companions | ✓ | ✓ | ~ ᴿ¹⁷ (the wiki authority seam has no Dev walkthrough) | ✓ | ✓ ᵀ² |
 | Rolling upgrade (wire compat) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ² |
+| Contracts & receipts (item 1) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Effects companion (`mycelium-effects`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (no metrics; the file is where the integrator put it) |
+| Replay & simulation (item 6) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (no operator capture path — code gap) |
+| Commitments (`mycelium-commitment`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (retention names no verb) |
+| Gateway / SDK receipt parity — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Gateway caller identity (item 7) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Action evaluator + evidence (AE) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Scoped mandates + authority at execution (item 5, Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Member removal + identity authentication (C5) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Confined fleet (H7) — new, run 17 | ✓ ᴿ¹⁷ | — | — | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Adaptive stability / control (item 4) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (`ConfidenceBound` untunable — code gap) |
+| Knowledge layer (item 3 + Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Election / leadership (`mycelium::election`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 
-ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
+ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 
 ## What was found, and how it was closed
 
@@ -371,6 +455,32 @@ Prior `Clear` cells later found Thin/Missing — the ledger that scores this aud
 doc analogue of `ratings.md`'s calibration ledger). A cell with repeated hits deserves structural
 skepticism, not a re-asserted ✓.
 
+- **2026-09-26 (run 17) — Security · HOW·Dev** read `Clear` in runs 13–16 while `09-security.md`'s
+  first `TlsConfig` literal used `key_path`/`cert_path`, fields that do not exist (`cert_pem`/`key_pem`)
+  — did not compile. **Third hit of the config-literal class** (2026-07-11 wire constant; 2026-09-05
+  `PersistenceConfig`). The run-16 sweep was reproduced by name over guides 01/13 and the operations
+  pages; it never swept chapter 09. Structural fix: the sweep is over **every** `docs/guide/*.md`, and
+  the auditor prompt carries it verbatim.
+- **2026-09-26 (run 17) — Layer III · HOW·Dev** read `Clear` in runs 1–16 while `04-consensus.md`'s
+  reference blocks called ten methods on `agent.` that live on `agent.consensus()`, called
+  `start_consensus_listener()` without its argument, and matched a `#[non_exhaustive]` enum without
+  a `_` arm. The blocks were "moved from README" and never re-verified as code after the sub-handle
+  split. Found by opening the block, not by the literal sweep (which checks struct fields, not
+  receivers) — the sweep now also checks that every `agent.method(` a chapter shows exists on
+  `GossipAgent` or names its handle.
+- **2026-09-26 (run 17) — Capabilities · HOW·Dev** read `Clear` in runs 1–16 while
+  `02-capabilities.md`'s `CapabilityGroupDef` literal omitted `topology_policy` with no `..`. Same
+  class as the first entry; found by the widened sweep.
+- **2026-09-26 (run 17) — Persistence · HOW·Ops** read `Clear` from run 16 while
+  `production-readiness.md` §3's backup bullet prescribed the live-copy procedure `deployment.md`
+  retracted the same morning. Same-day drift inside one funnel: the runbook moved and the checklist
+  that links it did not. Sharpening: a change to a runbook procedure is a change to every checklist
+  line that restates it — grep the readiness page for the procedure's key phrase before closing.
+- **2026-09-26 (run 17) — Security · HOW·Ops (A2A) and identity** — text written **the same day**
+  by the materials review was already wrong when audited: the negative probe named `message/send`
+  (the handler knows `tasks/send`), so followed literally it passed vacuously on an open node; and
+  the identity example command omitted `--features tls,compliance`. The lesson is the audit's own:
+  a must-work instruction is verified against code *when written*, not at the next run. Both fixed.
 - **2026-09-05 (run 16) — Security · WHAT·Ops + HOW·Ops** read `Clear` in runs 1–15 while `rbac.md`
   (and the wiki security page) stated the public surface as exactly `/health|/ready|/stats|/metrics`
   + descriptor — but `POST /mcp` (tool invocation **with the node's identity**), `GET /signals/{kind}`
@@ -496,8 +606,8 @@ skepticism, not a re-asserted ✓.
 ## Re-run guidance
 
 The audit was a one-time systematic sweep; a re-run should be a **diff**. Re-audit a concept only
-when its code/docs changed since the last run (run 16 baseline: tag `v2.4.2` + the 2026-09-05 lint —
-`git log v2.4.2..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
+when its code/docs changed since the last run (run 17 baseline: tag `v2.15.1` + PR #426 —
+`git log v2.15.1..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
 above is the baseline: any cell dropping below ✓ is a regression. The method (four auditors, the
 Clear/Thin/Missing rubric, the exact prompts) is reproducible from this session's transcript. New
 concepts (a new sub-handle, a new companion, a new external standard) each need a fresh row audited

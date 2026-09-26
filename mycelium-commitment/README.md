@@ -61,7 +61,9 @@ faked.
 
 ## What it does not do (yet)
 
-Replay an award under `mycelium-sim`: a whole-node recording diverges on task interleaving, which needs the
-kernel's scheduler seam; the crate pins that gap with a test that asserts the divergence. A mandate revoked
+Replaying an award under `mycelium-sim` **does** work since the scheduler seam (v2.9.0):
+`a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam` asserts the replay
+succeeds and that only the disarmed plant diverges (an earlier version of this line said the opposite).
+A mandate revoked
 *during* the award's round is not caught by the check, which runs before it. Participants are named, not
 authenticated, here: authority lives in the gateway's caller context and in mandates, not in this crate.
