@@ -170,6 +170,7 @@ check.
 |---|---|---|
 | `mycelium-core/src/persistence.rs`: `open_wal` (418), `wal_append` (429–), `fsync_dir` (465), `do_snapshot` (493–: read-back 549, `tfs::write` 583, `File::open`+`sync_data` 585, `rename` 588), `replay` (212, 259) | **durability**: what survives a process kill versus a power loss; whether a write is in the page cache or on the platter; whether the directory entry for `snapshot.bin` is durable before `wal.bin` is truncated | **storage adapter** with the plan's five distinctions: volatile bytes · durable bytes · directory entries · process death ≠ power loss · write completion ≠ sync. The first scenario (PR 4) is the WAL/snapshot race with a merge-removed witness |
 | `src/agent/lifecycle.rs:64` (`create_dir_all`) · `http.rs:349,350` (cert PEMs) · `schema_handle.rs` | start-up I/O, configuration inputs | recorded **external inputs** (bundle §5), not a fault surface |
+| `src/main.rs` `record::run_recorded` — `std::fs::create_dir_all` for the bundle directory (2026-09-26) | nothing recorded: it runs **after** `take()` has removed the seams, to write the bundle of the run that just ended (`Bundle::write` does the file I/O itself). Under `sim` only. | admitted deliberately — the write is the recording's *output*, not a choice inside it; routing it through a seam would record the act of saving the recording |
 
 ### 2.5 Hash iteration order (D13)
 

@@ -117,6 +117,16 @@ impl Default for ConfidenceBound {
     }
 }
 
+impl ConfidenceBound {
+    /// The bound the operator configured — `control_max_staleness_ms` / `control_min_peers_heard`
+    /// on `GossipConfig` (env `GOSSIP_CONTROL_MAX_STALENESS_MS` / `GOSSIP_CONTROL_MIN_PEERS_HEARD`).
+    /// Every governor builds its `ControlSpec` from this rather than from `Default`, so "loosen the
+    /// bound" is a setting and not a sentence (doc-coverage run 17).
+    pub fn from_config(cfg: &crate::config::GossipConfig) -> Self {
+        Self { max_staleness_ms: cfg.control_max_staleness_ms, min_peers_heard: cfg.control_min_peers_heard }
+    }
+}
+
 /// Why a view is not certain enough. Named, so a held action says *what* was missing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Uncertainty {
@@ -617,3 +627,19 @@ mod tests {
         assert_eq!(may_propose(&pending, &s, 120_000), Ok(()), "past it, settled as unknown");
     }
 }
+
+#[cfg(test)]
+mod confidence_bound_tests {
+    use super::ConfidenceBound;
+
+    #[test]
+    fn from_config_carries_the_operator_setting() {
+        let mut cfg = crate::config::GossipConfig::default();
+        assert_eq!(ConfidenceBound::from_config(&cfg), ConfidenceBound::default(), "defaults agree");
+        cfg.control_max_staleness_ms = 120_000;
+        cfg.control_min_peers_heard = 2;
+        let b = ConfidenceBound::from_config(&cfg);
+        assert_eq!((b.max_staleness_ms, b.min_peers_heard), (120_000, 2));
+    }
+}
+

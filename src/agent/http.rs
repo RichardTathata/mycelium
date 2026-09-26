@@ -2528,7 +2528,12 @@ async fn gw_kv_get(
 
 /// `POST /gateway/kv` — write a KV entry.
 ///
-/// Body: `{"key": "…", "value_b64": "…"}`. Returns `{"ok": true}`.
+/// Body: `{"key": "…", "value_b64": "…"}`. Returns `{"ok": true, "operation_id", "local_durability",
+/// "local_durability_error"?}` — the write's **receipt** (rung 1 always; rung 2 as
+/// `local_durability`, the same vocabulary the consensus commits and the SDKs carry). Until
+/// 2026-09-26 the route discarded the receipt and answered a bare `{"ok": true}`, so an HTTP or SDK
+/// client could not learn rung 2 for an ordinary set (doc-coverage run 17). Additive: `ok` is
+/// unchanged.
 async fn gw_kv_set(
     State(ctx): State<Arc<HttpCtx>>,
     Json(body):  Json<serde_json::Value>,
@@ -2560,8 +2565,24 @@ async fn gw_kv_set(
                            Json(json!({"error":"missing 'value_b64' (use \"\" for an empty value, or DELETE to tombstone)"}))).into_response(),
     };
 
-    kv_write(&ctx.agent_ctx, key, value, false);
-    Json(json!({ "ok": true })).into_response()
+    let tc = Arc::clone(&ctx.agent_ctx);
+    let op = mycelium_core::receipt::OperationId::generate(&tc.node_id);
+    let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
+    match mycelium_core::ops::kv_set_with_receipt(&tc, op, attempt, key, value, None).await {
+        Ok(r) => {
+            let mut body = json!({
+                "ok": true,
+                "operation_id": r.operation_id.to_string(),
+                "local_durability": r.local_durability.tag(),
+            });
+            if let Some(reason) = r.local_durability.failure_reason() {
+                body["local_durability_error"] = json!(reason);
+            }
+            Json(body).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({ "ok": false, "error": e.to_string() }))).into_response(),
+    }
 }
 
 /// `DELETE /gateway/kv?key=K` — tombstone a KV entry.
@@ -6698,6 +6719,29 @@ mod gateway_caller_tests {
             .json(&serde_json::json!({"key": "probe/x", "value_b64": ""}))
             .send().await.unwrap();
         assert_eq!(write.status(), 403, "a read token does not write");
+        g.shutdown().await;
+
+        // The write's receipt (doc-coverage run 17, code gap 2): a writer sees rung 2, not a bare ok.
+        let g = node(Some(alloc_port()), vec![], |c| {
+            c.gateway_named_tokens = vec![crate::GatewayNamedToken {
+                name: "writer".into(), token: "w".into(), scopes: vec!["kv:write".into()],
+            }];
+        });
+        g.start().await.unwrap();
+        let port = g.config().http_port.unwrap();
+        for _ in 0..100 {
+            if http.get(format!("http://127.0.0.1:{port}/health")).send().await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let write = http.post(format!("http://127.0.0.1:{port}/gateway/kv"))
+            .header(axum::http::header::AUTHORIZATION, "Bearer w")
+            .json(&serde_json::json!({"key": "probe/y", "value_b64": "aGk="}))
+            .send().await.unwrap();
+        assert_eq!(write.status(), 200);
+        let body: serde_json::Value = write.json().await.unwrap();
+        assert_eq!(body["ok"], true);
+        assert!(body["operation_id"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
+        assert_eq!(body["local_durability"], "not_configured", "no persistence on this node: rung 2 says so — {body}");
 
         g.shutdown().await;
     }

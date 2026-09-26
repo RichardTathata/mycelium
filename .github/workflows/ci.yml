@@ -171,6 +171,9 @@ jobs:
       # Every target compiles without default features: an example that uses an optional feature must declare it as
       # `required-features`, or this fails. A compile check, not clippy: examples have never been linted in CI.
       - run: cargo check --all-targets --no-default-features
+      # The node binary's recorded-run path (`GOSSIP_RECORD_BUNDLE_DIR`) exists only under `sim`;
+      # nothing else builds the bin with it, so this is the line that keeps it compiling.
+      - run: cargo check --bin mycelium --features cli,sim
 
   wasm-host:
     # WS-E M12 companion crate. Its own job: it pulls wasmtime (large first

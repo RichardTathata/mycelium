@@ -3,14 +3,25 @@ use mycelium::config::GossipConfig;
 use mycelium::error::GossipError;
 use std::{error::Error, sync::Arc};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
     let config = parse_args()?;
 
+    // `GOSSIP_RECORD_BUNDLE_DIR` (builds with `sim` only): run under the replay seams on a
+    // current-thread runtime and write a bundle at shutdown — the operator's capture path that
+    // diagnostics.md used to imply and the tree did not have (doc-coverage run 17, code gap 3).
+    #[cfg(feature = "sim")]
+    if let Ok(dir) = std::env::var("GOSSIP_RECORD_BUNDLE_DIR") {
+        return record::run_recorded(config, std::path::PathBuf::from(dir));
+    }
+
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(config))
+}
+
+async fn run(config: GossipConfig) -> Result<(), Box<dyn Error>> {
     let node_id = NodeId::new(&config.bind_address, config.bind_port)?;
 
     let agent = Arc::new(GossipAgent::new(node_id, config));
@@ -218,3 +229,48 @@ async fn run_interactive(agent: Arc<GossipAgent>) -> Result<(), GossipError> {
 
     Ok(())
 }
+
+/// The recorded run. Off in every shipped build: the seams route through the kernel only under
+/// `sim`, and this module exists only then.
+#[cfg(feature = "sim")]
+mod record {
+    use super::*;
+    use mycelium::sim_seam::{install, take, SimContext};
+    use mycelium_sim::{Bundle, Kernel, Sources};
+
+    /// Install the seams for this node, run it to shutdown on a **current-thread** runtime (the
+    /// kernel is per thread; a multi-thread runtime would record a fraction of the choices), then
+    /// write the bundle. The bundle has **no witness**: it reproduces the run's timing, and whoever
+    /// debugs it adds the assertion that failed (`Bundle::witnessed_by`) before trusting a replay.
+    pub(super) fn run_recorded(config: GossipConfig, dir: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
+        let seed: u64 = std::env::var("GOSSIP_RECORD_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0x5eed);
+        // Through the seam, read *before* `install` so it is the real wall clock: the recording's
+        // `Sources` are seeded from it, and every later read is routed and recorded.
+        let wall_ms = mycelium::sim_seam::wall_now_ms();
+        let node = format!("{}:{}", config.bind_address, config.bind_port);
+        install(SimContext {
+            kernel:  Kernel::recording(),
+            sources: Sources::seeded(seed, wall_ms),
+            node,
+            offsets: Default::default(),
+        });
+        tracing::info!(dir = %dir.display(), seed, "recording this run into a replay bundle (current-thread runtime)");
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let outcome = rt.block_on(run(config));
+        drop(rt);
+
+        match take() {
+            Some(ctx) => {
+                std::fs::create_dir_all(&dir)?;
+                Bundle::new(ctx.kernel.trace().clone())
+                    .write(&dir)
+                    .map_err(|e| format!("writing the bundle: {e:?}"))?;
+                tracing::info!(dir = %dir.display(), "bundle written — add a witness before you trust a replay");
+            }
+            None => tracing::warn!("no recording context to write"),
+        }
+        outcome
+    }
+}
+

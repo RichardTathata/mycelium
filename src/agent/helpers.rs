@@ -36,7 +36,20 @@ pub(crate) use mycelium_core::ops::{
 /// membership governor's own TTL: an intent nobody is refreshing has evaporated, and an evaporated
 /// floor must not block elections forever (posture rule 5, *roles evaporate*).
 #[cfg(any(feature = "consensus", feature = "gateway"))]
+/// How long a `MembershipIntent` declares an electorate **floor** for elections. Deliberately
+/// **shorter** than the governor's own TTL on the same key (`MEMBERSHIP_INTENT_TTL_MS`, 5 min): the
+/// governor may keep *acting* on a stale intent for minutes, but a stale intent must not keep
+/// *refusing elections* for that long — a group that shrank legitimately would be wedged. Pinned at
+/// compile time, just below.
 pub(crate) const ELECTORATE_INTENT_TTL_MS: u64 = 30_000;
+
+// Two TTLs read one key, on purpose: the floor evaporates an order of magnitude before the governor
+// stops acting on the intent. If someone unifies them upward, this stops the build.
+#[cfg(any(feature = "consensus", feature = "gateway"))]
+const _: () = assert!(
+    ELECTORATE_INTENT_TTL_MS * 10 <= crate::agent::membership_governor::MEMBERSHIP_INTENT_TTL_MS,
+    "the electorate floor TTL must stay an order of magnitude below the governor's intent TTL"
+);
 
 /// The electorate a group proposal is allowed to decide with.
 #[cfg(feature = "consensus")]

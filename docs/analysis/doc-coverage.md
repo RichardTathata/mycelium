@@ -89,6 +89,15 @@ concern). WHY is usually shared Dev+Ops.
   though their headers need them, so the bare command runs a hollow demo; (7) two TTLs read one
   `sys/govern/membership/{group}` key (governor 5 min, electorate floor 30 s) — probably intended,
   stated nowhere but diagnostics.md now. **Floor after fixes: 0 ✗ cells; Tier-1 open: 0 doc, 4 code.**
+  **Same day, the code gaps closed** (`fix/doc-coverage-code-gaps`): (1) `control_max_staleness_ms` /
+  `control_min_peers_heard` on `GossipConfig` + env, every governor through
+  `ConfidenceBound::from_config`; (2) `POST /gateway/kv` returns `operation_id` / `local_durability`;
+  (3) the node binary records a run under `sim` with `GOSSIP_RECORD_BUNDLE_DIR`; (4)
+  `GOSSIP_GATEWAY_NAMED_TOKENS`; (5) `validate()` refuses a family wildcard by name rather than
+  widening `scope_admits` (a silent grant at upgrade was the wrong fix); (6) two of the three examples
+  already had entries — `coordination_viz` and `control_envelope_viz` gained theirs; (7) the two TTLs
+  are pinned by a test and cross-referenced in their doc comments. The four `~` cells above return to
+  ✓ once that branch merges.
 - **2026-09-05 (run 16)** — diff-gated over **20 commits since run 15**: the reason 0.6.0 PAIR imports
   (OpenAI façade, router reservations, `llm_meta` + Ollama collector, `openai_serve`), two gateway-auth
   fixes (companion routes 09-04; node-level `/mcp` `/signals` `/consensus/{slot}` 09-05), the three P1

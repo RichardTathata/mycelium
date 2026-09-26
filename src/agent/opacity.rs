@@ -388,7 +388,7 @@ where
             actuator: format!("boundary/{kind}"),
             spacing_ms: hint.release_spacing_ms,
             settle_timeout_ms: 0,
-            bound: ConfidenceBound::default(),
+            bound: ConfidenceBound::from_config(&ctx.config),
             profile: Profile::Legacy,
         };
         let mut last_action_ms: Option<u64> = None;
