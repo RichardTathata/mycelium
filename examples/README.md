@@ -13,6 +13,40 @@ every example by the stack **layer** it teaches *and* its facets — how deep (*
 > **Colour-coded, scannable, opens offline:** [`docs/wiki/dev/examples-layer-matrix.html`](../docs/wiki/dev/examples-layer-matrix.html)
 > is the same matrix rendered — layer dots + facet chips + a per-layer summary strip.
 
+## Recommended paths
+
+The matrix below is complete and is the architect's view. These five paths are the integrator's:
+each answers *which example fits my situation*, *what must I change*, and *how do I know it worked*.
+Every step is a run doc that follows the **tutorial contract** at the end of this section.
+
+| Reader goal | Sequence | Finish with |
+|---|---|---|
+| **Understand the substrate** | [`hello_mesh`](../docs/guide/01-gossip-kv.md) → [`hello_capability`](../docs/guide/02-capabilities.md) → [`stigmergy`](coop/README.md) | change a capability's advertisement and watch discovery converge |
+| **Integrate an existing application** | a [Python](a2a_langchain/README.md) or [TypeScript](../mycelium-ts/README.md) client, or [`hello_mesh`](../docs/guide/01-gossip-kv.md) in Rust → your tool through MCP ([`mcp_tool_authority`](../docs/guide/20-authorising-actions.md)) or A2A ([`a2a_skill_authority`](../docs/guide/20-authorising-actions.md)) → the authority check refusing a call | one customer function runs through a named, observable boundary, and one refused call proves the boundary is there |
+| **Demonstrate adaptive operations** | [`provisioning_viz`](coop/README.md) → kill the active node → recovery → [`diagnostics`](coop/README.md) | recovery *and* the evidence of its limits, on one screen |
+| **Demonstrate governed autonomy** | [`procurement_authority`](coop/README.md) → a real gateway with an evaluator ([`mcp_tool_authority`](../docs/guide/20-authorising-actions.md)) → resource-side enforcement ([`authority_drain`](../docs/design/authority-at-execution.md)) → the consumer's evidence | permission, execution and outcome visibly distinguished; a bypass evidenced |
+| **Operate across organisations** | [`federated_domains`](../docs/guide/17-federation.md) → disconnect → reconnect → revoke → [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | independent domains stay independent, and a revoked partner stays revoked |
+
+**By outcome** (the matrix's layer dots say *what a demo exercises*; these say *what it shows*):
+**recovery** — `provisioning`, `reheal_deploy`, `rotation`, `diagnostics`, `curator_handover` ·
+**authority** — `procurement_authority`, `mcp_tool_authority`, `a2a_skill_authority`, `authority_drain`,
+`coordinator_by_accretion` · **evidence** — `procurement_authority` (acts 5–6), `auditor_questions`,
+`receipt_ladder`, `replay_a_bundle` · **domain isolation** — `federated_domains`,
+`federation_trust_is_not_transitive`, `federation_facts`. A demo that is all-· in the matrix
+(`replay_a_bundle`, `curator_handover`) is not exercising *nothing*; it is exercising a contract that
+cuts across the layers, which is what these tags are for.
+
+**The tutorial contract** — what a run doc on a recommended path carries, in this order, and
+nothing the API reference already says: *prerequisites* · the *exact pinned command* · the *expected
+visible result* (the line to look for) · *key code* locations · one *exercise* · one *induced
+failure* · what the result *proves* · what it *does not prove* · *cleanup* · the *adaptation* to
+customer code. The co-op README's entries 12 and 13 are the shape; the rest of the suite READMEs
+are being brought to it path by path.
+
+**For a multi-demo presentation:** every visual demo has its own default port (below); the two that
+used to share `:8096` (`control_envelope_viz`, `guardrail_viz`) now differ and honour
+`MYCELIUM_VIZ_PORT` to move either. Check the port column before opening more than one.
+
 ## The capability matrix
 
 **Layers:** ● primary · ○ also exercises · · none — **I** gossip-KV (state) · **II** signal-mesh
@@ -130,7 +164,7 @@ links to its walkthrough README.
 | [`provisioning_viz`](coop/README.md) ★ | `:8097` | `cargo run -p mycelium-coop-examples --features wasm,metrics --bin provisioning_viz` |
 | [`catalog_viz`](coop/README.md) | `:8098` | `cargo run -p mycelium-coop-examples --features wasm,metrics --bin catalog_viz` |
 | [`wiki_council_viz`](../mycelium-wiki/examples/README.md) ★ | `:8095` | `cargo run -p mycelium-wiki --example wiki_council_viz --features gateway,llm,metrics` |
-| [`guardrail_viz`](../mycelium-guardrails/examples/README.md) ★ | `:8096` | `cargo run -p mycelium-guardrails --example guardrail_viz --features compliance,gateway,metrics-export` |
+| [`guardrail_viz`](../mycelium-guardrails/examples/README.md) ★ | `:8097` | `cargo run -p mycelium-guardrails --example guardrail_viz --features compliance,gateway,metrics-export` |
 | [`conway`](../docs/guide/01-gossip-kv.md) | `:8090` | `cargo run --example conway --features metrics` |
 | [`coordination_viz`](../docs/guide/14-patterns-and-pitfalls.md) | `:8100` | `cargo run --example coordination_viz --features metrics` |
 | [`conway-gpu`](conway-gpu/README.md) | — | `cargo run --release -p conway-gpu` (GPU/wgpu; no gateway) |

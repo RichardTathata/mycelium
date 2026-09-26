@@ -107,3 +107,9 @@ problem. Plus the Bitcoin emergent-MCB section and NANDA positioning from
 [coordinator-free-recursion](theory/coordinator-free-recursion.md). The Mycelium mapping:
 MCB ↔ Layer I/II admission · P ↔ Layer III structure · S ↔ downstream outcome · Î ↔ Layer II
 transparency — the article is the monetary instance of the Coordinator-Trap argument.
+
+**2026-09-26 — customer-materials review.** The buyer deck's overstated argument (six lines: "holds
+only what is relevant", "nothing to fail", "nothing to subpoena", "anti-fragile", "mixing them is
+free", "a moat that can't be copied") was rewritten in one pass and the undersell fixed alongside;
+the overclaim ledger in `docs/publications/README.md` carries the detail and the lesson for
+`/publication-lint`. Log: [dev/.log/2026-09-26-customer-materials.md](../dev/.log/2026-09-26-customer-materials.md).

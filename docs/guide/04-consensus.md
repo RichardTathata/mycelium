@@ -1,4 +1,14 @@
-# 04 — Consensus: strong consistency on demand
+# 04 — Consensus: quorum agreement on demand
+
+> **Read this before using it for anything exclusive.** Layer III gives you value-bound votes, a
+> leased commit and a fencing token — *agreement*, not the textbook "strong consistency". The quorum
+> is `floor(n/2)+1` over the members **this node observes**, so two nodes with different views can
+> each count a majority. The **supported profile** for a lock, a leader or a single writer is stated
+> once, in the [threat model §7](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile),
+> and checked in [production-readiness.md](../operations/production-readiness.md): fixed
+> `quorum_size`, `use_trust_slices` with every voter declaring the same set, opacity not counted as
+> absence, membership changes outside the profile — and exclusivity enforced **at the resource** by
+> refusing a stale fencing token. Everything below is the mechanism; that paragraph is the contract.
 
 ## Concept
 

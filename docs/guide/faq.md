@@ -35,7 +35,7 @@ The companions are opinionated coordination patterns on top of the **public API*
 
 | Your problem | Use | Start with |
 |---|---|---|
-| Shared eventually-consistent state, events, opt-in strong consistency | **core substrate** | [`three_node_demo`](../../README.md#run) · guide [01](01-gossip-kv.md)/[03](03-signals.md)/[04](04-consensus.md) |
+| Shared eventually-consistent state, events, opt-in quorum agreement | **core substrate** | [`three_node_demo`](../../README.md#run) · guide [01](01-gossip-kv.md)/[03](03-signals.md)/[04](04-consensus.md) |
 | Stage-by-stage work handoff, pull-based pipelines | **tuple-space** (position/coordination) | [`redistribution.rs`](../../mycelium-tuple-space/examples/redistribution.rs) · guide [07](07-pipelines.md) |
 | One shared pool of facts many agents read & refine | **blackboard** (content) | [`microgrid.rs`](../../mycelium-blackboard/examples/microgrid.rs) |
 | Durable, curated, queryable memory the fleet grounds on | **wiki** | [`wiki_chat.rs`](../../mycelium-wiki/examples/wiki_chat.rs) |

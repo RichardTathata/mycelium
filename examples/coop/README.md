@@ -13,10 +13,30 @@ A cohesive set of runnable demos for Mycelium's newer capabilities — the **mai
 
 Full design + roadmap history: [`docs/plans/example-suite.md`](../../docs/plans/example-suite.md).
 
+## Reading the co-op as your business
+
+The co-op is kept because it is understandable, constructive, and forces real distributed decisions.
+Read it with this translation and every demo is your estate:
+
+| In the co-op | In an enterprise estate |
+|---|---|
+| a depot | an operating site, a service instance, a worker pool |
+| a donation | a work item, a request, a job |
+| a kitchen | a downstream customer or consuming system |
+| a purchasing ceiling | delegated financial or operational authority, with a limit |
+| a steward | an authorised human intervener |
+| a partner co-op | a supplier or partner domain with its own trust root |
+| the morning rush | a demand change |
+| a depot going quiet | a node, zone or dependency failure |
+
+Simulated effects are labelled as such in each demo's output; a real effect (a real model, a real
+tool) is marked **manual** in the table below.
+
 ## How to run
 
-**Fourteen demos are shipped: twelve run Docker-free in CI, two are manual** (they need real
-model weights). Everything shares the [repo setup](../README.md#shared-setup); then:
+**Fifteen demos are shipped: thirteen run Docker-free in CI, two are manual** (they need real
+model weights). An earlier version of this line said twelve while `ci_smoke.sh` ran thirteen —
+the count is now checked against the script, not remembered. Everything shares the [repo setup](../README.md#shared-setup); then:
 
 ```bash
 ./ci_smoke.sh          # the twelve CI demos, in order, with assertions (also the CI job)
@@ -60,6 +80,8 @@ curl http://127.0.0.1:<printed-port>/.well-known/agent-facts.json
 | 09 | `mcp_toolgrowth` | ✅ shipped | an LLM agent grows the fabric's toolset at runtime — declares a need, the tool's **code arrives** (catalogue → pull → verify → instantiate), is bridged over MCP, then invoked |
 | 10 | `llm_council` | ✅ shipped | a council of **differentiated** LLM agents deliberates a shared task — fan-out → synthesis → iterative refinement, all via the tuple space |
 | 11 | `catalog` | ✅ shipped | the **cluster-wide artifact catalogue** — register a deployable, discover it via gossip, pull bytes over the mesh, provision & invoke (no registry server) |
+| 12 | `diagnostics` | ✅ shipped | **diagnosing an emergent condition** from a node's own local view — an intent-vs-reality mismatch induced on one depot, named by a *different* depot with no collector |
+| 13 | `procurement_authority` ⭐ | ✅ shipped | **what a gateway can promise about an agent's actions, and what it cannot** — six acts: permitted, denied, *authority not established*, an authorised intervention, a bypass the evidence names, a correction that cites what it replaces |
 | M | `model_deploy` | ✅ shipped (manual) | **a real LLM model deployed through the artifact library** — weights (GGUF) **and** their deployment **profile** as two signed artifacts, profile → weights by content address → library → catalogue → resource-checked election → streamed with live percent → resolved + `ollama create` → probe-gated → real tokens under the governed profile. Needs Ollama; not in `ci_smoke` |
 
 ## Browser showcases
@@ -322,6 +344,65 @@ addressing makes every holder (librarian or peer cache) equally verifiable, so l
 pauses nothing that any live holder can serve. Full operator + developer guide:
 [operations/artifacts.md](../../docs/operations/artifacts.md); design record:
 [design/artifact-library.md](../../docs/design/artifact-library.md).
+
+### 12 — `diagnostics`
+
+**Purpose.** The operator surface for *Legible Emergence*. The morning-rush coordinator publishes an
+intent — keep `rush-pool` between one and two depots — while four are already serving it. That is a
+benign intent-vs-reality mismatch, the kind an on-call volunteer would otherwise see only as "the
+depot count looks off". Every depot computes a **fleet diagnosis** from the gossiped KV it already
+holds, so we induce the mismatch on `depot-a` and ask `depot-b`, which never saw the operator's
+action, *what's wrong* — and it names the group, the band and the fix from its own local view.
+
+```bash
+cargo run -p mycelium-coop-examples --bin diagnostics
+```
+
+**Expect:** `All assertions passed`, with a line beginning `diagnosed` that names `rush-pool`, the
+`[1, 2]` band and the four registered depots. **Key code:** `agent.fleet_diagnosis()`; the same
+answer over `GET /gateway/diagnose`. **Exercise:** widen the band to `[1, 4]` and rerun — the
+diagnosis should disappear, not soften. **Induced failure:** stop `depot-a` before `depot-b`
+diagnoses; the mismatch is still named, because the intent and the registrations are in the KV,
+not in `depot-a`. **Proves:** diagnosis is *data*, computable anywhere the KV is. **Does not
+prove:** that a diagnosis is acted on — nothing here changes the pool. **Adapt:** replace the
+depot registrations with your service's group registrations; the intent key and the diagnosis
+API are unchanged.
+
+### 13 — `procurement_authority` ⭐ (the governed-autonomy flagship)
+
+**Purpose.** What a gateway can promise about an agent's actions, and what it cannot — on the
+**public seam and the reference evaluator**, so an adopter can run it, read it and build against it
+(the Cedar adapter and the evidence exporter are the private companion's; this runs without them).
+A co-op agent holds an approved purchasing remit with a ceiling. Six things happen:
+
+1. **A purchase within the remit** — permitted; the decision says what it checked.
+2. **An over-limit purchase** — *denied*, no business effect, and note who attests that.
+3. **A purchase nobody wrote a rule about** — **not denied**: *authority not established*, a
+   different fact that must never be reported as drift.
+4. **A steward's intervention** — a different principal, authorised on its own terms.
+5. **A misconfigured route** — denied, and it happened anyway. The evidence says **both**. This is
+   the act worth staying for: permission is not proof of outcome.
+6. **A corrected observation** — the supplier's first report was wrong; the correction cites the
+   record it replaces and the original stays on disk.
+
+Then it runs the **contract fixtures** against the evaluator — what an operator does to a
+replacement evaluator before trusting it.
+
+```bash
+cargo run -p mycelium-coop-examples --bin procurement_authority
+```
+
+**Expect:** `All assertions passed`; act three prints `authority not established`; act five prints
+`denied, and it ran anyway`. **Key code:** the `ActionEvaluator` attach, the `ReferenceEvaluator`
+rules, `AeEvidence` records, the correction. **Exercise:** raise the ceiling and watch act two
+become act one. **Induced failure:** remove the rule for act one; it becomes act three, *not* a
+denial. **Proves:** decision, execution and outcome are distinct records, and a bypass is
+*evidenced*, not prevented, by a route-level preflight. **Does not prove:** enforcement at the
+resource (that is `with_provider_enforcement` and the confined-fleet deployment), or a deployed
+cloud integration or a completed consumer acceptance journey — the fixture consumer here is a stub.
+**Adapt:** swap the co-op's operations for your tool names and the remit for your policy; the
+evaluator seam and the evidence shape are what you keep. **Business translation:** see the table
+under *Reading the co-op as your business* above.
 
 ### M — `model_deploy` (manual — a real LLM through the library)
 

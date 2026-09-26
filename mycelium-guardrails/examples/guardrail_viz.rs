@@ -16,7 +16,7 @@
 //! tab** (point it at `:9096`) shows the very same denial seals.
 //!
 //! ```text
-//! cargo run -p mycelium-guardrails --example guardrail_viz --features compliance,gateway,metrics-export  # → :8096
+//! cargo run -p mycelium-guardrails --example guardrail_viz --features compliance,gateway,metrics-export  # → :8097 (MYCELIUM_VIZ_PORT to move it)
 //! ```
 #![allow(clippy::field_reassign_with_default)]
 
@@ -30,7 +30,14 @@ use mycelium::{GossipAgent, GossipConfig, NodeId, TlsConfig};
 use mycelium_guardrails::{apply, guarded_rpc_serve, prove_denials, Policy};
 
 const KIND: &str = "agent.tool.invoke";
-const HTTP_PORT: u16 = 8096;
+/// The dashboard port: `MYCELIUM_VIZ_PORT` if set, else 8097. The browser demos used to share
+/// one hard-coded port and collided in a multi-demo presentation (readiness review, 2026-09-26);
+/// each now has its own default, and a presenter can move any of them.
+const DEFAULT_HTTP_PORT: u16 = 8097;
+
+fn http_port() -> u16 {
+    std::env::var("MYCELIUM_VIZ_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_HTTP_PORT)
+}
 /// The Mycelium gateway port on the provider node — target it with the Ops Console.
 const OPS_PORT: u16 = 9096;
 /// The Mycelium concepts + services this demo exercises — injected into the dashboard's "what you're
@@ -233,10 +240,10 @@ fn state_json(ctx: &Ctx, st: &VizState) -> String {
 // ── HTTP dashboard ─────────────────────────────────────────────────────────────
 
 async fn serve_http(ctx: Arc<Ctx>, state: Arc<Mutex<VizState>>) {
-    let listener = match TcpListener::bind(format!("127.0.0.1:{HTTP_PORT}")).await {
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", http_port())).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("HTTP server failed to bind :{HTTP_PORT} — {e}");
+            eprintln!("HTTP server failed to bind :{} — {e}", http_port());
             return;
         }
     };
@@ -358,7 +365,7 @@ async fn main() {
 
     #[cfg(feature = "gateway")]
     {
-        let _ = provider.kv().set("ui/viz", format!("http://127.0.0.1:{HTTP_PORT}/"));
+        let _ = provider.kv().set("ui/viz", format!("http://127.0.0.1:{}/", http_port()));
         let _ = provider.kv().set("ui/label", "Guardrail wedge".to_string());
     }
 
@@ -374,7 +381,7 @@ async fn main() {
 
     println!("╔══════════════════════════════════════════════════════╗");
     println!("║  Guardrail wedge — structural stop + cryptographic proof ║");
-    println!("║  Open in browser → http://127.0.0.1:{HTTP_PORT}/         ║");
+    println!("║  Open in browser → http://127.0.0.1:{}/         ║", http_port());
     #[cfg(feature = "gateway")]
     println!("║  Ops Console     → point it at 127.0.0.1:{OPS_PORT} (Audit tab = the seals) ║");
     println!("╚══════════════════════════════════════════════════════╝");

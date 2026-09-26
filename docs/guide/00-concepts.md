@@ -326,7 +326,7 @@ the question to answer is not "what went wrong" but "what should the caller do d
 |---|---|---|---|
 | **I — Gossip KV** | eventually-consistent shared state (LWW, HLC, anti-entropy) | KV entry, evaporation | [01](01-gossip-kv.md) |
 | **II — Signal mesh** | ephemeral scoped events with admission boundaries | Signal, Boundary, opacity | [03](03-signals.md) |
-| **III — Consensus** | opt-in strong consistency on top of I | quorum, leased commit, consistent_set | [04](04-consensus.md) |
+| **III — Consensus** | opt-in quorum agreement on top of I (supported profile: threat model §7) | quorum, leased commit, consistent_set | [04](04-consensus.md) |
 | **Capability system** | broker-less discovery (cuts across I–III) | Capability, Requirement, Demand, group | [02](02-capabilities.md) |
 | **Application / edge** | the patterns + the standards spoken outward | Skill, Artifact · MCP, A2A, AgentFacts | [05](05-skills.md)–[08](08-a2a-interop.md) |
 

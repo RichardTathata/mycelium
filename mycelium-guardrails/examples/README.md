@@ -80,7 +80,7 @@ and the observer prove the stop.
 ```bash
 cargo run -p mycelium-guardrails --example guardrail_viz --features compliance,gateway,metrics-export
 ```
-Open **http://127.0.0.1:8096/** — runs continuously, Ctrl-C to stop.
+Open **http://127.0.0.1:8097/** — runs continuously, Ctrl-C to stop.
 
 **What it demonstrates.** The same provider / authorized / unauthorized / observer roles as
 the wedge, driven interactively. It follows the [UI-example

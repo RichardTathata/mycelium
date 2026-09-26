@@ -1,4 +1,11 @@
-# Mycelium on Kubernetes — reference cluster
+# Mycelium on Kubernetes — reference cluster (ephemeral demonstration)
+
+> **What this is:** the *topology* — StatefulSets, a headless Service, probes, scrape annotations —
+> with **no persistence, no TLS and no gateway authentication**, on a demo image. It shows Mycelium
+> on many machines; it is not the persistent, secured profile
+> [`docs/operations/deployment.md`](../../docs/operations/deployment.md) describes, and the section
+> at the bottom lists exactly what to add before it is. The deployment guide used to say these
+> manifests implemented that profile; they never did (external readiness review, 2026-09-26).
 
 A ready-to-apply cluster: **1 seed + N workers + a management dashboard**, wired the way
 [`docs/operations/deployment.md`](../../docs/operations/deployment.md) describes (StatefulSet +
@@ -18,8 +25,8 @@ The manifests reference the image name `mycelium-demo`. Build it from the repo r
 to a registry your cluster can pull from:
 
 ```sh
-docker build -t ghcr.io/you/mycelium:v2.0.0 -f docker/Dockerfile .
-docker push  ghcr.io/you/mycelium:v2.0.0
+docker build -t ghcr.io/you/mycelium:v2.15.1 -f docker/Dockerfile .
+docker push  ghcr.io/you/mycelium:v2.15.1
 ```
 
 Point the manifests at your image by editing the `images:` block in
@@ -29,7 +36,7 @@ Point the manifests at your image by editing the `images:` block in
 images:
   - name: mycelium-demo
     newName: ghcr.io/you/mycelium
-    newTag:  v2.0.0
+    newTag:  v2.15.1
 ```
 
 For a **local kind cluster** you can skip the registry: `kind load docker-image mycelium-demo:latest`.

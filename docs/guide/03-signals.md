@@ -185,7 +185,7 @@ flood the whole mesh; it's just that only group members act on them. For very
 large clusters where bandwidth matters, prefer the `Locality` scope to
 constrain propagation geographically.
 
-→ Next: [04-consensus.md](04-consensus.md) — opt-in strong consistency on top of this substrate.
+→ Next: [04-consensus.md](04-consensus.md) — opt-in quorum agreement on top of this substrate.
 
 ---
 

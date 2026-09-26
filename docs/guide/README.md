@@ -17,7 +17,7 @@ registry, the bus, and the scheduler all at once.
 Most distributed systems treat consistency as the default and availability as
 the thing you sacrifice during a partition. Mycelium inverts this. Eventual
 consistency is the default substrate — fast, partition-tolerant, no coordinator
-required. Strong consistency is an opt-in overlay you reach for only where your
+required. Quorum agreement is an opt-in overlay you reach for only where your
 application actually needs it. You pay for guarantees only where they matter.
 
 This is what [ROADMAP.md](../../ROADMAP.md) calls **The Structural Inversion**:
@@ -81,8 +81,13 @@ still floods the mesh so it reaches its targets, and a boundary is not a
 confidentiality control (see the runtime invariants on
 [unconditional forwarding](../wiki/dev/architecture/runtime-invariants.md)).
 
-**Layer III** adds strong consistency on top of the eventual-consistency
-substrate. `consistent_set`, `append`, `distributed_lock`, and `elect_leader`
+**Layer III** adds quorum agreement on top of the eventual-consistency
+substrate — value-bound votes, leased commits, a fencing token. It is *agreement
+under a stated profile*, not "strong consistency" in the textbook sense: the quorum
+is derived from the members a node observes, so using it for an exclusive effect
+means running the supported profile in the
+[threat model](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile)
+and fencing at the resource. `consistent_set`, `append`, `distributed_lock`, and `elect_leader`
 are opt-in overlays, not the default. Pay for consistency only where you need it.
 
 **The capability system** is the connective tissue: nodes advertise what they
@@ -134,7 +139,7 @@ live outside `examples/` and are easy to miss:
 | [01](01-gossip-kv.md) | Gossip KV — shared state without a broker | `cargo run --example conway` | 30 s |
 | [02](02-capabilities.md) | Capability discovery — find nodes by what they do | `cargo run --example hello_capability` | 30 s |
 | [03](03-signals.md) | Signal mesh — ephemeral scoped events | `cargo run -p mycelium-coop-examples --bin mailbox_llm` | 30 s |
-| [04](04-consensus.md) | Consensus overlay — strong consistency on demand | overlay scenarios in `three_node_demo` | 2 min |
+| [04](04-consensus.md) | Consensus overlay — quorum agreement on demand, and its supported profile | overlay scenarios in `three_node_demo` | 2 min |
 | [05](05-skills.md) | Skills — LLM agents on the mesh | `cd examples/community && ./demo.sh` | 5 min |
 | [06](06-tool-discovery.md) | MCP tool discovery — LLM finds tools dynamically | `./examples/chat/demo.sh` | 5 min |
 | [07](07-pipelines.md) | Fluid pipelines — Agentic Flow Networks | `docker compose up --scale worker=10` | 3 min |
@@ -181,7 +186,7 @@ let val = agent.kv().get("my/key");
 agent.mesh().signal_rx(signal_kind::INVOKE);  // returns mpsc::Receiver<Signal>
 agent.mesh().emit(signal_kind::INVOKE, SignalScope::Group("nlp".into()), payload);
 
-// Layer III — strong consistency (opt-in)
+// Layer III — quorum agreement (opt-in)
 agent.consensus().consistent_set("seq/counter", b"1").await?;
 
 // Capability system — discovery
