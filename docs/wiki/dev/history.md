@@ -618,7 +618,9 @@ routes. And a **remote panic** in item 7's own refusal path.
 **The fifth, and the most instructive.** `a_replayed_write_does_not_touch_the_disk` opened a read-only
 file to prove no I/O happened; the replay path *does* re-perform a recorded success, so the write was
 failing with `EBADF` every run and the swallowed error hid it. **The test measured nothing and
-passed.** Fixing the swallow made it fail — working correctly for the first time.
+passed.** Fixing the swallow made it fail — working correctly for the first time. It was renamed with
+the fix to what it actually shows, `a_replayed_write_reperforms_the_effect_it_recorded`
+(`mycelium-core/src/sim_seam.rs`); this page carried the old name for six days (lint 2026-09-26).
 
 **Two process notes.** A fix requiring a signature for the node-principal mapping was **tried and
 reverted** — it breaks a node's own unsigned self envelope on a non-`tls` mesh, which an existing test

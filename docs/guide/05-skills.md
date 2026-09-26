@@ -31,7 +31,7 @@ sequenceDiagram
     participant R as researcher<br/>:7952
     participant W as writer<br/>:7953
 
-    You->>O: POST /invoke {"topic":"gossip protocols"}
+    You->>O: invoke.sh → rpc_call("skill.invoke", {topic:"gossip protocols"})
     O->>O: planning cycle begins<br/>tools: [researcher, writer]
     O->>R: rpc_call("skill.invoke", {topic:...})
     R->>R: LLM generates findings
