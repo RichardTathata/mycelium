@@ -27,7 +27,7 @@ this page is the index + the gate.
   accepts only that form, so a node still on the two-entry pair is refused. The Ops Console's
   **Integrity** tab answers this, or:
   `curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'`
-  → [cert-rotation.md](cert-rotation.md), `cargo run --example identity_one_record`
+  → [cert-rotation.md](cert-rotation.md), `cargo run --example identity_one_record --features tls,compliance`
 - ☐ **Understood what proofs do *not* give you** — *proofs required* is **not** *identity
   authenticated*: first sighting of an unseen node is still trust-on-first-use, and **anchors** are
   what close that. → [cert-rotation.md](cert-rotation.md)
@@ -61,7 +61,8 @@ this page is the index + the gate.
   credential required at the edge** (`CallPolicy`, [federation.md](federation.md)); or an **ingress
   in front of the route** that terminates TLS and rejects unauthenticated requests before they reach
   the node. Pick one, and then run the negative probe — an unauthenticated `POST /a2a`
-  `message/send` naming a real skill must **not** dispatch it (the skill's own counter stays at zero,
+  `tasks/send` naming a real skill must **not** dispatch it (the handler's methods are `tasks/send`,
+  `tasks/sendSubscribe`, `tasks/get`, `tasks/cancel`; any other name is `-32601` and proves nothing) (the skill's own counter stays at zero,
   the response is a refusal, and the evidence journal records the denial if an evaluator is attached).
   `with_a2a()` warns when it mounts with none of these. → [rbac.md](rbac.md),
   `cargo run --example a2a_skill_authority --features tls,a2a` (the refused call is act two)
@@ -76,6 +77,20 @@ this page is the index + the gate.
   resource** with the fencing token — winning an election is not the grant. →
   [threat-model.md §7](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile),
   guide [04](../guide/04-consensus.md), `cargo run --example coordination_integrity --features consensus`
+
+- ☐ **Execution authority, if agents act on protected resources** — an `ExecutionAuthority` is
+  attached (`with_execution_authority`), revocation checkpoints reach it within the freshness
+  window, `with_durable_epochs` is set so a **restart does not restore revoked authority**, the
+  provider side runs `with_provider_enforcement()` where the work runs, and every `mesh:read`/
+  `mesh:write` token that *serves* an RPC kind has been reissued with **`mesh:serve`** before the
+  one-release grace ends (2.15.0). Rehearse: revoke a mandate and watch running work stop within its
+  class's bound (`cargo run --example authority_drain --features compliance`).
+  → [rbac.md §2, §7](rbac.md), [confined-fleet.md §3](confined-fleet.md), guide [21](../guide/21-mandates.md)
+- ☐ **You can remove a member** — an operator authority is configured
+  (`with_membership_authorities`), the CA key is **off every node** (`ca_key_off_node` in the
+  confinement report), and a signed `MemberRemoval` has been rehearsed: the removed keys are refused
+  at the TLS handshake and `sys/membership/removed/` carries the record. → [cert-rotation.md
+  § Removing a member](cert-rotation.md), [confined-fleet.md](confined-fleet.md)
 
 ## 3 · Persistence & restart
 
@@ -99,9 +114,13 @@ this page is the index + the gate.
 - ☐ **The golden on-disk fixtures replay in your pipeline**, not only in ours. `tests/fixtures/persistence/`
   is the regression floor for what an acknowledgement means; if you fork or vendor, a PR that changes
   an ack's meaning changes a pin, in the open. Run them as part of your own acceptance.
-- ☐ **Backup covers the identity** — the data dir (WAL + snapshot) *and* `auto_cert_dir` are
-  backed up; restore = put the dirs back + restart (WAL replays, mesh re-syncs the rest). The
-  identity dir is the one part that can't be regenerated. → [deployment.md §Backup & restore](deployment.md#backup--restore)
+- ☐ **Backup is one point in time, and covers everything that carries authority.** A **quiesced
+  copy** or a **single atomic filesystem snapshot** of the data dir (WAL + snapshot), `auto_cert_dir`,
+  the `DurableEpochs` journal, the evidence journal and any companion store — *together*, never
+  copied live (a live copy can take the old snapshot and the truncated WAL). Restore = all of them
+  from the **same** point, then verify a **revoked** mandate is still refused. An earlier version of
+  this line said *"put the dirs back + restart"*; that wording is retracted.
+  → [deployment.md §Backup & restore](deployment.md#backup--restore)
 
 ## 4 · Sizing & back-pressure (the scale sweep)
 
@@ -165,8 +184,10 @@ this page is the index + the gate.
 
 ## 7 · The companions you actually use
 
-Each companion crate (`mycelium-tuple-space`, `-blackboard`, `-wiki`, `-wasm-host`, `-agentfacts`) is
-built on the public API and has its own gates + worked example. If your deployment uses one:
+Each companion crate (`mycelium-tuple-space`, `-blackboard`, `-wiki`, `-wasm-host`, `-agentfacts`,
+`-effects`, `-commitment`, `-reason`, `-guardrails`; `-sim` has nothing to operate) is built on the
+public API and has its own gates + worked example ([companions.md](companions.md) has a section
+per crate). If your deployment uses one:
 
 - ☐ its role/failover model is understood (elected role + capability-ring failover — call `shutdown`
   on teardown for the wiki),

@@ -10,6 +10,15 @@ framework that speaks A2A — LangChain, AutoGen, or a hand-rolled client — ca
 discover and call Mycelium skills without knowing anything about gossip,
 capabilities, or the mesh topology.
 
+> **What `/a2a` does and does not check.** The route is public by design: a peer needs no Mycelium
+> credential. No bearer → the caller is `anonymous`; an *unrecognised* bearer → **401**; a federation
+> credential, if presented, is the caller's identity. A malformed request answers JSON-RPC `-32700`.
+> What decides whether a skill *runs* is an attached `ActionEvaluator` (chapter
+> [20](20-authorising-actions.md)) or a federation edge ([17](17-federation.md)); with neither, an
+> anonymous caller reaches skill dispatch and `with_a2a()` warns about exactly that. Building with
+> `--features a2a` alone (no `tls`) has no evaluator by construction. The methods the handler knows
+> are `tasks/send`, `tasks/sendSubscribe`, `tasks/get` and `tasks/cancel`.
+
 ```mermaid
 sequenceDiagram
     participant LC as LangChain Agent<br/>(Python)

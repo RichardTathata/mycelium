@@ -33,6 +33,7 @@ vocabulary is in [00 · Concepts](../guide/00-concepts.md).
 | [rbac.md](rbac.md) | signed role claims, capability authz, OAuth2 gateway ACLs |
 | [sso.md](sso.md) | generic-OIDC SSO at the gateway |
 | [gateway-tls.md](gateway-tls.md) | native HTTPS for the gateway (so tokens aren't cleartext) |
+| [confined-fleet.md](confined-fleet.md) | **running untrusted agents as a confined fleet** (Boundary H7) — separate pods, the NetworkPolicy, the node settings, the reader policy, the confinement report and its `unmet()` list; the manifests in `deploy/confined-fleet/` |
 | [federation.md](federation.md) | **connecting two independently admitted meshes** (v3 item 2) — the invariant that federation never joins the transports, standing a partner up, overlapping key rotation, revoking *both* halves, and why some federated answers are `DeliveryUnknown` rather than failures |
 | [shared-responsibility-matrix.md](shared-responsibility-matrix.md) | SOC 2 control map — what Mycelium provides vs. what you own (adopter/auditor evidence) |
 | [data-erasure.md](data-erasure.md) | GDPR right-to-erasure via crypto-shredding (`SubjectKeyRegistry`) |

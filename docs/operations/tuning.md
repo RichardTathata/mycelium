@@ -17,6 +17,7 @@ operator's working set.
 | `health_check_interval_secs` | `10` | `GOSSIP_HEALTH_CHECK_INTERVAL_SECS` | s |
 | `reconnect_backoff_secs` | `5` | `GOSSIP_RECONNECT_BACKOFF_SECS` | s |
 | `peer_eviction_intervals` | `3` | `GOSSIP_PEER_EVICTION_INTERVALS` | × interval |
+| `domain_profile` | `open` | `GOSSIP_DOMAIN_PROFILE` | `open` \| `enforced` — a federated domain runs `enforced` on every node (TLS required at `validate()`) |
 | `propagation_window_secs` | `60` | `GOSSIP_PROPAGATION_WINDOW_SECS` | s |
 | `default_ttl` | `5` | `GOSSIP_DEFAULT_TTL` | hops |
 | `max_active_connections` | `0` (unlimited) | `GOSSIP_MAX_ACTIVE_CONNECTIONS` | connections |

@@ -154,6 +154,14 @@ competing one.
 
 ---
 
+**A retry token that survives *your* restart.** `retry_with_receipt` needs the prior receipt in
+memory. When the caller itself may crash between attempts, split the write:
+`let prepared = kv.prepare_write(key, value)` mints the operation identity *before* anything is sent —
+persist `prepared` wherever your own state lives — then `kv.commit_prepared(prepared)` performs it.
+A caller that comes back from its own restart re-commits the same prepared write and gets the same
+`operation_id`, so the substrate's *same identity, same content* rule turns the duplicate into an
+idempotent retry rather than a second write (`mycelium-core/src/kv_handle.rs`).
+
 ## When the answer is unknown
 
 ```rust
@@ -225,6 +233,36 @@ building a client, match on these rather than on prose.
   `DedupOutcome` of `Fresh` or `Replayed` so a destination can tell a first delivery from a retry.
 
 ---
+
+## Rung 4 in practice: `mycelium-effects`
+
+Rung 4 — *the destination committed* — is never the substrate's to claim, so it lives in a companion
+crate whose whole job is one effect happening **once** at a destination you own.
+
+```rust
+use mycelium_effects::{apply_within, Effect, EffectDestination, EffectRefusal, SqliteDestination};
+use mycelium::{AttemptId, OperationId};
+
+// The destination: one SQLite file (yours to back up), a dedup table keyed by operation id,
+// and the handler that performs the effect inside the same transaction as the dedup insert.
+let dest = Arc::new(SqliteDestination::open(path, "billing-writer", handler)?);
+
+let op = OperationId::generate();
+let effect = Effect::new(op.clone(), AttemptId::fresh(&op), payload);
+match apply_within(dest.clone(), effect, Duration::from_secs(5)).await {
+    Ok(commit)                             => { /* rung 4: the receipt names the destination */ }
+    Err(EffectRefusal::Conflict { .. })     => { /* same op id, different content — a bug upstream */ }
+    Err(EffectRefusal::DeliveryUnknown)     => { /* the deadline passed; NOT a failure — retry with the same effect */ }
+    Err(EffectRefusal::Failed(e))           => { /* the destination refused; no dedup row was written */ }
+}
+```
+
+`EffectDestination` is the one trait to implement for your own destination (`apply(&Effect) ->
+Result<DestinationCommit, EffectRefusal>`). With the `tuple-space` feature, `TupleConsumer::new(space,
+destination, namespace)` consumes work items in the order *effect first, ack second* — an ack before
+the effect is the double-delivery the crate exists to prevent. `cargo run -p mycelium-effects
+--example destination_commit` shows the ladder end to end. Operator's side: [companions.md
+§ mycelium-effects](../operations/companions.md). Design: [`exactly-once-effect.md`](../design/exactly-once-effect.md).
 
 ## Where to go next
 

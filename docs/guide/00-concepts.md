@@ -359,6 +359,7 @@ the question to answer is not "what went wrong" but "what should the caller do d
 | `operation_id` / `attempt_id` | native | caller-minted identity of an operation (stable across retries) and of each attempt; the key of every receipt | `design/contracts-receipts.md` |
 | `DeliveryUnknown` | native | a timeout's honest answer: the rungs established so far, then *unknown* — never a negative | `design/contracts-receipts.md` |
 | `Buffered` | native | a durability rung: survives a process crash, lost to a power failure. A *different* claim from `OnDisk`, not a weaker one | `receipt_ladder` |
+| Destination commit / `mycelium-effects` | native | rung 4 — one effect, once, at a destination you own; a SQLite dedup table keyed by `operation_id`, `DeliveryUnknown` on a passed deadline | guide [18](18-contracts-and-receipts.md) § Rung 4 |
 | Mandate / term / epoch | native | one appointment (enumerated operations, no wildcard) · which appointment this is · what orders authority; an installed epoch never goes backwards | `curator_handover` |
 | Allocated right | native | exclusive units in a node-local fsynced journal, never gossiped and never reclaimed because a holder went quiet (contracts axis item 4) | `design/adaptive-stability.md` |
 | Domain | native | one independently admitted mesh; federation exports *services* between domains and never joins the transports | `federated_domains` |

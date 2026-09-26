@@ -85,6 +85,8 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`a2a_skill_authority`](../docs/guide/20-authorising-actions.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · |
 | [`destination_commit`](../docs/operations/companions.md) | ● | · | · | · | Adv | CLI | · | · | · |
 | [`redistribution_cn`](../docs/guide/24-commitments.md) | · | ● | · | ● | Adv | CLI | · | · | · |
+| [`authority_drain`](../docs/design/authority-at-execution.md) | · | · | · | ● | Adv | CLI | · | ✓ | · |
+| [`confined_fleet_node`](../docs/operations/confined-fleet.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · |
 | **Coordination & identity integrity** — an election needs an electorate, winning is not a grant, one node quietly holding everything reads as healthy, and a node's identity travels as one record. All *run* in CI | | | | | | | | | |
 | [`coordination_integrity`](../docs/guide/04-consensus.md) | · | · | ● | ○ | Adv | CLI | · | · | · |
 | [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | CLI | · | · | · |

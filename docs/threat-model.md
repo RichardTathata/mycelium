@@ -407,36 +407,6 @@ more; every composed guarantee above is claimed only with its safety argument an
 
 ---
 
-## 7. Safety-sensitive agreement: the supported profile
-
-*Added 2026-09-26, from an external readiness review (its F8): "automatic quorum sizing is not a
-stable electorate". Stated here, where an adopter looks, rather than in a module comment.*
-
-Layer III's quorum is `floor(n/2)+1` over the group members **this node observes** (or a fixed
-`quorum_size`), optionally reduced by members whose load pheromone reads opaque. That is a
-*count*, not an agreement about **which** identities form the electorate: two non-empty, disjoint
-views can each satisfy a locally computed majority, so **quorum intersection across a membership
-change is an assumption the protocol does not enforce**. Value-bound votes (v2.14.0) stop two
-proposers committing different values at one ballot; they do not make two views one view.
-
-**The supported profile** for any use where the outcome is *exclusive* — a distributed lock, a
-leader, a single writer, anything a second holder would corrupt:
-
-| Setting | Required value | Why |
-|---|---|---|
-| `quorum_size` | a strict majority of the **fixed** voter set, stated explicitly | a derived quorum shrinks with the view |
-| `use_trust_slices` | `true`, with **every** voter calling `declare_trust` with the **same** set | the tally then counts only votes from the fixed *eligible* set (`consensus.rs`, pinned by `test_trust_slice_filters_votes`) |
-| `count_opaque_as_absent` | `false` | a partition that reads as "everyone else is opaque" must not become a smaller quorum |
-| membership | **fixed for the life of the slot**; drain and re-form to change it | there is no versioned electorate or transition protocol |
-| the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
-
-Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
-leaving under a live slot — Layer III is **coordination that says what it means** (a leadership
-answer names the rung it reached) and is appropriate for work distribution, elections whose loser
-merely idles, and anything where a duplicate is a cost rather than a corruption. **Not claimed:**
-a versioned electorate, a safe membership-transition protocol, or single-decree safety as a proof
-of the whole protocol. Those are roadmap; the profile above is what ships.
-
 ## 6. What identity, evidence and replay artefacts may carry (revision 2)
 
 The axis creates new records that travel: caller contexts, audit and evidence records, traces, and — with item 6 —
@@ -472,3 +442,32 @@ A record supplied by anyone else is data, never authority.
 not promise that a redaction map is complete for a custom seam an adopter adds, and does not encrypt anything in
 memory (§4 stands).
 
+## 7. Safety-sensitive agreement: the supported profile
+
+*Added 2026-09-26, from an external readiness review (its F8): "automatic quorum sizing is not a
+stable electorate". Stated here, where an adopter looks, rather than in a module comment.*
+
+Layer III's quorum is `floor(n/2)+1` over the group members **this node observes** (or a fixed
+`quorum_size`), optionally reduced by members whose load pheromone reads opaque. That is a
+*count*, not an agreement about **which** identities form the electorate: two non-empty, disjoint
+views can each satisfy a locally computed majority, so **quorum intersection across a membership
+change is an assumption the protocol does not enforce**. Value-bound votes (v2.14.0) stop two
+proposers committing different values at one ballot; they do not make two views one view.
+
+**The supported profile** for any use where the outcome is *exclusive* — a distributed lock, a
+leader, a single writer, anything a second holder would corrupt:
+
+| Setting | Required value | Why |
+|---|---|---|
+| `quorum_size` | a strict majority of the **fixed** voter set, stated explicitly | a derived quorum shrinks with the view |
+| `use_trust_slices` | `true`, with **every** voter calling `declare_trust` with the **same** set | the tally then counts only votes from the fixed *eligible* set (`consensus.rs`, pinned by `test_trust_slice_filters_votes`) |
+| `count_opaque_as_absent` | `false` | a partition that reads as "everyone else is opaque" must not become a smaller quorum |
+| membership | **fixed for the life of the slot**; drain and re-form to change it | there is no versioned electorate or transition protocol |
+| the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
+
+Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
+leaving under a live slot — Layer III is **coordination that says what it means** (a leadership
+answer names the rung it reached) and is appropriate for work distribution, elections whose loser
+merely idles, and anything where a duplicate is a cost rather than a corruption. **Not claimed:**
+a versioned electorate, a safe membership-transition protocol, or single-decree safety as a proof
+of the whole protocol. Those are roadmap; the profile above is what ships.

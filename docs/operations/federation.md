@@ -32,6 +32,13 @@ and a catalogue credential cannot make a call.
 
 ## Standing a partner up
 
+**Step 0 — the enforced domain profile, on every node.** A federated domain runs
+`GossipConfig.domain_profile = DomainProfile::Enforced` (env `GOSSIP_DOMAIN_PROFILE=enforced`;
+`mycelium-core/src/config.rs`). The default, `Open`, changes nothing and is what you get if you
+skip this: under `Enforced`, `validate()` refuses a node without TLS, and the threat model's
+Boundary D assumes every node of the domain is under it. Nothing in the three pieces below
+turns it on for you.
+
 Three pieces, in this order.
 
 ```rust
@@ -91,7 +98,7 @@ curl -sX POST localhost:7946/gateway/federation/call -H "Authorization: Bearer $
 ```
 
 ```python
-fed = agent.federation()                      # mycelium-py ≥ 0.2.5
+fed = agent.federation()                      # mycelium-py ≥ 0.2.4 (the `federation` module ships in 0.2.4)
 fed.connect("partner.example")
 fed.call("partner.example", "surplus-food/collection", "…")
 ```

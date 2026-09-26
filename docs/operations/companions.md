@@ -295,3 +295,25 @@ act with a cost, not a flag left set. The redaction rules and the witness check 
   [wiki curator/failover](../wiki/dev/companions/wiki.md#curator-election--failover-the-recallable-role-not-the-coordinator-trap),
   [tuple-space](../wiki/dev/companions/tuple-space.md), [blackboard](../wiki/dev/companions/blackboard.md).
 - Developer "which one / how to build on it": [building-on-mycelium](../guide/building-on-mycelium.md), [FAQ](../guide/faq.md).
+
+## Knowledge layer — what an operator owns (2.14.0)
+
+The knowledge layer is library-embedded (no route, no SDK verb), but three things in it are the
+operator's, not the integrator's:
+
+- **The trusted external issuers.** `TrustedExternalIssuers::trust(issuer, key)` is configuration: which
+  operators, partners and catalogue owners may sign records your readers accept. A `node:` name is
+  refused there by construction. Rotate a key by trusting the new one and dropping the old — nothing
+  re-signs old records for you.
+- **Cohort declarations.** A `CohortDeclaration` is signed by *you* (`operator`, `seq` monotonic,
+  `valid_from_ms`/`valid_until_ms`). A provider that budgets by cohort admits your fleet under the
+  declared cap and strangers under the `undeclared` pool; `cohort_budget_refusals()` is the counter to
+  chart.
+- **The durable stores.** `DurableKnowledgeStore` and `DurableHeadCheckpoints` are node-local files
+  (the paths you passed to `open`), never gossiped; they go in the backup set beside `auto_cert_dir`
+  ([deployment.md § Backup & restore](deployment.md#backup--restore)).
+
+**What it rests on:** the member signing path's strength is `require_identity_proofs`
+([cert-rotation.md § Authenticated identity](cert-rotation.md)), **default off**; with it off a
+member's key is trust-on-first-use. Dev chapter: [guide 23](../guide/23-knowledge.md).
+

@@ -148,6 +148,39 @@ unchanged is not detecting divergence — it is re-seeding.
 
 ---
 
+## Recording a node, not a function
+
+The example above installs the seams around a free function. A **node** — an agent, a companion —
+records the same way, with three more facts: the kernel is per thread, so one thread per node; the
+`sim` feature must be on in *your* build (`mycelium = { …, features = ["sim"] }` — off in every
+shipped build); and the clock is paused for the replay. This is what the commitment crate's own test
+does (`mycelium-commitment/src/lib.rs`, the whole-node recording), lifted out:
+
+```rust
+use mycelium::sim_seam::{install, take, SimContext};
+use mycelium_sim::{seams::Sources, Bundle, Kernel};
+
+// Record: one current-thread runtime, the seams installed before the node starts.
+install(SimContext { kernel: Kernel::recording(), sources: Sources::seeded(seed, wall_ms),
+                     node: "depot-north".into(), offsets: Default::default() });
+run_the_node().await;                                   // every choice goes through the seams
+let ctx = take().expect("the recording");
+Bundle::new(ctx.kernel.trace().clone())
+    .witnessed_by("the assertion that failed", Some("the toggle that makes it fail again".into()))
+    .write(&dir)?;
+
+// Replay: the same node, the bundle's trace, the wall clock held still.
+mycelium::sim_seam::pause_clock_for_replay();
+install(SimContext { kernel: Kernel::replaying(bundle.trace.clone()), .. });
+run_the_node().await;                                   // a divergence panics, naming the choice
+take(); mycelium::sim_seam::resume_clock_after_replay();
+```
+
+There is **no** operator's capture verb — no flag, config field or route starts a recording on a
+running node; a bundle is an integrator's harness artefact ([diagnostics.md § Capturing a replay
+bundle](../operations/diagnostics.md)). The scheduler seam (v2.9.0) is what makes a whole node
+replay without divergence; before it, task interleaving diverged.
+
 ## What this does not establish
 
 - **Not a multi-node schedule.** The scheduler seam's first arm covers one node's waits.

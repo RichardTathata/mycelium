@@ -76,9 +76,38 @@ curl -X POST https://gateway:9443/gateway/identity/revoke \
 ```
 
 **Ownership limit (by design):** only the node itself, holding its *current* key, can revoke
-its own keys — the coordinator-free trade-off. A **fully-compromised or offline** node cannot
-be force-revoked by a fleet operator without a separate operator-authority mechanism (not yet
-provided). Re-issuing the cluster CA remains the heavier fallback for that case.
+its own keys — the coordinator-free trade-off. A **fully-compromised or offline** node is the
+operator's case, below; an earlier version of this paragraph said that mechanism was *not yet
+provided*, which stopped being true with member removal (C5, v2.15.0).
+
+**AgentFacts across a rotation.** The facts edge (`/.well-known/agent-facts.json`) re-signs the
+document with the node's *current* key on every fetch, so a partner pulling after the rotation
+verifies against the new key; a partner that cached the previous document within its `ttl_secs`
+still verifies it against the key it was signed with (`SignedFacts::verify`), and the domain board's
+fields verify with `verify_any` against the known-key history. Nothing needs re-publishing.
+
+### Removing a member (an operator's authority, C5)
+
+Self-revocation is a node's act; **removal** is an operator's, and it names *every* key the member
+ever held so the removed node cannot come back under an older one.
+
+1. **Before you need it:** every node attaches the operator authorities it will honour —
+   `agent.with_membership_authorities(authorities, external)` (`src/agent/membership_ops.rs`) —
+   and the CA key lives **off every node** (`ca_key_off_node` in the confinement report reports
+   *unmet* otherwise, because a node that can mint a removed member a new identity defeats the
+   removal).
+2. **Build and sign** a `MemberRemoval { node, keys, seq, issued_at_ms, reason }` over its
+   `canonical_bytes()` with the operator's key (`src/membership.rs`), producing a
+   `SignedMemberRemoval`.
+3. **Offer it** to any live node: `agent.offer_member_removal(&signed)`. It is written under
+   `sys/membership/removed/{node}` (monotonic by `seq`; a lower sequence is refused) and gossips.
+4. **Verify:** `agent.removed_members()` on a few nodes, or
+   `curl -s localhost:PORT/gateway/kv/keys | grep 'sys/membership/removed/'`; a connection
+   presenting any removed key is refused at the TLS handshake.
+
+**Not covered:** gateway bearer tokens the removed member held are a separate revocation
+(`rbac.md`); and a CA key that *is* on a node can still mint a fresh identity — which is why step 1
+is a precondition, not advice. Design record: `docs/design/member-removal.md`.
 
 ### Authenticated identity — enabling proof enforcement (identity-auth Phase 2/3)
 
@@ -168,4 +197,4 @@ Expectations during/after rotation:
 | `rotate_identity` → `InvalidField { field: "tls" }` | node has no `GossipConfig::tls`, or no cluster CA on disk | enable tls; rotation requires an established CA (`ca-cert.pem` + `ca-key.pem` in `auto_cert_dir`) |
 | peers briefly reject the node's new-key frames | cutover happened before the new key gossiped | increase `propagation`; verification self-heals via anti-entropy once the key arrives |
 | `sys/identity/{node}` entry growing over time | by design — the full key history is retained (32 B/rotation) so old signatures verify | none needed; rotations are rare. If ever a concern, prune keys older than your audit-retention horizon |
-| rotating away from a compromised key, old signatures still verify | retained-key design (option B) | perform explicit revocation (re-issue CA / rebuild trust), not just rotation |
+| rotating away from a compromised key, old signatures still verify | retained-key design (option B) | remove the member (§ Removing a member) or, as the heavier fallback, re-issue the CA / rebuild trust), not just rotation |

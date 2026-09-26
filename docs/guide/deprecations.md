@@ -197,3 +197,31 @@ partner that predates the binding keeps working — and that default gives **no 
 against an active attacker**, because an absent binding is indistinguishable from a stripped one.
 Turn it on once every partner has upgraded. `BodyNotBound` means upgrade the partner;
 `BodyMismatch` means someone is on the path.
+
+## 11. `mesh:read` / `mesh:write` admitted on the serve routes — one release (2.15.0)
+
+**What changes.** Registering to serve an RPC kind — `POST /gateway/rpc/serve/{kind}` and
+`/gateway/rpc/respond` — requires the new scope **`mesh:serve`**. In 2.15.x a token holding
+`mesh:read` or `mesh:write` is still admitted there, **with a warning in the gateway log**; the
+next MINOR refuses it with `403 {"required_scope": "mesh:serve"}`.
+
+**Why.** Serving and calling were one scope, so a token that could serve could also reach the
+raw call routes; separating them is what lets a skill server hold *only* `mesh:serve` (closure plan
+C1, `src/agent/http.rs`).
+
+**Migration.** Reissue every serving client's token with `mesh:serve` (a named token,
+[rbac.md §1](../operations/rbac.md)); grep the gateway log for the warning to find the ones you
+missed. A caller that only *calls* needs no change.
+
+## 12. `POST /gateway/kv` without `value_b64` is 400 (2.14.0)
+
+**What changes.** The gateway KV write requires `value_b64`. A body without it answers **400
+`missing 'value_b64'`** and mutates nothing; before 2.14.0 it stored an **empty value** and answered
+`{"ok": true}`, so a client bug looked like success.
+
+**Why.** A write that succeeds at writing nothing is the silent failure the receipt vocabulary exists
+to remove; `""` is the explicit way to write an empty value.
+
+**Migration.** Send `value_b64` always (`""` for empty). `mycelium-py` ≥ 0.2.4 and `mycelium-ts`
+≥ 0.1.1 already do; a raw HTTP client is the one to check.
+

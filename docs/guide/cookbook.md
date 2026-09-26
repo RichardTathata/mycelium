@@ -339,6 +339,13 @@ Chapter: [09 · Security](09-security.md); ops: [rbac.md](../operations/rbac.md)
 
 ---
 
+### How do I make a side effect happen exactly once?
+
+You don't, on the substrate — rung 4 is the destination's. Use `mycelium-effects`: an `Effect` keyed
+by your `OperationId`, a destination whose dedup insert and the effect share one transaction
+(`SqliteDestination`, or your own `EffectDestination`), and `apply_within(dest, effect, deadline)`,
+whose `DeliveryUnknown` you retry with the **same** effect. Guide [18 § Rung 4](18-contracts-and-receipts.md).
+
 ## Reference — the service layer (RPC, bulk, scatter-gather, mailbox)
 
 *Moved from the repo README (2026-07-10).*

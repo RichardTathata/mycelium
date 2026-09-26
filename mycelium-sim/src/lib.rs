@@ -24,11 +24,11 @@
 //! # Scope of PR 2
 //!
 //! The kernel, the clock and RNG interfaces, record/replay, and a bundle sufficient for **exact**
-//! reproduction. What is deliberately *not* here: the storage and channel **adapters** that wire
-//! production's own `tokio::fs` and channels through these seams, and the static forbidden-call
-//! check that stops new nondeterminism from bypassing them — both PR 3. Until those land, a call
-//! that does not come through a [`seams::Seams`] is invisible to the kernel, and this crate cannot
-//! tell you that it happened.
+//! reproduction. The storage and channel **adapters** (PR 3), the timer seam every periodic loop
+//! ticks through, and the scheduler seam (v2.9.0) have since landed in `mycelium_core::sim_seam`,
+//! and the static forbidden-call check is `scripts/check-sim-seams.sh`, run by `make check` against
+//! a baseline of permitted call sites. (This paragraph said "both PR 3 … until those land" long
+//! after they had; doc-coverage run 17.)
 //!
 //! # The gate
 //!
