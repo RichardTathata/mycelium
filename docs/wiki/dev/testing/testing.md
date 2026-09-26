@@ -488,6 +488,34 @@ federation rather than about a race with gossip.
 domain's CA, as the enforced profile requires; the gateways' HTTP is plain inside the compose
 network); a hostile network between domains; more than two domains; anything under the `sim` kernel.
 
+## A per-partner claim is unfalsifiable with one partner (2026-09-23)
+
+Item 2's record states a dozen guarantees about **a partner**: this partner sees only its grants, this
+partner's credential authorises this export, revoking this partner stops only this partner. Every one of
+them was tested, and every test configured **one** partner.
+
+With one partner in the bundle, "the key for the claimed origin" and "the only key there is" are the same
+key, so a whole family of defects is invisible. The decisive plant: make `TrustBundle::acceptable_keys`
+return **every** non-revoked key in the bundle instead of the claimed domain's.
+
+| | Result under the plant |
+|---|---|
+| 24 pre-existing federation tests | **all green** |
+| the impersonation gate (two trusted partners) | fails: beta's key authenticates a credential naming gamma |
+| the three-domain end-to-end gate | fails: the forged call returns **200**, so it *ran* |
+
+That defect is a complete authentication bypass between partners, and the existing suite would have shipped
+it. The same shape caught a union catalogue (beta learns gamma's export exists) and an over-broad revoke.
+
+**The rule: a claim quantified over X needs two Xs to be a test.** One partner, one domain, one tenant, one
+gateway: a suite built at cardinality one cannot distinguish *per-X* behaviour from *global* behaviour, and
+the failure it misses is usually the one where X's authority leaks to Y. It is cheap to fix and easy to
+forget, because a cardinality-one suite is green and looks complete.
+
+The companion claim needs three: **a common neighbour must not be a bridge.** Two domains that never spoke,
+both federated with a third, must not appear in each other's membership, native namespaces or connection
+tables. `lib_tests.rs` → `three_domains_one_edge_and_the_middle_domain_is_not_a_bridge`.
+
 ## Loom: permutation model-checking of the atomic patterns
 
 Deterministic unit tests and stress loops surface a lock-free bug only by luck — the buggy

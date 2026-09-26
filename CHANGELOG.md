@@ -90,6 +90,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that can be walked around by choosing a different door is not an enforcement point. `docs/guide/20` gains the
   matching section; CI runs it.
 
+- **Two partners on one edge are gated** (federation, a test-only change). Every per-partner guarantee was
+  tested with **one** partner configured, where "the key for the claimed origin" and "the only key in the
+  bundle" are the same key. A planted bundle-wide key search left all 24 federation tests green while letting
+  one partner mint credentials in another's name. The new gate catches it as a `200` where a `401` belongs.
+  Now checked with two partners on one edge: per-partner catalogues, grants that do not cross, a trusted
+  partner that cannot speak for another, per-partner revocation, and a common neighbour that is not a bridge.
+  It complements `three_domains_compose_without_trust_composing` (a chain) with the star. Written 2026-09-23,
+  recovered from an uncommitted worktree on 2026-09-25.
+
 ### Fixed
 
 - **`/a2a` `tasks/sendSubscribe` ignored a presented mandate.** The streaming path passed no params to the action

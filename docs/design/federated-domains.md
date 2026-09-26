@@ -378,6 +378,22 @@ A sixth, cheap and worth stating: **slots are per partner** (`GatewayPool`), so 
 saturating its allowance at a hub's gateway does not refuse another's work — with two domains, "per
 partner" and "per gateway" are the same number.
 
+**The star, as well as the chain (added 2026-09-25).** The chain above has one partner per edge. With one
+partner configured, "the key for the claimed origin" and "the only key in the bundle" are the same key, so
+every per-partner claim in this record was indistinguishable from a claim about the edge as a whole.
+`three_domains_one_edge_and_the_middle_domain_is_not_a_bridge` gives alpha **two** partners, beta and gamma,
+who have no relationship with each other. It adds four edge tests, and no production change:
+- each partner's catalogue is its own grants (a union would tell beta that gamma's export exists);
+- the other partner's grant is not yours;
+- **a trusted partner cannot mint a credential in another trusted partner's name**;
+- revoking one leaves the other working;
+- **the common neighbour is not a bridge**: non-merger holds for all three pairs, beta and gamma included.
+
+The plant that shows why: make `TrustBundle::acceptable_keys` return every key in the bundle instead of the
+claimed origin's. All 24 federation tests that existed when this was written (2026-09-23) stayed green, and a
+call forged by beta in gamma's name answered **200**, so it ran. That is a complete authentication bypass
+between partners, which the new gate catches.
+
 **Row 11 is closed.**
 
 ## Appendix — anchors verified at adoption (2026-09-17)
