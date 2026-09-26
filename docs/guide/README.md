@@ -40,7 +40,10 @@ advertisements, consensus ballots, audit records, tool registrations — is
 stored as a key in the gossip KV store. There is one substrate, not a stack of
 separate systems. This means any node can inspect any layer's state, and the
 anti-entropy mechanism that heals KV partitions also heals capability routing
-and consensus voting.
+and consensus voting. The one deliberate exception is durable *evidence*: the
+action-evidence journal (v2.6.0) is node-local and never gossiped, and only a
+hash-bearing reference to each record travels the shared medium — see
+[chapter 20](20-authorising-actions.md).
 
 ---
 
@@ -72,8 +75,11 @@ key-value state — no Zookeeper, no etcd, no Redis. Any node can write; every
 node converges. HLC timestamps preserve causal ordering under clock skew.
 
 **Layer II** adds ephemeral events that propagate epidemically. Each node
-declares a `Boundary` — its admission rules — so signals flow where they're
-relevant and nowhere else.
+declares a `Boundary` — its admission rules — so a node *admits* only the
+signals relevant to it. Admission is scoped; forwarding is not: a scoped signal
+still floods the mesh so it reaches its targets, and a boundary is not a
+confidentiality control (see the runtime invariants on
+[unconditional forwarding](../wiki/dev/architecture/runtime-invariants.md)).
 
 **Layer III** adds strong consistency on top of the eventual-consistency
 substrate. `consistent_set`, `append`, `distributed_lock`, and `elect_leader`

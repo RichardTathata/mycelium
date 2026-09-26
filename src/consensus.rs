@@ -23,8 +23,16 @@
 //! - **No signing**: trusted-domain only; Byzantine fault tolerance is
 //!   out of scope.
 //! - **Quorum slices** (optional, SCP §3.1): nodes may declare trust sets via
-//!   [`GossipAgent::declare_trust`]. The basic protocol uses simple majority;
-//!   trust-slice-based quorum intersection is a future extension.
+//!   [`GossipAgent::declare_trust`]. With `use_trust_slices` the proposer's tally counts only
+//!   votes from its declared set — a fixed *eligible* voter set. The quorum size is still simple
+//!   majority (or `quorum_size`) over the observed roster; slice-based quorum *intersection* is a
+//!   future extension. **Safety-sensitive use** therefore means: `quorum_size` fixed,
+//!   `use_trust_slices` on with every voter declaring the same set, `count_opaque_as_absent`
+//!   off, and membership changes outside the supported profile — the quorum is derived from
+//!   what this node *observes*, so intersection across a membership change is an assumption,
+//!   not a consequence of value-bound votes. The eligibility filter is pinned by
+//!   `lib_tests::test_trust_slice_filters_votes` (a vote from outside the declared set is not
+//!   counted) and `test_trust_slice_admits_trusted_vote`.
 
 use crate::agent::{emit_signal, emit_signal_async, make_gossip_update, TaskCtx};
 use crate::config::{GroupTopologyPolicy, TopologyEnforcement};
