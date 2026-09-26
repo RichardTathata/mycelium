@@ -9,6 +9,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`POST /gateway/kv` returns the write's receipt** — `operation_id`, `local_durability`
+  (`on_disk` · `buffered` · `not_configured` · `failed`), `local_durability_error` when failed —
+  beside the unchanged `ok`. Until now the route discarded the receipt, so no HTTP or SDK client could
+  learn rung 2 for an ordinary set (doc-coverage run 17, code gap).
+- **The governors' confidence bound is a setting**: `GossipConfig.control_max_staleness_ms` (30 000)
+  and `control_min_peers_heard` (1), env `GOSSIP_CONTROL_MAX_STALENESS_MS` /
+  `GOSSIP_CONTROL_MIN_PEERS_HEARD`, `validate()` refuses 0. Every governor now builds its
+  `ConfidenceBound` from config (`ConfidenceBound::from_config`); before, all three hardcoded the
+  default and the control runbook's "loosen the bound on evidence" had nothing to turn.
+- **`GOSSIP_GATEWAY_NAMED_TOKENS`** — the named-token table from the environment
+  (`name|token|scope,scope;…`), so the credential model the docs prefer is settable where
+  `gateway_auth_token` is; a malformed entry refuses the whole variable at startup.
+- **The node binary records a run** when built with `sim` and started with
+  `GOSSIP_RECORD_BUNDLE_DIR=<dir>`: current-thread runtime under the replay seams, the bundle written
+  at shutdown. Off in every shipped build; CI compiles the path (`cargo check --bin mycelium
+  --features cli,sim`).
+- `[[example]]` entries with `required-features = ["metrics"]` for `coordination_viz` and
+  `control_envelope_viz`, so a bare `cargo run --example` fails loudly instead of running a hollow build.
+
+### Changed
+- **`validate()` refuses a family-wildcard scope** (`llm:*` and the like) on scoped tokens, named
+  tokens and OIDC group scopes: scopes match exactly or the single `*`, and a token written the other
+  way admitted nothing without anyone being told.
+
+**Upgrade note:** `GossipConfig` gained two fields, which breaks an exhaustive struct literal; the
+`Default`+assignment pattern is unaffected. A config that already carried a `family:*` scope now
+fails `validate()` — it never granted anything, so rewrite it as the scopes it meant.
+
 ## [2.15.1] — 2026-09-26
 
 **Two gates that never ran, and the docs saying what the code does.** Wire **v12** unchanged

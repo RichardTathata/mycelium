@@ -2166,6 +2166,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "mycelium-core",
+ "mycelium-sim",
  "mycelium-tuple-space",
  "opentelemetry",
  "opentelemetry-otlp",

@@ -54,7 +54,7 @@ compliance = ["mycelium-core/compliance", "gateway", "tls", "dep:jsonwebtoken"]
 # Exposes `test_util::alloc_port` (a bind-verified port allocator) for companion integration
 # tests. Test-only — no runtime deps, never enable in a production build.
 # Forwards core's replay seams (item 6). Off in every shipped build.
-sim = ["mycelium-core/sim"]
+sim = ["mycelium-core/sim", "dep:mycelium-sim"]
 test-util = []
 
 # The `fuzz/` directory is its own cargo-fuzz crate; keep it out of any
@@ -70,6 +70,7 @@ exclude = ["fuzz", "mycelium-wasm-host/tests/fixtures/echo-component", "examples
 # Layers III+ on top. Feature-forwarded below so `mycelium`'s tls/metrics/compliance
 # enable the matching surface in core.
 mycelium-core = { path = "mycelium-core" }
+mycelium-sim  = { path = "mycelium-sim", optional = true }   # the recorded-run path in the node binary (`sim`)
 
 # Core
 tokio = { version = "1.35", features = ["full"] }
@@ -293,3 +294,16 @@ incremental = false
 [lints.clippy]
 # Pre-existing pattern in test code — not worth refactoring 61 test initialisers
 field_reassign_with_default = "allow"
+
+# The two browser demos whose run doc says `--features metrics`: without this a bare
+# `cargo run --example …` compiled a hollow build (doc-coverage run 17, code gap 6).
+[[example]]
+name              = "coordination_viz"
+path              = "examples/coordination_viz.rs"
+required-features = ["metrics"]
+
+[[example]]
+name              = "control_envelope_viz"
+path              = "examples/control_envelope_viz.rs"
+required-features = ["metrics"]
+

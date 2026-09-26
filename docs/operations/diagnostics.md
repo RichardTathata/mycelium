@@ -326,14 +326,17 @@ bundle with no witness replays a run in which nothing went wrong, and reproducin
 that the harness works. In the witness, a `null` toggle means *the failure needs no toggle* — it does
 **not** mean nobody checked.
 
-**Capture is not on by default, does not ship enabled — and is not an operator's verb.** The seam
-routes through the kernel only under the `sim` feature, off in every shipped build; there is **no**
-CLI flag, config field or route that starts a recording on a running node. A bundle is produced by
-an integrator's harness: a `sim`-enabled build that calls `sim_seam::install` on the node's thread
-before start and `take()` after — guide [19 § Recording a node](../guide/19-replay-and-simulation.md).
-An earlier version of this paragraph read as if an operator could capture from production with a
-build switch; they cannot (doc-coverage run 17). What an operator *can* do is hand the harness the
-config and inputs it needs, redacted as above.
+**Capture is not on by default and does not ship enabled — it is a build, then a variable.** The
+seam routes through the kernel only under the `sim` feature, off in every shipped build. The node
+binary built with `--features cli,sim` and started with **`GOSSIP_RECORD_BUNDLE_DIR=<dir>`** runs on
+a current-thread runtime under the seams and writes the bundle there at shutdown (`SIGTERM`/`^C`;
+`GOSSIP_RECORD_SEED` fixes the seed). The bundle carries **no witness** — it reproduces the run's
+timing; whoever debugs it adds the assertion that failed — and its `config.json` is **empty**: the
+node writes `build.json` and `choices.trace`, and the redacted config (secrets replaced, as above) is
+attached by hand before the bundle travels. An *embedded* agent (your own binary)
+records the way guide [19 § Recording a node](../guide/19-replay-and-simulation.md) shows; nothing
+starts a recording on a node built without `sim`, and no route starts one at runtime. (Until
+2026-09-26 this paragraph implied a capture path the tree did not have — doc-coverage run 17.)
 
 ## See it: the induce-and-diagnose demo
 

@@ -45,4 +45,5 @@
 2 src/capability_config.rs
 9 src/consensus.rs
 1 src/federation/catalog.rs
+1 src/main.rs
 1 src/mesh_manifest.rs

@@ -30,6 +30,9 @@ use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn, scan_pre
 /// `sys/govern/membership/{group}` — one fleet intent per governed group.
 pub const MEMBERSHIP_PREFIX: &str = "sys/govern/membership/";
 /// Evaporation window for a membership intent (refresh within this or it self-heals away).
+/// How long the governor keeps acting on a published `MembershipIntent`. The consensus reader
+/// applies a **separate, shorter** TTL (30 s, `helpers::ELECTORATE_INTENT_TTL_MS`) to the same key
+/// for the electorate floor — see the comment there for why the two differ.
 pub const MEMBERSHIP_INTENT_TTL_MS: u64 = 5 * 60 * 1000;
 
 /// Elastic-sizing intent for one group: keep the live member count within `[min, max]`, minus any
@@ -324,7 +327,7 @@ impl GossipAgent {
             actuator: "group-membership".into(),
             spacing_ms: cooldown.as_millis() as u64,
             settle_timeout_ms: interval_secs.saturating_mul(2).saturating_mul(1000),
-            bound: ConfidenceBound::default(),
+            bound: ConfidenceBound::from_config(&self.config),
             profile: Profile::Legacy,
         };
         self.task_ctx.spawn_task(async move {
