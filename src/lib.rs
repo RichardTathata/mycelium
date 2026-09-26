@@ -280,7 +280,8 @@ pub use agent::ae_contract;
 pub use agent::confinement::{ClockSync, ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
-    mandate_operation, possession_request, resource_key, Assessment, ExecutionAuthority, PresentedMandate,
+    arguments_digest, mandate_operation, possession_request, resource_key, Assessment, ExecutionAuthority, PresentedMandate,
+    WorkGuard,
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::evidence_journal::{
