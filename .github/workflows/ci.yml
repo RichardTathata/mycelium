@@ -160,6 +160,9 @@ jobs:
       # --bins --tests too: the `mycelium` binary once failed to compile without `cli` (its tracing-subscriber) and
       # this line, being --lib only, never saw it.
       - run: cargo clippy --lib --bins --tests --no-default-features -- -D warnings
+      # Every target compiles without default features: an example that uses an optional feature must declare it as
+      # `required-features`, or this fails. A compile check, not clippy: examples have never been linted in CI.
+      - run: cargo check --all-targets --no-default-features
 
   wasm-host:
     # WS-E M12 companion crate. Its own job: it pulls wasmtime (large first

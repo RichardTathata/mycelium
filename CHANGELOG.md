@@ -126,6 +126,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Five examples declare the features they use** (`a2a_skill_authority`, `coordination_integrity`,
+  `distributed_lock`, `llm_agent`, `three_node_demo`), so `--all-targets --no-default-features` builds skip them
+  rather than failing.
 - **`--no-default-features` builds no longer fail on the node binary.** `[[bin]] mycelium` now requires `cli` (its
   `tracing-subscriber`), so builds without `cli` skip it. CI's no-default-features clippy covers `--bins --tests` too.
 - **`/a2a` `tasks/sendSubscribe` ignored a presented mandate.** The streaming path passed no params to the action

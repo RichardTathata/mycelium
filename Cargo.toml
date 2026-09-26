@@ -231,6 +231,33 @@ path              = "examples/confined_fleet_node.rs"
 # operator, the provider and the gateway (docker/Dockerfile.confined-fleet).
 required-features = ["compliance", "a2a"]
 
+# Examples that use optional features declare them, so builds without those features skip them rather than failing
+# (`cargo check --all-targets --no-default-features`).
+[[example]]
+name              = "a2a_skill_authority"
+path              = "examples/a2a_skill_authority.rs"
+required-features = ["tls", "a2a"]             # the action evaluator is gateway + tls; CI runs it with these
+
+[[example]]
+name              = "coordination_integrity"
+path              = "examples/coordination_integrity.rs"
+required-features = ["consensus"]
+
+[[example]]
+name              = "distributed_lock"
+path              = "examples/distributed_lock.rs"
+required-features = ["consensus"]
+
+[[example]]
+name              = "llm_agent"
+path              = "examples/llm_agent.rs"
+required-features = ["cli"]                    # its logging setup is tracing-subscriber
+
+[[example]]
+name              = "three_node_demo"
+path              = "examples/three_node_demo.rs"
+required-features = ["consensus", "cli"]
+
 [[example]]
 name              = "identity_one_record"
 path              = "examples/identity_one_record.rs"
