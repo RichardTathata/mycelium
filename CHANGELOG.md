@@ -126,6 +126,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`--no-default-features` builds no longer fail on the node binary.** `[[bin]] mycelium` now requires `cli` (its
+  `tracing-subscriber`), so builds without `cli` skip it. CI's no-default-features clippy covers `--bins --tests` too.
 - **`/a2a` `tasks/sendSubscribe` ignored a presented mandate.** The streaming path passed no params to the action
   preflight, so a mandate-requiring rule refused every stream call even though both SDKs offer `mandate=` on
   `stream`. It now passes the request's params, exactly as `tasks/send` does.

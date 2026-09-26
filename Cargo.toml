@@ -169,6 +169,13 @@ libc         = "0.2"
 async-openai = "0.28"
 proptest     = "1"
 
+# The node binary. Its logging setup is `tracing-subscriber`, which only the `cli` feature brings, so without `cli`
+# (e.g. `--no-default-features`) the binary is skipped rather than failing to compile.
+[[bin]]
+name              = "mycelium"
+path              = "src/main.rs"
+required-features = ["cli"]
+
 [[bin]]
 name = "skillrunner"
 path = "src/bin/skillrunner/main.rs"
