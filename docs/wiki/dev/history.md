@@ -22,6 +22,80 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.15.0 release — 2026-09-26 (tag `v2.15.0`) — authority at every door
+
+Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line.
+
+**The release exists because of a sentence in v2.14.0.** That release shipped a gateway deciding
+authority per call, and its own documentation said what it was: *a route-level preflight at this
+gateway* — **a provider reached another way is not covered**. Honest, and a boundary. This release is
+the Boundary H closure plan, **C1–C12**, closing it.
+
+**What that boundary actually contained.** A client holding `mesh:write` could put `mcp.invoke` or
+`skill.invoke` in the *body* of `POST /gateway/rpc/call` — or `scatter`, `signal/emit`,
+`mailbox/deliver`, `shard/emit`, `overlay/emit_reliable` — and reach a provider **directly**, past the
+action evaluator and every mandate check `/mcp` and `/a2a` run. The kinds now answer **`403
+protected_kind`**, naming the door to use, and a new scope **`mesh:serve`** separates serving from
+calling so a serving agent needs no power to call.
+
+**The method was enumeration, not assertion.** The question was never *can we enforce* but **where**,
+and the only way to know which doors exist is to list them and try each one. That is what C7's
+**bypass matrix** is: after a revocation, every door the code has runs nothing — `/mcp`, `/a2a` send
+*and* stream, the raw routes, a member's direct call, the SDK serve stream — measured by the
+**handlers' own counters**, with a plant proving those doors reach the handlers beforehand. A matrix
+of refusals that never verified the calls arrive is a matrix of nothing.
+
+**The awkward cases, which is where the work was.**
+
+- **C8, restart.** A replayed pre-revocation checkpoint could make a revoked term read as current.
+  `RevocationView::started_at` refuses, for freshness, checkpoints issued before the reader started —
+  relying on checkpoints being cumulative, which is the authority's contract. `DurableEpochs`
+  journals installed epochs before they take effect and reloads them as a floor.
+- **C9, check-then-act.** Answered **at each site** rather than denied. `GitStore::late_writes()`
+  counts commits that landed after the authority lapsed; a reference pre-receive hook refuses a push
+  once the appointment has expired by the remote's clock. The window is **narrowed and stated**, not
+  eliminated: a process paused after its check can still write late by the length of the pause.
+- **C10, work already running.** A provider registers calls acting under a mandate and the agent
+  re-runs A1's check every sweep; the first failed check cancels the work. Stops are recorded as
+  requested, acknowledged and confirmed.
+- **C11, the frozen clock.** Every read of `Hlc::current()` classified — the seen-set TTL sites fail
+  closed, the rest are stamps — with `scripts/check-hlc-current.sh` failing CI on an unclassified new
+  one. The end-to-end test: a gateway whose HLC is an hour behind still refuses an expired mandate.
+- **C12, the stop, measured.** `examples/authority_drain` (in CI) admits calls under a mandate on a
+  live node, revokes the term, and checks T_admit and T_drain **from the node's own records** against
+  the bound the class declares. A bound nobody measures is a hope.
+
+**C5 is the operator's answer.** A signed member removal from a configured authority names the node
+and every key it has held; an accepting node drops its pings, signals and gossip writes and refuses
+its certificate at the TLS handshake. It spreads by gossip under `sys/membership/removed/` and is
+monotonic. `ConfinementReport::ca_key_off_node` reports **unmet** for a node holding the fleet CA's
+private key — because such a node could mint a removed member a new identity, which makes the removal
+theatre.
+
+**And the clock that was failing open.** Three sites deciding whether something had **expired** read
+`physical_ms(hlc.current())`, a bare atomic load that never consults the wall clock and advances only
+on gossip traffic. On a quiet or partitioned node it froze: a mandate never expired, a checkpoint
+never went stale. A partition is exactly when an expiry check must keep counting.
+`Hlc::decision_now_ms()` is the fix — deliberately **not** `tick()`, so a reading never mutates the
+HLC — and C11 then classified every remaining read rather than leaving the next one to be found the
+same way.
+
+**Two defects found by a demonstration, not a test.** `examples/a2a_skill_authority` was written to
+show enforcement that already existed at `/a2a`; on its **first CI run** it exposed
+`submitted → failed → working` — a terminal task state followed by a non-terminal one, because the
+progress emitter was spawned before the outcome was known and never cancelled. The success path had
+it too, for any dispatch under 100 ms, so it predated the AE seam. The second was a **false failure**
+in the replay forbidden-call gate: its test-module skip matched only the literal `#[cfg(test)]`, so
+nine `#[cfg(all(test, …))]` modules were counted as production and their clock calls sat in the
+baseline as admitted debt. A gate that fires on correct code teaches people to bump the baseline
+without reading it.
+
+**Not claimed.** The check-then-act window is narrowed and stated, not closed. `clock_sync` in the
+confinement report is always `Unverified` — the substrate cannot attest to an operator's time source.
+Provider enforcement **fails closed without an evaluator**, which means a provider that attaches none
+enforces nothing; and a mandate carried to a provider is *carried, not verified*, until that provider
+verifies it.
+
 ## v2.14.0 release — 2026-09-25 (tag `v2.14.0`) — coordination that says what it means
 
 Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line.
