@@ -267,3 +267,32 @@ Entry format:
   --contains <commit>` empty, or a `[Unreleased]` CHANGELOG entry, means the claim is provisional.
   The general form, which is the part worth keeping: **a lint pass inherits the confidence of the
   gate that last ran, and `make check` is not the gate for a cross-process default.**
+- 2026-09-26 (full pass): **§1 named regression gates — a test's pre-rename name on a live page for
+  six days, through a pass that declared §1 clean.** `history.md` cited
+  `a_replayed_write_does_not_touch_the_disk`; v2.9.1 (#323, 2026-09-20) renamed it to
+  `a_replayed_write_reperforms_the_effect_it_recorded` *because* the old name described a claim the
+  fixed test no longer made. The 2026-09-24 pass did not see it because the check had no enumeration:
+  "every test cited by name" was verified for whichever names the linter happened to look for.
+  Sharpening (structural): the check is now a **mechanical sweep** — every backticked snake_case
+  identifier on every non-`.log` wiki page, grepped against the whole tree; absent = finding. Run this
+  pass, it found exactly one live-page miss and correctly ignored the dated `.log` citations.
+- 2026-09-26 (full pass): **§4 UI-example contract — two compliant browser examples unclassified
+  through a pass that ran the enumeration.** `control_envelope_viz` (added 2026-09-18) and
+  `coordination_viz` (2026-09-24) were absent from the contract page's classification line, whose
+  count still said 12 while the tree said 14. The 2026-07-15 sharpening said "classify every hit";
+  the 09-24 pass ran the grep and did not reconcile the result against the page. Sharpening: the
+  classification line pins the **hit count**, and the pass diffs that number before anything else — a
+  count that moved is a hit nobody classified.
+- 2026-09-26 (full pass): **§1 front-door pin one release behind within hours — a release-runbook
+  gap, not a lint gap.** `building-on-mycelium.md` pinned `v2.15.0` the morning v2.15.1 was cut,
+  because `RELEASING.md` §6's anchor list did not name the install snippet; the 2026-09-06 lint
+  sharpening made the pin *checkable* but left it dependent on a lint running after every release.
+  Sharpening: the pin is a release anchor in §6, and the lint check records a stale pin as *two*
+  findings (the doc, and the release step that skipped it).
+- 2026-09-26 (same pass): **§1 endpoint check — a diagram label that names a route which does not
+  exist** (`POST /invoke`, guide 05's sequence diagram; the community example drives the orchestrator
+  with `rpc_call("skill.invoke", …)`). Not a prior miss — the URL sweep is new since 09-06 and this is
+  the first pass to include guide *diagrams* in its grep — but recorded because a mermaid label is
+  exactly the place a reader treats as documentation and a linter treats as decoration. No
+  sharpening beyond the note: the sweep already covers it; keep it covering it.
+

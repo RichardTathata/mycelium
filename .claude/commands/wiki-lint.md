@@ -41,9 +41,17 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   read-modify-write that lost a concurrently-dialing peer in the fan-out activation
   (`peer_list_tx`, found live 2026-07-21; loom model `loom-spike/tests/bounded_append.rs` proves
   the schedule). The rule predated the bug — this sweep is what makes it mechanical.
-- **Named regression gates**: every test cited by name in a wiki page still exists
-  (`grep -rn "<test_name>" src/ mycelium-core/src/ mycelium-*/src/ mycelium-*/tests/`).
-  A renamed/deleted gate = a finding.
+- **Named regression gates — and every other identifier a page cites**: mechanically, not by
+  eye. Extract every backticked `snake_case` identifier with two or more underscores from every
+  wiki page **outside `.log/`** (`grep -rhoE '\`[a-z][a-z0-9]*(_[a-z0-9]+){2,}\`' docs/wiki
+  --include='*.md'`, minus the `.log` trees) and `grep -rqF` each against the whole tree (`src/`,
+  every crate's `src/` and `tests/`, `tests/`, `examples/`, `scripts/`, `.github/`, `Makefile`).
+  An identifier absent from the tree = a finding: a renamed or deleted test, function, constant or
+  flag. `.log/` entries are dated records and are exempt; a clippy lint name cited in prose is a
+  known false positive, dismiss it by hand. This replaced "every test cited by name still exists"
+  after `history.md` carried a test's pre-rename name for six days across a pass that declared
+  §1 clean — the old check had no enumeration, so it checked whatever the linter remembered
+  (ledger 2026-09-26).
 - **Cited constants/flags** (e.g. `MAX_KV_WRITE_BYTES`, `WIRE_VERSION`/`PREV_WIRE_VERSION`,
   `swim_failure_detector` default): read the cited file and confirm the stated value/default.
   **Scope includes guide *chapters*, not just the front-door docs** — grep every guide page that pins
@@ -75,7 +83,9 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   them). Verify: the reserved-KV-prefix list matches the `src/lib.rs` namespace-ownership
   table (top-level prefixes — grep `\| \`` rows, diff the sets); `WIRE_VERSION`; the eight
   sub-handle names; the `Cargo.toml` feature flags; **the install snippet's `tag = "…"` pins are the newest tag
-  on each line** (`git tag -l 'v*' | sort -V | tail -1`; `git tag -l 'mycelium-<crate>-*'`). A mismatch = a finding (fix the doc). The
+  on each line** (`git tag -l 'v*' | sort -V | tail -1`; `git tag -l 'mycelium-<crate>-*'`). A mismatch = a finding (fix the doc) —
+  and since 2026-09-26 the pin is also a **release-runbook anchor** (`RELEASING.md` §6), so a pin found stale here means
+  a release skipped that step, which is a second finding to record. The
   *linking* front-doors (the FAQ's routing tables) need only the dead-link check in §3.
 
 Numbers the wiki deliberately does NOT pin (test counts, dep counts) are exempt — the
@@ -139,7 +149,10 @@ Ops Console link, or the metrics feature is a finding. Enumerate them the tree-d
 *documented exception*. An **unclassified** hit is itself a finding: the earlier check verified a known
 list of 9 + named 2 exceptions but never reconciled against the full grep, so `ops_console` (a browser
 example that is the *consumer* of `ui/viz`, not an advertiser) sat unclassified until its 2026-07-15
-move re-ran the enumeration (ledger).
+move re-ran the enumeration (ledger). **Diff the hit count against the count written on the
+contract page's classification line** — the page pins it for exactly this; two compliant examples
+(`control_envelope_viz`, `coordination_viz`) sat unclassified through the 2026-09-24 pass because the
+enumeration was run and the list was not reconciled against it (ledger 2026-09-26).
 
 ## Output
 
