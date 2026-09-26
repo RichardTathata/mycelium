@@ -22,6 +22,21 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.15.1 release — 2026-09-26 (tag `v2.15.1`) — the review's public gates
+
+Wire **v12** unchanged (`PREV = 11`); no API change; a PATCH.
+
+An independent customer-readiness review of `46ef0c9` reported ten findings; the public-side ones
+shipped in #425, each with a regression test seen failing first. **F7:** the electorate floor never
+expired — a Unix-ms stamp compared against the monotonic seam, whose origin is three orders below any
+Unix timestamp, so the TTL saturated to zero (#377, 2.14.0); now wall time. **F9:** the
+external-authority integration test was added (#399) and broken (#417) on the same day and never ran
+in CI. **Exit criterion 3:** `ci-retest.sh` strict mode on the security gate. **F8/F10:** the
+trust-slice docs corrected and the safety-sensitive consensus profile stated; the guide's two
+overstatements fixed. The private companion's six findings closed on its own line the same day.
+The lesson, on the testing page: a documented guarantee was treated as covered without an executed
+test of its failure boundary. Log: [dev/.log/2026-09-26-review-f7-f9-doc-drift.md](.log/2026-09-26-review-f7-f9-doc-drift.md).
+
 ## v2.15.0 release — 2026-09-26 (tag `v2.15.0`) — authority at every door
 
 Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line.

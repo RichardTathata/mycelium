@@ -9,6 +9,59 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.15.1] — 2026-09-26
+
+**Two gates that never ran, and the docs saying what the code does.** Wire **v12** unchanged
+(`PREV = 11`); no API change; a PATCH.
+
+An independent customer-readiness review (2026-09-26, of `46ef0c9`) reported ten findings across the
+substrate and its private companion. The public-side ones are here. Each fix carries a regression test
+that was **seen failing before the fix** — the review's bar, and the one both gates below had been
+missing: a documented guarantee treated as covered without an executed test of its failure boundary.
+
+**Check before upgrading:** nothing to do. One behaviour change to know about: a stale
+`MembershipIntent` used to hold its electorate floor **forever**; it now expires after 30 s, as its
+documentation always said. A group that was refusing elections because of an intent nobody had
+refreshed will elect after this upgrade.
+
+### Fixed
+- **The electorate floor never expired (review F7).** `declared_electorate_min` compared a Unix-ms
+  `written_at_ms` against `mono_now_ns() / 1_000_000`. The monotonic seam's origin is a year in
+  nanoseconds (~3.15e10 ms), three orders below any Unix timestamp, so the saturating subtraction was
+  `0` for every intent and the TTL never fired — while the membership governor, reading the same key
+  with wall time, had long since let it evaporate. Shipped in #377 (2.14.0). Now
+  `sim_seam::wall_now_ms()`; `electorate_intent_tests` crosses the TTL (#425).
+- **`tests/gateway_mandate_external.rs` panicked with no runtime (review F9).** Added in #399 and
+  broken the same day by #417 (attaching an authority spawns the C10 sweeper); with a runtime it then
+  failed on fixed timestamps that C8's `mark_started` correctly refuses as predating the start. Nothing
+  noticed through the 2.15.0 tag because CI ran only the *other* root integration binary — `cargo
+  check --all-targets` proves a test compiles, not that it passes. Now `#[tokio::test]` with
+  post-attach stamps, **and a `run` line in `ci.yml`** (#425).
+
+### Changed
+- **No green-on-retry for the security gate.** `scripts/ci-retest.sh` gains `CI_RETEST_STRICT=1`: the
+  isolated rerun still happens and is annotated, but a pass on retry fails the job. Applied to the
+  `compliance,a2a` lib suite — the audit chain and both gateway enforcement points (#425).
+- **Trust slices say what they do (review F8).** `declare_trust`'s comment, the `consensus.rs` header
+  and guide chapter 4 said slices were stored for a future extension; the ballot loop has filtered the
+  tally on the declared set under `use_trust_slices` all along. Restated as what it is — a fixed
+  *eligible* voter set, quorum size unchanged, slice-based intersection not implemented — and the
+  header states the **safety-sensitive profile**: fixed `quorum_size`, `use_trust_slices` on with
+  every voter declaring the same set, `count_opaque_as_absent` off, membership changes outside the
+  profile. The quorum is derived from what a node *observes*, so intersection across a membership
+  change is an assumption, not a consequence of value-bound votes (#425).
+- **Guide wording (review F10).** *"signals flow where they're relevant and nowhere else"* — admission
+  is scoped, forwarding is not, and a boundary is not a confidentiality control; *"every higher-layer
+  feature is stored in the gossip KV"* — the evidence journal (2.6.0) deliberately is not; the on-ramp
+  pin example moves to the current tag; the pilot page's *"days old"* dated (#425).
+- **Wiki:** two rules in `dev/testing/testing.md` — every `tests/*.rs` binary has a `run` line in
+  `ci.yml`, and every documented expiry has a test that crosses it (#425).
+
+### Not claimed
+- The review's F8 (automatic quorum sizing is not a stable electorate) is answered by **restricting
+  the supported profile and stating it**, not by a versioned electorate or a membership-transition
+  protocol. Dynamic membership under safety-sensitive agreement remains roadmap work.
+
 ## [2.15.0] — 2026-09-26
 
 **Authority at every door.** Wire **v12** unchanged (`PREV = 11`); additive on the 2.x line throughout.
