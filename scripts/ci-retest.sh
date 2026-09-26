@@ -18,7 +18,15 @@
 #
 # Deterministic unit gates should stay on bare `cargo test`; route only the port-binding suites
 # through this tier.
+#
+# STRICT MODE (`CI_RETEST_STRICT=1`): the retry still runs, and the annotation is still written,
+# but a pass-on-retry is a FAILURE. For the gates that carry a security or correctness claim —
+# the audit chain and both gateway enforcement points — "eventually green" is not the same as
+# deterministic, and an intermittent correctness failure would otherwise pass on the second try
+# (external review, 2026-09-26). The isolated rerun is kept because it is diagnostic: it tells
+# the reader whether the failure is order-dependent.
 set -uo pipefail
+strict="${CI_RETEST_STRICT:-0}"
 
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
@@ -43,6 +51,10 @@ for t in "${failed[@]}"; do
     echo "::warning title=FLAKY TEST::${msg}"
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
       echo "⚠️ **FLAKY**: \`$t\` (\`cargo test $*\`)" >> "$GITHUB_STEP_SUMMARY"
+    fi
+    if [ "$strict" = "1" ]; then
+      echo "── ci-retest: STRICT — a pass on retry is a failure for this gate ──"
+      rc=1
     fi
   else
     echo "── ci-retest: $t failed twice — real failure ──"

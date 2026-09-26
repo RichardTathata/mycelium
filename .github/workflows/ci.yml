@@ -30,7 +30,10 @@ jobs:
       # chain lives behind `compliance` and the A2A enforcement point behind `a2a`, and
       # neither standard gate built the pair — so a test of the two together silently
       # never ran. Widening an existing gate can only catch more.
-      - run: ./scripts/ci-retest.sh --lib --features compliance,a2a
+      # STRICT: the audit chain and both gateway enforcement points are a security gate, and a
+      # security gate that goes green on an isolated retry has not passed. The retry still runs
+      # (it is diagnostic) and is still annotated, but it fails the job.
+      - run: CI_RETEST_STRICT=1 ./scripts/ci-retest.sh --lib --features compliance,a2a
       # Consensus-free embed: gateway without the consensus feature must still
       # test green (a minimal-embed node forwards PROPOSE/VOTE/COMMIT without
       # running them). Same 2026-07-21 gap closure.
@@ -59,6 +62,11 @@ jobs:
       # compile and be able to permit, deny and be undecided. `--lib` would never catch a
       # `#[non_exhaustive]` constructor hole, which is how one shipped into review (2026-09-15).
       - run: cargo test --test ae_external_adapter --features tls,a2a
+      # Same premise for the operator-built execution authority (`with_execution_authority`). Added
+      # in #399, broken the same day by #417's sweeper spawn, and unnoticed through the v2.15.0 tag
+      # because only the line above was ever *run* here — a `tests/` binary that CI compiles and
+      # does not execute is not a gate (external review F9, 2026-09-26).
+      - run: cargo test --test gateway_mandate_external --features tls,a2a
       # `tls` as well as `fuzz-internals`: two of the trust-edge parsers (the presented
       # credential, the catalogue reply) live behind it, so without it they are not
       # compiled and the mini-fuzz would silently cover two of four.
