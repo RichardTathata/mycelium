@@ -1,0 +1,61 @@
+# Phase 2 of the confined-fleet deployment test (closure plan C7 and C12, deployment variants): the mandate
+# authority and a provider member, both running the node image (examples/confined_fleet_node). The gateway is the
+# reference deployment, patched to the same image by the script. Placeholders are filled by the script.
+#
+# The authority is reachable by members, not by agents: the agents' default-deny egress covers it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: authority
+  namespace: confined-fleet
+  labels: { app: authority, mycelium.dev/role: authority }
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: authority
+      image: NODE_IMAGE
+      imagePullPolicy: Never
+      env:
+        - { name: ROLE, value: operator }
+        - { name: AUTHORITY_SEED, value: "AUTHORITY_SEED_HEX" }
+      ports:
+        - { name: api, containerPort: 8400 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authority
+  namespace: confined-fleet
+spec:
+  selector: { app: authority }
+  ports:
+    - { name: api, port: 8400, targetPort: api }
+---
+# A member that serves the protected tools and skill, with provider enforcement. Agents cannot reach it: they reach
+# only the gateway's API port.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: provider
+  namespace: confined-fleet
+  labels: { app: provider, mycelium.dev/role: member }
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: provider
+      image: NODE_IMAGE
+      imagePullPolicy: Never
+      env:
+        - { name: ROLE, value: provider }
+        - name: POD_IP
+          valueFrom: { fieldRef: { fieldPath: status.podIP } }
+        - { name: OPERATOR_URL, value: "http://authority.confined-fleet.svc:8400" }
+        - { name: AUTHORITY_PUB, value: "AUTHORITY_PUB_HEX" }
+        - { name: HOLDER_PUB, value: "HOLDER_PUB_HEX" }
+      ports:
+        - { name: gossip, containerPort: 57000 }
+      volumeMounts:
+        - { name: member-key, mountPath: /etc/mycelium/tls, readOnly: true }
+  volumes:
+    - name: member-key
+      secret: { secretName: member-key }

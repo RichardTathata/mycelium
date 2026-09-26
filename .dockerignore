@@ -4,3 +4,10 @@ tests/integration/
 docker/
 *.md
 .cargo/
+# Local-only trees that are never build inputs: agent worktrees (whole repo copies with their own targets), nested
+# build outputs and SDK dependencies. A clean CI checkout has none of them.
+.claude/
+**/target/
+**/node_modules/
+**/.venv/
+**/__pycache__/

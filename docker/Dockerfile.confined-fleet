@@ -1,0 +1,19 @@
+# The node image for the confined-fleet kind job (Boundary H closure plan C7 and C12, deployment variants):
+# `examples/confined_fleet_node`, which runs as the operator, the provider or the gateway (ROLE), and carries the
+# agent's subcommands. A debug build: the job measures the mechanism's timing against declared bounds, and a
+# release build would double the job's build time for no change in what it shows.
+# Bookworm on both stages: the binary links the build stage's glibc.
+FROM rust:1.96-slim-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=confined-fleet-bookworm-target,target=/build/target \
+    cargo build --example confined_fleet_node --features compliance,a2a && \
+    cp target/debug/examples/confined_fleet_node /confined_fleet_node
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 curl && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /confined_fleet_node /usr/local/bin/confined_fleet_node
+ENTRYPOINT ["confined_fleet_node"]

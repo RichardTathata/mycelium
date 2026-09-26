@@ -38,7 +38,8 @@ spec:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---
-# The gateway accepts agents on its API port only. The admin port is left to the operator's own ingress rules.
+# The gateway accepts agents on its API port only, and other members on its gossip port. The admin port is left to
+# the operator's own ingress rules.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -60,3 +61,10 @@ spec:
       ports:
         - { protocol: TCP, port: 8080 }
         - { protocol: TCP, port: 9090 }
+    # Other members of the mesh (providers) peer with the gateway on its gossip port. Agents never match this rule,
+    # and their own egress policy would block the port anyway.
+    - from:
+        - podSelector:
+            matchLabels: { mycelium.dev/role: member }
+      ports:
+        - { protocol: TCP, port: 57000 }

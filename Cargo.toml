@@ -218,6 +218,13 @@ path              = "examples/authority_drain.rs"
 required-features = ["compliance"]
 
 [[example]]
+name              = "confined_fleet_node"
+path              = "examples/confined_fleet_node.rs"
+# Closure plan C7/C12, deployment variants: the node image the confined-fleet kind job builds and runs as the
+# operator, the provider and the gateway (docker/Dockerfile.confined-fleet).
+required-features = ["compliance", "a2a"]
+
+[[example]]
 name              = "identity_one_record"
 path              = "examples/identity_one_record.rs"
 # `tls` for the identity machinery itself; `compliance` for the signed role claim, which is the
