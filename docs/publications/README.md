@@ -246,3 +246,23 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   workload rather than by number of legal entities. The engineering deck's title widened to match.
   Lesson for `/publication-lint`: it checks claims one at a time; this argument was six lines that
   each read as rhetoric alone and as a falsifiable claim together.
+
+- 2026-09-26 (lint run 3, after v2.15.1 and the two external reviews): **five findings, three
+  fixed, two flagged.** *Critical, fixed:* `customer-pitch.html:377` folded the 100-node scale result
+  into "a test suite that runs on every change" — the 100-node suite runs only on the nightly
+  self-hosted runner, which the same slide's *Honest next* says is offline; the sentence now separates
+  the measured scale result from the per-change Docker suites (4-node, 3-node, two-mesh, confined
+  fleet). *Major, fixed:* `presentation.html:1442`/`:1456` still said **`Broadcast`** for the scope
+  that has been `Cluster` since 2026-07-10, and the code sample named a variant that does not exist
+  (run 1 fixed `:1210` and missed these two — a name-by-name fix where a grep was needed; this run
+  grepped). *Major undersell, fixed:* `paper1/paper.md:377` and `main.tex:910`/`:932` called the
+  keyed-exact-match `take` **roadmapped**; `take_by_key` shipped as M13 on 2026-06-20 — the PDF is
+  derived and needs re-rendering. *Minor, fixed:* `presentation.html:758` "In production:" read as a
+  production-use claim; now "In a real deployment:"; the `v3 · Contracts` eyebrow gained "shipped
+  2.8.0–2.15.1" so the axis is labelled rather than inferred. *Flagged, author's call:*
+  `presentation.html:744` "zero config" (recommend *no per-stage configuration*), and the
+  **"Production Ready"** eyebrow at `:1122`, which sits beside the pitch's own "no third-party
+  production deployment yet" — the slide is about release gates, and *Release discipline* would say
+  that without the tension. Clean: no Byzantine/trustless/tamper-proof language anywhere; "linearizable"
+  appears only as *not linearizable*; wire v12/PREV 11 correct; no crisis framing; no dead links or
+  missing figures; philosophy §"What This Architecture Is Not" agrees with both decks.
