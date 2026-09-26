@@ -71,6 +71,15 @@ pub fn mandate_operation(operation: &str, resource: &str) -> String {
     format!("{operation}:{}", resource_key(resource))
 }
 
+/// **The canonical digest of a call's arguments**, as the gateway and a provider compute it: SHA-256
+/// of their `serde_json` encoding (keys in sorted order). A holder signs its possession proof over
+/// `possession_request(operation, resource, &arguments_digest(&arguments))`. The SDKs export the same
+/// function (`arguments_digest` / `argumentsDigest`) with shared golden vectors; this is the Rust one,
+/// for a member acting under its own grant (closure plan C12 found it was crate-private).
+pub fn arguments_digest(arguments: &serde_json::Value) -> [u8; 32] {
+    super::action_evaluator::arguments_digest(&serde_json::to_vec(arguments).unwrap_or_default())
+}
+
 /// The request bytes a possession proof binds to: this operation, this resource (before `@`), these
 /// arguments. Tagged and length-prefixed. **Published format** — the SDKs compute it too, and a
 /// golden vector pins all three.
@@ -561,6 +570,9 @@ pub(crate) mod tests {
         assert_eq!(canonical, br#"{"text":"dispatch"}"#);
         let hex: String = crate::agent::action_evaluator::arguments_digest(&canonical).iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, "719121f66b67e12629032511ad5cff8f9b541591eed0fffbe645b9f5e14a7a23");
+        // The public function computes the same bytes (closure plan C12).
+        let public: String = arguments_digest(&serde_json::json!({ "text": "dispatch" })).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(public, hex);
     }
 
     /// **The golden vector** the SDKs pin: operation, resource before `@`, arguments digest.

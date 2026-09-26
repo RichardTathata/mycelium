@@ -211,6 +211,13 @@ path              = "examples/auditor_questions.rs"
 required-features = ["tls", "compliance"]
 
 [[example]]
+name              = "authority_drain"
+path              = "examples/authority_drain.rs"
+# Closure plan C12: T_admit and T_drain measured on a live node. `compliance` for the member-key
+# view a node's own grant is verified through (and it brings `gateway` and `tls`).
+required-features = ["compliance"]
+
+[[example]]
 name              = "identity_one_record"
 path              = "examples/identity_one_record.rs"
 # `tls` for the identity machinery itself; `compliance` for the signed role claim, which is the

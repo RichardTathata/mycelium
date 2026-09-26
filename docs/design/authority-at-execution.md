@@ -84,8 +84,8 @@ clock extremes are testable exactly.
   Found by an external review, 2026-09-25.
 - **Order.** An authentic revocation counts whatever order its checkpoint arrives in, and even when the
   checkpoint is refused as replayed or future-dated for freshness (fixed 2026-09-25, same review).
-- **Timing by deployment.** T_admit and T_drain are measured by the caller's clock. Their *logic* is tested here;
-  measuring them in a deployment is a follow-up.
+- **Timing by deployment.** T_admit and T_drain are measured on a live node (`examples/authority_drain`, §10); the
+  same measurement in the confined-fleet cluster is still open.
 - **The Cedar adapter.** `allowances_without_mandate` checks the reference evaluator only. The private Cedar adapter
   needs the same check over its own policy.
 
@@ -294,6 +294,11 @@ stopped a handler already running when its mandate lapsed. Revocation stopped ne
 **The drain bound**, for a cancellable handler: the sweep interval, plus *s*, plus the handler's own time to stop.
 For a cooperative loop it is that **only if the loop races `authority_lapsed()`**; otherwise it is `Unbounded`, as the
 model already says of a continuation that cannot confirm.
+
+**Measured** (closure plan C12). `examples/authority_drain`, run in CI, measures on a live node: calls admitted under a
+mandate, the term revoked, T_admit and T_drain taken from the node's own records and checked against
+`StopContract::drain_bound`. A first local run: T_drain 25 ms against a declared 300 ms, T_admit none, no unconfirmed
+stops. The same measurement in the confined-fleet cluster is open (it needs a node image in that job).
 
 **Gates.** `test_c10_running_work_stops_when_its_authority_lapses`:
 - the plant: a sweep with nothing revoked cancels nothing;

@@ -85,6 +85,9 @@ jobs:
       # The three questions an auditor asks. Each act asserts — including that an edited audit
       # chain FAILS to verify, which is the one a "trust us" answer cannot make checkable.
       - run: cargo run --example auditor_questions --features tls,compliance
+      # Closure plan C12: the stop, measured. Admit calls under a mandate, revoke it, and check T_admit
+      # and T_drain on a live node against the bound the class declares.
+      - run: cargo run --example authority_drain --features compliance
       # Policy at the gateway, per MCP tool call. Five acts: permitted-and-executed, denied on an
       # argument value, denied by remit, and twice INDETERMINATE — which refuses. The fourth act
       # is the gate: an unmapped tool must never fall through to permit.

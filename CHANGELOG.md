@@ -11,6 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The stop, measured** (Boundary H closure plan C12). `examples/authority_drain` (run in CI) admits calls under a
+  mandate on a live node, revokes the term, and checks T_admit and T_drain from the node's own records against the
+  bound the class declares. **`mycelium::arguments_digest`**: the canonical arguments digest, public in Rust as it
+  already was in both SDKs, pinned to the same golden vector. `WorkGuard` is re-exported.
 - **The bypass matrix** (Boundary H closure plan C7). After a revocation, every door the code has runs nothing, by
   the handlers' own counters: `/mcp`, `/a2a` send and stream, `/gateway/rpc/call` and `signal/emit` with protected
   kinds, a member's direct call, and the SDK serve stream. The plant: before the revocation the front doors reach the
