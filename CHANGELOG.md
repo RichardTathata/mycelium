@@ -15,6 +15,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mandate on a live node, revokes the term, and checks T_admit and T_drain from the node's own records against the
   bound the class declares. **`mycelium::arguments_digest`**: the canonical arguments digest, public in Rust as it
   already was in both SDKs, pinned to the same golden vector. `WorkGuard` is re-exported.
+- **An operator can remove a member** (Boundary H closure plan C5, ADR `docs/design/member-removal.md`).
+  - A `SignedMemberRemoval` from a configured membership authority (`with_membership_authorities`,
+    `offer_member_removal`) names the node and every key it has held.
+  - A node that accepts it drops the member's pings, signals and gossip writes, and refuses its certificate at the
+    TLS handshake.
+  - RPC receive refuses the member (`CallerError::Removed`), and its keys read as revoked, so A1 refuses a mandate
+    it holds.
+  - The removal spreads by gossip under the new reserved namespace `sys/membership/removed/`, verified at every
+    node. It is monotonic.
+  - `ConfinementReport::ca_key_off_node`: a node holding the fleet CA's private key reports it unmet, since it
+    could mint a removed member a new identity.
 - **The bypass matrix** (Boundary H closure plan C7). After a revocation, every door the code has runs nothing, by
   the handlers' own counters: `/mcp`, `/a2a` send and stream, `/gateway/rpc/call` and `signal/emit` with protected
   kinds, a member's direct call, and the SDK serve stream. The plant: before the revocation the front doors reach the

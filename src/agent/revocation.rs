@@ -178,7 +178,9 @@ pub(crate) fn revocation_nodes(ctx: &TaskCtx) -> Vec<NodeId> {
 /// local gossip view. Consulted by [`super::helpers::known_verifying_keys`] to exclude revoked keys
 /// from every retained-key verify path.
 pub(crate) fn revoked_key_set(ctx: &TaskCtx) -> HashSet<[u8; 32]> {
-    let mut revoked = HashSet::new();
+    // Closure plan C5: a removed member's keys read as revoked, so its signatures are attributable
+    // history, never current, and a mandate it holds no longer verifies.
+    let mut revoked: HashSet<[u8; 32]> = ctx.removed.keys().into_iter().collect();
     for node in revocation_nodes(ctx) {
         for signed in validated_signed_revocations(ctx, &node) {
             revoked.insert(signed.event.revoked_key);

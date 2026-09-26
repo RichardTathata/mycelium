@@ -115,6 +115,7 @@
 //! | `sys/consensus-accepted/{node}/{slot}` | the acceptor's durable record — `ballot(8)‖digest(32)`, so a restart cannot make this node vote twice at one ballot; self-owned, removed on commit (`consensus`) |
 //! | `sys/identity-signed/{node}`       | identity-auth Phase 3b — the **sealed** record: `version(1)‖history‖proof(96)` in ONE entry, so keys and proof can never arrive apart; preferred by readers, and the only form accepted under `require_identity_proofs` (`tls`) |
 //! | `sys/caller-context/{node}`        | v3 item 7 — the node strips + verifies the `GatewayCaller` envelope on its RPC receive path (value `b"1"`, the envelope version); a secure-profile gateway dispatches only to nodes carrying it. Written at start by every node; self-owned (`sys/` tripwire) |
+//! | `sys/membership/removed/{node}`    | closure plan C5 — an operator-signed `SignedMemberRemoval` for `{node}` (JSON), written by the node that accepted it so the removal reaches every member by gossip as well as by direct offer. Verified on ingest; a forged entry has no effect. The removed node's own `sys/` tripwire may count it |
 //! | `cap/{node}/llm/inference`         | LLM backend capability (model, context, backend, endpoint attrs) |
 //! | `cap/{node}/llm/installable`       | LLM models that can be pulled (model, size_gb, est_mins attrs) |
 //! | `cap/{node}/llm/loading`           | LLM model pull in progress; the shipped provisioner writes a `pct` (0–100) attr (the `llm_agent` example's *simulated* pull uses `progress`) |
@@ -228,6 +229,10 @@ pub mod control;
 /// Records and links only: no store, no resolution, no gossip.
 #[cfg(feature = "tls")]
 pub mod knowledge;
+/// Removing a member (Boundary H closure plan C5): operator-signed removals, enforced at the
+/// transport, the TLS handshake, RPC receive and knowledge verification.
+#[cfg(feature = "tls")]
+pub mod membership;
 
 // Layers I+II substrate live in the `mycelium-core` crate (ROADMAP §v2.0 M1, complete).
 // Re-exported here so existing `crate::store::…`, `crate::signal::…`, `crate::config::…`,

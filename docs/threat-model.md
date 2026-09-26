@@ -368,6 +368,13 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **The consensus boundary.** No H claim rests on exclusive authority until the election and lock repairs pass
     their acceptance gate. Until then, a signed grant proves who issued it, and entitlement comes from
     configuration.
+  - **An operator can remove a member** (closure plan C5, [`design/member-removal.md`](design/member-removal.md)).
+    A removal signed by a configured membership authority cuts the member off at the connection loop, the TLS
+    handshake (both directions) and RPC receive, and revokes every key it names, so A1 refuses its mandates. It
+    spreads by gossip and is verified at every node. Presence fails open on a stale membership view, and
+    protected work fails closed through A1. *Limits:* a removal takes effect when it arrives. It is real only
+    when the fleet CA's private key is off member nodes (`ConfinementReport::ca_key_off_node`); otherwise a
+    removed node can mint itself a new identity.
 - *Residual:*
   - **Collusion and cooperation are the same behaviour with different intent.** mTLS authenticates membership, not
     intent, and that is as true of a thousand members as of one. A population acting within its authorisation will

@@ -73,6 +73,11 @@ pub struct ConfinementReport {
     pub action_evaluator: Setting,
     /// An evidence journal is attached, so every decision is recorded, fsynced, before dispatch.
     pub evidence_journal: Setting,
+    /// **The fleet CA's private key is not on this node** (closure plan C5). A node holding it can
+    /// mint itself a new identity after being removed, so removal would only remove a name. `Set`
+    /// when TLS is configured and no CA key is in this node's certificate directory; `Unset` when
+    /// one is (the `auto_cert_dir` development default) or TLS is off.
+    pub ca_key_off_node: Setting,
     /// Always [`NetworkConfinement::Unverified`].
     pub network_confinement: NetworkConfinement,
     /// Always [`ClockSync::Unverified`] (closure plan C11): every expiry and freshness check assumes
@@ -91,6 +96,7 @@ impl ConfinementReport {
             ("audit_sink", self.audit_sink),
             ("action_evaluator", self.action_evaluator),
             ("evidence_journal", self.evidence_journal),
+            ("ca_key_off_node", self.ca_key_off_node),
         ] {
             if s != Setting::Set {
                 out.push(name);
@@ -119,12 +125,19 @@ impl GossipAgent {
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let (action_evaluator, evidence_journal) = (Setting::NotInBuild, Setting::NotInBuild);
 
+        // A node can see this one: whether the CA's private key sits in its own cert directory.
+        let ca_key_off_node = match &self.config.tls {
+            Some(tls) => Setting::from_bool(!tls.auto_cert_dir.join("ca-key.pem").exists()),
+            None => Setting::Unset,
+        };
+
         ConfinementReport {
             egress_allow_list: Setting::from_bool(!self.config.egress.allow_hosts.is_empty()),
             identity_proofs_required: Setting::from_bool(self.config.require_identity_proofs),
             audit_sink,
             action_evaluator,
             evidence_journal,
+            ca_key_off_node,
             network_confinement: NetworkConfinement::Unverified,
             clock_sync: ClockSync::Unverified,
         }
@@ -166,6 +179,24 @@ mod tests {
         assert!(!r.unmet().contains(&"egress_allow_list"));
         assert!(!r.unmet().contains(&"identity_proofs_required"));
         assert_eq!(r.network_confinement, NetworkConfinement::Unverified);
+    }
+
+    /// **Closure plan C5:** a node that holds the fleet CA's private key could mint itself a new
+    /// identity after being removed, so it is reported unmet; without it the setting holds.
+    #[test]
+    fn a_ca_key_on_the_node_is_an_unmet_setting() {
+        let dir = std::env::temp_dir().join(format!("confine-ca-{}", crate::test_util::alloc_port()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        let r = agent(cfg.clone()).confinement_report();
+        assert_eq!(r.ca_key_off_node, Setting::Set, "no CA key here");
+        std::fs::write(dir.join("ca-key.pem"), b"-----BEGIN PRIVATE KEY-----").unwrap();
+        let r = agent(cfg).confinement_report();
+        assert_eq!(r.ca_key_off_node, Setting::Unset);
+        assert!(r.unmet().contains(&"ca_key_off_node"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(agent(GossipConfig::default()).confinement_report().ca_key_off_node, Setting::Unset, "no TLS, no removal");
     }
 
     /// A setting the build cannot provide is reported as such, never as a choice not made.

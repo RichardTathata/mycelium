@@ -133,6 +133,7 @@ fn spawn_handler(
         tls: std::sync::OnceLock::new(),
         peer_keys: Arc::new(papaya::HashMap::new()),
         peer_anchor_keys: Arc::new(papaya::HashMap::new()),
+        removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
         identity_anchor_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         peers: Arc::new(papaya::HashMap::new()),
         rate_throttle: Arc::new(papaya::HashMap::new()),
@@ -175,6 +176,8 @@ fn spawn_handler(
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "tls")]
+        membership: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         cohort_budget: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1121,6 +1124,7 @@ async fn test_subscribe_notified_via_gossip() {
             tls: std::sync::OnceLock::new(),
             peer_keys: Arc::new(papaya::HashMap::new()),
             peer_anchor_keys: Arc::new(papaya::HashMap::new()),
+            removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
             identity_anchor_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             peers: Arc::new(papaya::HashMap::new()),
             rate_throttle: Arc::new(papaya::HashMap::new()),
@@ -1163,6 +1167,8 @@ async fn test_subscribe_notified_via_gossip() {
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "tls")]
+        membership: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         cohort_budget: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -9977,4 +9983,136 @@ fn a2a_mounted_without_evaluator_or_bearer_is_the_open_configuration() {
     // `task_ctx.action_evaluator`. That half is exercised by `procurement_authority` and
     // `mcp_tool_authority`; what matters here is that BOTH doors exist, so an operator has a
     // choice rather than an instruction.
+}
+
+/// **Boundary H closure plan C5: removing a member.** Three TLS nodes share a fleet CA; A and C take
+/// removals from an operator membership authority. The operator removes B at A.
+/// - A refuses B from then on: its gossip writes are not applied, and it does not come back as a
+///   peer (its pings are dropped and its certificate is refused at the handshake);
+/// - C learns the removal by gossip, verifies it and applies it too;
+/// - C, which was not removed, is unaffected (the plant);
+/// - B's identity keys read as revoked at A, so a mandate B holds no longer proves possession;
+/// - a removal from an untrusted issuer, or a forged one, is ignored; a second offer is a no-op.
+#[cfg(feature = "compliance")]
+mod member_removal {
+    use super::*;
+    use crate::config::TlsConfig;
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::membership::{MemberRemoval, RemovalOffer, SignedMemberRemoval};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn removal(key: &SigningKey, authority: &str, node: &NodeId, keys: Vec<[u8; 32]>) -> SignedMemberRemoval {
+        let removal = MemberRemoval {
+            authority: IssuerId::new(authority).unwrap(),
+            node: node.clone(),
+            keys,
+            seq: 1,
+            issued_at_ms: 1_000,
+            reason: "compromised".into(),
+        };
+        SignedMemberRemoval { signature: key.sign(&removal.canonical_bytes()).to_bytes().to_vec(), removal }
+    }
+
+    async fn poll(mut ok: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if ok() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_removed_member_is_cut_off_and_an_unremoved_one_is_not() {
+        let ports = [alloc_port(), alloc_port(), alloc_port()];
+        let id = |p: u16| NodeId::new("127.0.0.1", p).unwrap();
+        let (node_a, node_b, node_c) = (id(ports[0]), id(ports[1]), id(ports[2]));
+        let cert_dir = std::env::temp_dir().join(format!("myc-c5-{}-{}-{}", ports[0], ports[1], ports[2]));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+
+        let mk = |port: u16, boots: Vec<NodeId>| {
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
+            cfg.bootstrap_peers = boots;
+            cfg.reconnect_backoff_secs = 1;
+            cfg.health_check_interval_secs = 1;
+            cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+            Arc::new(GossipAgent::new(id(port), cfg))
+        };
+        let a = mk(ports[0], vec![]);
+        a.start().await.unwrap();
+        let b = mk(ports[1], vec![node_a.clone()]);
+        let c = mk(ports[2], vec![node_a.clone()]);
+        b.start().await.unwrap();
+        c.start().await.unwrap();
+        assert!(poll(|| a.peers().len() == 2 && !b.peers().is_empty() && !c.peers().is_empty()).await, "fleet failed to peer");
+
+        let operator = SigningKey::from_bytes(&[51u8; 32]);
+        let rogue = SigningKey::from_bytes(&[52u8; 32]);
+        let authorities = || {
+            let mut external = TrustedExternalIssuers::new();
+            external.trust(IssuerId::new("operator:membership").unwrap(), operator.verifying_key().to_bytes()).unwrap();
+            external.trust(IssuerId::new("operator:other").unwrap(), rogue.verifying_key().to_bytes()).unwrap();
+            external
+        };
+        a.with_membership_authorities([IssuerId::new("operator:membership").unwrap()], authorities());
+        c.with_membership_authorities([IssuerId::new("operator:membership").unwrap()], authorities());
+
+        // B's identity key, as A has seen it.
+        let key_b = {
+            let key = format!("sys/identity/{node_b}");
+            assert!(poll(|| a.kv().get(&key).is_some_and(|v| v.len() == 32)).await, "A never saw B's identity key");
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&a.kv().get(&key).unwrap());
+            k
+        };
+
+        // Before removal B's writes reach A: the channel works, so the refusal below is the removal.
+        let _ = b.kv().set("c5/before", b"b".to_vec());
+        assert!(poll(|| a.kv().get("c5/before").is_some()).await, "B's write never reached A before removal");
+
+        // The plant's opposites: an issuer that is not a membership authority, and a forgery.
+        assert_eq!(a.offer_member_removal(&removal(&rogue, "operator:other", &node_b, vec![key_b])), Some(RemovalOffer::UntrustedAuthority));
+        let mut forged = removal(&operator, "operator:membership", &node_c, vec![]);
+        forged.removal.node = node_b.clone();
+        assert!(matches!(a.offer_member_removal(&forged), Some(RemovalOffer::Unverifiable(_))));
+        assert!(a.removed_members().is_empty(), "a refused removal removes nobody");
+
+        // The operator removes B, naming a retained key it held before a rotation as well.
+        let retained = [9u8; 32];
+        let signed = removal(&operator, "operator:membership", &node_b, vec![key_b, retained]);
+        assert_eq!(a.offer_member_removal(&signed), Some(RemovalOffer::Accepted));
+        assert_eq!(a.offer_member_removal(&signed), Some(RemovalOffer::AlreadyRemoved), "monotonic: a repeat is a no-op");
+        assert_eq!(a.removed_members(), vec![node_b.clone()]);
+
+        // Its keys, current and retained, now read as revoked at A.
+        let revoked = crate::agent::revocation::revoked_key_set(&a.task_ctx);
+        assert!(revoked.contains(&key_b) && revoked.contains(&retained), "a removed member's keys are revoked");
+
+        // C learns it by gossip and applies it.
+        assert!(poll(|| c.removed_members() == vec![node_b.clone()]).await, "the removal never reached C");
+
+        // B's writes are no longer applied at A or C; C's still are (the plant).
+        let _ = b.kv().set("c5/after-b", b"b".to_vec());
+        let _ = c.kv().set("c5/after-c", b"c".to_vec());
+        assert!(poll(|| a.kv().get("c5/after-c").is_some()).await, "an unremoved member's write must still arrive");
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(a.kv().get("c5/after-b").is_none(), "a removed member's write was applied at A");
+        assert!(c.kv().get("c5/after-b").is_none(), "a removed member's write was applied at C");
+
+        // B does not come back as a peer: over several reconnect and health intervals A never
+        // re-admits it, while C stays.
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(!a.peers().contains(&node_b), "a removed member rejoined A");
+        }
+        assert!(a.peers().contains(&node_c), "an unremoved member was dropped");
+
+        for n in [&a, &b, &c] {
+            n.shutdown_with_timeout(Duration::from_secs(5)).await;
+        }
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
 }

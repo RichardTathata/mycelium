@@ -94,6 +94,14 @@ share the undeclared pool. Watch `cohort_budget_refusals()`.
 clock is within *s* of real time: run NTP (or equivalent) and monitor it. The node's report says
 `clock_sync: Unverified`, because a node cannot vouch for its own clock.
 
+**Be able to remove a member** (closure plan C5). Keep the fleet CA's private key **off** member nodes: issue each
+node its certificate from an operator-held CA, and do not leave `ca-key.pem` in its `auto_cert_dir`. A node that
+holds the CA key can mint itself a new identity after it is removed, and its report shows `ca_key_off_node` unmet.
+On every node, `agent.with_membership_authorities([membership_issuer], external)`, where `external` trusts your
+membership authority's key. To remove a member, sign a `MemberRemoval` naming the node and every identity key it has
+held, and offer it with `offer_member_removal` (to one node, or to each for speed); it spreads by gossip, and each
+node verifies it. A removal is permanent: the member comes back only under a new identity.
+
 Then read what the node itself can confirm:
 
 ```rust

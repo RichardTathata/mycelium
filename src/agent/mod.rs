@@ -116,6 +116,9 @@ pub(crate) mod audit;
 pub(crate) mod revocation;
 #[cfg(feature = "compliance")]
 mod knowledge_keys;
+/// Closure plan C5: applying member removals at the agent.
+#[cfg(feature = "tls")]
+mod membership_ops;
 #[cfg(feature = "compliance")]
 pub(crate) mod transparency;
 #[cfg(feature = "compliance")]
@@ -535,6 +538,9 @@ pub(crate) struct TaskCtx {
     /// work it receives, set via `with_provider_enforcement`. Off = today's behaviour.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) provider_enforcement: std::sync::atomic::AtomicBool,
+    /// Closure plan C5: the membership authorities this node takes removals from.
+    #[cfg(feature = "tls")]
+    pub(crate) membership: std::sync::OnceLock<Arc<crate::membership::MembershipAuthorities>>,
     /// Closure plan C4: H6's cohort budget at this provider, set via `with_cohort_budget`.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) cohort_budget: std::sync::OnceLock<Arc<provider_enforcement::ProviderBudget>>,
@@ -911,6 +917,7 @@ impl GossipAgent {
             tls: std::sync::OnceLock::new(),
             peer_keys: Arc::new(papaya::HashMap::new()),
             peer_anchor_keys: Arc::new(papaya::HashMap::new()),
+            removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
             identity_anchor_conflicts: Arc::new(AtomicU64::new(0)),
             peers: Arc::clone(&peers_arc),
             rate_throttle: Arc::new(papaya::HashMap::new()),
@@ -985,6 +992,8 @@ impl GossipAgent {
             execution_authority: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "tls")]
+            membership: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             cohort_budget: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1474,7 +1483,7 @@ impl GossipAgent {
         })?;
 
         // 1. Generate the new material (persisted, not yet active).
-        let material = crate::tls::generate_rotation(tls_cfg, &self.node_id)?;
+        let material = crate::tls::generate_rotation(tls_cfg, &self.node_id, Arc::clone(&self.task_ctx.removed))?;
         let new_vk = material.verifying_key;
 
         // 2. Publish new ‖ (every previously-published key) — the full rotation

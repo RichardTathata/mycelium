@@ -1002,6 +1002,12 @@ pub mod kv_ns {
     /// refused instead. Self-owned (`sys/` tripwire), never written for another node.
     pub const CALLER_CONTEXT: &str = "sys/caller-context/";
 
+    /// Member removals (closure plan C5). Key: `sys/membership/removed/{node}`, value: the
+    /// operator-signed `SignedMemberRemoval` as JSON. Written by the node that accepted it, so the
+    /// removal spreads by gossip as well as by direct offer; every reader verifies it before
+    /// applying it, so a forged entry does nothing.
+    pub const MEMBERSHIP_REMOVED: &str = "sys/membership/removed/";
+
     /// Persistent quorum evidence namespace (library-internal — do not write from application code).
     ///
     /// Key: `sys/quorum/{kind}/{sender_node_id}`. Value: 8-byte little-endian Unix millisecond

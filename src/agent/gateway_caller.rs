@@ -207,11 +207,14 @@ pub enum CallerError {
     /// originates (a secure-profile gateway node): a raw emission shaped like an RPC, never the
     /// node's own action.
     Missing,
+    /// The sending node has been removed from the mesh by an operator (closure plan C5).
+    Removed,
 }
 
 impl std::fmt::Display for CallerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CallerError::Removed => write!(f, "the sending node has been removed from the mesh"),
             CallerError::Malformed(why) => write!(f, "caller context malformed: {why}"),
             CallerError::ViaMismatch { claimed, sender } => {
                 write!(f, "caller context names gateway {claimed} but the frame came from {sender}")
@@ -719,6 +722,10 @@ fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
 /// `Ok(None)`: no context — the sender acts for itself. `Ok(Some(_))`: a verified context.
 /// `Err(_)`: a context was present and must be **refused**; never treat the call as the node's.
 pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
+    // Closure plan C5: a removed member is refused before any serve path, whatever it frames.
+    if ctx.removed.is_node_removed(req.sender()) {
+        return Err(CallerError::Removed);
+    }
     let env_bytes = match req.frame() {
         Frame::Unframed(_) => {
             if sender_promises_envelopes(ctx, req.sender()) {
