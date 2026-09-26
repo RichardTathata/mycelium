@@ -176,9 +176,12 @@ run_the_node().await;                                   // a divergence panics, 
 take(); mycelium::sim_seam::resume_clock_after_replay();
 ```
 
-There is **no** operator's capture verb — no flag, config field or route starts a recording on a
-running node; a bundle is an integrator's harness artefact ([diagnostics.md § Capturing a replay
-bundle](../operations/diagnostics.md)). The scheduler seam (v2.9.0) is what makes a whole node
+The node binary has the same recipe built in, **under `sim` only**: a build with
+`--features cli,sim` started with `GOSSIP_RECORD_BUNDLE_DIR=<dir>` runs on a current-thread runtime
+under the seams and writes the bundle at shutdown (`GOSSIP_RECORD_SEED` picks the seed) — the
+operator's capture path, [diagnostics.md § Capturing a replay bundle](../operations/diagnostics.md).
+An embedded agent records the way this section shows; there is no route or config field that starts
+a recording on a node built without `sim`. The scheduler seam (v2.9.0) is what makes a whole node
 replay without divergence; before it, task interleaving diverged.
 
 ## What this does not establish

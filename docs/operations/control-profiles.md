@@ -50,7 +50,7 @@ which reading you are looking at.
    traces show the rules are right*. Watch, for at least the longest cycle your fleet has (a membership
    cooldown, a tuner interval, the slowest install):
    - `control_would_hold_count` rising steadily → the predicate would be holding routine actions on a view
-     it considers stale: either the fleet really is that partitioned, or `ConfidenceBound` is too strict — and it is **not tunable**: every governor uses `ConfidenceBound::default()`, `{ max_staleness_ms: 30_000, min_peers_heard: 1 }` (`src/control.rs`), so the lever is your `health_check_interval_secs` fitting inside 30 s, not a knob (a setter is a recorded code gap, doc-coverage run 17) for
+     it considers stale: either the fleet really is that partitioned, or `ConfidenceBound` is too strict — loosen it with `control_max_staleness_ms` / `control_min_peers_heard` (`GOSSIP_CONTROL_MAX_STALENESS_MS` / `GOSSIP_CONTROL_MIN_PEERS_HEARD`; defaults 30 000 ms / 1; read at start, so a restart applies it) — every governor builds its bound from these (`ConfidenceBound::from_config`). Until 2026-09-26 the default was hardcoded and this sentence had nothing to turn for
      your health-check interval. Loosen the bound *on evidence*, not the rule.
    - `held_by_spacing` rising fast → the advisor recommends faster than the spacing admits; that is the
      spacing doing its job. `held_by_settling` rising → knobs are slow to read back; check the applier.

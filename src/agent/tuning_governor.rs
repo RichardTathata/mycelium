@@ -163,6 +163,10 @@ pub struct TuningGovernor {
     /// `Legacy` is the old gate exactly — the contract is not consulted; `Observe` evaluates it and
     /// **counts** what it would have held, holding nothing; `EnforceLocal`/`EnforceAllocated` hold.
     profile: AtomicU8,
+    // The confidence bound, from config (`set_confidence_bound`, called by `start_cluster_tuner`);
+    // `ConfidenceBound::default()`'s values until then.
+    bound_max_staleness_ms: AtomicU64,
+    bound_min_peers_heard: AtomicU64,
 }
 
 impl Default for TuningGovernor {
@@ -179,6 +183,8 @@ impl Default for TuningGovernor {
             held_settling: AtomicU64::new(0),
             settled_unknown: AtomicU64::new(0),
             profile: AtomicU8::new(Profile::Legacy.as_u8()),
+            bound_max_staleness_ms: AtomicU64::new(ConfidenceBound::default().max_staleness_ms),
+            bound_min_peers_heard: AtomicU64::new(ConfidenceBound::default().min_peers_heard as u64),
         }
     }
 }
@@ -303,15 +309,25 @@ impl TuningGovernor {
         self.settle_timeout_ms.store(settle_timeout_ms, Ordering::Relaxed);
     }
 
-    /// The param's `ControlSpec`: one actuator per param, this governor's timing, no confidence
-    /// bound — the view is this node's own knob, which is never uncertain (ADR §9, 4b).
+    /// The confidence bound this governor's specs carry — the operator's, from config.
+    pub fn set_confidence_bound(&self, bound: ConfidenceBound) {
+        self.bound_max_staleness_ms.store(bound.max_staleness_ms, Ordering::Relaxed);
+        self.bound_min_peers_heard.store(bound.min_peers_heard as u64, Ordering::Relaxed);
+    }
+
+    /// The param's `ControlSpec`: one actuator per param, this governor's timing, and the
+    /// configured confidence bound — nominal here, because the view is this node's own knob,
+    /// which is never uncertain (ADR §9, 4b); carried so every governor answers to one setting.
     fn spec_for(&self, param: HotParam) -> ControlSpec {
         ControlSpec {
             governor: "tuning".into(),
             actuator: param.key().into(),
             spacing_ms: self.spacing_ms.load(Ordering::Relaxed),
             settle_timeout_ms: self.settle_timeout_ms.load(Ordering::Relaxed),
-            bound: ConfidenceBound::default(),
+            bound: ConfidenceBound {
+                max_staleness_ms: self.bound_max_staleness_ms.load(Ordering::Relaxed),
+                min_peers_heard: self.bound_min_peers_heard.load(Ordering::Relaxed) as usize,
+            },
             profile: Profile::Legacy,
         }
     }
@@ -593,6 +609,17 @@ impl GossipAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bound a spec carries is the operator's, not `Default`'s (doc-coverage run 17, code gap 1:
+    /// every governor hardcoded the default and the runbook's "loosen it" turned nothing).
+    #[test]
+    fn the_confidence_bound_comes_from_the_operator_not_the_default() {
+        let g = TuningGovernor::default();
+        assert_eq!(g.spec_for(HotParam::InboundFps).bound, ConfidenceBound::default());
+        g.set_confidence_bound(ConfidenceBound { max_staleness_ms: 90_000, min_peers_heard: 3 });
+        let b = g.spec_for(HotParam::InboundFps).bound;
+        assert_eq!((b.max_staleness_ms, b.min_peers_heard), (90_000, 3));
+    }
 
     // ── The contract at the gate (item 4 PR 4b): spacing and settling, pure in time. The view
     //    is this node's own knob, so there is no confidence predicate here — only the two clocks.

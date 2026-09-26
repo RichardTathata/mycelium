@@ -129,6 +129,9 @@ impl GossipAgent {
         // within two ticks settles as unknown. Set once here; the applier alone leaves both at 0.
         let two_ticks = (interval.as_millis() as u64).saturating_mul(2);
         self.task_ctx.tuning_governor.set_control_timing(two_ticks, two_ticks);
+        self.task_ctx.tuning_governor.set_confidence_bound(
+            crate::control::ConfidenceBound::from_config(&self.task_ctx.config),
+        );
         self.task_ctx.spawn_task(async move {
             // Through the timer seam (item 6): a replay ticks the same schedule without waiting.
             let mut tick = mycelium_core::sim_seam::interval_ms(

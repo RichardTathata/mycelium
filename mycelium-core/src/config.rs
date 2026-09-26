@@ -989,6 +989,19 @@ pub struct GossipConfig {
     #[serde(default)]
     pub protected_rpc_kinds: Vec<String>,
 
+    /// The confidence bound every governor applies before it counts its view as *certain enough*
+    /// (item 4's control contract, `ConfidenceBound`): the stalest heard peer may be at most this
+    /// old. Default **30 000 ms** — strict on purpose; an operator loosens it *on evidence*
+    /// (`docs/operations/control-profiles.md` step 2). Env `GOSSIP_CONTROL_MAX_STALENESS_MS`.
+    /// Until 2026-09-26 every governor hardcoded the default, so the runbook's "loosen the bound"
+    /// had nothing to turn (doc-coverage run 17).
+    #[serde(default = "default_control_max_staleness_ms")]
+    pub control_max_staleness_ms: u64,
+    /// At least this many peers must have been heard inside the window. Default **1**.
+    /// Env `GOSSIP_CONTROL_MIN_PEERS_HEARD`.
+    #[serde(default = "default_control_min_peers_heard")]
+    pub control_min_peers_heard: usize,
+
     /// Domain profile (v3 item 2 PR 1). `Open` (default) is today's behaviour. `Enforced` requires
     /// TLS and refuses SWIM — see [`DomainProfile`]; `validate()` enforces it.
     pub domain_profile: DomainProfile,
@@ -1017,6 +1030,44 @@ pub struct GossipConfig {
     /// Requires the `tls` crate feature. Has no effect when the feature is
     /// disabled even if set to `Some(...)`.
     pub tls: Option<TlsConfig>,
+}
+
+fn default_control_max_staleness_ms() -> u64 { 30_000 }
+fn default_control_min_peers_heard() -> usize { 1 }
+
+/// `GOSSIP_GATEWAY_NAMED_TOKENS` — the named-token table from the environment, so the credential
+/// model the docs say to prefer is settable where `gateway_auth_token` is (env-driven deployments:
+/// `deploy/kubernetes`, `docker/`; doc-coverage run 17). Format: entries separated by `;`, fields
+/// by `|`, scopes by `,` — `ci-bot|s3cr3t|mcp:invoke;skill-server|t0k3n|mesh:serve`. `|` and `;`
+/// cannot appear in a name, token or scope. A malformed entry refuses the whole variable.
+pub fn parse_named_tokens_env(v: &str) -> Result<Vec<GatewayNamedToken>, GossipError> {
+    let mut out = Vec::new();
+    for entry in v.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+        let mut parts = entry.splitn(3, '|');
+        let (name, token, scopes) = match (parts.next(), parts.next(), parts.next()) {
+            (Some(n), Some(t), Some(s)) if !n.trim().is_empty() && !t.trim().is_empty() => {
+                (n.trim(), t.trim(), s)
+            }
+            _ => {
+                return Err(GossipError::InvalidField {
+                    field: "gateway_named_tokens",
+                    reason: format!(
+                        "GOSSIP_GATEWAY_NAMED_TOKENS entry {entry:?} is not `name|token|scope,scope`"
+                    ),
+                })
+            }
+        };
+        let scopes: Vec<String> =
+            scopes.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
+        if scopes.is_empty() {
+            return Err(GossipError::InvalidField {
+                field: "gateway_named_tokens",
+                reason: format!("GOSSIP_GATEWAY_NAMED_TOKENS entry {name:?} names no scope"),
+            });
+        }
+        out.push(GatewayNamedToken { name: name.to_string(), token: token.to_string(), scopes });
+    }
+    Ok(out)
 }
 
 impl Default for GossipConfig {
@@ -1089,6 +1140,8 @@ impl Default for GossipConfig {
             require_identity_proofs:       false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
             protected_rpc_kinds:           Vec::new(),
+            control_max_staleness_ms:      30_000,
+            control_min_peers_heard:       1,
             domain_profile:                DomainProfile::Open,
             egress:                        EgressPolicy::default(),
             #[cfg(feature = "compliance")]
@@ -1205,6 +1258,41 @@ impl GossipConfig {
     /// Called automatically by `GossipAgent::start` and [`load_from_file`](Self::load_from_file).
     /// Call manually after mutating fields directly to catch errors early.
     pub fn validate(&self) -> Result<(), GossipError> {
+        if self.control_max_staleness_ms == 0 {
+            return Err(GossipError::InvalidField {
+                field: "control_max_staleness_ms",
+                reason: "must be > 0: a zero staleness bound holds every governor action forever".into(),
+            });
+        }
+        if self.control_min_peers_heard == 0 {
+            return Err(GossipError::InvalidField {
+                field: "control_min_peers_heard",
+                reason: "must be ≥ 1: a view that heard nobody is not a view".into(),
+            });
+        }
+        // Scopes match exactly, or the single wildcard "*". A *family* wildcard such as `llm:*`
+        // matches nothing at the gateway (`scope_admits`), so a token written that way admits
+        // nothing and nobody is told — refused here, at startup, by name (doc-coverage run 17).
+        let malformed = |field: &'static str, scopes: &[String]| -> Result<(), GossipError> {
+            for s in scopes {
+                if s.contains('*') && s != "*" {
+                    return Err(GossipError::InvalidField {
+                        field,
+                        reason: format!(
+                            "scope {s:?}: scopes match exactly or the single wildcard \"*\"; a family \
+                             wildcard admits nothing — list `llm:read`, `llm:write`, `llm:invoke` by name"
+                        ),
+                    });
+                }
+            }
+            Ok(())
+        };
+        for t in &self.gateway_scoped_tokens { malformed("gateway_scoped_tokens", &t.scopes)?; }
+        for t in &self.gateway_named_tokens  { malformed("gateway_named_tokens",  &t.scopes)?; }
+        #[cfg(feature = "compliance")]
+        if let Some(oidc) = &self.oidc {
+            for scopes in oidc.group_scopes.values() { malformed("oidc.group_scopes", scopes)?; }
+        }
         // The enforced domain profile (item 2 PR 1). Checked first and refused outright: a node
         // that claims the profile and does not meet it should not reach the point of opening a
         // socket, because by then a partner has something to talk to.
@@ -1636,6 +1724,15 @@ impl GossipConfig {
                 reason,
             })?;
         }
+        if let Ok(v) = env::var("GOSSIP_CONTROL_MAX_STALENESS_MS") {
+            self.control_max_staleness_ms = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_CONTROL_MIN_PEERS_HEARD") {
+            self.control_min_peers_heard = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_NAMED_TOKENS") {
+            self.gateway_named_tokens = parse_named_tokens_env(&v)?;
+        }
         if let Ok(v) = env::var("GOSSIP_PROTECTED_RPC_KINDS") {
             self.protected_rpc_kinds = v
                 .split(',')
@@ -1989,6 +2086,75 @@ mod tests {
 
     /// SWIM off is the point of the profile, not a nicety: its control datagrams are
     /// unauthenticated UDP, and that is exactly what must not run at a federation boundary.
+    // ── doc-coverage run 17: the gaps closed by making settings of what was hardcoded ──
+
+    #[test]
+    fn named_tokens_parse_from_the_environment_format() {
+        let toks = parse_named_tokens_env("ci-bot|s3cr3t|mcp:invoke, mesh:serve ; skill-server|t0k3n|mesh:serve").unwrap();
+        assert_eq!(toks.len(), 2);
+        assert_eq!((toks[0].name.as_str(), toks[0].token.as_str()), ("ci-bot", "s3cr3t"));
+        assert_eq!(toks[0].scopes, vec!["mcp:invoke".to_string(), "mesh:serve".to_string()]);
+        assert_eq!(toks[1].scopes, vec!["mesh:serve".to_string()]);
+        assert!(parse_named_tokens_env("").unwrap().is_empty(), "empty is no tokens, not an error");
+    }
+
+    #[test]
+    fn a_malformed_named_token_entry_refuses_the_whole_variable() {
+        for bad in ["ci-bot|s3cr3t", "|s3cr3t|kv:read", "ci-bot||kv:read", "ci-bot|s3cr3t|"] {
+            let err = parse_named_tokens_env(bad).expect_err(bad);
+            assert!(format!("{err}").contains("gateway_named_tokens"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_family_wildcard_scope_is_refused_at_validate_not_silently_inert() {
+        let mut cfg = GossipConfig::default();
+        cfg.gateway_named_tokens = vec![GatewayNamedToken {
+            name: "llm-client".into(), token: "t".into(), scopes: vec!["llm:*".into()],
+        }];
+        let err = cfg.validate().expect_err("`llm:*` admits nothing and must be refused by name");
+        assert!(format!("{err}").contains("llm:*"), "{err}");
+        cfg.gateway_named_tokens[0].scopes = vec!["*".into()];
+        cfg.validate().expect("the single wildcard is the one wildcard");
+    }
+
+    #[test]
+    fn a_zero_confidence_bound_is_refused() {
+        let mut cfg = GossipConfig::default();
+        assert_eq!((cfg.control_max_staleness_ms, cfg.control_min_peers_heard), (30_000, 1));
+        cfg.control_max_staleness_ms = 0;
+        assert!(format!("{}", cfg.validate().unwrap_err()).contains("control_max_staleness_ms"));
+        cfg.control_max_staleness_ms = 30_000;
+        cfg.control_min_peers_heard = 0;
+        assert!(format!("{}", cfg.validate().unwrap_err()).contains("control_min_peers_heard"));
+    }
+
+    /// The three new variables are applied, and a malformed named-token entry refuses the
+    /// override rather than silently leaving the table empty.
+    #[test]
+    #[allow(unsafe_code)]
+    fn the_control_bound_and_named_tokens_come_from_the_environment() {
+        let _lock = env_test_lock();
+        let vars = ["GOSSIP_CONTROL_MAX_STALENESS_MS", "GOSSIP_CONTROL_MIN_PEERS_HEARD", "GOSSIP_GATEWAY_NAMED_TOKENS"];
+        let _guards: Vec<EnvGuard> = vars.iter().map(|v| EnvGuard(v, std::env::var(v).ok())).collect();
+        // SAFETY: mutations serialised by env_test_lock().
+        unsafe {
+            std::env::set_var(vars[0], "90000");
+            std::env::set_var(vars[1], "3");
+            std::env::set_var(vars[2], "ci-bot|s3cr3t|mcp:invoke;skill-server|t0k3n|mesh:serve");
+        }
+        let mut cfg = GossipConfig::default();
+        cfg.apply_env_overrides().expect("well-formed overrides apply");
+        assert_eq!((cfg.control_max_staleness_ms, cfg.control_min_peers_heard), (90_000, 3));
+        assert_eq!(cfg.gateway_named_tokens.len(), 2);
+        assert_eq!(cfg.gateway_named_tokens[1].scopes, vec!["mesh:serve".to_string()]);
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var(vars[2], "ci-bot|s3cr3t") };
+        let err = GossipConfig::default().apply_env_overrides().expect_err("a malformed entry refuses");
+        assert!(format!("{err}").contains("gateway_named_tokens"), "{err}");
+    }
+
     #[test]
     fn the_enforced_domain_profile_refuses_swim() {
         let mut cfg = GossipConfig {

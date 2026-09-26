@@ -37,9 +37,11 @@ cfg.gateway_named_tokens = vec![
     GatewayNamedToken { name: "skill-server".into(), token: "…".into(),
                         scopes: vec!["mesh:serve".into()] },   // serves RPC kinds; cannot call them
 ];
-// There is NO environment variable for the named table (only `gateway_auth_token` has
-// GOSSIP_GATEWAY_AUTH_TOKEN). Set it in code, or in the TOML file `GossipConfig::load_from_file`
-// reads; the issuer prefix is `gateway_identity_issuer` (default: this node's id).
+// From the environment: GOSSIP_GATEWAY_NAMED_TOKENS="ci-bot|…|mcp:invoke;skill-server|…|mesh:serve"
+// (entries `;`, fields `|`, scopes `,`; a malformed entry refuses the whole variable at startup).
+// Or the TOML file `GossipConfig::load_from_file` reads. The issuer prefix is
+// `gateway_identity_issuer` (default: this node's id). Scopes match exactly or "*": a scope such
+// as `llm:*` is refused by `validate()` rather than silently admitting nothing.
 ```
 
 Distribute the auto-generated `./mycelium-tls/ca-cert.pem` to every node (shared
