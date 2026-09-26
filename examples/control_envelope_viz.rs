@@ -55,7 +55,14 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const HTTP_PORT: u16 = 8096;
+/// The dashboard port: `MYCELIUM_VIZ_PORT` if set, else 8096. The browser demos used to share
+/// one hard-coded port and collided in a multi-demo presentation (readiness review, 2026-09-26);
+/// each now has its own default, and a presenter can move any of them.
+const DEFAULT_HTTP_PORT: u16 = 8096;
+
+fn http_port() -> u16 {
+    std::env::var("MYCELIUM_VIZ_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_HTTP_PORT)
+}
 
 /// Rule 4 of the UI-example contract: the concepts this demo exercises, as data.
 const CONCEPTS: &str = r#"[
@@ -216,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg,
     ));
     agent.start().await?;
-    let _ = agent.kv().set("ui/viz", bytes::Bytes::from(format!("http://127.0.0.1:{HTTP_PORT}/")));
+    let _ = agent.kv().set("ui/viz", bytes::Bytes::from(format!("http://127.0.0.1:{}/", http_port())));
     let _ = agent.kv().set("ui/label", bytes::Bytes::from_static(b"control envelope"));
 
     // The allocated budget: eight units of provisioning capacity, held under one term.
@@ -270,14 +277,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(serve_http(Arc::clone(&state), gw_port));
 
-    let mut depots = vec![
+    let mut depots = [
         Depot { name: "north", peers_heard: 4, seq: 0, last_action_ms: None, settle: SettleState::Idle },
         Depot { name: "harbour", peers_heard: 2, seq: 0, last_action_ms: None, settle: SettleState::Idle },
         Depot { name: "hill", peers_heard: 1, seq: 0, last_action_ms: None, settle: SettleState::Idle },
     ];
 
     println!("╔════════════════════════════════════════════════════════╗");
-    println!("║  Control envelope → http://127.0.0.1:{HTTP_PORT}              ║");
+    println!("║  Control envelope → http://127.0.0.1:{}              ║", http_port());
     println!("║  the same load, one rung at a time: advice → refusal   ║");
     println!("╚════════════════════════════════════════════════════════╝");
 
@@ -299,10 +306,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => 2,
             };
             // An action settles once observed — here, after one tick.
-            if let SettleState::Pending { since_ms, .. } = &d.settle {
-                if now_ms.saturating_sub(*since_ms) > 1_200 {
-                    d.settle = SettleState::Idle;
-                }
+            if let SettleState::Pending { since_ms, .. } = &d.settle
+                && now_ms.saturating_sub(*since_ms) > 1_200
+            {
+                d.settle = SettleState::Idle;
             }
         }
 
@@ -388,10 +395,10 @@ fn free_port() -> u16 {
 
 /// Minimal HTTP server — the `/state`-JSON + polling-canvas pattern `conway` established.
 async fn serve_http(state: Arc<Mutex<VizState>>, gw_port: u16) {
-    let listener = match TcpListener::bind(format!("127.0.0.1:{HTTP_PORT}")).await {
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", http_port())).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("HTTP server failed to bind :{HTTP_PORT} — {e}");
+            eprintln!("HTTP server failed to bind :{} — {e}", http_port());
             return;
         }
     };

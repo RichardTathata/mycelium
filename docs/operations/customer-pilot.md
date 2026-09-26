@@ -10,6 +10,10 @@ validation**, and calls a 10 "unreachable from inside this loop." A first custom
 exactly what closes that gap — *the pilot is the validation*. This page is how to run that first one so
 it de-risks the engagement instead of stress-testing the newest code in production.
 
+> **The engagement itself** — roles, workbooks, the pinned pack, the acceptance script, handover
+> and closeout — is [engagement-kit.md](engagement-kit.md). This page is the *why* and the shape;
+> that one is the *what you carry on site*.
+
 ## The framing (say this out loud with the customer)
 
 - The **substrate** (Layers I–III, security, SDKs) is mature and heavily tested.

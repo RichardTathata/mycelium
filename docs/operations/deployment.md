@@ -82,7 +82,9 @@ while every org's topology differs. It *does* ship **reference deployment scaffo
 copy and adapt: Kubernetes manifests —
 [`deploy/kubernetes/`](../../deploy/kubernetes/) (`kubectl apply -k deploy/kubernetes`): a
 seed StatefulSet + headless Service, a scalable worker StatefulSet, and a mgmt dashboard,
-wired exactly as this section describes — and Terraform for the cluster itself —
+wired for the *topology* this section describes — **as an ephemeral demonstration**: no PVCs,
+no TLS, no gateway auth, a demo image (its README lists exactly what it leaves out) — and
+Terraform for the cluster itself —
 [`deploy/terraform/`](../../deploy/terraform/) (EKS + ECR, or GKE + Artifact Registry), so
 the whole path is `terraform apply` → push image → `kubectl apply -k`. Deploy it (or your
 own) like any **stateful** service, minding two requirements that follow from the design:
@@ -101,8 +103,11 @@ own) like any **stateful** service, minding two requirements that follow from th
 `GOSSIP_BOOTSTRAP_PEERS` (or the demo image's `MYCELIUM_PEERS`) to a seed pod's DNS
 name, `readinessProbe` → `/ready`, `livenessProbe` → `/health`, and
 `GOSSIP_CLUSTER_NAME` to the environment. Scrape `/metrics` with a `ServiceMonitor`.
-The ready-to-apply manifests in [`deploy/kubernetes/`](../../deploy/kubernetes/) do
-exactly this — start there rather than from scratch, and see
+The manifests in [`deploy/kubernetes/`](../../deploy/kubernetes/) give you the StatefulSet,
+headless Service, probes and scrape annotations — **and stop there**: they mount no volume,
+gossip without TLS, and leave the gateway unauthenticated, so they are the demonstration
+profile, not this section's persistent one. Start from them and add the two requirements
+above plus [production-readiness.md](production-readiness.md)'s gates; and see
 [`deploy/terraform/`](../../deploy/terraform/) to provision the EKS/GKE cluster they run on. **AWS/GCP/bare metal:** an instance/ECS-task
 per node with a stable address (Elastic IP / internal DNS) + a durable disk (EBS /
 PD) for `auto_cert_dir` + WAL; a sample systemd unit is just `ExecStart=mycelium`
@@ -211,21 +216,46 @@ window fails CI, not your rollout.
 ## Backup & restore
 
 Persistence is a **WAL + periodic snapshot** in the node's data directory, and identity is
-the Ed25519 key/cert under `auto_cert_dir`. Both are plain on-disk state, so backup and
-restore are just directory operations:
+the Ed25519 key/cert under `auto_cert_dir`. Both are plain on-disk state — but *"plain on-disk
+state"* is not *"copy it whenever"*, and an earlier version of this section said it was.
 
-- **Back up** the persistence data dir *and* the `auto_cert_dir` (the identity). Snapshot
-  the volume, or copy the dirs while the node runs — the WAL makes a copy taken mid-write
-  self-consistent on replay.
-- **Restore** = put the dirs back where the node expects them and start it. On boot it
-  loads the latest snapshot and replays the WAL tail on top of it (last-writer-wins per key,
-  every record), then re-bootstraps and re-learns any newer KV from peers via anti-entropy
-  (same path as [restart](#restart-behaviour)). Keeping
-  `auto_cert_dir` means the node comes back with the *same* identity — no re-issue, no
-  signature churn, and its audit/consensus history stays attributable to it.
+**Do not copy the directories while the node runs.** The snapshot writer merges the WAL tail into
+a new snapshot, renames it into place, and *then* truncates the WAL — each step durable on its
+own. A copier that reads `snapshot.bin` before the rename and `wal.bin` after the truncation gets
+the **old** snapshot and an **empty** tail: every record that was in the tail is in neither file
+it took. The WAL makes a *single* file consistent under a torn write; it does not make two files
+consistent with each other across a compaction. (External readiness review, 2026-09-26.)
 
-Because state also lives redundantly across the mesh, a single node's data dir is not the
-only copy of the cluster's KV — but it **is** the only copy of that node's identity and its
-per-node audit chain ([audit.md](audit.md)), so the `auto_cert_dir` is the part you cannot
-regenerate. Back it up. (There is no snapshot/restore *API* — Mycelium is a library; the
-data dir is the interface.)
+**Supported backup, pick one:**
+
+1. **Quiesced copy.** Stop the node (or `SIGTERM` and wait for `/health` to go away), copy the
+   persistence dir and `auto_cert_dir`, start it. The node re-learns anything it missed from
+   peers via anti-entropy on rejoin, so a quiesced node costs nothing but its own absence.
+2. **Filesystem snapshot** covering *both* directories in one atomic point in time — LVM, ZFS,
+   an EBS/PD volume snapshot of the one volume that holds both. A volume snapshot of two volumes
+   is two points in time, and is the live-copy problem again.
+
+**Back up together, or not at all.** A restore that brings back some of this state at an older
+point than the rest is the failure the review named *"put the directories back"*. The set, per
+node, and what an older copy of each does on its own:
+
+| State | Where | An older copy alone… |
+|---|---|---|
+| KV WAL + snapshot | persistence dir `kv/` | re-learned from peers; safe |
+| Node identity | `auto_cert_dir` | a *different* node to the mesh if the key changed; if an operator removed the old identity, its removal record still stands |
+| Revocation epochs, mandate floors | the `DurableEpochs` journal (when attached) | **resurrects revoked authority** — never restore this older than the identity |
+| Evidence journal | the `with_evidence_journal` path | records the consumer already has re-send under the same ids (safe); records after the copy are **gone**, and the exporter's cursor must be reset with it |
+| Companion stores (tuple-space WAL, blackboard, wiki store) | each companion's own dir | [companions.md](companions.md) — each has its own replay rule |
+| A private companion's outbox | its dir | sequences reissue under a stale copy unless the outbox's *generation* is bumped after the restore — the companion documents the call |
+
+**Restore** = stop the node, put **all** of the above back from the **same** point in time, and
+start it. On boot it loads the latest snapshot and replays the WAL tail on top (last-writer-wins
+per key, every record), re-bootstraps, and re-learns any newer KV from peers via anti-entropy.
+Then verify: `/ready` answers, `/stats` shows it hearing peers, and — if an evaluator or authority
+is attached — a **revoked** mandate is still refused (the check that a restore did not resurrect
+authority; `examples/authority_drain` is the shape of it).
+
+**What is tested.** The WAL/snapshot replay path has golden fixtures replayed in CI
+(`tests/fixtures/persistence/`). The two backup procedures above are **not** exercised by CI — they
+are a filesystem and an operator, and this page says so rather than implying a green suite covers
+them.

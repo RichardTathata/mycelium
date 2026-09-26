@@ -53,10 +53,29 @@ this page is the index + the gate.
   has **no scope floor**: a federation credential names a partner, a bearer resolves to a principal
   whose *scopes are dropped*, and nothing at all is anonymous. With **no** `ActionEvaluator`
   attached the seam is inert and an anonymous caller reaches **skill dispatch** — confirmed by
-  probe, not inferred. Attach an evaluator, configure a bearer, or require a federation credential
-  before exposing an `a2a` node beyond a trusted network. `with_a2a()` warns when it mounts into
-  exactly this configuration. → [rbac.md](rbac.md),
-  `cargo run --example mcp_tool_authority --features tls,compliance`
+  probe, not inferred. **Configuring a bearer is not a requirement to present one:** the route's
+  auth layer turns an *absent* `Authorization` header into an anonymous principal and proceeds
+  (`a2a_optional_auth`), so a bearer only identifies callers who choose to send it. What actually
+  admits or refuses is one of: an **`ActionEvaluator`** whose policy denies anonymous principals
+  (`with_action_evaluator`, the enforcement point this route was built for); a **federation
+  credential required at the edge** (`CallPolicy`, [federation.md](federation.md)); or an **ingress
+  in front of the route** that terminates TLS and rejects unauthenticated requests before they reach
+  the node. Pick one, and then run the negative probe — an unauthenticated `POST /a2a`
+  `message/send` naming a real skill must **not** dispatch it (the skill's own counter stays at zero,
+  the response is a refusal, and the evidence journal records the denial if an evaluator is attached).
+  `with_a2a()` warns when it mounts with none of these. → [rbac.md](rbac.md),
+  `cargo run --example a2a_skill_authority --features tls,a2a` (the refused call is act two)
+
+- ☐ **Consensus used for an exclusive effect?** (a lock, a leader, a single writer) Then run it under
+  the **supported profile** and nothing looser: `quorum_size` **fixed** to a strict majority of a
+  **fixed** voter set, `use_trust_slices: true` with **every** voter declaring that same set,
+  `count_opaque_as_absent: false`, and **membership changes outside the profile** (drain and
+  re-form; do not add or remove voters under a live slot). The quorum is derived from what each node
+  *observes*, so intersection across a membership change is an assumption, not a guarantee, and
+  opacity-driven shrinking can hand two partitions two majorities. And enforce exclusivity **at the
+  resource** with the fencing token — winning an election is not the grant. →
+  [threat-model.md §7](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile),
+  guide [04](../guide/04-consensus.md), `cargo run --example coordination_integrity --features consensus`
 
 ## 3 · Persistence & restart
 

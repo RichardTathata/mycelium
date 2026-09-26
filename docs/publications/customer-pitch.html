@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mycelium — Coordinate AI Agent Fleets Without a Coordinator</title>
+<title>Mycelium — Coordination for applications and AI agents, without a coordinator</title>
 <style>
   :root {
     --bg:#0d1117; --surface:#161b22; --surface2:#1c2128; --surface3:#21262d;
@@ -135,7 +135,7 @@
     <div class="hero-center">
       <div class="hero-title">Mycelium</div>
       <div class="hero-tagline">Coordinate AI agent fleets without handing your data to anyone's coordinator.</div>
-      <div class="hero-sub">An embedded, coordinator-free substrate for edge-native agent fleets. No central engine, no control plane, no party that holds everyone's state.</div>
+      <div class="hero-sub">An embedded substrate that gives your existing applications <em>and</em> your AI agents a shared way to discover capabilities, exchange work and adapt to failure — within explicit authority and evidence boundaries, on the infrastructure you already operate. No obligatory central coordinator; no party that has to hold everyone's state.</div>
       <div class="badges">
         <span class="badge"><span class="dot dot-g"></span>Data-sovereign by construction</span>
         <span class="badge"><span class="dot dot-b"></span>No single point of failure</span>
@@ -150,7 +150,7 @@
   <div class="slide-top"><span class="eyebrow">The Problem</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title warn">Every agent platform puts something <em>in the middle.</em></div>
-    <div class="slide-sub">Call it an orchestrator, a control plane, a registry, a broker — every mainstream multi-agent framework has a coordinator. It routes every request, holds the shared state, and decides who does what. It is convenient to build on. And it sees everything.</div>
+    <div class="slide-sub">Call it an orchestrator, a control plane, a registry, a broker — the common shape of a multi-agent framework is a coordinator: a component every request passes through, that holds the shared state and decides who does what. It is convenient to build on. It is also the component that sees everything, whose restart loses the decisions in flight, and whose capacity every agent shares. Not every framework is built this way; the ones we compare against are named in the engineering deck, with the workload result beside each.</div>
     <div class="cols3">
       <div class="card card-accent-red">
         <div class="card-icon">🗄️</div>
@@ -217,7 +217,7 @@
   <div class="slide-top"><span class="eyebrow">The Shift</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">Coordinate <em>without a coordinator.</em></div>
-    <div class="slide-sub">Mycelium is an embedded library, not a platform you connect to. There is no central engine, no control plane, no registry. Coordination <strong>emerges</strong> from the substrate: each node holds only what is relevant to it, advertises what it can do, and the fleet self-organises — based on a published model of complex adaptive systems, and 50 years of distributed-systems history.</div>
+    <div class="slide-sub">Mycelium is an embedded library, not a platform you connect to. There is no central engine, no control plane, no registry. Coordination <strong>emerges</strong> from the substrate: each node keeps its own application state locally and <em>admits</em> only the signals relevant to it, advertises what it can do, and the fleet self-organises — based on a published model of complex adaptive systems, and 50 years of distributed-systems history. (Shared substrate state — who offers what, who is alive — is gossiped across the domain; a <em>domain boundary</em> is where dissemination stops, and that is a different thing from a node's admission filter.) <strong>The first step is small:</strong> keep your deployment platform, embed the library in one application or put one tool path behind the gateway, and expand on evidence.</div>
     <div class="cols2" style="align-items:center;gap:28px;">
       <div class="card card-accent-red" style="text-align:center;">
         <div class="card-icon" style="font-size:30px;">◍</div>
@@ -230,7 +230,7 @@
         <div class="card-body">Peers gossip soft-state with each other. No hub. Capability, load, and membership are signals in a shared medium that evaporate when a node goes quiet.</div>
       </div>
     </div>
-    <div class="callout callout-green">Nothing in the middle means <strong>nothing to hold your data, nothing to fail, and nothing to be controlled.</strong></div>
+    <div class="callout callout-green">No obligatory middle means <strong>no single component that holds everyone's data, whose failure stops the fleet, or whose owner controls it.</strong> Nodes, networks, stores and model endpoints still fail — locally, and visibly.</div>
   </div>
 </div>
 
@@ -288,12 +288,12 @@
 <div class="slide" id="cs7">
   <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 3 of 4</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
-    <div class="slide-title good">Nothing to take down, <em>subpoena, or saturate.</em></div>
+    <div class="slide-title good">No single component to take down, <em>compel, or saturate.</em></div>
     <div class="slide-sub">Kill any node and the fleet self-heals — capabilities re-advertise, work re-routes, a standby promotes itself. There is no privileged component to fail, compromise, coerce, or overload.</div>
     <div class="cols3">
-      <div class="card card-accent-blue"><div class="card-icon">🪨</div><div class="card-title">Anti-fragile</div><div class="card-body">A node failing is a normal, local event the fleet absorbs — not an outage. Failure detection is built in: a node that goes quiet simply fades.</div></div>
-      <div class="card card-accent-blue"><div class="card-icon">🛡️</div><div class="card-title">Anti-capture</div><div class="card-body">No chokepoint to seize, bribe, or compel. A domain that no longer trusts the federation can exit unilaterally — sovereignty includes the right to leave.</div></div>
-      <div class="card card-accent-blue"><div class="card-icon">📈</div><div class="card-title">No central bottleneck</div><div class="card-body">There is no engine whose cognitive or network load grows with the fleet. Adding agents adds capacity, not a tax on a shared centre.</div></div>
+      <div class="card card-accent-blue"><div class="card-icon">🪨</div><div class="card-title">Failure is local</div><div class="card-body">A node failing is a normal, local event the fleet absorbs — not an outage. Failure detection is built in: a node that goes quiet simply fades. What the fleet cannot absorb, it reports — a diagnosis is data any node can compute.</div></div>
+      <div class="card card-accent-blue"><div class="card-icon">🛡️</div><div class="card-title">No single chokepoint</div><div class="card-body">No one component to seize or compel — a demand lands on a node, a domain, a key holder, and each answers for its own state. A domain that no longer trusts the federation can exit unilaterally; sovereignty includes the right to leave. What that protects depends on where your keys and disks are, and the operations guide says exactly what.</div></div>
+      <div class="card card-accent-blue"><div class="card-icon">📈</div><div class="card-title">No central bottleneck</div><div class="card-body">There is no engine whose load grows with the fleet. Adding agents adds capacity, not a tax on a shared centre — and each node's own gossip, storage and model costs are stated, measured, and yours.</div></div>
     </div>
     <div class="callout callout-blue">Resilience and security stop being features you bolt on around a coordinator, and become <strong>properties of not having one.</strong></div>
   </div>
@@ -315,7 +315,7 @@
       <span class="pattern-pill">Curated Knowledge</span>
       <span class="pattern-pill">Consensus</span>
     </div>
-    <div class="callout callout-purple">Pick the pattern the problem wants — <strong>not the one the framework forces.</strong> And because they share one substrate, mixing them is free: a pipeline can pull work, broadcast an event, and reach agreement without three separate systems to operate.</div>
+    <div class="callout callout-purple">Pick the pattern the problem wants — <strong>not the one the framework forces.</strong> And because they share one substrate, mixing them costs no <em>second system</em>: a pipeline can pull work, broadcast an event, and reach agreement without three separate systems to operate. The network, processing and operating cost of each pattern is still real, and stated per pattern in the engineering deck.</div>
   </div>
 </div>
 
@@ -329,15 +329,15 @@
       <div class="card card-accent-green">
         <div class="card-icon">✅</div>
         <div class="card-title">You need this when…</div>
-        <div class="card-body" style="line-height:1.8;">• multiple organisations, domains, or jurisdictions are involved<br>• data that cannot — or must not — be centralised<br>• agents that must outlive restarts, partitions, and partial failure<br>• a fleet that has to keep running when parts of it don't</div>
+        <div class="card-body" style="line-height:1.8;">• multiple organisations, domains, or jurisdictions are involved<br>• one organisation whose services, workers and agents must keep coordinating when a site, zone or dependency fails<br>• data that cannot — or must not — be centralised<br>• agents that must outlive restarts, partitions, and partial failure<br>• an agent's actions that must be authorised, and evidenced, at a boundary you can name</div>
       </div>
       <div class="card" style="border-left:3px solid var(--muted);">
         <div class="card-icon">🟡</div>
         <div class="card-title">You don't (yet) when…</div>
-        <div class="card-body" style="line-height:1.8;">• one team, one trust boundary, one data store<br>• a single task you split into "agents" for convenience<br>• a workload a single capable model will likely absorb next year<br><br>No shame in this — it just isn't us, and we'll say so.</div>
+        <div class="card-body" style="line-height:1.8;">• one process, one store, and no need to keep running through partial failure<br>• a single task you split into "agents" for convenience<br>• a workload a single capable model will likely absorb next year<br><br>No shame in this — it just isn't us, and we'll say so.</div>
       </div>
     </div>
-    <div class="callout callout-orange">The test: <strong>is the knowledge genuinely dispersed across independent parties?</strong> If yes, no central model can absorb it — by the same argument that makes the coordinator fail. If no, you may not have a fleet at all.</div>
+    <div class="callout callout-orange">The test: <strong>is the coordination genuinely distributed — across parties, sites, or failure domains?</strong> If yes, no single model or coordinator absorbs it. If no, you may not have a fleet at all. Qualify by the workload and its value, not by the number of legal entities.</div>
   </div>
 </div>
 
@@ -370,7 +370,7 @@
     <div class="cols3">
       <div class="card card-accent-green">
         <div class="card-title">✓ Built</div>
-        <div class="card-body" style="line-height:1.75;">Three-layer substrate. Security &amp; compliance: authenticated identity (CA-anchored, proof-chained rotation) with revocation, role-based access, OIDC single sign-on, tamper-evident audit with SIEM export, native gateway TLS, data-at-rest encryption, live key rotation, GDPR crypto-shred erasure. Durable curated knowledge canon — group-scoped, optionally <strong>git-backed</strong>, so history is the audit trail; agents, pipelines, and humans co-edit one record. Sovereign federation — now with its <strong>transport</strong>: two independently admitted meshes exchanging explicitly exported services, proven not to merge with the link cut at the network layer. <strong>Typed durability receipts</strong> (an acknowledgement names what it proves; a timeout is <em>unknown</em>, never a failure). <strong>Deterministic replay</strong> of a whole node from a recorded run. <strong>Gateway authorisation with attributable evidence</strong> (enforcement point, three verdicts, evidence journal, reference policy engine). Scoped mandates. Coordinator-free fleet diagnosis (detect → localize → explain → intervene, no central collector). Polyglot SDKs (Rust · Python · TypeScript). Feature-complete v2.</div>
+        <div class="card-body" style="line-height:1.75;">Three-layer substrate. Security &amp; compliance: authenticated identity (CA-anchored, proof-chained rotation) with revocation, role-based access, OIDC single sign-on, tamper-evident audit with SIEM export, native gateway TLS, data-at-rest encryption, live key rotation, GDPR crypto-shred erasure (effective under the key-custody and replica conditions the data-erasure runbook states). Durable curated knowledge canon — group-scoped, optionally <strong>git-backed</strong>, so history is the audit trail; agents, pipelines, and humans co-edit one record. Sovereign federation — now with its <strong>transport</strong>: two independently admitted meshes exchanging explicitly exported services, proven not to merge with the link cut at the network layer. <strong>Typed durability receipts</strong> (an acknowledgement names what it proves; a timeout is <em>unknown</em>, never a failure). <strong>Deterministic replay</strong> of a whole node from a recorded run. <strong>Gateway authorisation with attributable evidence</strong> (enforcement point, three verdicts, evidence journal, reference policy engine). Scoped mandates. Coordinator-free fleet diagnosis (detect → localize → explain → intervene, no central collector). Polyglot SDKs (Rust · Python · TypeScript). Feature-complete v2.</div>
       </div>
       <div class="card card-accent-blue">
         <div class="card-title">✓ Demonstrated</div>
@@ -378,7 +378,7 @@
       </div>
       <div class="card card-accent-orange">
         <div class="card-title">→ Honest next</div>
-        <div class="card-body" style="line-height:1.75;">Sustained real-network and load validation — the nightly scale runner is not yet operating, so that criterion is unmet rather than passed. The measured "federate-at-N" threshold. Production policy adapters and the evidence exporter for the governance wedge. Transport security on the federation edge itself, and more than two domains. <strong>No third-party production deployment yet</strong> — that is the gap a design partnership closes.</div>
+        <div class="card-body" style="line-height:1.75;">Sustained real-network and load validation — the nightly scale runner is not yet operating, so that criterion is unmet rather than passed. The measured "federate-at-N" threshold. A Cedar policy adapter and the signed evidence exporter are <strong>implemented</strong> — in the private companion, pinned to this release, with the oversight consumer's contract — and their <strong>combined deployment acceptance is outstanding</strong>: the joint runs on both clouds with that consumer have not happened, and a local fixture does not stand in for them. Transport security on the federation edge and more than two domains shipped in 2.13. <strong>No third-party production deployment yet</strong> — that is the gap a design partnership closes.</div>
       </div>
     </div>
     <div class="callout callout-blue">We are looking for <strong>design partners</strong>, not selling shrink-wrap at 10,000 nodes. The honesty is deliberate — it is the same discipline that produced the architecture.</div>
@@ -392,11 +392,11 @@
     <div class="slide-title">Not "the best." <em>The structurally different.</em></div>
     <div class="slide-sub">We will not claim Mycelium is state-of-the-art for the field — that is earned with outside evidence we don't yet have. We will claim only what is defensible, because a claim a skeptic concedes is worth more than one they dismiss.</div>
     <div class="cols3">
-      <div class="card card-accent-purple"><div class="card-title">A moat that can't be copied</div><div class="card-body">The sovereignty advantage is structural. A coordinator-based competitor cannot adopt it without abandoning the coordinator — i.e. without abandoning their architecture.</div></div>
+      <div class="card card-accent-purple"><div class="card-title">A structural difference, not a feature</div><div class="card-body">The sovereignty advantage is structural: a coordinator-based design cannot offer it without removing the coordinator. That is a difference in shape, not an impossibility for anyone else — and it is the kind a security architect can verify rather than take on trust.</div></div>
       <div class="card card-accent-purple"><div class="card-title">A limit, not a frontier</div><div class="card-body">Coordinator-freeness sits at a structural floor. Competitors who want these properties converge <em>toward</em> this design — there is nothing "past" zero coordinators to leapfrog it.</div></div>
       <div class="card card-accent-purple"><div class="card-title">Grounded, not trend-chasing</div><div class="card-body">Built from a published argument and five decades of distributed-systems research — Holland, Gelernter, gossip, lease decay — not from this quarter's framework.</div></div>
     </div>
-    <div class="callout callout-purple">The philosophy is the moat — and, for the data-sovereign buyer, <strong>it is also the buying reason.</strong> That alignment is rare, and it is the whole pitch.</div>
+    <div class="callout callout-purple">The shape is the argument — and, for the data-sovereign buyer, <strong>it is also the buying reason.</strong> Everything else on these slides is a consequence you can test.</div>
     <div class="callout callout-green" style="font-size:13px;">
       <strong>The direction is being validated from outside.</strong> In September 2026 NVIDIA shipped PAIR — pooling a household's GPUs for local inference with no central scheduler, each machine deciding from its own view. That is the GPU plane. Mycelium is the agent plane above it (capabilities, shared state, tools, traces, recovery) and stacks on it; any OpenAI-compatible client can already point at a Mycelium node and have its calls routed across your fleet — keeping prompts and data on your network.
     </div>

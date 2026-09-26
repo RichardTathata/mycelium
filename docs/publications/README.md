@@ -230,3 +230,19 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   card, a **Curated Knowledge** pattern pill, and the Built card's security list + knowledge-canon
   line. Every added claim is shipped-and-gated (v2.3.0 tag; the wiki patterns on main, CI-green,
   27+ store tests + the exactly-once gate); tamper-*evident* language preserved; no numbers added.
+
+- 2026-09-26 (external customer-materials review, not a lint run): **`customer-pitch.html` — six
+  lines making one overstated argument**, fixed in one pass: `:220` "each node holds only what is
+  relevant to it" (admission is scoped, dissemination is not — the same drift the guide README had);
+  `:233` "nothing to fail"; `:291` "nothing to take down, subpoena, or saturate"; `:294`
+  "anti-fragile"; `:318` "mixing them is free"; `:395`/`:399` "a moat that can't be copied".
+  Also `:153` "every mainstream multi-agent framework … routes every request" (universal claim, not
+  established here), `:373` erasure without its key-custody conditions, and `:381` "Honest next"
+  listing policy adapters and the exporter as future work when both are implemented (private
+  companion) with combined acceptance outstanding. The defensible strength, now what the deck says:
+  no *obligatory* central coordination dependency, explicit boundaries, recovery mechanisms and
+  observable limits. Undersell fixed in the same pass: the title and hero no longer centre agent
+  fleets alone, the small first step is on the Shift slide, the qualification slide qualifies by
+  workload rather than by number of legal entities. The engineering deck's title widened to match.
+  Lesson for `/publication-lint`: it checks claims one at a time; this argument was six lines that
+  each read as rhetoric alone and as a falsifiable claim together.
