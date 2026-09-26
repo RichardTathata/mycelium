@@ -9476,6 +9476,256 @@ async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
+/// **Closure plan C7: the bypass matrix.** One node is both gateway and provider, with an evaluator
+/// requiring a `depot` mandate, an execution authority, and provider enforcement. Every handler
+/// counts what reaches it.
+///
+/// **The plant:** with a valid mandate, `/mcp` `tools/call`, `/a2a` `tasks/send` and `/a2a`
+/// `tasks/sendSubscribe` each reach their handler. Without it, the refusals below could come from a
+/// node that refused everything.
+///
+/// Then the authority **revokes** the term, and every door is tried again with the revoked mandate.
+/// The pass condition is that **no handler runs**, observed by the counters inside the handlers, not
+/// by the absence of an error:
+///
+/// | Door | Refused at |
+/// |---|---|
+/// | `/mcp` `tools/call` | the gateway (#399) and the provider (C3) |
+/// | `/a2a` `tasks/send`, `tasks/sendSubscribe` | the gateway and the provider |
+/// | `/gateway/rpc/call` with a protected kind | the route (C1) |
+/// | `/gateway/signal/emit`, RPC-shaped | the route (C1) |
+/// | a member's direct `rpc_call_with_mandate` | the provider (C3) |
+/// | `/gateway/rpc/serve` delivering to an SDK agent | the provider check before streaming (C3) |
+///
+/// Not in this matrix, and gated where they are built: federation calls (the same `ae_preflight`,
+/// `federation_transport` tests), the wiki store (`mycelium-wiki` `git_store_authority`), and
+/// reconnecting as a removed member (C5, proposed).
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn test_c7_the_bypass_matrix_no_door_runs_revoked_work() {
+    use crate::agent::gateway_authority::{possession_request, ExecutionAuthority, PresentedMandate};
+    use crate::config::{GatewayNamedToken, TlsConfig};
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{
+        ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
+    };
+    use crate::mandate::grant::{possession_message, EntitlementTable, GrantVerifier, SignedMandateGrant};
+    use crate::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
+    use crate::{ReferenceEvaluator, Rule};
+    use base64::Engine;
+    use ed25519_dalek::SigningKey;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const CALLER: &str = "token:gw/agent-1";
+    let authority_key = SigningKey::from_bytes(&[60u8; 32]);
+    let holder_key = SigningKey::from_bytes(&[62u8; 32]);
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("c7-matrix-{http_port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.gateway_identity_issuer = Some("gw".into());
+    cfg.gateway_named_tokens =
+        vec![GatewayNamedToken { name: "agent-1".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
+    cfg.protected_rpc_kinds = vec!["depot.custom".into()];
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a());
+    let me = agent.node_id().clone();
+    let tool = format!("tool:work@{me}");
+    let skill = format!("skill:depot/dispatch@{me}");
+    let custom = format!("depot:custom@{me}");
+
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-c7")
+            .with_catalogue("cat-c7", "1")
+            .map_action("tools/call", tool.clone())
+            .map_action("skill.invoke", skill.clone())
+            .map_action("depot.custom", custom.clone())
+            .allow(Rule::new("*", "tools/call", tool.clone()).requiring_mandate("depot"))
+            .allow(Rule::new("*", "skill.invoke", skill.clone()).requiring_mandate("depot"))
+            .allow(Rule::new("*", "depot.custom", custom.clone()).requiring_mandate("depot")),
+    ));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external.trust(IssuerId::new("operator:acme").unwrap(), authority_key.verifying_key().to_bytes()).unwrap();
+    external.trust(IssuerId::new(CALLER).unwrap(), holder_key.verifying_key().to_bytes()).unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    agent.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external)));
+    agent.with_provider_enforcement();
+    agent.start().await.unwrap();
+    let _cap = agent.capabilities().advertise_capability(crate::capability::Capability::new("depot", "dispatch"), Duration::from_secs(30));
+
+    // Handlers, each counting what reaches it.
+    let tool_ran = Arc::new(AtomicUsize::new(0));
+    let t2 = Arc::clone(&tool_ran);
+    let _tool = agent.mcp().register_mcp_tool("work", serde_json::json!({}), move |_args| {
+        let t = Arc::clone(&t2);
+        async move { t.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!("done")) }
+    });
+    let skill_ran = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, ran) = (Arc::clone(&agent), Arc::clone(&skill_ran));
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                ran.fetch_add(1, Ordering::SeqCst);
+                agent.service().rpc_respond(&req, b"dispatched".to_vec());
+            }
+        });
+    }
+    // The SDK agent: whatever the serve stream delivers for `depot.custom` is counted.
+    let sdk_saw = Arc::new(AtomicUsize::new(0));
+    {
+        let saw = Arc::clone(&sdk_saw);
+        // The HTTP server may still be starting: retry the connect briefly.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let resp = loop {
+            match reqwest::Client::new()
+                .get(format!("http://127.0.0.1:{http_port}/gateway/rpc/serve/depot.custom"))
+                .bearer_auth("s3cret")
+                .send()
+                .await
+            {
+                Ok(r) => break r,
+                Err(e) => {
+                    assert!(tokio::time::Instant::now() < deadline, "the serve stream never opened: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
+        assert_eq!(resp.status(), 200, "the SDK agent's serve stream is open");
+        tokio::spawn(async move {
+            use futures_util::StreamExt as _;
+            let mut body = resp.bytes_stream();
+            while let Some(Ok(chunk)) = body.next().await {
+                saw.fetch_add(String::from_utf8_lossy(&chunk).matches("event: depot.custom").count(), Ordering::SeqCst);
+            }
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let wall_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let checkpoint = |seq: u64, revoked: &[&str]| {
+        let c = RevocationCheckpoint {
+            authority: PrincipalId::new("operator:acme").unwrap(),
+            scope: "depot".into(),
+            seq,
+            issued_at_ms: wall_ms(),
+            revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
+        };
+        SignedRevocationCheckpoint { signature: mycelium_core::tls::sign_bytes(&authority_key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+    };
+    agent.offer_revocation_checkpoint(&checkpoint(1, &[])).unwrap();
+
+    let grant_for = |holder: &str| {
+        let m = Mandate {
+            holder: PrincipalId::new(holder).unwrap(),
+            established_by: PrincipalId::new("operator:acme").unwrap(),
+            purpose: "depot".into(),
+            scope: "depot".into(),
+            operations: vec![
+                "tools/call:tool:work".to_string(),
+                "skill.invoke:skill:depot/dispatch".to_string(),
+                "depot.custom:depot:custom".to_string(),
+            ],
+            epoch: 1,
+            term: TermId::new("t1").unwrap(),
+            valid_from_ms: 0,
+            valid_until_ms: wall_ms() + 600_000,
+        };
+        SignedMandateGrant { signature: mycelium_core::tls::sign_bytes(&authority_key, &m.canonical_bytes()).to_vec(), mandate: m }
+    };
+    let client_grant = grant_for(CALLER);
+    let member_grant = grant_for(&format!("node:{me}"));
+    let digest_of = |v: &serde_json::Value| crate::agent::action_evaluator::arguments_digest(&serde_json::to_vec(v).unwrap());
+    let client_mandate = |op: &str, res: &str, args: &serde_json::Value| {
+        let proof = mycelium_core::tls::sign_bytes(&holder_key, &possession_message(&client_grant.mandate, &possession_request(op, res, &digest_of(args))));
+        serde_json::to_value(PresentedMandate { grant: client_grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof) }).unwrap()
+    };
+    let member_mandate = |op: &str, res: &str, args: &serde_json::Value| {
+        let proof = agent.sign_with_identity(&possession_message(&member_grant.mandate, &possession_request(op, res, &digest_of(args)))).unwrap();
+        serde_json::to_value(PresentedMandate { grant: member_grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(proof) }).unwrap()
+    };
+
+    let http = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    let tool_args = serde_json::json!({});
+    let text = "go";
+    let mcp_call = |m: serde_json::Value| {
+        let (http, base) = (http.clone(), base.clone());
+        async move {
+            http.post(format!("{base}/mcp")).bearer_auth("s3cret")
+                .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":"work","arguments":{},"_meta":{"mandate":m}}}))
+                .send().await.unwrap().text().await.unwrap()
+        }
+    };
+    let a2a = |method: &str, m: serde_json::Value| {
+        let (http, base, method) = (http.clone(), base.clone(), method.to_string());
+        async move {
+            http.post(format!("{base}/a2a")).bearer_auth("s3cret")
+                .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":{
+                    "id": format!("task-{}", fastrand::u32(..)), "skillId": "depot/dispatch",
+                    "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+                    "_meta": {"mandate": m}}}))
+                .send().await.unwrap().text().await.unwrap()
+        }
+    };
+    let skill_args = serde_json::json!({ "text": text });
+
+    // ── The plant: a valid mandate reaches every handler through the front doors. ──
+    mcp_call(client_mandate("tools/call", &tool, &tool_args)).await;
+    a2a("tasks/send", client_mandate("skill.invoke", &skill, &skill_args)).await;
+    a2a("tasks/sendSubscribe", client_mandate("skill.invoke", &skill, &skill_args)).await;
+    assert_eq!(tool_ran.load(Ordering::SeqCst), 1, "plant: /mcp reaches the tool");
+    assert_eq!(skill_ran.load(Ordering::SeqCst), 2, "plant: /a2a send and stream reach the skill");
+
+    // ── Revoked. ──
+    agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();
+    let (tool0, skill0, sdk0) = (tool_ran.load(Ordering::SeqCst), skill_ran.load(Ordering::SeqCst), sdk_saw.load(Ordering::SeqCst));
+
+    mcp_call(client_mandate("tools/call", &tool, &tool_args)).await;
+    a2a("tasks/send", client_mandate("skill.invoke", &skill, &skill_args)).await;
+    a2a("tasks/sendSubscribe", client_mandate("skill.invoke", &skill, &skill_args)).await;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(
+        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"work","arguments":{}}}).to_string(),
+    );
+    for (route, body) in [
+        ("rpc/call", serde_json::json!({"target": me.to_string(), "method": "mcp.invoke", "payload_b64": b64, "timeout_secs": 2})),
+        ("rpc/call", serde_json::json!({"target": me.to_string(), "method": "skill.invoke", "payload_b64": b64, "timeout_secs": 2})),
+        ("signal/emit", serde_json::json!({"kind": "mcp.invoke", "scope": format!("node:{me}"), "payload_b64": b64})),
+    ] {
+        let status = http.post(format!("{base}/gateway/{route}")).bearer_auth("s3cret").json(&body).send().await.unwrap().status();
+        assert_eq!(status, 403, "{route} refuses protected work");
+    }
+    let tool_call = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"work","arguments":tool_args}});
+    let _ = agent.service().rpc_call_with_mandate(me.clone(), "mcp.invoke", tool_call.to_string().into_bytes(),
+        &member_mandate("tools/call", &tool, &tool_args), &tool, Duration::from_secs(5)).await;
+    let _ = agent.service().rpc_call_with_mandate(me.clone(), "skill.invoke", text.as_bytes().to_vec(),
+        &member_mandate("skill.invoke", &skill, &skill_args), &skill, Duration::from_secs(5)).await;
+    let custom_args = serde_json::json!({ "payload_b64": base64::engine::general_purpose::STANDARD.encode(b"work") });
+    let _ = agent.service().rpc_call_with_mandate(me.clone(), "depot.custom", b"work".to_vec(),
+        &member_mandate("depot.custom", &custom, &custom_args), &custom, Duration::from_secs(3)).await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(tool_ran.load(Ordering::SeqCst), tool0, "no door ran the tool after revocation");
+    assert_eq!(skill_ran.load(Ordering::SeqCst), skill0, "no door ran the skill after revocation");
+    assert_eq!(sdk_saw.load(Ordering::SeqCst), sdk0, "the serve stream delivered nothing to the SDK agent");
+
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
 /// **A leadership answer names the rung it reached.**
 ///
 /// `elect_leader` returns a bare `NodeId`, which cannot distinguish *"a quorum chose me"* from

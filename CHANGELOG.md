@@ -11,6 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The bypass matrix** (Boundary H closure plan C7). After a revocation, every door the code has runs nothing, by
+  the handlers' own counters: `/mcp`, `/a2a` send and stream, `/gateway/rpc/call` and `signal/emit` with protected
+  kinds, a member's direct call, and the SDK serve stream. The plant: before the revocation the front doors reach the
+  handlers.
 - **Every read of `Hlc::current()` classified, and guarded** (Boundary H closure plan C11).
   - The seen-set TTL sites fail closed on a frozen clock; the rest are stamps.
   - `consensus::causal_now_ms` uses `decision_now_ms`.
