@@ -9,6 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.16.0] — 2026-09-26
+
+**Settings where there were sentences.** Wire **v12** unchanged (`PREV = 11`); additive on the 2.x
+line, with one validation tightening. Three external reviews in two days (a code review, a customer-
+materials review, and the project's own doc-coverage and publication lints run against them) found
+the same shape repeatedly: a runbook telling an operator to turn something that had no knob, a route
+that discarded what it had computed, a capture path the docs implied and the tree lacked. This
+release closes those, and carries the documentation those passes produced: the engagement kit, the
+example paths, the supported consensus profile in the threat model, the buyer deck said straight.
+
+**Upgrade notes.** `GossipConfig` gained `control_max_staleness_ms` and `control_min_peers_heard`,
+which breaks an exhaustive struct literal (the `Default`+assignment pattern is unaffected). A config
+that carries a family-wildcard scope such as `llm:*` now **fails `validate()`** — it never granted
+anything, so rewrite it as the scopes it meant. `POST /gateway/kv`'s response gained fields beside
+the unchanged `ok`.
+
 ### Added
 - **`POST /gateway/kv` returns the write's receipt** — `operation_id`, `local_durability`
   (`on_disk` · `buffered` · `not_configured` · `failed`), `local_durability_error` when failed —

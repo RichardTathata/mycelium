@@ -7,7 +7,7 @@
 #   images:
 #     - name: mycelium-demo
 #       newName: ghcr.io/you/mycelium
-#       newTag:  v2.15.1
+#       newTag:  v2.16.0
 #
 # See deploy/kubernetes/README.md for building/pushing the image and the multi-host scale story.
 apiVersion: kustomize.config.k8s.io/v1beta1

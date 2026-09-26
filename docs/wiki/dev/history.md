@@ -22,6 +22,24 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.16.0 release — 2026-09-26 (tag `v2.16.0`) — settings where there were sentences
+
+Wire **v12** unchanged (`PREV = 11`); a MINOR: additive API plus one validation tightening.
+
+Three external reviews in two days — a code review (F1–F10), a customer-materials review, and the
+project's own doc-coverage run 17 and publication-lint run 3 — kept finding one shape: a runbook
+instruction with nothing behind it. This release closes the seven code gaps doc-coverage surfaced
+(the governors' confidence bound as `GossipConfig` settings with env overrides; the receipt on
+`POST /gateway/kv`; the recorded run in the node binary under `sim`; `GOSSIP_GATEWAY_NAMED_TOKENS`;
+`validate()` refusing a family-wildcard scope rather than widening `scope_admits`; `required-features`
+on two visualisers; the two intent TTLs pinned at compile time) and carries the documentation those
+passes produced: `docs/operations/engagement-kit.md`, the example catalogue's recommended paths, the
+supported consensus profile in `threat-model.md §7`, the A2A checklist's real admission controls, the
+backup procedure that no longer says "copy the dirs live", the buyer deck without its six overstated
+lines, and twelve new rows in the doc-coverage matrix. Logs:
+[doc-coverage run 17](.log/2026-09-26-doc-coverage-run-17.md) ·
+[customer materials](.log/2026-09-26-customer-materials.md) · [lint](.log/2026-09-26-lint.md).
+
 ## v2.15.1 release — 2026-09-26 (tag `v2.15.1`) — the review's public gates
 
 Wire **v12** unchanged (`PREV = 11`); no API change; a PATCH.

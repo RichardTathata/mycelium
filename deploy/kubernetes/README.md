@@ -25,8 +25,8 @@ The manifests reference the image name `mycelium-demo`. Build it from the repo r
 to a registry your cluster can pull from:
 
 ```sh
-docker build -t ghcr.io/you/mycelium:v2.15.1 -f docker/Dockerfile .
-docker push  ghcr.io/you/mycelium:v2.15.1
+docker build -t ghcr.io/you/mycelium:v2.16.0 -f docker/Dockerfile .
+docker push  ghcr.io/you/mycelium:v2.16.0
 ```
 
 Point the manifests at your image by editing the `images:` block in
@@ -36,7 +36,7 @@ Point the manifests at your image by editing the `images:` block in
 images:
   - name: mycelium-demo
     newName: ghcr.io/you/mycelium
-    newTag:  v2.15.1
+    newTag:  v2.16.0
 ```
 
 For a **local kind cluster** you can skip the registry: `kind load docker-image mycelium-demo:latest`.
