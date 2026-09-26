@@ -1,7 +1,11 @@
 # dev/diagnostics — the emergent-detector layer (Legible Emergence, complete)
 
-↑ [dev/](dev.md) · design: `docs/design/legible-emergence-taxonomy.md` · plan:
-`docs/plans/legible-emergence.md` · code: `src/agent/emergent.rs`
+↑ [dev/](dev.md) · design: `docs/design/legible-emergence-taxonomy.md` (P1–P7, the substrate's
+liveness/consistency pathologies) and its proposed addendum
+[`legible-emergence-content-plane.md`](../../design/legible-emergence-content-plane.md) (P8/P9 — the
+adoption cascade and the unfalsifiable propagated claim: what the fleet comes to *believe* from a
+shared board; design record, no code, 2026-09-20) · plan: `docs/plans/legible-emergence.md` · code:
+`src/agent/emergent.rs`
 
 Coordinator-free **emergent-stratum** diagnosability — the sibling of the node-local `/stats`
 tripwires (`commit_conflicts`, …), at the cluster/temporal level. The motivating gap: the

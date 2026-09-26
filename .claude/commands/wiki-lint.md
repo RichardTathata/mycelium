@@ -41,9 +41,17 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   read-modify-write that lost a concurrently-dialing peer in the fan-out activation
   (`peer_list_tx`, found live 2026-07-21; loom model `loom-spike/tests/bounded_append.rs` proves
   the schedule). The rule predated the bug — this sweep is what makes it mechanical.
-- **Named regression gates**: every test cited by name in a wiki page still exists
-  (`grep -rn "<test_name>" src/ mycelium-core/src/ mycelium-*/src/ mycelium-*/tests/`).
-  A renamed/deleted gate = a finding.
+- **Named regression gates — and every other identifier a page cites**: mechanically, not by
+  eye. Extract every backticked `snake_case` identifier with two or more underscores from every
+  wiki page **outside `.log/`** (`grep -rhoE '\`[a-z][a-z0-9]*(_[a-z0-9]+){2,}\`' docs/wiki
+  --include='*.md'`, minus the `.log` trees) and `grep -rqF` each against the whole tree (`src/`,
+  every crate's `src/` and `tests/`, `tests/`, `examples/`, `scripts/`, `.github/`, `Makefile`).
+  An identifier absent from the tree = a finding: a renamed or deleted test, function, constant or
+  flag. `.log/` entries are dated records and are exempt; a clippy lint name cited in prose is a
+  known false positive, dismiss it by hand. This replaced "every test cited by name still exists"
+  after `history.md` carried a test's pre-rename name for six days across a pass that declared
+  §1 clean — the old check had no enumeration, so it checked whatever the linter remembered
+  (ledger 2026-09-26).
 - **Cited constants/flags** (e.g. `MAX_KV_WRITE_BYTES`, `WIRE_VERSION`/`PREV_WIRE_VERSION`,
   `swim_failure_detector` default): read the cited file and confirm the stated value/default.
   **Scope includes guide *chapters*, not just the front-door docs** — grep every guide page that pins

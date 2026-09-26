@@ -82,6 +82,11 @@ journal record saying what the gateway observed — `completed`/`failed` from th
 `none` when refused before sending, and **`unknown` on a timeout, never `failed`** (the call may have
 run). Before it every permitted call read as `effect: unknown`, so the evidence could say what an
 agent was allowed to do and never what it did.
+**AE2 adopted 2026-09-20** — [`design/action-envelope-ae2.md`](../../design/action-envelope-ae2.md):
+enforcement *at the resource* and what its strength depends on — the enforcement point that is not the
+gateway, which is why `preflight` went public in 2.12.0 and why 2.15.0's `with_provider_enforcement`
+exists; the private companion's resource-side point embodies it. (Uncited from this wiki for six days
+after adoption — lint 2026-09-26.)
 **AE0 adopted 2026-09-13** — [`design/action-envelope-ae0.md`](../../design/action-envelope-ae0.md): the envelope
 (item 1's `operation_id`/`attempt_id` + item 7's verified actor, operation, resource, argument digest, mandate,
 `policy.revision`, validity, mapping), the `ActionEvaluator` contract (permit · deny · indeterminate; deterministic;

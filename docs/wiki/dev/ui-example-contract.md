@@ -94,9 +94,13 @@ carries `gateway,metrics`) **or** a *documented exception* above (`conway-gpu` �
 exceptions list — is a finding (either fix it or classify it). An unclassified hit is the gap the
 `ops_console` move exposed (ledger 2026-07-15).
 
-**Current classification (tree-derived, lint 2026-09-05 — 12 `include_str! *.html` hits):**
+**Current classification (tree-derived, lint 2026-09-26 — 14 `include_str! *.html` hits):**
 *compliant* — `redistribution_viz` · `catalog_viz` · `llm_council_viz` · `provisioning_viz` ·
 `stigmergy_viz` · `microgrid_viz` · `guardrail_viz` · `wiki_council_viz` · `conway` · `llm_agent`
-(Mesh Control — its documented run command is the guide's, `--features metrics`); *documented
-exceptions* — `conway-gpu` · `three_node_demo` · `ops_console`. Re-derive with
-`grep -rl 'include_str!.*\.html' examples mycelium-*/examples` each pass and update this line.
+(Mesh Control — its documented run command is the guide's, `--features metrics`) ·
+`control_envelope_viz` · `coordination_viz` (both `--features metrics`, gateway default-on; both
+advertise `ui/viz` and inject the link and the concepts box — verified 2026-09-26, having sat
+unclassified through the 2026-09-24 pass); *documented exceptions* — `conway-gpu` ·
+`three_node_demo` · `ops_console`. Re-derive with `grep -rl 'include_str!.*\.html' examples
+mycelium-*/examples` each pass, **and diff the hit count against the one written here** — a count
+that moved is a hit nobody classified.
