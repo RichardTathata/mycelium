@@ -48,7 +48,10 @@ record, not duplicates of those.
 > ranged pulls staged to disk, the HTTP source's 512 MiB in-memory cap closed, emulators in CI and real buckets as
 > delivery evidence; rev 0.5: the **two ways a capability arrives** — directly deployed or dynamically installed — a
 > `[hosts]` table so the checker knows whether anything could host an entry, and one runbook page owning the lifecycle
-> that `deployment.md`, `artifacts.md` and guide 02 point at — plus three recorded questions); it says *would bind*, never *is bound*. **The design-time half of
+> that `deployment.md`, `artifacts.md` and guide 02 point at; rev 0.6: the **stem fleet** — identical nodes loading what
+> `[[presence]]` and `[[requirement]]` declarations call for, a node that declares from its file at startup so file and
+> runtime vocabulary are one, and a CI topology beside the coop suites — with a single build order. **Complete as an
+> argument at rev 0.6**; one question (SDK units) stays open); it says *would bind*, never *is bound*. **The design-time half of
 > the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
 > written in. Nothing built yet.
 >

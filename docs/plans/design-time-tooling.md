@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.5, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; §13 holds the recorded questions). Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.6, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; rev 0.6 added §13, the stem fleet — D17–D18, R1–R2, answering Q1 — and §15, the build order. **Complete as an argument at rev 0.6.**) Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -221,7 +221,9 @@ exporter and depends only on W2's document; it can run in parallel with W3–W5.
 | D5 | Lanes by name and role | Declaring lane *content* — the space matches nothing on content (E6), so a declaration would describe something the runtime never checks |
 | D6 | Authority as reachability over declared rules | Running the evaluator offline — an evaluator's answer depends on envelope facts (principal, scopes, arguments) that exist only per call |
 | D7 | No secrets, no addresses | A single file for everything — it could not be committed, and the point is a checked-in vocabulary |
-| D8 | Runtime use of the new sections is out of scope | Folding it in — it changes node startup behaviour and belongs in its own plan with its own gate |
+| D8 | Runtime use of the new sections is out of scope *(superseded by D18 at rev 0.6: taken, with its own phase R1)* | Folding it in unplanned — it changes node startup behaviour and needed its own gate |
+| D17 *(rev 0.6)* | Presence policies are declarable (`[[presence]]`) and checked as a requirement with a count against distinct hosting units | Leaving presence code-only (the one desired state an all-stem fleet runs on would be the one thing the checker could not see) |
+| D18 *(rev 0.6)* | A unit declares from its file at startup (`--units`), so file and runtime vocabulary are one; code declaration still works, doing both warns | Keeping the file descriptive (Q1: the check passes on a vocabulary the unit does not speak); a fleet-level file any node reads (a control plane by another door — every declaration stays a unit's own evaporating entry) |
 | D15 *(rev 0.5)* | A unit declares what it hosts (`[hosts]`: kinds, budget, headroom, trusted publishers, placement root), so *would bind by provisioning* requires a host that could | Treating any matching entry as bindable (the checker would pass a fleet the provisioner never installs into) |
 | D16 *(rev 0.5)* | One page owns the capability lifecycle for both arrival paths; `deployment.md`, `artifacts.md` and guide 02 point at it | Growing each existing page (three partial tellings of one workflow, the drift this plan exists to remove) |
 | D11 *(rev 0.4)* | One adapter over the `object_store` crate, behind `store-aws` / `store-gcp` features | The AWS and Google SDKs (two large trees, two shapes, two paths to keep honest); hand-rolled SigV4 over reqwest (a signing implementation this project would then own) |
@@ -460,19 +462,105 @@ checker that exists.
 artifact stays the provisioner's probabilistic self-election at runtime, and the checker says a
 host *exists*, never *which*.
 
-## 13. Recorded questions for rev 0.6 *(rev 0.3; not decided here)*
+## 13. The stem fleet: identical nodes that load what the declarations call for *(rev 0.6)*
 
-- **Q1 — nothing binds a unit's code to its file.** D8 leaves runtime use of the new sections out of
-  scope, so a unit can declare a requirement in its file and never call `declare_requirement`, or the
-  reverse; the check passes on a vocabulary the unit does not speak. The candidate answer is small — a
-  unit loads its file at startup and declares from it, so the file is the source rather than a
-  description — and it is D8's own plan. It should follow W2 quickly.
-- **Q2 — SDK units.** D2 admits an SDK agent as a unit, but only the Rust node loads
-  `NodeCapabilityConfig`. A Python or TypeScript unit would have a file for the checker and nothing
-  reading it at runtime: Q1 in a second form. The answer probably rides on A3's SDK work.
-- **Q3 — catalogue units are answered by A2**, recorded here so the earlier list is complete.
+A cluster can be a set of identical **stem nodes** that hold no application capability at deploy time
+and load what is required dynamically. The autonomic loop was built for this shape and the coop
+`provisioning` demo runs it: two identical providers, a declared need, one self-elects and installs,
+kill it and the standby re-provisions (`examples/coop/src/bin/provisioning.rs`). What the shape needs,
+and where it stops, is stated here so a buyer is not left to infer it.
 
-## 14. Not claimed
+**What a stem node is.** Not empty: the mesh binary with the wasm host and a provisioner, runtimes for
+the kinds it hosts (the WASM sandbox is registered by default; a blob runtime needs its native consumer
+— an Ollama or ONNX process — already on the node), the CA identity, the publisher keys it trusts, a
+reachable library or store, and its egress policy. That is D15's `[hosts]` table plus `GossipConfig`.
+A stem fleet is a fleet of one image.
+
+**What drives the loading** is two kinds of desired state, both reconciled locally by every node
+through the one resolve-and-pull path (`mycelium-wasm-host/src/provisioner.rs:107–126`):
+
+- **demand** — a `req/` entry with no live provider, declared by any unit that needs the capability;
+- **presence** — a `SupervisionPolicy` (`filter`, `min_providers`, `max_providers`) that keeps at
+  least N and at most M providers across the fleet **independent of demand**. This is what makes the
+  shape self-healing, and it is the answer to *who requires anything in an all-stem fleet*: the
+  operator declares presence, and the fleet fills it.
+
+Nothing assigns a node an artifact. Each node sees the gap, self-elects with a probability that damps
+the herd, checks its own runtime, budget and headroom, and installs; which node ends up hosting is not
+predictable and the checker never says.
+
+**D17 — presence is declarable.** The unit file gains `[[presence]]`, the `SupervisionPolicy` fields
+written down, and the checker treats a presence policy as a requirement with a count: it must be
+hostable by at least `min_providers` distinct units' `[hosts]` (D15), or the finding is
+**`presence unhostable`** naming the shortfall.
+
+```toml
+[[presence]]                         # keep 2–4 route optimizers alive fleet-wide
+ns = "route"; name = "optimize"
+min_providers = 2
+max_providers = 4
+```
+
+**D18 — Q1 answered: the file is the source, and a unit declares from it at startup.** This is D8's
+own plan, now taken: a node given `--units <file>` loads it with the same loader (W1) and, after
+`start()`, declares every `[[requirement]]`, defines every `[[group]]`, attaches a provisioner
+configured from `[hosts]`, and publishes every `[[presence]]` as a supervision policy. Nothing in the
+file is read by any other node; every declaration still travels as the evaporating KV entry it always
+was, so the runtime law is unchanged — intents lapse, nodes reconcile locally, and the records say what
+was installed. What changes is that the design-time file and the runtime vocabulary can no longer
+disagree, because there is one of them. A unit that declares in code keeps working; a unit that does
+both gets a warning naming the duplicate.
+
+**Where the shape stops**, on the tin:
+
+- **Only two kinds load dynamically** — WASM components against the host interface, and blobs for a
+  runtime already present. New native code, a companion crate, a gateway route, a TLS change are a new
+  image and a rolling deploy (`docs/operations/deployment.md` §Rolling upgrades). The stem image is
+  itself a direct deployment.
+- **The catalogue is the supply chain.** Every stem node trusts the publisher keys in its config, a
+  signed entry is what stops a relabelled artifact, and install rights through the rights ledger bound
+  what any node takes on. This is the posture to review before adopting the shape (threat model §7).
+- **Large models are filesystem-backed until S1–S3 land** (§11).
+
+| Phase | Deliverable | Exit gate |
+|---|---|---|
+| **R1** | `[[presence]]` in the format and `presence unhostable` in the checker; `--units <file>` on the node binary and the startup declaration path (D18), with the duplicate warning | A fixture with `min_providers = 2` and one hosting unit reports `presence unhostable (1 of 2)`; a node started with the §3 file shows its `req/`, `cap-group/` and presence entries on a second node; the same requirement declared in both file and code warns once; all seen failing first |
+| **R2** | The stem fleet as the second reference topology: N identical nodes from one image, one units directory, a presence policy, a librarian; in CI beside the coop suites | The fleet converges to `min_providers` live providers within a bound; killing one restores it; the checker's JSON for the directory and the fleet's `cap/` view agree on which capabilities exist (the first declared-versus-observed comparison, run locally without a consumer); guide 13 gains the topology with its limits |
+
+R1 depends on W1 and L1 (the format) and A2 (the hosting check); R2 depends on R1 and W2. R2 is also
+the first place §9's comparison runs end to end, so it doubles as W6's local fixture.
+
+## 14. Recorded questions *(rev 0.3; status at rev 0.6)*
+
+- **Q1 — nothing binds a unit's code to its file.** **Answered by D18 / R1.**
+- **Q2 — SDK units.** D2 admits an SDK agent as a unit, but only the Rust node loads the file. A
+  Python or TypeScript unit has a file for the checker and nothing reading it at runtime. **Open.** The
+  candidate answer is that the SDKs gain a `declare_from(path)` verb over the existing gateway routes
+  (requirements and groups already have them; presence and hosts do not apply to an SDK agent), so it
+  rides on A3's SDK work and is a day once A3 exists.
+- **Q3 — catalogue units.** **Answered by A2 / L1.**
+
+## 15. Build order
+
+The plan is complete as an argument at rev 0.6; nothing is built. The order, chosen so each step
+ships a whole thing and the shipped defect goes first:
+
+1. **S1** — streaming HTTP pulls; closes E12, independent of everything else.
+2. **W1 + L1 + the format half of R1** — the unit file, one PR, because every later step reads it.
+3. **W2 + A2 + L2** — the checker, the provisioning class, the lifecycle page; the coop fixtures.
+4. **R1's runtime half, then R2** — the node declares from its file; the stem fleet in CI.
+5. **S2 + A1** — the S3 adapter and `mycelium artifact publish|list|verify`, which share it.
+6. **S3** — GCS on the same adapter.
+7. **W3, W4, W5** — schema awareness, the authority overlay, DOT; each a day, any order.
+8. **A3** — the gateway publish route, with its scope family and matrix plant.
+9. **W6** — the consumer record, private repo, in parallel from step 3 on.
+10. **S4** — real buckets, when an account exists; delivery evidence, not a commit.
+
+What the plan leaves outside itself: Q2, a designer UI (§6, deliberately none), the enforced
+composition (§8, the axis plan's §13 decides), and NovusLens's own rendering (their side of the
+handover).
+
+## 16. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is
