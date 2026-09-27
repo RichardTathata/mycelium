@@ -38,6 +38,13 @@ record, not duplicates of those.
 > **Still open:** the deck and philosophy passes, the companion onboarding checklist, the **Phase-C adversarial
 > self-audit** over items 1 + 2 + 7, and the private RA/AE slices (a separate repository — see §8).
 >
+> **Design-time tooling (proposed, 2026-09-27):** [`design-time-tooling.md`](design-time-tooling.md) — the
+> unit declaration file (requirements, groups, lanes, authority vocabulary beside today's `[[capability]]`) and an
+> offline `mycelium wire-check` that applies the mesh's own match rule to a directory of units before deployment.
+> Five phases W1–W5, decision register D1–D8; it says *would bind*, never *is bound*. **The design-time half of
+> the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
+> written in. Nothing built yet.
+>
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).
 > **Two primary deliverables**, each substrate-native: [`mycelium-reason.md`](mycelium-reason.md) — the
