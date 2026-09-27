@@ -131,7 +131,7 @@ at a gateway (the same value `GatewayCaller` resolves at runtime). It is not an 
 key an observation record also carries. The JSON output (§4) carries `revision`, the git commit of the
 units directory, mirroring the policy revision the gateway stamps on every decision
 (`set_deployed_policy_revision`). Without these two, the output cannot be joined to anything the fleet
-later reports (§10).
+later reports (§9).
 
 ---
 
@@ -159,7 +159,7 @@ runtime facts.
 offers, requirements, edges, lanes, authority edges, findings) under a **versioned document schema**,
 `mycelium.design/declaration/1`, with `revision` (D9) and the schema id in the envelope; `--format dot`
 emits Graphviz. Exit 0 with no errors, 1 with any error, 2 for a file that does not load. The wording
-in every line is *would bind* / *could not bind*. The JSON is a document a consumer reads (§10), so it
+in every line is *would bind* / *could not bind*. The JSON is a document a consumer reads (§9), so it
 is pinned like the evidence schema: a change to its shape is a schema version, not an edit.
 
 **CI recipe** (lands in guide 12's section, beside the schema gate):
@@ -186,7 +186,7 @@ Each phase ships with its regression test seen failing first, per the repository
 | **W3** | Schema awareness: the checker reads the same schema directory guide 12 seeds, so a `schema_id` that names no file is an error and a provider/consumer version split is reported as the rollout-window case | A fixture holding `v1` providers and a `v2` requirement reports `schema-only mismatch` with both ids |
 | **W4** | The authority overlay (D6): per wired edge, reachability through declared mandates and rules; `--no-authority` to skip | A fixture whose only rule requires a mandate scope no unit declares reports `unauthorisable edge`; the `procurement_authority` example's vocabulary written as a fixture passes |
 | **W5** | `--format dot`; a paragraph in guide 12 and one in `docs/operations/deployment.md`; a row in `examples/README.md` under the tutorial contract | The coop fixture renders; `/doc-coverage` gains a HOW·Ops cell for *deployment wiring* that opens the runbook |
-| **W6** *(rev 0.2)* | The declaration as a consumer record (§10): the schema pinned in the private `COMPATIBILITY.md` beside the evidence schema; the private exporter ships a `deployment_declaration` batch next to `policy_deployment`, same signing, same batch identity, same byte-identical-under-one-id rule; the operation names in the JSON's authority edges pass through the exporter's reviewed catalogue so an unmapped one exports as `unmapped`, never as a guess | Public: the golden JSON from W2 validates against the pinned schema. Private: a retry of a declaration batch returns the remembered bytes; an observation joined to a declared edge by (principal, ns, name, schema_id) resolves to exactly one edge on the coop fixture; the consumer's rendering is on their side of the handover and is not a gate here |
+| **W6** *(rev 0.2)* | The declaration as a consumer record (§9): the schema pinned in the private `COMPATIBILITY.md` beside the evidence schema; the private exporter ships a `deployment_declaration` batch next to `policy_deployment`, same signing, same batch identity, same byte-identical-under-one-id rule; the operation names in the JSON's authority edges pass through the exporter's reviewed catalogue so an unmapped one exports as `unmapped`, never as a guess | Public: the golden JSON from W2 validates against the pinned schema. Private: a retry of a declaration batch returns the remembered bytes; an observation joined to a declared edge by (principal, ns, name, schema_id) resolves to exactly one edge on the coop fixture; the consumer's rendering is on their side of the handover and is not a gate here |
 
 W1 and W2 are the value; W3–W5 are each a day and can stop after any one of them without leaving a
 half-feature, because each is a finding class added to a working checker. W6 is private work on the
