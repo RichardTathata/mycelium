@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.1, 2026-09-27. Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.2, 2026-09-27 (rev 0.2 added D9, W6 and §9: the declaration as a consumer record). Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -62,6 +62,7 @@ is the unit's name. The checker takes a directory (or a list of files) and nothi
 
 ```toml
 # units/planner.toml — what this unit offers, needs, defines and may do.
+principal = "planner"                # D9 — the principal this unit presents; the join key
 
 [[capability]]                       # unchanged from today (E1)
 ns   = "plan"
@@ -124,6 +125,14 @@ declaration could ever authorise.
 **D7 — the file carries no secrets and no addresses.** Tokens, peers and ports stay in `GossipConfig`.
 A unit file is safe to commit.
 
+**D9 — a unit names its principal, and the checker's JSON names its revision** *(rev 0.2)*. The file
+gains one top-level field, `principal = "planner"`, the issuer-qualified principal the unit will present
+at a gateway (the same value `GatewayCaller` resolves at runtime). It is not an address: it is the one
+key an observation record also carries. The JSON output (§4) carries `revision`, the git commit of the
+units directory, mirroring the policy revision the gateway stamps on every decision
+(`set_deployed_policy_revision`). Without these two, the output cannot be joined to anything the fleet
+later reports (§10).
+
 ---
 
 ## 4. The checker: `mycelium wire-check`
@@ -146,9 +155,12 @@ runtime facts.
 | `unranked ranking` | a ranking on an attribute no matching capability carries | warning |
 | `single provider` | a requirement with exactly one possible provider across the deployment | warning |
 
-**Output.** Text by default; `--format json` emits the resolved graph (units, offers, requirements,
-edges, findings); `--format dot` emits Graphviz. Exit 0 with no errors, 1 with any error, 2 for a
-file that does not load. The wording in every line is *would bind* / *could not bind*.
+**Output.** Text by default; `--format json` emits the resolved graph (units with their principals,
+offers, requirements, edges, lanes, authority edges, findings) under a **versioned document schema**,
+`mycelium.design/declaration/1`, with `revision` (D9) and the schema id in the envelope; `--format dot`
+emits Graphviz. Exit 0 with no errors, 1 with any error, 2 for a file that does not load. The wording
+in every line is *would bind* / *could not bind*. The JSON is a document a consumer reads (§10), so it
+is pinned like the evidence schema: a change to its shape is a schema version, not an edit.
 
 **CI recipe** (lands in guide 12's section, beside the schema gate):
 
@@ -170,13 +182,15 @@ Each phase ships with its regression test seen failing first, per the repository
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | **W1** | The format: `NodeCapabilityConfig` gains `requirements`, `groups`, `lanes`, `mandates`, `rules` with `#[serde(default)]`; conversions to `CapFilter`, `CapabilityGroupDef`, `Mandate`-shaped and `Rule`-shaped values; loader rejects an unknown operator and a `Version` that does not parse | Every existing `[[capability]]` file loads byte-for-byte unchanged (pinned by a fixture); the §3 example loads and round-trips through `CapFilter::matches` against a hand-built `Capability` |
-| **W2** | The checker over a directory, the six error findings and two warnings above, text and JSON output, the subcommand, exit codes; the coop demos' units written as the first fixture directory under `tests/fixtures/units/` | A fixture with one deliberately unwired requirement exits 1 naming it; the coop fixture exits 0; CI runs both |
+| **W2** | The checker over a directory, the six error findings and two warnings above, text and JSON output (the `mycelium.design/declaration/1` document with `principal` per unit and `revision` in the envelope, D9), the subcommand, exit codes; the coop demos' units written as the first fixture directory under `tests/fixtures/units/` | A fixture with one deliberately unwired requirement exits 1 naming it; the coop fixture exits 0; CI runs both; the JSON of the coop fixture is a golden file, so a shape change is a visible diff |
 | **W3** | Schema awareness: the checker reads the same schema directory guide 12 seeds, so a `schema_id` that names no file is an error and a provider/consumer version split is reported as the rollout-window case | A fixture holding `v1` providers and a `v2` requirement reports `schema-only mismatch` with both ids |
 | **W4** | The authority overlay (D6): per wired edge, reachability through declared mandates and rules; `--no-authority` to skip | A fixture whose only rule requires a mandate scope no unit declares reports `unauthorisable edge`; the `procurement_authority` example's vocabulary written as a fixture passes |
 | **W5** | `--format dot`; a paragraph in guide 12 and one in `docs/operations/deployment.md`; a row in `examples/README.md` under the tutorial contract | The coop fixture renders; `/doc-coverage` gains a HOW·Ops cell for *deployment wiring* that opens the runbook |
+| **W6** *(rev 0.2)* | The declaration as a consumer record (§10): the schema pinned in the private `COMPATIBILITY.md` beside the evidence schema; the private exporter ships a `deployment_declaration` batch next to `policy_deployment`, same signing, same batch identity, same byte-identical-under-one-id rule; the operation names in the JSON's authority edges pass through the exporter's reviewed catalogue so an unmapped one exports as `unmapped`, never as a guess | Public: the golden JSON from W2 validates against the pinned schema. Private: a retry of a declaration batch returns the remembered bytes; an observation joined to a declared edge by (principal, ns, name, schema_id) resolves to exactly one edge on the coop fixture; the consumer's rendering is on their side of the handover and is not a gate here |
 
 W1 and W2 are the value; W3–W5 are each a day and can stop after any one of them without leaving a
-half-feature, because each is a finding class added to a working checker.
+half-feature, because each is a finding class added to a working checker. W6 is private work on the
+exporter and depends only on W2's document; it can run in parallel with W3–W5.
 
 ---
 
@@ -208,6 +222,7 @@ half-feature, because each is a finding class added to a working checker.
 | D6 | Authority as reachability over declared rules | Running the evaluator offline — an evaluator's answer depends on envelope facts (principal, scopes, arguments) that exist only per call |
 | D7 | No secrets, no addresses | A single file for everything — it could not be committed, and the point is a checked-in vocabulary |
 | D8 | Runtime use of the new sections is out of scope | Folding it in — it changes node startup behaviour and belongs in its own plan with its own gate |
+| D9 *(rev 0.2)* | The JSON is a versioned, revisioned document with a per-unit principal, so a consumer can join it to runtime records | Human-only output (then a consumer would parse an unstable shape); joining on node id (D7 forbids it, and a node id is not stable across redeploys, whereas a principal is what the evidence already names) |
 
 ---
 
@@ -241,7 +256,37 @@ down (§3) and checks it (§4). So:
 
 ---
 
-## 9. Not claimed
+## 9. The declaration as a fleet target-state record *(rev 0.2)*
+
+The evidence exporter already gives an external consumer (NovusLens, in the private companion) two
+kinds of runtime record: `activity_observation` — what ran, under which decision, on which route, with
+coverage never claimed complete — and `policy_deployment` — which policy revision was live when. Both
+are facts about what happened. Nothing says what the fleet was *supposed* to look like, so the consumer
+can show activity but not drift.
+
+The checker's JSON is that missing record. Shipped as a third kind, `deployment_declaration`, the same
+way `policy_deployment` is (W6), it lets a consumer render three comparisons it cannot render today:
+
+- **Declared versus observed.** Every edge the checker said would bind, against whether any
+  observation traversed it. An edge with no observations is idle or broken, and the runtime's own
+  opacity entry (E2) says which.
+- **Observed but undeclared.** A call between two principals that no declaration wired. That is the
+  interesting finding, and under *detection, not prevention* it is a report, never a block.
+- **Authority coverage.** W4's `unauthorisable edge` findings beside the evaluator's actual deny
+  records, so a reader sees what the design excluded before the evaluator refused it.
+
+**The join.** A unit file has no node ids or addresses (D7), so the join runs on what both sides carry:
+the principal (D9) on the authority side, and `(ns, name, schema_id)` on the wiring side; an operation
+name goes through the exporter's reviewed catalogue so it means one thing in both records. **The
+revision** (D9) tells the consumer which declaration each observation is compared against, exactly as
+the policy revision does for decisions.
+
+**The sentence on the record.** The declaration says *would bind*. A view built on it says
+**declared**, never *desired and enforced*: nothing makes the fleet conform to the file, and the
+comparison is a report, not a control surface. A consumer that presents it as a target the substrate
+enforces has misread it, and the record's own schema name is chosen to make that harder.
+
+## 10. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is

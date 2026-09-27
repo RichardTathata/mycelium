@@ -41,7 +41,8 @@ record, not duplicates of those.
 > **Design-time tooling (proposed, 2026-09-27):** [`design-time-tooling.md`](design-time-tooling.md) — the
 > unit declaration file (requirements, groups, lanes, authority vocabulary beside today's `[[capability]]`) and an
 > offline `mycelium wire-check` that applies the mesh's own match rule to a directory of units before deployment.
-> Five phases W1–W5, decision register D1–D8; it says *would bind*, never *is bound*. **The design-time half of
+> Six phases W1–W6, decision register D1–D9 (rev 0.2: the checker's JSON is a versioned, revisioned record a consumer such
+> as NovusLens can join to its runtime observations — declared versus observed, never enforced); it says *would bind*, never *is bound*. **The design-time half of
 > the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
 > written in. Nothing built yet.
 >
