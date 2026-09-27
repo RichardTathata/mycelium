@@ -53,89 +53,98 @@ used to share `:8096` (`control_envelope_viz`, `guardrail_viz`) now differ and h
 (events, opacity) · **III** consensus · **IV** capability/agent. **Facets:** *Level* Intro/Adv (★ flagship) ·
 *Surface* Web (browser UI) / CLI · *LLM* real (needs a model) / mock (echo, no key) / · none · *Audit* ✓
 emits a signed tamper-evident trail · *Metrics* ✓ built with the Prometheus recorder (the Ops Console
-**Metrics** tab climbs live).
+**Metrics** tab climbs live) · *CI* ✓ **executed** on every change (the root `cargo run` gallery in
+`ci.yml`, a suite's `ci_smoke.sh`, the coop smoke, the Docker cluster suites, or the LangGraph rungs);
+· compiled in CI but **not executed** — every browser demo and every manual one. Two group headers
+used to say "all run in CI" in prose; they did not (`coordination_viz`, `control_envelope_viz`,
+`destination_commit` were not run), and a claim per row is checkable where a claim per group was not.
+
+**The groups, in one line each.** *The v3 contracts axis:* one decisive demonstration per item —
+`replay_a_bundle` is all-· by construction because the replay kernel is not a layer. *Coordination &
+identity integrity:* an election needs an electorate, winning is not a grant, one node quietly holding
+everything reads as healthy, and a node's identity travels as one record. The rest name themselves.
 
 Each example name links to its **run doc** (a README or guide chapter that tells you how to start it) —
 not to raw source. The suite READMEs carry the per-example walkthrough + the exact command.
 
-| Example | I | II | III | IV | Level | Surface | LLM | Audit | Metrics |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **Start here** — the zero-setup ladder, one file each | | | | | | | | | |
-| [`hello_mesh`](../docs/guide/01-gossip-kv.md) | ● | · | · | · | Intro | CLI | · | · | · |
-| [`hello_capability`](../docs/guide/02-capabilities.md) | · | · | · | ● | Intro | CLI | · | · | · |
-| [`conway`](../docs/guide/01-gossip-kv.md) | ● | ○ | · | · | Intro | Web | · | · | ✓ |
-| [`distributed_lock`](../docs/guide/04-consensus.md) | · | · | ● | · | Intro | CLI | · | · | · |
-| [`invoke_skill`](../docs/guide/05-skills.md) | ○ | · | · | ● | Intro | CLI | · | · | · |
-| [`semantic_coordination`](../docs/guide/11-semantic-coordination.md) | · | ● | · | ○ | Intro | CLI | · | · | · |
-| **Top-level** — beyond the ladder | | | | | | | | | |
-| [`llm_agent`](../docs/guide/02-capabilities.md) | ○ | ○ | · | ● | Adv | Web | mock | · | ✓ |
-| [`coordinator_comparison`](../docs/plans/three_arm_workdist.md) | ● | · | · | ● | Adv | CLI | · | · | · |
-| [`three_arm_workdist`](../docs/plans/three_arm_workdist.md) | ● | · | · | ● | Adv | CLI | · | · | · |
-| [`three_node_demo`](chat/README.md) ★ | ● | ● | ● | ● | Adv | Web | real | · | · |
-| [`ops_console`](ops_console/README.md) † | ○ | ○ | ○ | ○ | Adv | Web | · | · | · |
-| **The v3 contracts axis** — one decisive demonstration per item; each *runs* in CI, not just builds. `replay_a_bundle` is all-· by construction: the replay kernel is not a layer | | | | | | | | | |
-| [`receipt_ladder`](../docs/design/contracts-receipts.md) | ● | · | · | · | Adv | CLI | · | · | · |
-| [`replay_a_bundle`](../docs/design/replay-nondeterminism-inventory.md) | · | · | · | · | Adv | CLI | · | · | · |
-| [`curator_handover`](../docs/design/scoped-mandates.md) | · | · | · | · | Adv | CLI | · | · | · |
-| [`control_envelope_viz`](../docs/design/adaptive-stability.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
-| [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · |
-| [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
-| [`procurement_authority`](../docs/guide/20-authorising-actions.md) | · | · | · | ● | Adv | CLI | · | · | · |
-| [`mcp_tool_authority`](../docs/guide/20-authorising-actions.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · |
-| [`a2a_skill_authority`](../docs/guide/20-authorising-actions.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · |
-| [`destination_commit`](../docs/operations/companions.md) | ● | · | · | · | Adv | CLI | · | · | · |
-| [`redistribution_cn`](../docs/guide/24-commitments.md) | · | ● | · | ● | Adv | CLI | · | · | · |
-| [`authority_drain`](../docs/design/authority-at-execution.md) | · | · | · | ● | Adv | CLI | · | ✓ | · |
-| [`confined_fleet_node`](../docs/operations/confined-fleet.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · |
-| **Coordination & identity integrity** — an election needs an electorate, winning is not a grant, one node quietly holding everything reads as healthy, and a node's identity travels as one record. All *run* in CI | | | | | | | | | |
-| [`coordination_integrity`](../docs/guide/04-consensus.md) | · | · | ● | ○ | Adv | CLI | · | · | · |
-| [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | CLI | · | · | · |
-| [`coordination_viz`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | Web | · | · | ✓ |
-| [`identity_one_record`](../docs/guide/09-security.md) | ● | · | · | ○ | Adv | CLI | · | · | · |
-| [`auditor_questions`](../docs/guide/09-security.md) | ● | · | · | ○ | Adv | CLI | · | ✓ | · |
-| [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | · | · | · | ● | Adv | CLI | · | · | · |
-| **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | |
-| [`mailbox_llm`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
-| [`stigmergy`](coop/README.md) | · | ● | · | ○ | Adv | CLI | · | · | · |
-| [`stigmergy_viz`](coop/README.md) | · | ● | · | ○ | Adv | Web | · | · | ✓ |
-| [`elastic_intent`](coop/README.md) | · | · | · | ● | Adv | CLI | · | · | · |
-| [`provisioning`](coop/README.md) ★ | · | · | · | ● | Adv | CLI | · | · | · |
-| [`provisioning_viz`](coop/README.md) ★ | · | · | · | ● | Adv | Web | · | · | ✓ |
-| [`federation_facts`](coop/README.md) | · | · | · | ● | Adv | CLI | · | · | · |
-| [`rotation`](coop/README.md) | · | · | · | ● | Adv | CLI | · | · | · |
-| [`consensus`](coop/README.md) | · | ○ | ● | · | Adv | CLI | · | · | · |
-| [`llm_pipeline`](coop/README.md) | · | · | · | ● | Adv | CLI | mock | · | · |
-| [`mcp_toolgrowth`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
-| [`llm_council`](coop/README.md) | · | · | · | ● | Adv | CLI | mock | · | · |
-| [`llm_council_viz`](coop/README.md) | · | · | · | ● | Adv | Web | mock | · | ✓ |
-| [`catalog`](coop/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
-| [`catalog_viz`](coop/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
-| [`model_deploy`](coop/README.md) | ○ | · | · | ● | Adv | CLI | real | · | · |
-| [`reheal_deploy`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
-| [`diagnostics`](coop/README.md) | · | ● | · | ○ | Adv | CLI | · | · | · |
-| **Companions** — blackboard · tuple-space · wiki, atop I/II | | | | | | | | | |
-| [`microgrid`](../mycelium-blackboard/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
-| [`microgrid_viz`](../mycelium-blackboard/examples/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
-| [`redistribution`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
-| [`redistribution_viz`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ |
-| [`admission`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · |
-| [`fluid_pipeline`](fluid_pipeline/README.md) | · | · | · | ● | Adv | CLI | · | · | · |
-| [`wiki_chat`](../mycelium-wiki/examples/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
-| [`wiki_council_viz`](../mycelium-wiki/examples/README.md) ★ | ○ | · | · | ● | Adv | Web | real | · | ✓ |
-| **Reasoning** — [`mycelium-reason/examples/README.md`](../mycelium-reason/examples/README.md) | | | | | | | | | |
-| [`fleet_reasoning`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | mock | · | · |
-| [`reason_node`](../mycelium-reason/examples/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · |
-| [`reheal_node`](../mycelium-reason/examples/README.md) | ○ | · | ○ | ● | Adv | CLI | mock | · | · |
-| [`ollama_serve`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | real | · | · |
-| [`openai_serve`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | real | · | · |
-| **Guardrails** — [`mycelium-guardrails/examples/README.md`](../mycelium-guardrails/examples/README.md) | | | | | | | | | |
-| [`guardrail_fleet`](../mycelium-guardrails/examples/README.md) | · | · | · | ● | Adv | CLI | · | ✓ | · |
-| [`guardrail_wedge`](../mycelium-guardrails/examples/README.md) | · | · | · | ● | Adv | CLI | · | ✓ | · |
-| [`guardrail_viz`](../mycelium-guardrails/examples/README.md) ★ | · | · | · | ● | Adv | Web | · | ✓ | ✓ |
-| **Python interop** — external agents & skills | | | | | | | | | |
-| [`a2a_langchain`](a2a_langchain/README.md) | · | · | · | ● | Adv | CLI | real | · | · |
-| [`langgraph`](langgraph/README.md) | ○ | · | ○ | ● | Adv | CLI | mock | · | · |
-| [`community`](community/README.md) | · | · | · | ● | Adv | Web | real | ✓ | · |
+| Example | I | II | III | IV | Level | Surface | LLM | Audit | Metrics | CI |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Start here** — the zero-setup ladder, one file each | | | | | | | | | | |
+| [`hello_mesh`](../docs/guide/01-gossip-kv.md) | ● | · | · | · | Intro | CLI | · | · | · | · |
+| [`hello_capability`](../docs/guide/02-capabilities.md) | · | · | · | ● | Intro | CLI | · | · | · | · |
+| [`conway`](../docs/guide/01-gossip-kv.md) | ● | ○ | · | · | Intro | Web | · | · | ✓ | · |
+| [`distributed_lock`](../docs/guide/04-consensus.md) | · | · | ● | · | Intro | CLI | · | · | · | · |
+| [`invoke_skill`](../docs/guide/05-skills.md) | ○ | · | · | ● | Intro | CLI | · | · | · | · |
+| [`semantic_coordination`](../docs/guide/11-semantic-coordination.md) | · | ● | · | ○ | Intro | CLI | · | · | · | · |
+| **Top-level** — beyond the ladder | | | | | | | | | | |
+| [`llm_agent`](../docs/guide/02-capabilities.md) | ○ | ○ | · | ● | Adv | Web | mock | · | ✓ | · |
+| [`coordinator_comparison`](../docs/plans/three_arm_workdist.md) | ● | · | · | ● | Adv | CLI | · | · | · | · |
+| [`three_arm_workdist`](../docs/plans/three_arm_workdist.md) | ● | · | · | ● | Adv | CLI | · | · | · | · |
+| [`three_node_demo`](chat/README.md) ★ | ● | ● | ● | ● | Adv | Web | real | · | · | ✓ |
+| [`ops_console`](ops_console/README.md) † | ○ | ○ | ○ | ○ | Adv | Web | · | · | · | · |
+| **The v3 contracts axis** — one decisive demonstration per item | | | | | | | | | | |
+| [`receipt_ladder`](../docs/design/contracts-receipts.md) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`replay_a_bundle`](../docs/design/replay-nondeterminism-inventory.md) | · | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`curator_handover`](../docs/design/scoped-mandates.md) | · | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`control_envelope_viz`](../docs/design/adaptive-stability.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · |
+| [`knowledge_layer`](../docs/design/knowledge-layer.md) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`federated_domains`](../docs/guide/17-federation.md) | ○ | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`procurement_authority`](../docs/guide/20-authorising-actions.md) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`mcp_tool_authority`](../docs/guide/20-authorising-actions.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| [`a2a_skill_authority`](../docs/guide/20-authorising-actions.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| [`destination_commit`](../docs/operations/companions.md) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`redistribution_cn`](../docs/guide/24-commitments.md) | · | ● | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`authority_drain`](../docs/design/authority-at-execution.md) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| [`confined_fleet_node`](../docs/operations/confined-fleet.md) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| **Coordination & identity integrity** | | | | | | | | | | |
+| [`coordination_integrity`](../docs/guide/04-consensus.md) | · | · | ● | ○ | Adv | CLI | · | · | · | ✓ |
+| [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | CLI | · | · | · | ✓ |
+| [`coordination_viz`](../docs/guide/14-patterns-and-pitfalls.md) | · | · | ○ | ● | Adv | Web | · | · | ✓ | · |
+| [`identity_one_record`](../docs/guide/09-security.md) | ● | · | · | ○ | Adv | CLI | · | · | · | ✓ |
+| [`auditor_questions`](../docs/guide/09-security.md) | ● | · | · | ○ | Adv | CLI | · | ✓ | · | ✓ |
+| [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | | |
+| [`mailbox_llm`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · | ✓ |
+| [`stigmergy`](coop/README.md) | · | ● | · | ○ | Adv | CLI | · | · | · | ✓ |
+| [`stigmergy_viz`](coop/README.md) | · | ● | · | ○ | Adv | Web | · | · | ✓ | · |
+| [`elastic_intent`](coop/README.md) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`provisioning`](coop/README.md) ★ | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`provisioning_viz`](coop/README.md) ★ | · | · | · | ● | Adv | Web | · | · | ✓ | · |
+| [`federation_facts`](coop/README.md) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`rotation`](coop/README.md) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`consensus`](coop/README.md) | · | ○ | ● | · | Adv | CLI | · | · | · | ✓ |
+| [`llm_pipeline`](coop/README.md) | · | · | · | ● | Adv | CLI | mock | · | · | ✓ |
+| [`mcp_toolgrowth`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · | ✓ |
+| [`llm_council`](coop/README.md) | · | · | · | ● | Adv | CLI | mock | · | · | ✓ |
+| [`llm_council_viz`](coop/README.md) | · | · | · | ● | Adv | Web | mock | · | ✓ | · |
+| [`catalog`](coop/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`catalog_viz`](coop/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · |
+| [`model_deploy`](coop/README.md) | ○ | · | · | ● | Adv | CLI | real | · | · | · |
+| [`reheal_deploy`](coop/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · | · |
+| [`diagnostics`](coop/README.md) | · | ● | · | ○ | Adv | CLI | · | · | · | ✓ |
+| **Companions** — blackboard · tuple-space · wiki, atop I/II | | | | | | | | | | |
+| [`microgrid`](../mycelium-blackboard/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`microgrid_viz`](../mycelium-blackboard/examples/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · |
+| [`redistribution`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · | · |
+| [`redistribution_viz`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · |
+| [`admission`](../mycelium-tuple-space/examples/README.md) | ○ | · | · | ● | Adv | CLI | · | · | · | · |
+| [`fluid_pipeline`](fluid_pipeline/README.md) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`wiki_chat`](../mycelium-wiki/examples/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · | ✓ |
+| [`wiki_council_viz`](../mycelium-wiki/examples/README.md) ★ | ○ | · | · | ● | Adv | Web | real | · | ✓ | · |
+| **Reasoning** — [`mycelium-reason/examples/README.md`](../mycelium-reason/examples/README.md) | | | | | | | | | | |
+| [`fleet_reasoning`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | mock | · | · | ✓ |
+| [`reason_node`](../mycelium-reason/examples/README.md) | ○ | · | · | ● | Adv | CLI | mock | · | · | · |
+| [`reheal_node`](../mycelium-reason/examples/README.md) | ○ | · | ○ | ● | Adv | CLI | mock | · | · | · |
+| [`ollama_serve`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | real | · | · | · |
+| [`openai_serve`](../mycelium-reason/examples/README.md) | · | · | · | ● | Adv | CLI | real | · | · | · |
+| **Guardrails** — [`mycelium-guardrails/examples/README.md`](../mycelium-guardrails/examples/README.md) | | | | | | | | | | |
+| [`guardrail_fleet`](../mycelium-guardrails/examples/README.md) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| [`guardrail_wedge`](../mycelium-guardrails/examples/README.md) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| [`guardrail_viz`](../mycelium-guardrails/examples/README.md) ★ | · | · | · | ● | Adv | Web | · | ✓ | ✓ | · |
+| **Python interop** — external agents & skills | | | | | | | | | | |
+| [`a2a_langchain`](a2a_langchain/README.md) | · | · | · | ● | Adv | CLI | real | · | · | · |
+| [`langgraph`](langgraph/README.md) | ○ | · | ○ | ● | Adv | CLI | mock | · | · | ✓ |
+| [`community`](community/README.md) | · | · | · | ● | Adv | Web | real | ✓ | · | ✓ |
 
 **Harness binaries — deliberately not rows above.** `federation_node` (the one binary of the
 two-mesh Docker suite), `scrape_fleet_node` and `scrape_worker_node` (launcher + sidecar for the
