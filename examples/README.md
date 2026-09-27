@@ -74,7 +74,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`hello_capability`](../docs/guide/02-capabilities.md#02--capabilities-find-nodes-by-what-they-do) · [src](hello_capability.rs) | · | · | · | ● | Intro | CLI | · | · | · | · |
 | [`conway`](../docs/guide/01-gossip-kv.md#the-example) · [src](conway.rs) | ● | ○ | · | · | Intro | Web | · | · | ✓ | · |
 | [`distributed_lock`](../docs/guide/04-consensus.md#the-distributed-lock-service) · [src](distributed_lock.rs) | · | · | ● | · | Intro | CLI | · | · | · | · |
-| [`invoke_skill`](community/README.md#invokesh-wraps-cargo-run---example-invoke_skill-examplesinvoke_skillrs-and-drives-it-with) · [src](invoke_skill.rs) | ○ | · | · | ● | Intro | CLI | · | · | · | · |
+| [`invoke_skill`](community/README.md#manual) · [src](invoke_skill.rs) | ○ | · | · | ● | Intro | CLI | · | · | · | · |
 | [`semantic_coordination`](../docs/guide/11-semantic-coordination.md#the-problem-type-erased-coordination) · [src](semantic_coordination.rs) | · | ● | · | ○ | Intro | CLI | · | · | · | · |
 | **Top-level** — beyond the ladder | | | | | | | | | | |
 | [`llm_agent`](../docs/guide/02-capabilities.md#the-example) · [src](llm_agent.rs) | ○ | ○ | · | ● | Adv | Web | mock | · | ✓ | · |
@@ -83,19 +83,19 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`three_node_demo`](chat/README.md#how-to-run) · [src](three_node_demo.rs) ★ | ● | ● | ● | ● | Adv | Web | real | · | · | ✓ |
 | [`ops_console`](ops_console/README.md#how-to-run) · [src](ops_console) † | ○ | ○ | ○ | ○ | Adv | Web | · | · | · | · |
 | **The v3 contracts axis** — one decisive demonstration per item | | | | | | | | | | |
-| [`receipt_ladder`](../docs/guide/18-contracts-and-receipts.md#18--contracts--receipts) · [src](receipt_ladder.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
-| [`replay_a_bundle`](../docs/guide/19-replay-and-simulation.md#19--replay--simulation) · [src](../mycelium-sim/examples/replay_a_bundle.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ |
-| [`curator_handover`](../docs/guide/21-mandates.md#21--mandates) · [src](../mycelium-wiki/examples/curator_handover.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ |
-| [`control_envelope_viz`](../docs/guide/22-stability-and-control.md#22--stability--control) · [src](control_envelope_viz.rs) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · |
+| [`receipt_ladder`](../docs/guide/18-contracts-and-receipts.md#run-the-ladder) · [src](receipt_ladder.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`replay_a_bundle`](../docs/guide/19-replay-and-simulation.md#run-it) · [src](../mycelium-sim/examples/replay_a_bundle.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`curator_handover`](../docs/guide/21-mandates.md#run-the-demonstration) · [src](../mycelium-wiki/examples/curator_handover.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ |
+| [`control_envelope_viz`](../docs/guide/22-stability-and-control.md#run-the-demonstration) · [src](control_envelope_viz.rs) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md#7-what-lands-next) · [src](knowledge_layer.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
 | [`federated_domains`](../docs/guide/17-federation.md#encrypting-the-link-the-pin-is-the-anchor) · [src](federated_domains.rs) | ○ | · | · | ● | Adv | CLI | · | · | · | ✓ |
 | [`procurement_authority`](coop/README.md#13--procurement_authority--the-governed-autonomy-flagship) · [src](coop/src/bin/procurement_authority.rs) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
 | [`mcp_tool_authority`](../docs/guide/20-authorising-actions.md#which-tools-an-agent-may-actually-call) · [src](mcp_tool_authority.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
 | [`a2a_skill_authority`](../docs/guide/20-authorising-actions.md#the-other-door-and-why-it-is-the-one-that-matters) · [src](a2a_skill_authority.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
 | [`destination_commit`](../docs/operations/companions.md#mycelium-effects--the-transactional-destination) · [src](../mycelium-effects/examples/destination_commit.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
-| [`redistribution_cn`](../docs/guide/24-commitments.md#24--commitments--the-contract-net) · [src](../mycelium-commitment/examples/redistribution_cn.rs) | · | ● | · | ● | Adv | CLI | · | · | · | ✓ |
+| [`redistribution_cn`](../docs/guide/24-commitments.md#run-it) · [src](../mycelium-commitment/examples/redistribution_cn.rs) | · | ● | · | ● | Adv | CLI | · | · | · | ✓ |
 | [`authority_drain`](../docs/design/authority-at-execution.md#4-what-this-does-not-claim) · [src](authority_drain.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
-| [`confined_fleet_node`](../docs/operations/confined-fleet.md#the-node-image-the-suite-runs-is-examplesconfined_fleet_noders-built-by) · [src](confined_fleet_node.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| [`confined_fleet_node`](../docs/operations/confined-fleet.md#1-before-you-start-does-your-cni-enforce-networkpolicy) · [src](confined_fleet_node.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
 | **Coordination & identity integrity** | | | | | | | | | | |
 | [`coordination_integrity`](../docs/guide/04-consensus.md#what-a-successful-election-means) · [src](coordination_integrity.rs) | · | · | ● | ○ | Adv | CLI | · | · | · | ✓ |
 | [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md#12--expect-one-node-to-end-up-holding-every-single-writer-role) · [src](coordinator_by_accretion.rs) | · | · | ○ | ● | Adv | CLI | · | · | · | ✓ |
@@ -105,7 +105,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md#three-domains--the-question-two-cannot-ask) · [src](federation_trust_is_not_transitive.rs) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | | |
 | [`mailbox_llm`](coop/README.md#01--mailbox_llm) · [src](coop/src/bin/mailbox_llm.rs) | ○ | · | · | ● | Adv | CLI | mock | · | · | ✓ |
-| [`stigmergy`](coop/README.md#or-any-single-demo) · [src](coop/src/bin/stigmergy.rs) | · | ● | · | ○ | Adv | CLI | · | · | · | ✓ |
+| [`stigmergy`](coop/README.md#how-to-run) · [src](coop/src/bin/stigmergy.rs) | · | ● | · | ○ | Adv | CLI | · | · | · | ✓ |
 | [`stigmergy_viz`](coop/README.md#browser-showcases) · [src](coop/src/bin/stigmergy_viz.rs) | · | ● | · | ○ | Adv | Web | · | · | ✓ | · |
 | [`elastic_intent`](coop/README.md#03--elastic_intent) · [src](coop/src/bin/elastic_intent.rs) | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
 | [`provisioning`](coop/README.md#04--provisioning--the-flagship) · [src](coop/src/bin/provisioning.rs) ★ | · | · | · | ● | Adv | CLI | · | · | · | ✓ |
@@ -142,8 +142,8 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`guardrail_wedge`](../mycelium-guardrails/examples/README.md#guardrail_wedge) · [src](../mycelium-guardrails/examples/guardrail_wedge.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
 | [`guardrail_viz`](../mycelium-guardrails/examples/README.md#guardrail_viz) · [src](../mycelium-guardrails/examples/guardrail_viz.rs) ★ | · | · | · | ● | Adv | Web | · | ✓ | ✓ | · |
 | **Python interop** — external agents & skills | | | | | | | | | | |
-| [`a2a_langchain`](a2a_langchain/README.md#3--install-python-dependencies) · [src](a2a_langchain) | · | · | · | ● | Adv | CLI | real | · | · | · |
-| [`langgraph`](langgraph/README.md#terminal-2--node-b) · [src](langgraph) | ○ | · | ○ | ● | Adv | CLI | mock | · | · | ✓ |
+| [`a2a_langchain`](a2a_langchain/README.md#4--run-the-langchain-agent) · [src](a2a_langchain) | · | · | · | ● | Adv | CLI | real | · | · | · |
+| [`langgraph`](langgraph/README.md#how-to-run) · [src](langgraph) | ○ | · | ○ | ● | Adv | CLI | mock | · | · | ✓ |
 | [`community`](community/README.md#end-to-end-demo-recommended) · [src](community) | · | · | · | ● | Adv | Web | real | ✓ | · | ✓ |
 
 **Harness binaries — deliberately not rows above.** `federation_node` (the one binary of the
