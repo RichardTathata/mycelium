@@ -46,7 +46,9 @@ record, not duplicates of those.
 > artifact — a reviewable description, `mycelium artifact publish|list|verify`, *would bind by provisioning*, and a
 > gateway route for SDK teams; rev 0.4: **object stores** — S3 and GCS as requirements over one `object_store` adapter,
 > ranged pulls staged to disk, the HTTP source's 512 MiB in-memory cap closed, emulators in CI and real buckets as
-> delivery evidence — plus three recorded questions); it says *would bind*, never *is bound*. **The design-time half of
+> delivery evidence; rev 0.5: the **two ways a capability arrives** — directly deployed or dynamically installed — a
+> `[hosts]` table so the checker knows whether anything could host an entry, and one runbook page owning the lifecycle
+> that `deployment.md`, `artifacts.md` and guide 02 point at — plus three recorded questions); it says *would bind*, never *is bound*. **The design-time half of
 > the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
 > written in. Nothing built yet.
 >

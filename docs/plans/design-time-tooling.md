@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.4, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; §12 holds the recorded questions). Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.5, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; §13 holds the recorded questions). Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -222,6 +222,8 @@ exporter and depends only on W2's document; it can run in parallel with W3–W5.
 | D6 | Authority as reachability over declared rules | Running the evaluator offline — an evaluator's answer depends on envelope facts (principal, scopes, arguments) that exist only per call |
 | D7 | No secrets, no addresses | A single file for everything — it could not be committed, and the point is a checked-in vocabulary |
 | D8 | Runtime use of the new sections is out of scope | Folding it in — it changes node startup behaviour and belongs in its own plan with its own gate |
+| D15 *(rev 0.5)* | A unit declares what it hosts (`[hosts]`: kinds, budget, headroom, trusted publishers, placement root), so *would bind by provisioning* requires a host that could | Treating any matching entry as bindable (the checker would pass a fleet the provisioner never installs into) |
+| D16 *(rev 0.5)* | One page owns the capability lifecycle for both arrival paths; `deployment.md`, `artifacts.md` and guide 02 point at it | Growing each existing page (three partial tellings of one workflow, the drift this plan exists to remove) |
 | D11 *(rev 0.4)* | One adapter over the `object_store` crate, behind `store-aws` / `store-gcp` features | The AWS and Google SDKs (two large trees, two shapes, two paths to keep honest); hand-rolled SigV4 over reqwest (a signing implementation this project would then own) |
 | D12 *(rev 0.4)* | A ranged fetcher trait with chunks staged to disk | Extending the in-memory prefetch cache (a model in RAM before its hash is checked, which is E12's defect generalised) |
 | D13 *(rev 0.4)* | Credentials are the node's cloud identity, resolved by the adapter, egress-gated | Keys in the unit file, description or manifest (D7); credentials on librarians only (holds only for the small-artifact mesh path, artifact-library §5) |
@@ -394,7 +396,71 @@ optimisation (artifact-library §5) and is unchanged. Multi-region replication, 
 bucket versioning are the store's business and the operator's; the node reads by content address and
 nothing here manages a bucket.
 
-## 12. Recorded questions for rev 0.5 *(rev 0.3; not decided here)*
+## 12. Two ways a capability arrives, one workflow *(rev 0.5)*
+
+A capability reaches a cluster in one of two ways, and the documentation describes each on its own
+page without ever putting them side by side:
+
+| | **Directly deployed** | **Dynamically installed** |
+|---|---|---|
+| What is deployed | a unit whose capabilities are in its binary or its `[[capability]]` file, started by the operator's platform | a *host* unit that runs a provisioner (`mycelium-wasm-host`), with runtimes for some kinds and a budget |
+| Who decides it exists | the operator, at deploy time | the host node, at runtime, when it sees unmet demand (`req/` with no provider), self-elects, and the signed footprint fits its headroom |
+| Where the code comes from | the unit's image | the catalogue entry's content address, pulled from the library (§11) and verified |
+| When it goes away | when the unit stops | when demand lapses or a governor sheds it; a tombstone, and the placed bytes at the host's placement root |
+| Where it is documented today | `docs/operations/deployment.md`, guide 13 | `docs/operations/artifacts.md` §3, `dynamic-scaling.md` §Elastic capacity, the `provisioning` and `catalog` demos |
+| What the checker knows (rev 0.4) | the unit's `[[capability]]` blocks | "an entry matches" (A2) — **but not whether any unit could host it** |
+
+The last row is the design defect: A2 as written would say *would bind by provisioning* for a 5 GB
+model in a fleet where no unit runs a blob runtime or has 5 GB of headroom, and the provisioner
+would never self-elect (`Provisioner::register_runtime`, `set_install_budget`,
+`set_resource_policy`, `mycelium-wasm-host/src/provisioner.rs:282–296`). The row above it is the
+documentation defect: an operator reading `deployment.md` does not learn that some of the fleet's
+capabilities will not be in any image, and one reading `artifacts.md` does not learn how a host unit
+is deployed in the first place.
+
+**D15 — a unit declares what it hosts.** The unit file gains a `[hosts]` table: the artifact kinds
+the unit has runtimes for, its install budget, its headroom fraction, the publisher keys it trusts,
+and the placement root. These are the provisioner's own settings (E-rows above) written down, and D8
+applies: nothing here makes the node read them at runtime yet.
+
+```toml
+[hosts]                              # this unit runs a provisioner
+kinds            = ["wasm-component", "blob"]
+install_budget_bytes = 8589934592    # 8 GiB
+headroom         = 0.8
+trusted_publishers = ["ed25519:3f…"] # keys, never secrets
+placement_root   = "/var/lib/mycelium/artifacts"
+```
+
+With it, A2 becomes precise: a requirement *would bind by provisioning* only when an entry's
+`provides` matches **and** some unit's `[hosts]` names the entry's kind with a budget at or above the
+entry's signed footprint. Otherwise the finding is **`unhostable entry`** (an error), naming the kind or
+the bytes short, which is the design-time form of the provisioner's `ineligible_skips` tripwire.
+
+**D16 — one page owns the lifecycle, and the two existing pages point at it.** A new
+`docs/operations/capability-lifecycle.md` states the workflow once, for both columns, in the order an
+operator lives it: declare (the unit files, §3) → check (`wire-check`, §4) → deploy the direct units
+and the host units (`deployment.md`) → publish the catalogue (§10, §11) → watch demand pull the rest
+in (`dynamic-scaling.md`) → read the three views (§9). `deployment.md` gains one paragraph saying that
+some capabilities will not be in any image and linking here; `artifacts.md` gains one saying how a host
+unit is deployed and linking here. Guide 02 (capabilities) gets the same two-column table above, since
+that is where a developer first meets the word. The wiki's architecture folder cites the page rather
+than restating it.
+
+| Phase | Deliverable | Exit gate |
+|---|---|---|
+| **L1** | `[hosts]` in the format (W1) and the `unhostable entry` finding in the checker (A2) | A fixture with a matching entry and no hosting unit reports `unhostable entry`; the same fixture plus a host unit with budget below the footprint reports it naming the bytes short; with budget above, `would bind by provisioning`; all three seen failing first |
+| **L2** | `capability-lifecycle.md`, the two pointing paragraphs, guide 02's table, the wiki citation; the coop `provisioning` demo's units written as the fixture so the page's example is the checker's fixture | `/doc-coverage` gains a row *capability lifecycle* with HOW·Ops and HOW·Dev both Clear by opening the page; `/wiki-lint`'s dead-link and coverage checks pass; a reader of `deployment.md` reaches the page in one link |
+
+L1 is part of W1 and A2 rather than after them, because it changes the format. L2 is the
+documentation deliverable of the whole plan and lands with W2, so the page is written against a
+checker that exists.
+
+**Not claimed.** The `[hosts]` table describes eligibility, not placement: which host installs a given
+artifact stays the provisioner's probabilistic self-election at runtime, and the checker says a
+host *exists*, never *which*.
+
+## 13. Recorded questions for rev 0.6 *(rev 0.3; not decided here)*
 
 - **Q1 — nothing binds a unit's code to its file.** D8 leaves runtime use of the new sections out of
   scope, so a unit can declare a requirement in its file and never call `declare_requirement`, or the
@@ -406,7 +472,7 @@ nothing here manages a bucket.
   reading it at runtime: Q1 in a second form. The answer probably rides on A3's SDK work.
 - **Q3 — catalogue units are answered by A2**, recorded here so the earlier list is complete.
 
-## 13. Not claimed
+## 14. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is
