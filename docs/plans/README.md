@@ -50,8 +50,10 @@ record, not duplicates of those.
 > `[hosts]` table so the checker knows whether anything could host an entry, and one runbook page owning the lifecycle
 > that `deployment.md`, `artifacts.md` and guide 02 point at; rev 0.6: the **stem fleet** — identical nodes loading what
 > `[[presence]]` and `[[requirement]]` declarations call for, a node that declares from its file at startup so file and
-> runtime vocabulary are one, and a CI topology beside the coop suites — with a single build order. **Complete as an
-> argument at rev 0.6**; one question (SDK units) stays open); it says *would bind*, never *is bound*. **The design-time half of
+> runtime vocabulary are one, and a CI topology beside the coop suites — with a single build order; rev 0.7: the
+> examples recut in **three tiers** (a units directory for every declaring example; the artifact-shaped coop demos run
+> from one stem image; mechanism demos untouched) — the host's four-interface WASM world is the stated limit. **Complete
+> as an argument at rev 0.7**; two questions (SDK units, widening the component world) stay open); it says *would bind*, never *is bound*. **The design-time half of
 > the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
 > written in. Nothing built yet.
 >

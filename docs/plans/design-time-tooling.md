@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.6, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; rev 0.6 added §13, the stem fleet — D17–D18, R1–R2, answering Q1 — and §15, the build order. **Complete as an argument at rev 0.6.**) Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.7, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; rev 0.6 added §13, the stem fleet — D17–D18, R1–R2, answering Q1 — and §15, the build order; rev 0.7 added §16, recutting the examples in three tiers — X1–X2, Q4 recorded. **Complete as an argument at rev 0.7.**) Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -553,14 +553,65 @@ ships a whole thing and the shipped defect goes first:
 6. **S3** — GCS on the same adapter.
 7. **W3, W4, W5** — schema awareness, the authority overlay, DOT; each a day, any order.
 8. **A3** — the gateway publish route, with its scope family and matrix plant.
-9. **W6** — the consumer record, private repo, in parallel from step 3 on.
-10. **S4** — real buckets, when an account exists; delivery evidence, not a commit.
+9. **X1, then X2** — the examples' units directories after step 3, the stem cuts after step 4.
+10. **W6** — the consumer record, private repo, in parallel from step 3 on.
+11. **S4** — real buckets, when an account exists; delivery evidence, not a commit.
 
-What the plan leaves outside itself: Q2, a designer UI (§6, deliberately none), the enforced
+What the plan leaves outside itself: Q2, Q4, a designer UI (§6, deliberately none), the enforced
 composition (§8, the axis plan's §13 decides), and NovusLens's own rendering (their side of the
 handover).
 
-## 16. Not claimed
+## 16. Recutting the examples to a stem cluster plus declarations *(rev 0.7)*
+
+The examples (25 top-level, 19 coop bins, 21 across the companions) are Rust binaries that call the
+public API directly; that is what they are for, and guide chapters cite them by name. "Recut every
+example as a stem cluster plus requirements" would hide the API most of them exist to show, and for
+most it is not possible today, because of one fact:
+
+| # | Fact | Evidence |
+|---|---|---|
+| E16 | A WASM component can **handle a request**, read and write its **confined KV subtree**, **emit a signal**, and log. It cannot take from a tuple-space lane, call another capability, declare a requirement, hold a mandate, or vote. The host world is four interfaces | `mycelium-wasm-host/wit/host.wit` (`world capability-component`) |
+
+So what can load dynamically is an *invocable function with local state*, and a demo whose logic is a
+worker draining a lane, a proposer, a curator or a federated caller cannot become an artifact without
+widening that world. The recut therefore comes in three tiers, decided here:
+
+**Tier 1 — every example that declares anything gets a units directory.** This is the universal
+recut and it costs nothing in code: each example that advertises a capability, declares a requirement,
+defines a group or names a lane gets `examples/<name>/units/` written in the §3 format, the checker
+runs on it in CI, and with D18 the example can start from its file instead of its `main`. The
+example keeps showing the API; the directory shows the same vocabulary as a declaration, and the two
+are gated to agree (R1's duplicate warning is the gate). This is what "stem cluster + requirements"
+means for the suite as a whole, and it is what makes the checker's fixtures the examples rather than
+a parallel set that drifts.
+
+**Tier 2 — the artifact-shaped coop demos run from one stem image.** Five demos already load their
+dynamic part from the catalogue (`provisioning`, `catalog`, `model_deploy`, `reheal_deploy`,
+`mcp_toolgrowth`, plus `llm_agent`'s model path). Their static roles (seeder, buffer, worker) stay
+code; their dynamic role becomes the R2 topology: N stem nodes from one image, the demo's units
+directory, its presence policy, its artifact in the library. One `Makefile` target runs each demo both
+ways and asserts the same outcome. These are the examples the buyer deck should show, because they
+are the shape §13 describes.
+
+**Tier 3 — mechanism demonstrations stay as they are.** Election, authority drain, the receipt ladder,
+identity as one record, federation trust, the distributed lock, the replay bundles, the viz pages,
+Conway: none has a capability to install, and a stem cut would add a catalogue to a demo about
+something else. They get Tier 1's directory only where they declare something, and otherwise nothing.
+
+**Q4 — widening the component world** (tuple-space take/complete, calling a capability, declaring a
+requirement from inside a component) is the question a full recut would need answered, and it is a
+security question before it is a feature: every import is a hole in the confinement the host exists to
+enforce. **Recorded, not decided.** It belongs with the guardrails plan, not here.
+
+| Phase | Deliverable | Exit gate |
+|---|---|---|
+| **X1** | Tier 1: a units directory for every declaring example, `wire-check` over all of them in CI, a *declared* facet in `examples/README.md`'s matrix | Every directory exits 0; deleting one capability block from any directory turns its CI row red (seen failing first); the README's tutorial contract names the directory as part of the example |
+| **X2** | Tier 2: the five artifact-shaped demos and `llm_agent` run from the stem image with `--units`; the both-ways target | Each demo's stem run reaches the same asserted outcome as its code run, in CI beside the coop smokes; the buyer deck's provisioning slide cites the stem run |
+
+X1 follows W2 and R1 and is mostly authoring; X2 follows R2. Neither changes any example's code path,
+so guide citations stay valid.
+
+## 17. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is
