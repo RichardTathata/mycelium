@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.3, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3 — and §11, the recorded questions). Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.4, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; §12 holds the recorded questions). Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -222,6 +222,10 @@ exporter and depends only on W2's document; it can run in parallel with W3–W5.
 | D6 | Authority as reachability over declared rules | Running the evaluator offline — an evaluator's answer depends on envelope facts (principal, scopes, arguments) that exist only per call |
 | D7 | No secrets, no addresses | A single file for everything — it could not be committed, and the point is a checked-in vocabulary |
 | D8 | Runtime use of the new sections is out of scope | Folding it in — it changes node startup behaviour and belongs in its own plan with its own gate |
+| D11 *(rev 0.4)* | One adapter over the `object_store` crate, behind `store-aws` / `store-gcp` features | The AWS and Google SDKs (two large trees, two shapes, two paths to keep honest); hand-rolled SigV4 over reqwest (a signing implementation this project would then own) |
+| D12 *(rev 0.4)* | A ranged fetcher trait with chunks staged to disk | Extending the in-memory prefetch cache (a model in RAM before its hash is checked, which is E12's defect generalised) |
+| D13 *(rev 0.4)* | Credentials are the node's cloud identity, resolved by the adapter, egress-gated | Keys in the unit file, description or manifest (D7); credentials on librarians only (holds only for the small-artifact mesh path, artifact-library §5) |
+| D14 *(rev 0.4)* | The manifest is also an object in the store | Keeping it file-only (the runbook's cron-sync step, a second thing to keep consistent) |
 | D10 *(rev 0.3)* | The signed line-hex manifest stays the library's truth; a reviewable TOML description is the input and a command derives the one from the other | Changing the manifest format (re-opens a shipped, signed record); a readable manifest with no derivation check (two sources of truth that drift) |
 | D9 *(rev 0.2)* | The JSON is a versioned, revisioned document with a per-unit principal, so a consumer can join it to runtime records | Human-only output (then a consumer would parse an unstable shape); joining on node id (D7 forbids it, and a node id is not stable across redeploys, whereas a principal is what the evidence already names) |
 
@@ -330,7 +334,67 @@ A3 is the one that touches the gateway and so the authority surface; it follows 
 route since v2.15.0 follows (a scope family, a refusal by name, a plant in the matrix) and ships only
 with those. A1 and A2 are CLI and checker work and can go with W2.
 
-## 11. Recorded questions for rev 0.4 *(rev 0.3; not decided here)*
+## 11. Object stores: S3 and GCS are requirements *(rev 0.4)*
+
+The artifact-library design (§5 there) says a large artifact is pulled **directly from the durable
+store by every installing node**, chunked, hashed on the way, gated by that node's egress policy. What
+ships realises that only when the store is a filesystem the node can mount:
+
+| # | Fact | Evidence |
+|---|---|---|
+| E11 | `FsLibrarySource` is the only durable source that is ranged and servable; it is what the librarian fronts and the coop demos use | `mycelium-wasm-host/src/artifact.rs:240`, `:323`; `examples/coop/src/bin/catalog.rs:91` |
+| E12 | `HttpLibrarySource` materialises the **whole body in memory before hashing**, capped at 512 MiB by `Content-Length`, and a chunked response with no length is not bounded at all. The code's own comment (audit 2026-07-15, pass 5) names the fix — streaming through `RangedArtifactSource` — as tracked, not added | `mycelium-wasm-host/src/http_source.rs:146–160` |
+| E13 | `BlobFetcher` is the vendor extension point (one method, whole-object) and **nothing implements it** in the repository; there is no ranged variant to implement | `mycelium-wasm-host/src/http_source.rs:36` |
+| E14 | `PrefetchingSource` caches in memory (`Mutex<HashMap<ArtifactId, Bytes>>`), so even a streaming fetcher behind it would land a model in RAM | `mycelium-wasm-host/src/http_source.rs:43` |
+| E15 | The manifest is a local file (`LibrarianConfig::manifest_path`); for a remote store the runbook tells the operator to sync it down by cron or a mounted volume | `docs/operations/artifacts.md` §2 "Remote blob stores" |
+
+So a buyer whose models live in S3 or GCS cannot install one today. This is code, not docs, and it is
+in this plan because the artifact path is the design-time input A2 reads and A1 writes.
+
+**D11 — one adapter over the `object_store` crate, not two vendor SDKs.** `object_store` (Apache
+Arrow's, 0.14) gives S3, GCS, Azure, plain HTTP and local behind one interface with **ranged reads**
+(`get_range`, `get_ranges`), streaming bodies, and credentials from the environment, instance
+metadata and workload identity — the three the two clouds actually use in production. The AWS and
+Google SDKs are each larger than this whole crate's dependency tree, differ in shape, and would give
+two code paths to keep honest. The adapter goes behind features `store-aws` and `store-gcp` (and
+`store-azure` for free) in `mycelium-wasm-host`, off by default, so a build that does not want the tree
+does not carry it; `cargo audit` and the feature-matrix clippy cover each.
+
+**D12 — a ranged fetcher trait, and staging to disk, never to memory.** `BlobFetcher` gains a ranged
+sibling (`size`, `fetch_range`) that the object-store adapter and a fixed `HttpLibrarySource` both
+implement, and the bridge to `RangedArtifactSource` stages chunks to a node-local directory, so the
+blob runtime's 4 MiB chunked placement reads from disk. `PrefetchingSource`'s in-memory cache stays
+for small artifacts and is refused above a configured size rather than silently used.
+
+**D13 — credentials are the node's cloud identity, never a file this plan defines.** An IAM role or a
+GCP service account attached to the instance, resolved by the adapter; static keys stay possible
+through the environment for a developer machine and are never in a unit file, an artifact description
+or a manifest (D7 again). Every request still passes the node's `EgressPolicy` (`permits_url`) first,
+so an operator can pin a bucket host.
+
+**D14 — the manifest lives in the store too.** The library's manifest is written as an object at a
+fixed key beside the blobs, so a librarian fronting a remote store reads it from the store and the
+"sync it down" step in the runbook goes away; `mycelium artifact publish --library s3://bucket/prefix`
+(A1) writes blob and manifest line through the same adapter. The manifest stays the signed source of
+truth (D10); only its location gains a second option.
+
+| Phase | Deliverable | Exit gate |
+|---|---|---|
+| **S1** | The ranged fetcher trait, disk staging, and `HttpLibrarySource` re-done over HTTP `Range` requests with the body streamed and hashed incrementally; the 512 MiB cap and the unbounded-chunked hole both closed; `PrefetchingSource` refuses above its size bound by name | A 2 GiB blob served by a local HTTP fixture installs with peak RSS bounded (measured in the test, asserted under a ceiling); a chunked response with no `Content-Length` is bounded; both seen failing on the current code first |
+| **S2** | The `object_store` adapter behind `store-aws`; A1's `publish` and the librarian read and write `s3://` URLs; D14's manifest-in-store | CI: a MinIO container as the S3-compatible fixture — publish, librarian reconcile, a node installs a blob by ranged pull, provenance verified; the egress gate refusing a bucket host outside `allow_hosts` |
+| **S3** | `store-gcp`, same adapter, same tests; the S3-interoperability path (HMAC keys against the GCS XML API) documented as a fallback, not the route | CI: `fake-gcs-server` as the fixture, the S2 sequence green; a build with `store-gcp` and without `store-aws` compiles and passes the feature-matrix clippy |
+| **S4** | Real-cloud evidence: a nightly against one real S3 bucket and one real GCS bucket, workload-identity credentials, the blob a real quantised model, results recorded like the scale nightly. Emulators prove the code path; only this proves the cloud | Two green runs each, recorded with dates; a runbook section per cloud in `docs/operations/artifacts.md` with the IAM/service-account policy the node needs, and the honest line that a credential on every pulling node is the price of no relay |
+
+S1 is independent of the store and closes a shipped hole; it goes first. S2 and S3 share the adapter and
+differ only by fixture and feature. S4 is delivery evidence in the sense AE4 uses the term: it needs
+an account, not a commit, and the plan does not claim the clouds until it runs.
+
+**Not claimed by this section.** Peer serving of a pulled model over the bulk transport stays an
+optimisation (artifact-library §5) and is unchanged. Multi-region replication, lifecycle rules and
+bucket versioning are the store's business and the operator's; the node reads by content address and
+nothing here manages a bucket.
+
+## 12. Recorded questions for rev 0.5 *(rev 0.3; not decided here)*
 
 - **Q1 — nothing binds a unit's code to its file.** D8 leaves runtime use of the new sections out of
   scope, so a unit can declare a requirement in its file and never call `declare_requirement`, or the
@@ -342,7 +406,7 @@ with those. A1 and A2 are CLI and checker work and can go with W2.
   reading it at runtime: Q1 in a second form. The answer probably rides on A3's SDK work.
 - **Q3 — catalogue units are answered by A2**, recorded here so the earlier list is complete.
 
-## 12. Not claimed
+## 13. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is
