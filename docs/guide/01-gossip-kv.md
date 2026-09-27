@@ -41,6 +41,14 @@ converge as soon as they reconnect.
 
 ## The Example
 
+**Zero-setup first — `hello_mesh`.** Two embedded agents on loopback share state by gossip: `alpha`
+writes a key, `beta` (told only `alpha`'s address) learns it by gossip and prints it. No broker, no
+config, no features to enable — Layer I and nothing else.
+
+```bash
+cargo run --example hello_mesh
+```
+
 **Conway's Game of Life on a 16×16 gossip mesh** — 256 `GossipAgent` instances
 run in-process over TCP. Each agent owns one cell. Cell state lives in the KV
 store and propagates epidemically. A local timer drives each agent's generation

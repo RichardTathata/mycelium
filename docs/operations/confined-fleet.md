@@ -13,6 +13,9 @@ If it does not, the manifests confine **nothing**, silently. Check it the way th
 
 ```bash
 make test-confined-fleet                         # kind + Calico reference run
+# The node image the suite runs is `examples/confined_fleet_node.rs` (built by
+# docker/Dockerfile.confined-fleet, driven by scripts/test-confined-fleet.sh with ROLE=operator|provider|gateway
+# and the `agent-doors` subcommand); it is a fixture the harness starts, not a demo you read.
 # or against your own cluster's CNI, by hand: apply deploy/confined-fleet/ with your images, then from an agent pod
 #   curl --connect-timeout 5 https://example.com    # must fail
 # and from a pod the agent policies do not select

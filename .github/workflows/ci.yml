@@ -236,6 +236,9 @@ jobs:
       - run: ./scripts/ci-retest.sh -p mycelium-effects --features tuple-space
       - run: cargo clippy -p mycelium-effects --all-targets -- -D warnings
       - run: cargo clippy -p mycelium-effects --features tuple-space --all-targets -- -D warnings
+      # The example is the crate's decisive demonstration (guide 18 § Rung 4); the catalogue said it
+      # ran in CI and it did not (2026-09-27).
+      - run: cargo run -p mycelium-effects --example destination_commit
 
   commitment:
     # v3 §6.9 CN1 — the commitment companion: the contract net as five records on the public API.
