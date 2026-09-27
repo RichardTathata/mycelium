@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.2, 2026-09-27 (rev 0.2 added D9, W6 and §9: the declaration as a consumer record). Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.3, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §11, registering an artifact — D10, A1–A3 — and §12, the recorded questions). Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -222,6 +222,7 @@ exporter and depends only on W2's document; it can run in parallel with W3–W5.
 | D6 | Authority as reachability over declared rules | Running the evaluator offline — an evaluator's answer depends on envelope facts (principal, scopes, arguments) that exist only per call |
 | D7 | No secrets, no addresses | A single file for everything — it could not be committed, and the point is a checked-in vocabulary |
 | D8 | Runtime use of the new sections is out of scope | Folding it in — it changes node startup behaviour and belongs in its own plan with its own gate |
+| D10 *(rev 0.3)* | The signed line-hex manifest stays the library's truth; a reviewable TOML description is the input and a command derives the one from the other | Changing the manifest format (re-opens a shipped, signed record); a readable manifest with no derivation check (two sources of truth that drift) |
 | D9 *(rev 0.2)* | The JSON is a versioned, revisioned document with a per-unit principal, so a consumer can join it to runtime records | Human-only output (then a consumer would parse an unstable shape); joining on node id (D7 forbids it, and a node id is not stable across redeploys, whereas a principal is what the evidence already names) |
 
 ---
@@ -286,7 +287,62 @@ the policy revision does for decisions.
 comparison is a report, not a control surface. A consumer that presents it as a target the substrate
 enforces has misread it, and the record's own schema name is chosen to make that harder.
 
-## 10. Not claimed
+## 11. Adjacent, and in scope: registering an artifact *(rev 0.3)*
+
+The provisioner (`mycelium-wasm-host/src/provisioner.rs`) can fill a requirement no deployed unit
+offers by installing from the catalogue, and a catalogue entry's `provides` is a full `Capability`
+chosen so `CapFilter::matches` works unchanged against it (`mycelium-wasm-host/src/catalog.rs:55`).
+So the catalogue is a design-time input to the checker. Reading it exposed two gaps in how an artifact
+gets there, both design-time and both in this plan's territory:
+
+| # | Gap | Evidence |
+|---|---|---|
+| G1 | **Publishing is a Rust program.** The production path (`docs/operations/artifacts.md` §2) is `FsLibrarySource::store` → `InstallableEntry::new(…).with_kind(…).with_requirements(…).signed_by(&key)` → `Manifest::append_entry`, written as CI code. There is no `mycelium` subcommand and no gateway route (`grep '"/gateway/artifact' src/agent/http.rs` is empty), so a Python or TypeScript team cannot register an artifact without writing Rust | `mycelium-wasm-host/src/catalog.rs:141`, `:344`; `src/agent/http.rs` route table |
+| G2 | **The manifest cannot be reviewed.** It is one hex line per bincode-encoded entry (`Manifest::parse`), the library's source of truth and a signed record — correct as a format for the librarian, unreadable in a pull request. A reviewer cannot see what capability, kind or footprint a line declares | `mycelium-wasm-host/src/catalog.rs:297` |
+
+**D10 — the signed manifest stays the truth; a readable description is the input, and the tool derives
+one from the other.** Changing the manifest's format would re-open a shipped, signed record. Instead an
+artifact is *described* in a TOML file a reviewer reads, and a command turns the description plus the
+bytes plus a key into the manifest line. The description is committed beside the unit files; the
+manifest is regenerated and checked against it in CI, the way a lock file is.
+
+```toml
+# artifacts/route-optimizer.toml — what this artifact would provide once installed
+kind = "wasm-component"              # wasm-component | blob
+bytes = "build/route_optimizer.wasm" # relative; the content address is computed, never written
+est_install_secs = 1
+  [provides]                         # a Capability, the same shape as [[capability]] in a unit
+  ns = "route"; name = "optimize"
+  [provides.attrs]
+  version = "1.4.0"
+  [requires]                         # the signed footprint (artifacts.md §2)
+  disk_bytes = 0
+  mem_bytes  = 67108864
+```
+
+| Phase | Deliverable | Exit gate |
+|---|---|---|
+| **A1** | `mycelium artifact publish <description.toml> --library <dir> --key <file>`: stores the bytes, builds and signs the entry, appends the manifest line; `mycelium artifact list <dir>` renders a manifest as the same TOML shape with the content address and signer shown; `mycelium artifact verify <dir> --trusted <key>…` runs `verify_provenance` over every line | `list` of a manifest written by `publish` reproduces the description (golden fixture); a description whose `bytes` changed under an unchanged manifest fails `verify` in CI, seen failing first |
+| **A2** | The checker reads a library directory (`--library <dir>`) and reports **`would bind by provisioning`** for a requirement no unit offers but a manifest entry's `provides` matches — a separate class, a warning not an error, naming the entry and its footprint; with `--strict-deployed` it is an error | The coop fixture with the `catalog` demo's manifest turns one `unwired requirement` into `would bind by provisioning`; the JSON document carries the entry's content address on that edge |
+| **A3** | `POST /gateway/artifacts/publish` behind a new scope family `artifact:publish`: the body is an **already-signed** entry (signing stays with the publisher's key, which never reaches a gateway) that the route verifies against the node's trusted publisher keys and writes with `publish_installable`; the bytes are not uploaded through the gateway — they are at a blob store the librarian mirrors (`HttpLibrarySource`, artifacts.md §2). SDK verbs in `mycelium-py` / `mycelium-ts` that build and sign the entry client-side | An unsigned or untrusted entry is refused 403 by name; a signed one appears under `installable/` on a second node; the route is in the scope table and the bypass matrix's plant covers it |
+
+A3 is the one that touches the gateway and so the authority surface; it follows the pattern every
+route since v2.15.0 follows (a scope family, a refusal by name, a plant in the matrix) and ships only
+with those. A1 and A2 are CLI and checker work and can go with W2.
+
+## 12. Recorded questions for rev 0.4 *(rev 0.3; not decided here)*
+
+- **Q1 — nothing binds a unit's code to its file.** D8 leaves runtime use of the new sections out of
+  scope, so a unit can declare a requirement in its file and never call `declare_requirement`, or the
+  reverse; the check passes on a vocabulary the unit does not speak. The candidate answer is small — a
+  unit loads its file at startup and declares from it, so the file is the source rather than a
+  description — and it is D8's own plan. It should follow W2 quickly.
+- **Q2 — SDK units.** D2 admits an SDK agent as a unit, but only the Rust node loads
+  `NodeCapabilityConfig`. A Python or TypeScript unit would have a file for the checker and nothing
+  reading it at runtime: Q1 in a second form. The answer probably rides on A3's SDK work.
+- **Q3 — catalogue units are answered by A2**, recorded here so the earlier list is complete.
+
+## 13. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is

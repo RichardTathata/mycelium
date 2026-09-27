@@ -42,7 +42,9 @@ record, not duplicates of those.
 > unit declaration file (requirements, groups, lanes, authority vocabulary beside today's `[[capability]]`) and an
 > offline `mycelium wire-check` that applies the mesh's own match rule to a directory of units before deployment.
 > Six phases W1–W6, decision register D1–D9 (rev 0.2: the checker's JSON is a versioned, revisioned record a consumer such
-> as NovusLens can join to its runtime observations — declared versus observed, never enforced); it says *would bind*, never *is bound*. **The design-time half of
+> as NovusLens can join to its runtime observations — declared versus observed, never enforced; rev 0.3: registering an
+> artifact — a reviewable description, `mycelium artifact publish|list|verify`, *would bind by provisioning*, and a
+> gateway route for SDK teams — plus three recorded questions); it says *would bind*, never *is bound*. **The design-time half of
 > the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
 > written in. Nothing built yet.
 >
