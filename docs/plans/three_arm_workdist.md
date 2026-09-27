@@ -5,6 +5,17 @@
 2a § "What Remains Open Empirically" sets up. It exists to test a specific,
 falsifiable prediction — not to produce a benchmark.
 
+## Run it
+
+```bash
+MODE=pull   cargo run --example three_arm_workdist   # no prediction: workers take() when free (default)
+MODE=gossip cargo run --example three_arm_workdist   # prediction-local: the client picks from its own view
+MODE=broker cargo run --example three_arm_workdist   # prediction-central: a designated node answers pick_worker
+```
+
+Source: `examples/three_arm_workdist.rs`. The three arms are the section after next; the sweep is at
+the end.
+
 ## The predictions under test (Paper 2a)
 
 1. The outcome gap between the two *prediction* arms (broker, gossip) and the

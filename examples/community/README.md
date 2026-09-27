@@ -42,6 +42,9 @@ cd examples/community
 ./start.sh           # orchestrator :7950, researcher :7952, writer :7953
 sleep 3              # wait for gossip to converge
 
+# `invoke.sh` wraps `cargo run --example invoke_skill` (examples/invoke_skill.rs) and drives it with
+# SKILL_CALLER_PORT / SKILL_NODE_PORT / SKILL_CAP / SKILL_PAYLOAD; run the example directly to call
+# any advertised skill from a one-shot caller.
 ./invoke.sh "gossip protocols"                    # technical style
 ./invoke.sh "Rust ownership" casual               # casual tone
 ./invoke.sh "large language models" executive 8  # executive, 8 findings
