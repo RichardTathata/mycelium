@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.3, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §11, registering an artifact — D10, A1–A3 — and §12, the recorded questions). Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.3, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3 — and §11, the recorded questions). Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -287,7 +287,7 @@ the policy revision does for decisions.
 comparison is a report, not a control surface. A consumer that presents it as a target the substrate
 enforces has misread it, and the record's own schema name is chosen to make that harder.
 
-## 11. Adjacent, and in scope: registering an artifact *(rev 0.3)*
+## 10. Adjacent, and in scope: registering an artifact *(rev 0.3)*
 
 The provisioner (`mycelium-wasm-host/src/provisioner.rs`) can fill a requirement no deployed unit
 offers by installing from the catalogue, and a catalogue entry's `provides` is a full `Capability`
@@ -330,7 +330,7 @@ A3 is the one that touches the gateway and so the authority surface; it follows 
 route since v2.15.0 follows (a scope family, a refusal by name, a plant in the matrix) and ships only
 with those. A1 and A2 are CLI and checker work and can go with W2.
 
-## 12. Recorded questions for rev 0.4 *(rev 0.3; not decided here)*
+## 11. Recorded questions for rev 0.4 *(rev 0.3; not decided here)*
 
 - **Q1 — nothing binds a unit's code to its file.** D8 leaves runtime use of the new sections out of
   scope, so a unit can declare a requirement in its file and never call `declare_requirement`, or the
@@ -342,7 +342,7 @@ with those. A1 and A2 are CLI and checker work and can go with W2.
   reading it at runtime: Q1 in a second form. The answer probably rides on A3's SDK work.
 - **Q3 — catalogue units are answered by A2**, recorded here so the earlier list is complete.
 
-## 13. Not claimed
+## 12. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is
