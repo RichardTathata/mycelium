@@ -6743,6 +6743,23 @@ mod gateway_caller_tests {
         assert!(body["operation_id"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
         assert_eq!(body["local_durability"], "not_configured", "no persistence on this node: rung 2 says so — {body}");
 
+        // Run 62: a bearer is matched exactly or not at all. Interior whitespace, case, or a scheme
+        // the parser does not strip must never admit — and on a closed gateway "not admitted" is
+        // 401, never a downgrade to anonymous 200. (Trailing whitespace is deliberately not a case:
+        // HTTP strips trailing OWS from a field value before the server sees it — RFC 9110 §5.5,
+        // established by Run 61's probe — so `"Bearer w "` reaches the token table as `"w"`.)
+        for (hdr, why) in [
+            ("Bearer  w", "double space"),
+            ("bearer w", "lowercase scheme"),
+            ("Bearer W", "wrong case in the token"),
+            ("Bearerw", "no separator"),
+        ] {
+            let r = http.get(format!("http://127.0.0.1:{port}/gateway/kv/keys"))
+                .header(axum::http::header::AUTHORIZATION, hdr)
+                .send().await.unwrap();
+            assert_eq!(r.status(), 401, "{why}: {hdr:?} must not be admitted");
+        }
+
         g.shutdown().await;
     }
 }
