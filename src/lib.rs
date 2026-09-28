@@ -220,6 +220,7 @@
 
 pub mod capability;
 pub mod capability_config;
+pub mod wire_check;
 pub mod mesh_manifest;
 /// Federation identity and policy objects (v3 item 2 — `docs/design/federated-domains.md`).
 /// The contract (types, canonical signing bytes) and, under `tls`, the transport's first arm (`edge`,

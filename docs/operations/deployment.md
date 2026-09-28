@@ -22,6 +22,12 @@ agent.start().await?;
 A node needs: a **gossip port** and at least one **bootstrap peer** to find the
 mesh (a seed needs none). Everything else is optional.
 
+> **Some of the fleet's capabilities will be in no image.** A unit that runs a provisioner installs
+> what the declarations call for from the catalogue at runtime, and a fleet can be nothing but such
+> hosts. How a deployment is declared, checked before anything runs, deployed, published to, watched
+> and read back — for capabilities you deploy *and* for the ones the fleet installs — is one page:
+> [capability-lifecycle.md](capability-lifecycle.md).
+
 ## Ports
 
 | Config | Purpose | Default |

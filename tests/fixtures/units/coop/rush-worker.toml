@@ -1,0 +1,9 @@
+# A rush worker: the surge capacity the dispatcher calls on.
+principal = "rush-worker"
+
+[[capability]]
+ns       = "rush"
+name     = "worker"
+ttl_secs = 30
+  [capability.attrs]
+  shift = "evening"

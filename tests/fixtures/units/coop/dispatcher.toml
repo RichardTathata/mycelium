@@ -1,0 +1,22 @@
+# The dispatcher: defines the depots group and calls on rush workers when intake surges.
+principal = "dispatcher"
+
+[[requirement]]
+ns   = "rush"
+name = "worker"
+
+[[group]]
+name = "depots"
+  [group.filter]
+  ns   = "depot"
+  name = "intake"
+  [[group.provides]]
+  ns   = "logistics"
+  name = "intake"
+  [[group.requires]]
+  ns   = "rush"
+  name = "worker"
+
+[[requirement]]
+ns   = "logistics"
+name = "intake"

@@ -19,6 +19,10 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-09-28 (design-time tooling, not a run)** — one new row, *capability lifecycle*: HOW·Ops is
+  `capability-lifecycle.md` (declare · check · deploy · publish · watch · read, each step opened and
+  its command run); HOW·Dev is the unit file's module doc and guide 02's two-column table; WHY is the
+  plan's §12. Opened and read, not inferred from titles.
 - **2026-09-28 (positioning pass, not a run)** — one new row, *what is proven*: a dated
   `docs/operations/what-is-proven.md` (WHY: why one page; HOW·Ops and HOW·Dev: the three tables with a
   gate, a bound or a missing proof per line, each opened and read), linked from the README, both decks,
@@ -382,6 +386,7 @@ closed it.
 | Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Election / leadership (`mycelium::election`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Capability lifecycle — the two arrival paths, the unit file, `wire-check` (`operations/capability-lifecycle.md`, guide 02, `src/capability_config.rs`) — new, 2026-09-28 | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 

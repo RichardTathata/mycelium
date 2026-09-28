@@ -1,0 +1,12 @@
+# The auditor: reads completed work off the `done` lane and asks the evidence questions.
+principal = "auditor"
+
+[[lane]]
+name = "done"
+role = "consumes"
+
+[[rule]]
+actor            = "worker"
+operation        = "route.optimize"
+resource         = "*"
+requires_mandate = "routing"
