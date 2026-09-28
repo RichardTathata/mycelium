@@ -513,6 +513,17 @@ was installed. What changes is that the design-time file and the runtime vocabul
 disagree, because there is one of them. A unit that declares in code keeps working; a unit that does
 both gets a warning naming the duplicate.
 
+*D18 amended at R1 (2026-09-28):* the runtime half lives in **`mycelium-stem`**, a binary of the
+`mycelium-wasm-host` crate (`Stem::start`), not as `--units` on the `mycelium` node binary — the
+provisioner, the runtimes and the librarian live in that crate and the dependency runs the other way,
+so the node binary could never have attached a provisioner. A `Stem` advertises every `[[capability]]`
+(always-alive; `probe_url` is logged, not honoured — the node binary's probe loop is the place for it),
+declares every `[[requirement]]`, defines every `[[group]]`, and, with `[hosts]`, runs a provisioner
+configured from it with every `[[presence]]` as a supervision policy, refreshing the catalogue from KV
+each tick. One image, every role: `--librarian <manifest> --publisher ed25519:<hex>` takes the librarian
+role over `--library`. Lanes, mandates and rules are vocabulary for the check and the evaluator and do
+nothing at runtime, said once at start.
+
 **Where the shape stops**, on the tin:
 
 - **Only two kinds load dynamically** — WASM components against the host interface, and blobs for a
@@ -526,8 +537,8 @@ both gets a warning naming the duplicate.
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
-| **R1** *(format half with W1 and `presence unhostable` with W2, 2026-09-28; the `--units` startup path is open)* | `[[presence]]` in the format and `presence unhostable` in the checker; `--units <file>` on the node binary and the startup declaration path (D18), with the duplicate warning | A fixture with `min_providers = 2` and one hosting unit reports `presence unhostable (1 of 2)`; a node started with the §3 file shows its `req/`, `cap-group/` and presence entries on a second node; the same requirement declared in both file and code warns once; all seen failing first |
-| **R2** | The stem fleet as the second reference topology: N identical nodes from one image, one units directory, a presence policy, a librarian; in CI beside the coop suites | The fleet converges to `min_providers` live providers within a bound; killing one restores it; the checker's JSON for the directory and the fleet's `cap/` view agree on which capabilities exist (the first declared-versus-observed comparison, run locally without a consumer); guide 13 gains the topology with its limits |
+| **R1** ✅ *shipped 2026-09-28 — the runtime half as `mycelium-stem` in the wasm-host crate, not `--units` on the node binary (D18 amended below)* | `[[presence]]` in the format and `presence unhostable` in the checker; `--units <file>` on the node binary and the startup declaration path (D18), with the duplicate warning | A fixture with `min_providers = 2` and one hosting unit reports `presence unhostable (1 of 2)`; a node started with the §3 file shows its `req/`, `cap-group/` and presence entries on a second node; the same requirement declared in both file and code warns once; all seen failing first |
+| **R2** ✅ *shipped 2026-09-28 — as an in-process fleet test in the wasm-host CI job (`the_stem_fleet_fills_a_presence_floor_and_reheals`), not a Docker suite; the Docker cut is open* | The stem fleet as the second reference topology: N identical nodes from one image, one units directory, a presence policy, a librarian; in CI beside the coop suites | The fleet converges to `min_providers` live providers within a bound; killing one restores it; the checker's JSON for the directory and the fleet's `cap/` view agree on which capabilities exist (the first declared-versus-observed comparison, run locally without a consumer); guide 13 gains the topology with its limits |
 
 R1 depends on W1 and L1 (the format) and A2 (the hosting check); R2 depends on R1 and W2. R2 is also
 the first place §9's comparison runs end to end, so it doubles as W6's local fixture.

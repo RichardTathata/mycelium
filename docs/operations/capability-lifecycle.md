@@ -66,9 +66,15 @@ the node), the publisher keys it trusts, reach to the library or store, and its 
 of identical hosts is the **stem fleet** (`docs/plans/design-time-tooling.md` §13): it holds nothing
 application-specific at deploy time and loads what the declarations call for.
 
-Today the node does **not** read the unit file at startup: a unit declares its requirements, groups
-and presence in code, and the file is the same vocabulary written down for the check. Making the
-file the source a node declares from is the plan's R1, next.
+A **stem node** declares from the file at startup: `mycelium-stem --units <unit.toml>` (a binary of
+`mycelium-wasm-host`, feature `stem`) advertises every `[[capability]]`, declares every
+`[[requirement]]`, defines every `[[group]]`, and, with `[hosts]`, runs a provisioner from it with
+every `[[presence]]` as a standing want — `--library <dir>` to read bytes from a directory, none to
+pull them over the mesh from a librarian, `--librarian <manifest> --publisher ed25519:<hex>` to take
+the librarian role too. The file and the runtime vocabulary are then one thing; every declaration
+still travels as its own evaporating entry and no other node reads the file. A unit that declares in
+code keeps working; the `mycelium` node binary itself does not read the file, because the provisioner
+lives in the wasm-host crate and the dependency runs the other way.
 
 ## 4 · Publish — the catalogue
 

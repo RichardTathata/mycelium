@@ -21,6 +21,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_prefetch_cache_refuses_a_blob_past_its_bound`).
 
 ### Added
+- **`mycelium-stem`** (`mycelium-wasm-host`, feature `stem`; `Stem::start` as a library): a node
+  that declares from its unit file — every `[[capability]]` advertised, every `[[requirement]]`
+  declared, every `[[group]]` defined — and, with `[hosts]`, runs a provisioner configured from it
+  (kinds → runtimes, install budget, headroom, trusted publisher keys, placement root, fuel) with
+  every `[[presence]]` as a supervision policy, refreshing the catalogue from KV each tick and
+  prefetching mesh-pulled artifacts. `--library <dir>` reads bytes from a directory, `--librarian
+  <manifest> --publisher ed25519:<hex>` takes the librarian role too. R1's runtime half and R2's
+  image of `docs/plans/design-time-tooling.md` §13: the file and the runtime vocabulary are one
+  thing, and every declaration still travels as its own evaporating entry. Gated by
+  `a_stem_declares_from_its_file_and_a_peer_sees_it` and the in-process fleet test
+  `the_stem_fleet_fills_a_presence_floor_and_reheals` (three stems, one librarian, a floor of two,
+  a kill, a re-heal, and the checker's declaration compared with what bound).
+  `Provisioner::refresh_catalog` / `catalog()` are new for it.
 - **`mycelium wire-check`** (`src/wire_check.rs`; W2, A2, L1 and R1's checker halves of
   `docs/plans/design-time-tooling.md`): the offline check over a directory of unit files, and
   optionally a directory of artifact descriptions (`--library`). A pure function over declarations

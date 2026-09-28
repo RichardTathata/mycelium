@@ -283,6 +283,18 @@ impl Provisioner {
         self.runtimes.insert(runtime.kind(), runtime);
     }
 
+    /// Replace the catalogue this provisioner resolves against — the gossiped catalogue is a
+    /// **snapshot** at construction (`InstallableCatalog::from_kv`), so a node that starts before
+    /// the librarian's entries arrive must refresh it (a stem node does, every tick).
+    pub fn refresh_catalog(&mut self, catalog: InstallableCatalog) {
+        self.catalog = catalog;
+    }
+
+    /// The entries currently resolved against.
+    pub fn catalog(&self) -> &InstallableCatalog {
+        &self.catalog
+    }
+
     /// Cap the artifacts this node will elect to install by their `size_bytes` hint.
     pub fn set_install_budget(&mut self, max_bytes: u64) {
         self.install_budget_bytes = Some(max_bytes);

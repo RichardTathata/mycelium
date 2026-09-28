@@ -198,6 +198,8 @@ jobs:
       - run: ./scripts/ci-retest.sh -p mycelium-wasm-host
       # S1's resident-memory gate owns the process (it measures RSS), so it runs alone.
       - run: cargo test -p mycelium-wasm-host --lib a_large_blob_stages_to_disk_within_a_memory_bound -- --ignored
+      # The stem node binary (design-time-tooling.md §13): opt-in feature, so check it explicitly.
+      - run: cargo check -p mycelium-wasm-host --bin mycelium-stem --features stem
       - run: cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 
   agentfacts:

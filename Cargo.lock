@@ -2373,6 +2373,7 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wasmtime",
  "wasmtime-wasi",
 ]

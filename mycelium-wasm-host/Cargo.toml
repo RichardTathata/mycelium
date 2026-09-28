@@ -50,6 +50,19 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # is tiny.
 metrics = "0.24"
 
+# The stem node binary (design-time-tooling.md §13, R1/R2): a node that declares from its unit
+# file and provisions what the declarations call for. Opt-in so the library carries no logging
+# subscriber.
+tracing-subscriber = { version = "0.3", optional = true }
+
+[features]
+stem = ["dep:tracing-subscriber"]
+
+[[bin]]
+name              = "mycelium-stem"
+path              = "src/bin/mycelium-stem.rs"
+required-features = ["stem"]
+
 [dev-dependencies]
 # test-only: the bind-verified, process-unique port allocator (retires the free_port TOCTOU
 # flake class). Cargo unions this with the normal `mycelium` dep for the test target only.
