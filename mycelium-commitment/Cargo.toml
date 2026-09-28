@@ -6,7 +6,7 @@ rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "The commitment companion for Mycelium (v3 contracts axis §6.9, CN1): the contract net as five records — announce · offer · award · report · assess — each with a mechanism the substrate already has, the award a receipt-bearing write and never a KV write alone. Built entirely on Mycelium's public API."
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["contract-net", "commitment", "coordination", "multi-agent", "distributed-systems"]
 categories = ["asynchronous", "network-programming"]
 

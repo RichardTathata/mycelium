@@ -4,10 +4,10 @@ version = "2.16.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
-description = "Broker-less gossip substrate for AI agent fleets: KV store, signal mesh, consensus, capability discovery"
+description = "Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay. Embedded, broker-less: gossip KV, signal mesh, consensus, capability discovery."
 license = "AGPL-3.0-only"
 # Commercial embedding license available — see README §License or contact tathatasystems@proton.me
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 readme = "README.md"
 keywords = ["distributed-systems", "gossip", "p2p", "protocol"]
 categories = ["network-programming", "asynchronous"]

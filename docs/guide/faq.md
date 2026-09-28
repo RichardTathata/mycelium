@@ -8,6 +8,9 @@ here doesn't route you well, that's a docs bug — open an issue.
 
 ## Is Mycelium for me?
 
+**Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.** (That is the project's one
+description — [`docs/positioning.md`](../positioning.md) — and the README opens with it.)
+
 Mycelium earns its keep when you have **many agents (or nodes) that must
 coordinate, and you don't want a coordinator** — no broker, no scheduler, no
 control plane to run or scale or fail. State converges by gossip; work is claimed,

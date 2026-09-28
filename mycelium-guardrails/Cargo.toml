@@ -6,7 +6,7 @@ rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "Structural, coordinator-free guardrails for Mycelium (v3.0): a self-imposed, tier-labelled policy — what an agent may do — compiled to boundary + AgentPolicy + authorized_callers, on the public API only"
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["guardrails", "policy", "multi-agent", "distributed-systems", "governance"]
 categories = ["network-programming", "asynchronous"]
 

@@ -1,9 +1,27 @@
 # Mycelium
 
-A **broker-less mesh runtime for AI agent fleets**, embedded as a Rust library. Agents discover
-each other's capabilities, route tool calls, exchange events, and reach consensus — with **no
-coordinator, central registry, or single point of failure**. State converges by gossip; work is
-claimed, not dispatched; roles are discovered, not assigned.
+**Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.**
+
+It is an embedded Rust library in three layers — a gossip KV store, a signal mesh, and epidemic
+consensus — with capability discovery across them: no broker, no registry, no daemon, no control
+plane. State converges by gossip; work is claimed, not dispatched; roles are discovered, not
+assigned. It is **probably overkill** if you want to chain a few LLM calls, run one orchestrator
+that fans out to workers, or coordinate through a database or queue you already operate; reach for
+a workflow engine or a broker there ([why not X?](docs/guide/faq.md#why-not-langgraph--temporal--nats--)).
+It earns its keep when many agents must coordinate and nobody should be in charge: fleets that
+partition and heal, edge and on-prem meshes, systems where *who is in charge* must be emergent and
+recallable. The sentence above is the project's one description ([`docs/positioning.md`](docs/positioning.md));
+what it can prove, and what it cannot yet, is one page: [`what-is-proven.md`](docs/operations/what-is-proven.md).
+
+## Start here — five steps
+
+<!-- path:start -->
+1. **[`hello_mesh`](examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
+2. **[`hello_capability`](examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
+3. **[the co-op `provisioning` demo](examples/coop/README.md)** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+4. **[guide 20](docs/guide/20-authorising-actions.md) with [`authority_drain`](examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
+5. **[`what-is-proven.md`](docs/operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
+<!-- path:end -->
 
 ## Hello, mesh — 30 seconds, no setup
 
@@ -171,7 +189,7 @@ R. Nicholson, *"The Coordinator Trap: Structural Scaling Liabilities in Mediated
 Architectures and a Substrate-Based Alternative,"* Tathata Systems Ltd, 2026 —
 [doi:10.5281/zenodo.20665238](https://doi.org/10.5281/zenodo.20665238) (CC BY 4.0; source in
 [`docs/publications/`](docs/publications/), reproducible at tag
-[`paper-submission-v2`](https://github.com/RichardEko/mycelium/tree/paper-submission-v2)).
+[`paper-submission-v2`](https://github.com/RichardTathata/mycelium/tree/paper-submission-v2)).
 
 It is the lead of a **four-part corpus** (all CC BY 4.0; full read-order, dependency graph, and
 DOIs in [`docs/publications/README.md`](docs/publications/README.md)):

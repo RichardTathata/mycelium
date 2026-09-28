@@ -22,6 +22,16 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Proposition alignment — 2026-09-28 (PR #434, docs only) — one sentence, one proof page, one path
+
+A step-back review found the story told in four sentences, its limits in six places, its start on three
+funnels, and three stale facts (the GitHub description, the pre-move account in the SDK READMEs and every
+`Cargo.toml`, a crate doc saying *two primitives*). Now: `docs/positioning.md` holds the sentence and the
+five-step path, `scripts/check-positioning.sh` gates every door in `make check` (seen red on seventeen
+before any edit), `docs/operations/what-is-proven.md` is the dated proof page every gap-stating place
+links, the buyer deck leads with authority and evidence, both decks share one title. Plan:
+`docs/plans/proposition-alignment.md`. Log: `.log/2026-09-28-proposition-alignment.md`.
+
 ## v2.16.0 release — 2026-09-26 (tag `v2.16.0`) — settings where there were sentences
 
 Wire **v12** unchanged (`PREV = 11`); a MINOR: additive API plus one validation tightening.

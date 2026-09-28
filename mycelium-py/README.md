@@ -1,6 +1,6 @@
 # mycelium-py
 
-Python SDK for the [Mycelium](https://github.com/RichardEko/mycelium) gossip mesh.
+Python SDK for [Mycelium](https://github.com/RichardTathata/mycelium). Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.
 
 Connects to a running Rust Mycelium node over loopback HTTP. No native extension —
 the HTTP gateway sidecar adds ~1 ms per call, invisible next to LLM inference latency.

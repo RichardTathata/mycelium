@@ -6,7 +6,7 @@ rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "Blackboard-style shared working memory companion crate for Mycelium: opportunistic multi-agent reasoning over typed facts with competitive destructive claim-by-predicate (Linda's `in`), built entirely on Mycelium's public API"
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["blackboard", "linda", "multi-agent", "distributed-systems", "coordination"]
 categories = ["network-programming", "asynchronous"]
 

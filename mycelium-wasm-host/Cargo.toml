@@ -6,7 +6,7 @@ rust-version = "1.94"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "WASM Component host for Mycelium (v2.0 WS-E M12): pull + instantiate sandboxed capability components that talk to the local node through a capability-scoped WIT world — the runtime code-mobility / OSGi-bundle analogue, built on Mycelium's public API"
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["wasm", "component-model", "code-mobility", "distributed-systems", "wasmtime"]
 categories = ["wasm", "network-programming"]
 

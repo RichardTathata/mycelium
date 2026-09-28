@@ -6,7 +6,9 @@ lives in the **LLM wiki** and the code canon it cites.
 
 ## What this is
 
-Mycelium is an embedded, broker-less Rust library — a three-layer substrate for AI agent
+Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.
+(the one description, `docs/positioning.md`, gated by `scripts/check-positioning.sh`). Concretely: an
+embedded, broker-less Rust library — a three-layer substrate for AI agent
 fleets and storage replication: **I** gossip KV (LWW + HLC, Merkle anti-entropy) ·
 **II** signal mesh (scoped events, admission boundaries, opacity) · **III** epidemic
 consensus. Layers I+II are the `mycelium-core` crate; `mycelium` adds III, capabilities,
@@ -203,7 +205,8 @@ the **consumer-side-only per-partner budget** (the edge has no slot accounting �
 needing a decision rather than a patch; **the composition finding is closed**, 2026-09-21, by recording the
 receipt's rung and the origin domain onto the execution record — `docs/design/composed-effect.md`, and note what
 it claims: the composed sentence is *reconstructable*, not *enforced*); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
-silently and the criterion has never been met**. **Phase state (2026-09-23, after v2.12.0 — the axis is delivered).** Phases **B, C, D and E are
+silently and the criterion has never been met** (every gap of this kind, together and dated:
+`docs/operations/what-is-proven.md`). **Phase state (2026-09-23, after v2.12.0 — the axis is delivered).** Phases **B, C, D and E are
 closed**: D's private half (RA4, AE2, AE3) landed 2026-09-20/21 and E's (RA5, RA6, AE4's contract
 half) on 2026-09-21, alongside the public side in 2.8.0/2.9.0. **Phase A has one gate still open and
 it is not a code gate:** V1, above. The **only other outstanding gate in the whole axis** is AE4's

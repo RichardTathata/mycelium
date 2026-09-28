@@ -1,7 +1,8 @@
 # Proposition alignment: one sentence, one proof page, one path (plan)
 
-**Status:** proposed, rev 0.1, 2026-09-28. A documentation and positioning plan; no code changes except one
-check script. Follows a step-back review of the story as told by the front doors, made after
+**Status:** ✅ **executed 2026-09-28** (rev 0.2 — P1–P5 in one PR, #434, the same day the plan was written; the
+A12 line corrected: performance *is* micro-benchmarked, what is missing is a figure under load). A documentation and
+positioning plan; no code changes except one check script. Follows a step-back review of the story as told by the front doors, made after
 [`design-time-tooling.md`](design-time-tooling.md) reached rev 0.8.
 
 > Posture, once: the system is one thing and the front doors tell it three ways. A buyer meets *mesh
@@ -26,7 +27,7 @@ check script. Follows a step-back review of the story as told by the front doors
 | A9 | `docs/publications/presentation.html` `<title>` | *Adaptive Substrate for Services and AI Agent Fleets* | a fourth phrasing |
 | A10 | `ROADMAP.md` status line | one paragraph of ~1,800 words, which itself says it *had fallen five releases behind* and points at `CHANGELOG.md` | a status line that is a wall is not read; the pointer is right, the wall should go |
 | A11 | `CLAUDE.md` §What this is; `docs/wiki/wiki.md` | *an embedded, broker-less Rust library — a three-layer substrate* | consistent with each other; contributor-facing; keep, quote the sentence |
-| A12 | `docs/operations/production-readiness.md`, `shared-responsibility-matrix.md`, `docs/analysis/ratings.md` Run 62, `v3-contracts-axis.md` §10, `CLAUDE.md` §Active work, `docs/publications/README.md` ledger | the proof gaps — no named production deployment; the nightly scale runner never green (V1); performance never benchmarked; AE4's four joint cloud runs need a counterparty; the self-audit floor at 7/7/7 for the same three dimensions across many runs — each stated honestly **in one of six places** | no single page a reviewer or buyer can read |
+| A12 | `docs/operations/production-readiness.md`, `shared-responsibility-matrix.md`, `docs/analysis/ratings.md` Run 62, `v3-contracts-axis.md` §10, `CLAUDE.md` §Active work, `docs/publications/README.md` ledger | the proof gaps — no named production deployment; the nightly scale runner never green (V1); performance measured only as hot-path micro-benchmarks on one machine (rev 0.1 said *never benchmarked*, which was wrong — `tuning.md` §Performance baselines); AE4's four joint cloud runs need a counterparty; the self-audit floor at 7/7/7 for the same three dimensions across many runs — each stated honestly **in one of six places** | no single page a reviewer or buyer can read |
 | A13 | `docs/guide/README.md` (25 chapters), `examples/README.md` §Recommended paths, `docs/operations/README.md` | three good funnels that do not agree on the first five steps | the path from *is this for me* to a running fleet is long |
 
 **What this means.** Nothing here is false except A5, A6 and A7. The defect is that a true story is told
@@ -147,6 +148,11 @@ file) and `/publication-lint` reads them.
 
 P1 and P2 are one PR (the script must be red then green in the same change). P3 and P4 are one PR
 each. P5 is small and can ride with P2. Total: three PRs, two to three days, no code but the script.
+
+*Executed 2026-09-28 in one PR (#434) rather than three, the script seen red on all seventeen doors and
+paths before any edit; the GitHub description set with `gh repo edit`; the decks reordered; the proof
+page written; every funnel carrying the path. The plan's own §1 line about performance was the one
+finding the execution corrected.*
 
 ---
 

@@ -43,7 +43,7 @@ record, not duplicates of those.
 > description, two dead SDK links and a crate doc that says *two primitives*. One canonical sentence in
 > `docs/positioning.md` quoted verbatim and gated by a script in `make check`; one deck title with authority and
 > evidence leading the buyer story; one dated proof page (`what-is-proven.md`); one five-step path on every funnel.
-> Three PRs, docs only. Nothing done yet.
+> **Executed the same day** (P1–P5, PR #434): the script red on seventeen doors and paths, then green.
 >
 > **Design-time tooling (proposed, 2026-09-27):** [`design-time-tooling.md`](design-time-tooling.md) — the
 > unit declaration file (requirements, groups, lanes, authority vocabulary beside today's `[[capability]]`) and an

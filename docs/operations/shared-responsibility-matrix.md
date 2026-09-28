@@ -17,6 +17,10 @@
 Legend: **M** = Mycelium provides (inherit + configure) · **S** = Shared · **D** = Deployer owns ·
 ⚠ = open gap, tracked in [soc2-audit-gap-closure](../plans/soc2-audit-gap-closure.md).
 
+This matrix says what the library provides and what you own; what the project has and has not
+**shown** — proven in CI, demonstrated with a bound, not yet shown — is its companion page,
+[what-is-proven.md](what-is-proven.md), dated and refreshed at every release.
+
 ## The org-level criteria (CC1–CC5, CC9) — not the library's to hold
 
 CC1 Control Environment · CC2 Communication · CC3 Risk Assessment · CC4 Monitoring · CC5 Control

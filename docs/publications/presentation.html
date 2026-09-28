@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mycelium — Adaptive Substrate for Services and AI Agent Fleets</title>
+<title>Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.</title>
 <style>
   :root {
     --bg:#0d1117; --surface:#161b22; --surface2:#1c2128; --surface3:#21262d;
@@ -202,8 +202,8 @@
     <div class="hero-center">
       <div class="hero-title">Mycelium</div>
       <div class="hero-tagline">
-        One coordinator-free fabric for AI agent fleets — <strong style="color:var(--text)">every interaction pattern</strong>, not just RPC.<br>
-        <strong style="color:var(--text)">Minimal management. Maximum agility. Maximum robustness.</strong>
+        Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.<br>
+        <strong style="color:var(--text)">The engineer's deck — one coordinator-free fabric, every interaction pattern, not just RPC.</strong>
       </div>
       <div class="badges">
         <span class="badge"><span class="dot dot-g"></span>5 crates tested · 13/13 scenarios passing</span>
@@ -212,7 +212,7 @@
         <span class="badge"><span class="dot dot-m"></span>NANDA-federable</span>
       </div>
       <div style="margin-top:16px;font-size:13px;color:var(--accent);letter-spacing:.01em;">
-        <a href="https://github.com/RichardEko/mycelium" style="color:var(--accent);text-decoration:none;">github.com/RichardEko/mycelium</a>
+        <a href="https://github.com/RichardTathata/mycelium" style="color:var(--accent);text-decoration:none;">github.com/RichardTathata/mycelium</a>
       </div>
       <div style="margin-top:8px;font-size:11px;color:var(--muted);letter-spacing:.04em;">© 2026 Tathata Systems Ltd &nbsp;·&nbsp; Company No. 17260812</div>
     </div>
@@ -898,7 +898,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
       <div class="card-body">An election needs an <strong>electorate</strong>: a group whose roster a node cannot see is <em>refused</em>, never decided alone — <em>"I cannot see members"</em> must not become <em>"I may decide alone"</em>. The answer then <strong>names the rung it reached</strong> (<code>Decided</code>, a quorum chose this value at this ballot, bound to it by digest · <code>Observed</code>, this is what my replica says) and carries a <strong>fencing token</strong>. Underneath, votes are bound to the proposal they voted for, a node casts one vote per ballot in either role, a higher ballot adopts what was already accepted, and that memory survives a restart.<br><br><em>And the limit, said out loud:</em> no coordinator-free protocol can promise a leadership that stays true. LWW decides which <em>record</em> survives; it cannot undo work two callers each performed after being told they had won. Exclusivity is enforced <strong>at the resource</strong>, by refusing a stale token — never by a call returning success.</div>
     </div>
     <div class="callout callout-orange" style="margin-top:10px;font-size:12px;">
-      <strong>Labelled honestly.</strong> Every claim on this slide is <em>shipped under a tag</em> and carries a runnable demonstration that names what it does <em>not</em> establish — and several found real defects before release, including one whose own first explanation was wrong and had to be retracted. The gateway authorisation seam, its evidence journal and a reference policy engine also ship; <strong>production policy adapters and the evidence exporter are the commercial layer and are not claimed here</strong>.
+      <strong>Labelled honestly.</strong> Every claim on this slide is <em>shipped under a tag</em> and carries a runnable demonstration that names what it does <em>not</em> establish — and several found real defects before release, including one whose own first explanation was wrong and had to be retracted. The gateway authorisation seam, its evidence journal and a reference policy engine ship here; a <strong>Cedar policy adapter and the signed evidence exporter are implemented</strong> in the private companion, pinned to this release, and their <strong>combined deployment acceptance is outstanding</strong> — the joint runs with the oversight consumer on both clouds have not happened, and a local fixture does not stand in for them.
     </div>
   </div>
 </div>
@@ -1257,7 +1257,7 @@ MOCK_LLM=1 cargo run \
     <div class="cols2" style="gap:24px;margin-top:8px;">
       <div style="display:flex;flex-direction:column;gap:14px;">
         <div class="code-block" style="font-size:12px;">
-<span class="cm"># github.com/RichardEko/mycelium</span>
+<span class="cm"># github.com/RichardTathata/mycelium</span>
 
 <span class="cm"># Add to your Rust project</span>
 cargo add mycelium
@@ -1309,6 +1309,21 @@ docker compose up --build --scale worker=10
 </div>
 
 
+<!-- Proven: what is, and what is not -->
+<div class="slide" id="sProven">
+  <div class="slide-top"><span class="eyebrow">What Is Proven</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-body">
+    <div class="slide-title">Proven, demonstrated, <em>not yet shown.</em></div>
+    <div class="slide-sub">Three lists, kept on one dated page in the repository (<code>docs/operations/what-is-proven.md</code>, refreshed at every release). This slide is the page as of 2026-09-28.</div>
+    <div class="cols3">
+      <div class="card card-accent-green"><div class="card-title">Proven in CI, every merge</div><div class="card-body">The authority bypass matrix (every door runs nothing after a revocation, by the handlers' own counters) · golden on-disk persistence fixtures replayed · the deterministic-replay corpus · the fails-first regression floor · twelve fuzz targets with a reachability registry · the co-op and AFN smokes · the Docker cluster suites (4-node, 3-node, two-mesh, confined fleet) with no retries.</div></div>
+      <div class="card card-accent-blue"><div class="card-title">Demonstrated, bound stated</div><div class="card-body">Running work stops within its class's measured bound when authority lapses (<code>authority_drain</code>) · the ten-council git contention run · 100-node formation and convergence when the scale suite runs · a two-mesh federation that does not merge with the link cut · four CLI demonstrations that found real defects before release.</div></div>
+      <div class="card card-accent-orange"><div class="card-title">Not yet shown</div><div class="card-body">No named third-party production deployment. The nightly scale runner: the hosted job has no runner; the local runner's last rows failed on the environment. Performance: hot-path micro-benchmarks on one machine only, no end-to-end figure under load. The four joint AWS/GCP runs with the oversight consumer. Models pulled from S3 or GCS. The self-audit floor at 7/7/7 for the same three dimensions across many runs, with a 48-entry ledger of scores later proven wrong.</div></div>
+    </div>
+    <div class="callout callout-orange"><strong>Why say it here.</strong> The gaps are each stated honestly elsewhere in the repository; a reviewer assembling them from six places assembles them against us. One page, one slide, one date.</div>
+  </div>
+</div>
+
 <!-- ═══════════════════════════════════════════════════════════════
      APPENDIX DIVIDER
 ═══════════════════════════════════════════════════════════════ -->
@@ -1329,6 +1344,9 @@ docker compose up --build --scale worker=10
         <span class="badge"><span class="dot dot-m"></span>A8 · Prompt Skills</span>
         <span class="badge"><span class="dot dot-g"></span>A9 · Semantic Coordination</span>
         <span class="badge"><span class="dot dot-b"></span>A10 · TupleSpace (pull)</span>
+        <span class="badge"><span class="dot dot-p"></span>A11 · Blackboard</span>
+        <span class="badge"><span class="dot dot-m"></span>A12 · Mailbox &amp; Events</span>
+        <span class="badge"><span class="dot dot-g"></span>A13 · Wiki</span>
       </div>
     </div>
   </div>

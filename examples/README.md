@@ -15,6 +15,16 @@ every example by the stack **layer** it teaches *and* its facets — how deep (*
 
 ## Recommended paths
 
+**Start here — five steps**, the same five on every front door ([`docs/positioning.md`](../docs/positioning.md)):
+
+<!-- path:start -->
+1. **[`hello_mesh`](hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
+2. **[`hello_capability`](hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
+3. **[the co-op `provisioning` demo](coop/README.md)** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+4. **[guide 20](../docs/guide/20-authorising-actions.md) with [`authority_drain`](authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
+5. **[`what-is-proven.md`](../docs/operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
+<!-- path:end -->
+
 The matrix below is complete and is the architect's view. These five paths are the integrator's:
 each answers *which example fits my situation*, *what must I change*, and *how do I know it worked*.
 Every step is a run doc that follows the **tutorial contract** at the end of this section.
