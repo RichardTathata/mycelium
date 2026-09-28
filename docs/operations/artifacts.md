@@ -196,9 +196,17 @@ Sign **after** `with_kind`/`with_requirements`. For an ad-hoc publish without a
 library (a dev one-off), the `InMemorySource` + `publish_installable` flow above
 still works — it just dies with the process.
 
-**Remote blob stores:** blobs can live in any HTTP(S) store (consumed via
-`HttpLibrarySource` + `PrefetchingSource`, egress-gated, credential headers;
-implement `BlobFetcher` for a vendor SDK). The *manifest* is a local file path
+**Remote blob stores:** blobs can live in any HTTP(S) store, egress-gated, with credential
+headers. Two paths, by size. A **small** artifact (a WASM component) goes through
+`HttpLibrarySource` + `PrefetchingSource` into memory, bounded at
+`DEFAULT_MAX_IN_MEMORY_BYTES` (64 MiB) and **refused by name** past it — the body is read in
+pieces and counted, so a chunked response with no `Content-Length` is bounded too. A **large**
+artifact (a model) goes through `DiskStagedSource`: pulled in HTTP `Range` pieces
+(`RangedBlobFetcher`, `HEAD` for the size, `206` or nothing), hashed as it streams, written to a
+node-local staging directory, and served to the blob runtime from disk; peak memory is one piece
+whatever the size, and a store that ignores `Range` gets its `200` dropped unread. Implement
+`BlobFetcher` (and `RangedBlobFetcher` for large artifacts) for a vendor SDK; an object-store
+adapter for S3 and GCS is planned (`docs/plans/design-time-tooling.md` §11). The *manifest* is a local file path
 (`LibrarianConfig::manifest_path`), so for a remote store, sync the manifest file
 down to the librarian node (CI artifact, cron `curl`, or a mounted volume) while
 the bytes stay remote — the librarian mirrors what its manifest names

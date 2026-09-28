@@ -15,6 +15,15 @@
 //!   before caching; `fetch` serves the verified cache. The same two-step
 //!   `MeshArtifactSource` proved; the remote stays untrusted either way.
 //!
+//! **Two sizes, two paths (S1, `docs/plans/design-time-tooling.md` §11).** A *small* artifact
+//! (a WASM component) goes through [`PrefetchingSource`] into memory, bounded by
+//! [`DEFAULT_MAX_IN_MEMORY_BYTES`] and refused **by name** past it — with or without a declared
+//! `Content-Length`, because the body is read in chunks and counted, never materialised first. A
+//! *large* artifact (a model) goes through [`DiskStagedSource`]: pulled in HTTP `Range` pieces
+//! via [`RangedBlobFetcher`], hashed as it streams, written to a node-local staging directory,
+//! and served to the blob runtime from disk. Neither path holds more than one chunk in RAM
+//! before the content address is checked.
+//!
 //! **Egress:** an object-store pull is an outbound reach the node chooses, so
 //! [`HttpLibrarySource`] is gated by an [`EgressPolicy`] exactly like the LLM backends — a
 //! denied host fails *before* any connection is attempted. Every pulling node carries its own
@@ -27,7 +36,16 @@ use std::sync::Arc;
 use bytes::Bytes;
 use mycelium::EgressPolicy;
 
-use crate::artifact::{verify_artifact, ArtifactId, ArtifactSource};
+use crate::artifact::{verify_artifact, ArtifactId, ArtifactSource, FsLibrarySource, RangedArtifactSource};
+
+/// The most bytes the whole-object path will hold in memory for one artifact — the bound on
+/// [`HttpLibrarySource::fetch_remote`] and on [`PrefetchingSource`]'s cache. 64 MiB: six times
+/// the mesh frame cap, small enough that a node never OOMs before it can check a hash. Anything
+/// larger is a blob and belongs to [`DiskStagedSource`].
+pub const DEFAULT_MAX_IN_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Default HTTP `Range` piece for [`DiskStagedSource`]: 4 MiB, the blob runtime's own chunk.
+pub const DEFAULT_RANGE_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Async remote fetch by content address — the extension point for vendor object-store SDKs.
 /// `Ok(None)` = the remote doesn't hold it (a miss, not a failure); `Err` = the attempt failed
@@ -37,17 +55,36 @@ pub trait BlobFetcher: Send + Sync {
     async fn fetch_remote(&self, id: &ArtifactId) -> Result<Option<Bytes>, String>;
 }
 
+/// Ranged remote reads by content address — the extension point a **large** artifact needs.
+/// `size` answers `Ok(None)` for a miss; `fetch_range` returns at most `len` bytes from `offset`
+/// (a short read at the tail is normal) and `Ok(None)` for a miss. A remote that cannot serve
+/// ranges answers `Err`, never a whole body under a range request.
+#[async_trait::async_trait]
+pub trait RangedBlobFetcher: BlobFetcher {
+    async fn size(&self, id: &ArtifactId) -> Result<Option<u64>, String>;
+    async fn fetch_range(&self, id: &ArtifactId, offset: u64, len: u64) -> Result<Option<Bytes>, String>;
+}
+
 /// Bridges an async [`BlobFetcher`] into the sync [`ArtifactSource`] face: bytes must be
 /// [`prefetch`](Self::prefetch)ed — pulled and verified against the content address — into the
 /// cache before `WasmHost::provision` (or a serving librarian) reads them via `fetch`.
 pub struct PrefetchingSource {
-    fetcher: Arc<dyn BlobFetcher>,
-    cache:   Mutex<HashMap<ArtifactId, Bytes>>,
+    fetcher:   Arc<dyn BlobFetcher>,
+    cache:     Mutex<HashMap<ArtifactId, Bytes>>,
+    max_bytes: u64,
 }
 
 impl PrefetchingSource {
     pub fn new(fetcher: Arc<dyn BlobFetcher>) -> Self {
-        Self { fetcher, cache: Mutex::new(HashMap::new()) }
+        Self { fetcher, cache: Mutex::new(HashMap::new()), max_bytes: DEFAULT_MAX_IN_MEMORY_BYTES }
+    }
+
+    /// The most bytes one cached artifact may occupy (default
+    /// [`DEFAULT_MAX_IN_MEMORY_BYTES`]). A larger blob is refused by name at `prefetch` —
+    /// it belongs in a [`DiskStagedSource`].
+    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes.max(1);
+        self
     }
 
     /// Pull `id` from the remote into the local cache, verified on arrival — a remote returning
@@ -58,6 +95,11 @@ impl PrefetchingSource {
             return true;
         }
         match self.fetcher.fetch_remote(id).await {
+            Ok(Some(bytes)) if bytes.len() as u64 > self.max_bytes => {
+                tracing::warn!(artifact = %id, bytes = bytes.len(), bound = self.max_bytes,
+                    "artifact exceeds the in-memory bound — refused; stage it to disk (DiskStagedSource)");
+                false
+            }
             Ok(Some(bytes)) if verify_artifact(&bytes, id).is_ok() => {
                 self.cache.lock().unwrap().insert(*id, bytes);
                 true
@@ -97,10 +139,11 @@ impl ArtifactSource for PrefetchingSource {
 /// static headers carry credentials (`Authorization: Bearer …`, S3-compatible static auth);
 /// an [`EgressPolicy`] gates every request **before** it is dispatched.
 pub struct HttpLibrarySource {
-    base_url: String,
-    headers:  Vec<(String, String)>,
-    egress:   EgressPolicy,
-    client:   reqwest::Client,
+    base_url:  String,
+    headers:   Vec<(String, String)>,
+    egress:    EgressPolicy,
+    client:    reqwest::Client,
+    max_bytes: u64,
 }
 
 impl HttpLibrarySource {
@@ -113,7 +156,50 @@ impl HttpLibrarySource {
             headers:  Vec::new(),
             egress:   EgressPolicy::default(),
             client:   reqwest::Client::new(),
+            max_bytes: DEFAULT_MAX_IN_MEMORY_BYTES,
         }
+    }
+
+    /// The most bytes [`fetch_remote`](BlobFetcher::fetch_remote) will read for one artifact
+    /// (default [`DEFAULT_MAX_IN_MEMORY_BYTES`]). The body is read in pieces and counted, so
+    /// the bound holds for a chunked response with no `Content-Length` too. Ranged reads
+    /// ([`RangedBlobFetcher`]) are bounded by the range they ask for and ignore this.
+    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes.max(1);
+        self
+    }
+
+    fn url_for(&self, id: &ArtifactId) -> Result<String, String> {
+        let url = format!("{}/{}", self.base_url.trim_end_matches('/'), id.to_hex());
+        if !self.egress.permits_url(&url) {
+            return Err(format!("egress policy denies {url}"));
+        }
+        Ok(url)
+    }
+
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        let mut req = self.client.request(method, url);
+        for (name, value) in &self.headers {
+            req = req.header(name, value);
+        }
+        req
+    }
+
+    /// Read a response body in pieces, refusing by name once it passes `bound` — before the
+    /// piece that crosses it is kept. This is what closes E12: the old path called
+    /// `resp.bytes()`, which materialises a chunked body whole before anything can be checked.
+    async fn read_bounded(mut resp: reqwest::Response, bound: u64, url: &str) -> Result<Bytes, String> {
+        let mut out = bytes::BytesMut::with_capacity(resp.content_length().unwrap_or(0).min(bound) as usize);
+        while let Some(piece) = resp.chunk().await.map_err(|e| format!("read {url}: {e}"))? {
+            if out.len() as u64 + piece.len() as u64 > bound {
+                return Err(format!(
+                    "GET {url}: body exceeds the in-memory bound of {bound} B (read {} B so far) — stage it to disk",
+                    out.len()
+                ));
+            }
+            out.extend_from_slice(&piece);
+        }
+        Ok(out.freeze())
     }
 
     /// Attach a static request header (credentials: `("Authorization", "Bearer …")`).
@@ -134,35 +220,209 @@ impl HttpLibrarySource {
 #[async_trait::async_trait]
 impl BlobFetcher for HttpLibrarySource {
     async fn fetch_remote(&self, id: &ArtifactId) -> Result<Option<Bytes>, String> {
-        let url = format!("{}/{}", self.base_url.trim_end_matches('/'), id.to_hex());
-        if !self.egress.permits_url(&url) {
-            return Err(format!("egress policy denies {url}"));
-        }
-        let mut req = self.client.get(&url);
-        for (name, value) in &self.headers {
-            req = req.header(name, value);
-        }
-        let resp = req.send().await.map_err(|e| format!("GET {url}: {e}"))?;
+        let url = self.url_for(id)?;
+        let resp = self.request(reqwest::Method::GET, &url).send().await.map_err(|e| format!("GET {url}: {e}"))?;
         match resp.status() {
             s if s.is_success() => {
-                // Bound the in-memory materialization: this source has no ranged streaming (design §5),
-                // so a huge body OOMs the node BEFORE the content-hash check. The mesh path is bounded
-                // by the 10 MiB frame cap; bound the HTTP path via Content-Length (audit 2026-07-15
-                // pass 5). RESIDUAL: a chunked response with no/lying Content-Length is not bounded
-                // here — the complete fix is streaming via `RangedArtifactSource` (needs reqwest's
-                // `stream` feature + futures); tracked, not silently added.
-                const MAX_HTTP_BLOB_BYTES: u64 = 512 * 1024 * 1024;
+                // A declared length past the bound is refused before a byte is read; an
+                // undeclared one is refused by `read_bounded` the moment it crosses.
                 if let Some(len) = resp.content_length()
-                    && len > MAX_HTTP_BLOB_BYTES
+                    && len > self.max_bytes
                 {
-                    return Err(format!("GET {url}: declared body {len} B exceeds cap {MAX_HTTP_BLOB_BYTES} B"));
+                    return Err(format!(
+                        "GET {url}: declared body {len} B exceeds the in-memory bound of {} B — stage it to disk",
+                        self.max_bytes
+                    ));
                 }
-                let bytes = resp.bytes().await.map_err(|e| format!("read {url}: {e}"))?;
-                Ok(Some(bytes))
+                Ok(Some(Self::read_bounded(resp, self.max_bytes, &url).await?))
             }
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             s => Err(format!("GET {url}: {s}")),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl RangedBlobFetcher for HttpLibrarySource {
+    /// `HEAD` — the declared `Content-Length`. A store that answers without one cannot be
+    /// staged in ranges, and says so.
+    async fn size(&self, id: &ArtifactId) -> Result<Option<u64>, String> {
+        let url = self.url_for(id)?;
+        let resp = self.request(reqwest::Method::HEAD, &url).send().await.map_err(|e| format!("HEAD {url}: {e}"))?;
+        match resp.status() {
+            // The header, not `content_length()`: for a HEAD the body is empty by definition and
+            // the client's size hint reports that emptiness, not the declared length.
+            s if s.is_success() => resp
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(Some)
+                .ok_or_else(|| format!("HEAD {url}: no Content-Length — this store cannot be ranged")),
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            s => Err(format!("HEAD {url}: {s}")),
+        }
+    }
+
+    /// `GET` with `Range: bytes=offset-(offset+len-1)`. Only a `206` is read; a `200` means the
+    /// store ignored the range and would send the whole body, so the response is dropped
+    /// **unread** and the call fails by name. The body is counted against `len`, never trusted.
+    async fn fetch_range(&self, id: &ArtifactId, offset: u64, len: u64) -> Result<Option<Bytes>, String> {
+        if len == 0 {
+            return Ok(Some(Bytes::new()));
+        }
+        let url = self.url_for(id)?;
+        let resp = self
+            .request(reqwest::Method::GET, &url)
+            .header(reqwest::header::RANGE, format!("bytes={}-{}", offset, offset + len - 1))
+            .send()
+            .await
+            .map_err(|e| format!("GET {url}: {e}"))?;
+        match resp.status() {
+            reqwest::StatusCode::PARTIAL_CONTENT => Ok(Some(Self::read_bounded(resp, len, &url).await?)),
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            reqwest::StatusCode::OK => Err(format!(
+                "GET {url}: the store ignored the Range header (answered 200) — refusing to read a whole body"
+            )),
+            s => Err(format!("GET {url} (range {offset}+{len}): {s}")),
+        }
+    }
+}
+
+/// The **large-artifact** path: pull a blob from a [`RangedBlobFetcher`] in range-sized pieces
+/// into a node-local staging directory, hashing as it streams, and serve it from disk. Peak
+/// memory is one piece, whatever the blob's size. The staged file is complete-or-absent: pieces
+/// land in a uniquely named `.part-…` file that is renamed into place only after the content
+/// address matches, so a reader (the blob runtime's own ranged install, a librarian mirroring a
+/// remote store) never sees a partial or unverified blob. Staging the same id twice is idempotent.
+///
+/// Serving is delegated to an [`FsLibrarySource`] over the same directory, so everything a
+/// library directory offers — ranged reads, `list`, `remove` — is available on the stage.
+pub struct DiskStagedSource {
+    fetcher:     Arc<dyn RangedBlobFetcher>,
+    stage:       FsLibrarySource,
+    chunk_bytes: u64,
+}
+
+impl DiskStagedSource {
+    /// A staged source over `dir` (created if absent), pulling in [`DEFAULT_RANGE_CHUNK_BYTES`]
+    /// pieces.
+    pub fn open(fetcher: Arc<dyn RangedBlobFetcher>, dir: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
+        Ok(Self { fetcher, stage: FsLibrarySource::open(dir)?, chunk_bytes: DEFAULT_RANGE_CHUNK_BYTES })
+    }
+
+    /// Override the range piece (min 1; tests use tiny pieces to exercise many rounds).
+    pub fn with_chunk_bytes(mut self, chunk_bytes: u64) -> Self {
+        self.chunk_bytes = chunk_bytes.max(1);
+        self
+    }
+
+    /// The staging directory, as a library source.
+    pub fn stage(&self) -> &FsLibrarySource {
+        &self.stage
+    }
+
+    /// Pull `id` into the stage, verified, returning whether it is now staged. A miss, a store
+    /// that cannot be ranged, a range the store ignores, a short or failed piece, or a hash
+    /// mismatch each return `false` with the reason logged; nothing partial is left behind.
+    /// Idempotent — a staged id short-circuits without a request.
+    pub async fn stage_artifact(&self, id: &ArtifactId) -> bool {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+
+        if self.stage.size(id).is_some() {
+            return true;
+        }
+        let total = match self.fetcher.size(id).await {
+            Ok(Some(n)) => n,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!(artifact = %id, %e, "cannot stage: size unknown");
+                return false;
+            }
+        };
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = self.stage.dir().join(format!(
+            ".part-{}-{}-{}",
+            id.to_hex(),
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let result: Result<(), String> = async {
+            let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| format!("create {}: {e}", tmp.display()))?;
+            let mut hasher = Sha256::new();
+            let mut fetched = 0u64;
+            while fetched < total {
+                let want = self.chunk_bytes.min(total - fetched);
+                let piece = match self.fetcher.fetch_range(id, fetched, want).await? {
+                    Some(p) => p,
+                    None => return Err("the store stopped holding the artifact mid-pull".into()),
+                };
+                if piece.is_empty() {
+                    return Err(format!("empty range at {fetched}/{total}"));
+                }
+                hasher.update(&piece);
+                file.write_all(&piece).await.map_err(|e| format!("write {}: {e}", tmp.display()))?;
+                fetched += piece.len() as u64;
+            }
+            file.flush().await.map_err(|e| format!("flush {}: {e}", tmp.display()))?;
+            drop(file);
+            let actual = ArtifactId::from_hex(&format!("{:x}", hasher.finalize())).map_err(|e| e.to_string())?;
+            if actual != *id {
+                return Err(format!("artifact hash mismatch: expected {id}, got {actual}"));
+            }
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => match tokio::fs::rename(&tmp, self.stage.dir().join(id.to_hex())).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(artifact = %id, %e, "staged bytes verified but could not be placed");
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::warn!(artifact = %id, %e, "staging failed — nothing kept");
+                let _ = tokio::fs::remove_file(&tmp).await;
+                false
+            }
+        }
+    }
+
+    /// Stage a set of ids (a manifest's worth — the mirror step for a librarian fronting a
+    /// remote store). Returns how many are now staged.
+    pub async fn stage_all(&self, ids: &[ArtifactId]) -> usize {
+        let mut ok = 0;
+        for id in ids {
+            if self.stage_artifact(id).await {
+                ok += 1;
+            }
+        }
+        ok
+    }
+}
+
+impl ArtifactSource for DiskStagedSource {
+    /// Whole-blob read from the stage — for a small staged artifact; a large one should be read
+    /// through [`as_ranged`](ArtifactSource::as_ranged), as the blob runtime does.
+    fn fetch(&self, id: &ArtifactId) -> Option<Bytes> {
+        self.stage.fetch(id)
+    }
+
+    fn as_ranged(&self) -> Option<&dyn RangedArtifactSource> {
+        Some(self)
+    }
+}
+
+impl RangedArtifactSource for DiskStagedSource {
+    fn size(&self, id: &ArtifactId) -> Option<u64> {
+        self.stage.size(id)
+    }
+
+    fn fetch_range(&self, id: &ArtifactId, offset: u64, len: u64) -> Option<Bytes> {
+        self.stage.fetch_range(id, offset, len)
     }
 }
 
@@ -211,6 +471,230 @@ mod tests {
             }
         });
         (format!("http://{addr}"), hits, auth_seen)
+    }
+
+
+    // ── S1 fixtures: a range-capable, optionally chunked, on-the-fly blob server ─────────────
+    // (`docs/plans/design-time-tooling.md` §11 S1). The body is generated per offset, never
+    // materialised, so the server can serve gigabytes without holding them.
+
+    fn gen_byte(i: u64) -> u8 {
+        ((i.wrapping_mul(2_654_435_761) ^ (i >> 7)) & 0xff) as u8
+    }
+
+    fn gen_id(len: u64) -> ArtifactId {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut off = 0u64;
+        while off < len {
+            let n = (buf.len() as u64).min(len - off) as usize;
+            for (k, b) in buf[..n].iter_mut().enumerate() {
+                *b = gen_byte(off + k as u64);
+            }
+            h.update(&buf[..n]);
+            off += n as u64;
+        }
+        ArtifactId::from_hex(&format!("{:x}", h.finalize())).unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum ServeMode {
+        /// `Content-Length` on GET, `206` + `Content-Range` on a `Range` request, `HEAD` answered.
+        Ranged,
+        /// `Transfer-Encoding: chunked`, no length, `Range` ignored (a CDN that streams).
+        ChunkedNoLength,
+        /// Declares a length but ignores `Range` (answers `200` with the whole body).
+        IgnoresRange,
+    }
+
+    /// Serve one blob of `len` generated bytes at `/{hex}` for any hex; `lie` flips every byte
+    /// so the content address never matches.
+    fn spawn_range_server(len: u64, mode: ServeMode, lie: bool) -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                h.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let method = req.split(' ').next().unwrap_or("GET").to_string();
+                let range = req.lines().find_map(|l| {
+                    let l = l.trim();
+                    l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| {
+                        let (a, b) = r.split_once('-').unwrap();
+                        let a: u64 = a.parse().unwrap();
+                        let b: u64 = b.parse().unwrap_or(len - 1);
+                        (a, b.min(len - 1))
+                    })
+                });
+                let write_body = |stream: &mut std::net::TcpStream, from: u64, to_incl: u64, chunked: bool| {
+                    let mut off = from;
+                    let mut piece = vec![0u8; 1 << 16];
+                    while off <= to_incl {
+                        let n = (piece.len() as u64).min(to_incl - off + 1) as usize;
+                        for (k, b) in piece[..n].iter_mut().enumerate() {
+                            let v = gen_byte(off + k as u64);
+                            *b = if lie { !v } else { v };
+                        }
+                        if chunked {
+                            let _ = stream.write_all(format!("{n:x}\r\n").as_bytes());
+                            let _ = stream.write_all(&piece[..n]);
+                            let _ = stream.write_all(b"\r\n");
+                        } else {
+                            let _ = stream.write_all(&piece[..n]);
+                        }
+                        off += n as u64;
+                    }
+                    if chunked {
+                        let _ = stream.write_all(b"0\r\n\r\n");
+                    }
+                };
+                match (mode, method.as_str(), range) {
+                    (ServeMode::Ranged, "HEAD", _) | (ServeMode::IgnoresRange, "HEAD", _) => {
+                        let _ = stream.write_all(
+                            format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\naccept-ranges: bytes\r\nconnection: close\r\n\r\n").as_bytes(),
+                        );
+                    }
+                    (ServeMode::ChunkedNoLength, "HEAD", _) => {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n");
+                    }
+                    (ServeMode::Ranged, _, Some((a, b))) => {
+                        let _ = stream.write_all(
+                            format!("HTTP/1.1 206 Partial Content\r\ncontent-length: {}\r\ncontent-range: bytes {a}-{b}/{len}\r\nconnection: close\r\n\r\n", b - a + 1).as_bytes(),
+                        );
+                        write_body(&mut stream, a, b, false);
+                    }
+                    (ServeMode::Ranged, _, None) | (ServeMode::IgnoresRange, _, _) => {
+                        let _ = stream.write_all(
+                            format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n").as_bytes(),
+                        );
+                        write_body(&mut stream, 0, len - 1, false);
+                    }
+                    (ServeMode::ChunkedNoLength, _, _) => {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n");
+                        write_body(&mut stream, 0, len - 1, true);
+                    }
+                }
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// E12's residual, pinned: a chunked response with no `Content-Length` was read whole. The
+    /// whole-object path must refuse **by name** once the body passes the in-memory bound, with
+    /// or without a declared length.
+    ///
+    /// Seen failing first at the default bound (a 65 MiB chunked body materialised whole);
+    /// kept at a 2 MiB bound so the unit test does not itself hold 64 MiB.
+    #[tokio::test]
+    async fn a_chunked_body_with_no_length_is_bounded_by_name() {
+        let len = 3 * MIB; // one past the bound set below
+        let (base, _hits) = spawn_range_server(len, ServeMode::ChunkedNoLength, false);
+        let id = gen_id(len);
+        let err = match HttpLibrarySource::new(&base).with_max_bytes(2 * MIB).fetch_remote(&id).await {
+            Err(e) => e,
+            Ok(b) => panic!(
+                "a body past the in-memory bound must be refused, not materialised: got {} B",
+                b.map(|b| b.len()).unwrap_or(0)
+            ),
+        };
+        assert!(err.contains("exceeds") && err.contains("bound"), "refused by name, got: {err}");
+    }
+
+    /// The prefetch cache is for small artifacts. A blob past its bound is refused by name —
+    /// never silently held in RAM — even when the store declares a length under the old cap.
+    #[tokio::test]
+    async fn the_prefetch_cache_refuses_a_blob_past_its_bound() {
+        let len = 65 * MIB;
+        let (base, _hits) = spawn_range_server(len, ServeMode::Ranged, false);
+        let id = gen_id(len);
+        let source = PrefetchingSource::new(Arc::new(HttpLibrarySource::new(&base)));
+        assert!(!source.prefetch(&id).await, "65 MiB must not enter the in-memory cache");
+        assert!(source.fetch(&id).is_none());
+    }
+
+    fn rss_kib() -> u64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout).trim().parse().expect("rss")
+    }
+
+    /// S1's exit gate: a blob far larger than the in-memory bound stages to disk in range
+    /// pieces with peak resident memory bounded — the size is `MYCELIUM_S1_BLOB_MIB` (default
+    /// 64; the plan's 2 GiB run is the same test with the variable set), the bound is
+    /// size-independent because only one piece is ever held.
+    ///
+    /// Ignored by default because it measures the **process's** resident memory, which the
+    /// other tests in this binary perturb when they run beside it (a chunked-body test holding
+    /// its bound, a wasm instantiation): it must own the process. CI runs it alone:
+    /// `cargo test -p mycelium-wasm-host --lib a_large_blob_stages -- --ignored`.
+    #[tokio::test]
+    #[ignore = "measures process RSS; run alone: cargo test -p mycelium-wasm-host --lib a_large_blob_stages -- --ignored"]
+    async fn a_large_blob_stages_to_disk_within_a_memory_bound() {
+        let mib: u64 = std::env::var("MYCELIUM_S1_BLOB_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+        let len = mib * MIB;
+        let (base, hits) = spawn_range_server(len, ServeMode::Ranged, false);
+        let id = gen_id(len);
+        let dir = std::env::temp_dir().join(format!("mycelium-s1-stage-{}-{}", std::process::id(), mib));
+        let _ = std::fs::remove_dir_all(&dir);
+        let staged = DiskStagedSource::open(Arc::new(HttpLibrarySource::new(&base)), &dir)
+            .unwrap()
+            .with_chunk_bytes(4 * MIB);
+
+        let before = rss_kib();
+        assert!(staged.stage_artifact(&id).await, "the blob stages");
+        let after = rss_kib();
+        let grew_mib = after.saturating_sub(before) / 1024;
+        assert!(grew_mib < 32, "peak RSS grew by {grew_mib} MiB staging {mib} MiB — the pull is not streaming");
+        assert!(hits.load(Ordering::SeqCst) as u64 >= len / (4 * MIB), "one request per 4 MiB piece");
+
+        // Served from disk, ranged — the shape the blob runtime's install consumes.
+        assert_eq!(staged.as_ranged().unwrap().size(&id), Some(len));
+        let tail = staged.fetch_range(&id, len - 5, 5).unwrap();
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail[4], gen_byte(len - 1));
+        assert!(dir.join(id.to_hex()).exists(), "complete-or-absent: the verified file is in place");
+        assert!(!std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".part-")),
+            "no partial file left behind");
+        // Idempotent: a second stage makes no request.
+        let h = hits.load(Ordering::SeqCst);
+        assert!(staged.stage_artifact(&id).await);
+        assert_eq!(hits.load(Ordering::SeqCst), h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stage keeps nothing it could not verify or could not bound: a lying store, a store
+    /// that ignores `Range` (a `200` is dropped unread), and a store with no length each leave
+    /// the directory empty.
+    #[tokio::test]
+    async fn the_stage_keeps_nothing_it_cannot_verify_or_bound() {
+        let len = 3 * MIB;
+        let id = gen_id(len);
+        for (mode, lie, why) in [
+            (ServeMode::Ranged, true, "lying bytes"),
+            (ServeMode::IgnoresRange, false, "range ignored"),
+            (ServeMode::ChunkedNoLength, false, "no length"),
+        ] {
+            let (base, _hits) = spawn_range_server(len, mode, lie);
+            let dir = std::env::temp_dir().join(format!("mycelium-s1-refuse-{}-{why}", std::process::id()).replace(' ', "-"));
+            let _ = std::fs::remove_dir_all(&dir);
+            let staged = DiskStagedSource::open(Arc::new(HttpLibrarySource::new(&base)), &dir)
+                .unwrap()
+                .with_chunk_bytes(MIB);
+            assert!(!staged.stage_artifact(&id).await, "{why}: must not stage");
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "{why}: nothing kept");
+            assert!(staged.fetch(&id).is_none());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[tokio::test]
