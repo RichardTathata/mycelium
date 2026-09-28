@@ -21,6 +21,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_prefetch_cache_refuses_a_blob_past_its_bound`).
 
 ### Added
+- **`mycelium-artifact publish | list | verify`** (`mycelium-wasm-host`, feature `stem`; the
+  functions are public): the artifact tool of `docs/plans/design-time-tooling.md` D10 / A1. A
+  reviewable TOML description (kind, the capability it provides, the footprint, the path to the
+  bytes — the same file `mycelium wire-check --library` reads) is the input; `publish` stores the
+  bytes content-addressed, builds and signs the entry with a 64-hex Ed25519 seed from a file or an
+  environment variable, and appends the manifest line, idempotently; `list` renders a manifest back
+  into the description shape with the content address and signer shown; `verify` exits 1 naming an
+  untrusted signer, a missing or corrupt blob, and — with `--descriptions` — a description whose
+  bytes changed under an unchanged manifest. Gated by a round-trip test (`list` of a published
+  manifest parses back to the description) and a verify test that names each of the three problems.
 - **`mycelium-stem`** (`mycelium-wasm-host`, feature `stem`; `Stem::start` as a library): a node
   that declares from its unit file — every `[[capability]]` advertised, every `[[requirement]]`
   declared, every `[[group]]` defined — and, with `[hosts]`, runs a provisioner configured from it
