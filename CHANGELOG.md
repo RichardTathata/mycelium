@@ -21,6 +21,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_prefetch_cache_refuses_a_blob_past_its_bound`).
 
 ### Added
+- **`mycelium wire-check`** (`src/wire_check.rs`; W2, A2, L1 and R1's checker halves of
+  `docs/plans/design-time-tooling.md`): the offline check over a directory of unit files, and
+  optionally a directory of artifact descriptions (`--library`). A pure function over declarations
+  that applies the mesh's own `CapFilter::matches` and reports what **could not bind**: `unwired
+  requirement`, `schema-only mismatch` (named with both ids), `type-cross constraint`, `empty group`,
+  `group requires unmet`, `orphan lane`, `unhostable entry` (an artifact matches but no unit's
+  `[hosts]` could take it), `presence unhostable` (a floor no set of deployed and hosting units can
+  meet) — each an error, exit 1 — and `would bind by provisioning`, `unranked ranking`, `single
+  provider` as warnings (`--strict-deployed` turns the first into an error). `--format json` emits
+  the versioned document `mycelium.design/declaration/1` with the directory's git revision, so a
+  consumer can join it to runtime observations by `(principal, ns, name, schema_id)`; `--format dot`
+  draws it. Exit 2 when a file does not load. It says *would bind under these declarations*, never
+  *is bound*. Fixtures: the co-op deployment as six unit files and one artifact description
+  (`tests/fixtures/units/coop`, green with its library, one provisioning warning, a golden JSON), and
+  an unwired one that exits 1 naming its ghost; CI runs both through the binary.
+- **`docs/operations/capability-lifecycle.md`** — the two ways a capability arrives (directly
+  deployed, dynamically installed) as one workflow: declare · check · deploy · publish · watch · read
+  back what bound; `deployment.md`, `artifacts.md` and guide 02 point at it.
 - **The unit file** (`NodeCapabilityConfig`, W1 of `docs/plans/design-time-tooling.md`): the
   `[[capability]]` TOML grows `principal`, `[[requirement]]` (a `CapFilter` — attributes with
   `eq · ne · gt · gte · lt · lte`, a bare value meaning `eq`, `schema_id`, a ranking),

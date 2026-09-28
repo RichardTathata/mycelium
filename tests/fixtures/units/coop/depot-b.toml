@@ -1,0 +1,17 @@
+# The second depot: the same offer, a smaller budget, a wasm-only host — the standby.
+principal = "depot-b"
+
+[[capability]]
+ns       = "depot"
+name     = "intake"
+ttl_secs = 30
+  [capability.attrs]
+  region   = "south"
+  capacity = 80
+
+[hosts]
+kinds                = ["wasm-component"]
+install_budget_bytes = 1073741824
+headroom             = 0.8
+trusted_publishers   = ["ed25519:coop-ci"]
+placement_root       = "/var/lib/mycelium/artifacts"

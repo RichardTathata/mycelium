@@ -1,0 +1,6 @@
+# The seeder: fills the `optimize` lane with donations (a client, no capability of its own).
+principal = "seeder"
+
+[[lane]]
+name = "optimize"
+role = "produces"

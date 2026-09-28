@@ -1,0 +1,11 @@
+# A deployment with one deliberately unwired requirement: nobody offers `ghost/town`, no artifact
+# provides it, so `wire-check` must exit 1 and name it. The fixture the W2 exit gate reads.
+principal = "lonely"
+
+[[capability]]
+ns   = "self"
+name = "sufficient"
+
+[[requirement]]
+ns   = "ghost"
+name = "town"

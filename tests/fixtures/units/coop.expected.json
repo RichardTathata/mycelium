@@ -1,0 +1,199 @@
+{
+  "schema": "mycelium.design/declaration/1",
+  "revision": null,
+  "units": [
+    {
+      "name": "auditor",
+      "principal": "auditor",
+      "offers": [],
+      "requires": [],
+      "groups": [],
+      "hosts_kinds": [],
+      "presence": []
+    },
+    {
+      "name": "depot-a",
+      "principal": "depot-a",
+      "offers": [
+        "depot/intake"
+      ],
+      "requires": [],
+      "groups": [],
+      "hosts_kinds": [
+        "wasm-component",
+        "blob"
+      ],
+      "presence": [
+        "route/optimize 1..2"
+      ]
+    },
+    {
+      "name": "depot-b",
+      "principal": "depot-b",
+      "offers": [
+        "depot/intake"
+      ],
+      "requires": [],
+      "groups": [],
+      "hosts_kinds": [
+        "wasm-component"
+      ],
+      "presence": []
+    },
+    {
+      "name": "dispatcher",
+      "principal": "dispatcher",
+      "offers": [],
+      "requires": [
+        "rush/worker",
+        "logistics/intake"
+      ],
+      "groups": [
+        "depots"
+      ],
+      "hosts_kinds": [],
+      "presence": []
+    },
+    {
+      "name": "rush-worker",
+      "principal": "rush-worker",
+      "offers": [
+        "rush/worker"
+      ],
+      "requires": [],
+      "groups": [],
+      "hosts_kinds": [],
+      "presence": []
+    },
+    {
+      "name": "seeder",
+      "principal": "seeder",
+      "offers": [],
+      "requires": [],
+      "groups": [],
+      "hosts_kinds": [],
+      "presence": []
+    },
+    {
+      "name": "worker",
+      "principal": "worker",
+      "offers": [],
+      "requires": [
+        "route/optimize",
+        "depot/intake"
+      ],
+      "groups": [],
+      "hosts_kinds": [],
+      "presence": []
+    }
+  ],
+  "artifacts": [
+    "route-optimizer"
+  ],
+  "edges": [
+    {
+      "requirer": "dispatcher",
+      "principal": "dispatcher",
+      "ns": "rush",
+      "name": "worker",
+      "schema_id": null,
+      "providers": [
+        {
+          "via": "unit",
+          "unit": "rush-worker",
+          "principal": "rush-worker"
+        }
+      ]
+    },
+    {
+      "requirer": "dispatcher",
+      "principal": "dispatcher",
+      "ns": "logistics",
+      "name": "intake",
+      "schema_id": null,
+      "providers": [
+        {
+          "via": "group",
+          "group": "depots",
+          "defined_by": "dispatcher"
+        }
+      ]
+    },
+    {
+      "requirer": "worker",
+      "principal": "worker",
+      "ns": "route",
+      "name": "optimize",
+      "schema_id": null,
+      "providers": [
+        {
+          "via": "artifact",
+          "artifact": "route-optimizer",
+          "hosts": [
+            "depot-a",
+            "depot-b"
+          ]
+        }
+      ]
+    },
+    {
+      "requirer": "worker",
+      "principal": "worker",
+      "ns": "depot",
+      "name": "intake",
+      "schema_id": null,
+      "providers": [
+        {
+          "via": "unit",
+          "unit": "depot-a",
+          "principal": "depot-a"
+        },
+        {
+          "via": "unit",
+          "unit": "depot-b",
+          "principal": "depot-b"
+        }
+      ]
+    }
+  ],
+  "lanes": [
+    {
+      "name": "done",
+      "producers": [
+        "worker"
+      ],
+      "consumers": [
+        "auditor"
+      ]
+    },
+    {
+      "name": "optimize",
+      "producers": [
+        "seeder"
+      ],
+      "consumers": [
+        "worker"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "severity": "warning",
+      "kind": "single provider",
+      "unit": "dispatcher",
+      "message": "requirement rush/worker: exactly one possible provider across the deployment"
+    },
+    {
+      "severity": "warning",
+      "kind": "single provider",
+      "unit": "dispatcher",
+      "message": "requirement logistics/intake: exactly one possible provider across the deployment"
+    },
+    {
+      "severity": "warning",
+      "kind": "would bind by provisioning",
+      "unit": "worker",
+      "message": "requirement route/optimize: no deployed provider; artifact \"route-optimizer\" (wasm-component) could be installed by depot-a|depot-b"
+    }
+  ]
+}

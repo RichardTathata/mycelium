@@ -214,6 +214,12 @@ the bytes stay remote — the librarian mirrors what its manifest names
 
 ### 3 · How another node installs it
 
+> **How a host gets there in the first place.** The node that installs is itself a *direct*
+> deployment — an image with the mesh binary, the wasm host, a provisioner, the runtimes for the
+> kinds its `[hosts]` table names, the publisher keys it trusts and its egress policy. The whole
+> workflow, from the unit files through the offline check to what the fleet reports back, is
+> [capability-lifecycle.md](capability-lifecycle.md); this section is its step 4 and step 5.
+
 The installing node needs no configuration beyond being in the cluster:
 
 ```rust

@@ -6,6 +6,20 @@
 > with no address ever configured. This chapter explains what that example does. (`llm_agent` is the
 > richer, LLM-driven version.)
 
+## Two ways a capability arrives
+
+| | **Directly deployed** | **Dynamically installed** |
+|---|---|---|
+| What is deployed | a unit whose capabilities are in its binary or its `[[capability]]` file | a **host** unit running a provisioner, with runtimes for some kinds and a budget |
+| Who decides it exists | the operator, at deploy time | the host, at runtime, on unmet demand or a presence floor, if the footprint fits |
+| Where the code comes from | the unit's image | a signed catalogue entry's content address, pulled and verified |
+| When it goes away | when the unit stops | when demand lapses or a governor sheds it |
+
+Both are runtime facts once the fleet exists; what is fixed at design time is the vocabulary — what
+could match what — written in the **unit file** (below) and checked before anything runs by
+`mycelium wire-check`. The operator's walk through both, in order, is
+[`capability-lifecycle.md`](../operations/capability-lifecycle.md).
+
 ## Concept
 
 In a traditional microservice architecture you resolve a service by its address

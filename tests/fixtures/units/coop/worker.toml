@@ -1,0 +1,29 @@
+# The worker: needs an optimizer nobody deploys (a depot will install one), drains the
+# `optimize` lane and completes into `done`.
+principal = "worker"
+
+[[requirement]]
+ns   = "route"
+name = "optimize"
+
+[[requirement]]
+ns   = "depot"
+name = "intake"
+  [requirement.attrs]
+  capacity = { gte = 50 }
+  [requirement.ranking]
+  attribute = "capacity"
+  order     = "descending"
+
+[[lane]]
+name = "optimize"
+role = "consumes"
+
+[[lane]]
+name = "done"
+role = "produces"
+
+[[mandate]]
+holder     = "worker"
+scope      = "routing"
+operations = ["route.optimize", "route.complete"]

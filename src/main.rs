@@ -8,6 +8,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
+    // `mycelium wire-check <units-dir> …` — the offline check over a directory of unit files
+    // (docs/plans/design-time-tooling.md §4). A pure function over declarations; it starts no
+    // node and reads no mesh, so it runs before the runtime is built.
+    if std::env::args().nth(1).as_deref() == Some("wire-check") {
+        std::process::exit(wire_check_cli(std::env::args().skip(2).collect()));
+    }
+
     let config = parse_args()?;
 
     // `GOSSIP_RECORD_BUNDLE_DIR` (builds with `sim` only): run under the replay seams on a
@@ -129,9 +136,130 @@ async fn await_shutdown_signal() -> Result<(), std::io::Error> {
     }
 }
 
+/// `mycelium wire-check <units-dir> [--library <artifacts-dir>] [--format text|json|dot]
+/// [--strict-deployed] [--revision <rev>]`. Reads every `*.toml` in `units-dir` as a unit (its
+/// file stem is the unit's name) and every `*.toml` in `artifacts-dir` as an artifact description,
+/// runs [`mycelium::wire_check::check`], prints the report, and exits 0 with no errors, 1 with
+/// any, 2 when a file does not load. The revision defaults to `git rev-parse HEAD` in `units-dir`
+/// when that succeeds, so the JSON document names the commit it describes.
+fn wire_check_cli(args: Vec<String>) -> i32 {
+    use mycelium::wire_check::{check, ArtifactDescription, CheckOptions, Unit};
+
+    let mut dir: Option<String> = None;
+    let mut library: Option<String> = None;
+    let mut format = "text".to_string();
+    let mut opts = CheckOptions::default();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--library" => library = it.next(),
+            "--format" => format = it.next().unwrap_or_default(),
+            "--strict-deployed" => opts.strict_deployed = true,
+            "--revision" => opts.revision = it.next(),
+            "-h" | "--help" => {
+                eprintln!("Usage: mycelium wire-check <units-dir> [--library <artifacts-dir>] [--format text|json|dot] [--strict-deployed] [--revision <rev>]\n\
+                           \n\
+                           Applies the mesh's own match rule (CapFilter::matches) to a directory of unit files and reports\n\
+                           what could not bind. It says *would bind under these declarations*, never *is bound*: liveness,\n\
+                           ranking over runtime attributes, locality, membership now, a mandate's currency and load are\n\
+                           runtime facts the mesh reports itself. Exit 0 with no errors, 1 with any, 2 if a file does not load.");
+                return 0;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("wire-check: unknown option {other}");
+                return 2;
+            }
+            other => dir = Some(other.to_string()),
+        }
+    }
+    let Some(dir) = dir else {
+        eprintln!("wire-check: a units directory is required");
+        return 2;
+    };
+    if !matches!(format.as_str(), "text" | "json" | "dot") {
+        eprintln!("wire-check: --format must be text, json or dot");
+        return 2;
+    }
+
+    fn toml_files(dir: &str) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+        let mut files: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir)
+            .map_err(|e| format!("{dir}: {e}"))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .filter_map(|p| p.file_stem().map(|s| (s.to_string_lossy().into_owned(), p.clone())))
+            .collect();
+        files.sort();
+        Ok(files)
+    }
+
+    let units: Vec<Unit> = match toml_files(&dir) {
+        Ok(files) => {
+            let mut units = Vec::new();
+            for (name, path) in files {
+                match mycelium::NodeCapabilityConfig::load_from_file(&path) {
+                    Ok(config) => units.push(Unit { name, config }),
+                    Err(e) => {
+                        eprintln!("wire-check: {}: {e}", path.display());
+                        return 2;
+                    }
+                }
+            }
+            units
+        }
+        Err(e) => {
+            eprintln!("wire-check: {e}");
+            return 2;
+        }
+    };
+    let mut artifacts = Vec::new();
+    if let Some(lib) = &library {
+        match toml_files(lib) {
+            Ok(files) => {
+                for (name, path) in files {
+                    let text = match std::fs::read_to_string(&path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("wire-check: {}: {e}", path.display());
+                            return 2;
+                        }
+                    };
+                    match ArtifactDescription::from_toml_str(&text) {
+                        Ok(a) => artifacts.push((name, a)),
+                        Err(e) => {
+                            eprintln!("wire-check: {}: {e}", path.display());
+                            return 2;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("wire-check: {e}");
+                return 2;
+            }
+        }
+    }
+    if opts.revision.is_none() {
+        opts.revision = std::process::Command::new("git")
+            .args(["-C", &dir, "rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+
+    let report = check(&units, &artifacts, &opts);
+    match format.as_str() {
+        "json" => println!("{}", report.render_json()),
+        "dot" => print!("{}", report.render_dot()),
+        _ => print!("{}", report.render_text()),
+    }
+    report.exit_code()
+}
+
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--format text|json|dot] [--strict-deployed]\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

@@ -1,0 +1,16 @@
+# The route optimizer, as an artifact description (docs/plans/design-time-tooling.md D10): what it
+# would provide once installed, its kind, and the footprint a host must have room for. The bytes
+# are the committed echo-component fixture standing in for a real optimizer, as in the demos.
+kind             = "wasm-component"
+bytes            = "../../../../mycelium-wasm-host/tests/fixtures/echo-component/echo_component.wasm"
+est_install_secs = 1
+
+[provides]
+ns   = "route"
+name = "optimize"
+  [provides.attrs]
+  engine = { version = "1.0.0" }
+
+[requires]
+disk_bytes = 0
+mem_bytes  = 67108864

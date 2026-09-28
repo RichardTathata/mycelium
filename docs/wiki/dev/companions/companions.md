@@ -56,7 +56,11 @@ via wasm-host).
   (streamed place-and-probe for models/data) as another; provenance binds the whole entry;
   **S1 (2026-09-28):** the HTTP store path split by size — `PrefetchingSource` bounded in memory
   and refusing by name, `DiskStagedSource` + `RangedBlobFetcher` staging a large blob to disk in
-  `Range` pieces (`.log/2026-09-28-s1-streaming-http.md`);
+  `Range` pieces (`.log/2026-09-28-s1-streaming-http.md`); **W2 (2026-09-28):** the offline
+  `mycelium wire-check` (`src/wire_check.rs`, pure over unit files, the mesh's own `CapFilter::matches`)
+  reports *would bind by provisioning* / *unhostable entry* / *presence unhostable* from artifact
+  descriptions and `[hosts]` tables — the operator's walk is `docs/operations/capability-lifecycle.md`
+  (`.log/2026-09-28-w2-wire-check.md`);
   the probe is *consumed* — a per-round health pass withdraws failing installs (restart ≡
   provisioning is the health protocol). Real-model proof: the coop `model_deploy` demo.
   Security note: wasmtime is this crate's sandbox — keep

@@ -127,7 +127,7 @@ use std::{
 ///
 /// Load with [`NodeCapabilityConfig::load_from_file`], then drive the probe
 /// loop with [`run_capability_probes`].
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct NodeCapabilityConfig {
     /// The issuer-qualified principal this unit presents at a gateway — the one key a runtime
     /// observation also carries, and so the join between a declaration and what the fleet later
