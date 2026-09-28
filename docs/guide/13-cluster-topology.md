@@ -149,6 +149,24 @@ production clusters.
 
 ---
 
+### 5 — The stem fleet (identical nodes that load what the declarations call for)
+
+A fleet of one image: every node is `mycelium-stem --units <unit.toml>` (the `mycelium-wasm-host`
+crate, feature `stem`) with the same unit file, a `[hosts]` table naming the kinds it can run, and
+`[[presence]]` floors for the capabilities that must exist. One node also takes the librarian role
+over the library (`--librarian`). Nothing application-specific is in the image; a node that sees a
+presence floor below its count, or a `req/` entry with no provider, self-elects, pulls the artifact
+from the catalogue, verifies and runs it. Kill a host and a standby does the same. Seeds are chosen as
+in shapes 1–3; the stem shape is about *what the nodes hold*, not how they find each other.
+
+**Its limits, on the tin** (`docs/plans/design-time-tooling.md` §13): only WASM components and
+blobs load dynamically (a `blob` runtime needs its native consumer on the node); the catalogue is the
+supply chain, so the publisher keys in `[hosts].trusted_publishers` are the posture to review; and
+which host installs a given artifact is decided at runtime — the offline check says a host *exists*,
+never which. The in-process fleet test `the_stem_fleet_fills_a_presence_floor_and_reheals` (three
+stems, one librarian, a floor of two, a kill and a re-heal, and the checker's declaration compared with
+what bound) is the shape's gate; a Docker cut of it is not yet built.
+
 ### 4 — Full bootstrap mesh (all nodes listed as seeds)
 
 ```rust
