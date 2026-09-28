@@ -40,6 +40,71 @@
 //! `probe_url` is optional. When absent the capability is treated as
 //! always-alive — useful for in-process capabilities (MCP tool handlers,
 //! compute functions) that don't have a separate health endpoint.
+//!
+//! ## The unit file (design-time tooling, W1 / L1 / R1)
+//!
+//! The same file can carry everything a deployable **unit** declares — what it *requires*, the
+//! *groups* it defines, the *lanes* it feeds or drains, the *authority* it expects, what it
+//! *hosts*, and the *presence* it keeps — beside the capabilities above. Every section is optional
+//! and every existing `[[capability]]`-only file loads unchanged. The plan that argues the format
+//! is `docs/plans/design-time-tooling.md` §3; this is that format, and the loader is its only parser.
+//!
+//! ```toml
+//! principal = "planner"                  # the principal this unit presents; the join key (D9)
+//!
+//! [[requirement]]                        # declare_requirement, in a file
+//! ns   = "llm"
+//! name = "inference"
+//! schema_id = "llm.inference.v2"         # exact match, as CapFilter::schema_id
+//!   [requirement.attrs]
+//!   model   = "llama3.2"                 # a bare value is Eq
+//!   context = { gte = 8192 }             # gt | gte | lt | lte | ne | eq
+//!   engine  = { version = "2.1.0" }      # a Version value, anywhere a value goes
+//!   [requirement.ranking]
+//!   attribute = "context"
+//!   order = "descending"
+//!
+//! [[group]]                              # define_capability_group, in a file
+//! name = "routers"
+//!   [group.filter]
+//!   ns = "plan"; name = "route"
+//!   [[group.provides]]
+//!   ns = "plan"; name = "routing"
+//!   [[group.requires]]
+//!   ns = "data"; name = "realtime"
+//!
+//! [[lane]]                               # a tuple-space stage this unit touches
+//! name = "stage-b"
+//! role = "consumes"                      # produces | consumes
+//!
+//! [[mandate]]                            # the authority vocabulary this unit expects
+//! holder = "planner"
+//! scope  = "routers"
+//! operations = ["plan.route", "plan.reroute"]
+//!
+//! [[rule]]                               # reference-evaluator rules, the same fields as Rule
+//! actor = "planner"; operation = "plan.route"; resource = "*"
+//! requires_mandate = "routers"
+//!
+//! [hosts]                                # this unit runs a provisioner (D15)
+//! kinds = ["wasm-component", "blob"]
+//! install_budget_bytes = 8589934592
+//! headroom = 0.8
+//! trusted_publishers = ["ed25519:3f…"]
+//! placement_root = "/var/lib/mycelium/artifacts"
+//!
+//! [[presence]]                           # keep 2–4 route optimizers alive fleet-wide (D17)
+//! ns = "route"; name = "optimize"
+//! min_providers = 2
+//! max_providers = 4
+//! ```
+//!
+//! What the loader **does**: parse, then [`NodeCapabilityConfig::validate`] — an unknown
+//! constraint operator, a `Version` that does not parse, a ranking with an unknown order, a
+//! mandate that enumerates nothing, a presence floor of zero or a ceiling below it, a hosts
+//! table naming an unknown kind or a headroom outside `(0, 1]` are each refused **by name**.
+//! What it does **not** do (D8, taken by D18 as phase R1): nothing here is declared to the
+//! mesh at startup yet — the sections are the vocabulary the offline check (W2) reads.
 
 use crate::error::GossipError;
 use serde::{Deserialize, Serialize};
@@ -47,7 +112,7 @@ use std::{
     collections::BTreeMap,
     path::Path,
 };
-use crate::CapValue;
+use crate::{CapConstraint, CapFilter, CapRanking, CapValue, RankingOrder};
 #[cfg(feature = "gateway")]
 use crate::{Capability, CapabilityReg, GossipAgent};
 #[cfg(feature = "gateway")]
@@ -64,9 +129,59 @@ use std::{
 /// loop with [`run_capability_probes`].
 #[derive(Debug, Default, Deserialize)]
 pub struct NodeCapabilityConfig {
+    /// The issuer-qualified principal this unit presents at a gateway — the one key a runtime
+    /// observation also carries, and so the join between a declaration and what the fleet later
+    /// reports (plan D9). Not an address.
+    #[serde(default)]
+    pub principal:    Option<String>,
     /// All capability probe entries declared for this node.
     #[serde(default, rename = "capability")]
     pub capabilities: Vec<CapabilityProbeEntry>,
+    /// What this unit requires — each a [`CapFilter`] once converted.
+    #[serde(default, rename = "requirement")]
+    pub requirements: Vec<FilterDecl>,
+    /// The capability groups this unit defines.
+    #[serde(default, rename = "group")]
+    pub groups:       Vec<GroupDecl>,
+    /// The tuple-space lanes this unit feeds or drains, by name.
+    #[serde(default, rename = "lane")]
+    pub lanes:        Vec<LaneDecl>,
+    /// The mandates this unit expects to hold or be checked against.
+    #[serde(default, rename = "mandate")]
+    pub mandates:     Vec<MandateDecl>,
+    /// The reference-evaluator rules this unit expects to be admitted by.
+    #[serde(default, rename = "rule")]
+    pub rules:        Vec<RuleDecl>,
+    /// What this unit can host — present only for a unit that runs a provisioner (D15).
+    #[serde(default)]
+    pub hosts:        Option<HostsDecl>,
+    /// Presence policies this unit publishes — keep N..M providers alive (D17).
+    #[serde(default, rename = "presence")]
+    pub presence:     Vec<PresenceDecl>,
+}
+
+/// A semantic-version triple written as `"major.minor.patch"`; parsed at load so a
+/// malformed one is refused by the loader, not discovered by a filter that never matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SemverTriple(pub [u32; 3]);
+
+impl<'de> Deserialize<'de> for SemverTriple {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let parts: Vec<&str> = s.trim().split('.').collect();
+        if parts.len() != 3 {
+            return Err(serde::de::Error::custom(format!(
+                "version {s:?} is not major.minor.patch"
+            )));
+        }
+        let mut out = [0u32; 3];
+        for (i, part) in parts.iter().enumerate() {
+            out[i] = part.parse().map_err(|_| {
+                serde::de::Error::custom(format!("version {s:?}: {part:?} is not a number"))
+            })?;
+        }
+        Ok(Self(out))
+    }
 }
 
 /// A single probe-and-advertise declaration.
@@ -109,6 +224,9 @@ fn default_ttl_secs()            -> u64 { 30 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum TomlCapValue {
+    /// `{ version = "2.1.0" }` — a [`CapValue::Version`]. A bare string stays `Text`, so every
+    /// existing file keeps its meaning; a version is a version only when written as one.
+    Version { version: SemverTriple },
     Bool(bool),
     Integer(i64),
     Float(f64),
@@ -118,11 +236,347 @@ pub enum TomlCapValue {
 impl From<TomlCapValue> for CapValue {
     fn from(v: TomlCapValue) -> Self {
         match v {
+            TomlCapValue::Version { version } => CapValue::Version(version.0),
             TomlCapValue::Bool(b)    => CapValue::Bool(b),
             TomlCapValue::Integer(n) => CapValue::Integer(n),
             TomlCapValue::Float(f)   => CapValue::Float(f),
             TomlCapValue::Text(s)    => CapValue::Text(s.into()),
         }
+    }
+}
+
+// ── Unit declarations ─────────────────────────────────────────────────────────
+
+fn invalid(field: &'static str, reason: impl Into<String>) -> GossipError {
+    GossipError::InvalidField { field, reason: reason.into() }
+}
+
+/// One attribute constraint as written: a bare value means `Eq`; an operator table
+/// (`{ gte = 8192 }`) names one of `eq · ne · gt · gte · lt · lte`. The two forms are told apart
+/// by shape; an operator the substrate does not have is refused by [`NodeCapabilityConfig::validate`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum TomlConstraint {
+    Bare(TomlCapValue),
+    Op(BTreeMap<String, TomlCapValue>),
+}
+
+impl TomlConstraint {
+    /// The [`CapConstraint`] this writes, or why it cannot.
+    pub fn to_constraint(&self) -> Result<CapConstraint, String> {
+        match self {
+            Self::Bare(v) => Ok(CapConstraint::Eq(v.clone().into())),
+            Self::Op(map) => {
+                if map.len() != 1 {
+                    return Err(format!(
+                        "a constraint table names exactly one operator; got {} keys ({})",
+                        map.len(),
+                        map.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+                let (op, v) = map.iter().next().expect("one entry");
+                let v: CapValue = v.clone().into();
+                Ok(match op.as_str() {
+                    "eq"  => CapConstraint::Eq(v),
+                    "ne"  => CapConstraint::Ne(v),
+                    "gt"  => CapConstraint::Gt(v),
+                    "gte" => CapConstraint::Gte(v),
+                    "lt"  => CapConstraint::Lt(v),
+                    "lte" => CapConstraint::Lte(v),
+                    other => return Err(format!(
+                        "unknown constraint operator {other:?} (eq · ne · gt · gte · lt · lte)"
+                    )),
+                })
+            }
+        }
+    }
+}
+
+/// A ranking over one attribute, `order = "ascending" | "descending"`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RankingDecl {
+    pub attribute: String,
+    pub order:     String,
+}
+
+/// A filter as written — a `[[requirement]]`, a `[group.filter]`, a `[[group.requires]]`, or the
+/// filter half of a `[[presence]]`. Converts to a [`CapFilter`] with [`to_filter`](Self::to_filter).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FilterDecl {
+    pub ns:   String,
+    pub name: String,
+    #[serde(default)]
+    pub schema_id: Option<String>,
+    #[serde(default)]
+    pub attrs:   BTreeMap<String, TomlConstraint>,
+    #[serde(default)]
+    pub ranking: Option<RankingDecl>,
+}
+
+impl FilterDecl {
+    /// The [`CapFilter`] this declares — the same value `declare_requirement` takes, so
+    /// `CapFilter::matches` on it is the mesh's own rule and not a re-implementation.
+    pub fn to_filter(&self) -> Result<CapFilter, String> {
+        let mut f = CapFilter::new(self.ns.as_str(), self.name.as_str());
+        for (attr, c) in &self.attrs {
+            f = f.with(attr.as_str(), c.to_constraint().map_err(|e| format!("attr {attr:?}: {e}"))?);
+        }
+        if let Some(sid) = &self.schema_id {
+            f = f.with_schema(sid.as_str());
+        }
+        if let Some(r) = &self.ranking {
+            let order = match r.order.as_str() {
+                "ascending"  => RankingOrder::Ascending,
+                "descending" => RankingOrder::Descending,
+                other => return Err(format!("ranking order {other:?} is not ascending | descending")),
+            };
+            f.ranking = Some(CapRanking { attribute: r.attribute.as_str().into(), order });
+        }
+        Ok(f)
+    }
+}
+
+/// A capability a group asserts once it has members (`[[group.provides]]`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CapDecl {
+    pub ns:   String,
+    pub name: String,
+    #[serde(default)]
+    pub schema_id: Option<String>,
+    #[serde(default)]
+    pub attrs: BTreeMap<String, TomlCapValue>,
+}
+
+impl CapDecl {
+    /// The [`Capability`](crate::Capability) this declares.
+    pub fn to_capability(&self) -> crate::Capability {
+        let mut cap = crate::Capability::new(self.ns.as_str(), self.name.as_str());
+        for (k, v) in &self.attrs {
+            cap = cap.with(k.as_str(), v.clone().into());
+        }
+        if let Some(sid) = &self.schema_id {
+            cap = cap.with_schema_id(sid.as_str());
+        }
+        cap
+    }
+}
+
+/// A `[[group]]` — the fields of [`CapabilityGroupDef`](crate::CapabilityGroupDef) plus its name.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GroupDecl {
+    pub name:   String,
+    pub filter: FilterDecl,
+    #[serde(default)]
+    pub topology_policy: Option<crate::GroupTopologyPolicy>,
+    #[serde(default)]
+    pub provides: Vec<CapDecl>,
+    #[serde(default)]
+    pub requires: Vec<FilterDecl>,
+}
+
+impl GroupDecl {
+    /// The definition `define_capability_group` takes.
+    pub fn to_def(&self) -> Result<crate::CapabilityGroupDef, String> {
+        Ok(crate::CapabilityGroupDef {
+            filter:          self.filter.to_filter().map_err(|e| format!("group {:?} filter: {e}", self.name))?,
+            topology_policy: self.topology_policy.clone(),
+            provides:        self.provides.iter().map(CapDecl::to_capability).collect(),
+            requires:        self
+                .requires
+                .iter()
+                .enumerate()
+                .map(|(i, r)| r.to_filter().map_err(|e| format!("group {:?} requires[{i}]: {e}", self.name)))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+/// Which side of a lane a unit is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaneRole {
+    Produces,
+    Consumes,
+}
+
+/// A `[[lane]]` — a tuple-space stage by name and the role this unit takes on it. Lanes match
+/// nothing on content, so a declaration is a name and a side and nothing more (plan D5).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LaneDecl {
+    pub name: String,
+    pub role: LaneRole,
+}
+
+/// A `[[mandate]]` — the authority vocabulary a unit expects: who holds it, over which scope,
+/// which **enumerated** operations. Absence is denial and there is no wildcard, as in
+/// [`Mandate`](crate::mandate::Mandate). Epoch, term and validity are runtime facts a
+/// declaration does not carry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MandateDecl {
+    pub holder: String,
+    pub scope:  String,
+    #[serde(default)]
+    pub operations: Vec<String>,
+    #[serde(default)]
+    pub established_by: Option<String>,
+    #[serde(default)]
+    pub purpose: Option<String>,
+}
+
+impl MandateDecl {
+    /// Does the declared mandate enumerate `operation`?
+    pub fn permits(&self, operation: &str) -> bool {
+        self.operations.iter().any(|o| o == operation)
+    }
+}
+
+/// A `[[rule]]` — the reference evaluator's [`Rule`](crate::Rule), as written: `*` is any;
+/// `requires_values` are compared for equality by name.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RuleDecl {
+    pub actor:     String,
+    pub operation: String,
+    pub resource:  String,
+    #[serde(default)]
+    pub requires_scopes: Vec<String>,
+    #[serde(default)]
+    pub requires_facts: Vec<String>,
+    #[serde(default)]
+    pub requires_mandate: Option<String>,
+    #[serde(default)]
+    pub requires_values: BTreeMap<String, toml::Value>,
+}
+
+impl RuleDecl {
+    /// The evaluator's own rule type, where the evaluator exists (a gateway that can attest).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub fn to_rule(&self) -> Result<crate::Rule, String> {
+        let mut rule = crate::Rule::new(self.actor.as_str(), self.operation.as_str(), self.resource.as_str());
+        rule.requires_scopes = self.requires_scopes.clone();
+        rule.requires_facts = self.requires_facts.clone();
+        rule.requires_mandate = self.requires_mandate.clone();
+        rule.requires_values = self
+            .requires_values
+            .iter()
+            .map(|(k, v)| serde_json::to_value(v).map(|j| (k.clone(), j)).map_err(|e| format!("requires_values.{k}: {e}")))
+            .collect::<Result<_, _>>()?;
+        Ok(rule)
+    }
+}
+
+/// The artifact kinds a hosting unit may name — the names of `ArtifactKind` in the wasm-host
+/// crate, which this crate does not depend on.
+pub const HOSTABLE_KINDS: &[&str] = &["wasm-component", "blob"];
+
+/// `[hosts]` — what a unit that runs a provisioner can host (plan D15): the kinds it has runtimes
+/// for, its install budget, its headroom fraction, the publisher keys it trusts, its placement
+/// root, and the fuel budget an agent-published entry runs under (D19). These are the
+/// provisioner's own settings written down; nothing here reads them at runtime yet (D18 / R1).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct HostsDecl {
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub install_budget_bytes: Option<u64>,
+    #[serde(default)]
+    pub headroom: Option<f64>,
+    #[serde(default)]
+    pub trusted_publishers: Vec<String>,
+    #[serde(default)]
+    pub placement_root: Option<String>,
+    #[serde(default)]
+    pub fuel_per_call: Option<u64>,
+}
+
+impl HostsDecl {
+    /// Can this host run an entry of `kind`, with a signed footprint of `bytes`? Eligibility only:
+    /// which host installs stays the provisioner's runtime self-election.
+    pub fn can_host(&self, kind: &str, bytes: u64) -> bool {
+        self.kinds.iter().any(|k| k == kind) && self.install_budget_bytes.is_none_or(|b| bytes <= b)
+    }
+}
+
+/// A `[[presence]]` — keep between `min_providers` and `max_providers` live providers of a filter
+/// across the fleet, independent of demand (the wasm-host `SupervisionPolicy`, plan D17).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PresenceDecl {
+    #[serde(flatten)]
+    pub filter: FilterDecl,
+    pub min_providers: usize,
+    #[serde(default)]
+    pub max_providers: Option<usize>,
+}
+
+impl NodeCapabilityConfig {
+    /// Every refusal the loader makes, by name. Called by [`load_from_file`](Self::load_from_file)
+    /// after parsing; call it yourself on a config built in code.
+    pub fn validate(&self) -> Result<(), GossipError> {
+        if let Some(p) = &self.principal
+            && p.trim().is_empty()
+        {
+            return Err(invalid("principal", "must not be empty when present"));
+        }
+        for (i, r) in self.requirements.iter().enumerate() {
+            r.to_filter().map_err(|e| invalid("requirement", format!("[{i}] {}/{}: {e}", r.ns, r.name)))?;
+        }
+        for g in &self.groups {
+            if g.name.trim().is_empty() {
+                return Err(invalid("group", "a group needs a name"));
+            }
+            g.to_def().map_err(|e| invalid("group", e))?;
+        }
+        for l in &self.lanes {
+            if l.name.trim().is_empty() {
+                return Err(invalid("lane", "a lane needs a name"));
+            }
+        }
+        for m in &self.mandates {
+            if m.holder.trim().is_empty() || m.scope.trim().is_empty() {
+                return Err(invalid("mandate", "holder and scope must not be empty"));
+            }
+            if m.operations.is_empty() {
+                return Err(invalid("mandate", format!(
+                    "{:?} over {:?} enumerates no operations — absence is denial, so it grants nothing",
+                    m.holder, m.scope
+                )));
+            }
+        }
+        for r in &self.rules {
+            if r.actor.is_empty() || r.operation.is_empty() || r.resource.is_empty() {
+                return Err(invalid("rule", "actor, operation and resource must not be empty (use \"*\" for any)"));
+            }
+        }
+        if let Some(h) = &self.hosts {
+            for k in &h.kinds {
+                if !HOSTABLE_KINDS.contains(&k.as_str()) {
+                    return Err(invalid("hosts.kinds", format!(
+                        "unknown artifact kind {k:?} ({})",
+                        HOSTABLE_KINDS.join(" | ")
+                    )));
+                }
+            }
+            if let Some(hr) = h.headroom
+                && !(hr > 0.0 && hr <= 1.0)
+            {
+                return Err(invalid("hosts.headroom", format!("{hr} is outside (0, 1]")));
+            }
+        }
+        for (i, p) in self.presence.iter().enumerate() {
+            p.filter.to_filter().map_err(|e| invalid("presence", format!("[{i}]: {e}")))?;
+            if p.min_providers == 0 {
+                return Err(invalid("presence.min_providers", format!(
+                    "[{i}] {}/{}: a floor of zero keeps nothing alive", p.filter.ns, p.filter.name
+                )));
+            }
+            if let Some(max) = p.max_providers
+                && max < p.min_providers
+            {
+                return Err(invalid("presence.max_providers", format!(
+                    "[{i}] {}/{}: ceiling {max} is below floor {}", p.filter.ns, p.filter.name, p.min_providers
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -133,18 +587,31 @@ impl NodeCapabilityConfig {
     /// the module documentation.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, GossipError> {
         let s = std::fs::read_to_string(path).map_err(GossipError::Io)?;
-        toml::from_str(&s).map_err(GossipError::Toml)
+        Self::from_toml_str(&s)
+    }
+
+    /// Parse and [`validate`](Self::validate) a unit file's text.
+    pub fn from_toml_str(s: &str) -> Result<Self, GossipError> {
+        let cfg: Self = toml::from_str(s).map_err(GossipError::Toml)?;
+        cfg.validate()?;
+        Ok(cfg)
     }
 }
 
 impl CapabilityProbeEntry {
-    #[cfg(feature = "gateway")]
-    pub(crate) fn build_capability(&self) -> Capability {
-        let mut cap = Capability::new(self.ns.as_str(), self.name.as_str());
+    /// The [`Capability`](crate::Capability) this entry advertises once its probe passes — the
+    /// declared offer the offline check (W2) matches requirements against.
+    pub fn build_capability_public(&self) -> crate::Capability {
+        let mut cap = crate::Capability::new(self.ns.as_str(), self.name.as_str());
         for (k, v) in &self.attrs {
             cap = cap.with(k.as_str(), v.clone().into());
         }
         cap
+    }
+
+    #[cfg(feature = "gateway")]
+    pub(crate) fn build_capability(&self) -> Capability {
+        self.build_capability_public()
     }
 
     #[cfg(feature = "gateway")]
@@ -311,5 +778,178 @@ pub async fn run_capability_probes<F>(
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod unit_file_tests {
+    use super::*;
+    use crate::Capability;
+
+    /// The three shipped `[[capability]]`-only files load exactly as before: the same entries,
+    /// and every new section empty. This is the pin that says the format grew without moving.
+    #[test]
+    fn existing_capability_files_load_unchanged() {
+        for (file, ns, name, ttl) in [
+            ("examples/node_n0.toml", "data", "realtime", 60),
+            ("examples/node_n1.toml", "", "", 0),
+            ("examples/node_n2.toml", "", "", 0),
+        ] {
+            let cfg = NodeCapabilityConfig::load_from_file(file).unwrap_or_else(|e| panic!("{file}: {e}"));
+            assert!(!cfg.capabilities.is_empty(), "{file} declares capabilities");
+            if !ns.is_empty() {
+                let e = &cfg.capabilities[0];
+                assert_eq!((e.ns.as_str(), e.name.as_str(), e.ttl_secs), (ns, name, ttl));
+            }
+            assert!(cfg.principal.is_none() && cfg.requirements.is_empty() && cfg.groups.is_empty()
+                && cfg.lanes.is_empty() && cfg.mandates.is_empty() && cfg.rules.is_empty()
+                && cfg.hosts.is_none() && cfg.presence.is_empty(), "{file}: no new section appears from nowhere");
+        }
+    }
+
+    const PLAN_EXAMPLE: &str = r#"
+principal = "planner"
+
+[[capability]]
+ns = "plan"
+name = "route"
+ttl_secs = 30
+  [capability.attrs]
+  region = "north"
+  engine = { version = "2.1.0" }
+
+[[requirement]]
+ns = "llm"
+name = "inference"
+schema_id = "llm.inference.v2"
+  [requirement.attrs]
+  model = "llama3.2"
+  context = { gte = 8192 }
+  [requirement.ranking]
+  attribute = "context"
+  order = "descending"
+
+[[group]]
+name = "routers"
+  [group.filter]
+  ns = "plan"
+  name = "route"
+  [[group.provides]]
+  ns = "plan"
+  name = "routing"
+  [[group.requires]]
+  ns = "data"
+  name = "realtime"
+
+[[lane]]
+name = "stage-b"
+role = "consumes"
+
+[[mandate]]
+holder = "planner"
+scope = "routers"
+operations = ["plan.route", "plan.reroute"]
+
+[[rule]]
+actor = "planner"
+operation = "plan.route"
+resource = "*"
+requires_mandate = "routers"
+  [rule.requires_values]
+  region = "north"
+
+[hosts]
+kinds = ["wasm-component", "blob"]
+install_budget_bytes = 8589934592
+headroom = 0.8
+trusted_publishers = ["ed25519:3f"]
+placement_root = "/var/lib/mycelium/artifacts"
+
+[[presence]]
+ns = "route"
+name = "optimize"
+min_providers = 2
+max_providers = 4
+"#;
+
+    /// The plan's §3 example loads, and its requirement — through `CapFilter::matches`, the
+    /// mesh's own rule — accepts the capability it names and refuses the ones it does not.
+    #[test]
+    fn the_plan_example_loads_and_its_filters_match_with_the_mesh_rule() {
+        let cfg = NodeCapabilityConfig::from_toml_str(PLAN_EXAMPLE).expect("loads");
+        assert_eq!(cfg.principal.as_deref(), Some("planner"));
+
+        // A Version attribute in a capability's attrs is a Version, not Text.
+        let cap = cfg.capabilities[0].build_capability_public();
+        assert_eq!(cap.attributes.get("engine"), Some(&CapValue::Version([2, 1, 0])));
+        assert_eq!(cap.attributes.get("region"), Some(&CapValue::Text("north".into())));
+
+        let req = cfg.requirements[0].to_filter().unwrap();
+        let offered = Capability::new("llm", "inference")
+            .with("model", CapValue::Text("llama3.2".into()))
+            .with("context", CapValue::Integer(8192))
+            .with_schema_id("llm.inference.v2");
+        assert!(req.matches(&offered), "the plan's requirement binds the capability it names");
+        assert!(!req.matches(&offered.clone().with("context", CapValue::Integer(4096))), "gte refuses a smaller context");
+        assert!(!req.matches(&Capability::new("llm", "inference")
+            .with("model", CapValue::Text("llama3.2".into()))
+            .with("context", CapValue::Integer(8192))
+            .with_schema_id("llm.inference.v1")), "the schema id is exact");
+        assert_eq!(req.ranking.as_ref().map(|r| (r.attribute.as_ref(), r.order)), Some(("context", RankingOrder::Descending)));
+
+        let def = cfg.groups[0].to_def().unwrap();
+        assert_eq!(def.provides[0].name.as_ref(), "routing");
+        assert_eq!(def.requires[0].namespace.as_ref(), "data");
+        assert!(def.filter.matches(&Capability::new("plan", "route")));
+
+        assert_eq!((cfg.lanes[0].name.as_str(), cfg.lanes[0].role), ("stage-b", LaneRole::Consumes));
+        assert!(cfg.mandates[0].permits("plan.reroute") && !cfg.mandates[0].permits("plan.delete"));
+        let hosts = cfg.hosts.as_ref().unwrap();
+        assert!(hosts.can_host("blob", 1 << 30) && !hosts.can_host("blob", 1 << 34) && !hosts.can_host("native", 1));
+        assert_eq!((cfg.presence[0].min_providers, cfg.presence[0].max_providers), (2, Some(4)));
+        assert!(cfg.presence[0].filter.to_filter().unwrap().matches(&Capability::new("route", "optimize")));
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        {
+            let rule = cfg.rules[0].to_rule().unwrap();
+            assert_eq!(rule.requires_mandate.as_deref(), Some("routers"));
+            assert_eq!(rule.requires_values[0], ("region".to_string(), serde_json::json!("north")));
+        }
+    }
+
+    fn refused(toml: &str) -> String {
+        match NodeCapabilityConfig::from_toml_str(toml) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("must be refused:\n{toml}"),
+        }
+    }
+
+    #[test]
+    fn the_loader_refuses_by_name() {
+        let e = refused("[[requirement]]\nns = \"a\"\nname = \"b\"\n[requirement.attrs]\nx = { between = 3 }\n");
+        assert!(e.contains("unknown constraint operator") && e.contains("between"), "{e}");
+
+        let e = refused("[[capability]]\nns = \"a\"\nname = \"b\"\n[capability.attrs]\nv = { version = \"2.1\" }\n");
+        assert!(e.contains("major.minor.patch") || e.contains("version"), "{e}");
+
+        let e = refused("[[requirement]]\nns = \"a\"\nname = \"b\"\n[requirement.ranking]\nattribute = \"x\"\norder = \"sideways\"\n");
+        assert!(e.contains("sideways"), "{e}");
+
+        let e = refused("[[mandate]]\nholder = \"h\"\nscope = \"s\"\n");
+        assert!(e.contains("enumerates no operations"), "{e}");
+
+        let e = refused("[[presence]]\nns = \"a\"\nname = \"b\"\nmin_providers = 0\n");
+        assert!(e.contains("floor of zero"), "{e}");
+
+        let e = refused("[[presence]]\nns = \"a\"\nname = \"b\"\nmin_providers = 3\nmax_providers = 2\n");
+        assert!(e.contains("below floor"), "{e}");
+
+        let e = refused("[hosts]\nkinds = [\"native\"]\n");
+        assert!(e.contains("unknown artifact kind") && e.contains("native"), "{e}");
+
+        let e = refused("[hosts]\nheadroom = 1.5\n");
+        assert!(e.contains("outside (0, 1]"), "{e}");
+
+        let e = refused("[[requirement]]\nns = \"a\"\nname = \"b\"\n[requirement.attrs]\nx = { gte = 1, lte = 9 }\n");
+        assert!(e.contains("exactly one operator"), "{e}");
     }
 }

@@ -68,6 +68,12 @@ whether it qualifies.
 
 `examples/llm_agent.rs` creates three nodes that load their capabilities from
 TOML manifests (`examples/node_n0.toml`, `node_n1.toml`, `node_n2.toml`).
+The same file is the **unit file**: beside `[[capability]]` it can declare what a unit
+*requires* (a `[[requirement]]` is a `CapFilter`, attributes with operators, a bare value
+meaning equals), the `[[group]]`s it defines, the `[[lane]]`s it feeds or drains, the
+`[[mandate]]`s and `[[rule]]`s it expects, what it `[hosts]`, and the `[[presence]]` it keeps —
+the format `docs/plans/design-time-tooling.md` §3 argues, with every refusal by name at load
+(`NodeCapabilityConfig::validate`; the module doc of `src/capability_config.rs` is the reference).
 A probe loop advertises health. The mesh control UI lets you apply any of 11
 topology presets and watch capability emergence in real time.
 

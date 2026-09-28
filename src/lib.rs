@@ -346,7 +346,9 @@ pub use capability::{
     WiredEmitOutcome, WiringProvider, WiringStatus,
 };
 pub use capability_config::{
-    CapabilityProbeEntry, NodeCapabilityConfig, ProbeEvent, ProbeState, TomlCapValue,
+    CapDecl, CapabilityProbeEntry, FilterDecl, GroupDecl, HostsDecl, LaneDecl, LaneRole, MandateDecl,
+    NodeCapabilityConfig, PresenceDecl, ProbeEvent, ProbeState, RankingDecl, RuleDecl, SemverTriple,
+    TomlCapValue, TomlConstraint, HOSTABLE_KINDS,
 };
 #[cfg(feature = "gateway")]
 pub use capability_config::run_capability_probes;
