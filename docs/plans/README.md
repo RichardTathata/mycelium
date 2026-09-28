@@ -52,8 +52,11 @@ record, not duplicates of those.
 > `[[presence]]` and `[[requirement]]` declarations call for, a node that declares from its file at startup so file and
 > runtime vocabulary are one, and a CI topology beside the coop suites — with a single build order; rev 0.7: the
 > examples recut in **three tiers** (a units directory for every declaring example; the artifact-shaped coop demos run
-> from one stem image; mechanism demos untouched) — the host's four-interface WASM world is the stated limit. **Complete
-> as an argument at rev 0.7**; two questions (SDK units, widening the component world) stay open); it says *would bind*, never *is bound*. **The design-time half of
+> from one stem image; mechanism demos untouched) — the host's four-interface WASM world is the stated limit; rev 0.8:
+> **agent-authored functions** — four legitimate uses of dynamic load (authored tools, reproducible evaluators, boundary
+> transforms, pure pipeline work), fuel on by default for an agent's entry, and *proposed → shadow lane → reviewer
+> co-signs* before it takes demand. **Complete as an argument at rev 0.8**; two questions (SDK units, widening the
+> component world) stay open); it says *would bind*, never *is bound*. **The design-time half of
 > the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
 > written in. Nothing built yet.
 >

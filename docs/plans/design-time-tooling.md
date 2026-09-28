@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.7, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; rev 0.6 added §13, the stem fleet — D17–D18, R1–R2, answering Q1 — and §15, the build order; rev 0.7 added §16, recutting the examples in three tiers — X1–X2, Q4 recorded. **Complete as an argument at rev 0.7.**) Nothing here is built. This plan argues the declaration
+**Status:** proposed, rev 0.8, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; rev 0.6 added §13, the stem fleet — D17–D18, R1–R2, answering Q1 — and §15, the build order; rev 0.7 added §16, recutting the examples in three tiers — X1–X2, Q4 recorded; rev 0.8 added §17, agent-authored functions — U1–U4, D19–D20, F1–F3. **Complete as an argument at rev 0.8.**) Nothing here is built. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -222,6 +222,8 @@ exporter and depends only on W2's document; it can run in parallel with W3–W5.
 | D6 | Authority as reachability over declared rules | Running the evaluator offline — an evaluator's answer depends on envelope facts (principal, scopes, arguments) that exist only per call |
 | D7 | No secrets, no addresses | A single file for everything — it could not be committed, and the point is a checked-in vocabulary |
 | D8 | Runtime use of the new sections is out of scope *(superseded by D18 at rev 0.6: taken, with its own phase R1)* | Folding it in unplanned — it changes node startup behaviour and needed its own gate |
+| D19 *(rev 0.8)* | Fuel on by default for an entry published by an agent principal, from `[hosts].fuel_per_call`; the operator's own entries as configured | Fuel for everything (a cost the operator's reviewed code need not pay); fuel for nothing (an agent's loop runs until the node is shed) |
+| D20 *(rev 0.8)* | An agent-published entry is *proposed*, loads only into a shadow lane, and becomes loadable on a reviewer's co-signature — the award's shape | Trusting the agent's key outright (one compromised or confused agent fills the fleet); a human approval outside the manifest (a policy in someone's head, invisible to the checker and the records) |
 | D17 *(rev 0.6)* | Presence policies are declarable (`[[presence]]`) and checked as a requirement with a count against distinct hosting units | Leaving presence code-only (the one desired state an all-stem fleet runs on would be the one thing the checker could not see) |
 | D18 *(rev 0.6)* | A unit declares from its file at startup (`--units`), so file and runtime vocabulary are one; code declaration still works, doing both warns | Keeping the file descriptive (Q1: the check passes on a vocabulary the unit does not speak); a fleet-level file any node reads (a control plane by another door — every declaration stays a unit's own evaporating entry) |
 | D15 *(rev 0.5)* | A unit declares what it hosts (`[hosts]`: kinds, budget, headroom, trusted publishers, placement root), so *would bind by provisioning* requires a host that could | Treating any matching entry as bindable (the checker would pass a fleet the provisioner never installs into) |
@@ -553,9 +555,10 @@ ships a whole thing and the shipped defect goes first:
 6. **S3** — GCS on the same adapter.
 7. **W3, W4, W5** — schema awareness, the authority overlay, DOT; each a day, any order.
 8. **A3** — the gateway publish route, with its scope family and matrix plant.
-9. **X1, then X2** — the examples' units directories after step 3, the stem cuts after step 4.
-10. **W6** — the consumer record, private repo, in parallel from step 3 on.
-11. **S4** — real buckets, when an account exists; delivery evidence, not a commit.
+9. **F1, F2, F3** — fuel by default, the proposed-then-accepted entry with its shadow lane, the guide section.
+10. **X1, then X2** — the examples' units directories after step 3, the stem cuts after step 4.
+11. **W6** — the consumer record, private repo, in parallel from step 3 on.
+12. **S4** — real buckets, when an account exists; delivery evidence, not a commit.
 
 What the plan leaves outside itself: Q2, Q4, a designer UI (§6, deliberately none), the enforced
 composition (§8, the axis plan's §13 decides), and NovusLens's own rendering (their side of the
@@ -611,7 +614,61 @@ enforce. **Recorded, not decided.** It belongs with the guardrails plan, not her
 X1 follows W2 and R1 and is mostly authoring; X2 follows R2. Neither changes any example's code path,
 so guide citations stay valid.
 
-## 17. Not claimed
+## 17. Agent-authored functions: the legitimate uses of dynamic load *(rev 0.8)*
+
+The sandbox was built for code the fleet does not trust: content-addressed, provenance-signed,
+confined to its own KV subtree, optionally fuel-metered per call, no filesystem, no network
+(`mycelium-wasm-host/src/host.rs:90`, `:147`; `confine.rs`). That is the right envelope for a
+function an agent wrote an hour ago, and the four-interface world (E16) is what keeps it one. The uses
+below are recorded so the shape is argued for once and the gates travel with it.
+
+| Use | What loads | Why an artifact and not a prompt or native code |
+|---|---|---|
+| **U1 — functions an agent authors** for itself or its peers: a scorer, a vendor-format parser, a route heuristic | a component compiled outside the fleet, published under the agent's key, loaded where demand is unmet | distribution is the catalogue (signed, pulled, verified), not a prompt; the fleet loads, it never builds (`docs/plans/mycelium-reason.md`, the tool-growth frame) |
+| **U2 — evaluators that must be reproducible**: a knowledge-layer assessment, a contract-net evaluation, a policy predicate | a deterministic component with no clock and no network | the same answer on replay, and the invocation is in the evidence journal; *why was this awarded* becomes answerable from records, not from a transcript |
+| **U3 — transforms at boundaries**: validators and normalisers between schema versions, redaction before export, per-receiver guardrail checks beyond a regex | a component invoked at the boundary | the deliberate contrast with schema migrations, which stay *declarative data, never code* because they **gossip** (guide 12 §tier 3); a component does not gossip — it is pulled by content address under a signature, which is why code is acceptable on this path and not on that one |
+| **U4 — pure work in a pipeline**: the stage function the coop demos stand in for | the stage function | the worker that drains the lane stays native — exactly the boundary E16 draws |
+
+**What has to be true for this to be safe.** Most of it exists; two decisions are new.
+
+- A publisher key is an identity, so an agent that publishes is a principal holding a mandate for
+  `artifact.publish`, and A3's route refuses anything else by name.
+- Install rights bound how much of the fleet any one key can fill
+  (`Provisioner::with_install_rights`, `provisioner.rs:204`), and a presence policy (D17) bounds how
+  many copies run.
+- The host trusts only the publisher keys in `[hosts].trusted_publishers` (D15;
+  `provisioner.rs:145`); an agent's key is trusted by being listed, and delisted by an edit that goes
+  through review.
+- **D19 — fuel on by default for agent-published entries.** `WasmHost::with_fuel_per_call` is opt-in
+  today (`host.rs:188`). An entry whose publisher is an agent principal, rather than the operator's
+  CI key, is invoked with a fuel budget from `[hosts].fuel_per_call`, and a component that runs past
+  it traps and is recorded. The operator's own entries may run unmetered; an agent's may not.
+- **D20 — a second signature before promotion.** An agent-published entry enters the catalogue as
+  *proposed* and is loaded only into a **shadow lane** (the control-profile ladder,
+  `docs/operations/control-profiles.md`), beside the incumbent, where its outputs are recorded and
+  compared but take no demand. It becomes loadable for real when a reviewer's key co-signs the entry
+  — the shape `mycelium-commitment` already uses for an award, where a name without a signature is a
+  claim (`mycelium-commitment/src/lib.rs:162`). *An agent proposed and a reviewer accepted* is then a
+  fact in the manifest, not a policy in someone's head.
+- The one thing never to do is widen the component world to make any of this easier. Q4 stands: an
+  evaluator that can call out is no longer an evaluator that replays.
+
+| Phase | Deliverable | Exit gate |
+|---|---|---|
+| **F1** | D19: `fuel_per_call` in `[hosts]`; the provisioner invokes an agent-published entry metered and an operator-published one as configured; the trap recorded as an execution with the fuel exhausted named | An entry signed by an agent principal that loops is stopped at the budget and its execution record says so; the same component under the operator's key runs to completion; seen failing first |
+| **F2** | D20: `proposed` in the manifest line (inside the signature), a second-signer field, the shadow-lane load, `mycelium artifact accept <entry> --key <reviewer>`, and A2 reporting a proposed entry as *would bind after acceptance* rather than *would bind by provisioning* | A proposed entry never takes demand (the incumbent's call count is unchanged across a run); after acceptance it does; a forged acceptance fails provenance; the coop `provisioning` demo gains the shadow-then-accept sequence as its third wave |
+| **F3** | The guide: a section in `docs/guide/16-guardrails.md` stating U1–U4, the five gates, and the honest limit; the catalogue runbook's trust section pointing at it | `/doc-coverage` gains a row *agent-authored functions* with HOW·Dev and HOW·Ops Clear by opening the page |
+
+F1 needs W1 (the `[hosts]` table); F2 needs A1 and A2 (the manifest tooling and the provisioning
+class); F3 lands with F2. In the build order they sit after step 5.
+
+**Not claimed by this section.** Determinism is a property of the component, not a guarantee of the
+host: a component that reads its own KV subtree can see a different value on replay if that subtree
+changed, and only a recording (`mycelium-sim`) makes the replay exact. Fuel bounds instructions, not
+wall time or memory; memory stays the instance limit the host already sets. And a reviewer's
+signature says a person accepted the entry, not that the function is correct.
+
+## 18. Not claimed
 
 A green wire-check does not mean the deployment will wire: a provider can be down, a probe can fail, a
 mandate can be revoked, an intent can lapse, and the checker sees none of it. It means the vocabulary is
