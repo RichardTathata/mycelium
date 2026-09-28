@@ -78,8 +78,10 @@ lives in the wasm-host crate and the dependency runs the other way.
 
 ## 4 · Publish — the catalogue
 
-For every artifact in `deploy/artifacts/`: build the bytes, store them in the library, describe and
-sign the entry, append the manifest line ([artifacts.md](artifacts.md) §2). A librarian reconciles the
+For every artifact in `deploy/artifacts/`: build the bytes, then `mycelium-artifact publish
+<description> --library <dir> --key-env <SEED>` stores them, signs the entry and appends the manifest
+line; `mycelium-artifact verify --descriptions deploy/artifacts` in CI keeps the reviewable
+description and the signed manifest from drifting ([artifacts.md](artifacts.md) §2). A librarian reconciles the
 manifest to the gossiped catalogue, so every node sees the entry; the bytes travel only to the nodes
 that install. A large artifact reaches a host in `Range` pieces staged to disk, never through memory
 ([artifacts.md](artifacts.md) § Remote blob stores).

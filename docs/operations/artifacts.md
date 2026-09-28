@@ -151,10 +151,40 @@ its `comp/{node}/{ns}/` subtree). Build it to a `.wasm` and you have your bytes.
 
 ### 2 · Declare the footprint, sign, and publish to the library
 
-The publish step is CI code (no node, no mesh): store the bytes in the library,
-describe them — **kind**, cost hints, and the **resource footprint** — sign, and
-append to the manifest. A running librarian picks the change up on its next
-reconcile pass and the catalogue updates cluster-wide.
+The publish step runs in CI (no node, no mesh). **Describe** the artifact in a TOML file a reviewer
+can read — its kind, the capability it will provide, and the resource footprint — and let the tool
+derive the signed manifest line from it (`docs/plans/design-time-tooling.md` D10):
+
+```toml
+# artifacts/route-optimizer.toml
+kind             = "wasm-component"          # wasm-component | blob
+bytes            = "build/route_optimizer.wasm"
+est_install_secs = 1
+[provides]
+ns = "route"
+name = "optimize"
+  [provides.attrs]
+  engine = { version = "1.4.0" }
+[requires]                                   # the signed footprint — see below
+disk_bytes = 0
+mem_bytes  = 67108864
+```
+
+```sh
+# the key: a 32-byte Ed25519 seed as 64 hex characters, from a file or a secret in the environment
+mycelium-artifact publish artifacts/route-optimizer.toml --library /srv/mycelium-library --key-env PUBLISHER_SEED
+mycelium-artifact list   /srv/mycelium-library                       # the manifest, in the description shape
+mycelium-artifact verify /srv/mycelium-library --trusted ed25519:<hex> --descriptions artifacts/
+```
+
+`publish` stores the bytes content-addressed, builds and signs the entry, and appends the manifest
+line (idempotent: the same bytes are one line and one blob). `list` renders every line back into the
+description shape with the content address and the signer shown. `verify` exits 1 naming each
+problem: a signer outside the trusted keys, bytes missing from the library or not hashing to their
+address, and — with `--descriptions` — a description whose bytes changed under an unchanged manifest,
+which is the check a CI job runs so the reviewable file and the signed truth cannot drift. The tool is
+the `mycelium-artifact` binary of `mycelium-wasm-host` (feature `stem`). The same in code, for a
+pipeline that already has the types: store the bytes in the library, describe them, sign, append:
 
 ```rust
 use mycelium_wasm_host::{ArtifactKind, FsLibrarySource, InstallableEntry, Manifest,

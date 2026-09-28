@@ -38,6 +38,7 @@ mod provisioner;
 mod resources;
 mod runtime;
 mod stem;
+mod tools;
 
 pub use artifact::{
     verify_artifact, ArtifactId, ArtifactIdError, ArtifactKind, ArtifactSource, FsLibrarySource,
@@ -60,6 +61,10 @@ pub use librarian::{
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
 pub use provisioner::{verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{Stem, StemError, StemOptions, StemSource};
+pub use tools::{
+    kind_from_name, kind_name, list as list_manifest, publish as publish_artifact, publisher_from_str, render_entry,
+    signing_key_from_hex, verify as verify_library, PublishOutcome, VerifyReport,
+};
 pub use resources::{ResourceProbe, SystemResourceProbe};
 pub use runtime::{
     cap_invoke_kind, ArtifactRuntime, BlobRuntime, InstallError, Installed, ProgressFn,

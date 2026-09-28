@@ -63,6 +63,12 @@ name              = "mycelium-stem"
 path              = "src/bin/mycelium-stem.rs"
 required-features = ["stem"]
 
+# The artifact tool (design-time-tooling.md §10, A1): publish | list | verify over a library.
+[[bin]]
+name              = "mycelium-artifact"
+path              = "src/bin/mycelium-artifact.rs"
+required-features = ["stem"]
+
 [dev-dependencies]
 # test-only: the bind-verified, process-unique port allocator (retires the free_port TOCTOU
 # flake class). Cargo unions this with the normal `mycelium` dep for the test target only.
