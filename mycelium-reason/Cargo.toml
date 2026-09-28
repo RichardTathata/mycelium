@@ -6,7 +6,7 @@ rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "LLM-authoring DX companion for Mycelium (v3.0): capability-routed inference, fleet-reasoning traces, artifact-aware resume — the Tier-3 differentiators, composed from the public API only"
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["llm", "inference", "multi-agent", "distributed-systems", "tracing"]
 categories = ["network-programming", "asynchronous"]
 

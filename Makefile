@@ -178,6 +178,7 @@ check:
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
+	./scripts/check-positioning.sh                              # one sentence, one path, no pre-move links (docs/positioning.md)
 
 ## gate-knowledge — the knowledge layer's SEMANTIC gate (item 3, a Phase D exit condition).
 ## Three negative cases — misleading evidence cannot erase a conflicting observation, cannot refresh

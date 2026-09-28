@@ -38,6 +38,13 @@ record, not duplicates of those.
 > **Still open:** the deck and philosophy passes, the companion onboarding checklist, the **Phase-C adversarial
 > self-audit** over items 1 + 2 + 7, and the private RA/AE slices (a separate repository — see §8).
 >
+> **Proposition alignment (proposed, 2026-09-28):** [`proposition-alignment.md`](proposition-alignment.md) — the
+> story is told in four sentences, its limits in six places, its start on three funnels; a review found a stale GitHub
+> description, two dead SDK links and a crate doc that says *two primitives*. One canonical sentence in
+> `docs/positioning.md` quoted verbatim and gated by a script in `make check`; one deck title with authority and
+> evidence leading the buyer story; one dated proof page (`what-is-proven.md`); one five-step path on every funnel.
+> **Executed the same day** (P1–P5, PR #434): the script red on seventeen doors and paths, then green.
+>
 > **Design-time tooling (proposed, 2026-09-27):** [`design-time-tooling.md`](design-time-tooling.md) — the
 > unit declaration file (requirements, groups, lanes, authority vocabulary beside today's `[[capability]]`) and an
 > offline `mycelium wire-check` that applies the mesh's own match rule to a directory of units before deployment.

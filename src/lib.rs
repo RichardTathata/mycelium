@@ -1,14 +1,22 @@
-//! # mycelium — gossip substrate for adaptive AI agent systems
+//! # mycelium — a coordinator-free substrate for AI agent fleets
 //!
-//! An embedded, broker-less library that provides two primitives:
+//! Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.
 //!
-//! - **Layer 1 — KV store**: epidemic last-write-wins state propagation over TCP.
-//!   Every agent holds a eventually-consistent view of the full cluster's key-value state.
-//! - **Layer 2 — Signal mesh**: ephemeral scoped events that flood the cluster epidemically.
+//! An embedded, broker-less library in three layers, with capability discovery across them:
+//!
+//! - **Layer I — KV store**: epidemic last-write-wins state propagation over TCP.
+//!   Every agent holds an eventually-consistent view of the full cluster's key-value state.
+//! - **Layer II — Signal mesh**: ephemeral scoped events that flood the cluster epidemically.
 //!   Each agent holds a local [`Boundary`](signal::Boundary) (its receptor set) that decides
 //!   whether it *acts* on an incoming signal — forwarding is always unconditional.
+//! - **Layer III — Consensus**: opt-in epidemic agreement — ballots and quorum, `consistent_set`,
+//!   locks, leader election, a durable log — reached for only where an operation needs it.
+//! - **Capabilities**: discovery by *what a node does* — advertise, resolve, requirements and demand
+//!   pressure, emergent groups — the atom every higher pattern is built from.
 //!
-//! Higher layers build Actor/Event systems, async RPC, and MCP AI tool routing on top.
+//! Above them: RPC and bulk transfer, actor mailboxes, MCP tool routing, A2A interop, and the
+//! contracts axis — typed receipts, gateway authorisation with an evidence journal, scoped
+//! mandates, federated domains, deterministic replay (`mycelium-sim`).
 //! Each agent chooses its own payload serialisation; the substrate routes by signal `kind`
 //! string and carries opaque [`bytes::Bytes`].
 //!
@@ -43,14 +51,14 @@
 //! ```
 //!
 //! See [`GossipAgent`] for the full API. See [`GossipConfig`] for all tunable parameters.
-//! See [ROADMAP.md](https://github.com/RichardEko/mycelium/blob/main/ROADMAP.md) for the
+//! See [ROADMAP.md](https://github.com/RichardTathata/mycelium/blob/main/ROADMAP.md) for the
 //! layer-by-layer architecture and higher-layer design.
 //!
 //! **Building a use case on top of Mycelium?** Start with
-//! [Building on Mycelium](https://github.com/RichardEko/mycelium/blob/main/docs/guide/building-on-mycelium.md)
+//! [Building on Mycelium](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/building-on-mycelium.md)
 //! — the integrator contract (dependency, public-API-only rule, reserved KV prefixes, the
 //! invariants to respect, and a copyable `CLAUDE.md` snippet), then the
-//! [FAQ](https://github.com/RichardEko/mycelium/blob/main/docs/guide/faq.md).
+//! [FAQ](https://github.com/RichardTathata/mycelium/blob/main/docs/guide/faq.md).
 //!
 //! ## Crate layout — `mycelium` vs `mycelium-core`
 //!
@@ -66,7 +74,7 @@
 //! You can also trim *this* crate toward the core with `default-features = false` (drops the
 //! gateway) and `--features gateway` without `consensus` (drops the agreement layer); a
 //! consensus-disabled node still forwards PROPOSE/VOTE/COMMIT, it just never acts. The split
-//! landed in v2.0 M1 — see [ROADMAP.md](https://github.com/RichardEko/mycelium/blob/main/ROADMAP.md)
+//! landed in v2.0 M1 — see [ROADMAP.md](https://github.com/RichardTathata/mycelium/blob/main/ROADMAP.md)
 //! §v2.0 Milestones for the rationale.
 //!
 //! ## KV namespace ownership

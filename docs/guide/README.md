@@ -7,10 +7,24 @@
 > — the integrator contract (dependency, public-API-only rule, reserved KV prefixes,
 > invariants, and a copyable `CLAUDE.md` snippet).
 
-Mycelium is a broker-less embedded Rust library. You embed it directly in your
-process — there is no daemon, no sidecar, no coordinator to run. Each node is
-simultaneously a participant in the mesh and a full peer. The mesh is the
-registry, the bus, and the scheduler all at once.
+**Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.**
+It is a broker-less embedded Rust library: you embed it directly in your process — there is no
+daemon, no sidecar, no coordinator to run. Each node is simultaneously a participant in the mesh
+and a full peer; the mesh is the registry, the bus, and the scheduler all at once. The map of the
+contracts axis behind *authorise*, *account* and *replay*: local decision-making · evidence-aware
+capability selection · scoped authority · bounded federation · coordination contracts tested through
+deterministic replay (chapters 18–24). The sentence is the project's one description
+([`docs/positioning.md`](../positioning.md)).
+
+## Start here — five steps
+
+<!-- path:start -->
+1. **[`hello_mesh`](../../examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
+2. **[`hello_capability`](../../examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
+3. **[the co-op `provisioning` demo](../../examples/coop/README.md)** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+4. **[guide 20](20-authorising-actions.md) with [`authority_drain`](../../examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
+5. **[`what-is-proven.md`](../operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
+<!-- path:end -->
 
 ## Design philosophy
 

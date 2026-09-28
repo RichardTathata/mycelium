@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mycelium — Coordination for applications and AI agents, without a coordinator</title>
+<title>Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.</title>
 <style>
   :root {
     --bg:#0d1117; --surface:#161b22; --surface2:#1c2128; --surface3:#21262d;
@@ -134,14 +134,61 @@
   <div class="slide-body">
     <div class="hero-center">
       <div class="hero-title">Mycelium</div>
-      <div class="hero-tagline">Coordinate AI agent fleets without handing your data to anyone's coordinator.</div>
-      <div class="hero-sub">An embedded substrate that gives your existing applications <em>and</em> your AI agents a shared way to discover capabilities, exchange work and adapt to failure — within explicit authority and evidence boundaries, on the infrastructure you already operate. No obligatory central coordinator; no party that has to hold everyone's state.</div>
+      <div class="hero-tagline">Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.</div>
+      <div class="hero-sub"><strong>The buyer's deck.</strong> In order: what an agent <em>may</em> do, checked where the work happens · what it <em>did</em>, as records a third party can audit · a fleet that fills itself · how — no coordinator, on the infrastructure you already operate · and what is proven today against what is not. An embedded substrate for your existing applications <em>and</em> your AI agents; no obligatory central coordinator, no party that has to hold everyone's state.</div>
       <div class="badges">
         <span class="badge"><span class="dot dot-g"></span>Data-sovereign by construction</span>
         <span class="badge"><span class="dot dot-b"></span>No single point of failure</span>
         <span class="badge"><span class="dot dot-p"></span>Open-source · embeddable · polyglot</span>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- 06a Value 1: the wedge — enforce remits where agents act -->
+<div class="slide" id="csWedge">
+  <div class="slide-top"><span class="eyebrow eyebrow-green">What an agent may do</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-body">
+    <div class="slide-title good">Enforce your remits <em>where the agents actually act.</em></div>
+    <div class="slide-sub">Put a gateway in front of the tools and endpoints your agents already call. Every dispatch is checked against your policy <strong>before</strong> it runs, and every decision is recorded with the reason — including the ones that said yes.</div>
+    <div class="cols3">
+      <div class="card card-accent-green"><div class="card-title">Three answers, not two</div><div class="card-body">Permit, deny, and <strong>indeterminate</strong> — authority could not be <em>established</em>. Nothing says the action is forbidden, only that nothing says it is allowed. A system with only yes and no has to guess, and it guesses in the permissive direction.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Attribution, or no action</div><div class="card-body">Under the strict profile a decision that cannot be <em>recorded</em> refuses the action — even one the policy permitted. Enforcement without attribution is an unlogged gate, not governance.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Coverage is a field</div><div class="card-body">The evidence names the routes the enforcement point does <em>not</em> see. An auditor is never invited to read silence as an all-clear — which is the failure mode of every dashboard that only shows what it caught.</div></div>
+    </div>
+    <div class="callout callout-orange">
+      <strong>Stated precisely:</strong> this is self-imposed prevention <em>for the routes this gateway fronts</em>, and nothing for routes it does not. Only a check inside the resource itself is stronger. The enforcement point, the three verdicts, the evidence journal and a reference policy engine ship in the substrate today; production policy adapters and the evidence exporter are the commercial layer.
+    </div>
+  </div>
+</div>
+
+<!-- 06b What it did: records a third party can audit -->
+<div class="slide" id="csEvidence">
+  <div class="slide-top"><span class="eyebrow eyebrow-green">What it did</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-body">
+    <div class="slide-title good">Every effect leaves a record <em>a third party can audit.</em></div>
+    <div class="slide-sub">Permission is half the story. The other half is being able to show, later and to someone else, what actually ran, under which decision, and whether it lasted — without trusting the agent's own account of itself.</div>
+    <div class="cols3">
+      <div class="card card-accent-green"><div class="card-title">Receipts that name their rung</div><div class="card-body">An acknowledgement says exactly what it proves — applied here · on this node's disk · persisted by named peers · committed at a destination — and nothing above it. A timeout is <em>unknown</em>, never a failure; a required-sync write refuses rather than applying an undurable one.</div></div>
+      <div class="card card-accent-green"><div class="card-title">An evidence journal, exported</div><div class="card-body">Every authorisation decision and every execution is written to a node-local, fsynced journal; only a hash-bearing reference travels the shared medium. A signed exporter ships the records to your oversight tool in batches whose identity is derived from their contents, so a retry can never change a record under a reused id.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Replay</div><div class="card-body">A recorded run is a file you can re-run. A changed build replays until the first step where it departs, so "what would this fix have done" is answered by the recording, not by argument.</div></div>
+    </div>
+    <div class="callout callout-orange"><strong>Stated precisely.</strong> A record is <em>reconstructable</em>, not enforced — nothing here stops a durable effect being attributed to the wrong principal. Coverage is never claimed complete: each observation names the one route it observed, so silence is never read as an all-clear.</div>
+  </div>
+</div>
+
+<!-- 06c A fleet that fills itself -->
+<div class="slide" id="csFleet">
+  <div class="slide-top"><span class="eyebrow eyebrow-green">A fleet that fills itself</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-body">
+    <div class="slide-title good">Deploy identical nodes. <em>Declare what must exist.</em></div>
+    <div class="slide-sub">Roles are discovered, not assigned — and that includes roles nobody deployed. A node that sees an unmet need can pull the capability from a signed catalogue, verify it, run it in a sandbox and advertise it; kill it and a standby does the same. Nothing predicted which node.</div>
+    <div class="cols3">
+      <div class="card card-accent-green"><div class="card-title">The catalogue — shipped</div><div class="card-body">A signed entry per artifact: the capability it will provide, its kind, its content address, its resource footprint inside the signature. Bytes are pulled by content address from a library and verified on arrival; no registry server exists to run or to lose.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Presence — shipped</div><div class="card-body">"Keep at least two of these alive, at most four." Every node reconciles that locally: sees the gap, self-elects with a probability that damps the herd, checks its own runtime and headroom, installs. Restart is the same path as first install. Runs in CI as the co-op <code>provisioning</code> demo.</div></div>
+      <div class="card card-accent-orange"><div class="card-title">Declarations — planned</div><div class="card-body">One file per unit: what it offers, needs, hosts, and may do — checked <em>before</em> deployment by a command that runs the mesh's own matching rule, and shipped to your oversight tool as the target state to compare against what actually bound. The plan is public (<code>docs/plans/design-time-tooling.md</code>); nothing of it is built.</div></div>
+    </div>
+    <div class="callout callout-orange"><strong>Labelled.</strong> The loop and the catalogue ship today and are exercised in CI. The declaration file, the offline check, agent-authored functions under a fuel budget and a second signature, and models pulled from S3 or GCS are a plan, not a feature — and a WASM component can only handle a request, read its own confined state, and emit; it cannot take work from a lane or call another capability.</div>
   </div>
 </div>
 
@@ -249,27 +296,9 @@
   </div>
 </div>
 
-<!-- 06 Value 1: sovereignty -->
-<!-- 06a Value 1: the wedge — enforce remits where agents act -->
-<div class="slide" id="csWedge">
-  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 1 of 4</span><span class="slide-num">·· / ··</span></div>
-  <div class="slide-body">
-    <div class="slide-title good">Enforce your remits <em>where the agents actually act.</em></div>
-    <div class="slide-sub">Put a gateway in front of the tools and endpoints your agents already call. Every dispatch is checked against your policy <strong>before</strong> it runs, and every decision is recorded with the reason — including the ones that said yes.</div>
-    <div class="cols3">
-      <div class="card card-accent-green"><div class="card-title">Three answers, not two</div><div class="card-body">Permit, deny, and <strong>indeterminate</strong> — authority could not be <em>established</em>. Nothing says the action is forbidden, only that nothing says it is allowed. A system with only yes and no has to guess, and it guesses in the permissive direction.</div></div>
-      <div class="card card-accent-green"><div class="card-title">Attribution, or no action</div><div class="card-body">Under the strict profile a decision that cannot be <em>recorded</em> refuses the action — even one the policy permitted. Enforcement without attribution is an unlogged gate, not governance.</div></div>
-      <div class="card card-accent-green"><div class="card-title">Coverage is a field</div><div class="card-body">The evidence names the routes the enforcement point does <em>not</em> see. An auditor is never invited to read silence as an all-clear — which is the failure mode of every dashboard that only shows what it caught.</div></div>
-    </div>
-    <div class="callout callout-orange">
-      <strong>Stated precisely:</strong> this is self-imposed prevention <em>for the routes this gateway fronts</em>, and nothing for routes it does not. Only a check inside the resource itself is stronger. The enforcement point, the three verdicts, the evidence journal and a reference policy engine ship in the substrate today; production policy adapters and the evidence exporter are the commercial layer.
-    </div>
-  </div>
-</div>
-
 <!-- 07 Value 1: sovereignty -->
 <div class="slide" id="cs6">
-  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 2 of 4</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · Sovereignty</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">Your data <em>never leaves your control.</em></div>
     <div class="slide-sub">There is no central custodian — by construction, not by policy. Each node holds its own state. Identity is self-certified (no central authority issues it). Across organisations or borders, domains <strong>federate as sovereign peers</strong> — each self-certifies, none surrenders custody.</div>
@@ -286,7 +315,7 @@
 
 <!-- 07 Value 2: no SPOF / capture -->
 <div class="slide" id="cs7">
-  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 3 of 4</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · Resilience</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">No single component to take down, <em>compel, or saturate.</em></div>
     <div class="slide-sub">Kill any node and the fleet self-heals — capabilities re-advertise, work re-routes, a standby promotes itself. There is no privileged component to fail, compromise, coerce, or overload.</div>
@@ -301,7 +330,7 @@
 
 <!-- 08 Value 3: every pattern -->
 <div class="slide" id="cs8">
-  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · 4 of 4</span><span class="slide-num">·· / ··</span></div>
+  <div class="slide-top"><span class="eyebrow eyebrow-green">Value · One fabric</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">Every way agents need to interact. <em>One fabric.</em></div>
     <div class="slide-sub">Most platforms give you one shape — a remote call wearing a prompt, brokered through the middle. Real coordination is richer than that. Mycelium offers the whole repertoire on one substrate, so you are never locked into the wrong pattern for your problem.</div>
@@ -366,7 +395,7 @@
   <div class="slide-top"><span class="eyebrow eyebrow-orange">Where It Is Today</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title">Built, proven where it's proven, <em>honest about the rest.</em></div>
-    <div class="slide-sub">A sophisticated buyer is owed a clear line between what is done, what is demonstrated, and what is still ahead.</div>
+    <div class="slide-sub">A sophisticated buyer is owed a clear line between what is done, what is demonstrated, and what is still ahead. The line is kept on one dated page in the repository — <code>docs/operations/what-is-proven.md</code> — refreshed at every release; this slide is its summary as of 2026-09-28.</div>
     <div class="cols3">
       <div class="card card-accent-green">
         <div class="card-title">✓ Built</div>
@@ -378,7 +407,7 @@
       </div>
       <div class="card card-accent-orange">
         <div class="card-title">→ Honest next</div>
-        <div class="card-body" style="line-height:1.75;">Sustained real-network and load validation — the nightly scale runner is not yet operating, so that criterion is unmet rather than passed. The measured "federate-at-N" threshold. A Cedar policy adapter and the signed evidence exporter are <strong>implemented</strong> — in the private companion, pinned to this release, with the oversight consumer's contract — and their <strong>combined deployment acceptance is outstanding</strong>: the joint runs on both clouds with that consumer have not happened, and a local fixture does not stand in for them. Transport security on the federation edge and more than two domains shipped in 2.13. <strong>No third-party production deployment yet</strong> — that is the gap a design partnership closes.</div>
+        <div class="card-body" style="line-height:1.75;">Sustained real-network and load validation — the nightly scale runner is not operating (the hosted job has no runner; the local runner's last rows failed on the environment, not on the substrate), so that criterion is unmet rather than passed. Performance is measured only as hot-path micro-benchmarks on one machine; there is no end-to-end throughput or latency figure under load. The measured "federate-at-N" threshold. A Cedar policy adapter and the signed evidence exporter are <strong>implemented</strong> — in the private companion, pinned to this release, with the oversight consumer's contract — and their <strong>combined deployment acceptance is outstanding</strong>: the joint runs on both clouds with that consumer have not happened, and a local fixture does not stand in for them. Transport security on the federation edge and more than two domains shipped in 2.13. <strong>No third-party production deployment yet</strong> — that is the gap a design partnership closes.</div>
       </div>
     </div>
     <div class="callout callout-blue">We are looking for <strong>design partners</strong>, not selling shrink-wrap at 10,000 nodes. The honesty is deliberate — it is the same discipline that produced the architecture.</div>
@@ -434,7 +463,7 @@
       </div>
       <div class="badges" style="margin-top:30px;">
         <span class="badge"><span class="dot dot-g"></span>tathatasystems@proton.me</span>
-        <span class="badge"><span class="dot dot-b"></span>github.com/RichardEko/mycelium</span>
+        <span class="badge"><span class="dot dot-b"></span>github.com/RichardTathata/mycelium</span>
         <span class="badge"><span class="dot dot-p"></span>The Coordinator Trap · DOI 10.5281/zenodo.20665238</span>
       </div>
       <div class="hero-sub" style="margin-top:16px;font-size:11.5px;color:var(--muted);">Dr. Richard Nicholson · © 2026 Tathata Systems Ltd · Licensed CC BY 4.0</div>

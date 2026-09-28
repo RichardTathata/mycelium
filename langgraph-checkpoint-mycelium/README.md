@@ -1,7 +1,7 @@
 # langgraph-checkpoint-mycelium
 
 A [LangGraph](https://langchain-ai.github.io/langgraph/) checkpointer backed by the
-[Mycelium](https://github.com/RichardEko/mycelium) mesh. LangGraph runs **on**
+[Mycelium](https://github.com/RichardTathata/mycelium) mesh. LangGraph runs **on**
 Mycelium: graph state becomes coordinator-free, gossip-replicated, and resumable
 across nodes — kill the node a thread was running on and any other node in the mesh
 can pick it up.

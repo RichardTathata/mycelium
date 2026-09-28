@@ -33,8 +33,8 @@ derived artifacts and are not tracked.
 
 | File | Audience |
 |---|---|
-| [`presentation.html`](presentation.html) | Engineer-facing — architecture and strategy. |
-| [`customer-pitch.html`](customer-pitch.html) | Buyer-facing — value, data sovereignty, trust. |
+| [`presentation.html`](presentation.html) | Engineer-facing — architecture and strategy. Title: the one sentence ([`docs/positioning.md`](../positioning.md)); the hero names the audience. |
+| [`customer-pitch.html`](customer-pitch.html) | Buyer-facing — what an agent may do · what it did · a fleet that fills itself · how · what is proven. Same title, same sentence. |
 
 ---
 
@@ -266,3 +266,18 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   that without the tension. Clean: no Byzantine/trustless/tamper-proof language anywhere; "linearizable"
   appears only as *not linearizable*; wire v12/PREV 11 correct; no crisis framing; no dead links or
   missing figures; philosophy §"What This Architecture Is Not" agrees with both decks.
+
+- 2026-09-28 (positioning pass, not a lint run — `docs/plans/proposition-alignment.md`): **four
+  titles, one sentence.** The two decks carried two different `<title>`s (*Coordination for
+  applications and AI agents, without a coordinator* · *Adaptive Substrate for Services and AI Agent
+  Fleets*), the README a third sentence and the FAQ a fourth. Both decks now open with the one
+  sentence from `docs/positioning.md`, gated by `scripts/check-positioning.sh` in `make check`.
+  The buyer deck was **reordered** to lead with authority and evidence (the wedge slide moved to
+  second; two new slides — *What it did* and *A fleet that fills itself* — each with a *labelled*
+  callout separating shipped from planned; the value eyebrows renamed from *N of 4*). The engineer
+  deck gained a **What Is Proven** slide before the appendix, and its `sV4` callout no longer says
+  the policy adapters and exporter are *not claimed here* — both are implemented in the private
+  companion with combined acceptance outstanding, the same correction the pitch received on
+  2026-09-26. Both decks' GitHub links moved off the pre-move account. The dated source for every
+  status line on both decks is now one page, `docs/operations/what-is-proven.md`. Not an overclaim
+  finding; a consistency pass with one correction (`sV4`).

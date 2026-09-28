@@ -19,6 +19,10 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-09-28 (positioning pass, not a run)** — one new row, *what is proven*: a dated
+  `docs/operations/what-is-proven.md` (WHY: why one page; HOW·Ops and HOW·Dev: the three tables with a
+  gate, a bound or a missing proof per line, each opened and read), linked from the README, both decks,
+  `production-readiness.md` and the shared-responsibility matrix. The rest of the matrix is carried.
 - **2026-09-26 (run 17)** — diff-gated over **283 commits since run 16** (v2.5.0 → v2.15.1: the whole
   v3 contracts axis, Boundary H C1–C12, the election rewrite, three external reviews). Four parallel
   auditors (contracts axis · authority and evidence · stability/knowledge/federation · the carried rows),
@@ -377,6 +381,7 @@ closed it.
 | Knowledge layer (item 3 + Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Election / leadership (`mycelium::election`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 

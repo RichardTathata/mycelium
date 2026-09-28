@@ -6,7 +6,7 @@ rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "The effects companion for Mycelium (v3 contracts axis, item 1 PR 5): a transactional reference destination whose dedup row and business change commit together, yielding the destination-commit receipt — the one rung the substrate never provides on its own. Built entirely on Mycelium's public API."
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["exactly-once", "idempotency", "receipts", "multi-agent", "distributed-systems"]
 categories = ["database", "asynchronous"]
 

@@ -2,6 +2,11 @@
 
 ↑ [Operations](README.md) · pairs with [production-readiness.md](production-readiness.md)
 
+> Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay. That is the sentence a pilot is sold on ([`docs/positioning.md`](../positioning.md)); the
+> order it is told in — what an agent *may* do · what it *did* · a fleet that fills itself · how ·
+> what is proven — is the buyer deck's, and the last item is one dated page,
+> [what-is-proven.md](what-is-proven.md), which a pilot is the way to move lines off.
+
 Mycelium is technically ready to carry a real customer engagement — v2.0 complete, the companion
 ecosystem shipped, security/observability/compliance in place, CI-gated. But every strong signal today
 is **self-assessed**: the project's own audit methodology

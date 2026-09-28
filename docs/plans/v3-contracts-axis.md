@@ -945,7 +945,10 @@ lifecycle events; term ≠ epoch; fixed allocated rights never reclaimed on disa
 *Rewritten at rev 1.15 (2026-09-23). This section had been a queue of next steps since rev 1.14
 (2026-09-15) and was nine releases stale: it still opened with "Item 1, PR 1 — this unblocks
 everything", which landed on 2026-09-13. **The queue is kept below as §10.1, unedited**, because the
-order things were done in is part of the record — but it is history, not instructions.*
+order things were done in is part of the record — but it is history, not instructions. The gaps this
+section names — V1, AE4, the oscillation not posed — are on the one dated page,
+`docs/operations/what-is-proven.md`, beside every other gap the repository states; this section keeps
+the detail.*
 
 ### 10.1 Delivered
 

@@ -6,7 +6,7 @@ rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "WS-F M16-A: self-certified AgentFacts emission for a Mycelium domain — a NANDA-quilt sovereign patch. Builds a self-signed, TTL-scoped agent-metadata document from live substrate state and serves it at the gateway edge. Built entirely on Mycelium's public API."
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["nanda", "agent-discovery", "federation", "a2a", "distributed-systems"]
 categories = ["network-programming", "web-programming"]
 

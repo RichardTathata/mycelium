@@ -1,8 +1,20 @@
 # Operations
 
-DevOps-facing runbooks for deploying and operating a Mycelium cluster. The
+Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.
+These are the DevOps-facing runbooks for deploying and operating such a cluster. The
 developer-side counterpart is the [guide cookbook](../guide/cookbook.md); the
-vocabulary is in [00 · Concepts](../guide/00-concepts.md).
+vocabulary is in [00 · Concepts](../guide/00-concepts.md); what the project can prove today, and
+what it cannot yet, is [what-is-proven.md](what-is-proven.md).
+
+## Start here — five steps
+
+<!-- path:start -->
+1. **[`hello_mesh`](../../examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
+2. **[`hello_capability`](../../examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
+3. **[the co-op `provisioning` demo](../../examples/coop/README.md)** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+4. **[guide 20](../guide/20-authorising-actions.md) with [`authority_drain`](../../examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
+5. **[`what-is-proven.md`](what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
+<!-- path:end -->
 
 ## Start here
 
@@ -17,6 +29,7 @@ vocabulary is in [00 · Concepts](../guide/00-concepts.md).
 
 | Doc | What it covers |
 |---|---|
+| [what-is-proven.md](what-is-proven.md) | **the dated line** — proven in CI on every merge · demonstrated with the bound stated · not yet shown and what would show it; refreshed at every release |
 | [production-readiness.md](production-readiness.md) | **the go-live checklist** — one pre-flight tying the topic docs below into a single sweep (security · persistence · sizing · observability · supply chain · companions) |
 | [customer-pilot.md](customer-pilot.md) | **first customer-led project** — scoping, de-risking, and treating the pilot as the external validation the internal audit loop can't self-supply |
 | [engagement-kit.md](engagement-kit.md) | **the consultancy kit** — one bounded customer integration end to end: qualification, pre-site and integration workbooks, the pinned pack, the acceptance script, handover, closeout; three roles named; its own acceptance test |

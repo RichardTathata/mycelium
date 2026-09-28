@@ -6,7 +6,7 @@ rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "Group-scoped, LLM-curated wiki for Mycelium — the maintained-meaning / authoritative-specific knowledge canon that composes with an external metrics store and RAG. Control-plane on Mycelium (curator election + failover, access-brokering, MCP tool); data-plane in a pluggable node-independent store."
 license = "AGPL-3.0-only"
-repository = "https://github.com/RichardEko/mycelium"
+repository = "https://github.com/RichardTathata/mycelium"
 keywords = ["wiki", "knowledge-base", "multi-agent", "distributed-systems", "coordination"]
 categories = ["network-programming", "asynchronous"]
 

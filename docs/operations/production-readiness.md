@@ -11,6 +11,10 @@ this page is the index + the gate.
 > why), or *blocking*. Nothing here is Mycelium-specific ceremony — it is the same discipline any
 > distributed data-plane deserves.
 
+> **Before the checklist:** [what-is-proven.md](what-is-proven.md) is the dated line between what
+> the project proves in CI, what it has demonstrated with a bound, and what it has not yet shown —
+> read it first, so a go-live decision rests on the third table and not on the README.
+
 ## 1 · Identity & transport security
 
 - ☐ **mTLS on** — build with `--features tls`; every node has an Ed25519 identity and peer connections
