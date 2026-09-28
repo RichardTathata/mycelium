@@ -189,6 +189,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-retest.sh -p mycelium-wasm-host
+      # S1's resident-memory gate owns the process (it measures RSS), so it runs alone.
+      - run: cargo test -p mycelium-wasm-host --lib a_large_blob_stages_to_disk_within_a_memory_bound -- --ignored
       - run: cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 
   agentfacts:

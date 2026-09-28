@@ -35,7 +35,7 @@ fastrand = "2"
 ed25519-dalek = "2"
 # `rt` only — the provisioner spawns a serve task per hosted capability (tokio::spawn +
 # JoinHandle). The embedder supplies the runtime (same one the GossipAgent runs on).
-tokio    = { version = "1.35", features = ["rt"] }
+tokio    = { version = "1.35", features = ["rt", "fs", "io-util"] }  # fs + io-util: the disk stage (S1)
 # Resource-aware install eligibility (artifact-library §4.4): the default ResourceProbe
 # reads available memory + disk so a node never elects for an artifact it cannot fit.
 # system+disk features only — no process/network/component scanning.

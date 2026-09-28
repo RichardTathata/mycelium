@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A large artifact from an HTTP store no longer lands in memory before its hash is checked.**
+  `HttpLibrarySource::fetch_remote` read the whole body with `bytes()`, capped only by a declared
+  `Content-Length` (512 MiB) — a chunked response with no length was unbounded, as the code's own
+  comment from the 2026-07-15 audit said. The body is now read in pieces and counted against
+  `DEFAULT_MAX_IN_MEMORY_BYTES` (64 MiB, `with_max_bytes`), refused **by name** the moment it
+  crosses, length declared or not; `PrefetchingSource` refuses a blob past its bound rather than
+  caching it (`with_max_bytes`). Both pinned by tests seen failing first
+  (`a_chunked_body_with_no_length_is_bounded_by_name`,
+  `the_prefetch_cache_refuses_a_blob_past_its_bound`).
+
+### Added
+- **`DiskStagedSource` and `RangedBlobFetcher`** (`mycelium-wasm-host`): the large-artifact path.
+  A blob is pulled in HTTP `Range` pieces (`HEAD` for the size; only a `206` is read — a store that
+  ignores `Range` has its `200` dropped unread), hashed as it streams, written to a node-local
+  staging directory, and served to the blob runtime from disk, so peak memory is one piece whatever
+  the size. Complete-or-absent: a `.part-…` file is renamed into place only after the content
+  address matches. Gate: `a_large_blob_stages_to_disk_within_a_memory_bound` asserts resident memory
+  grows by under 32 MiB while staging 64 MiB (`MYCELIUM_S1_BLOB_MIB` scales it); it measures the
+  process, so it is `#[ignore]`d and CI runs it alone. S1 of
+  `docs/plans/design-time-tooling.md` §11; the object-store adapter (S2–S4) is still to come.
+
 ## [2.16.0] — 2026-09-26
 
 **Settings where there were sentences.** Wire **v12** unchanged (`PREV = 11`); additive on the 2.x

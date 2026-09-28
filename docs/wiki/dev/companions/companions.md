@@ -54,6 +54,9 @@ via wasm-host).
   capability-resolved pulls (`MeshArtifactSource::resolving`), and the **kind/runtime
   generalization** — `ArtifactRuntime`/`Installed` with `WasmHost` as one engine and `BlobRuntime`
   (streamed place-and-probe for models/data) as another; provenance binds the whole entry;
+  **S1 (2026-09-28):** the HTTP store path split by size — `PrefetchingSource` bounded in memory
+  and refusing by name, `DiskStagedSource` + `RangedBlobFetcher` staging a large blob to disk in
+  `Range` pieces (`.log/2026-09-28-s1-streaming-http.md`);
   the probe is *consumed* — a per-round health pass withdraws failing installs (restart ≡
   provisioning is the health protocol). Real-model proof: the coop `model_deploy` demo.
   Security note: wasmtime is this crate's sandbox — keep

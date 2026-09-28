@@ -48,7 +48,10 @@ pub use catalog::{
 };
 pub use confine::{confine_key, ConfinementError, COMPONENT_KV_PREFIX};
 pub use host::{HostState, Instance, Request, Response, WasmHost, WasmHostError};
-pub use http_source::{BlobFetcher, HttpLibrarySource, PrefetchingSource};
+pub use http_source::{
+    BlobFetcher, DiskStagedSource, HttpLibrarySource, PrefetchingSource, RangedBlobFetcher,
+    DEFAULT_MAX_IN_MEMORY_BYTES, DEFAULT_RANGE_CHUNK_BYTES,
+};
 pub use librarian::{
     librarian_filter, spawn_librarian, LibrarianConfig, LibrarianHandle, LIBRARIAN_NAME,
     LIBRARIAN_NS,
