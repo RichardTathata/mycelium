@@ -35,7 +35,7 @@ a 2026-07-11 snapshot; the linked files are the live source — check them, don'
 
 | Mechanism | Audits | Source of truth | Output |
 |---|---|---|---|
-| `mycelium-analysis` | code & architecture — 25 dimensions | **execution evidence** (suites, probes, builds) | [`ratings.md`](ratings.md) — 43 runs, a 34-entry calibration ledger |
+| `mycelium-analysis` | code & architecture — 25 dimensions | **execution evidence** (suites, probes, builds) | [`ratings.md`](ratings.md) — 62 runs, a 48-entry calibration ledger (counts as of 2026-09-28; the file is the truth) |
 | `wiki-lint` | the internal knowledge base (`docs/wiki/`) | **the code it cites** (re-verified, not trusted) | dated `.log/` entries + the [miss-log](../wiki/dev/.log/lint-calibration.md) |
 | `doc-coverage` | documentation *completeness* — WHAT/WHY/HOW × Dev/Ops | **adversarial read** (a name-drop is not coverage) | [`doc-coverage.md`](doc-coverage.md) — living matrix + calibration section |
 | `publication-lint` | the *external* claim surface (decks, papers, philosophy) | **shipped reality** (code, milestones, CI) | fixes + an overclaim ledger in [`publications/README.md`](../publications/README.md) |
