@@ -21,6 +21,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_prefetch_cache_refuses_a_blob_past_its_bound`).
 
 ### Added
+- **The unit file** (`NodeCapabilityConfig`, W1 of `docs/plans/design-time-tooling.md`): the
+  `[[capability]]` TOML grows `principal`, `[[requirement]]` (a `CapFilter` — attributes with
+  `eq · ne · gt · gte · lt · lte`, a bare value meaning `eq`, `schema_id`, a ranking),
+  `[[group]]` (a `CapabilityGroupDef` with its name), `[[lane]]` (name and `produces | consumes`),
+  `[[mandate]]` (holder, scope, enumerated operations), `[[rule]]` (the reference evaluator's
+  fields), `[hosts]` (kinds, install budget, headroom, trusted publishers, placement root, fuel) and
+  `[[presence]]` (a filter with `min_providers` / `max_providers`). A `Version` is written
+  `{ version = "2.1.0" }` wherever a value goes; a bare string stays `Text`, so every existing
+  file loads unchanged (pinned by `existing_capability_files_load_unchanged`). `load_from_file`
+  now validates and refuses **by name**: an unknown operator, a version that is not
+  `major.minor.patch`, a ranking order that is neither direction, a mandate that enumerates
+  nothing, a presence floor of zero or a ceiling below it, an unknown hosted kind, a headroom
+  outside `(0, 1]`. Nothing is declared to the mesh from the file yet (D18 / R1 is next); the
+  sections are the vocabulary the offline check (W2) reads.
 - **`DiskStagedSource` and `RangedBlobFetcher`** (`mycelium-wasm-host`): the large-artifact path.
   A blob is pulled in HTTP `Range` pieces (`HEAD` for the size; only a `206` is read — a store that
   ignores `Range` has its `200` dropped unread), hashed as it streams, written to a node-local

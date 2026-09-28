@@ -57,7 +57,7 @@ disk. JSON is emitted as *output* (§4), never read as input.
 operator deploys as one: a node binary with its co-located services, or an SDK agent. The file's name
 is the unit's name. The checker takes a directory (or a list of files) and nothing else.
 
-**D3 — a filter is written as attributes with operators; a bare value is equality.** This mirrors
+**D3 — a filter is written as attributes with operators; a bare value is equality.** *(W1 refinement, 2026-09-28: a **Version** is written `{ version = "2.1.0" }` wherever a value goes and is parsed at load; a bare string stays `Text`, so every existing `[[capability]]` file keeps its meaning — the §3 example's `version = "2.1.0"` comment was wrong on this point.)* This mirrors
 `CapConstraint` exactly (E4) and adds nothing to it.
 
 ```toml
@@ -181,7 +181,7 @@ Each phase ships with its regression test seen failing first, per the repository
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
-| **W1** | The format: `NodeCapabilityConfig` gains `requirements`, `groups`, `lanes`, `mandates`, `rules` with `#[serde(default)]`; conversions to `CapFilter`, `CapabilityGroupDef`, `Mandate`-shaped and `Rule`-shaped values; loader rejects an unknown operator and a `Version` that does not parse | Every existing `[[capability]]` file loads byte-for-byte unchanged (pinned by a fixture); the §3 example loads and round-trips through `CapFilter::matches` against a hand-built `Capability` |
+| **W1** ✅ *shipped 2026-09-28 (with L1's and R1's format halves)* | The format: `NodeCapabilityConfig` gains `principal`, `requirements`, `groups`, `lanes`, `mandates`, `rules`, `hosts`, `presence` with `#[serde(default)]`; conversions to `CapFilter`, `CapabilityGroupDef`, `Mandate`-shaped and `Rule`-shaped values; loader rejects an unknown operator and a `Version` that does not parse | Every existing `[[capability]]` file loads byte-for-byte unchanged (pinned by a fixture); the §3 example loads and round-trips through `CapFilter::matches` against a hand-built `Capability` |
 | **W2** | The checker over a directory, the six error findings and two warnings above, text and JSON output (the `mycelium.design/declaration/1` document with `principal` per unit and `revision` in the envelope, D9), the subcommand, exit codes; the coop demos' units written as the first fixture directory under `tests/fixtures/units/` | A fixture with one deliberately unwired requirement exits 1 naming it; the coop fixture exits 0; CI runs both; the JSON of the coop fixture is a golden file, so a shape change is a visible diff |
 | **W3** | Schema awareness: the checker reads the same schema directory guide 12 seeds, so a `schema_id` that names no file is an error and a provider/consumer version split is reported as the rollout-window case | A fixture holding `v1` providers and a `v2` requirement reports `schema-only mismatch` with both ids |
 | **W4** | The authority overlay (D6): per wired edge, reachability through declared mandates and rules; `--no-authority` to skip | A fixture whose only rule requires a mandate scope no unit declares reports `unauthorisable edge`; the `procurement_authority` example's vocabulary written as a fixture passes |
@@ -453,7 +453,7 @@ than restating it.
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
-| **L1** | `[hosts]` in the format (W1) and the `unhostable entry` finding in the checker (A2) | A fixture with a matching entry and no hosting unit reports `unhostable entry`; the same fixture plus a host unit with budget below the footprint reports it naming the bytes short; with budget above, `would bind by provisioning`; all three seen failing first |
+| **L1** *(format half shipped 2026-09-28 with W1; the finding waits for A2)* | `[hosts]` in the format (W1) and the `unhostable entry` finding in the checker (A2) | A fixture with a matching entry and no hosting unit reports `unhostable entry`; the same fixture plus a host unit with budget below the footprint reports it naming the bytes short; with budget above, `would bind by provisioning`; all three seen failing first |
 | **L2** | `capability-lifecycle.md`, the two pointing paragraphs, guide 02's table, the wiki citation; the coop `provisioning` demo's units written as the fixture so the page's example is the checker's fixture | `/doc-coverage` gains a row *capability lifecycle* with HOW·Ops and HOW·Dev both Clear by opening the page; `/wiki-lint`'s dead-link and coverage checks pass; a reader of `deployment.md` reaches the page in one link |
 
 L1 is part of W1 and A2 rather than after them, because it changes the format. L2 is the
@@ -526,7 +526,7 @@ both gets a warning naming the duplicate.
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
-| **R1** | `[[presence]]` in the format and `presence unhostable` in the checker; `--units <file>` on the node binary and the startup declaration path (D18), with the duplicate warning | A fixture with `min_providers = 2` and one hosting unit reports `presence unhostable (1 of 2)`; a node started with the §3 file shows its `req/`, `cap-group/` and presence entries on a second node; the same requirement declared in both file and code warns once; all seen failing first |
+| **R1** *(format half shipped 2026-09-28 with W1)* | `[[presence]]` in the format and `presence unhostable` in the checker; `--units <file>` on the node binary and the startup declaration path (D18), with the duplicate warning | A fixture with `min_providers = 2` and one hosting unit reports `presence unhostable (1 of 2)`; a node started with the §3 file shows its `req/`, `cap-group/` and presence entries on a second node; the same requirement declared in both file and code warns once; all seen failing first |
 | **R2** | The stem fleet as the second reference topology: N identical nodes from one image, one units directory, a presence policy, a librarian; in CI beside the coop suites | The fleet converges to `min_providers` live providers within a bound; killing one restores it; the checker's JSON for the directory and the fleet's `cap/` view agree on which capabilities exist (the first declared-versus-observed comparison, run locally without a consumer); guide 13 gains the topology with its limits |
 
 R1 depends on W1 and L1 (the format) and A2 (the hosting check); R2 depends on R1 and W2. R2 is also
