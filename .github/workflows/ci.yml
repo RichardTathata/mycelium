@@ -216,6 +216,10 @@ jobs:
             curl -sf http://localhost:9090/ >/dev/null && break
             sleep 1
           done
+          # The image's initialBuckets did not create the bucket on the first run (NoSuchBucket on
+          # PUT), so make it explicitly with the runner's AWS CLI and list what the store holds.
+          aws --endpoint-url http://localhost:9090 s3api create-bucket --bucket mycelium-test || true
+          aws --endpoint-url http://localhost:9090 s3 ls
       # The object-store adapter against that bucket, plus clippy with every feature.
       - run: cargo test -p mycelium-wasm-host --features object_store,stem object_store_source -- --nocapture
       - run: cargo clippy -p mycelium-wasm-host --all-targets --features object_store,stem -- -D warnings
