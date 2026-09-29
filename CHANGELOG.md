@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **wasmtime 49.0.1 / wasmtime-wasi 49.0.1** (from 46.0.3): RUSTSEC-2026-0316 (dynamic record lifting
+  could allocate beyond the hostcall fuel limit) and RUSTSEC-2026-0314 (a guest could panic the host
+  through a filesystem datetime overflow), both dated 2026-09-24, both without a 46.x fix. Confined to
+  `mycelium-wasm-host` as before; the substrate's dependency tree is unchanged.
+
 ### Fixed
 - **A large artifact from an HTTP store no longer lands in memory before its hash is checked.**
   `HttpLibrarySource::fetch_remote` read the whole body with `bytes()`, capped only by a declared
