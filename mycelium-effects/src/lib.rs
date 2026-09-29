@@ -207,6 +207,47 @@ pub fn check_composition(
         .map_err(|e: MandateRefusal| EffectRefusal::Unauthorised { leg: CompositionLeg::Authority, reason: e.to_string() })
 }
 
+#[cfg(feature = "envelope")]
+impl Composition {
+    /// Build a composition from what the gateway already established — the envelope's verified
+    /// actor, its operation and resource (the operation a grant must enumerate is
+    /// `{operation}:{resource_key}`, as the gateway's own mandate assessment computes it) — and the
+    /// mandate the caller presented, so a provider that commits at a destination hands over the
+    /// gateway's facts rather than assembling them by hand.
+    ///
+    /// Refused before any check when the envelope was assembled under a **different** binding than
+    /// the presented grant (holder, term, scope or epoch differ): the two would then describe two
+    /// appointments, and a composition must describe one.
+    pub fn from_envelope(
+        envelope: &mycelium::ActionEnvelope,
+        presented: &mycelium::PresentedMandate,
+        origin_domain: Option<String>,
+    ) -> Result<Self, String> {
+        let principal = PrincipalId::new(&envelope.actor).ok_or("the envelope names no actor")?;
+        let mandate = presented.grant.mandate.clone();
+        if let Some(b) = &envelope.mandate {
+            if b.holder != mandate.holder {
+                return Err(format!("the envelope is bound to holder {:?}, the presented grant to {:?}", b.holder.as_str(), mandate.holder.as_str()));
+            }
+            if b.term != mandate.term {
+                return Err(format!("the envelope is bound to term {:?}, the presented grant to {:?}", b.term.as_str(), mandate.term.as_str()));
+            }
+            if b.scope != mandate.scope {
+                return Err(format!("the envelope is bound to scope {:?}, the presented grant to {:?}", b.scope, mandate.scope));
+            }
+            if b.epoch != mandate.epoch {
+                return Err(format!("the envelope is bound to epoch {}, the presented grant to {}", b.epoch, mandate.epoch));
+            }
+        }
+        Ok(Self {
+            principal,
+            operation: mycelium::mandate_operation(&envelope.operation, &envelope.resource),
+            mandate,
+            origin_domain,
+        })
+    }
+}
+
 /// A destination that can commit an effect exactly once and say so.
 ///
 /// `apply` takes `&self`: a destination is shared between appliers, and it is the destination's

@@ -274,6 +274,9 @@ jobs:
       - run: ./scripts/ci-retest.sh -p mycelium-effects --features tuple-space
       - run: cargo clippy -p mycelium-effects --all-targets -- -D warnings
       - run: cargo clippy -p mycelium-effects --features tuple-space --all-targets -- -D warnings
+      # The gateway-side composition constructor (composed-effect.md §9) needs the attesting build.
+      - run: cargo test -p mycelium-effects --features tuple-space,envelope --test composed
+      - run: cargo clippy -p mycelium-effects --features tuple-space,envelope --all-targets -- -D warnings
       # The example is the crate's decisive demonstration (guide 18 § Rung 4); the catalogue said it
       # ran in CI and it did not (2026-09-27).
       - run: cargo run -p mycelium-effects --example destination_commit

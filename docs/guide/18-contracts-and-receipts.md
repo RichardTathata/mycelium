@@ -266,7 +266,10 @@ and **authorised** (`ResourceAuthority::check` accepts the mandate for that oper
 resource, now). `apply_composed(&ComposedEffect, &ResourceAuthority, now_ms)` is the call; a
 refusal is `Unauthorised { leg, reason }` and leaves no row and no dedup entry, so a later authorised
 attempt is `Fresh`. The domain leg is carried, not re-verified here — a destination holds no trust
-bundle. Design: [`composed-effect.md`](../design/composed-effect.md) §9.
+bundle. A provider behind the gateway builds the composition from what the gateway established —
+`Composition::from_envelope(&envelope, &presented_mandate, origin_domain)` (feature `envelope`) —
+and records a refusal with `AeEvidence::for_destination_refusal`, so the journal shows which point
+said no. Design: [`composed-effect.md`](../design/composed-effect.md) §9.
 
 `EffectDestination` is the one trait to implement for your own destination (`apply(&Effect) ->
 Result<DestinationCommit, EffectRefusal>`). With the `tuple-space` feature, `TupleConsumer::new(space,

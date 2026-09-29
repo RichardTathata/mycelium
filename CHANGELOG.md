@@ -27,7 +27,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closed — an unrecognised refusal is *not committed*, never *retry until it lands*. Gate:
   `mycelium-effects/tests/composed.rs`, written before the check existed and observed to commit every
   planted leg. The check and the commit are two steps: the check-then-act window every resource has,
-  narrowed and stated.
+  narrowed and stated. Beside it: `Composition::from_envelope` (feature `envelope`) builds the
+  composition from the gateway's `ActionEnvelope` and the caller's `PresentedMandate`, refusing an
+  envelope bound to a different appointment than the presented grant; and
+  `AeEvidence::for_destination_refusal` records a destination's refusal as a denied decision at
+  enforcement point `destination` with nothing run, so a refusal after a gateway permit is as
+  reconstructable as a commit.
 
 ### Fixed
 - **A large artifact from an HTTP store no longer lands in memory before its hash is checked.**

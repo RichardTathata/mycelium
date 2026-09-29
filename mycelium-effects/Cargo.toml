@@ -17,6 +17,11 @@ default = []
 # re-delivered and the second apply is `Replayed`. Optional so the crate's core — the destination
 # and the receipt — couples to neither companion.
 tuple-space = ["dep:mycelium-tuple-space", "dep:bytes"]
+# The gateway-side constructor (`Composition::from_envelope`, composed-effect.md §9): builds a
+# composition from the `ActionEnvelope` the gateway assembled and the mandate the caller presented.
+# Needs the gateway's attesting build, so it pulls those features of the substrate in; optional so
+# a destination that assembles its own composition never does.
+envelope = ["mycelium/gateway", "mycelium/tls"]
 
 [dependencies]
 # Companion-crate contract: only Mycelium's PUBLIC API is used — no internal

@@ -170,8 +170,13 @@ superseded epoch, the wrong scope, an expired window — is refused by name and 
 epoch installed later at the resource supersedes an effect the earlier one authorised. Written
 before the check existed and observed to fail (every planted leg committed), per §8's own rule.
 
-**What lands next.** A gateway-side constructor that builds a `Composition` from the
-`ActionEnvelope` and the carried mandate, so a provider that commits at a destination hands over
-the composition the gateway already established rather than assembling it by hand; and the
-evidence record's `execution` carrying the destination's refusal by leg, so a refused composition is
-as reconstructable as a committed one.
+**Both halves of the join, the same day.** `Composition::from_envelope` (feature `envelope`)
+builds the composition from the `ActionEnvelope` the gateway assembled and the `PresentedMandate`
+the caller carried — the principal is the envelope's verified actor, the operation is the one a
+grant must enumerate (`{operation}:{resource_key}`, as the gateway's own assessment computes it) —
+and refuses before any check when the envelope was assembled under a different binding than the
+presented grant. And a destination's refusal is **evidence**: `AeEvidence::for_destination_refusal`
+writes a `Decided` record at enforcement point `destination`, verdict `Deny`, execution `None`,
+with the leg in `checked`, so a refusal after a gateway permit is as reconstructable as a commit and
+a reader sees which point said no. The record kinds are unchanged; a consumer's `_` arm needs
+nothing new.

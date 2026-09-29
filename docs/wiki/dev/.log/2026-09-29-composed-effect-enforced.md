@@ -19,8 +19,13 @@ and observed to fail: with the composed path delegating without checks, every pl
 - **The window is stated, not closed:** check then transaction, the same check-then-act window every
   resource in the tree has; a destination that can take the authority inside its transaction should
   override the default.
-- Next, recorded in §9: a gateway-side `Composition` constructor from the `ActionEnvelope`, and the
-  evidence record carrying a destination's refusal by leg.
+- **The join's two halves landed the same day.** `Composition::from_envelope` (effects feature
+  `envelope`, which pulls the substrate's `gateway` + `tls` in) takes the operation a grant must
+  enumerate from `mandate_operation(operation, resource)` — the gateway's own rule, so the destination
+  and the gateway check the same string — and refuses an envelope bound to a different holder, term,
+  scope or epoch than the presented grant. `AeEvidence::for_destination_refusal` is a `Decided` record
+  at enforcement point `destination`, `Deny`, `Execution::None`, the leg in `checked`; no new record
+  kind, so the private exporter's mapping is untouched.
 
 **Pages touched:** guide 18 (the composed path, the `_` arm); `what-is-proven.md` (a proven-in-CI row);
 `CLAUDE.md`'s composed sentence; the buyer deck's evidence slide callout; `CHANGELOG.md`.

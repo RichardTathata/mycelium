@@ -168,3 +168,43 @@ fn the_pure_check_agrees_with_the_destination() {
     let foreign = Composition { origin_domain: Some("partner.example".into()), ..good() };
     assert!(check_composition(&foreign, &authority, NOW).is_ok(), "the domain leg is carried, not checked here");
 }
+
+/// The gateway-side constructor: a composition built from the envelope the gateway assembled and
+/// the mandate the caller presented agrees with the destination — the operation is the one a grant
+/// must enumerate (`{operation}:{resource_key}`), the principal is the envelope's verified actor,
+/// and an envelope assembled under a different binding is refused before anything is checked.
+#[cfg(feature = "envelope")]
+#[test]
+fn a_composition_from_the_envelope_agrees_with_the_destination() {
+    use mycelium::{ActionEnvelope, MandateBinding, NodeId, PresentedMandate};
+    use mycelium::mandate::grant::SignedMandateGrant;
+
+    let via = NodeId::new("127.0.0.1", 7946).unwrap();
+    let grant_mandate = mandate("worker-a", "depot-ledger", &["tools/call:tool:ledger"], 3, 10_000);
+    let presented = PresentedMandate {
+        grant: SignedMandateGrant { mandate: grant_mandate.clone(), signature: Vec::new() },
+        possession: String::new(),
+    };
+    let binding = MandateBinding::established(principal("worker-a"), TermId::new("term-7").unwrap(), "depot-ledger", 3);
+    let envelope = ActionEnvelope::builder("worker-a", via.clone(), "tools/call", "tool:ledger@depot-node")
+        .identities("op-1", "attempt-1")
+        .mandate(binding)
+        .validity(1_000, 2_000)
+        .build();
+
+    let composition = Composition::from_envelope(&envelope, &presented, Some("partner.example".into())).unwrap();
+    assert_eq!(composition.operation, "tools/call:tool:ledger", "the operation a grant must enumerate");
+    assert_eq!(composition.principal, principal("worker-a"));
+    assert_eq!(composition.origin_domain.as_deref(), Some("partner.example"));
+    let authority = ResourceAuthority::new("depot-ledger", 3);
+    assert!(check_composition(&composition, &authority, NOW).is_ok());
+
+    // An envelope bound to a different term than the presented grant is refused before any check.
+    let other = ActionEnvelope::builder("worker-a", via, "tools/call", "tool:ledger@depot-node")
+        .identities("op-2", "attempt-1")
+        .mandate(MandateBinding::established(principal("worker-a"), TermId::new("term-8").unwrap(), "depot-ledger", 3))
+        .validity(1_000, 2_000)
+        .build();
+    let err = Composition::from_envelope(&other, &presented, None).unwrap_err();
+    assert!(err.contains("term"), "{err}");
+}
