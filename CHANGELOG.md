@@ -32,7 +32,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `LibrarianConfig` gained `manifest_source: Option<Arc<dyn ManifestSource>>` (an exhaustive
   literal breaks — add `manifest_source: None`), and `mycelium-artifact publish|list|verify` take a
   store URL. `Manifest::upsert` is new. Gated by `publish_stage_and_verify_through_the_store`,
-  which CI runs against a MinIO service and which runs over `file://` elsewhere, saying so; and
+  which CI runs against an S3-compatible store (Adobe's S3Mock; MinIO's images are no longer publicly pullable) and which runs over `file://` elsewhere, saying so; and
   by the egress refusal before any client is built. Not yet: a GCS fixture, a real bucket.
 - **`mycelium-artifact publish | list | verify`** (`mycelium-wasm-host`, feature `stem`; the
   functions are public): the artifact tool of `docs/plans/design-time-tooling.md` D10 / A1. A

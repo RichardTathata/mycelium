@@ -266,7 +266,7 @@ mod tests {
     }
 
     /// A store URL from the environment — `MYCELIUM_S3_TEST_URL=s3://bucket/prefix` with the
-    /// builders' credentials beside it (CI runs a MinIO). Absent, the local `file://` store
+    /// builders' credentials beside it (CI runs an S3-compatible store, Adobe's S3Mock). Absent, the local `file://` store
     /// stands in and the test says so: the adapter is exercised, the cloud is not.
     fn test_store_url(dir: &std::path::Path) -> (String, bool) {
         match std::env::var("MYCELIUM_S3_TEST_URL") {

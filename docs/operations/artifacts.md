@@ -240,7 +240,7 @@ whatever the size, and a store that ignores `Range` gets its `200` dropped unrea
 `s3://bucket/prefix`, `gs://bucket/prefix`, `az://…`, `https://host/prefix`, `file:///dir` — and the
 credentials are the node's cloud identity from the environment (an instance or task role, or
 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`; `AWS_ENDPOINT` + `AWS_ALLOW_HTTP=true` for an
-S3-compatible store such as MinIO), never a file this project defines. It is ranged, so a model
+S3-compatible store), never a file this project defines. It is ranged, so a model
 stages to disk in pieces; every request is gated by the node's egress policy on the store URL
 before a client is built. **The manifest lives in the store too**, at `<prefix>/manifest`: a
 librarian fronting the store reads it from there (`LibrarianConfig::manifest_source`), and
