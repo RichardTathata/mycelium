@@ -18,7 +18,7 @@ use std::time::Duration;
 use mycelium::{CapFilter, Capability, CapabilityReg, GossipAgent};
 
 use crate::artifact::ArtifactSource;
-use crate::catalog::{publish_installable, InstallableEntry, Manifest, INSTALLABLE_PREFIX};
+use crate::catalog::{publish_installable, InstallableEntry, Manifest, ManifestError, INSTALLABLE_PREFIX};
 use crate::mesh_source::serve_artifacts;
 
 /// Capability namespace/name a librarian advertises. One advertisement per serving node — never
@@ -48,6 +48,19 @@ pub struct LibrarianConfig {
     pub publisher: [u8; 32],
     /// Manifest poll / reconcile interval.
     pub sync_interval: Duration,
+    /// Where the manifest is read from on each pass. `None` reads the file at `manifest_path`;
+    /// `Some` reads from a store (an object-store library, D14 — the manifest lives at
+    /// `<prefix>/manifest` beside the blobs, so nothing has to sync it down).
+    pub manifest_source: Option<Arc<dyn ManifestSource>>,
+}
+
+/// Where a librarian reads its manifest from — a file by default, an object store when the
+/// library lives in one. A source that cannot be read reports the error; the librarian then
+/// skips the pass and keeps serving (detection, not prevention: the catalogue keeps its
+/// last-good state until the source heals).
+#[async_trait::async_trait]
+pub trait ManifestSource: Send + Sync {
+    async fn load_manifest(&self) -> Result<Manifest, ManifestError>;
 }
 
 /// A running librarian. Dropping it stops serving, retracts the capability advertisement, and
@@ -80,7 +93,7 @@ pub fn spawn_librarian(
     );
     let sync = tokio::spawn(async move {
         loop {
-            sync_once(&agent, &cfg);
+            sync_once(&agent, &cfg).await;
             tokio::time::sleep(cfg.sync_interval).await;
         }
     });
@@ -91,8 +104,12 @@ pub fn spawn_librarian(
 /// *live KV view* filtered to this publisher's entries (not remembered state), so a restarted
 /// librarian repairs anything that changed while it was down — removals are re-tombstoned, LWW
 /// drift is re-published — with no state carried across restarts.
-fn sync_once(agent: &Arc<GossipAgent>, cfg: &LibrarianConfig) {
-    let manifest = match Manifest::load(&cfg.manifest_path) {
+async fn sync_once(agent: &Arc<GossipAgent>, cfg: &LibrarianConfig) {
+    let loaded = match &cfg.manifest_source {
+        Some(src) => src.load_manifest().await,
+        None => Manifest::load(&cfg.manifest_path),
+    };
+    let manifest = match loaded {
         Ok(m) => m,
         Err(e) => {
             // Unreadable/corrupt manifest: skip the pass, keep serving. Detection, not
@@ -205,6 +222,7 @@ mod tests {
                 manifest_path: manifest_path.clone(),
                 publisher: ours_key.verifying_key().to_bytes(),
                 sync_interval: Duration::from_millis(100),
+                manifest_source: None,
             },
         );
 
@@ -273,6 +291,7 @@ mod tests {
                 manifest_path,
                 publisher: key.verifying_key().to_bytes(),
                 sync_interval: Duration::from_millis(100),
+                manifest_source: None,
             },
         );
 

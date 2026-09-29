@@ -21,6 +21,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_prefetch_cache_refuses_a_blob_past_its_bound`).
 
 ### Added
+- **The object-store adapter** (`ObjectStoreFetcher`, `mycelium-wasm-host` feature `object_store`;
+  S2 of `docs/plans/design-time-tooling.md` §11): one URL selects the store through the
+  `object_store` crate — `s3://`, `gs://`, `az://`, `https://`, `file://` — with credentials from
+  the environment (the node's cloud identity, never a file this project defines). It implements
+  both `BlobFetcher` (whole-object, refused past the in-memory bound by name) and
+  `RangedBlobFetcher` (`head` for the size, `get_range` for a piece), so a model stages to disk in
+  pieces through `DiskStagedSource`; every request is gated by the egress policy on the store URL
+  before a client is built. The manifest lives in the store at `<prefix>/manifest` (D14):
+  `LibrarianConfig` gained `manifest_source: Option<Arc<dyn ManifestSource>>` (an exhaustive
+  literal breaks — add `manifest_source: None`), and `mycelium-artifact publish|list|verify` take a
+  store URL. `Manifest::upsert` is new. Gated by `publish_stage_and_verify_through_the_store`,
+  which CI runs against an S3-compatible store (Adobe's S3Mock; MinIO's images are no longer publicly pullable) and which runs over `file://` elsewhere, saying so; and
+  by the egress refusal before any client is built. Not yet: a GCS fixture, a real bucket.
 - **`mycelium-artifact publish | list | verify`** (`mycelium-wasm-host`, feature `stem`; the
   functions are public): the artifact tool of `docs/plans/design-time-tooling.md` D10 / A1. A
   reviewable TOML description (kind, the capability it provides, the footprint, the path to the

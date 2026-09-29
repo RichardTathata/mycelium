@@ -54,9 +54,11 @@ metrics = "0.24"
 # file and provisions what the declarations call for. Opt-in so the library carries no logging
 # subscriber.
 tracing-subscriber = { version = "0.3", optional = true }
+object_store = { version = "0.14", features = ["aws", "gcp"], optional = true }
 
 [features]
 stem = ["dep:tracing-subscriber"]
+object_store = ["dep:object_store"]
 
 [[bin]]
 name              = "mycelium-stem"

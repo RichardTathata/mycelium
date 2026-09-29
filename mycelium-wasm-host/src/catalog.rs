@@ -346,13 +346,20 @@ impl Manifest {
         entry: InstallableEntry,
     ) -> Result<(), ManifestError> {
         let mut m = Self::load(path)?;
+        m.upsert(entry);
+        m.save(path)
+    }
+
+    /// Add `entry`, replacing any existing row with the same KV key — the in-memory half of
+    /// [`append_entry`](Self::append_entry), for a manifest that lives somewhere other than a file
+    /// (an object store, S2).
+    pub fn upsert(&mut self, entry: InstallableEntry) {
         let key = entry.kv_key();
-        if let Some(existing) = m.entries.iter_mut().find(|e| e.kv_key() == key) {
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.kv_key() == key) {
             *existing = entry;
         } else {
-            m.entries.push(entry);
+            self.entries.push(entry);
         }
-        m.save(path)
     }
 
     /// Diff two manifest revisions into the librarian's sync actions:

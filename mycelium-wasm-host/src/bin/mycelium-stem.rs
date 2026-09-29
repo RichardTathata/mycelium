@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(spawn_librarian(
                     Arc::clone(&agent),
                     Arc::new(FsLibrarySource::open(dir)?) as Arc<_>,
-                    LibrarianConfig { manifest_path: manifest.into(), publisher, sync_interval: Duration::from_secs(5) },
+                    LibrarianConfig { manifest_path: manifest.into(), publisher, sync_interval: Duration::from_secs(5), manifest_source: None },
                 ))
             }
             (Some(_), None) => return Err("--librarian needs --library".into()),

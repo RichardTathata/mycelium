@@ -235,8 +235,17 @@ artifact (a model) goes through `DiskStagedSource`: pulled in HTTP `Range` piece
 (`RangedBlobFetcher`, `HEAD` for the size, `206` or nothing), hashed as it streams, written to a
 node-local staging directory, and served to the blob runtime from disk; peak memory is one piece
 whatever the size, and a store that ignores `Range` gets its `200` dropped unread. Implement
-`BlobFetcher` (and `RangedBlobFetcher` for large artifacts) for a vendor SDK; an object-store
-adapter for S3 and GCS is planned (`docs/plans/design-time-tooling.md` §11). The *manifest* is a local file path
+`BlobFetcher` (and `RangedBlobFetcher` for large artifacts) for a vendor SDK, or use the shipped
+**object-store adapter** (`ObjectStoreFetcher`, feature `object_store`): one URL selects the store —
+`s3://bucket/prefix`, `gs://bucket/prefix`, `az://…`, `https://host/prefix`, `file:///dir` — and the
+credentials are the node's cloud identity from the environment (an instance or task role, or
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`; `AWS_ENDPOINT` + `AWS_ALLOW_HTTP=true` for an
+S3-compatible store), never a file this project defines. It is ranged, so a model
+stages to disk in pieces; every request is gated by the node's egress policy on the store URL
+before a client is built. **The manifest lives in the store too**, at `<prefix>/manifest`: a
+librarian fronting the store reads it from there (`LibrarianConfig::manifest_source`), and
+`mycelium-artifact publish --library s3://bucket/prefix` writes blob and manifest through the same
+adapter, so nothing has to be synced down. For a library that stays a local file path
 (`LibrarianConfig::manifest_path`), so for a remote store, sync the manifest file
 down to the librarian node (CI artifact, cron `curl`, or a mounted volume) while
 the bytes stay remote — the librarian mirrors what its manifest names

@@ -87,22 +87,33 @@ pub struct PublishOutcome {
     pub signer:     String,
 }
 
-/// Store the description's bytes, build and sign the entry, append the manifest line.
-pub fn publish(description: &Path, library: &Path, key: &SigningKey) -> Result<PublishOutcome, String> {
+/// Read a description and the bytes it names (relative to the description's directory).
+pub fn read_description_and_bytes(description: &Path) -> Result<(ArtifactDescription, Vec<u8>), String> {
     let text = std::fs::read_to_string(description).map_err(|e| format!("{}: {e}", description.display()))?;
     let d = ArtifactDescription::from_toml_str(&text).map_err(|e| format!("{}: {e}", description.display()))?;
-    let kind = kind_from_name(&d.kind).ok_or_else(|| format!("unknown artifact kind {:?}", d.kind))?;
     let bytes_rel = d.bytes.as_deref().ok_or_else(|| format!("{}: `bytes` is required to publish", description.display()))?;
     let bytes_path = description.parent().unwrap_or_else(|| Path::new(".")).join(bytes_rel);
     let bytes = std::fs::read(&bytes_path).map_err(|e| format!("{}: {e}", bytes_path.display()))?;
-    let lib = FsLibrarySource::open(library).map_err(|e| format!("{}: {e}", library.display()))?;
-    let artifact = lib.store(&bytes).map_err(|e| format!("store: {e}"))?;
-    let provides = d.provides.to_capability();
-    let entry = InstallableEntry::new(provides.clone(), artifact)
+    Ok((d, bytes))
+}
+
+/// The signed entry a description declares for bytes already stored at `artifact`.
+pub fn build_entry(d: &ArtifactDescription, bytes: &[u8], artifact: ArtifactId, key: &SigningKey) -> Result<InstallableEntry, String> {
+    let kind = kind_from_name(&d.kind).ok_or_else(|| format!("unknown artifact kind {:?}", d.kind))?;
+    Ok(InstallableEntry::new(d.provides.to_capability(), artifact)
         .with_kind(kind)
         .with_cost(bytes.len() as u64, d.est_install_secs.unwrap_or(0))
         .with_requirements(d.requires.disk_bytes, d.requires.mem_bytes)
-        .signed_by(key);
+        .signed_by(key))
+}
+
+/// Store the description's bytes, build and sign the entry, append the manifest line.
+pub fn publish(description: &Path, library: &Path, key: &SigningKey) -> Result<PublishOutcome, String> {
+    let (d, bytes) = read_description_and_bytes(description)?;
+    let lib = FsLibrarySource::open(library).map_err(|e| format!("{}: {e}", library.display()))?;
+    let artifact = lib.store(&bytes).map_err(|e| format!("store: {e}"))?;
+    let entry = build_entry(&d, &bytes, artifact, key)?;
+    let (provides, kind) = (entry.provides.clone(), entry.kind);
     Manifest::append_entry(&library.join(MANIFEST_FILE), entry).map_err(|e| format!("manifest: {e}"))?;
     Ok(PublishOutcome {
         artifact,
