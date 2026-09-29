@@ -194,7 +194,7 @@ jobs:
     # same test exercises the adapter over file:// and says so.
     services:
       minio:
-        image: bitnami/minio:2025
+        image: bitnami/minio:latest
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
