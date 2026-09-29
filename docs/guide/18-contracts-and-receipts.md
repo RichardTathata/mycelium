@@ -250,12 +250,23 @@ let dest = Arc::new(SqliteDestination::open(path, "billing-writer", handler)?);
 let op = OperationId::generate();
 let effect = Effect::new(op.clone(), AttemptId::fresh(&op), payload);
 match apply_within(dest.clone(), effect, Duration::from_secs(5)).await {
-    Ok(commit)                             => { /* rung 4: the receipt names the destination */ }
-    Err(EffectRefusal::Conflict { .. })     => { /* same op id, different content — a bug upstream */ }
-    Err(EffectRefusal::DeliveryUnknown)     => { /* the deadline passed; NOT a failure — retry with the same effect */ }
-    Err(EffectRefusal::Failed(e))           => { /* the destination refused; no dedup row was written */ }
+    Ok(commit)                                    => { /* rung 4: the receipt names the destination */ }
+    Err(EffectRefusal::Conflict { .. })            => { /* same op id, different content — a bug upstream */ }
+    Err(EffectRefusal::DeliveryUnknown)            => { /* the deadline passed; NOT a failure — retry with the same effect */ }
+    Err(EffectRefusal::Failed(e))                  => { /* the destination refused; no dedup row was written */ }
+    Err(EffectRefusal::Unauthorised { leg, reason }) => { /* the composition did not hold — a denial, never a retry */ }
+    Err(_)                                        => { /* #[non_exhaustive]: an unrecognised refusal is NOT committed */ }
 }
 ```
+
+**The composed path.** A destination can be asked to commit an effect *with* its composition —
+who it is attributed to, under which mandate, for which operation, from which domain — and refuse
+before the transaction unless the effect is **attributed** (the principal is the mandate's holder)
+and **authorised** (`ResourceAuthority::check` accepts the mandate for that operation at this
+resource, now). `apply_composed(&ComposedEffect, &ResourceAuthority, now_ms)` is the call; a
+refusal is `Unauthorised { leg, reason }` and leaves no row and no dedup entry, so a later authorised
+attempt is `Fresh`. The domain leg is carried, not re-verified here — a destination holds no trust
+bundle. Design: [`composed-effect.md`](../design/composed-effect.md) §9.
 
 `EffectDestination` is the one trait to implement for your own destination (`apply(&Effect) ->
 Result<DestinationCommit, EffectRefusal>`). With the `tuple-space` feature, `TupleConsumer::new(space,

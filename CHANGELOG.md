@@ -15,6 +15,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through a filesystem datetime overflow), both dated 2026-09-24, both without a 46.x fix. Confined to
   `mycelium-wasm-host` as before; the substrate's dependency tree is unchanged.
 
+### Changed
+- **The composed effect is enforced at the destination** (`mycelium-effects`; `docs/design/composed-effect.md`
+  §9). `Composition` — the verified principal, the operation, the presented mandate, the origin domain —
+  travels with an effect, and `EffectDestination::apply_composed(&ComposedEffect, &ResourceAuthority,
+  now_ms)` commits only when the effect is **attributed** (the principal is the mandate's holder) and
+  **authorised** (`ResourceAuthority::check` for that operation at this resource, now). A refusal is
+  `EffectRefusal::Unauthorised { leg, reason }` and leaves no business row and no dedup row, so a later
+  authorised attempt is `Fresh`. The domain leg is carried, not re-verified (a destination holds no
+  trust bundle). **Upgrade note:** `EffectRefusal` is now `#[non_exhaustive]`; a `_` arm must fail
+  closed — an unrecognised refusal is *not committed*, never *retry until it lands*. Gate:
+  `mycelium-effects/tests/composed.rs`, written before the check existed and observed to commit every
+  planted leg. The check and the commit are two steps: the check-then-act window every resource has,
+  narrowed and stated.
+
 ### Fixed
 - **A large artifact from an HTTP store no longer lands in memory before its hash is checked.**
   `HttpLibrarySource::fetch_remote` read the whole body with `bytes()`, capped only by a declared
