@@ -39,6 +39,8 @@ mod resources;
 mod runtime;
 mod stem;
 mod tools;
+#[cfg(feature = "object_store")]
+mod object_store_source;
 
 pub use artifact::{
     verify_artifact, ArtifactId, ArtifactIdError, ArtifactKind, ArtifactSource, FsLibrarySource,
@@ -55,16 +57,19 @@ pub use http_source::{
     DEFAULT_MAX_IN_MEMORY_BYTES, DEFAULT_RANGE_CHUNK_BYTES,
 };
 pub use librarian::{
-    librarian_filter, spawn_librarian, LibrarianConfig, LibrarianHandle, LIBRARIAN_NAME,
+    librarian_filter, spawn_librarian, LibrarianConfig, LibrarianHandle, ManifestSource, LIBRARIAN_NAME,
     LIBRARIAN_NS,
 };
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
 pub use provisioner::{verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{Stem, StemError, StemOptions, StemSource};
 pub use tools::{
-    kind_from_name, kind_name, list as list_manifest, publish as publish_artifact, publisher_from_str, render_entry,
-    signing_key_from_hex, verify as verify_library, PublishOutcome, VerifyReport,
+    build_entry, kind_from_name, kind_name, list as list_manifest, publish as publish_artifact, publisher_from_str,
+    read_description_and_bytes, render_entry, signing_key_from_hex, verify as verify_library, PublishOutcome,
+    VerifyReport,
 };
+#[cfg(feature = "object_store")]
+pub use object_store_source::{list_store, publish_to_store, verify_store, ObjectStoreFetcher};
 pub use resources::{ResourceProbe, SystemResourceProbe};
 pub use runtime::{
     cap_invoke_kind, ArtifactRuntime, BlobRuntime, InstallError, Installed, ProgressFn,

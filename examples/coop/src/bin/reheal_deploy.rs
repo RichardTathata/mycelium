@@ -424,6 +424,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             manifest_path: lib_dir.join(MANIFEST_FILE),
             publisher: publisher_pub,
             sync_interval: Duration::from_millis(500),
+            manifest_source: None,
         },
     );
     println!("[librarian] up — manifest → catalogue sync running");

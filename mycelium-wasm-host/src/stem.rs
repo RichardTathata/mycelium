@@ -378,6 +378,7 @@ mod tests {
                 manifest_path: lib_dir.join(MANIFEST_FILE),
                 publisher:     key.verifying_key().to_bytes(),
                 sync_interval: Duration::from_millis(200),
+                manifest_source: None,
             },
         );
         let publisher_hex: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();

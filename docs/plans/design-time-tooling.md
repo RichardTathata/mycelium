@@ -378,7 +378,7 @@ through the environment for a developer machine and are never in a unit file, an
 or a manifest (D7 again). Every request still passes the node's `EgressPolicy` (`permits_url`) first,
 so an operator can pin a bucket host.
 
-**D14 — the manifest lives in the store too.** The library's manifest is written as an object at a
+**D14 — the manifest lives in the store too.** *(built with S2: `ObjectStoreFetcher::read_manifest`/`write_manifest` at `<prefix>/manifest`; the librarian takes an optional `ManifestSource`; `mycelium-artifact publish --library s3://…` writes both.)* The library's manifest is written as an object at a
 fixed key beside the blobs, so a librarian fronting a remote store reads it from the store and the
 "sync it down" step in the runbook goes away; `mycelium artifact publish --library s3://bucket/prefix`
 (A1) writes blob and manifest line through the same adapter. The manifest stays the signed source of
@@ -387,8 +387,8 @@ truth (D10); only its location gains a second option.
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | **S1** ✅ *shipped 2026-09-28* | The ranged fetcher trait (`RangedBlobFetcher`), disk staging (`DiskStagedSource`), and `HttpLibrarySource` re-done over HTTP `Range` requests with the body streamed and hashed incrementally; the 512 MiB cap and the unbounded-chunked hole both closed; `PrefetchingSource` refuses above its size bound by name | A 2 GiB blob served by a local HTTP fixture installs with peak RSS bounded (measured in the test, asserted under a ceiling); a chunked response with no `Content-Length` is bounded; both seen failing on the current code first |
-| **S2** | The `object_store` adapter behind `store-aws`; A1's `publish` and the librarian read and write `s3://` URLs; D14's manifest-in-store | CI: a MinIO container as the S3-compatible fixture — publish, librarian reconcile, a node installs a blob by ranged pull, provenance verified; the egress gate refusing a bucket host outside `allow_hosts` |
-| **S3** | `store-gcp`, same adapter, same tests; the S3-interoperability path (HMAC keys against the GCS XML API) documented as a fallback, not the route | CI: `fake-gcs-server` as the fixture, the S2 sequence green; a build with `store-gcp` and without `store-aws` compiles and passes the feature-matrix clippy |
+| **S2** ✅ *shipped 2026-09-28 — one feature `object_store` (aws + gcp together, the crate's own features) rather than `store-aws`/`store-gcp`; the CI fixture is a MinIO service; without `MYCELIUM_S3_TEST_URL` the same test runs over `file://` and says so* | The `object_store` adapter behind `store-aws`; A1's `publish` and the librarian read and write `s3://` URLs; D14's manifest-in-store | CI: a MinIO container as the S3-compatible fixture — publish, librarian reconcile, a node installs a blob by ranged pull, provenance verified; the egress gate refusing a bucket host outside `allow_hosts` |
+| **S3** *(the GCS builder is compiled in with S2 — `gs://` URLs parse — but no GCS fixture runs in CI yet)* | `store-gcp`, same adapter, same tests; the S3-interoperability path (HMAC keys against the GCS XML API) documented as a fallback, not the route | CI: `fake-gcs-server` as the fixture, the S2 sequence green; a build with `store-gcp` and without `store-aws` compiles and passes the feature-matrix clippy |
 | **S4** | Real-cloud evidence: a nightly against one real S3 bucket and one real GCS bucket, workload-identity credentials, the blob a real quantised model, results recorded like the scale nightly. Emulators prove the code path; only this proves the cloud | Two green runs each, recorded with dates; a runbook section per cloud in `docs/operations/artifacts.md` with the IAM/service-account policy the node needs, and the honest line that a credential on every pulling node is the price of no relay |
 
 S1 is independent of the store and closes a shipped hole; it goes first. S2 and S3 share the adapter and
