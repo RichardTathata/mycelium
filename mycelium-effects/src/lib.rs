@@ -53,6 +53,8 @@ pub use sqlite::SqliteDestination;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use mycelium::mandate::{Mandate, MandateRefusal, PrincipalId, ResourceAuthority, TermId};
+
 /// What a destination is asked to do: apply `payload` under `operation_id`, exactly once.
 ///
 /// `content_hash` is the caller's, computed over the payload with [`content_hash`] so a retry can
@@ -82,7 +84,11 @@ impl Effect {
 }
 
 /// Why an effect was not committed. **Each names what is true afterwards.**
+///
+/// `#[non_exhaustive]` since the composed path: a `_` arm must **fail closed** — an unrecognised
+/// refusal is *not committed*, never *retry until it lands*.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EffectRefusal {
     /// This `operation_id` was committed with **different content**. Nothing was applied, and
     /// the destination still holds the first version.
@@ -101,6 +107,13 @@ pub enum EffectRefusal {
     /// may commit after this returns — which is a different claim from failure, and the reason
     /// a retry resolves it as `Replayed` or `Fresh` rather than being refused.
     DeliveryUnknown,
+    /// The effect's **composition** did not hold at the destination
+    /// (`docs/design/composed-effect.md` §9): `leg` names which of *attributed* or *authorised*
+    /// failed, and `reason` says why in the mandate contract's own words. **Nothing was applied
+    /// and no dedup row exists.** A caller must treat this as a denial, never as a retryable
+    /// fault — retrying an unauthorised effect until it lands is the laundering a revocation
+    /// exists to stop.
+    Unauthorised { leg: CompositionLeg, reason: String },
 }
 
 impl std::fmt::Display for EffectRefusal {
@@ -115,10 +128,125 @@ impl std::fmt::Display for EffectRefusal {
             Self::DeliveryUnknown => {
                 f.write_str("the destination did not answer in time; the effect's fate is unknown")
             }
+            Self::Unauthorised { leg, reason } => {
+                write!(f, "the effect's composition did not hold ({leg}): {reason}; nothing was applied")
+            }
         }
     }
 }
 impl std::error::Error for EffectRefusal {}
+
+/// Which leg of the composed guarantee a destination refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompositionLeg {
+    /// The principal is not the mandate's holder: the effect is presented under someone else's
+    /// authority.
+    Attribution,
+    /// The mandate does not authorise this operation at this resource now — a superseded epoch,
+    /// the wrong scope, outside its window, or the operation not enumerated.
+    Authority,
+}
+
+impl std::fmt::Display for CompositionLeg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Attribution => "attribution",
+            Self::Authority => "authority",
+        })
+    }
+}
+
+/// What a **composed** effect carries beside its bytes: who it is attributed to, under what
+/// authority, for which operation, and from which domain — the legs the evidence record
+/// reconstructs after the fact (`composed-effect.md` §3), presented *before* the commit so a
+/// destination can refuse rather than merely record.
+///
+/// The destination enforces two: the effect is **attributed** (the principal is the mandate's
+/// holder) and **authorised** (`ResourceAuthority::check` accepts the mandate for this operation at
+/// this resource now). The **domain** leg is carried, not re-verified — a destination holds no
+/// trust bundle, so it records the origin the gateway established, and the record says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Composition {
+    /// The verified principal the gateway resolved (`ActionEnvelope::actor`).
+    pub principal: PrincipalId,
+    /// The operation the mandate must enumerate (`ActionEnvelope::operation`).
+    pub operation: String,
+    /// The mandate presented for it — carried to the resource so it can verify for itself.
+    pub mandate: Mandate,
+    /// The origin domain when the caller came through a federated edge; `None` is local.
+    pub origin_domain: Option<String>,
+}
+
+/// An effect with its composition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposedEffect {
+    pub effect: Effect,
+    pub composition: Composition,
+}
+
+/// The composition check, pure: attribution first, then the mandate contract's own check
+/// ([`ResourceAuthority::check`]). The order is the reason a caller sees: an effect presented under
+/// someone else's mandate is an attribution failure whatever that mandate would have permitted.
+pub fn check_composition(
+    composition: &Composition,
+    authority: &ResourceAuthority,
+    now_ms: u64,
+) -> Result<(), EffectRefusal> {
+    if composition.mandate.holder != composition.principal {
+        return Err(EffectRefusal::Unauthorised {
+            leg: CompositionLeg::Attribution,
+            reason: format!(
+                "the effect is attributed to {:?} but the mandate is held by {:?}",
+                composition.principal.as_str(),
+                composition.mandate.holder.as_str()
+            ),
+        });
+    }
+    authority
+        .check(&composition.mandate, &composition.operation, now_ms)
+        .map_err(|e: MandateRefusal| EffectRefusal::Unauthorised { leg: CompositionLeg::Authority, reason: e.to_string() })
+}
+
+#[cfg(feature = "envelope")]
+impl Composition {
+    /// Build a composition from what the gateway already established — the envelope's verified
+    /// actor, its operation and resource (the operation a grant must enumerate is
+    /// `{operation}:{resource_key}`, as the gateway's own mandate assessment computes it) — and the
+    /// mandate the caller presented, so a provider that commits at a destination hands over the
+    /// gateway's facts rather than assembling them by hand.
+    ///
+    /// Refused before any check when the envelope was assembled under a **different** binding than
+    /// the presented grant (holder, term, scope or epoch differ): the two would then describe two
+    /// appointments, and a composition must describe one.
+    pub fn from_envelope(
+        envelope: &mycelium::ActionEnvelope,
+        presented: &mycelium::PresentedMandate,
+        origin_domain: Option<String>,
+    ) -> Result<Self, String> {
+        let principal = PrincipalId::new(&envelope.actor).ok_or("the envelope names no actor")?;
+        let mandate = presented.grant.mandate.clone();
+        if let Some(b) = &envelope.mandate {
+            if b.holder != mandate.holder {
+                return Err(format!("the envelope is bound to holder {:?}, the presented grant to {:?}", b.holder.as_str(), mandate.holder.as_str()));
+            }
+            if b.term != mandate.term {
+                return Err(format!("the envelope is bound to term {:?}, the presented grant to {:?}", b.term.as_str(), mandate.term.as_str()));
+            }
+            if b.scope != mandate.scope {
+                return Err(format!("the envelope is bound to scope {:?}, the presented grant to {:?}", b.scope, mandate.scope));
+            }
+            if b.epoch != mandate.epoch {
+                return Err(format!("the envelope is bound to epoch {}, the presented grant to {}", b.epoch, mandate.epoch));
+            }
+        }
+        Ok(Self {
+            principal,
+            operation: mycelium::mandate_operation(&envelope.operation, &envelope.resource),
+            mandate,
+            origin_domain,
+        })
+    }
+}
 
 /// A destination that can commit an effect exactly once and say so.
 ///
@@ -130,6 +258,24 @@ pub trait EffectDestination: Send + Sync {
 
     /// Apply `effect` and record its dedup result **in one transaction**, returning the receipt.
     fn apply(&self, effect: &Effect) -> Result<DestinationCommit, EffectRefusal>;
+
+    /// Apply a **composed** effect: refuse unless its composition holds at this resource
+    /// (`check_composition` against `authority` at `now_ms`), then [`apply`](Self::apply).
+    ///
+    /// The check and the transaction are two steps, so the same check-then-act window every
+    /// resource in this tree has (`authority-at-execution.md`) exists here: a process that pauses
+    /// between them after an epoch is superseded acts late by the pause. Narrowed and stated, not
+    /// eliminated; a destination that can take the authority *inside* its transaction should
+    /// override this.
+    fn apply_composed(
+        &self,
+        composed: &ComposedEffect,
+        authority: &ResourceAuthority,
+        now_ms: u64,
+    ) -> Result<DestinationCommit, EffectRefusal> {
+        check_composition(&composed.composition, authority, now_ms)?;
+        self.apply(&composed.effect)
+    }
 }
 
 /// Apply with a deadline, mapping an overrun to [`EffectRefusal::DeliveryUnknown`].

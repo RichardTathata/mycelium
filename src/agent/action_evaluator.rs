@@ -699,6 +699,23 @@ pub struct AeEvidence {
 }
 
 impl AeEvidence {
+    /// The evidence for a **destination's** refusal of a composed effect
+    /// (`docs/design/composed-effect.md` §9): a `Decided` record at enforcement point
+    /// `destination`, verdict `Deny`, execution `None` — nothing ran there, and the resource can
+    /// say so. `leg` is the composition leg the destination refused (`attribution` or
+    /// `authority`) and `reason` its own words, so a refusal after a gateway permit is as
+    /// reconstructable as a commit: the journal holds the gateway's decision and the resource's,
+    /// and a reader sees which point said no.
+    pub fn for_destination_refusal(
+        envelope: &ActionEnvelope,
+        leg: &str,
+        reason: impl Into<String>,
+    ) -> Self {
+        let mut decision = Decision::deny(reason, envelope.expected_policy_revision.clone().unwrap_or_default());
+        decision.checked = vec![format!("composition:{leg}")];
+        Self::for_decision(envelope, &decision, Execution::None, "destination")
+    }
+
     /// The evidence for one decision over one envelope.
     ///
     /// `execution` is the enforcement point's own observation, because only it knows whether it
@@ -2414,3 +2431,29 @@ mod a1_policy_tests {
     }
 }
 
+
+#[cfg(test)]
+mod destination_refusal_tests {
+    use super::*;
+
+    /// A destination's refusal of a composed effect is a `Decided` record at enforcement point
+    /// `destination`, denied, with nothing run — so a reader of the journal sees which point said
+    /// no, after the gateway's own permit (`composed-effect.md` §9).
+    #[test]
+    fn a_destination_refusal_is_a_denied_decision_at_the_destination_with_nothing_run() {
+        let via = NodeId::new("127.0.0.1", 7946).unwrap();
+        let envelope = ActionEnvelope::builder("worker-a", via, "tools/call", "tool:ledger@depot")
+            .identities("op-1", "attempt-1")
+            .expected_policy_revision("rev-9")
+            .validity(1_000, 2_000)
+            .build();
+        let e = AeEvidence::for_destination_refusal(&envelope, "authority", "mandate superseded: installed 4, presented 3");
+        assert_eq!(e.kind, RecordKind::Decided);
+        assert_eq!(e.enforcement_point, "destination");
+        assert_eq!(e.decision, DecisionKind::Deny);
+        assert_eq!(e.execution, Execution::None);
+        assert_eq!(e.subject, "worker-a");
+        assert_eq!(e.policy_revision, "rev-9");
+        assert_eq!(e.at_ms, 1_000, "the envelope's own time, carried");
+    }
+}

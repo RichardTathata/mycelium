@@ -7,7 +7,9 @@ no new receipt** — the whole of this record is a join between things that alre
 
 > Posture, once: stated at the strength it has (rule 6). This record makes the composed claim
 > **reconstructable from evidence**. That is a weaker thing than making it *enforced*, and §7 says
-> exactly where the line is.
+> exactly where the line is. **§9 (2026-09-29) moves the line for two legs:** a destination now
+> *refuses* an effect that is not attributed and authorised at the resource; the domain leg stays
+> carried.
 
 ---
 
@@ -127,3 +129,54 @@ not a v3 deliverable. This is about the axis' own claim, not about whether compo
 
 The `AeEvidence` fields and the reconstruction gate, in that order — the gate is written first and
 observed to fail, because a gate written after the thing it gates tends to describe it.
+
+## 9. Enforced at the destination *(2026-09-29)*
+
+§7 drew the line: reconstructable, not enforced. This section moves it, for two of the legs, to the
+one place an effect can be refused rather than merely recorded — **the destination's commit**.
+
+**The mechanism.** `mycelium-effects` gains a [`Composition`] beside the effect: the verified
+principal, the operation, the mandate presented for it, and the origin domain. A destination's
+`apply_composed(&ComposedEffect, &ResourceAuthority, now_ms)` runs `check_composition` and commits
+only when it holds:
+
+- **attributed** — the principal *is* the mandate's holder; an effect presented under someone else's
+  mandate is refused as `Unauthorised { leg: Attribution }` whatever that mandate would permit;
+- **authorised** — `ResourceAuthority::check` accepts the mandate for this operation at this
+  resource now: not a superseded epoch, the resource's own scope, inside the window, the operation
+  enumerated. Refused as `Unauthorised { leg: Authority }` with the mandate contract's own reason.
+
+A refusal leaves **no business row and no dedup row**, so a later authorised attempt is `Fresh` — the
+refused attempt never happened at the resource. `EffectRefusal` is `#[non_exhaustive]` from here; a
+`_` arm must fail closed, because an unrecognised refusal is *not committed*, never *retry until it
+lands*.
+
+**The domain leg is carried, not re-verified.** A destination holds no trust bundle and cannot
+re-check a federated credential; it records the origin the gateway established (`origin_domain`),
+and the evidence record (§3) still carries it. So the sentence this record now supports is: *a
+durable effect, **enforced** to be attributed and authorised at the resource, **recorded** as
+cross-domain*. That is stronger than §7 and still not everything: the identity behind *attributed*
+is as strong as item 7's verification (`require_identity_proofs` is default-off), and *authorised*
+is as strong as the epoch the resource has installed.
+
+**The window.** The check and the transaction are two steps. A process that pauses between them
+after an epoch is superseded acts late by the pause — the same check-then-act window every resource
+in this tree has (`authority-at-execution.md`), narrowed and stated, not eliminated. A destination
+that can take the authority inside its own transaction should override the default.
+
+**The gate** (`mycelium-effects/tests/composed.rs`): a composed effect that holds commits once and
+replays; each leg planted missing — someone else's mandate, an operation not enumerated, a
+superseded epoch, the wrong scope, an expired window — is refused by name and leaves no row; an
+epoch installed later at the resource supersedes an effect the earlier one authorised. Written
+before the check existed and observed to fail (every planted leg committed), per §8's own rule.
+
+**Both halves of the join, the same day.** `Composition::from_envelope` (feature `envelope`)
+builds the composition from the `ActionEnvelope` the gateway assembled and the `PresentedMandate`
+the caller carried — the principal is the envelope's verified actor, the operation is the one a
+grant must enumerate (`{operation}:{resource_key}`, as the gateway's own assessment computes it) —
+and refuses before any check when the envelope was assembled under a different binding than the
+presented grant. And a destination's refusal is **evidence**: `AeEvidence::for_destination_refusal`
+writes a `Decided` record at enforcement point `destination`, verdict `Deny`, execution `None`,
+with the leg in `checked`, so a refusal after a gateway permit is as reconstructable as a commit and
+a reader sees which point said no. The record kinds are unchanged; a consumer's `_` arm needs
+nothing new.

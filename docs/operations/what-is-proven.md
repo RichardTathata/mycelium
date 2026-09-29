@@ -26,6 +26,7 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 | The **twelve fuzz targets** each reach their own invariant (the reachability registry) — on push and schedule, not on PRs | `fuzz/fuzz_targets/` (12) | `ci.yml` job `fuzz` |
 | A 4-node integration cluster, a 3-node overlay cluster, a **two-mesh federation that does not merge with the link cut**, and the confined fleet — **no retries** | the Docker cluster suites | `cluster-suites.yml` jobs `integration` · `overlay` · `federation` · `confined-fleet` |
 | Every companion crate's suite, both SDKs, the co-op and AFN smokes, `cargo audit`, the loom model | the per-crate jobs | `ci.yml` jobs `wasm-host` · `agentfacts` · `blackboard` · `effects` · `commitment` · `wiki` · `reason` · `guardrails` · `python-sdk` · `sdk-ts` · `coop-smoke` · `afn-smoke` · `audit` · `loom` |
+| A **composed effect** is refused at the destination unless it is attributed (the principal is the mandate's holder) and authorised (`ResourceAuthority::check`, now) — each leg planted missing leaves no row; the domain leg is carried, not re-verified | `mycelium-effects/tests/composed.rs`, written before the check and seen committing every planted leg | `ci.yml` job `effects` |
 | A regression is fixed only with a test **seen failing first** | the repository's bar since 2026-09-26; stated in each fix's commit | `CLAUDE.md`; the v2.15.1 and v2.16.0 changelog entries |
 
 ## Demonstrated, with the bound stated

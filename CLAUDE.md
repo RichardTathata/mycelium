@@ -204,7 +204,7 @@ ourselves in all of them under `-D warnings`. Costed on the page, not open work;
 the **consumer-side-only per-partner budget** (the edge has no slot accounting — the one audit finding still
 needing a decision rather than a patch; **the composition finding is closed**, 2026-09-21, by recording the
 receipt's rung and the origin domain onto the execution record — `docs/design/composed-effect.md`, and note what
-it claims: the composed sentence is *reconstructable*, not *enforced*); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
+it claims: the composed sentence is *reconstructable*; since 2026-09-29 its attribution and authority legs are also **enforced at the destination** — `mycelium-effects`' `apply_composed` refuses by leg, `composed-effect.md` §9 — with the domain leg carried, not re-verified); and **V1, the nightly scale runner, whose self-hosted box is offline so the job queues
 silently and the criterion has never been met** (every gap of this kind, together and dated:
 `docs/operations/what-is-proven.md`). **Phase state (2026-09-23, after v2.12.0 — the axis is delivered).** Phases **B, C, D and E are
 closed**: D's private half (RA4, AE2, AE3) landed 2026-09-20/21 and E's (RA5, RA6, AE4's contract

@@ -173,7 +173,7 @@
       <div class="card card-accent-green"><div class="card-title">An evidence journal, exported</div><div class="card-body">Every authorisation decision and every execution is written to a node-local, fsynced journal; only a hash-bearing reference travels the shared medium. A signed exporter ships the records to your oversight tool in batches whose identity is derived from their contents, so a retry can never change a record under a reused id.</div></div>
       <div class="card card-accent-green"><div class="card-title">Replay</div><div class="card-body">A recorded run is a file you can re-run. A changed build replays until the first step where it departs, so "what would this fix have done" is answered by the recording, not by argument.</div></div>
     </div>
-    <div class="callout callout-orange"><strong>Stated precisely.</strong> A record is <em>reconstructable</em>, not enforced — nothing here stops a durable effect being attributed to the wrong principal. Coverage is never claimed complete: each observation names the one route it observed, so silence is never read as an all-clear.</div>
+    <div class="callout callout-orange"><strong>Stated precisely.</strong> A destination <em>refuses</em> an effect that is not attributed and authorised at the resource — someone else's mandate, an operation it does not enumerate, a superseded epoch, an expired window — and leaves no row; the cross-domain leg is <em>recorded</em>, not re-verified there, because a destination holds no trust bundle. Coverage is never claimed complete: each observation names the one route it observed, so silence is never read as an all-clear.</div>
   </div>
 </div>
 
