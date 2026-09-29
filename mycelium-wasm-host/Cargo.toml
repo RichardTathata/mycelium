@@ -17,11 +17,11 @@ categories = ["wasm", "network-programming"]
 mycelium = { path = "..", default-features = false }
 
 # WASM Component Model runtime. component-model is the WIT/canonical-ABI half.
-wasmtime = "46"
+wasmtime = "49"
 # WASI host implementation. Real components (std-based guests) import wasi:* from libc
 # init; the host provides a *restricted, deny-by-default* WASI context (no fs/net/env/stdio)
 # as part of the sandbox — a component's only doors are our scoped imports + minimal WASI.
-wasmtime-wasi = "46"
+wasmtime-wasi = "49"
 
 anyhow   = "1"
 # The ArtifactRuntime kind-dispatch trait (docs/design/artifact-library.md §4) is async —
