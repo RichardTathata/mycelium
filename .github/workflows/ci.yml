@@ -189,16 +189,16 @@ jobs:
     # mycelium-core (the WS-A dep-tree invariant).
     name: WASM host (WS-E M12)
     runs-on: ubuntu-latest
-    # S2's S3-compatible fixture (design-time-tooling.md §11): a MinIO with one bucket, started as
-    # a step because the official image needs `server /data` as its command and a GitHub service
-    # cannot set one (and Bitnami's pre-configured image left Docker Hub). The object-store test
-    # runs against it through MYCELIUM_S3_TEST_URL; without the variable the same test exercises
-    # the adapter over file:// and says so.
+    # S2's S3-compatible fixture (design-time-tooling.md §11): Adobe's S3Mock with one bucket made
+    # from its environment (MinIO's images are no longer publicly pullable from Docker Hub or
+    # quay.io — three pulls failed before this). The object-store test runs against it through
+    # MYCELIUM_S3_TEST_URL; without the variable the same test exercises the adapter over file://
+    # and says so.
     env:
       MYCELIUM_S3_TEST_URL: s3://mycelium-test/library
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: http://localhost:9000
+      AWS_ENDPOINT: http://localhost:9090
       AWS_ALLOW_HTTP: "true"
       AWS_REGION: us-east-1
     steps:
@@ -209,16 +209,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-retest.sh -p mycelium-wasm-host
       # The S3-compatible fixture: MinIO in a container, one bucket made with the runner's AWS CLI.
-      - name: Start MinIO and make the test bucket
+      - name: Start an S3-compatible store with the test bucket
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio server /data
+          docker run -d --name s3mock -p 9090:9090 -e initialBuckets=mycelium-test adobe/s3mock
           for i in $(seq 1 30); do
-            curl -sf http://localhost:9000/minio/health/live && break
+            curl -sf http://localhost:9090/ >/dev/null && break
             sleep 1
           done
-          aws --endpoint-url http://localhost:9000 s3 mb s3://mycelium-test
       # The object-store adapter against that bucket, plus clippy with every feature.
       - run: cargo test -p mycelium-wasm-host --features object_store,stem object_store_source -- --nocapture
       - run: cargo clippy -p mycelium-wasm-host --all-targets --features object_store,stem -- -D warnings
