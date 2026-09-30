@@ -29,3 +29,9 @@ two call shapes as `{operation, resource}` — and `wire_check::call_shapes` is 
   from `worker` resolves to exactly one edge and a `tools/call tool:intake` one is *ambiguous*).
 
 **Pages touched:** plan row W6 (◐), the checker's module doc, CHANGELOG, the golden fixture.
+
+**Closed the same day, after the tag.** `v2.17.0` was cut (the first tag carrying the checker) and the
+companion's PR #4 shipped the private half on that pin: the `deployment_declaration` batch beside
+`policy_deployment`, the conformance arm (seen failing first — *no payload schema for type*), and
+`declared::join` / `declared::wired` on the vendored co-op golden. The plan row is ✅; the proof page's
+open line is now the consumer's own rendering.
