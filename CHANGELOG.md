@@ -9,6 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Fuel by publisher (plan D19 / F1, `mycelium-wasm-host`).** `WasmHost::metered()` counts fuel
+  without a default budget; `WasmHost::instantiate_with_fuel` / `provision_with_fuel` give each
+  instance its own; `Provisioner::set_fuel_policy(FuelPolicy)` decides per entry from its verified
+  signer — an operator key's entries run under `operator_budget` (absent = unbounded), every other
+  trusted key is an agent principal under `agent_budget`. A call that runs past its budget is stopped
+  as `WasmHostError::FuelExhausted { budget }` (a new variant; a match on `WasmHostError` needs an
+  arm) and recorded by name (`Provisioner::invocations()`, `InvocationRecord`/`InvocationOutcome`,
+  counter `mycelium_artifact_invocations_total{outcome}`); the install stays live. `[hosts]` gains
+  `operator_publishers` and `operator_fuel_per_call`; `validate()` refuses a zero budget and an
+  operator list without a trusted list or outside it, by name. The stem wires all of it. Gate: an
+  agent-signed entry that loops (the committed `spin_component.wasm`) is stopped at the budget and
+  the record says so; the same echo bytes under the agent's key are stopped too, and under the
+  operator's key run to completion — seen failing first with the budget applied uniformly. The gate
+  also found that a trap **poisons** the component instance (wasmtime refuses to re-enter it), so a
+  stopped call used to leave a dead install behind a live advertisement; the serve loop now replaces
+  a trapped instance from the verified bytes (the guest's in-memory state is lost, its KV subtree is
+  not) and stops serving only if that fails, so the probe withdraws and reinstalls.
+
 ### Security
 - **wasmtime 49.0.1 / wasmtime-wasi 49.0.1** (from 46.0.3): RUSTSEC-2026-0316 (dynamic record lifting
   could allocate beyond the hostcall fuel limit) and RUSTSEC-2026-0314 (a guest could panic the host

@@ -90,7 +90,9 @@
 //! kinds = ["wasm-component", "blob"]
 //! install_budget_bytes = 8589934592
 //! headroom = 0.8
-//! trusted_publishers = ["ed25519:3f…"]
+//! trusted_publishers = ["ed25519:3f…", "ed25519:a7…"]
+//! operator_publishers = ["ed25519:3f…"]   # the operator's own key: unbounded
+//! fuel_per_call = 50000000               # every other trusted key is an agent: metered (D19)
 //! placement_root = "/var/lib/mycelium/artifacts"
 //!
 //! [[presence]]                           # keep 2–4 route optimizers alive fleet-wide (D17)
@@ -475,8 +477,15 @@ pub const HOSTABLE_KINDS: &[&str] = &["wasm-component", "blob"];
 
 /// `[hosts]` — what a unit that runs a provisioner can host (plan D15): the kinds it has runtimes
 /// for, its install budget, its headroom fraction, the publisher keys it trusts, its placement
-/// root, and the fuel budget an agent-published entry runs under (D19). These are the
-/// provisioner's own settings written down; nothing here reads them at runtime yet (D18 / R1).
+/// root, and the fuel rule (D19). These are the provisioner's own settings written down; the
+/// stem (`mycelium-stem`, the wasm-host crate) reads them at start.
+///
+/// **Fuel (D19).** `fuel_per_call` is the budget, in wasm instructions, that an entry published by
+/// an *agent* principal runs under: a call that runs past it is stopped and recorded as *fuel
+/// exhausted*. `operator_publishers` names the keys whose entries are the operator's own; they
+/// run under `operator_fuel_per_call` (absent = unbounded). The classification is the entry's
+/// verified signer, so `operator_publishers` must be a subset of `trusted_publishers` — without
+/// provenance a signer is a claim, and `validate()` refuses the combination by name.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct HostsDecl {
     #[serde(default)]
@@ -491,6 +500,10 @@ pub struct HostsDecl {
     pub placement_root: Option<String>,
     #[serde(default)]
     pub fuel_per_call: Option<u64>,
+    #[serde(default)]
+    pub operator_publishers: Vec<String>,
+    #[serde(default)]
+    pub operator_fuel_per_call: Option<u64>,
 }
 
 impl HostsDecl {
@@ -564,6 +577,26 @@ impl NodeCapabilityConfig {
                 && !(hr > 0.0 && hr <= 1.0)
             {
                 return Err(invalid("hosts.headroom", format!("{hr} is outside (0, 1]")));
+            }
+            if h.fuel_per_call == Some(0) {
+                return Err(invalid("hosts.fuel_per_call", "a budget of 0 stops every call before its first instruction"));
+            }
+            if h.operator_fuel_per_call == Some(0) {
+                return Err(invalid("hosts.operator_fuel_per_call", "a budget of 0 stops every call before its first instruction"));
+            }
+            if !h.operator_publishers.is_empty() && h.trusted_publishers.is_empty() {
+                return Err(invalid(
+                    "hosts.operator_publishers",
+                    "names operator keys but hosts.trusted_publishers is empty: without provenance a signer is a claim, so nothing could tell an operator's entry from an agent's",
+                ));
+            }
+            for k in &h.operator_publishers {
+                if !h.trusted_publishers.contains(k) {
+                    return Err(invalid(
+                        "hosts.operator_publishers",
+                        format!("{k:?} is not in hosts.trusted_publishers (an operator key must be a trusted key)"),
+                    ));
+                }
             }
         }
         for (i, p) in self.presence.iter().enumerate() {
@@ -956,6 +989,15 @@ max_providers = 4
 
         let e = refused("[hosts]\nheadroom = 1.5\n");
         assert!(e.contains("outside (0, 1]"), "{e}");
+
+        let e = refused("[hosts]\nfuel_per_call = 0\n");
+        assert!(e.contains("hosts.fuel_per_call") && e.contains("budget of 0"), "{e}");
+
+        let e = refused("[hosts]\noperator_publishers = [\"ed25519:aa\"]\n");
+        assert!(e.contains("hosts.operator_publishers") && e.contains("trusted_publishers is empty"), "{e}");
+
+        let e = refused("[hosts]\ntrusted_publishers = [\"ed25519:bb\"]\noperator_publishers = [\"ed25519:aa\"]\n");
+        assert!(e.contains("hosts.operator_publishers") && e.contains("not in hosts.trusted_publishers"), "{e}");
 
         let e = refused("[[requirement]]\nns = \"a\"\nname = \"b\"\n[requirement.attrs]\nx = { gte = 1, lte = 9 }\n");
         assert!(e.contains("exactly one operator"), "{e}");
