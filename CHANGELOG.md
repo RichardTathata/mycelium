@@ -20,7 +20,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   placeholder the checker accepted. What is not recut, and why, is in the compose header.
 - **The GCS fixture (plan S3).** The object-store adapter's test runs once per configured store URL:
   `MYCELIUM_S3_TEST_URL` (S3Mock, as before) and now `MYCELIUM_GCS_TEST_URL` against `fake-gcs-server`
-  in CI, reached through the GCS builder's `GOOGLE_BASE_URL` with `GOOGLE_SKIP_SIGNATURE=true`. The
+  in CI, reached through the GCS builder's `GOOGLE_BASE_URL` with a static `GOOGLE_BEARER_TOKEN` (the
+  put path fetches a credential regardless of skip-signature in `object_store` 0.14). The
   same sequence — publish, manifest round trip, ranged staging, provenance and the streamed hash —
   over both; with neither variable the local `file://` store stands in and the test says so. An
   emulator proves the code path; only a real bucket proves the cloud (S4, open).

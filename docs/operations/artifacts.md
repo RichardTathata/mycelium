@@ -100,9 +100,10 @@ library instead), or malformed (400). The stem binary mounts the route when buil
 ### Object stores: what CI proves and what it does not
 
 The adapter (`object_store` feature) is exercised in CI against two emulators — S3Mock for `s3://`
-and `fake-gcs-server` for `gs://` (pointed at through `GOOGLE_BASE_URL` with `GOOGLE_SKIP_SIGNATURE=true`;
-against real GCS neither variable is set and the builder takes workload-identity or service-account
-credentials from the environment). An emulator proves the code path: URL parsing, the manifest round
+and `fake-gcs-server` for `gs://` (pointed at through `GOOGLE_BASE_URL`, with a static
+`GOOGLE_BEARER_TOKEN` the emulator ignores — `object_store` 0.14's put path fetches a credential
+regardless of `google_skip_signature`; against real GCS neither variable is set and the builder takes
+workload-identity or service-account credentials from the environment). An emulator proves the code path: URL parsing, the manifest round
 trip, ranged staging under the memory bound, provenance and the streamed hash. It does not prove the
 cloud — IAM, bucket policies, region and egress behaviour — which only a run against a real bucket
 does; that evidence is not recorded yet (plan S4), and this page will carry the dates when it is.

@@ -300,8 +300,9 @@ mod tests {
 
     /// The store URLs from the environment — `MYCELIUM_S3_TEST_URL=s3://bucket/prefix` (S2; CI
     /// runs an S3-compatible store, Adobe's S3Mock) and `MYCELIUM_GCS_TEST_URL=gs://bucket/prefix`
-    /// (S3; CI runs `fake-gcs-server`, reached through `GOOGLE_BASE_URL` with
-    /// `GOOGLE_SKIP_SIGNATURE=true`), each with the builders' credentials beside it. With neither
+    /// (S3; CI runs `fake-gcs-server`, reached through `GOOGLE_BASE_URL` with a static
+    /// `GOOGLE_BEARER_TOKEN` the emulator ignores — the put path fetches a credential regardless of
+    /// `skip_signature` in `object_store` 0.14), each with the builders' credentials beside it. With neither
     /// set, the local `file://` store stands in and the test says so: the adapter is exercised, the
     /// cloud is not. An emulator proves the code path; only a real bucket proves the cloud (S4).
     fn test_store_urls(dir: &std::path::Path) -> Vec<(String, bool)> {

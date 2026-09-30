@@ -218,10 +218,13 @@ jobs:
       AWS_ALLOW_HTTP: "true"
       AWS_REGION: us-east-1
       # S3 (design-time-tooling.md §11): the GCS path over fake-gcs-server, reached through the
-      # builder's base URL with signing skipped — the same test body, a second store.
+      # builder's base URL, with a static bearer the emulator ignores — the same test body, a second
+      # store. (`google_skip_signature` is not enough: object_store 0.14's put path fetches a
+      # credential regardless, and without one it asks the GCE metadata server; a static bearer is
+      # a credential that needs no server.)
       MYCELIUM_GCS_TEST_URL: gs://mycelium-test/library
       GOOGLE_BASE_URL: http://localhost:4443
-      GOOGLE_SKIP_SIGNATURE: "true"
+      GOOGLE_BEARER_TOKEN: emulator
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
