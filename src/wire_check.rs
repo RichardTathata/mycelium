@@ -29,7 +29,9 @@
 //!
 //! The JSON output is a versioned document, [`DECLARATION_SCHEMA`], with the `revision` the caller
 //! supplies (the git commit of the units directory) so a consumer can join it to runtime records
-//! by `(principal, ns, name, schema_id)` — the plan's §9. A change to its shape is a schema version.
+//! by `(principal, ns, name, schema_id)` — the plan's §9. A change to its shape is a schema version;
+//! the pin is `docs/reference/declaration.schema.json` (W6), validated against the golden and a
+//! fresh report by `tests/declaration_schema.rs`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -141,7 +143,13 @@ pub fn mandate_operation_form(operation: &str, resource: &str) -> String {
 /// The two call shapes a capability edge could take at a provider, as the provider enforcement
 /// point derives them: a skill (`skill.invoke` on `skill:{ns}/{name}`) or an MCP tool
 /// (`tools/call` on `tool:{name}`). The overlay admits an edge if either is authorised.
-fn call_shapes(ns: &str, name: &str) -> [(String, String); 2] {
+/// The two call shapes a requirement `ns/name` can take at a gateway — the operation and resource
+/// a grant must enumerate and a rule must admit: `skill.invoke` on `skill:{ns}/{name}` (an A2A
+/// skill) and `tools/call` on `tool:{name}` (an MCP tool). The authority overlay (W4) reasons over
+/// these; the JSON carries them on every edge (W6) so a consumer joining runtime records never
+/// re-derives them — and sees that the tool shape drops `ns`, which is why a tool-shaped
+/// observation can match more than one edge.
+pub fn call_shapes(ns: &str, name: &str) -> [(String, String); 2] {
     [
         ("skill.invoke".to_string(), format!("skill:{ns}/{name}")),
         ("tools/call".to_string(), format!("tool:{name}")),
@@ -191,6 +199,18 @@ pub struct Edge {
     pub name:      String,
     pub schema_id: Option<String>,
     pub providers: Vec<Provider>,
+    /// The call shapes this edge takes at a gateway ([`call_shapes`]), in the form a grant
+    /// enumerates and an evidence record carries — the join to runtime records on the authority
+    /// side (W6). Always both; a consumer maps each through its own reviewed catalogue.
+    #[serde(default)]
+    pub operations: Vec<CallShape>,
+}
+
+/// One call shape of an [`Edge`]: an operation on a resource, as the gateway names them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallShape {
+    pub operation: String,
+    pub resource:  String,
 }
 
 /// A lane and which units sit on each side.
@@ -634,6 +654,10 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                 name:      r.name.clone(),
                 schema_id: r.schema_id.clone(),
                 providers,
+                operations: call_shapes(&r.ns, &r.name)
+                    .into_iter()
+                    .map(|(operation, resource)| CallShape { operation, resource })
+                    .collect(),
             });
         }
         for g in &u.config.groups {

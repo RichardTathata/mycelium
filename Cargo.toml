@@ -153,6 +153,9 @@ metrics                     = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true }
 
 [dev-dependencies]
+# W6: the declaration document's schema (docs/reference/declaration.schema.json) is validated
+# against the golden and a fresh report by a real validator, test-only.
+jsonschema = "0.58"
 # Enable mycelium-core's test-only helpers (N_GOSSIP_SHARDS, store_hash, …) for
 # this crate's test builds. Cargo unions this with the normal dependency above, so
 # `test-support` is active only for tests, never a plain `cargo build`.
