@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mycelium.design/declaration/1",
+  "title": "Mycelium deployment declaration",
+  "description": "The document `mycelium wire-check --format json` emits (docs/plans/design-time-tooling.md \u00a79): what a set of units declares and how it would wire, before the fleet exists. A consumer joins it to runtime records by (principal, ns, name, schema_id). A change to this shape is a new schema version; this file is the pin (W6).",
+  "type": "object",
+  "required": [
+    "schema",
+    "revision",
+    "units",
+    "artifacts",
+    "edges",
+    "lanes",
+    "findings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "mycelium.design/declaration/1"
+    },
+    "revision": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The units directory's revision (a git commit), or null when unknown."
+    },
+    "units": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unit"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The artifact descriptions the check read, by name."
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/lane"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    }
+  },
+  "$defs": {
+    "capname": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+",
+      "description": "`ns/name`, optionally followed by a schema or attribute rendering."
+    },
+    "unit": {
+      "type": "object",
+      "required": [
+        "name",
+        "principal",
+        "offers",
+        "requires",
+        "groups",
+        "hosts_kinds",
+        "presence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The principal this unit presents (D9); the join key on the authority side."
+        },
+        "offers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/capname"
+          }
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hosts_kinds": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "wasm-component",
+              "blob"
+            ]
+          }
+        },
+        "presence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "`ns/name min..max` or `ns/name min..`."
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": [
+        "requirer",
+        "principal",
+        "ns",
+        "name",
+        "schema_id",
+        "providers",
+        "operations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requirer": {
+          "type": "string"
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ns": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/call_shape"
+          },
+          "description": "The call shapes this edge takes at a gateway, as a grant enumerates them (`{operation}:{resource}`) and an evidence record carries them \u2014 the join on the authority side. Both shapes, always; the tool shape drops `ns`, so a tool-shaped observation can match more than one edge and a consumer must say so rather than pick."
+        }
+      }
+    },
+    "provider": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "via",
+            "unit",
+            "principal"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "via": {
+              "const": "unit"
+            },
+            "unit": {
+              "type": "string"
+            },
+            "principal": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "via",
+            "group",
+            "defined_by"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "via": {
+              "const": "group"
+            },
+            "group": {
+              "type": "string"
+            },
+            "defined_by": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "via",
+            "artifact",
+            "hosts"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "via": {
+              "const": "artifact"
+            },
+            "artifact": {
+              "type": "string"
+            },
+            "hosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "proposed": {
+              "type": "boolean",
+              "description": "D20: binds only after a reviewer accepts it (absent when false)."
+            }
+          }
+        }
+      ]
+    },
+    "lane": {
+      "type": "object",
+      "required": [
+        "name",
+        "producers",
+        "consumers"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "producers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "consumers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "severity",
+        "kind",
+        "unit",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "severity": {
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "description": "One of the finding classes the checker's module doc tables; a new class is additive, a renamed one is a schema version."
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "call_shape": {
+      "type": "object",
+      "required": [
+        "operation",
+        "resource"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "enum": [
+            "skill.invoke",
+            "tools/call"
+          ]
+        },
+        "resource": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

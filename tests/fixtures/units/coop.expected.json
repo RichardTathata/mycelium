@@ -103,6 +103,16 @@
           "unit": "rush-worker",
           "principal": "rush-worker"
         }
+      ],
+      "operations": [
+        {
+          "operation": "skill.invoke",
+          "resource": "skill:rush/worker"
+        },
+        {
+          "operation": "tools/call",
+          "resource": "tool:worker"
+        }
       ]
     },
     {
@@ -116,6 +126,16 @@
           "via": "group",
           "group": "depots",
           "defined_by": "dispatcher"
+        }
+      ],
+      "operations": [
+        {
+          "operation": "skill.invoke",
+          "resource": "skill:logistics/intake"
+        },
+        {
+          "operation": "tools/call",
+          "resource": "tool:intake"
         }
       ]
     },
@@ -133,6 +153,16 @@
             "depot-a",
             "depot-b"
           ]
+        }
+      ],
+      "operations": [
+        {
+          "operation": "skill.invoke",
+          "resource": "skill:route/optimize"
+        },
+        {
+          "operation": "tools/call",
+          "resource": "tool:optimize"
         }
       ]
     },
@@ -152,6 +182,16 @@
           "via": "unit",
           "unit": "depot-b",
           "principal": "depot-b"
+        }
+      ],
+      "operations": [
+        {
+          "operation": "skill.invoke",
+          "resource": "skill:depot/intake"
+        },
+        {
+          "operation": "tools/call",
+          "resource": "tool:intake"
         }
       ]
     }

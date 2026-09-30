@@ -43,6 +43,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gate `tests/wire_check_examples.rs` holds both ways — every directory clean, and deleting any
   capability's last provider turns its directory red (seen failing first, twice), which is why each
   example's caller is written down as a requirer.
+- **The declaration document's schema (plan W6, public half).** `docs/reference/declaration.schema.json`
+  pins `mycelium.design/declaration/1`; `tests/declaration_schema.rs` validates the golden and freshly
+  generated reports against it with a real validator (`jsonschema`, a dev-dependency only) and plants
+  three refusals. Every `wire_check::Edge` gains `operations` — its two call shapes as
+  `{operation, resource}` (`CallShape`; `call_shapes` is public) — so a consumer joining runtime records
+  maps them through its own catalogue rather than re-deriving them. Additive: the document's schema
+  version is unchanged and no consumer existed before the pin.
 
 - **Fuel by publisher (plan D19 / F1, `mycelium-wasm-host`).** `WasmHost::metered()` counts fuel
   without a default budget; `WasmHost::instantiate_with_fuel` / `provision_with_fuel` give each
