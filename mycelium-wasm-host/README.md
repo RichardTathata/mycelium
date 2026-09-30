@@ -102,6 +102,12 @@ no presence floor — until a key in `require_reviewers` co-signs it (`mycelium-
 <ns/name> --key <reviewer-seed>`; `verify --reviewer` names a forged or unlisted acceptance). The
 acceptance is an Ed25519 signature over the publisher's signed content *and* signature; the line is
 rewritten in place (same KV key). An entry with neither field still encodes as v1 byte for byte.
+**The gateway door (A3, feature `gateway`):** `artifact_router(agent, trusted, librarian_publisher)`
+mounts `POST /gateway/artifacts/publish` (scope `artifact:publish`) through `with_http_routes` before
+`start()`; the body is one already-signed manifest line (`{"entry_hex": …}`), verified against
+`trusted` and written to `installable/`. Refusals by name: 403 unsigned / untrusted / does-not-verify /
+no-trusted-configured, 409 for a librarian-managed signer, 400 malformed. The stem binary mounts it
+from `[hosts].trusted_publishers`. Gate: `tests/gateway.rs`.
 
 **Provenance (landed):** content-addressing gives *integrity* (the bytes are what the catalog
 named); `InstallableEntry::signed_by(key)` adds *provenance* — an Ed25519 signature over the

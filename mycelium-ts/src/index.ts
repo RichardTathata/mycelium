@@ -44,4 +44,5 @@ export {
   DomainInfo,
   CatalogView,
 } from "./federation";
+export { Artifacts, ArtifactError, PublishReceipt } from "./artifacts";
 export { TOKEN_ENV, resolveToken, authHeaders, type AuthOptions } from "./auth";

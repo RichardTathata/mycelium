@@ -44,6 +44,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   capability's last provider turns its directory red (seen failing first, twice), which is why each
   example's caller is written down as a requirer.
 
+- **`POST /gateway/artifacts/publish` (plan A3, `mycelium-wasm-host` feature `gateway`).** A named,
+  checked door into the gossiped catalogue: the body is one **already-signed** catalogue line
+  (`{"entry_hex": …}`, the hex of a manifest line), verified against the node's trusted publishers
+  and written with `publish_installable`; the publisher's key never reaches a gateway and the bytes
+  never ride the request. New scope family **`artifact:publish`** (its own, not `kv:write` — a
+  narrower power with a check the raw KV route does not make). Refusals by name: 403 `unsigned
+  entry` / `untrusted publisher` / `provenance does not verify` / `no trusted publishers configured`,
+  409 `librarian-managed signer` (a librarian's manifest would tombstone the line at its next sync),
+  400 `malformed entry`. `artifact_router(agent, trusted, librarian_publisher)` is merged with
+  `with_http_routes` before `start()`; the stem binary mounts it from `[hosts].trusted_publishers`.
+  SDK verbs `artifacts().publish(entry_hex)` (`mycelium-py`, `mycelium-ts`) post the signed line
+  and surface a refusal under the gateway's own name (`ArtifactError.kind`). Gate: a two-node test
+  in which the signed line appears under `installable/` on the second node with provenance intact,
+  every refusal answers by name, and `kv:write` does not open the door.
 - **Fuel by publisher (plan D19 / F1, `mycelium-wasm-host`).** `WasmHost::metered()` counts fuel
   without a default budget; `WasmHost::instantiate_with_fuel` / `provision_with_fuel` give each
   instance its own; `Provisioner::set_fuel_policy(FuelPolicy)` decides per entry from its verified

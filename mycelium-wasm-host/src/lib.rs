@@ -64,6 +64,10 @@ pub use librarian::{
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{Stem, StemError, StemOptions, StemSource};
+#[cfg(feature = "gateway")]
+pub mod gateway;
+#[cfg(feature = "gateway")]
+pub use gateway::{artifact_router, ArtifactGateway};
 pub use tools::{
     accept as accept_entry, acceptance_problem, build_entry, kind_from_name, kind_name, list as list_manifest,
     publish as publish_artifact, publisher_from_str, read_description_and_bytes, render_entry, select_entry,

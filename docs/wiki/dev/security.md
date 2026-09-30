@@ -26,7 +26,7 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    `/gateway/wiki/ingest`, `/gateway/tuple/put` … answered without a bearer while the
    companion docs claimed coverage — gates in core and `mycelium-reason`, ledger entry
    in `docs/analysis/ratings.md`. Companion paths have **scope families** in
-   `required_scope` (`llm:*` for reason, `wiki:*`, `board:*`, `tuple:*`), exact paths only;
+   `required_scope` (`llm:*` for reason, `wiki:*`, `board:*`, `tuple:*`, `artifact:publish` for the wasm-host gateway door since 2026-09-30), exact paths only;
    unlisted companion paths stay `admin`. *Fixed 2026-09-05 (external review, finding 4):*
    the **node-level** `/mcp`, `/signals/{kind}`, `/consensus/{slot}` were public by routing
    comment while this page and `rbac.md` listed only the four probes — `POST /mcp` `tools/call`

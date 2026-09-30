@@ -72,6 +72,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `wiki:read` / `wiki:write` | `mycelium-wiki`: `/wiki/read`, `/wiki/query` / `/wiki/propose`, `/wiki/ingest` |
 | `board:read` / `board:write` | `mycelium-blackboard`: `/bb/read`, `/bb/depth` / `/bb/post`, `claim`, `ack`, `release` |
 | `tuple:read` / `tuple:write` | `mycelium-tuple-space`: `/tuple/depth` / `put`, `take`, `take_by_key`, `complete`, `ack` |
+| `artifact:publish` | `mycelium-wasm-host` (feature `gateway`, plan A3): `POST /gateway/artifacts/publish` — one **already-signed** catalogue line, verified against the node's `[hosts].trusted_publishers` and written to `installable/`. Its own family, not `kv:write`, because it is a narrower power with a check the raw KV route does not make; note that `kv:write` can still write `installable/` through `POST /gateway/kv`, so the defence that holds in every case is the provisioner's `require_provenance` |
 | `admin` | the deny-by-default fallback for any route not in the table — including any companion path not listed above |
 
 > **Since 2026-09-04** companion routes (merged via `with_http_routes`) sit behind this gate at

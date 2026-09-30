@@ -104,20 +104,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..StemOptions::default()
     };
 
+    // The librarian's publisher key, parsed once: the librarian owns it, and (A3) the gateway
+    // publish route refuses entries under it, since the librarian's manifest would tombstone them.
+    let librarian_publisher: Option<[u8; 32]> = match (&librarian, &publisher) {
+        (Some(_), Some(p)) => {
+            let key = p.strip_prefix("ed25519:").ok_or("--librarian needs --publisher ed25519:<hex>")?;
+            let bytes = (0..32)
+                .map(|i| u8::from_str_radix(key.get(2 * i..2 * i + 2).unwrap_or("zz"), 16))
+                .collect::<Result<Vec<u8>, _>>()
+                .map_err(|_| "--publisher must be ed25519:<64 hex>")?;
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes);
+            Some(k)
+        }
+        (Some(_), None) => return Err("--librarian needs --publisher ed25519:<hex>".into()),
+        _ => None,
+    };
+
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async move {
         let node = NodeId::new(&config.bind_address, config.bind_port)?;
         let agent = Arc::new(GossipAgent::new(node, config));
+        // A3: the gateway publish route, before start(), from the hosts table's trusted keys.
+        #[cfg(feature = "gateway")]
+        if let Some(h) = &units.hosts {
+            let trusted = h
+                .trusted_publishers
+                .iter()
+                .map(|s| mycelium_wasm_host::publisher_from_str(s))
+                .collect::<Result<Vec<_>, _>>()?;
+            if !trusted.is_empty() {
+                agent.with_http_routes(mycelium_wasm_host::artifact_router(Arc::clone(&agent), trusted, librarian_publisher));
+            }
+        }
         agent.start().await?;
 
         let _librarian = match (&librarian, &library) {
             (Some(manifest), Some(dir)) => {
-                let key = publisher.as_deref().and_then(|s| s.strip_prefix("ed25519:")).ok_or("--librarian needs --publisher ed25519:<hex>")?;
-                let bytes = (0..32)
-                    .map(|i| u8::from_str_radix(key.get(2 * i..2 * i + 2).unwrap_or("zz"), 16))
-                    .collect::<Result<Vec<u8>, _>>()
-                    .map_err(|_| "--publisher must be ed25519:<64 hex>")?;
-                let mut publisher = [0u8; 32];
-                publisher.copy_from_slice(&bytes);
+                let publisher = librarian_publisher.expect("checked above");
                 Some(spawn_librarian(
                     Arc::clone(&agent),
                     Arc::new(FsLibrarySource::open(dir)?) as Arc<_>,

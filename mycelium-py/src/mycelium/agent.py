@@ -78,6 +78,7 @@ def _raise_if_protected(resp: httpx.Response) -> None:
             return
         if data.get("error") == "protected_kind":
             raise ProtectedKindError(str(data.get("kind", "")), str(data.get("message", "protected kind")))
+from .artifacts import Artifacts
 from .federation import Federation
 
 
@@ -359,6 +360,14 @@ class MyceliumAgent:
         refusal's ``sent`` and ``delivery`` fields mean.
         """
         return Federation(_pool=self._pool)
+
+    # ── Artifact catalogue ──────────────────────────────────────────────────
+
+    def artifacts(self) -> Artifacts:
+        """The artifact catalogue's gateway door (plan A3): publish an **already-signed**
+        catalogue line into the gossiped ``installable/`` catalogue. The key stays with the
+        publisher; the bytes stay at the library. See :mod:`mycelium.artifacts`."""
+        return Artifacts(_pool=self._pool)
 
     # ── Capability advertisement ────────────────────────────────────────────
 
