@@ -86,6 +86,18 @@ For *origin*, sign the catalogue entry. A publisher signs with a key
 trusted publisher — even if its bytes hash correctly. Publisher keys are an
 operator concern (wrap a KMS); the demo uses a fixed seed.
 
+### Publishing through a gateway (A3)
+
+A line the CI step already signed can be announced to a running cluster without touching the
+library's manifest: `POST /gateway/artifacts/publish` with `{"entry_hex": "<the manifest line>"}`
+under a bearer holding `artifact:publish` (both SDKs: `agent.artifacts().publish(line)`). The node
+verifies the line against its `[hosts].trusted_publishers` and writes it to `installable/`; the
+bytes stay at the library. It is refused by name when unsigned, untrusted, altered after signing,
+or when the node lists no trusted publishers (403), when the signer is a key a librarian on that
+node manages (409 — the librarian's manifest would tombstone it at the next sync; publish to the
+library instead), or malformed (400). The stem binary mounts the route when built with the
+`gateway` feature and the hosts table names trusted publishers.
+
 ### Operational notes
 
 - **Metrics.** The provisioner/librarian emit Prometheus-ready counters through the `metrics`

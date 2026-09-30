@@ -55,10 +55,16 @@ metrics = "0.24"
 # subscriber.
 tracing-subscriber = { version = "0.3", optional = true }
 object_store = { version = "0.14", features = ["aws", "gcp"], optional = true }
+# A3: the gateway publish route (`POST /gateway/artifacts/publish`), merged into the node's
+# gateway via `with_http_routes` — the same seam every companion uses.
+axum       = { version = "0.8", optional = true }
+serde      = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
 
 [features]
 stem = ["dep:tracing-subscriber"]
 object_store = ["dep:object_store"]
+gateway = ["mycelium/gateway", "dep:axum", "dep:serde", "dep:serde_json"]
 
 [[bin]]
 name              = "mycelium-stem"
@@ -74,6 +80,10 @@ required-features = ["stem"]
 [dev-dependencies]
 # test-only: the bind-verified, process-unique port allocator (retires the free_port TOCTOU
 # flake class). Cargo unions this with the normal `mycelium` dep for the test target only.
-mycelium = { path = "..", default-features = false, features = ["test-util"] }
+# `compliance` so the gateway gate can see the scope layer refuse a wrong family (RBAC is a
+# compliance feature of the node; without it a bearer is a bearer).
+mycelium = { path = "..", default-features = false, features = ["test-util", "compliance"] }
 metrics-util = "0.20.4"
 tokio = { version = "1.35", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1.0"

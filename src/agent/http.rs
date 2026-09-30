@@ -787,6 +787,10 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/bb/claim"   => "board:write",
         "/gateway/bb/ack"     => "board:write",
         "/gateway/bb/release" => "board:write",
+        //   mycelium-wasm-host → `artifact:*` (A3): a signed catalogue line into `installable/`.
+        //   Its own family, not `kv:write`, because it is a narrower power with a check the raw
+        //   KV route does not make (provenance against the node's trusted publishers).
+        "/gateway/artifacts/publish" => "artifact:publish",
         //   mycelium-tuple-space → `tuple:*`.
         "/gateway/tuple/depth"       => "tuple:read",
         "/gateway/tuple/put"         => "tuple:write",
@@ -5125,6 +5129,7 @@ mod tests {
         assert_eq!(required_scope(&Method::POST, "/gateway/wiki/ingest"), "wiki:write");
         assert_eq!(required_scope(&Method::GET,  "/gateway/bb/depth"), "board:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/tuple/take"), "tuple:write");
+        assert_eq!(required_scope(&Method::POST, "/gateway/artifacts/publish"), "artifact:publish");
         // deny-by-default: anything unmapped requires admin — including an unlisted companion path.
         assert_eq!(required_scope(&Method::POST, "/gateway/some/future/route"), "admin");
         assert_eq!(required_scope(&Method::POST, "/gateway/wiki/some/future/verb"), "admin");
@@ -5582,6 +5587,8 @@ mod tests {
         cfg.gateway_scoped_tokens = vec![
             crate::GatewayToken { token: "llmro".into(), scopes: vec!["llm:read".into()] },
             crate::GatewayToken { token: "wikiw".into(), scopes: vec!["wiki:write".into()] },
+            crate::GatewayToken { token: "artpub".into(), scopes: vec!["artifact:publish".into()] },
+            crate::GatewayToken { token: "kvw".into(), scopes: vec!["kv:write".into()] },
             crate::GatewayToken { token: "super".into(), scopes: vec!["*".into()] },
         ];
         let agent = Arc::new(GossipAgent::new(id, cfg));
@@ -5590,6 +5597,7 @@ mod tests {
             axum::Router::new()
                 .route("/gateway/reason/trace/{run_id}", axum::routing::get(ok))
                 .route("/gateway/wiki/ingest", axum::routing::post(ok))
+                .route("/gateway/artifacts/publish", axum::routing::post(ok))
                 .route("/gateway/wiki/some/future/verb", axum::routing::post(ok)),
         );
         agent.start().await.unwrap();
@@ -5608,6 +5616,10 @@ mod tests {
         let body: serde_json::Value = r.json().await.unwrap();
         assert_eq!(body["required_scope"], "admin");
         assert_eq!(post("/gateway/wiki/some/future/verb", "super").await.unwrap().status(), 200, "wildcard reaches it");
+        // A3: the artifact publish door has its own family; kv:write does not open it.
+        assert_eq!(post("/gateway/artifacts/publish", "artpub").await.unwrap().status(), 200, "artifact:publish reaches artifacts/publish");
+        assert_eq!(post("/gateway/artifacts/publish", "kvw").await.unwrap().status(), 403, "kv:write is not artifact:publish");
+        assert_eq!(post("/gateway/artifacts/publish", "wikiw").await.unwrap().status(), 403, "wiki:write is not artifact:publish");
 
         agent.shutdown().await;
     }

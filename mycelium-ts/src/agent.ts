@@ -1,5 +1,6 @@
 import { sseStream } from "./sse";
 import { Federation } from "./federation";
+import { Artifacts } from "./artifacts";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 import {
   CapabilityHandle,
@@ -143,6 +144,15 @@ export class MyceliumAgent {
    */
   federation(): Federation {
     return new Federation(this.base, this.auth, this.timeout);
+  }
+
+  /**
+   * The artifact catalogue's gateway door (plan A3): publish an **already-signed** catalogue line
+   * into the gossiped `installable/` catalogue. The key stays with the publisher; the bytes stay
+   * at the library. See `./artifacts`.
+   */
+  artifacts(): Artifacts {
+    return new Artifacts(this.base, this.auth, this.timeout);
   }
 
   // ── Introspection ─────────────────────────────────────────────────────────

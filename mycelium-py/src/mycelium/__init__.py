@@ -11,6 +11,7 @@ from .agent import (
     ProtectedKindError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
+from .artifacts import Artifacts, ArtifactError
 from .federation import Federation, FederationError, DeliveryUnknown
 from .prompt_skill import PromptTemplate, PromptSkillClient
 from .reason import (
@@ -37,6 +38,8 @@ __all__ = [
     "A2aClient",
     "arguments_digest",
     "mandate_request_bytes",
+    "Artifacts",
+    "ArtifactError",
     "Federation",
     "FederationError",
     "DeliveryUnknown",
