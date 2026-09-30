@@ -1,0 +1,12 @@
+# Already on v2, and naming a schema the directory does not define at all.
+principal = "planner"
+
+[[requirement]]
+ns        = "llm"
+name      = "inference"
+schema_id = "llm/inference/v2"
+
+[[requirement]]
+ns        = "plan"
+name      = "route"
+schema_id = "plan/route/v9"

@@ -103,6 +103,11 @@ pub struct CheckOptions {
     pub strict_deployed: bool,
     /// The revision to stamp on the document (the git commit of the units directory), if known.
     pub revision: Option<String>,
+    /// The schema ids the deployment's schema directory defines (guide 12's `schemas/` — each
+    /// `.json` file's path relative to the directory, without the extension). When given, every
+    /// `schema_id` a unit or an artifact declares must be one of them, or the finding is
+    /// `unknown schema`. `None` skips the check.
+    pub known_schemas: Option<BTreeSet<String>>,
 }
 
 /// How serious a finding is: an `Error` makes the check exit 1; a `Warning` does not.
@@ -514,6 +519,45 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
     }
     offers.extend(group_offers);
 
+    // ── schemas: every declared schema id must be one the directory defines (W3) ─────────
+    if let Some(known) = &opts.known_schemas {
+        let mut unknown = |unit: Option<&str>, what: &str, sid: &Option<String>| {
+            if let Some(sid) = sid
+                && !known.contains(sid)
+            {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    kind:     "unknown schema".into(),
+                    unit:     unit.map(str::to_string),
+                    message:  format!("{what} names schema {sid:?}, which the schema directory does not define"),
+                });
+            }
+        };
+        for u in units {
+            for c in &u.config.capabilities {
+                unknown(Some(&u.name), &format!("capability {}/{}", c.ns, c.name), &c.schema_id);
+            }
+            for r in &u.config.requirements {
+                unknown(Some(&u.name), &format!("requirement {}/{}", r.ns, r.name), &r.schema_id);
+            }
+            for g in &u.config.groups {
+                unknown(Some(&u.name), &format!("group {:?} filter", g.name), &g.filter.schema_id);
+                for p in &g.provides {
+                    unknown(Some(&u.name), &format!("group {:?} provides {}/{}", g.name, p.ns, p.name), &p.schema_id);
+                }
+                for (i, req) in g.requires.iter().enumerate() {
+                    unknown(Some(&u.name), &format!("group {:?} requires[{i}]", g.name), &req.schema_id);
+                }
+            }
+            for p in &u.config.presence {
+                unknown(Some(&u.name), &format!("presence {}/{}", p.filter.ns, p.filter.name), &p.filter.schema_id);
+            }
+        }
+        for (aname, a) in artifacts {
+            unknown(None, &format!("artifact {aname:?} provides"), &a.provides.schema_id);
+        }
+    }
+
     let resolver = Resolver { units, artifacts, offers: &offers, opts };
 
     // ── requirements ───────────────────────────────────────────────────────────────────
@@ -748,7 +792,7 @@ mod tests {
         assert!(matches!(&r.edges[0].providers[0], Provider::Artifact { hosts, .. } if hosts == &vec!["depot-a".to_string(), "depot-b".to_string()]));
 
         // strict: the same deployment is an error
-        let r = check(&[worker, a, b], std::slice::from_ref(&art), &CheckOptions { strict_deployed: true, revision: Some("abc".into()) });
+        let r = check(&[worker, a, b], std::slice::from_ref(&art), &CheckOptions { strict_deployed: true, revision: Some("abc".into()), ..Default::default() });
         assert_eq!(r.exit_code(), 1);
         assert_eq!(r.revision.as_deref(), Some("abc"));
     }
@@ -762,6 +806,27 @@ mod tests {
         let r = check(&units, &[], &CheckOptions::default());
         assert_eq!(r.exit_code(), 0);
         assert_eq!(kinds(&r), vec![("unranked ranking", Severity::Warning), ("single provider", Severity::Warning)]);
+    }
+
+    /// W3: with the schema directory's ids known, an id nobody defined is an error wherever it is
+    /// declared, and a provider on `v1` against a requirement on `v2` is the rollout-window case,
+    /// named with both ids — a capability now carries its schema in the file too.
+    #[test]
+    fn schemas_are_checked_against_the_directory_and_the_window_is_named() {
+        let units = vec![
+            unit("llm-v1", "[[capability]]\nns=\"llm\"\nname=\"inference\"\nschema_id=\"llm/inference/v1\"\n[capability.attrs]\ncontext=8192\n"),
+            unit("planner", "[[requirement]]\nns=\"llm\"\nname=\"inference\"\nschema_id=\"llm/inference/v2\"\n[[requirement]]\nns=\"plan\"\nname=\"route\"\nschema_id=\"plan/route/v9\"\n"),
+        ];
+        let known: BTreeSet<String> = ["llm/inference/v1", "llm/inference/v2"].into_iter().map(String::from).collect();
+        let r = check(&units, &[], &CheckOptions { known_schemas: Some(known), ..Default::default() });
+        let text = r.render_text();
+        assert!(kinds(&r).contains(&("unknown schema", Severity::Error)), "{text}");
+        assert!(text.contains("requirement plan/route names schema \"plan/route/v9\""), "{text}");
+        assert!(kinds(&r).contains(&("schema-only mismatch", Severity::Error)), "{text}");
+        assert!(text.contains("wants schema \"llm/inference/v2\"; offers match except for schema (llm/inference/v1)"), "{text}");
+        // Without a schema directory the same deployment reports only the window and the unwired route.
+        let r = check(&units, &[], &CheckOptions::default());
+        assert!(!kinds(&r).iter().any(|(k, _)| *k == "unknown schema"));
     }
 
     #[test]

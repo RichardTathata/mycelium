@@ -173,6 +173,18 @@ The `--fail-on-conflict` flag causes `seed_schemas_from_dir` to return a non-zer
 exit code on any conflict — blocking the merge if a schema redefinition is
 attempted without a version bump.
 
+**Beside it, the wire-check.** The same directory is what `mycelium wire-check <units> --schemas
+./schemas` reads: a `schema_id` a unit or an artifact declares that names no file is `unknown
+schema`, and a provider still on `v1` against a requirement already on `v2` is reported as
+`schema-only mismatch` with both ids — the rollout window below, checkable before deployment
+rather than discovered as a `schema_mismatch` tripwire on the night
+([`capability-lifecycle.md`](../operations/capability-lifecycle.md) step 2).
+
+```yaml
+- name: Wire-check the deployment
+  run: cargo run --features cli --bin mycelium -- wire-check ./deploy/units --library ./deploy/artifacts --schemas ./schemas
+```
+
 **Rollout window**: during a `v1 → v2` migration, both schema IDs coexist in the
 ring. Providers gradually switch from advertising `v1` to `v2`; consumers switch
 their `CapFilter::with_schema` at their own pace. Once all consumers have

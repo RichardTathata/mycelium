@@ -1,0 +1,9 @@
+# Still on v1 of the inference schema: the rollout window, seen from the provider's side.
+principal = "llm-v1"
+
+[[capability]]
+ns        = "llm"
+name      = "inference"
+schema_id = "llm/inference/v1"
+  [capability.attrs]
+  model = "llama3.2"

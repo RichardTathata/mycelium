@@ -147,6 +147,7 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
 
     let mut dir: Option<String> = None;
     let mut library: Option<String> = None;
+    let mut schemas: Option<String> = None;
     let mut format = "text".to_string();
     let mut opts = CheckOptions::default();
     let mut it = args.into_iter();
@@ -156,8 +157,9 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
             "--format" => format = it.next().unwrap_or_default(),
             "--strict-deployed" => opts.strict_deployed = true,
             "--revision" => opts.revision = it.next(),
+            "--schemas" => schemas = it.next(),
             "-h" | "--help" => {
-                eprintln!("Usage: mycelium wire-check <units-dir> [--library <artifacts-dir>] [--format text|json|dot] [--strict-deployed] [--revision <rev>]\n\
+                eprintln!("Usage: mycelium wire-check <units-dir> [--library <artifacts-dir>] [--schemas <schemas-dir>] [--format text|json|dot] [--strict-deployed] [--revision <rev>]\n\
                            \n\
                            Applies the mesh's own match rule (CapFilter::matches) to a directory of unit files and reports\n\
                            what could not bind. It says *would bind under these declarations*, never *is bound*: liveness,\n\
@@ -238,6 +240,30 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
             }
         }
     }
+    if let Some(dir) = &schemas {
+        // Guide 12's rule: each `.json` file's path relative to the directory, without the extension.
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut std::collections::BTreeSet<String>) -> Result<(), String> {
+            for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+                let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+                if path.is_dir() {
+                    walk(root, &path, out)?;
+                } else if path.extension().is_some_and(|x| x == "json")
+                    && let Ok(rel) = path.strip_prefix(root)
+                {
+                    let id = rel.with_extension("").components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
+                    out.insert(id);
+                }
+            }
+            Ok(())
+        }
+        let root = std::path::Path::new(dir);
+        let mut ids = std::collections::BTreeSet::new();
+        if let Err(e) = walk(root, root, &mut ids) {
+            eprintln!("wire-check: {e}");
+            return 2;
+        }
+        opts.known_schemas = Some(ids);
+    }
     if opts.revision.is_none() {
         opts.revision = std::process::Command::new("git")
             .args(["-C", &dir, "rev-parse", "HEAD"])
@@ -259,7 +285,7 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--format text|json|dot] [--strict-deployed]\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed]\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

@@ -48,7 +48,7 @@ fn coop() -> Report {
     check(
         &load_units("tests/fixtures/units/coop"),
         &load_artifacts("tests/fixtures/units/artifacts"),
-        &CheckOptions { strict_deployed: false, revision: None },
+        &CheckOptions { strict_deployed: false, ..Default::default() },
     )
 }
 
@@ -73,7 +73,7 @@ fn the_coop_deployment_checks_green_and_names_the_one_provisioning_it_relies_on(
     let strict = check(
         &load_units("tests/fixtures/units/coop"),
         &load_artifacts("tests/fixtures/units/artifacts"),
-        &CheckOptions { strict_deployed: true, revision: None },
+        &CheckOptions { strict_deployed: true, ..Default::default() },
     );
     assert_eq!(strict.exit_code(), 1);
 }
@@ -114,4 +114,33 @@ fn the_coop_json_is_the_golden_document() {
     assert_eq!(json, expected, "the declaration document's shape or content changed; if intended, UPDATE_GOLDEN=1");
     let parsed: serde_json::Value = serde_json::from_str(&expected).unwrap();
     assert_eq!(parsed["schema"], mycelium::wire_check::DECLARATION_SCHEMA);
+}
+
+/// W3: with the schema directory beside the units, a schema nobody defined is named, and a provider
+/// on `v1` against a requirement on `v2` is the rollout-window case with both ids on the line.
+#[test]
+fn the_schema_window_fixture_names_the_window_and_the_unknown_schema() {
+    let mut known = std::collections::BTreeSet::new();
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else if p.extension().is_some_and(|x| x == "json") {
+                let rel = p.strip_prefix(root).unwrap().with_extension("");
+                out.insert(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    walk(Path::new("tests/fixtures/units/schemas"), Path::new("tests/fixtures/units/schemas"), &mut known);
+    assert_eq!(known.len(), 2, "{known:?}");
+    let r = check(
+        &load_units("tests/fixtures/units/schema-window"),
+        &[],
+        &CheckOptions { known_schemas: Some(known), ..Default::default() },
+    );
+    assert_eq!(r.exit_code(), 1);
+    let text = r.render_text();
+    assert!(text.contains("unknown schema (consumer): requirement plan/route names schema \"plan/route/v9\""), "{text}");
+    assert!(text.contains("schema-only mismatch (consumer): requirement llm/inference wants schema \"llm/inference/v2\"; offers match except for schema (llm/inference/v1)"), "{text}");
 }
