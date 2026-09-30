@@ -95,6 +95,14 @@ the gate). Gate:
 `an_agent_published_entry_that_loops_is_stopped_at_its_budget_and_the_operators_is_not` over the
 committed `spin_component.wasm` fixture (a guest that never returns).
 
+**Proposed → shadow → accept (D20, plan F2):** a description with `proposed = true` publishes an entry
+that `Provisioner` loads only into the **shadow lane** — installed and advertised as `{ns}/{name}.shadow`,
+callable by name for comparison, never resolved by the incumbent's filter, taking no demand and keeping
+no presence floor — until a key in `require_reviewers` co-signs it (`mycelium-artifact accept <library>
+<ns/name> --key <reviewer-seed>`; `verify --reviewer` names a forged or unlisted acceptance). The
+acceptance is an Ed25519 signature over the publisher's signed content *and* signature; the line is
+rewritten in place (same KV key). An entry with neither field still encodes as v1 byte for byte.
+
 **Provenance (landed):** content-addressing gives *integrity* (the bytes are what the catalog
 named); `InstallableEntry::signed_by(key)` adds *provenance* — an Ed25519 signature over the
 content address by a publisher. `Provisioner::require_provenance(trusted_keys)` then installs only

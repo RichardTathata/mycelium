@@ -46,7 +46,7 @@ run_demo() {
 run_demo "01 · mailbox_llm"      mailbox_llm      "All assertions passed" "triage replied"
 run_demo "02 · stigmergy"        stigmergy        "All assertions passed"
 run_demo "03 · elastic_intent"   elastic_intent   "All assertions passed"
-run_demo "04 · provisioning"     provisioning     "All assertions passed" "self-healed"
+run_demo "04 · provisioning"     provisioning     "All assertions passed" "self-healed" "shadow-then-accept complete"
 run_demo "05 · federation_facts" federation_facts "All assertions passed" "verified the self-signature"
 run_demo "06 · rotation"         rotation         "All assertions passed" "STILL verifies the old-key-signed field"
 run_demo "07 · consensus"        consensus        "All assertions passed" "reads as reopened"

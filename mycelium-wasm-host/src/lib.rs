@@ -47,6 +47,7 @@ pub use artifact::{
     InMemorySource, RangedArtifactSource, VerifyError,
 };
 pub use catalog::{
+    Acceptance, ENTRY_FORMAT_VERSION_V2,
     publish_installable, InstallableCatalog, InstallableEntry, Manifest, ManifestError,
     ResourceRequirements, ENTRY_FORMAT_VERSION, INSTALLABLE_PREFIX, MANIFEST_FILE,
 };
@@ -61,15 +62,15 @@ pub use librarian::{
     LIBRARIAN_NS,
 };
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
-pub use provisioner::{verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
+pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{Stem, StemError, StemOptions, StemSource};
 pub use tools::{
-    build_entry, kind_from_name, kind_name, list as list_manifest, publish as publish_artifact, publisher_from_str,
-    read_description_and_bytes, render_entry, signing_key_from_hex, verify as verify_library, PublishOutcome,
-    VerifyReport,
+    accept as accept_entry, acceptance_problem, build_entry, kind_from_name, kind_name, list as list_manifest,
+    publish as publish_artifact, publisher_from_str, read_description_and_bytes, render_entry, select_entry,
+    signing_key_from_hex, verify as verify_library, AcceptOutcome, PublishOutcome, VerifyReport,
 };
 #[cfg(feature = "object_store")]
-pub use object_store_source::{list_store, publish_to_store, verify_store, ObjectStoreFetcher};
+pub use object_store_source::{accept_in_store, list_store, publish_to_store, verify_store, ObjectStoreFetcher};
 pub use resources::{ResourceProbe, SystemResourceProbe};
 pub use runtime::{
     cap_invoke_kind, ArtifactRuntime, BlobRuntime, FuelPolicy, InstallError, Installed, InvocationLog,

@@ -504,6 +504,10 @@ pub struct HostsDecl {
     pub operator_publishers: Vec<String>,
     #[serde(default)]
     pub operator_fuel_per_call: Option<u64>,
+    /// D20: the reviewer keys whose acceptance promotes a proposed entry from the shadow lane
+    /// to a real load. Absent = a proposal never loads for real on this host.
+    #[serde(default)]
+    pub trusted_reviewers: Vec<String>,
 }
 
 impl HostsDecl {

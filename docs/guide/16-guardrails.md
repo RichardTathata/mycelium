@@ -140,6 +140,55 @@ The strong mechanisms below the guardrail compose without new code:
 
 ---
 
+## Agent-authored functions: the legitimate uses of dynamic load
+
+The sandbox (`mycelium-wasm-host`) was built for code the fleet does not trust: content-addressed,
+provenance-signed, confined to its own KV subtree, fuel-metered, no filesystem, no network. That is
+the right envelope for a function an agent wrote an hour ago, and these are the uses it is for
+(`docs/plans/design-time-tooling.md` §17):
+
+- **U1 — functions an agent authors** for itself or its peers: a scorer, a vendor-format parser, a
+  route heuristic. Distribution is the catalogue — signed, pulled, verified — never a prompt; the
+  fleet loads, it never builds.
+- **U2 — evaluators that must be reproducible**: a knowledge-layer assessment, a contract-net
+  evaluation, a policy predicate. A deterministic component with no clock and no network gives the
+  same answer on replay, and *why was this awarded* becomes answerable from records.
+- **U3 — transforms at boundaries**: validators and normalisers between schema versions, redaction
+  before export, per-receiver checks beyond a regex. The deliberate contrast is with schema
+  migrations, which stay *declarative data, never code* because they gossip; a component is pulled by
+  content address under a signature, which is why code is acceptable on this path and not on that one.
+- **U4 — pure work in a pipeline**: the stage function; the worker that drains the lane stays native.
+
+**The five gates** an agent-published function passes, and where each is enforced:
+
+1. **A publisher key is an identity.** The entry is signed (`mycelium-artifact publish --key`), and
+   a host installs only what a key in `[hosts].trusted_publishers` vouched for — provenance, not just
+   integrity (`Provisioner::require_provenance`).
+2. **Install rights bound how much of the fleet one key can fill**
+   (`Provisioner::with_install_rights`), and a `[[presence]]` policy bounds how many copies run.
+3. **Fuel is on by default for an agent's entries** (D19). `[hosts].fuel_per_call` is the budget an
+   entry not signed by a key in `[hosts].operator_publishers` runs under; a call that runs past it is
+   stopped, recorded as *fuel exhausted* with the budget named (`Provisioner::invocations()`), and the
+   next call gets a fresh budget on a fresh instance. The operator's own entries run as configured.
+4. **A second signature before promotion** (D20). A description with `proposed = true` publishes an
+   entry the host loads only into a **shadow lane** — advertised as `{ns}/{name}.shadow`, callable
+   by name for comparison, never resolved by the requirer's filter, so it takes no demand — until a
+   key in `[hosts].trusted_reviewers` co-signs it (`mycelium-artifact accept`). A forged acceptance
+   fails `verify` and promotes nothing. *An agent proposed and a reviewer accepted* is then a fact in
+   the manifest, not a policy in someone's head.
+5. **The component world stays narrow.** An evaluator that can call out is no longer an evaluator
+   that replays; widening the world to make any of this easier is the one thing not to do.
+
+The design-time checker sees the fourth gate too: `mycelium wire-check --library` reports a proposed
+artifact as *would bind after acceptance*, not *would bind by provisioning* (guide 12).
+
+**The honest limit.** Determinism is a property of the component, not a guarantee of the host: a
+component that reads its own KV subtree can see a different value on replay if that subtree changed,
+and only a recording (`mycelium-sim`) makes the replay exact. Fuel bounds instructions, not wall time
+or memory. And a reviewer's signature says a person accepted the entry, not that the function is
+correct. The runnable form is the co-op `provisioning` demo's wave 3 (shadow, forged acceptance,
+real acceptance) and the operator's side is `operations/artifacts.md` § Trust & provenance.
+
 ## Honest limits (state them, don't gloss them)
 
 - **Promise-strength, not central mandate** (Tiers A/B). Each node enforces its own boundary and its own

@@ -107,6 +107,15 @@ pub fn verify_published_head(published: &PublishedRightsHead, key: &[u8; 32]) ->
 struct LiveHosted {
     _cap:      CapabilityReg,
     installed: Box<dyn Installed>,
+    /// D20: loaded into the shadow lane — advertised as `{ns}/{name}.shadow`, so no filter for
+    /// `{ns}/{name}` ever resolves it and no call for the incumbent ever reaches it.
+    shadow:    bool,
+}
+
+/// The name a proposed entry is advertised under while it is in the shadow lane (D20): beside the
+/// incumbent, resolvable on purpose for comparison, never by the incumbent's filter.
+pub fn shadow_name(name: &str) -> String {
+    format!("{name}.shadow")
 }
 
 /// A **capability-presence invariant** (M14 supervision): keep at least `min_providers` live
@@ -146,6 +155,9 @@ pub struct Provisioner {
     /// are installed (Ed25519 over the entry — kind, content address, declared-provide). Empty =
     /// accept any (integrity-only).
     trusted_publishers: Vec<[u8; 32]>,
+    /// D20: the reviewer keys whose acceptance promotes a proposed entry from the shadow lane to
+    /// a real load. Empty = no proposal is ever loadable here (it can still shadow).
+    trusted_reviewers: Vec<[u8; 32]>,
     /// Skip entries whose `size_bytes` hint exceeds this (node-local install budget). `None` =
     /// unbounded.
     install_budget_bytes: Option<u64>,
@@ -198,6 +210,7 @@ impl Provisioner {
             self_elect_p,
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
+            trusted_reviewers: Vec::new(),
             install_budget_bytes: None,
             resource_policy: Some((Arc::new(SystemResourceProbe::new()), 0.8)),
             hosted: Arc::new(Mutex::new(HashMap::new())),
@@ -368,6 +381,39 @@ impl Provisioner {
     /// publisher keys. Without this, the provisioner trusts the catalog for integrity (hash match)
     /// but not origin; with it, an unsigned or untrusted-signer artifact is refused even if its
     /// bytes hash correctly.
+    /// D20: the reviewers whose acceptance makes a proposed entry loadable for real. A proposal
+    /// without a listed reviewer's acceptance loads only into the shadow lane
+    /// ([`shadow_name`]), which takes no demand.
+    pub fn require_reviewers(&mut self, reviewers: Vec<[u8; 32]>) {
+        self.trusted_reviewers = reviewers;
+    }
+
+    /// D20: is `entry` loadable for real here (not a proposal, or accepted by a listed reviewer)?
+    fn loadable(&self, entry: &InstallableEntry) -> bool {
+        entry.is_loadable(&self.trusted_reviewers)
+    }
+
+    /// Number of capabilities live in the shadow lane (D20).
+    pub fn shadow_count(&self) -> usize {
+        self.hosted
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| matches!(s, HostedState::Live(LiveHosted { shadow: true, .. })))
+            .count()
+    }
+
+    /// The artifacts live in the shadow lane (D20).
+    fn shadow_artifacts(&self) -> Vec<ArtifactId> {
+        self.hosted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| matches!(s, HostedState::Live(LiveHosted { shadow: true, .. })))
+            .map(|(a, _)| *a)
+            .collect()
+    }
+
     pub fn require_provenance(&mut self, trusted: Vec<[u8; 32]>) {
         self.trusted_publishers = trusted;
     }
@@ -513,6 +559,16 @@ impl Provisioner {
     /// Shared by the demand and presence paths — the one resolve-and-pull path the architecture
     /// promises.
     fn start_install(&self, entry: InstallableEntry) -> bool {
+        self.start_install_as(entry, false)
+    }
+
+    /// [`start_install`](Self::start_install), into the shadow lane when `shadow` (D20): the
+    /// entry is installed and served under [`shadow_name`], so it is resolvable for comparison
+    /// and never for the incumbent's demand.
+    fn start_install_as(&self, mut entry: InstallableEntry, shadow: bool) -> bool {
+        if shadow {
+            entry.provides.name = Arc::from(shadow_name(&entry.provides.name));
+        }
         let Some(runtime) = self.runtimes.get(&entry.kind).map(Arc::clone) else {
             return false; // eligible() screens this; belt-and-braces for direct callers
         };
@@ -600,7 +656,7 @@ impl Provisioner {
                             Some(HostedState::Installing { token: t, .. }) if *t == token => {
                                 map.insert(
                                     artifact,
-                                    HostedState::Live(LiveHosted { _cap: cap, installed }),
+                                    HostedState::Live(LiveHosted { _cap: cap, installed, shadow }),
                                 );
                                 None
                             }
@@ -683,6 +739,22 @@ impl Provisioner {
             self.withdraw(&artifact);
         }
 
+        // ── Promotion (D20) ──────────────────────────────────────────────────
+        // A shadow whose entry has since been accepted (or has left the catalogue) is withdrawn,
+        // so the demand pass below can bring the accepted entry live under its own name once
+        // demand is unmet. Acceptance travels as the same catalogue line, rewritten.
+        for artifact in self.shadow_artifacts() {
+            let still_a_proposal = self
+                .catalog
+                .entries()
+                .iter()
+                .any(|e| e.artifact == artifact && e.proposed && !self.loadable(e));
+            if !still_a_proposal {
+                tracing::info!(artifact = %artifact, "shadow withdrawn: its entry was accepted or retired");
+                self.withdraw(&artifact);
+            }
+        }
+
         // ── Demand-driven (M15) ──────────────────────────────────────────────
         let entries: Vec<InstallableEntry> = self.catalog.entries().to_vec();
         // Dedup by CAPABILITY within a round, not just by ArtifactId. Two catalog entries providing
@@ -702,6 +774,20 @@ impl Provisioner {
             let filter =
                 CapFilter::new(entry.provides.namespace.clone(), entry.provides.name.clone());
             let demand = self.agent.capabilities().demand(&filter);
+            if !self.loadable(&entry) {
+                // D20: a proposal without acceptance loads only into the shadow lane, and only
+                // where the capability is wanted at all — beside the incumbent, taking none of
+                // its demand. Its own dedup: one shadow per artifact (`is_hosted`, above).
+                if !demand.demanding_nodes.is_empty()
+                    && self.eligible(&entry)
+                    && self.self_elects()
+                    && self.start_install_as(entry, true)
+                {
+                    metrics::counter!("mycelium_artifact_shadow_installs_total").increment(1);
+                    started += 1;
+                }
+                continue;
+            }
             let unmet = demand.providers.is_empty() && !demand.demanding_nodes.is_empty();
             if !unmet {
                 continue;
@@ -723,9 +809,17 @@ impl Provisioner {
             if live >= policy.min_providers {
                 continue; // invariant already satisfied across the fleet
             }
-            // Resolve the catalog for an artifact that would satisfy the invariant.
-            let Some(entry) = self.catalog.resolve_best(&policy.filter).cloned() else {
-                continue; // nothing in the catalog provides it
+            // Resolve the catalog for an artifact that would satisfy the invariant — a loadable
+            // one (D20: a proposal keeps no floor).
+            let Some(entry) = self
+                .catalog
+                .entries()
+                .iter()
+                .filter(|e| policy.filter.matches(&e.provides) && self.loadable(e))
+                .min_by_key(|e| (e.size_bytes, e.est_install_secs))
+                .cloned()
+            else {
+                continue; // nothing loadable in the catalog provides it
             };
             if self.is_hosted(&entry.artifact)
                 || !self.provenance_ok(&entry)
@@ -1244,6 +1338,102 @@ mod tests {
         assert_eq!(prov.hosted_count(), 2);
         let again = String::from_utf8_lossy(&call("spin").await).into_owned();
         assert!(again.contains("fuel exhausted"), "{again}");
+        agent.shutdown().await;
+    }
+
+    /// D20's gate (plan F2): a proposed entry loads only into the shadow lane — resolvable as
+    /// `{name}.shadow` for comparison, never by the incumbent's filter — a stranger's acceptance
+    /// changes nothing, and a listed reviewer's acceptance promotes it. Seen failing first: with
+    /// no D20 the proposal installed for real on the first round.
+    #[tokio::test]
+    async fn a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it() {
+        use crate::catalog::InstallableEntry;
+        use ed25519_dalek::SigningKey;
+
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let author = SigningKey::from_bytes(&[31u8; 32]);
+        let reviewer = SigningKey::from_bytes(&[32u8; 32]);
+        let stranger = SigningKey::from_bytes(&[33u8; 32]);
+
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let proposed = InstallableEntry::new(Capability::new("text", "echo"), id).as_proposed().signed_by(&author);
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(proposed.clone());
+
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.require_provenance(vec![author.verifying_key().to_bytes()]);
+        prov.require_reviewers(vec![reviewer.verifying_key().to_bytes()]);
+
+        let _req = agent.capabilities().declare_requirement(CapFilter::new("text", "echo"), Duration::from_secs(30));
+        for _ in 0..40 {
+            if !agent.capabilities().demand(&CapFilter::new("text", "echo")).demanding_nodes.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        // Round 1: the proposal shadows — live, but not as text/echo.
+        assert_eq!(prov.provision_round(), 1, "the proposal loads into the shadow lane");
+        wait_live(&prov, 1).await;
+        assert_eq!(prov.shadow_count(), 1);
+        let mut shadow_seen = false;
+        for _ in 0..40 {
+            if !agent.capabilities().resolve(&CapFilter::new("text", "echo.shadow")).is_empty() {
+                shadow_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(shadow_seen, "the shadow is resolvable by its own name, for comparison");
+        assert!(agent.capabilities().resolve(&CapFilter::new("text", "echo")).is_empty(),
+            "the incumbent's filter never resolves a shadow");
+        let reply = agent.service()
+            .rpc_call(agent.node_id().clone(), crate::runtime::cap_invoke_kind("text", "echo.shadow"),
+                b"compare me".to_vec(), Duration::from_secs(5))
+            .await.expect("the shadow answers a call made to it by name");
+        assert_eq!(reply.as_ref(), b"compare me");
+        assert_eq!(prov.provision_round(), 0, "a shadow is not re-installed and takes no demand");
+
+        // A stranger's acceptance changes nothing.
+        let mut cat = InstallableCatalog::new();
+        cat.add(proposed.clone().accepted_by(&stranger).unwrap());
+        prov.refresh_catalog(cat);
+        assert_eq!(prov.provision_round(), 0);
+        assert_eq!(prov.shadow_count(), 1, "still a shadow under a forged acceptance");
+        assert!(agent.capabilities().resolve(&CapFilter::new("text", "echo")).is_empty());
+
+        // The listed reviewer's acceptance promotes it: the shadow is withdrawn, then the entry
+        // loads for real under its own name and takes the demand.
+        let mut cat = InstallableCatalog::new();
+        cat.add(proposed.clone().accepted_by(&reviewer).unwrap());
+        prov.refresh_catalog(cat);
+        let mut promoted = false;
+        for _ in 0..40 {
+            prov.provision_round();
+            if prov.shadow_count() == 0 && prov.hosted_count() == 1 {
+                promoted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(promoted, "accepted: withdrawn from the shadow lane and loaded for real");
+        let mut real_seen = false;
+        for _ in 0..40 {
+            if !agent.capabilities().resolve(&CapFilter::new("text", "echo")).is_empty() {
+                real_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(real_seen, "after acceptance the entry takes demand under its own name");
+        let reply = agent.service()
+            .rpc_call(agent.node_id().clone(), crate::runtime::cap_invoke_kind("text", "echo"),
+                b"for real".to_vec(), Duration::from_secs(5))
+            .await.expect("serves");
+        assert_eq!(reply.as_ref(), b"for real");
+
         agent.shutdown().await;
     }
 

@@ -10,6 +10,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Proposed → shadow → accept (plan D20 / F2, `mycelium-wasm-host`).** An `InstallableEntry` gains
+  `proposed` (inside the publisher's signature, under its own domain — flipping the byte breaks the
+  signature) and `acceptance` (a reviewer's Ed25519 signature over the publisher's signed content
+  *and* signature); an entry with neither still encodes as **v1, byte for byte**, one with either as
+  format v2 (`ENTRY_FORMAT_VERSION_V2`; a v1 decoder does not see it, which is the safe direction).
+  `as_proposed()`, `accepted_by(&reviewer)`, `verify_acceptance(&reviewers)`, `is_loadable(&reviewers)`.
+  `Provisioner::require_reviewers` names who may promote; a proposal without a listed reviewer's
+  acceptance loads only into the **shadow lane** — installed and advertised as `{ns}/{name}.shadow`
+  (`shadow_name`), callable by name for comparison, never resolved by the incumbent's filter, so it
+  takes no demand and keeps no presence floor; when the same catalogue line arrives accepted the
+  shadow is withdrawn and the entry loads for real. `mycelium-artifact accept <library|url>
+  <ns/name | artifact-hex> --key <reviewer>` co-signs in place (same KV key, the librarian
+  republishes it as an overwrite); `verify --reviewer ed25519:…` names a forged or unlisted
+  acceptance; a description's `proposed = true` publishes a proposal. `[hosts].trusted_reviewers`
+  wires it in the stem. `mycelium wire-check` reports a proposed artifact as **`would bind after
+  acceptance`** (`Provider::Artifact.proposed`, absent from the document unless true — the golden is
+  unchanged). Gates: the catalogue codec tests (v1 identity, v2 round trip, forged/moved acceptances),
+  the tool test, the provisioner test (shadow → forged → accepted, seen failing first: the proposal
+  installed for real on the first round), the checker fixture `artifacts-proposed`, and the co-op
+  `provisioning` demo's **wave 3** (the incumbent serves the whole wave while v2 shadows; a stranger's
+  acceptance changes nothing; the reviewer's promotes it and the accepted v2 serves wave 3b, visible
+  in its replies). API notes: `verify_library` / `verify_store` gained a `reviewers` parameter;
+  `PublishOutcome` gained `proposed`.
+- **Agent-authored functions, documented (plan F3):** guide 16 § *Agent-authored functions* (U1–U4,
+  the five gates, the honest limit), the artifacts runbook's trust section, a doc-coverage row.
 - **Fuel by publisher (plan D19 / F1, `mycelium-wasm-host`).** `WasmHost::metered()` counts fuel
   without a default budget; `WasmHost::instantiate_with_fuel` / `provision_with_fuel` give each
   instance its own; `Provisioner::set_fuel_policy(FuelPolicy)` decides per entry from its verified
@@ -69,7 +94,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`a_chunked_body_with_no_length_is_bounded_by_name`,
   `the_prefetch_cache_refuses_a_blob_past_its_bound`).
 
-### Added
 - **The object-store adapter** (`ObjectStoreFetcher`, `mycelium-wasm-host` feature `object_store`;
   S2 of `docs/plans/design-time-tooling.md` §11): one URL selects the store through the
   `object_store` crate — `s3://`, `gs://`, `az://`, `https://`, `file://` — with credentials from

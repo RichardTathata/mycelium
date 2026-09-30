@@ -159,3 +159,31 @@ fn the_unauthorised_fixture_names_the_edge_no_declaration_could_authorise() {
     let r = check(&load_units("tests/fixtures/units/unauthorised"), &[], &CheckOptions { authority: false, ..Default::default() });
     assert_eq!(r.exit_code(), 0, "{}", r.render_text());
 }
+
+#[test]
+fn a_proposed_artifact_would_bind_after_acceptance_not_by_provisioning() {
+    // D20 (plan F2): the same co-op deployment over a library whose optimizer is *proposed* is
+    // still wired — by an artifact that loads only into a shadow lane until a reviewer accepts it —
+    // and the checker says so by name, in the text and in the document.
+    let r = check(
+        &load_units("tests/fixtures/units/coop"),
+        &load_artifacts("tests/fixtures/units/artifacts-proposed"),
+        &CheckOptions { strict_deployed: false, ..Default::default() },
+    );
+    assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+    let kinds: Vec<&str> = r.findings.iter().map(|f| f.kind.as_str()).collect();
+    assert!(kinds.contains(&"would bind after acceptance"), "{}", r.render_text());
+    assert!(!kinds.contains(&"would bind by provisioning"), "a proposal is not a provisioning: {}", r.render_text());
+    let optimize = r.edges.iter().find(|e| e.ns == "route" && e.name == "optimize").expect("the worker's requirement");
+    assert!(
+        matches!(&optimize.providers[0], mycelium::wire_check::Provider::Artifact { proposed: true, .. }),
+        "{:?}",
+        optimize.providers
+    );
+    assert!(r.render_text().contains("(proposed)"), "{}", r.render_text());
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(json.contains("\"proposed\":true"), "{json}");
+    // And the accepted library's document does not carry the field at all (the golden is unchanged).
+    let accepted = serde_json::to_string(&coop()).unwrap();
+    assert!(!accepted.contains("proposed"), "{accepted}");
+}

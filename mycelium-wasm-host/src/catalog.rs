@@ -30,6 +30,21 @@ pub const INSTALLABLE_PREFIX: &str = "installable/";
 /// field deployments when the kind axis landed, so there is no pre-version format to accept.
 pub const ENTRY_FORMAT_VERSION: u8 = 1;
 
+/// Format version of an entry that carries D20's fields — `proposed` and a reviewer's
+/// acceptance. An entry with neither still encodes as v1, byte for byte, so nothing already
+/// published changes; a v1 decoder does not see a v2 entry (invisible, counted), which is the
+/// safe direction — an un-upgraded provisioner cannot load a proposed entry for real.
+pub const ENTRY_FORMAT_VERSION_V2: u8 = 2;
+
+/// A reviewer's co-signature on a proposed entry (plan D20): the award's shape — a record naming
+/// the party, verifiable against that party's key, over the publisher's signed content. A name
+/// without a signature is a claim; a signature under a key the host does not list is a stranger's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Acceptance {
+    pub reviewer:  [u8; 32],
+    pub signature: [u8; 64],
+}
+
 /// Publisher-declared **resource requirements** for hosting an artifact — what installing it
 /// actually consumes on a node, as opposed to the *ranking hints* (`size_bytes` is transfer
 /// cost). `0` = undeclared (no check). A node's provisioner refuses to self-elect for an entry
@@ -75,6 +90,12 @@ pub struct InstallableEntry {
     /// [`provenance_message`]: Self::provenance_message
     pub signer:            Vec<u8>, // 32-byte verifying key, or empty
     pub signature:         Vec<u8>, // 64-byte signature over provenance_message(), or empty
+    /// D20: published as a *proposal* — loadable only into a shadow lane until a reviewer
+    /// accepts it. Inside the publisher's signature (a proposal cannot be promoted by flipping a
+    /// byte); the whole entry then encodes as v2.
+    pub proposed:          bool,
+    /// D20: the reviewer's acceptance, if any — outside the publisher's signature, over it.
+    pub acceptance:        Option<Acceptance>,
 }
 
 impl InstallableEntry {
@@ -90,7 +111,17 @@ impl InstallableEntry {
             requires: ResourceRequirements::default(),
             signer: Vec::new(),
             signature: Vec::new(),
+            proposed: false,
+            acceptance: None,
         }
+    }
+
+    /// D20: mark the entry as a proposal (an agent-published entry that must be accepted before
+    /// it loads for real). Call **before** [`signed_by`](Self::signed_by) — it is inside the
+    /// signature.
+    pub fn as_proposed(mut self) -> Self {
+        self.proposed = true;
+        self
     }
 
     /// Set the artifact kind (install dispatch — `docs/design/artifact-library.md` §4).
@@ -122,8 +153,11 @@ impl InstallableEntry {
     /// are ranking inputs, not safety claims.
     fn provenance_message(&self) -> Vec<u8> {
         let cap = self.provides.encode();
-        let mut m = Vec::with_capacity(24 + 2 + 32 + 16 + cap.len());
-        m.extend_from_slice(b"mycelium-installable-v1");
+        let mut m = Vec::with_capacity(33 + 2 + 32 + 16 + cap.len());
+        // A proposal signs under its own domain, so a proposed entry and an accepted one with
+        // the same content never share a signature; an accepted entry's message is the v1
+        // message, byte for byte.
+        m.extend_from_slice(if self.proposed { b"mycelium-installable-proposed-v1".as_slice() } else { b"mycelium-installable-v1" });
         m.push(ENTRY_FORMAT_VERSION);
         m.push(self.kind.as_u8());
         m.extend_from_slice(self.artifact.as_bytes());
@@ -164,14 +198,64 @@ impl InstallableEntry {
         vk.verify(&self.provenance_message(), &Signature::from_bytes(&sig_bytes)).is_ok()
     }
 
+    /// The domain-separated message a reviewer's acceptance signs (D20): the publisher's signed
+    /// content **and** the publisher's signature, so an acceptance names one specific proposal
+    /// under one specific publisher key and nothing else.
+    fn acceptance_message(&self) -> Vec<u8> {
+        let mut m = b"mycelium-installable-accept-v1".to_vec();
+        m.extend_from_slice(&self.provenance_message());
+        m.extend_from_slice(&self.signature);
+        m
+    }
+
+    /// D20: a reviewer accepts a proposed, signed entry with `reviewer_key`. Refused by name when
+    /// the entry is not a proposal (nothing to accept) or carries no publisher signature (an
+    /// acceptance over an unsigned proposal would vouch for bytes nobody claimed).
+    pub fn accepted_by(mut self, reviewer_key: &ed25519_dalek::SigningKey) -> Result<Self, String> {
+        use ed25519_dalek::Signer;
+        if !self.proposed {
+            return Err("not a proposal: an entry the publisher did not mark proposed needs no acceptance".into());
+        }
+        if self.signature.len() != 64 || self.signer.len() != 32 {
+            return Err("unsigned proposal: an acceptance signs over the publisher's signature, and there is none".into());
+        }
+        let sig = reviewer_key.sign(&self.acceptance_message());
+        self.acceptance = Some(Acceptance { reviewer: reviewer_key.verifying_key().to_bytes(), signature: sig.to_bytes() });
+        Ok(self)
+    }
+
+    /// D20: is the acceptance genuine — present, by a reviewer in `reviewers`, and a valid
+    /// signature over this proposal under its publisher's signature? A forged acceptance (a
+    /// stranger's key, or a reviewer's name without their signature) is `false`.
+    pub fn verify_acceptance(&self, reviewers: &[[u8; 32]]) -> bool {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let Some(a) = &self.acceptance else { return false };
+        if !self.proposed || !reviewers.contains(&a.reviewer) {
+            return false;
+        }
+        let Ok(vk) = VerifyingKey::from_bytes(&a.reviewer) else { return false };
+        vk.verify(&self.acceptance_message(), &Signature::from_bytes(&a.signature)).is_ok()
+    }
+
+    /// D20: may a provisioner load this entry for real (advertise it under its own name and take
+    /// demand)? An entry that is not a proposal always may; a proposal only once a listed
+    /// reviewer's acceptance verifies. A proposal that is not loadable may still be loaded into a
+    /// **shadow lane** (`Provisioner`), which takes no demand.
+    pub fn is_loadable(&self, reviewers: &[[u8; 32]]) -> bool {
+        !self.proposed || self.verify_acceptance(reviewers)
+    }
+
     /// Serialize for gossip: `[1B version][1B kind][32B artifact][8B size][8B est]
-    /// [8B req_disk][8B req_mem][1B signed][32B signer + 64B sig if signed][Capability bytes]`.
+    /// [8B req_disk][8B req_mem][1B signed][32B signer + 64B sig if signed]` then, for v2 only,
+    /// `[1B proposed][1B accepted][32B reviewer + 64B sig if accepted]`, then `[Capability
+    /// bytes]`. An entry with neither D20 field set encodes as v1 (byte-identical to before).
     /// Built on the public `Capability::encode` (no internal codec).
     pub fn encode(&self) -> Vec<u8> {
         let cap = self.provides.encode();
         let signed = self.signer.len() == 32 && self.signature.len() == 64;
-        let mut out = Vec::with_capacity(67 + if signed { 96 } else { 0 } + cap.len());
-        out.push(ENTRY_FORMAT_VERSION);
+        let v2 = self.proposed || self.acceptance.is_some();
+        let mut out = Vec::with_capacity(67 + if signed { 96 } else { 0 } + if v2 { 98 } else { 0 } + cap.len());
+        out.push(if v2 { ENTRY_FORMAT_VERSION_V2 } else { ENTRY_FORMAT_VERSION });
         out.push(self.kind.as_u8());
         out.extend_from_slice(self.artifact.as_bytes());
         out.extend_from_slice(&self.size_bytes.to_le_bytes());
@@ -183,6 +267,17 @@ impl InstallableEntry {
             out.extend_from_slice(&self.signer);
             out.extend_from_slice(&self.signature);
         }
+        if v2 {
+            out.push(self.proposed as u8);
+            match &self.acceptance {
+                Some(a) => {
+                    out.push(1);
+                    out.extend_from_slice(&a.reviewer);
+                    out.extend_from_slice(&a.signature);
+                }
+                None => out.push(0),
+            }
+        }
         out.extend_from_slice(&cap);
         out
     }
@@ -190,9 +285,10 @@ impl InstallableEntry {
     /// Inverse of [`encode`](Self::encode). `None` for an unknown format version or kind byte —
     /// a node never guesses at an entry it cannot fully name (the caller counts the rejection).
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 67 || bytes[0] != ENTRY_FORMAT_VERSION {
+        if bytes.len() < 67 || !(bytes[0] == ENTRY_FORMAT_VERSION || bytes[0] == ENTRY_FORMAT_VERSION_V2) {
             return None;
         }
+        let v2 = bytes[0] == ENTRY_FORMAT_VERSION_V2;
         let kind = ArtifactKind::from_u8(bytes[1])?;
         let mut id = [0u8; 32];
         id.copy_from_slice(&bytes[2..34]);
@@ -215,6 +311,38 @@ impl InstallableEntry {
         } else {
             (Vec::new(), Vec::new())
         };
+        let (proposed, acceptance) = if v2 {
+            if bytes.len() < off + 2 {
+                return None;
+            }
+            let proposed = match bytes[off] {
+                0 => false,
+                1 => true,
+                _ => return None,
+            };
+            let accepted = match bytes[off + 1] {
+                0 => false,
+                1 => true,
+                _ => return None,
+            };
+            off += 2;
+            let acceptance = if accepted {
+                if bytes.len() < off + 96 {
+                    return None;
+                }
+                let mut reviewer = [0u8; 32];
+                reviewer.copy_from_slice(&bytes[off..off + 32]);
+                let mut signature = [0u8; 64];
+                signature.copy_from_slice(&bytes[off + 32..off + 96]);
+                off += 96;
+                Some(Acceptance { reviewer, signature })
+            } else {
+                None
+            };
+            (proposed, acceptance)
+        } else {
+            (false, None)
+        };
         let provides = Capability::decode(&bytes[off..])?;
         Some(Self {
             provides,
@@ -225,6 +353,8 @@ impl InstallableEntry {
             requires,
             signer,
             signature,
+            proposed,
+            acceptance,
         })
     }
 
@@ -829,5 +959,89 @@ mod tests {
         // Identical revisions are a no-op sync.
         let (p2, t2) = Manifest::diff(&new, &new);
         assert!(p2.is_empty() && t2.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod d20_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn entry() -> InstallableEntry {
+        InstallableEntry::new(Capability::new("route", "optimize"), ArtifactId::of(b"optimizer bytes"))
+            .with_cost(10, 1)
+            .with_requirements(0, 64)
+    }
+
+    #[test]
+    fn an_entry_with_neither_d20_field_still_encodes_as_v1_byte_for_byte() {
+        let publisher = SigningKey::from_bytes(&[3u8; 32]);
+        let e = entry().signed_by(&publisher);
+        let bytes = e.encode();
+        assert_eq!(bytes[0], ENTRY_FORMAT_VERSION);
+        assert_eq!(bytes.len(), 67 + 96 + e.provides.encode().len(), "no v2 tail");
+        let back = InstallableEntry::decode(&bytes).unwrap();
+        assert_eq!(back, e);
+        assert!(!back.proposed && back.acceptance.is_none());
+        assert!(back.verify_provenance(&[publisher.verifying_key().to_bytes()]));
+    }
+
+    #[test]
+    fn a_proposal_round_trips_as_v2_and_its_signature_is_its_own() {
+        let publisher = SigningKey::from_bytes(&[3u8; 32]);
+        let proposed = entry().as_proposed().signed_by(&publisher);
+        let accepted_form = entry().signed_by(&publisher);
+        assert_ne!(proposed.signature, accepted_form.signature, "a proposal signs under its own domain");
+        let bytes = proposed.encode();
+        assert_eq!(bytes[0], ENTRY_FORMAT_VERSION_V2);
+        let back = InstallableEntry::decode(&bytes).unwrap();
+        assert_eq!(back, proposed);
+        assert!(back.proposed && back.acceptance.is_none());
+        assert!(back.verify_provenance(&[publisher.verifying_key().to_bytes()]));
+        // Flipping the byte does not promote it: the publisher's signature no longer verifies.
+        let mut flipped = back.clone();
+        flipped.proposed = false;
+        assert!(!flipped.verify_provenance(&[publisher.verifying_key().to_bytes()]));
+    }
+
+    #[test]
+    fn acceptance_is_verifiable_by_a_listed_reviewer_and_a_forged_one_fails_by_name() {
+        let publisher = SigningKey::from_bytes(&[3u8; 32]);
+        let reviewer = SigningKey::from_bytes(&[4u8; 32]);
+        let stranger = SigningKey::from_bytes(&[5u8; 32]);
+        let reviewers = [reviewer.verifying_key().to_bytes()];
+
+        let proposed = entry().as_proposed().signed_by(&publisher);
+        assert!(!proposed.is_loadable(&reviewers), "a proposal is not loadable before acceptance");
+
+        let accepted = proposed.clone().accepted_by(&reviewer).unwrap();
+        assert!(accepted.verify_acceptance(&reviewers));
+        assert!(accepted.is_loadable(&reviewers));
+        let bytes = accepted.encode();
+        let back = InstallableEntry::decode(&bytes).unwrap();
+        assert_eq!(back, accepted);
+        assert!(back.is_loadable(&reviewers));
+        assert!(back.verify_provenance(&[publisher.verifying_key().to_bytes()]), "the publisher's signature is untouched");
+        assert_eq!(back.kv_key(), proposed.kv_key(), "same key: the librarian republishes in place");
+
+        // A stranger's acceptance: verifies as a signature, fails as an acceptance.
+        let by_stranger = proposed.clone().accepted_by(&stranger).unwrap();
+        assert!(!by_stranger.verify_acceptance(&reviewers));
+        assert!(!by_stranger.is_loadable(&reviewers));
+        // A reviewer's name without their signature.
+        let mut forged = proposed.clone();
+        forged.acceptance = Some(Acceptance { reviewer: reviewer.verifying_key().to_bytes(), signature: [7u8; 64] });
+        assert!(!forged.verify_acceptance(&reviewers));
+        // An acceptance moved onto a different proposal (different *signed* content — the cost
+        // hints are outside the signature, so a proposal differing only there is the same claim).
+        let other = entry().with_requirements(0, 65).as_proposed().signed_by(&publisher);
+        let mut moved = other.clone();
+        moved.acceptance = accepted.acceptance.clone();
+        assert!(!moved.verify_acceptance(&reviewers), "an acceptance names one proposal");
+
+        // Nothing to accept / nothing signed, refused by name.
+        assert!(entry().signed_by(&publisher).accepted_by(&reviewer).unwrap_err().contains("not a proposal"));
+        assert!(entry().as_proposed().accepted_by(&reviewer).unwrap_err().contains("unsigned proposal"));
+        assert!(entry().signed_by(&publisher).is_loadable(&[]), "an entry that is not a proposal always loads");
     }
 }

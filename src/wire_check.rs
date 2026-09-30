@@ -22,6 +22,7 @@
 //! | `presence unhostable` | a `[[presence]]` floor cannot be met by deployed providers plus distinct hosting units | error |
 //! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
+//! | `would bind after acceptance` | no deployed provider, and the hostable artifact that matches is **proposed** (D20) — it loads only into a shadow lane until a reviewer accepts it | warning (error with `strict_deployed`) |
 //! | `ungoverned edge` | the requirer declares no mandate and no rule while other units do | warning |
 //! | `unranked ranking` | a ranking on an attribute no matching capability carries | warning |
 //! | `single provider` | a requirement with exactly one possible provider | warning |
@@ -66,6 +67,10 @@ pub struct ArtifactDescription {
     pub bytes: Option<String>,
     #[serde(default)]
     pub est_install_secs: Option<u64>,
+    /// D20: published as a proposal — a provisioner loads it only into a shadow lane until a
+    /// reviewer accepts it, so the checker reports it as *would bind after acceptance*.
+    #[serde(default)]
+    pub proposed: bool,
 }
 
 /// The footprint an artifact declares (`artifacts.md` §2): disk at the placement root, memory
@@ -168,7 +173,13 @@ pub struct Finding {
 pub enum Provider {
     Unit { unit: String, principal: Option<String> },
     Group { group: String, defined_by: String },
-    Artifact { artifact: String, hosts: Vec<String> },
+    Artifact {
+        artifact: String,
+        hosts: Vec<String>,
+        /// D20: a proposed artifact binds only after a reviewer accepts it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        proposed: bool,
+    },
 }
 
 /// One requirement and everything that would bind to it.
@@ -245,7 +256,11 @@ impl Report {
                     .map(|p| match p {
                         Provider::Unit { unit, .. } => unit.clone(),
                         Provider::Group { group, .. } => format!("group {group}"),
-                        Provider::Artifact { artifact, hosts } => format!("artifact {artifact} on {}", hosts.join("|")),
+                        Provider::Artifact { artifact, hosts, proposed } => format!(
+                            "artifact {artifact}{} on {}",
+                            if *proposed { " (proposed)" } else { "" },
+                            hosts.join("|")
+                        ),
                     })
                     .collect();
                 out.push_str(&format!(
@@ -435,6 +450,19 @@ impl Resolver<'_> {
                             a.footprint_bytes()
                         ),
                     ));
+                } else if a.proposed {
+                    findings.push(finding(
+                        if self.opts.strict_deployed { Severity::Error } else { Severity::Warning },
+                        "would bind after acceptance",
+                        format!(
+                            "{label} {}/{}: no deployed provider; artifact {aname:?} ({}) is proposed — {} would load it only into a shadow lane until a reviewer accepts it",
+                            filter.namespace,
+                            filter.name,
+                            a.kind,
+                            hosts.join("|")
+                        ),
+                    ));
+                    providers.push(Provider::Artifact { artifact: aname.clone(), hosts, proposed: true });
                 } else {
                     findings.push(finding(
                         if self.opts.strict_deployed { Severity::Error } else { Severity::Warning },
@@ -447,7 +475,7 @@ impl Resolver<'_> {
                             hosts.join("|")
                         ),
                     ));
-                    providers.push(Provider::Artifact { artifact: aname.clone(), hosts });
+                    providers.push(Provider::Artifact { artifact: aname.clone(), hosts, proposed: false });
                 }
             }
         }

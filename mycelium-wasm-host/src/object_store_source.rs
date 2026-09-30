@@ -215,7 +215,33 @@ pub async fn publish_to_store(
         kind: entry.kind,
         size_bytes: bytes.len() as u64,
         signer: format!("ed25519:{}", key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>()),
+        proposed: d.proposed,
     })
+}
+
+/// [`crate::tools::accept`] against a store: read the manifest, accept the one entry `selector`
+/// names, write the manifest back (whole-object last-write-wins, like publish).
+pub async fn accept_in_store(
+    fetcher: &ObjectStoreFetcher,
+    selector: &str,
+    reviewer: &ed25519_dalek::SigningKey,
+) -> Result<crate::tools::AcceptOutcome, String> {
+    let mut m = fetcher.read_manifest().await.map_err(|e| format!("manifest: {e}"))?;
+    let entry = crate::tools::select_entry(&m, selector)?.clone();
+    if entry.acceptance.is_some() {
+        return Err(format!("{}/{} ({}) is already accepted", entry.provides.namespace, entry.provides.name, &entry.artifact.to_hex()[..12]));
+    }
+    let accepted = entry.accepted_by(reviewer)?;
+    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let out = crate::tools::AcceptOutcome {
+        artifact: accepted.artifact,
+        provides: accepted.provides.clone(),
+        signer: format!("ed25519:{}", hex(&accepted.signer)),
+        reviewer: format!("ed25519:{}", hex(&reviewer.verifying_key().to_bytes())),
+    };
+    m.upsert(accepted);
+    fetcher.write_manifest(&m).await?;
+    Ok(out)
 }
 
 /// `mycelium-artifact list` against a store URL.
@@ -225,7 +251,11 @@ pub async fn list_store(fetcher: &ObjectStoreFetcher) -> Result<String, String> 
 }
 
 /// `mycelium-artifact verify` against a store URL: provenance, presence, and a streamed hash.
-pub async fn verify_store(fetcher: &ObjectStoreFetcher, trusted: &[[u8; 32]]) -> Result<crate::tools::VerifyReport, String> {
+pub async fn verify_store(
+    fetcher: &ObjectStoreFetcher,
+    trusted: &[[u8; 32]],
+    reviewers: &[[u8; 32]],
+) -> Result<crate::tools::VerifyReport, String> {
     let m = fetcher.read_manifest().await.map_err(|e| format!("manifest: {e}"))?;
     let mut r = crate::tools::VerifyReport::default();
     for (i, e) in m.entries().iter().enumerate() {
@@ -233,6 +263,9 @@ pub async fn verify_store(fetcher: &ObjectStoreFetcher, trusted: &[[u8; 32]]) ->
         let who = format!("line {} ({}/{}, {})", i + 1, e.provides.namespace, e.provides.name, &e.artifact.to_hex()[..12]);
         if !trusted.is_empty() && !e.verify_provenance(trusted) {
             r.problems.push(format!("{who}: provenance does not verify against any trusted publisher"));
+        }
+        if let Some(p) = crate::tools::acceptance_problem(e, reviewers) {
+            r.problems.push(format!("{who}: {p}"));
         }
         match fetcher.hash_matches(&e.artifact, crate::http_source::DEFAULT_RANGE_CHUNK_BYTES).await? {
             None => r.problems.push(format!("{who}: bytes are not in the store")),
@@ -310,10 +343,10 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("stage").join(out.artifact.to_hex())).unwrap(), bytes);
 
         // verify: provenance and a streamed hash, over the store.
-        let r = verify_store(&again, &[key.verifying_key().to_bytes()]).await.unwrap();
+        let r = verify_store(&again, &[key.verifying_key().to_bytes()], &[]).await.unwrap();
         assert!(r.problems.is_empty(), "{:?}", r.problems);
         let other = signing_key_from_hex(&"5a".repeat(32)).unwrap().verifying_key().to_bytes();
-        let r = verify_store(&again, &[other]).await.unwrap();
+        let r = verify_store(&again, &[other], &[]).await.unwrap();
         assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
 
         // A miss is a miss.

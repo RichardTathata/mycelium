@@ -188,6 +188,8 @@ jobs:
           if cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/unauthorised; then
             echo "the unauthorised fixture must fail the check"; exit 1
           fi
+      # F2 (D20): a proposed artifact is reported as *would bind after acceptance*, a warning.
+      - run: cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/coop --library tests/fixtures/units/artifacts-proposed | grep -q "would bind after acceptance"
       # W3: the schema window and an unknown schema, both named, exit 1.
       - run: |
           if cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/schema-window --schemas tests/fixtures/units/schemas; then

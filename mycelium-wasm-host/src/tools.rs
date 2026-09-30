@@ -85,6 +85,17 @@ pub struct PublishOutcome {
     pub kind:       ArtifactKind,
     pub size_bytes: u64,
     pub signer:     String,
+    /// D20: published as a proposal — loads only into a shadow lane until a reviewer accepts it.
+    pub proposed:   bool,
+}
+
+/// What `accept` did.
+#[derive(Debug, Clone)]
+pub struct AcceptOutcome {
+    pub artifact: ArtifactId,
+    pub provides: Capability,
+    pub signer:   String,
+    pub reviewer: String,
 }
 
 /// Read a description and the bytes it names (relative to the description's directory).
@@ -100,11 +111,58 @@ pub fn read_description_and_bytes(description: &Path) -> Result<(ArtifactDescrip
 /// The signed entry a description declares for bytes already stored at `artifact`.
 pub fn build_entry(d: &ArtifactDescription, bytes: &[u8], artifact: ArtifactId, key: &SigningKey) -> Result<InstallableEntry, String> {
     let kind = kind_from_name(&d.kind).ok_or_else(|| format!("unknown artifact kind {:?}", d.kind))?;
-    Ok(InstallableEntry::new(d.provides.to_capability(), artifact)
+    let entry = InstallableEntry::new(d.provides.to_capability(), artifact)
         .with_kind(kind)
         .with_cost(bytes.len() as u64, d.est_install_secs.unwrap_or(0))
-        .with_requirements(d.requires.disk_bytes, d.requires.mem_bytes)
-        .signed_by(key))
+        .with_requirements(d.requires.disk_bytes, d.requires.mem_bytes);
+    let entry = if d.proposed { entry.as_proposed() } else { entry };
+    Ok(entry.signed_by(key))
+}
+
+/// Find the one manifest entry `selector` names: a content address (full or a hex prefix of at
+/// least 12 characters) or `ns/name`. Ambiguity is refused by name, never resolved by luck.
+pub fn select_entry<'a>(m: &'a Manifest, selector: &str) -> Result<&'a InstallableEntry, String> {
+    let matches: Vec<&InstallableEntry> = if let Some((ns, name)) = selector.split_once('/') {
+        m.entries().iter().filter(|e| e.provides.namespace.as_ref() == ns && e.provides.name.as_ref() == name).collect()
+    } else {
+        if selector.len() < 12 || !selector.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!("{selector:?}: name an entry as ns/name or by at least 12 hex characters of its content address"));
+        }
+        let sel = selector.to_ascii_lowercase();
+        m.entries().iter().filter(|e| e.artifact.to_hex().starts_with(&sel)).collect()
+    };
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(format!("{selector:?}: no manifest entry matches")),
+        many => Err(format!(
+            "{selector:?} names {} entries ({}); use the content address",
+            many.len(),
+            many.iter().map(|e| e.artifact.to_hex()[..12].to_string()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// D20's review step: a reviewer accepts the proposed entry `selector` names, and the manifest
+/// line is rewritten in place (same KV key, so the librarian republishes it as an overwrite and
+/// the signer scoping still holds — the publisher's signature is untouched). Refused by name when
+/// the entry is not a proposal, is unsigned, or is already accepted.
+pub fn accept(library: &Path, selector: &str, reviewer: &SigningKey) -> Result<AcceptOutcome, String> {
+    let path = library.join(MANIFEST_FILE);
+    let mut m = Manifest::load(&path).map_err(|e| format!("manifest: {e}"))?;
+    let entry = select_entry(&m, selector)?.clone();
+    if entry.acceptance.is_some() {
+        return Err(format!("{}/{} ({}) is already accepted", entry.provides.namespace, entry.provides.name, &entry.artifact.to_hex()[..12]));
+    }
+    let accepted = entry.accepted_by(reviewer)?;
+    let out = AcceptOutcome {
+        artifact: accepted.artifact,
+        provides: accepted.provides.clone(),
+        signer: format!("ed25519:{}", hex(&accepted.signer)),
+        reviewer: format!("ed25519:{}", hex(&reviewer.verifying_key().to_bytes())),
+    };
+    m.upsert(accepted);
+    m.save(&path).map_err(|e| format!("manifest: {e}"))?;
+    Ok(out)
 }
 
 /// Store the description's bytes, build and sign the entry, append the manifest line.
@@ -121,6 +179,7 @@ pub fn publish(description: &Path, library: &Path, key: &SigningKey) -> Result<P
         kind,
         size_bytes: bytes.len() as u64,
         signer: format!("ed25519:{}", hex(&key.verifying_key().to_bytes())),
+        proposed: d.proposed,
     })
 }
 
@@ -139,8 +198,16 @@ fn toml_value(v: &CapValue) -> String {
 pub fn render_entry(e: &InstallableEntry) -> String {
     let mut out = String::new();
     let signer = if e.signer.is_empty() { "unsigned".to_string() } else { format!("ed25519:{}", hex(&e.signer)) };
-    out.push_str(&format!("# artifact {} — {} B — {}\n", e.artifact.to_hex(), e.size_bytes, signer));
+    let status = match (&e.proposed, &e.acceptance) {
+        (false, _) => String::new(),
+        (true, None) => " — proposed (shadow lane only until accepted)".to_string(),
+        (true, Some(a)) => format!(" — proposed, accepted by ed25519:{}", hex(&a.reviewer)),
+    };
+    out.push_str(&format!("# artifact {} — {} B — {}{status}\n", e.artifact.to_hex(), e.size_bytes, signer));
     out.push_str(&format!("kind = {:?}\n", kind_name(e.kind)));
+    if e.proposed {
+        out.push_str("proposed = true\n");
+    }
     out.push_str(&format!("est_install_secs = {}\n", e.est_install_secs));
     out.push_str("\n[provides]\n");
     out.push_str(&format!("ns = {:?}\nname = {:?}\n", e.provides.namespace.as_ref(), e.provides.name.as_ref()));
@@ -171,10 +238,31 @@ pub struct VerifyReport {
     pub problems: Vec<String>,
 }
 
+/// D20's acceptance check for one entry, shared by the directory and store verifiers: a forged
+/// acceptance (a signature that does not verify under the reviewer it names) is always a problem;
+/// a reviewer outside `reviewers` is one when the list is given.
+pub fn acceptance_problem(e: &InstallableEntry, reviewers: &[[u8; 32]]) -> Option<String> {
+    let a = e.acceptance.as_ref()?;
+    let named = format!("ed25519:{}", hex(&a.reviewer));
+    if !e.verify_acceptance(&[a.reviewer]) {
+        return Some(format!("acceptance by {named} does not verify — forged, or the entry changed under it"));
+    }
+    if !reviewers.is_empty() && !reviewers.contains(&a.reviewer) {
+        return Some(format!("accepted by {named}, who is not a listed reviewer"));
+    }
+    None
+}
+
 /// Check every manifest line: provenance against `trusted` (when given), bytes present and
-/// hashing to the address; and, given `descriptions`, that each description's bytes still hash
+/// hashing to the address, a forged acceptance always and an unlisted reviewer against
+/// `reviewers` (when given); and, given `descriptions`, that each description's bytes still hash
 /// to the address the manifest carries for its capability.
-pub fn verify(library: &Path, trusted: &[[u8; 32]], descriptions: Option<&Path>) -> Result<VerifyReport, String> {
+pub fn verify(
+    library: &Path,
+    trusted: &[[u8; 32]],
+    reviewers: &[[u8; 32]],
+    descriptions: Option<&Path>,
+) -> Result<VerifyReport, String> {
     let m = Manifest::load(&library.join(MANIFEST_FILE)).map_err(|e| format!("manifest: {e}"))?;
     let lib = FsLibrarySource::open(library).map_err(|e| format!("{}: {e}", library.display()))?;
     let mut r = VerifyReport::default();
@@ -183,6 +271,9 @@ pub fn verify(library: &Path, trusted: &[[u8; 32]], descriptions: Option<&Path>)
         let who = format!("line {} ({}/{}, {})", i + 1, e.provides.namespace, e.provides.name, &e.artifact.to_hex()[..12]);
         if !trusted.is_empty() && !e.verify_provenance(trusted) {
             r.problems.push(format!("{who}: provenance does not verify against any trusted publisher"));
+        }
+        if let Some(p) = acceptance_problem(e, reviewers) {
+            r.problems.push(format!("{who}: {p}"));
         }
         match lib.fetch(&e.artifact) {
             None => r.problems.push(format!("{who}: bytes are not in the library")),
@@ -304,24 +395,24 @@ mem_bytes = 67108864
         let trusted = key.verifying_key().to_bytes();
         let out = publish(&descriptions.join("optimizer.toml"), &lib, &key).unwrap();
 
-        let r = verify(&lib, &[trusted], Some(&descriptions)).unwrap();
+        let r = verify(&lib, &[trusted], &[], Some(&descriptions)).unwrap();
         assert_eq!(r.checked, 1);
         assert!(r.problems.is_empty(), "{:?}", r.problems);
 
         // The bytes change; the manifest did not.
         std::fs::write(descriptions.join("optimizer.wasm"), b"v2 bytes").unwrap();
-        let r = verify(&lib, &[trusted], Some(&descriptions)).unwrap();
+        let r = verify(&lib, &[trusted], &[], Some(&descriptions)).unwrap();
         assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
         assert!(r.problems[0].contains("bytes changed under an unchanged manifest"), "{}", r.problems[0]);
 
         // An untrusted publisher.
         let other = signing_key_from_hex(&"ef".repeat(32)).unwrap().verifying_key().to_bytes();
-        let r = verify(&lib, &[other], None).unwrap();
+        let r = verify(&lib, &[other], &[], None).unwrap();
         assert!(r.problems.iter().any(|p| p.contains("provenance does not verify")), "{:?}", r.problems);
 
         // The blob goes missing.
         std::fs::remove_file(lib.join(out.artifact.to_hex())).unwrap();
-        let r = verify(&lib, &[trusted], None).unwrap();
+        let r = verify(&lib, &[trusted], &[], None).unwrap();
         assert!(r.problems.iter().any(|p| p.contains("not in the library")), "{:?}", r.problems);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -335,5 +426,82 @@ mem_bytes = 67108864
         assert_eq!(kind_from_name("blob"), Some(ArtifactKind::Blob));
         assert_eq!(kind_from_name("native"), None);
         assert_eq!(kind_name(ArtifactKind::WasmComponent), "wasm-component");
+    }
+}
+
+#[cfg(test)]
+mod d20_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "mycelium-tools-d20-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_proposed_description_publishes_a_proposal_that_accept_promotes_and_verify_checks() {
+        let dir = scratch("accept");
+        let lib = dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(dir.join("opt.wasm"), b"pretend component").unwrap();
+        std::fs::write(
+            dir.join("opt.toml"),
+            "kind = \"wasm-component\"\nproposed = true\nbytes = \"opt.wasm\"\n[provides]\nns = \"route\"\nname = \"optimize\"\n",
+        )
+        .unwrap();
+        let publisher = SigningKey::from_bytes(&[21u8; 32]);
+        let reviewer = SigningKey::from_bytes(&[22u8; 32]);
+        let stranger = SigningKey::from_bytes(&[23u8; 32]);
+        let reviewers = [reviewer.verifying_key().to_bytes()];
+
+        let out = publish(&dir.join("opt.toml"), &lib, &publisher).unwrap();
+        assert!(out.proposed);
+        let listed = list(&lib).unwrap();
+        assert!(listed.contains("proposed (shadow lane only until accepted)") && listed.contains("proposed = true"), "{listed}");
+        let m = Manifest::load(&lib.join(MANIFEST_FILE)).unwrap();
+        assert!(!m.entries()[0].is_loadable(&reviewers));
+
+        // A stranger's acceptance is a problem verify names; the entry stays unloadable.
+        let mut forged = m.clone();
+        let e = forged.entries()[0].clone().accepted_by(&stranger).unwrap();
+        forged.upsert(e);
+        forged.save(&lib.join(MANIFEST_FILE)).unwrap();
+        let r = verify(&lib, &[], &reviewers, None).unwrap();
+        assert!(r.problems.iter().any(|p| p.contains("not a listed reviewer")), "{:?}", r.problems);
+        assert!(!Manifest::load(&lib.join(MANIFEST_FILE)).unwrap().entries()[0].is_loadable(&reviewers));
+        m.save(&lib.join(MANIFEST_FILE)).unwrap();
+
+        // A forged signature under the reviewer's name.
+        let mut forged = m.clone();
+        let mut e = forged.entries()[0].clone();
+        e.acceptance = Some(crate::catalog::Acceptance { reviewer: reviewer.verifying_key().to_bytes(), signature: [9u8; 64] });
+        forged.upsert(e);
+        forged.save(&lib.join(MANIFEST_FILE)).unwrap();
+        let r = verify(&lib, &[], &[], None).unwrap();
+        assert!(r.problems.iter().any(|p| p.contains("does not verify")), "{:?}", r.problems);
+        m.save(&lib.join(MANIFEST_FILE)).unwrap();
+
+        // The real acceptance, by ns/name, then by address prefix (already accepted → refused).
+        let acc = accept(&lib, "route/optimize", &reviewer).unwrap();
+        assert_eq!(acc.reviewer, format!("ed25519:{}", hex(&reviewer.verifying_key().to_bytes())));
+        let m2 = Manifest::load(&lib.join(MANIFEST_FILE)).unwrap();
+        assert_eq!(m2.entries().len(), 1, "rewritten in place");
+        assert!(m2.entries()[0].is_loadable(&reviewers));
+        assert!(m2.entries()[0].verify_provenance(&[publisher.verifying_key().to_bytes()]));
+        assert!(verify(&lib, &[publisher.verifying_key().to_bytes()], &reviewers, None).unwrap().problems.is_empty());
+        let err = accept(&lib, &out.artifact.to_hex()[..12], &reviewer).unwrap_err();
+        assert!(err.contains("already accepted"), "{err}");
+        assert!(list(&lib).unwrap().contains("accepted by ed25519:"));
+        // Selectors refused by name.
+        assert!(select_entry(&m2, "abc").unwrap_err().contains("at least 12 hex"));
+        assert!(select_entry(&m2, "route/nothing").unwrap_err().contains("no manifest entry"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
