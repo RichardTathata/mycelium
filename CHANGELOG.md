@@ -10,6 +10,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The stem-examples suite (plan X2, first slice).** One image (`docker/Dockerfile.stem`) carries
+  `mycelium-stem`, `mycelium-artifact` and the co-op `stem_driver`; `docker/docker-compose.stem-examples.yml`
+  runs the `provisioning` demo (providers a and b as stems fed `examples/units/provisioning/`, the
+  driver killing the active one for real) and the `catalog` demo's phases 1–4 (librarian and installer
+  stems) with the same markers the code run prints; `make examples-both-ways DEMO=…` runs both and
+  greps one contract twice; the `stem-examples` job in `cluster-suites.yml` gates it. The hosting
+  units' publisher key is the public half of the suite's seed (`make stem-keys`) — the stem refuses a
+  placeholder the checker accepted. What is not recut, and why, is in the compose header.
+
+### Added
 - **Proposed → shadow → accept (plan D20 / F2, `mycelium-wasm-host`).** An `InstallableEntry` gains
   `proposed` (inside the publisher's signature, under its own domain — flipping the byte breaks the
   signature) and `acceptance` (a reviewer's Ed25519 signature over the publisher's signed content

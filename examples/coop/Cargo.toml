@@ -27,6 +27,14 @@ metrics = ["mycelium/metrics"]
 name = "mailbox_llm"
 path = "src/bin/mailbox_llm.rs"
 
+# X2: the stem-examples driver (docker/docker-compose.stem-examples.yml) — the roles a demo keeps
+# as code when its dynamic roles are stem nodes. `wasm` for `cap_invoke_kind`'s neighbourhood;
+# the image builds it with the same feature.
+[[bin]]
+name = "stem_driver"
+path = "src/bin/stem_driver.rs"
+required-features = ["wasm"]
+
 [[bin]]
 name = "stigmergy"
 path = "src/bin/stigmergy.rs"

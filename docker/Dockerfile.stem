@@ -1,0 +1,30 @@
+# The stem image (design-time-tooling.md §13 R1/R2, §16 X2): identical nodes that load what the
+# declarations call for. One image carries `mycelium-stem` (the node), `mycelium-artifact` (the
+# publisher, for the suite's init step) and the co-op `stem_driver` (the roles §16 says stay code:
+# the buffer, the seeder, the worker — and the asserts). Bookworm on both stages: the binaries link
+# the build stage's glibc. A debug build, like the confined-fleet image: the suite shows a
+# mechanism, and a release build would double the build time for no change in what it shows.
+FROM rust:1.96-slim-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=stem-bookworm-target,target=/build/target \
+    cargo build -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem && \
+    cargo build -p mycelium-coop-examples --bin stem_driver --features wasm && \
+    cp target/debug/mycelium-stem target/debug/mycelium-artifact target/debug/stem_driver /
+
+FROM debian:bookworm-slim
+# docker-cli: the driver kills the active provider for real (the suite's "self-healed" half); the
+# socket is mounted at run time. The static CLI, not the daemon package.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    arch=$(uname -m) && case "$arch" in x86_64) a=x86_64;; aarch64|arm64) a=aarch64;; *) echo "unsupported arch $arch"; exit 1;; esac && \
+    curl -fsSL "https://download.docker.com/linux/static/stable/$a/docker-27.5.1.tgz" | tar -xz -C /tmp && \
+    mv /tmp/docker/docker /usr/local/bin/docker && rm -rf /tmp/docker
+COPY --from=builder /mycelium-stem /mycelium-artifact /stem_driver /usr/local/bin/
+# The declaration directories and the wasm fixtures their artifact descriptions point at, at the
+# paths the descriptions' relative `bytes` resolve to.
+COPY examples/units /repo/examples/units
+COPY mycelium-wasm-host/tests/fixtures/*.wasm /repo/mycelium-wasm-host/tests/fixtures/
+ENTRYPOINT ["mycelium-stem"]
