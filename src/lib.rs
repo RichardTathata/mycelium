@@ -267,7 +267,7 @@ mod consensus;
 pub use agent::{
     AgentPolicy, ExecutionState, AgentStateMachine, PolicyViolation,
     BulkError, BulkServeHandle,
-    GossipAgent, MailboxHandle, McpError, McpToolHandle, McpHandle,
+    GossipAgent, MailboxHandle, McpCall, McpError, McpToolHandle, McpHandle,
     MeshEvent, RpcError, RpcRequest, RpcRequestRx, ScatterError, ScatterResult, SystemStats,
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
     CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,

@@ -269,7 +269,9 @@ attempt is `Fresh`. The domain leg is carried, not re-verified here — a destin
 bundle. A provider behind the gateway builds the composition from what the gateway established —
 `Composition::from_envelope(&envelope, &presented_mandate, origin_domain)` (feature `envelope`), or,
 in a tool handler, `Composition::from_caller(&caller, "tools/call", &format!("tool:{name}@{node}"), None)`
-from the `RequestPrincipal::Client` it receives (`from_carried` takes the same pieces apart) — and records a refusal with `AeEvidence::for_destination_refusal`, so the journal shows which point
+from the `RequestPrincipal::Client` it receives (`from_carried` takes the same pieces apart), or `Composition::from_call(&call, …)` from the
+`McpCall` a `register_mcp_tool_with_call` handler receives, which keeps the carried mandate on a
+member's own mandated direct call as well as on the gateway path — and records a refusal with `AeEvidence::for_destination_refusal`, so the journal shows which point
 said no. `cargo run --example composed_commit --features tls,compliance` is the whole thing end to end:
 permitted at the gateway, refused at the resource once it installs a newer epoch, both decisions in the
 journal. Design: [`composed-effect.md`](../design/composed-effect.md) §9.

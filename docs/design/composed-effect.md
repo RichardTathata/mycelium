@@ -189,3 +189,15 @@ writes a `Decided` record at enforcement point `destination`, verdict `Deny`, ex
 with the leg in `checked`, so a refusal after a gateway permit is as reconstructable as a commit and
 a reader sees which point said no. The record kinds are unchanged; a consumer's `_` arm needs
 nothing new.
+
+**The second door, the next day** *(2026-09-30)*. A member's own mandated direct call
+(`rpc_call_with_mandate`) carries its mandate on its self envelope, and the provider used to drop it
+when it mapped that envelope to a bare `RequestPrincipal::Node` — so `from_caller` had nothing to
+compose from on that path, and the composition was enforceable through the gateway only.
+`register_mcp_tool_with_call` hands a handler an `McpCall`: the principal and the mandate the
+request carried, whichever envelope brought it; `McpCall::principal_string` names a member the way
+its grant does (`node:{id}`), and `Composition::from_call` composes from it on both doors. The mandate
+is *carried*, not verified there — provider enforcement verified it before the handler ran, and the
+destination verifies it for itself again, which is the point of §9. Gated on the existing direct-call
+test (`test_c3_provider_enforcement_decides_direct_member_calls`): the handler sees the carried
+mandate and the holder string on the direct path.

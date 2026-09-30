@@ -198,6 +198,19 @@ impl Composition {
         Self::from_carried(&caller.principal, caller.mandate.as_ref(), operation, resource, origin_domain)
     }
 
+    /// [`from_caller`](Self::from_caller) for the whole call a tool handler receives
+    /// (`register_mcp_tool_with_call`): works on the gateway path **and** on a member's own mandated
+    /// direct call, because [`McpCall`](mycelium::McpCall) keeps the carried mandate either way and
+    /// names the principal as a mandate does (`node:{id}` for a member acting for itself).
+    pub fn from_call(
+        call: &mycelium::McpCall,
+        operation: &str,
+        resource: &str,
+        origin_domain: Option<String>,
+    ) -> Result<Self, String> {
+        Self::from_carried(&call.principal_string(), call.carried_mandate.as_ref(), operation, resource, origin_domain)
+    }
+
     /// [`from_caller`](Self::from_caller) over its pieces — the verified principal and the carried
     /// mandate as the caller context holds it — for a provider that has them apart, and for tests:
     /// a `GatewayCaller` is built only by the verifying receive path, which is right, so this is the

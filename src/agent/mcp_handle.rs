@@ -98,6 +98,25 @@ impl McpHandle {
         F: Fn(crate::RequestPrincipal, serde_json::Value) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
     {
+        self.register_mcp_tool_with_call(name, schema, move |call, args| handler(call.principal, args))
+    }
+
+    /// Like [`register_mcp_tool_with_principal`](Self::register_mcp_tool_with_principal), with
+    /// the whole [`McpCall`](crate::McpCall): the principal **and the mandate the request carried**,
+    /// so a tool that commits at a destination can compose its effect
+    /// (`mycelium_effects::Composition::from_call`) on the gateway path and on a member's own
+    /// mandated direct call alike. The mandate is carried, not verified here — enforcement
+    /// verified it before the handler ran when it is on, and a destination verifies it for itself.
+    pub fn register_mcp_tool_with_call<F, Fut>(
+        &self,
+        name:    impl Into<Arc<str>>,
+        schema:  serde_json::Value,
+        handler: F,
+    ) -> McpToolHandle
+    where
+        F: Fn(crate::McpCall, serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    {
         let name: Arc<str>   = name.into();
         let kv_key: Arc<str> = Arc::from(
             format!("tools/{}/{}", name, self.ctx.node_id).as_str(),

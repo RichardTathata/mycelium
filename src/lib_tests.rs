@@ -9336,8 +9336,13 @@ async fn test_c3_provider_enforcement_decides_direct_member_calls() {
 
     let ran = Arc::new(AtomicUsize::new(0));
     let r2 = Arc::clone(&ran);
-    let _tool = agent.mcp().register_mcp_tool("count", serde_json::json!({}), move |_args| {
+    // The handler receives the whole call: on a member's own mandated direct call the carried
+    // mandate reaches it, and the principal is named as the grant names its holder.
+    let seen_calls: Arc<std::sync::Mutex<Vec<(String, bool)>>> = Arc::default();
+    let seen2 = Arc::clone(&seen_calls);
+    let _tool = agent.mcp().register_mcp_tool_with_call("count", serde_json::json!({}), move |call, _args| {
         let r = Arc::clone(&r2);
+        seen2.lock().unwrap().push((call.principal_string(), call.carried_mandate.is_some()));
         async move { r.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!("ran")) }
     });
     let skill_seen = Arc::new(AtomicUsize::new(0));
@@ -9413,6 +9418,8 @@ async fn test_c3_provider_enforcement_decides_direct_member_calls() {
     let r = reply(agent.service().rpc_call_with_mandate(me.clone(), "mcp.invoke", payload.clone(), &presented, &tool, Duration::from_secs(5)).await.unwrap());
     assert!(r.get("error").is_none(), "an established mandate is admitted at the provider: {r}");
     assert_eq!(ran.load(Ordering::SeqCst), 1);
+    assert_eq!(seen_calls.lock().unwrap().as_slice(), &[(holder.clone(), true)],
+        "the handler saw the carried mandate and the holder string on a member's own direct call");
 
     // 3. Revoked: refused again.
     agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();

@@ -138,7 +138,7 @@ pub(crate) use helpers::make_gossip_update;
 pub(crate) use opacity::is_self_opaque;
 #[cfg(feature = "gateway")]
 pub use mcp::McpClientHandle;
-pub use mcp::{McpError, McpToolHandle};
+pub use mcp::{McpCall, McpError, McpToolHandle};
 pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{

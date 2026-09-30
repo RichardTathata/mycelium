@@ -31,7 +31,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   composition from the gateway's `ActionEnvelope` and the caller's `PresentedMandate`, refusing an
   envelope bound to a different appointment than the presented grant, and `Composition::from_caller`
   builds it at a provider from the caller context a tool handler receives (`from_carried` over its
-  pieces), demonstrated end to end by `examples/composed_commit` in CI — permitted at the gateway,
+  pieces; `from_call` over the new `McpCall` that `register_mcp_tool_with_call` hands a handler, which
+  keeps the carried mandate on a member's own mandated direct call too — before, mapping a self
+  envelope to a node principal dropped it), demonstrated end to end by `examples/composed_commit` in CI — permitted at the gateway,
   refused at the resource once it installs a newer epoch, both decisions in the journal; and
   `AeEvidence::for_destination_refusal` records a destination's refusal as a denied decision at
   enforcement point `destination` with nothing run, so a refusal after a gateway permit is as
