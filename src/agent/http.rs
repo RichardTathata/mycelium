@@ -4657,14 +4657,35 @@ mod tests {
         assert!(b.task_ctx.peer_anchor_keys.pin().get(&ida).unwrap().contains(&a_real),
                 "the anchor is A's actual identity key");
 
-        // Poisoning: write a sys/identity/{A} entry on B introducing a foreign key. The watcher's
-        // tripwire must flag the conflict (anchored key known, KV key differs).
+        // Since identity and its proof travel as one sealed record (v2.14.0), the watcher reads
+        // `sys/identity-signed/{A}` first and the legacy pair only when no sealed record is held
+        // (`helpers::resolve_identity_record`). So a poisoned legacy `sys/identity/{A}` is
+        // **masked** while B holds A's sealed record — the sealed record is authoritative — and
+        // whether the tripwire fired used to depend on whether that record had arrived yet: a
+        // race this test lost once in nine runs of main (the v2.17.0 release commit, 2026-09-30).
+        // Now the test waits for the sealed record, shows the masking, and then poisons the
+        // record the watcher actually reads: the sealed record is tombstoned (any node can gossip
+        // a newer tombstone) and the legacy pair carries the foreign key.
+        let sealed_key = format!("sys/identity-signed/{ida}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while b.kv().get(&sealed_key).is_none() {
+            assert!(std::time::Instant::now() < deadline, "B must hold A's sealed identity record");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let before = b.system_stats().identity_anchor_conflicts;
         let foreign = [0x42u8; 32];
         let mut poisoned = a_real.to_vec();
         poisoned.extend_from_slice(&foreign);
+        // The masked case: with the sealed record present, the legacy poison changes nothing.
+        let _ = b.kv().set(format!("sys/identity/{ida}"), bytes::Bytes::from(poisoned.clone()));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(b.system_stats().identity_anchor_conflicts, before,
+            "a legacy poison is masked while the sealed record is held: the sealed record is authoritative");
+        // The real poisoning: the sealed record gone, the legacy pair introduces a foreign key —
+        // the watcher re-scans (both keys sit under the `sys/identity` prefix) and reads the pair.
+        let _ = b.kv().delete(sealed_key);
         let _ = b.kv().set(format!("sys/identity/{ida}"), bytes::Bytes::from(poisoned));
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             if b.system_stats().identity_anchor_conflicts > before { break; }
             assert!(std::time::Instant::now() < deadline, "conflict tripwire never fired");
