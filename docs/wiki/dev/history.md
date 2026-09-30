@@ -22,6 +22,21 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## The composed effect, enforced at the destination — 2026-09-29/30 (PRs #441, #443, #444, unreleased)
+
+`docs/design/composed-effect.md` §7 said *reconstructable, not enforced*; §9 moves the attribution and
+authority legs to the one place an effect can be refused rather than recorded — the destination's
+commit. `mycelium-effects` gains `Composition`/`ComposedEffect`/`check_composition` and the trait's
+`apply_composed`, refusing by leg (`EffectRefusal::Unauthorised`, now `#[non_exhaustive]`, a `_` arm fails
+closed) and leaving no row; the gate `tests/composed.rs` was written first and seen to fail. The join
+from the gateway: `Composition::from_envelope` / `from_caller` (feature `envelope`), and a destination's
+refusal is evidence (`AeEvidence::for_destination_refusal`, enforcement point `destination`). The
+demonstration `examples/composed_commit` (CI): permitted at the gateway, refused at the resource. The
+second door closed the next day: a member's own mandated direct call dropped its carried mandate when the
+provider mapped the self envelope to a node principal — `register_mcp_tool_with_call` hands the handler an
+`McpCall` (principal + carried mandate) and `Composition::from_call` composes from it on both doors. The
+domain leg is carried, not re-verified. Logs: `.log/2026-09-29-composed-effect-enforced.md`.
+
 ## Proposition alignment — 2026-09-28 (PR #434, docs only) — one sentence, one proof page, one path
 
 A step-back review found the story told in four sentences, its limits in six places, its start on three

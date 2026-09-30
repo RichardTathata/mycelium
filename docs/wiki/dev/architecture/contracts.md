@@ -88,6 +88,11 @@ snapshot of today.
   derived back into it.
 - **Both SDKs** carry the vocabulary (`CommitResult.local_durability` / `localDurability`) and now
   explain it, not only carry it (their READMEs, §12.2).
+- **The composed effect is enforced at the destination** — a `mycelium-effects` destination's
+  `apply_composed` refuses an effect whose principal is not the mandate's holder or whose mandate the
+  resource's own authority rejects, by leg, leaving no row; the handler builds the `Composition` from the
+  call it receives (`from_caller` on the gateway path, `from_call` over `McpCall` on both doors), and the
+  domain leg is carried, not re-verified — [`composed-effect.md`](../../../design/composed-effect.md) §9.
 - **`set_with_min_acks` is `#[deprecated]`** and cannot succeed on today's substrate; the verb that
   does what its name says is `GossipAgent::set_with_replica_sync`, which **asks** each peer whether
   it holds the exact operation rather than watching gossip go by.

@@ -70,6 +70,29 @@ impl From<super::rpc::RpcError> for McpError {
 }
 
 
+/// What a tool handler is told about the call it is serving: who it is authorised **as**, and the
+/// mandate the request **carried** (not verified — the provider's enforcement point verified it
+/// before the handler ran, when enforcement is on; a destination verifies it for itself again).
+/// A gateway client's call carries the mandate on its caller context; a member's own mandated
+/// direct call carries it on its self envelope, and this is the only place it reaches a handler.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct McpCall {
+    pub principal: RequestPrincipal,
+    pub carried_mandate: Option<serde_json::Value>,
+}
+
+impl McpCall {
+    /// The principal as a mandate names it: a gateway client's principal, or `node:{id}` for a
+    /// member acting for itself — the holder string a member's own grant carries.
+    pub fn principal_string(&self) -> String {
+        match &self.principal {
+            RequestPrincipal::Node(n) => gateway_caller::node_principal(n),
+            RequestPrincipal::Client(c) => c.principal.clone(),
+        }
+    }
+}
+
 pub(super) async fn run_mcp_tool_task<F, Fut>(
     ctx:             Arc<TaskCtx>,
     mut cancel_rx:   oneshot::Receiver<()>,
@@ -80,7 +103,7 @@ pub(super) async fn run_mcp_tool_task<F, Fut>(
     handler:         F,
 )
 where
-    F: Fn(RequestPrincipal, serde_json::Value) -> Fut + Send + Sync + 'static,
+    F: Fn(McpCall, serde_json::Value) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
 {
     loop {
@@ -110,7 +133,7 @@ where
         // Item 7: who is calling — the gateway client behind a verified context, or the sending
         // node itself. A context that fails verification is refused with an error reply; the
         // handler never runs as if the node had called.
-        let principal = match gateway_caller::request_principal(&ctx, &req) {
+        let (principal, carried_mandate) = match gateway_caller::request_principal_and_mandate(&ctx, &req) {
             Ok(p) => p,
             Err(e) => {
                 warn!(tool = %tool_name, sender = %req.sender(), "mcp.invoke: caller context refused: {e}");
@@ -141,10 +164,11 @@ where
 
         let args   = rpc_req["params"]["arguments"].clone();
         // C10: under a mandate, the handler is cancelled if the mandate lapses while it runs.
+        let call = McpCall { principal, carried_mandate };
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        let result = super::provider_enforcement::run(&_admission, handler(principal, args)).await;
+        let result = super::provider_enforcement::run(&_admission, handler(call, args)).await;
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
-        let result = handler(principal, args).await;
+        let result = handler(call, args).await;
 
         let response = match result {
             Ok(val) => json!({

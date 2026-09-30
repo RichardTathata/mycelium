@@ -795,7 +795,25 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
 
 /// Resolve the principal `req` should be authorised as. `Err` means refuse.
 pub(crate) fn request_principal(ctx: &TaskCtx, req: &RpcRequest) -> Result<RequestPrincipal, CallerError> {
-    Ok(match verify(ctx, req)? {
+    request_principal_and_mandate(ctx, req).map(|(p, _)| p)
+}
+
+/// [`request_principal`] plus the mandate the request **carried** (not verified), whichever
+/// principal it resolves to. A member's own mandated direct call (`rpc_call_with_mandate`) frames a
+/// self envelope with the mandate; mapping that to [`RequestPrincipal::Node`] is right for
+/// authorisation but used to drop the mandate on the floor, so a tool that commits at a
+/// destination could not compose its effect on that path (`composed-effect.md` §9).
+pub(crate) fn request_principal_and_mandate(
+    ctx: &TaskCtx,
+    req: &RpcRequest,
+) -> Result<(RequestPrincipal, Option<serde_json::Value>), CallerError> {
+    let verified = verify(ctx, req)?;
+    let carried = verified.as_ref().and_then(|c| c.mandate.clone());
+    Ok((principal_of(req, verified), carried))
+}
+
+fn principal_of(req: &RpcRequest, verified: Option<GatewayCaller>) -> RequestPrincipal {
+    match verified {
         // A verified self envelope (`node:{via}`, via == sender) is the sending node's own action.
         //
         // NOTE (Phase-C audit): requiring `CallerAttestation::Signed` here was tried and reverted —
@@ -807,7 +825,7 @@ pub(crate) fn request_principal(ctx: &TaskCtx, req: &RpcRequest) -> Result<Reque
         Some(c) if c.principal == node_principal(&c.via) => RequestPrincipal::Node(c.via),
         Some(c) => RequestPrincipal::Client(c),
         None => RequestPrincipal::Node(req.sender().clone()),
-    })
+    }
 }
 
 /// The provider-side allowlist decision for a gateway client: an empty allowlist admits
