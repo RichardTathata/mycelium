@@ -217,14 +217,10 @@ jobs:
       AWS_ENDPOINT: http://localhost:9090
       AWS_ALLOW_HTTP: "true"
       AWS_REGION: us-east-1
-      # S3 (design-time-tooling.md §11): the GCS path over fake-gcs-server, reached through the
-      # builder's base URL, with a static bearer the emulator ignores — the same test body, a second
-      # store. (`google_skip_signature` is not enough: object_store 0.14's put path fetches a
-      # credential regardless, and without one it asks the GCE metadata server; a static bearer is
-      # a credential that needs no server.)
-      MYCELIUM_GCS_TEST_URL: gs://mycelium-test/library
-      GOOGLE_BASE_URL: http://localhost:4443
-      GOOGLE_BEARER_TOKEN: emulator
+      # S3 (design-time-tooling.md §11): the test also takes MYCELIUM_GCS_TEST_URL, but no GCS
+      # emulator runs here — fake-gcs-server's XML API accepts only signed-URL uploads
+      # (X-Goog-Algorithm in the query), and object_store 0.14 puts with a plain PUT under a bearer,
+      # so two CI runs ended at "invalid uploadType". The GCS gate is a real bucket (S4).
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
@@ -244,17 +240,7 @@ jobs:
           # PUT), so make it explicitly with the runner's AWS CLI and list what the store holds.
           aws --endpoint-url http://localhost:9090 s3api create-bucket --bucket mycelium-test || true
           aws --endpoint-url http://localhost:9090 s3 ls
-      # The GCS fixture: fake-gcs-server over plain HTTP, one bucket made through its JSON API.
-      - name: Start a GCS emulator with the test bucket
-        run: |
-          docker run -d --name fakegcs -p 4443:4443 fsouza/fake-gcs-server -scheme http -public-host localhost:4443 -external-url http://localhost:4443
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:4443/storage/v1/b >/dev/null && break
-            sleep 1
-          done
-          curl -sf -X POST "http://localhost:4443/storage/v1/b?project=test" -H 'Content-Type: application/json' -d '{"name":"mycelium-test"}'
-          curl -sf http://localhost:4443/storage/v1/b
-      # The object-store adapter against both buckets, plus clippy with every feature.
+      # The object-store adapter against that bucket, plus clippy with every feature.
       - run: cargo test -p mycelium-wasm-host --features object_store,stem object_store_source -- --nocapture
       - run: cargo clippy -p mycelium-wasm-host --all-targets --features object_store,stem -- -D warnings
       # S1's resident-memory gate owns the process (it measures RSS), so it runs alone.
