@@ -127,6 +127,13 @@ impl MeshArtifactSource {
     }
 }
 
+impl MeshArtifactSource {
+    /// How many verified artifacts the cache holds — what a stem re-serves to peers (X2).
+    pub fn cached_len(&self) -> usize {
+        self.cache.lock().unwrap().len()
+    }
+}
+
 impl ArtifactSource for MeshArtifactSource {
     fn fetch(&self, id: &ArtifactId) -> Option<Bytes> {
         self.cache.lock().unwrap().get(id).cloned()

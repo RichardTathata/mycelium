@@ -27,13 +27,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mycelium::{CapabilityGroupHandle, CapabilityReg, GossipAgent, NodeCapabilityConfig, RequirementHandle};
+use mycelium::{CapValue, Capability, CapabilityGroupHandle, CapabilityReg, GossipAgent, NodeCapabilityConfig, RequirementHandle};
 
 use crate::artifact::ArtifactSource;
 use crate::catalog::InstallableCatalog;
 use crate::host::WasmHost;
-use crate::librarian::librarian_filter;
-use crate::mesh_source::MeshArtifactSource;
+use crate::librarian::{librarian_filter, LIBRARIAN_NAME, LIBRARIAN_NS};
+use crate::mesh_source::{serve_artifacts, MeshArtifactSource};
 use crate::provisioner::Provisioner;
 use crate::resources::SystemResourceProbe;
 use crate::runtime::{BlobRuntime, FuelPolicy};
@@ -96,6 +96,10 @@ pub struct Stem {
     stop:    Option<tokio::sync::watch::Sender<bool>>,
     ticker:  Option<tokio::task::JoinHandle<()>>,
     hosted:  Arc<AtomicUsize>,
+    /// X2: on the mesh path a hosting stem re-serves its verified cache to peers (the late
+    /// joiner's source once the librarian is gone), advertised as `artifact/librarian` with
+    /// `role = "cache"` only once the cache holds something.
+    _peer_serve: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// `"ed25519:<64 hex>"` → the verifying key bytes; `field` names the table entry in the refusal.
@@ -145,12 +149,12 @@ impl Stem {
         }
 
         let hosted = Arc::new(AtomicUsize::new(0));
-        let (stop, ticker) = match &units.hosts {
+        let (stop, ticker, peer_serve) = match &units.hosts {
             None => {
                 if !units.presence.is_empty() {
                     return Err(StemError("[[presence]] needs a [hosts] table: only a hosting unit can keep providers alive".into()));
                 }
-                (None, None)
+                (None, None, None)
             }
             Some(h) => {
                 // D19: the engine counts fuel whenever any budget is declared; who pays is the
@@ -178,6 +182,11 @@ impl Stem {
                     Some(m) => (Arc::clone(&m) as Arc<dyn ArtifactSource + Send + Sync>, Some(m)),
                     None => (source, None),
                 };
+                // X2: whatever this stem pulls and verifies, it will answer for — a peer's pull
+                // finds an empty cache here as "not held" and moves on to the next holder.
+                let peer_serve = mesh.as_ref().map(|m| {
+                    serve_artifacts(Arc::clone(&agent), Arc::clone(m) as Arc<dyn ArtifactSource + Send + Sync>)
+                });
                 let mut prov = Provisioner::new(
                     Arc::clone(&agent),
                     Arc::new(host),
@@ -230,7 +239,9 @@ impl Stem {
                 let tick = opts.tick;
                 let kv = agent.kv();
                 let hosted_w = Arc::clone(&hosted);
+                let cache_agent = Arc::clone(&agent);
                 let ticker = tokio::spawn(async move {
+                    let mut cache_cap: Option<CapabilityReg> = None;
                     loop {
                         if *stop_rx.borrow_and_update() {
                             break;
@@ -243,6 +254,14 @@ impl Stem {
                             for id in ids {
                                 let _ = m.prefetch(&id).await;
                             }
+                            // Once the cache holds something, say so: a peer holder, not the
+                            // library of record.
+                            if cache_cap.is_none() && m.cached_len() > 0 {
+                                cache_cap = Some(cache_agent.capabilities().advertise_capability(
+                                    Capability::new(LIBRARIAN_NS, LIBRARIAN_NAME).with("role", CapValue::Text(Arc::from("cache"))),
+                                    Duration::from_secs(30),
+                                ));
+                            }
                         }
                         prov.provision_round();
                         hosted_w.store(prov.hosted_count(), Ordering::Relaxed);
@@ -251,13 +270,14 @@ impl Stem {
                             _ = stop_rx.changed() => {}
                         }
                     }
+                    drop(cache_cap);
                     drop(prov);
                 });
-                (Some(stop_tx), Some(ticker))
+                (Some(stop_tx), Some(ticker), peer_serve)
             }
         };
 
-        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted })
+        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve })
     }
 
     /// How many artifacts this stem currently hosts (as of its last tick).
@@ -272,6 +292,9 @@ impl Stem {
         }
         if let Some(t) = self.ticker.take() {
             let _ = t.await;
+        }
+        if let Some(s) = self._peer_serve.take() {
+            s.abort();
         }
     }
 }
@@ -379,6 +402,72 @@ mod tests {
     /// capability nobody deployed; kill one host and the third stem brings it back; and the
     /// offline check over the same files agrees with what the fleet did — the first
     /// declared-versus-observed comparison, run locally with no consumer.
+    /// X2 (the catalog demo's phase 6, as stems): a hosting stem on the mesh path re-serves what
+    /// it pulled and verified, advertised as a cache holder once it holds something — so when the
+    /// librarian is gone, a late joiner installs from the peer. Seen failing first: with no
+    /// re-serving, the late stem found no holder and never installed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_hosting_stem_re_serves_its_verified_cache_to_a_late_joiner() {
+        let lib_dir = scratch("cache-lib");
+        let lib = Arc::new(FsLibrarySource::open(&lib_dir).unwrap());
+        let key = SigningKey::from_bytes(&[8u8; 32]);
+        let artifact = lib.store(ECHO_COMPONENT).unwrap();
+        let entry = InstallableEntry::new(Capability::new("route", "optimize"), artifact)
+            .with_cost(ECHO_COMPONENT.len() as u64, 1)
+            .signed_by(&key);
+        Manifest::from_entries(vec![entry]).save(&lib_dir.join(MANIFEST_FILE)).unwrap();
+        let seed = agent(alloc_port(), None).await;
+        let librarian = spawn_librarian(
+            Arc::clone(&seed),
+            Arc::clone(&lib) as Arc<_>,
+            LibrarianConfig {
+                manifest_path: lib_dir.join(MANIFEST_FILE),
+                publisher:     key.verifying_key().to_bytes(),
+                sync_interval: Duration::from_millis(200),
+                manifest_source: None,
+            },
+        );
+        let publisher_hex: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let unit = |floor: u32| NodeCapabilityConfig::from_toml_str(&format!(
+            "principal=\"stem\"\n[hosts]\nkinds=[\"wasm-component\"]\ntrusted_publishers=[\"ed25519:{publisher_hex}\"]\n\
+             [[presence]]\nns=\"route\"\nname=\"optimize\"\nmin_providers={floor}\n"
+        )).unwrap();
+        let opts = StemOptions {
+            source: StemSource::Mesh { timeout: Duration::from_secs(5) },
+            tick: Duration::from_millis(300),
+            self_elect_p: 1.0,
+            declare_interval: Duration::from_secs(2),
+        };
+
+        // The installer: pulls from the librarian, hosts, and — once its cache holds the bytes —
+        // advertises itself as a cache holder.
+        let installer = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let installer_stem = Stem::start(Arc::clone(&installer), &unit(1), opts.clone()).unwrap();
+        assert!(wait_until(60, || installer_stem.hosted_count() == 1).await, "the installer hosts from the librarian");
+        let holders = |a: &Arc<GossipAgent>| a.capabilities().resolve(&librarian_filter()).len();
+        assert!(wait_until(30, || holders(&installer) == 2).await, "two holders: the librarian and the installer's cache");
+
+        // The librarian dies with its node.
+        drop(librarian);
+        seed.shutdown().await;
+
+        // A late joiner, bootstrapping from the installer, wants a second provider: the only
+        // holder left is the installer's cache.
+        let late = agent(alloc_port(), Some(installer.node_id().to_socket_addr().port())).await;
+        let late_stem = Stem::start(Arc::clone(&late), &unit(2), opts.clone()).unwrap();
+        assert!(wait_until(90, || late_stem.hosted_count() == 1).await, "the late joiner installed from the peer's cache");
+        let reply = late.service()
+            .rpc_call(late.node_id().clone(), crate::runtime::cap_invoke_kind("route", "optimize"),
+                b"late".to_vec(), Duration::from_secs(5))
+            .await.expect("the late joiner serves");
+        assert_eq!(reply.as_ref(), b"late");
+
+        late_stem.stop().await;
+        installer_stem.stop().await;
+        late.shutdown().await;
+        installer.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
     async fn the_stem_fleet_fills_a_presence_floor_and_reheals() {
         // ── the library and its librarian ───────────────────────────────────────

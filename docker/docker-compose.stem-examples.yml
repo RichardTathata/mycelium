@@ -22,8 +22,13 @@
 #                  acceptance is a manifest rewrite the driver would have to make in the library
 #                  volume and the stems re-read — open.
 #   catalog      — the librarian and the installer are stems (the installer pulls over the mesh);
-#                  the driver is the caller. The code run's phase 6 (a late joiner installing from
-#                  a peer's cache) has no stem equivalent: a stem does not re-serve its cache — open.
+#                  the driver is the caller. Then the code run's phase 6, as stems: the driver kills
+#                  the librarian and starts a late stem (`docker run`, the same image) that installs
+#                  from the installer's re-served cache and answers — "installed from a peer cache".
+#   mcp_toolgrowth — the library and the tool-host are stems; the installed `tool/unit-convert`
+#                  component is bridged as an MCP tool by the runtime (gateway feature), and the
+#                  driver is the agent: it declares the need, finds the tool in KV, and calls it over
+#                  `mcp.invoke` — "the converter code arrived over the mesh".
 
 x-stem: &stem
   image: mycelium-stem:test
@@ -112,6 +117,11 @@ services:
     environment:
       <<: *stem-env
       STEM_DRIVER_HOST: 172.40.0.20
+      STEM_LIBRARIAN_CONTAINER: mycelium-stem-librarian
+      STEM_LATE_IP: 172.40.0.23
+      STEM_INSTALLER_IP: 172.40.0.22
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       init-catalog: { condition: service_completed_successfully }
     networks:
@@ -137,11 +147,61 @@ services:
     networks:
       stem-net: { ipv4_address: 172.40.0.22 }
 
+  # ── mcp_toolgrowth ──────────────────────────────────────────────────────────
+  init-mcp_toolgrowth:
+    <<: *stem
+    profiles: [mcp_toolgrowth]
+    container_name: mycelium-stem-init-mcp_toolgrowth
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        set -e; for d in /repo/examples/units/mcp_toolgrowth/artifacts/*.toml; do
+        mycelium-artifact publish "$$d" --library /lib --key-env STEM_PUB_SEED; done;
+        mycelium-artifact list /lib
+    volumes: [ "lib:/lib" ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.4 }
+
+  driver-mcp_toolgrowth:
+    <<: *stem
+    profiles: [mcp_toolgrowth]
+    container_name: mycelium-stem-driver-mcp_toolgrowth
+    entrypoint: ["stem_driver"]
+    command: ["mcp_toolgrowth"]
+    environment:
+      <<: *stem-env
+      STEM_DRIVER_HOST: 172.40.0.30
+    depends_on:
+      init-mcp_toolgrowth: { condition: service_completed_successfully }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.30 }
+
+  library:
+    <<: *stem
+    profiles: [mcp_toolgrowth]
+    container_name: mycelium-stem-library
+    command: ["--units", "/repo/examples/units/mcp_toolgrowth/library.toml", "--library", "/lib", "--librarian", "/lib/manifest", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.31", "-p", "57000", "-r", "172.40.0.30:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-mcp_toolgrowth ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.31 }
+
+  tool-host:
+    <<: *stem
+    profiles: [mcp_toolgrowth]
+    container_name: mycelium-stem-tool-host
+    command: ["--units", "/repo/examples/units/mcp_toolgrowth/tool-host.toml", "--host", "172.40.0.32", "-p", "57000", "-r", "172.40.0.30:57000", "--tick-ms", "300"]
+    depends_on: [ driver-mcp_toolgrowth ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.32 }
+
 volumes:
   lib:
 
 networks:
   stem-net:
+    # Named, so the catalog driver can start the late joiner on it with `docker run --network`.
+    name: mycelium-stem-net
     ipam:
       config:
         - subnet: 172.40.0.0/24

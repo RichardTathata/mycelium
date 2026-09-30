@@ -1437,6 +1437,65 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// X2 (the tool-growth demo's tool-host, as a stem): an installed `tool/{name}` component is
+    /// bridged as MCP tool `{name}` — `tools/{name}/{node}` appears in KV and a `tools/call` over
+    /// `mcp.invoke` reaches the component. Seen failing first: with no bridge the KV key never
+    /// appeared.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn an_installed_tool_component_is_bridged_as_an_mcp_tool() {
+        use crate::catalog::InstallableEntry;
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("tool", "echo"), id));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.supervise(CapFilter::new("tool", "echo"), 1);
+        assert_eq!(prov.provision_round(), 1);
+        wait_live(&prov, 1).await;
+
+        let key = format!("tools/echo/{}", agent.node_id());
+        let mut registered = false;
+        for _ in 0..40 {
+            if agent.kv().get(&key).is_some() {
+                registered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(registered, "the bridge registered {key}");
+
+        let call = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"kg": 5000.0}},
+        });
+        let reply = agent.service()
+            .rpc_call(agent.node_id().clone(), mycelium::signal_kind::MCP_INVOKE, call.to_string().into_bytes(), Duration::from_secs(10))
+            .await.expect("mcp.invoke answers");
+        let resp: serde_json::Value = serde_json::from_slice(&reply).expect("a JSON-RPC reply");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("5000"), "the echo component's output came back through the MCP door: {resp}");
+
+        // Shed it (after the advertisement is observable, as the lifecycle test does) and the
+        // tool goes with the install.
+        let mut observable = false;
+        for _ in 0..40 {
+            if !agent.capabilities().demand(&CapFilter::new("tool", "echo")).providers.is_empty() {
+                observable = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(observable);
+        prov.policies.clear();
+        prov.supervise_band(CapFilter::new("tool", "echo"), 0, 0);
+        prov.provision_round();
+        assert_eq!(prov.hosted_count(), 0);
+        agent.shutdown().await;
+    }
+
     /// A probe reporting fixed numbers — resource-eligibility tests must not depend on the
     /// machine they run on.
     struct FixedProbe {

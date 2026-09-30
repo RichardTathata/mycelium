@@ -1,0 +1,20 @@
+# The late joiner: arrives after the librarian is gone, wants a second optimizer kept alive, and
+# installs from whichever holder is left — the installer's verified cache.
+principal = "late"
+
+[[requirement]]
+ns   = "route"
+name = "optimize"
+
+[hosts]
+kinds                = ["wasm-component"]
+install_budget_bytes = 1073741824
+headroom             = 0.8
+# The suite's test publisher: the public half of seed 42…42 (`make stem-keys`). A fixture, not a secret.
+trusted_publishers   = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"]
+placement_root       = "/var/lib/mycelium/artifacts"
+
+[[presence]]
+ns            = "route"
+name          = "optimize"
+min_providers = 2
