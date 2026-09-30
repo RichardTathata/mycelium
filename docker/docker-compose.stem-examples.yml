@@ -12,9 +12,13 @@
 # seed, and the stems. Static IPs: a node id is `ip:port`. No TLS: one private network.
 #
 # What each profile recuts, and what it does not:
-#   provisioning — providers a and b are stems (`--library /lib`); the driver seeds, drains, kills
-#                  the active provider through the docker socket, and drains again. Same markers
-#                  as the code run ("self-healed"). Wave 3 (shadow-then-accept) is not recut: an
+#   provisioning — providers a and b are stems over the shared library (`--library /lib`), and
+#                  provider-a is also its librarian (`--librarian`): a library on disk is not a
+#                  catalogue — the librarian is what publishes the manifest's lines into the
+#                  gossiped `installable/` catalogue the stems read each tick (the first CI run
+#                  found this: two quiet stems with a full library and an empty catalogue). The
+#                  driver seeds, drains, kills the active provider through the docker socket, and
+#                  drains again. Same markers as the code run ("self-healed"). Wave 3 (shadow-then-accept) is not recut: an
 #                  acceptance is a manifest rewrite the driver would have to make in the library
 #                  volume and the stems re-read — open.
 #   catalog      — the librarian and the installer are stems (the installer pulls over the mesh);
@@ -68,7 +72,7 @@ services:
     <<: *stem
     profiles: [provisioning]
     container_name: mycelium-stem-provider-a
-    command: ["--units", "/repo/examples/units/provisioning/provider-a.toml", "--library", "/lib", "--host", "172.40.0.11", "-p", "57000", "-r", "172.40.0.10:57000", "--tick-ms", "300"]
+    command: ["--units", "/repo/examples/units/provisioning/provider-a.toml", "--library", "/lib", "--librarian", "/lib/manifest", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.11", "-p", "57000", "-r", "172.40.0.10:57000", "--tick-ms", "300"]
     volumes: [ "lib:/lib" ]
     depends_on: [ driver-provisioning ]
     networks:
