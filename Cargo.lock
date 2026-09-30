@@ -2420,6 +2420,7 @@ dependencies = [
  "mycelium",
  "mycelium-tuple-space",
  "rusqlite",
+ "serde_json",
  "tokio",
  "tracing",
 ]

@@ -23,7 +23,10 @@ and observed to fail: with the composed path delegating without checks, every pl
   `envelope`, which pulls the substrate's `gateway` + `tls` in) takes the operation a grant must
   enumerate from `mandate_operation(operation, resource)` — the gateway's own rule, so the destination
   and the gateway check the same string — and refuses an envelope bound to a different holder, term,
-  scope or epoch than the presented grant. `AeEvidence::for_destination_refusal` is a `Decided` record
+  scope or epoch than the presented grant. `Composition::from_caller` is the provider-side twin over
+  `GatewayCaller` (the mandate travels *carried, not verified* on the caller context — C2 — and the
+  destination verifies it for itself, which is why the constructor does not need the provider's
+  assessment); a test pins that the two doors build one composition. `AeEvidence::for_destination_refusal` is a `Decided` record
   at enforcement point `destination`, `Deny`, `Execution::None`, the leg in `checked`; no new record
   kind, so the private exporter's mapping is untouched.
 

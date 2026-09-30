@@ -267,8 +267,9 @@ resource, now). `apply_composed(&ComposedEffect, &ResourceAuthority, now_ms)` is
 refusal is `Unauthorised { leg, reason }` and leaves no row and no dedup entry, so a later authorised
 attempt is `Fresh`. The domain leg is carried, not re-verified here — a destination holds no trust
 bundle. A provider behind the gateway builds the composition from what the gateway established —
-`Composition::from_envelope(&envelope, &presented_mandate, origin_domain)` (feature `envelope`) —
-and records a refusal with `AeEvidence::for_destination_refusal`, so the journal shows which point
+`Composition::from_envelope(&envelope, &presented_mandate, origin_domain)` (feature `envelope`), or,
+in a tool handler, `Composition::from_caller(&caller, "tools/call", &format!("tool:{name}@{node}"), None)`
+from the `RequestPrincipal::Client` it receives (`from_carried` takes the same pieces apart) — and records a refusal with `AeEvidence::for_destination_refusal`, so the journal shows which point
 said no. Design: [`composed-effect.md`](../design/composed-effect.md) §9.
 
 `EffectDestination` is the one trait to implement for your own destination (`apply(&Effect) ->

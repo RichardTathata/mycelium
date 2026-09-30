@@ -208,3 +208,40 @@ fn a_composition_from_the_envelope_agrees_with_the_destination() {
     let err = Composition::from_envelope(&other, &presented, None).unwrap_err();
     assert!(err.contains("term"), "{err}");
 }
+
+/// The provider-side constructor: from the pieces a tool handler's caller context holds — the
+/// gateway's verified principal and the mandate the caller carried — the composition is the same
+/// one the envelope path builds, and a caller that carried no mandate cannot compose. (A
+/// `GatewayCaller` itself is built only by the verifying receive path, so the piecewise form is
+/// what a test can exercise; `from_caller` is a one-line delegation to it.)
+#[cfg(feature = "envelope")]
+#[test]
+fn a_composition_from_the_carried_mandate_agrees_with_the_one_from_the_envelope() {
+    use mycelium::{ActionEnvelope, NodeId, PresentedMandate};
+    use mycelium::mandate::grant::SignedMandateGrant;
+
+    let via = NodeId::new("127.0.0.1", 7946).unwrap();
+    let presented = PresentedMandate {
+        grant: SignedMandateGrant {
+            mandate: mandate("worker-a", "depot-ledger", &["tools/call:tool:ledger"], 3, 10_000),
+            signature: Vec::new(),
+        },
+        possession: String::new(),
+    };
+    let carried = serde_json::to_value(&presented).unwrap();
+    let from_carried =
+        Composition::from_carried("worker-a", Some(&carried), "tools/call", "tool:ledger@depot-node", None).unwrap();
+
+    let envelope = ActionEnvelope::builder("worker-a", via, "tools/call", "tool:ledger@depot-node")
+        .identities("op-1", "attempt-1")
+        .validity(1_000, 2_000)
+        .build();
+    let from_envelope = Composition::from_envelope(&envelope, &presented, None).unwrap();
+    assert_eq!(from_carried, from_envelope, "two doors, one composition");
+    assert!(check_composition(&from_carried, &ResourceAuthority::new("depot-ledger", 3), NOW).is_ok());
+
+    let err = Composition::from_carried("worker-a", None, "tools/call", "tool:ledger@depot-node", None).unwrap_err();
+    assert!(err.contains("carried no mandate"), "{err}");
+    let err = Composition::from_carried("worker-a", Some(&serde_json::json!({"not": "a mandate"})), "tools/call", "tool:ledger", None).unwrap_err();
+    assert!(err.contains("does not parse"), "{err}");
+}

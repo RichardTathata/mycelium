@@ -175,7 +175,11 @@ builds the composition from the `ActionEnvelope` the gateway assembled and the `
 the caller carried — the principal is the envelope's verified actor, the operation is the one a
 grant must enumerate (`{operation}:{resource_key}`, as the gateway's own assessment computes it) —
 and refuses before any check when the envelope was assembled under a different binding than the
-presented grant. And a destination's refusal is **evidence**: `AeEvidence::for_destination_refusal`
+presented grant; `Composition::from_caller` does the same **at a provider**, from the caller context
+a tool handler already receives (`RequestPrincipal::Client`), so a handler that commits at a
+destination builds the composition from the gateway's verified principal and the mandate the
+caller carried, and a caller that carried none cannot compose. And a destination's refusal is
+**evidence**: `AeEvidence::for_destination_refusal`
 writes a `Decided` record at enforcement point `destination`, verdict `Deny`, execution `None`,
 with the leg in `checked`, so a refusal after a gateway permit is as reconstructable as a commit and
 a reader sees which point said no. The record kinds are unchanged; a consumer's `_` arm needs

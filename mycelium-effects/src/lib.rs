@@ -177,6 +177,53 @@ pub struct Composition {
     pub origin_domain: Option<String>,
 }
 
+#[cfg(feature = "envelope")]
+impl Composition {
+    /// Build a composition **at a provider**, from the caller context its tool handler already
+    /// receives (`RequestPrincipal::Client(caller)`): the gateway's verified principal, the mandate
+    /// the caller carried (`GatewayCaller::mandate`, *carried, not verified* — the destination
+    /// verifies it for itself, which is the point), and this call's operation and resource in the
+    /// form a grant must enumerate. A caller that carried no mandate cannot compose an effect, and
+    /// the error says so rather than composing one without authority.
+    ///
+    /// `operation` and `resource` are what the provider derives for the call — for an MCP tool,
+    /// `tools/call` and `tool:{name}@{this node}` — the same derivation the provider's own
+    /// enforcement point uses, so the destination and both enforcement points check one string.
+    pub fn from_caller(
+        caller: &mycelium::GatewayCaller,
+        operation: &str,
+        resource: &str,
+        origin_domain: Option<String>,
+    ) -> Result<Self, String> {
+        Self::from_carried(&caller.principal, caller.mandate.as_ref(), operation, resource, origin_domain)
+    }
+
+    /// [`from_caller`](Self::from_caller) over its pieces — the verified principal and the carried
+    /// mandate as the caller context holds it — for a provider that has them apart, and for tests:
+    /// a `GatewayCaller` is built only by the verifying receive path, which is right, so this is the
+    /// form that can be exercised without one.
+    pub fn from_carried(
+        principal: &str,
+        carried_mandate: Option<&serde_json::Value>,
+        operation: &str,
+        resource: &str,
+        origin_domain: Option<String>,
+    ) -> Result<Self, String> {
+        let principal = PrincipalId::new(principal).ok_or("the caller context names no principal")?;
+        let Some(raw) = carried_mandate else {
+            return Err("the caller carried no mandate — an effect cannot be composed without authority".into());
+        };
+        let presented: mycelium::PresentedMandate =
+            serde_json::from_value(raw.clone()).map_err(|e| format!("the carried mandate does not parse: {e}"))?;
+        Ok(Self {
+            principal,
+            operation: mycelium::mandate_operation(operation, resource),
+            mandate: presented.grant.mandate,
+            origin_domain,
+        })
+    }
+}
+
 /// An effect with its composition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposedEffect {
