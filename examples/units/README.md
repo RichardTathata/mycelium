@@ -13,6 +13,11 @@ any directory turns its row red — precisely, deleting the last provider of any
 (`tests/wire_check_examples.rs`) — which is why every advertised capability has a requirer here: the
 example's own caller, written down.
 
+**The stem run (X2).** `make examples-both-ways DEMO=provisioning` (or `catalog`) runs the demo as the
+in-process binary and as stem nodes from one image fed this directory
+(`docker/docker-compose.stem-examples.yml`), and greps the same markers from both. The hosting units'
+`trusted_publishers` is the public half of the suite's test seed (`make stem-keys`), a fixture.
+
 **Not here, and why:** `mcp_tool_authority`, `authority_drain`, `composed_commit` and
 `procurement_authority` declare MCP tools and mandates only — a tool is not a capability and the
 unit format has no row for it; `federation_node` and `invoke_skill` take their names from the

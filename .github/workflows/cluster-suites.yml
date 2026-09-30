@@ -39,6 +39,9 @@ on:
       - 'scripts/test-confined-fleet.sh'
       - 'examples/confined_fleet_node.rs'
       - 'docker/Dockerfile.confined-fleet'
+      - 'mycelium-wasm-host/**'
+      - 'examples/units/**'
+      - 'examples/coop/**'
       - '.github/workflows/cluster-suites.yml'
   pull_request:
     paths:
@@ -55,6 +58,9 @@ on:
       - 'scripts/test-confined-fleet.sh'
       - 'examples/confined_fleet_node.rs'
       - 'docker/Dockerfile.confined-fleet'
+      - 'mycelium-wasm-host/**'
+      - 'examples/units/**'
+      - 'examples/coop/**'
       - '.github/workflows/cluster-suites.yml'
   schedule:
     - cron: '0 5 * * *'   # nightly 05:00 UTC — catches drift even with no code change
@@ -113,3 +119,16 @@ jobs:
       # and severs by stopping a gateway, and the design record says so.
       - name: Federation suite (make test-federation)
         run: make test-federation
+
+  stem-examples:
+    name: Stem examples (X2 — a demo run as stem nodes fed its declaration directory, Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      # `make test-stem-examples`: for each recut demo, one image (`docker/Dockerfile.stem`), an init
+      # that publishes the demo's artifact descriptions into a signed library, the driver (the roles
+      # §16 keeps as code, and the asserts) and the stems fed `examples/units/<demo>/*.toml`. The
+      # driver prints the same markers the code run prints — the both-ways contract.
+      - name: Stem examples suite (make test-stem-examples)
+        run: make test-stem-examples
