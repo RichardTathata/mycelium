@@ -29,7 +29,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   planted leg. The check and the commit are two steps: the check-then-act window every resource has,
   narrowed and stated. Beside it: `Composition::from_envelope` (feature `envelope`) builds the
   composition from the gateway's `ActionEnvelope` and the caller's `PresentedMandate`, refusing an
-  envelope bound to a different appointment than the presented grant; and
+  envelope bound to a different appointment than the presented grant, and `Composition::from_caller`
+  builds it at a provider from the caller context a tool handler receives; and
   `AeEvidence::for_destination_refusal` records a destination's refusal as a denied decision at
   enforcement point `destination` with nothing run, so a refusal after a gateway permit is as
   reconstructable as a commit.

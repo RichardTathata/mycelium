@@ -21,7 +21,7 @@ tuple-space = ["dep:mycelium-tuple-space", "dep:bytes"]
 # composition from the `ActionEnvelope` the gateway assembled and the mandate the caller presented.
 # Needs the gateway's attesting build, so it pulls those features of the substrate in; optional so
 # a destination that assembles its own composition never does.
-envelope = ["mycelium/gateway", "mycelium/tls"]
+envelope = ["mycelium/gateway", "mycelium/tls", "dep:serde_json"]
 
 [dependencies]
 # Companion-crate contract: only Mycelium's PUBLIC API is used — no internal
@@ -29,6 +29,8 @@ envelope = ["mycelium/gateway", "mycelium/tls"]
 mycelium = { path = "..", default-features = false }
 mycelium-tuple-space = { path = "../mycelium-tuple-space", optional = true }
 bytes = { version = "1", optional = true }
+# `Composition::from_caller` parses the carried mandate out of the caller context's JSON.
+serde_json = { version = "1", optional = true }
 
 # The reference destination. `bundled` compiles SQLite in, so CI and every developer get the same
 # engine and no system library is a hidden dependency. Quarantined to this crate: core carries no
