@@ -79,9 +79,21 @@ rebuilds the catalog from the gossiped view. So any node publishes artifacts and
 resolves against the live cluster catalog — no embedder-supplied in-memory list required.
 
 **Fuel metering (landed):** `WasmHost::with_fuel_per_call(n)` grants each `invoke` a budget of `n`
-wasm instructions; a runaway component **traps** (`WasmHostError::Invoke`) instead of hanging the
-serve task. Instantiation runs with unlimited fuel so only `invoke` is bounded; `WasmHost::new()`
-stays unmetered (zero overhead). Recommended when serving untrusted components.
+wasm instructions; a runaway component is **stopped** (`WasmHostError::FuelExhausted { budget }`)
+instead of hanging the serve task. Instantiation runs with unlimited fuel so only `invoke` is
+bounded; `WasmHost::new()` stays unmetered (zero overhead). **Fuel by publisher (D19, plan F1):**
+`WasmHost::metered()` counts fuel without a default budget, and `Provisioner::set_fuel_policy`
+(`FuelPolicy`) decides per entry from its *verified signer* — an operator key's entries run under
+`operator_budget` (absent = unbounded), every other trusted key is an agent principal and runs
+under `agent_budget`. A stem reads this from `[hosts]`: `fuel_per_call` (the agent budget),
+`operator_publishers` (a subset of `trusted_publishers`, refused otherwise — without provenance a
+signer is a claim), `operator_fuel_per_call`. Every hosted call is recorded
+(`Provisioner::invocations()`, `InvocationOutcome::FuelExhausted { budget }` by name; counter
+`mycelium_artifact_invocations_total{outcome}`); a stopped call leaves the install live because the
+trapped instance is **replaced** from the verified bytes (a trap poisons a component instance — found by
+the gate). Gate:
+`an_agent_published_entry_that_loops_is_stopped_at_its_budget_and_the_operators_is_not` over the
+committed `spin_component.wasm` fixture (a guest that never returns).
 
 **Provenance (landed):** content-addressing gives *integrity* (the bytes are what the catalog
 named); `InstallableEntry::signed_by(key)` adds *provenance* — an Ed25519 signature over the

@@ -9,13 +9,76 @@
 //! **eligibility is node-local truth** (no GPU → no model runtime → this node never self-elects
 //! for model artifacts; some other node does).
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use mycelium::GossipAgent;
 
-use crate::artifact::{ArtifactKind, ArtifactSource};
+use crate::artifact::{ArtifactId, ArtifactKind, ArtifactSource};
 use crate::catalog::InstallableEntry;
 use crate::host::{HostState, Instance, WasmHost, WasmHostError};
+
+/// D19 — who pays for fuel. An entry's publisher is its verified `signer` (inside the signature,
+/// and checked against the provisioner's trusted keys before install): a signer listed here is
+/// the operator and its entries run under `operator_budget` (`None` = unbounded); every other
+/// signer is an agent principal and its entries run under `agent_budget`. The classification rests
+/// on provenance, so it is meaningful only where provenance is required — the stem refuses an
+/// operator list without a trusted list, by name.
+#[derive(Clone, Debug, Default)]
+pub struct FuelPolicy {
+    pub operator_publishers: Vec<[u8; 32]>,
+    pub agent_budget:        Option<u64>,
+    pub operator_budget:     Option<u64>,
+}
+
+impl FuelPolicy {
+    /// The budget an entry signed by `signer` runs under.
+    pub fn budget_for(&self, signer: &[u8]) -> Option<u64> {
+        if self.operator_publishers.iter().any(|k| k.as_slice() == signer) {
+            self.operator_budget
+        } else {
+            self.agent_budget
+        }
+    }
+}
+
+/// How one invocation of a hosted component ended — the runtime's execution record, kept on the
+/// node so an operator can see *fuel exhausted* by name rather than infer it from a reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InvocationOutcome {
+    Completed,
+    /// The component returned its own error string.
+    ComponentError(String),
+    /// The host trapped or failed at the ABI (not fuel).
+    HostError(String),
+    /// Stopped at its fuel budget (D19).
+    FuelExhausted { budget: u64 },
+}
+
+/// One entry of the runtime's invocation log: which artifact, serving which capability, published
+/// by whom, ended how.
+#[derive(Clone, Debug)]
+pub struct InvocationRecord {
+    pub artifact: ArtifactId,
+    pub provides: String,
+    pub signer:   Vec<u8>,
+    pub outcome:  InvocationOutcome,
+}
+
+/// The newest [`INVOCATION_LOG_CAP`] records, oldest dropped first. Wiki lock-order table row 50:
+/// a leaf, one lock per function, never across `await`.
+pub type InvocationLog = Arc<Mutex<VecDeque<InvocationRecord>>>;
+
+/// How many invocation records the runtime keeps.
+pub const INVOCATION_LOG_CAP: usize = 1024;
+
+fn record_invocation(log: &InvocationLog, rec: InvocationRecord) {
+    let mut g = log.lock().unwrap_or_else(|e| e.into_inner());
+    if g.len() >= INVOCATION_LOG_CAP {
+        g.pop_front();
+    }
+    g.push_back(rec);
+}
 
 /// The RPC `kind` an inbound caller uses to invoke the hosted capability `ns/name`. A caller
 /// resolves the capability to a provider node, then `rpc_call(provider, cap_invoke_kind(ns, name),
@@ -147,20 +210,85 @@ pub trait ArtifactRuntime: Send + Sync {
 /// Serve loop for one hosted WASM capability: owns the component [`Instance`] (wasmtime stores
 /// are single-threaded, so one task per instance serialises calls) and answers each inbound RPC
 /// by invoking the component's `handle` export and replying with its output.
-async fn serve_loop(
-    agent: Arc<GossipAgent>,
-    mut instance: Instance,
-    mut rx: mycelium::RpcRequestRx,
-) {
+/// What the serve loop needs to replace a trapped instance: a trap poisons a component instance
+/// (wasmtime refuses to re-enter it), so a call stopped at its budget would otherwise leave a
+/// dead install behind an advertised capability. The loop instantiates afresh from the verified
+/// bytes; the guest's in-memory state is lost with the instance (its KV subtree is not — that
+/// lives in the node's store), and the record names the stop.
+struct Reinstantiate {
+    host:   Arc<WasmHost>,
+    bytes:  Vec<u8>,
+    budget: Option<u64>,
+}
+
+/// What one serve loop knows about the install it serves: the record's identity and the means to
+/// replace a trapped instance.
+struct Served {
+    log:      InvocationLog,
+    artifact: ArtifactId,
+    provides: String,
+    signer:   Vec<u8>,
+    ns:       Arc<str>,
+    again:    Reinstantiate,
+}
+
+impl Served {
+    fn fresh(&self, agent: &GossipAgent) -> Result<Instance, WasmHostError> {
+        let state = HostState::new(agent.node_id().clone(), self.ns.clone(), agent.kv(), agent.mesh());
+        self.again.host.instantiate_with_fuel(&self.again.bytes, state, self.again.budget)
+    }
+}
+
+async fn serve_loop(agent: Arc<GossipAgent>, mut instance: Instance, mut rx: mycelium::RpcRequestRx, served: Served) {
+    let Served { log, artifact, provides, signer, .. } = &served;
+    let (artifact, provides) = (*artifact, provides.clone());
     while let Some(req) = rx.recv().await {
         let payload = req.payload().to_vec();
         // NB: wasm execution is synchronous and blocks this task for its duration — fine for
-        // short handlers; long-running components want fuel/epoch limits + spawn_blocking (follow-up).
-        let result: Vec<u8> = match instance.invoke("invoke", payload) {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => format!("component-error: {e}").into_bytes(),
-            Err(e) => format!("host-error: {e}").into_bytes(),
+        // short handlers; a fuel budget bounds a runaway one (D19), epoch limits + spawn_blocking
+        // stay a follow-up.
+        let (result, outcome): (Vec<u8>, InvocationOutcome) = match instance.invoke("invoke", payload) {
+            Ok(Ok(out)) => (out, InvocationOutcome::Completed),
+            Ok(Err(e)) => (format!("component-error: {e}").into_bytes(), InvocationOutcome::ComponentError(e)),
+            Err(WasmHostError::FuelExhausted { budget }) => (
+                format!("host-error: {}", WasmHostError::FuelExhausted { budget }).into_bytes(),
+                InvocationOutcome::FuelExhausted { budget },
+            ),
+            Err(e) => (format!("host-error: {e}").into_bytes(), InvocationOutcome::HostError(e.to_string())),
         };
+        if matches!(outcome, InvocationOutcome::FuelExhausted { .. } | InvocationOutcome::HostError(_)) {
+            // The trapped instance cannot be entered again: replace it, or stop serving so the
+            // provisioner's probe withdraws and reinstalls (restart ≡ provisioning).
+            match served.fresh(&agent) {
+                Ok(fresh) => {
+                    tracing::info!(%artifact, provides = %provides, "trapped instance replaced with a fresh one");
+                    instance = fresh;
+                }
+                Err(e) => {
+                    tracing::error!(%artifact, provides = %provides, error = %e,
+                        "could not replace the trapped instance — the serve task stops; the probe will withdraw the install");
+                    agent.service().rpc_respond(&req, result);
+                    record_invocation(log, InvocationRecord { artifact, provides, signer: signer.clone(), outcome });
+                    return;
+                }
+            }
+        }
+        let label = match &outcome {
+            InvocationOutcome::Completed => "completed",
+            InvocationOutcome::ComponentError(_) => "component_error",
+            InvocationOutcome::HostError(_) => "host_error",
+            InvocationOutcome::FuelExhausted { .. } => "fuel_exhausted",
+        };
+        metrics::counter!("mycelium_artifact_invocations_total", "outcome" => label).increment(1);
+        if let InvocationOutcome::FuelExhausted { budget } = &outcome {
+            tracing::warn!(%artifact, provides = %provides, budget, "hosted component stopped at its fuel budget");
+        }
+        record_invocation(log, InvocationRecord {
+            artifact,
+            provides: provides.clone(),
+            signer: signer.clone(),
+            outcome,
+        });
         agent.service().rpc_respond(&req, result);
     }
 }
@@ -169,12 +297,34 @@ async fn serve_loop(
 /// instantiate + serve), relocated behind the trait unchanged. `WasmHost` is the engine *inside*
 /// this runtime, not the definition of install.
 pub struct WasmComponentRuntime {
-    host: Arc<WasmHost>,
+    host:   Arc<WasmHost>,
+    /// D19: who runs metered. `None` = every entry gets the host's own default budget, as before.
+    policy: Option<FuelPolicy>,
+    log:    InvocationLog,
 }
 
 impl WasmComponentRuntime {
     pub fn new(host: Arc<WasmHost>) -> Self {
-        Self { host }
+        Self { host, policy: None, log: Arc::new(Mutex::new(VecDeque::new())) }
+    }
+
+    /// Attach the fuel policy (D19). A budget in it needs a metered host
+    /// ([`WasmHost::metered`] / [`WasmHost::with_fuel_per_call`]); an install on an unmetered host
+    /// under a budget fails by name rather than running unbounded.
+    pub fn with_fuel_policy(mut self, policy: FuelPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Share this runtime's invocation log (so a provisioner can hand it out).
+    pub fn with_invocation_log(mut self, log: InvocationLog) -> Self {
+        self.log = log;
+        self
+    }
+
+    /// The runtime's invocation log, newest last.
+    pub fn invocations(&self) -> Vec<InvocationRecord> {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
     }
 }
 
@@ -199,14 +349,32 @@ impl ArtifactRuntime for WasmComponentRuntime {
         );
         // Components are small (well under the mesh frame cap): pull + verify + instantiate in
         // one step. Chunked/ranged pulls with incremental progress are the blob runtime's job.
-        let instance = self.host.provision(&*source, &entry.artifact, state)?;
+        // The verified bytes are kept so a trapped instance can be replaced (see `Reinstantiate`).
+        let bytes = source
+            .fetch(&entry.artifact)
+            .ok_or_else(|| WasmHostError::Fetch(format!("no source holds artifact {}", entry.artifact)))?;
+        crate::artifact::verify_artifact(&bytes, &entry.artifact).map_err(|e| WasmHostError::Verify(e.to_string()))?;
+        let budget = match &self.policy {
+            Some(p) => p.budget_for(&entry.signer),
+            None => self.host.fuel_per_call(),
+        };
+        let instance = self.host.instantiate_with_fuel(&bytes, state, budget)?;
         progress(entry.size_bytes, entry.size_bytes);
 
         // Register the inbound serve handler *before* returning, so the advertisement the
         // provisioner makes on success always finds a live RPC receiver.
         let invoke_kind = cap_invoke_kind(&entry.provides.namespace, &entry.provides.name);
         let rx = ctx.agent.service().rpc_rx(invoke_kind);
-        let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx));
+        let provides = format!("{}/{}", entry.provides.namespace, entry.provides.name);
+        let served = Served {
+            log: Arc::clone(&self.log),
+            artifact: entry.artifact,
+            provides,
+            signer: entry.signer.clone(),
+            ns: entry.provides.namespace.clone(),
+            again: Reinstantiate { host: Arc::clone(&self.host), bytes: bytes.to_vec(), budget },
+        };
+        let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served));
         Ok(Box::new(WasmInstalled { serve }))
     }
 }

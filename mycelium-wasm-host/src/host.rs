@@ -144,9 +144,13 @@ impl HostState {
 /// to clone-share across instantiations; one per node is plenty.
 pub struct WasmHost {
     engine:        Engine,
-    /// Opt-in fuel budget granted to each `invoke` call. `Some(n)` ⇒ a component that runs past
-    /// `n` wasm instructions **traps** instead of hanging the serve task (deterministic). `None` ⇒
-    /// unmetered (the engine doesn't even enable fuel — zero overhead).
+    /// Whether the engine counts fuel at all. Decided once, at engine build: an unmetered engine
+    /// cannot bound any instance (zero overhead); a metered one can give each instance its own
+    /// budget, or none (`u64::MAX`, so the operator's own entries pay the count but never trap).
+    metered:       bool,
+    /// The budget an instance gets when [`instantiate`](Self::instantiate) is not told one.
+    /// `Some(n)` ⇒ a component that runs past `n` wasm instructions **traps** instead of hanging
+    /// the serve task (deterministic). `None` ⇒ unbounded.
     fuel_per_call: Option<u64>,
 }
 
@@ -159,6 +163,9 @@ pub enum WasmHostError {
     Instantiate(String),
     /// Calling the component's `handle` export trapped or failed at the ABI.
     Invoke(String),
+    /// The call ran past its fuel budget and was stopped (D19: an agent-published entry that
+    /// loops is stopped at the budget, and the record says so by name).
+    FuelExhausted { budget: u64 },
     /// No source held the requested artifact.
     Fetch(String),
     /// Fetched bytes did not match the requested content address.
@@ -171,6 +178,9 @@ impl std::fmt::Display for WasmHostError {
             Self::Engine(e) => write!(f, "wasm engine init failed: {e}"),
             Self::Instantiate(e) => write!(f, "component instantiation failed: {e}"),
             Self::Invoke(e) => write!(f, "component invocation failed: {e}"),
+            Self::FuelExhausted { budget } => {
+                write!(f, "fuel exhausted: the call ran past its budget of {budget} instructions")
+            }
             Self::Fetch(e) => write!(f, "artifact fetch failed: {e}"),
             Self::Verify(e) => write!(f, "artifact verification failed: {e}"),
         }
@@ -182,24 +192,42 @@ impl std::error::Error for WasmHostError {}
 impl WasmHost {
     /// Create a host with a Component-Model-enabled engine (no fuel metering — zero overhead).
     pub fn new() -> Result<Self, WasmHostError> {
-        Self::build(None)
+        Self::build(false, None)
     }
 
     /// Create a host that grants each `invoke` a fuel budget of `fuel_per_call` wasm instructions.
     /// A component exceeding it traps (`WasmHostError::Invoke`) rather than hanging the serve task —
     /// the safety bound recommended for serving untrusted components.
     pub fn with_fuel_per_call(fuel_per_call: u64) -> Result<Self, WasmHostError> {
-        Self::build(Some(fuel_per_call))
+        Self::build(true, Some(fuel_per_call))
     }
 
-    fn build(fuel_per_call: Option<u64>) -> Result<Self, WasmHostError> {
+    /// Create a host whose engine counts fuel but grants no budget by default: each
+    /// [`instantiate_with_fuel`](Self::instantiate_with_fuel) decides per instance, so one node can
+    /// run an agent-published entry metered and the operator's own unbounded (D19). An instance
+    /// given no budget runs unbounded on this host, paying only the count.
+    pub fn metered() -> Result<Self, WasmHostError> {
+        Self::build(true, None)
+    }
+
+    /// Does this host's engine count fuel? An unmetered host refuses a budget by name.
+    pub fn is_metered(&self) -> bool {
+        self.metered
+    }
+
+    /// The budget an instance gets when not told one (`None` = unbounded).
+    pub fn fuel_per_call(&self) -> Option<u64> {
+        self.fuel_per_call
+    }
+
+    fn build(metered: bool, fuel_per_call: Option<u64>) -> Result<Self, WasmHostError> {
         let mut cfg = Config::new();
         cfg.wasm_component_model(true);
-        if fuel_per_call.is_some() {
+        if metered {
             cfg.consume_fuel(true);
         }
         let engine = Engine::new(&cfg).map_err(|e| WasmHostError::Engine(e.to_string()))?;
-        Ok(Self { engine, fuel_per_call })
+        Ok(Self { engine, metered, fuel_per_call })
     }
 
     /// The shared engine (components are instantiated against it).
@@ -212,6 +240,24 @@ impl WasmHost {
     /// scoped imports (kv/mesh/log) are wired into the linker here; the guest can reach the node
     /// *only* through them.
     pub fn instantiate(&self, component_bytes: &[u8], state: HostState) -> Result<Instance, WasmHostError> {
+        self.instantiate_with_fuel(component_bytes, state, self.fuel_per_call)
+    }
+
+    /// [`instantiate`](Self::instantiate) with this instance's own per-call budget: `Some(n)`
+    /// bounds every `invoke` at `n` instructions, `None` leaves it unbounded. A budget on an
+    /// unmetered host is refused rather than silently ignored — a bound that is not enforced is
+    /// worse than none.
+    pub fn instantiate_with_fuel(
+        &self,
+        component_bytes: &[u8],
+        state: HostState,
+        fuel_per_call: Option<u64>,
+    ) -> Result<Instance, WasmHostError> {
+        if fuel_per_call.is_some() && !self.metered {
+            return Err(WasmHostError::Instantiate(
+                "a fuel budget needs a metered host (WasmHost::metered / with_fuel_per_call)".into(),
+            ));
+        }
         let component = Component::new(&self.engine, component_bytes)
             .map_err(|e| WasmHostError::Instantiate(e.to_string()))?;
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
@@ -223,12 +269,12 @@ impl WasmHost {
         let mut store = Store::new(&self.engine, state);
         // Component instantiation (libc/WASI init) runs guest code; give it unlimited fuel so the
         // per-call budget bounds only `invoke`, not start-up. (No-op when fuel is disabled.)
-        if self.fuel_per_call.is_some() {
+        if self.metered {
             store.set_fuel(u64::MAX).map_err(|e| WasmHostError::Instantiate(e.to_string()))?;
         }
         let world = bindings::CapabilityComponent::instantiate(&mut store, &component, &linker)
             .map_err(|e| WasmHostError::Instantiate(e.to_string()))?;
-        Ok(Instance { store, world, fuel_per_call: self.fuel_per_call })
+        Ok(Instance { store, world, metered: self.metered, fuel_per_call })
     }
 
     /// **Pull + verify + instantiate** — the M12 mechanism end to end. Fetch the artifact for
@@ -241,11 +287,23 @@ impl WasmHost {
         id: &ArtifactId,
         state: HostState,
     ) -> Result<Instance, WasmHostError> {
+        self.provision_with_fuel(source, id, state, self.fuel_per_call)
+    }
+
+    /// [`provision`](Self::provision) with the instance's own per-call budget (see
+    /// [`instantiate_with_fuel`](Self::instantiate_with_fuel)).
+    pub fn provision_with_fuel(
+        &self,
+        source: &(impl ArtifactSource + ?Sized),
+        id: &ArtifactId,
+        state: HostState,
+        fuel_per_call: Option<u64>,
+    ) -> Result<Instance, WasmHostError> {
         let bytes = source
             .fetch(id)
             .ok_or_else(|| WasmHostError::Fetch(format!("no source holds artifact {id}")))?;
         verify_artifact(&bytes, id).map_err(|e| WasmHostError::Verify(e.to_string()))?;
-        self.instantiate(&bytes, state)
+        self.instantiate_with_fuel(&bytes, state, fuel_per_call)
     }
 
     /// **The full autonomic step (M15 → M12):** resolve `filter` against `catalog` to pick the
@@ -272,6 +330,7 @@ impl WasmHost {
 pub struct Instance {
     store:         Store<HostState>,
     world:         bindings::CapabilityComponent,
+    metered:       bool,
     fuel_per_call: Option<u64>,
 }
 
@@ -282,7 +341,10 @@ impl Instance {
     pub fn invoke(&mut self, kind: &str, payload: Vec<u8>) -> Result<Result<Vec<u8>, String>, WasmHostError> {
         // Refuel per call so each invocation gets the full budget (and a runaway component traps
         // instead of hanging the serve task).
-        if let Some(budget) = self.fuel_per_call {
+        if self.metered {
+            // An unbounded instance on a metered engine is refuelled to the maximum: it pays the
+            // count and never traps.
+            let budget = self.fuel_per_call.unwrap_or(u64::MAX);
             self.store.set_fuel(budget).map_err(|e| WasmHostError::Invoke(e.to_string()))?;
         }
         let req = Request { kind: kind.to_string(), payload };
@@ -290,11 +352,19 @@ impl Instance {
             .world
             .mycelium_host_capability()
             .call_handle(&mut self.store, &req)
-            .map_err(|e| WasmHostError::Invoke(e.to_string()))?;
+            .map_err(|e| match (e.downcast_ref::<wasmtime::Trap>(), self.fuel_per_call) {
+                (Some(wasmtime::Trap::OutOfFuel), Some(budget)) => WasmHostError::FuelExhausted { budget },
+                _ => WasmHostError::Invoke(e.to_string()),
+            })?;
         Ok(match resp.error {
             Some(e) => Err(e),
             None => Ok(resp.payload),
         })
+    }
+
+    /// The per-call budget this instance runs under (`None` = unbounded).
+    pub fn fuel_per_call(&self) -> Option<u64> {
+        self.fuel_per_call
     }
 
     /// Access the underlying host state (e.g. for diagnostics).

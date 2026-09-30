@@ -88,8 +88,8 @@ async fn fuel_budget_bounds_a_component_invocation() {
     let mut inst = starved.instantiate(ECHO_COMPONENT, state).expect("instantiate (unlimited init)");
     let err = inst.invoke("go", b"x".to_vec());
     assert!(
-        matches!(err, Err(mycelium_wasm_host::WasmHostError::Invoke(_))),
-        "a starved invocation must trap, got {err:?}"
+        matches!(err, Err(mycelium_wasm_host::WasmHostError::FuelExhausted { budget: 1 })),
+        "a starved invocation is stopped at its budget, by name (D19), got {err:?}"
     );
 
     // An ample budget: the same call completes normally.
@@ -133,6 +133,38 @@ async fn provision_for_resolves_a_requirement_then_pulls_and_runs_the_match() {
         .provision_for(&catalog, &CapFilter::new("audio", "transcribe"), &source, state2)
         .expect("provision_for ok");
     assert!(none.is_none(), "unsatisfiable requirement yields Ok(None)");
+
+    agent.shutdown().await;
+}
+
+/// D19 at the host level: the budget is an instance property on a metered engine, so the same
+/// component bytes run stopped under one budget and unbounded under none — it is the key that
+/// decides, not the component. And a budget on an unmetered host is refused by name.
+#[tokio::test]
+async fn a_metered_host_gives_each_instance_its_own_budget() {
+    let agent = live_agent().await;
+    let host = WasmHost::metered().expect("engine");
+    assert!(host.is_metered());
+
+    let state = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+    let mut starved = host.instantiate_with_fuel(ECHO_COMPONENT, state, Some(1)).expect("instantiate");
+    let err = starved.invoke("go", b"x".to_vec());
+    assert!(
+        matches!(err, Err(mycelium_wasm_host::WasmHostError::FuelExhausted { budget: 1 })),
+        "stopped at its budget, by name: {err:?}"
+    );
+    assert_eq!(starved.fuel_per_call(), Some(1));
+
+    let state = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+    let mut unbounded = host.instantiate_with_fuel(ECHO_COMPONENT, state, None).expect("instantiate");
+    let out = unbounded.invoke("go", b"plenty".to_vec()).expect("no trap").expect("guest ok");
+    assert_eq!(out, b"plenty");
+    assert_eq!(unbounded.fuel_per_call(), None);
+
+    let plain = WasmHost::new().expect("engine");
+    let state = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+    let err = plain.instantiate_with_fuel(ECHO_COMPONENT, state, Some(1_000)).err().expect("refused");
+    assert!(err.to_string().contains("metered host"), "{err}");
 
     agent.shutdown().await;
 }

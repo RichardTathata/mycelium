@@ -72,6 +72,6 @@ pub use tools::{
 pub use object_store_source::{list_store, publish_to_store, verify_store, ObjectStoreFetcher};
 pub use resources::{ResourceProbe, SystemResourceProbe};
 pub use runtime::{
-    cap_invoke_kind, ArtifactRuntime, BlobRuntime, InstallError, Installed, ProgressFn,
-    RuntimeCtx, WasmComponentRuntime,
+    cap_invoke_kind, ArtifactRuntime, BlobRuntime, FuelPolicy, InstallError, Installed, InvocationLog,
+    InvocationOutcome, InvocationRecord, ProgressFn, RuntimeCtx, WasmComponentRuntime, INVOCATION_LOG_CAP,
 };

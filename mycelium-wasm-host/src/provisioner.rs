@@ -31,7 +31,10 @@ use crate::artifact::{ArtifactId, ArtifactKind, ArtifactSource};
 use crate::catalog::{InstallableCatalog, InstallableEntry, ResourceRequirements};
 use crate::host::WasmHost;
 use crate::resources::{ResourceProbe, SystemResourceProbe};
-use crate::runtime::{ArtifactRuntime, Installed, ProgressFn, RuntimeCtx, WasmComponentRuntime};
+use crate::runtime::{
+    ArtifactRuntime, FuelPolicy, Installed, InvocationLog, InvocationRecord, ProgressFn, RuntimeCtx,
+    WasmComponentRuntime,
+};
 
 /// How often a provisioned capability re-asserts its `cap/` advertisement.
 const ADVERTISE_INTERVAL: Duration = Duration::from_secs(5);
@@ -163,6 +166,11 @@ pub struct Provisioner {
     /// The hard bound on concurrent installs, when an operator attached one (item 4 PR 4c).
     /// `None` = the self-imposed budgets above are the only bounds, as before.
     install_rights: Option<Arc<InstallRights>>,
+    /// The component host, kept so [`set_fuel_policy`](Self::set_fuel_policy) can re-register the
+    /// WASM runtime over it.
+    wasm_host:    Arc<WasmHost>,
+    /// The WASM runtime's invocation log, shared with it (D19's execution record).
+    invocations:  InvocationLog,
 }
 
 impl Provisioner {
@@ -176,8 +184,12 @@ impl Provisioner {
         source: Arc<dyn ArtifactSource + Send + Sync>,
         self_elect_p: f64,
     ) -> Self {
+        let invocations: InvocationLog = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let mut runtimes: HashMap<ArtifactKind, Arc<dyn ArtifactRuntime>> = HashMap::new();
-        runtimes.insert(ArtifactKind::WasmComponent, Arc::new(WasmComponentRuntime::new(host)));
+        runtimes.insert(
+            ArtifactKind::WasmComponent,
+            Arc::new(WasmComponentRuntime::new(Arc::clone(&host)).with_invocation_log(Arc::clone(&invocations))),
+        );
         Self {
             agent,
             catalog,
@@ -191,7 +203,31 @@ impl Provisioner {
             hosted: Arc::new(Mutex::new(HashMap::new())),
             ineligible: Arc::new(AtomicU64::new(0)),
             install_rights: None,
+            wasm_host: host,
+            invocations,
         }
+    }
+
+    /// D19 — fuel by publisher: an entry signed by a key in `policy.operator_publishers` runs under
+    /// `operator_budget` (`None` = unbounded), every other entry under `agent_budget`. The
+    /// classification is the entry's verified `signer`, so pair this with
+    /// [`require_provenance`](Self::require_provenance): without it a signer is a claim. Replaces
+    /// the WASM runtime; installs already live keep the budget they were given.
+    pub fn set_fuel_policy(&mut self, policy: FuelPolicy) {
+        self.runtimes.insert(
+            ArtifactKind::WasmComponent,
+            Arc::new(
+                WasmComponentRuntime::new(Arc::clone(&self.wasm_host))
+                    .with_fuel_policy(policy)
+                    .with_invocation_log(Arc::clone(&self.invocations)),
+            ),
+        );
+    }
+
+    /// The WASM runtime's invocation records, newest last: how each hosted call ended, with a
+    /// fuel-exhausted stop named as such.
+    pub fn invocations(&self) -> Vec<InvocationRecord> {
+        self.invocations.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
     }
 
     /// Bound concurrent installs by the rights this node **holds** in `ledger` for `resource`
@@ -1125,6 +1161,89 @@ mod tests {
         assert_eq!(p2.provision_round(), 1, "trusted-signed artifact starts installing");
         wait_live(&p2, 1).await;
 
+        agent.shutdown().await;
+    }
+
+    /// D19's gate (plan F1): an entry signed by an agent principal that loops is stopped at the
+    /// budget and the record says so by name; the operator's entry runs unbounded to completion
+    /// under the same policy. (That the *budget*, not the component, decides is the host-level
+    /// test `a_metered_host_gives_each_instance_its_own_budget` — one node hosts one content
+    /// address once, so the same bytes cannot be catalogued twice here.) Seen failing first with
+    /// the budget applied uniformly: the operator's echo stopped too.
+    #[tokio::test]
+    async fn an_agent_published_entry_that_loops_is_stopped_at_its_budget_and_the_operators_is_not() {
+        use crate::catalog::InstallableEntry;
+        use crate::runtime::{FuelPolicy, InvocationOutcome};
+        use ed25519_dalek::SigningKey;
+        const SPIN_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/spin_component.wasm");
+        const AGENT_BUDGET: u64 = 1_000;
+
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::metered().expect("engine"));
+        let operator = SigningKey::from_bytes(&[11u8; 32]);
+        let author = SigningKey::from_bytes(&[12u8; 32]);
+        let operator_key = operator.verifying_key().to_bytes();
+        let author_key = author.verifying_key().to_bytes();
+
+        let mut source = InMemorySource::new();
+        let spin = source.insert(SPIN_COMPONENT.to_vec());
+        let echo = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        // The agent's loop and the operator's echo.
+        catalog.add(InstallableEntry::new(Capability::new("text", "spin"), spin).signed_by(&author));
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), echo).signed_by(&operator));
+
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.require_provenance(vec![operator_key, author_key]);
+        prov.set_fuel_policy(FuelPolicy {
+            operator_publishers: vec![operator_key],
+            agent_budget: Some(AGENT_BUDGET),
+            operator_budget: None,
+        });
+        for name in ["spin", "echo"] {
+            prov.supervise(CapFilter::new("text", name), 1);
+        }
+        for _ in 0..40 {
+            prov.provision_round();
+            if prov.hosted_count() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        wait_live(&prov, 2).await;
+
+        let call = |name: &'static str| {
+            let agent = Arc::clone(&agent);
+            async move {
+                agent
+                    .service()
+                    .rpc_call(agent.node_id().clone(), crate::runtime::cap_invoke_kind("text", name),
+                        b"payload".to_vec(), Duration::from_secs(10))
+                    .await
+                    .expect("the serve loop answers")
+            }
+        };
+        let spun = String::from_utf8_lossy(&call("spin").await).into_owned();
+        assert!(spun.contains("fuel exhausted") && spun.contains(&AGENT_BUDGET.to_string()),
+            "the agent's loop is stopped at its budget and the reply names it: {spun}");
+        assert_eq!(call("echo").await.as_ref(), b"payload", "the operator's echo runs unbounded to completion");
+
+        let outcomes: Vec<(String, InvocationOutcome)> =
+            prov.invocations().into_iter().map(|r| (r.provides, r.outcome)).collect();
+        assert_eq!(outcomes, vec![
+            ("text/spin".to_string(), InvocationOutcome::FuelExhausted { budget: AGENT_BUDGET }),
+            ("text/echo".to_string(), InvocationOutcome::Completed),
+        ], "the execution record names the stop and the budget");
+        let signers: Vec<Vec<u8>> = prov.invocations().into_iter().map(|r| r.signer).collect();
+        assert_eq!(signers, vec![author_key.to_vec(), operator_key.to_vec()]);
+
+        // Still live: a stopped call is a stopped call, not a dead install — the trapped instance
+        // is replaced (wasmtime refuses to re-enter one), and the next call gets a fresh budget.
+        // Found by this gate: before the replacement, the second call answered *cannot enter
+        // component instance*, a dead install behind a live advertisement.
+        assert_eq!(prov.hosted_count(), 2);
+        let again = String::from_utf8_lossy(&call("spin").await).into_owned();
+        assert!(again.contains("fuel exhausted"), "{again}");
         agent.shutdown().await;
     }
 

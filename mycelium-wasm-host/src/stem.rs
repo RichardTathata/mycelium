@@ -36,7 +36,7 @@ use crate::librarian::librarian_filter;
 use crate::mesh_source::MeshArtifactSource;
 use crate::provisioner::Provisioner;
 use crate::resources::SystemResourceProbe;
-use crate::runtime::BlobRuntime;
+use crate::runtime::{BlobRuntime, FuelPolicy};
 use crate::FsLibrarySource;
 
 /// Where a stem node pulls artifact bytes from.
@@ -98,18 +98,18 @@ pub struct Stem {
     hosted:  Arc<AtomicUsize>,
 }
 
-/// `"ed25519:<64 hex>"` → the verifying key bytes.
-fn parse_publisher(s: &str) -> Result<[u8; 32], StemError> {
+/// `"ed25519:<64 hex>"` → the verifying key bytes; `field` names the table entry in the refusal.
+fn parse_publisher(field: &str, s: &str) -> Result<[u8; 32], StemError> {
     let hex = s
         .strip_prefix("ed25519:")
-        .ok_or_else(|| StemError(format!("hosts.trusted_publishers: {s:?} must be ed25519:<64 hex>")))?;
+        .ok_or_else(|| StemError(format!("hosts.{field}: {s:?} must be ed25519:<64 hex>")))?;
     if hex.len() != 64 {
-        return Err(StemError(format!("hosts.trusted_publishers: {s:?} must carry 64 hex characters")));
+        return Err(StemError(format!("hosts.{field}: {s:?} must carry 64 hex characters")));
     }
     let mut out = [0u8; 32];
     for (i, b) in out.iter_mut().enumerate() {
         *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
-            .map_err(|_| StemError(format!("hosts.trusted_publishers: {s:?} is not hex")))?;
+            .map_err(|_| StemError(format!("hosts.{field}: {s:?} is not hex")))?;
     }
     Ok(out)
 }
@@ -153,11 +153,11 @@ impl Stem {
                 (None, None)
             }
             Some(h) => {
-                let host = match h.fuel_per_call {
-                    Some(fuel) => WasmHost::with_fuel_per_call(fuel),
-                    None => WasmHost::new(),
-                }
-                .map_err(|e| StemError(format!("wasm host: {e}")))?;
+                // D19: the engine counts fuel whenever any budget is declared; who pays is the
+                // policy below, decided per entry from its verified signer.
+                let metered = h.fuel_per_call.is_some() || h.operator_fuel_per_call.is_some();
+                let host = if metered { WasmHost::metered() } else { WasmHost::new() }
+                    .map_err(|e| StemError(format!("wasm host: {e}")))?;
                 let source: Arc<dyn ArtifactSource + Send + Sync> = match &opts.source {
                     StemSource::Mesh { timeout } => {
                         Arc::new(MeshArtifactSource::resolving(Arc::clone(&agent), librarian_filter(), *timeout))
@@ -196,8 +196,24 @@ impl Stem {
                     prov.set_resource_policy(Arc::new(SystemResourceProbe::new()), hr);
                 }
                 if !h.trusted_publishers.is_empty() {
-                    let keys = h.trusted_publishers.iter().map(|s| parse_publisher(s)).collect::<Result<Vec<_>, _>>()?;
+                    let keys = h
+                        .trusted_publishers
+                        .iter()
+                        .map(|s| parse_publisher("trusted_publishers", s))
+                        .collect::<Result<Vec<_>, _>>()?;
                     prov.require_provenance(keys);
+                }
+                if metered {
+                    let operator_publishers = h
+                        .operator_publishers
+                        .iter()
+                        .map(|s| parse_publisher("operator_publishers", s))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    prov.set_fuel_policy(FuelPolicy {
+                        operator_publishers,
+                        agent_budget: h.fuel_per_call,
+                        operator_budget: h.operator_fuel_per_call,
+                    });
                 }
                 for p in &units.presence {
                     let filter = p.filter.to_filter().map_err(StemError)?;
@@ -348,9 +364,9 @@ mod tests {
 
     #[test]
     fn presence_without_hosts_is_refused_and_a_bad_publisher_key_is_named() {
-        assert!(parse_publisher("ed25519:zz").unwrap_err().0.contains("64 hex"));
-        assert!(parse_publisher("rsa:aa").unwrap_err().0.contains("ed25519:<64 hex>"));
-        let ok = parse_publisher(&format!("ed25519:{}", "ab".repeat(32))).unwrap();
+        assert!(parse_publisher("trusted_publishers", "ed25519:zz").unwrap_err().0.contains("64 hex"));
+        assert!(parse_publisher("trusted_publishers", "rsa:aa").unwrap_err().0.contains("ed25519:<64 hex>"));
+        let ok = parse_publisher("trusted_publishers", &format!("ed25519:{}", "ab".repeat(32))).unwrap();
         assert_eq!(ok, [0xab; 32]);
     }
 
