@@ -209,6 +209,11 @@ pub struct CapabilityProbeEntry {
     /// Static capability attributes announced to the mesh on probe success.
     #[serde(default)]
     pub attrs: BTreeMap<String, TomlCapValue>,
+    /// The schema this capability advertises (guide 12), if any — the exact id a requirement's
+    /// `schema_id` must match. Absent means *no schema*, which a requirement with a `schema_id`
+    /// never matches.
+    #[serde(default)]
+    pub schema_id: Option<String>,
 }
 
 fn default_probe_timeout_secs() -> u64 { 3 }
@@ -605,6 +610,9 @@ impl CapabilityProbeEntry {
         let mut cap = crate::Capability::new(self.ns.as_str(), self.name.as_str());
         for (k, v) in &self.attrs {
             cap = cap.with(k.as_str(), v.clone().into());
+        }
+        if let Some(sid) = &self.schema_id {
+            cap = cap.with_schema_id(sid.as_str());
         }
         cap
     }

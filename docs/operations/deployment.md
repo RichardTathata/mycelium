@@ -26,7 +26,10 @@ mesh (a seed needs none). Everything else is optional.
 > what the declarations call for from the catalogue at runtime, and a fleet can be nothing but such
 > hosts. How a deployment is declared, checked before anything runs, deployed, published to, watched
 > and read back — for capabilities you deploy *and* for the ones the fleet installs — is one page:
-> [capability-lifecycle.md](capability-lifecycle.md).
+> [capability-lifecycle.md](capability-lifecycle.md). Before deploying anything, run
+> `mycelium wire-check <units-dir> --library <artifacts-dir> --schemas <schemas-dir>`: it applies the
+> mesh's own match rule to the declarations and exits 1 naming what could not bind, which is cheaper
+> than reading `sys/load/*/req/` after the fact. It says *would bind*, never *is bound*.
 
 ## Ports
 

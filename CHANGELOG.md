@@ -85,6 +85,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_stem_fleet_fills_a_presence_floor_and_reheals` (three stems, one librarian, a floor of two,
   a kill, a re-heal, and the checker's declaration compared with what bound).
   `Provisioner::refresh_catalog` / `catalog()` are new for it.
+- **`mycelium wire-check --schemas <dir>`** (W3): the checker reads guide 12's schema directory —
+  each `.json` file's path without the extension is a schema id — and reports `unknown schema` for a
+  `schema_id` any unit or artifact declares that the directory does not define, beside the
+  `schema-only mismatch` it already named with both ids. `[[capability]]` gained `schema_id` so a
+  declared offer can carry the schema it advertises. Fixture `tests/fixtures/units/schema-window`.
 - **`mycelium wire-check`** (`src/wire_check.rs`; W2, A2, L1 and R1's checker halves of
   `docs/plans/design-time-tooling.md`): the offline check over a directory of unit files, and
   optionally a directory of artifact descriptions (`--library`). A pure function over declarations
