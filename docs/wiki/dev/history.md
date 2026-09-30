@@ -22,6 +22,26 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Design-time tooling delivered, and the composition's bounded half — 2026-09-27 → 30 (PRs #433–#454, unreleased)
+
+`docs/plans/design-time-tooling.md` (rev 0.9), built in its own order: the unit file and `mycelium
+wire-check` (W1–W5, #436/#437/#445/#446), the artifact tool and its checker awareness (A1–A2, #439/#437),
+ranged fetch and the object-store adapter (S1–S2, #435/#440), the stem node and the fleet gate (R1–R2,
+#438), the lifecycle doc (L1–L2), the proposition alignment (#434). Then, 2026-09-30: fuel by publisher
+(F1, #448 — the gate found that a trap poisons a wasmtime component instance, so a stopped call left a
+dead install behind a live advertisement; the serve loop now replaces it), proposed → shadow → accept
+(F2 + F3, #449 — manifest v2 byte-identical for v1 entries, the shadow lane as a rename because a
+shadow cannot share the incumbent's RPC kind, the co-op demo's wave 3), the gateway publish door and
+SDK verbs (A3, #450 — the route in the companion, the scope row in core, 409 for a librarian-managed
+signer; the SDKs carry the signed line and do not sign, Q5), the examples' declaration directories (X1,
+#451 — sixteen, gated both ways; the gate found a lane consumed by nobody and a librarian nobody
+required), the declaration's schema and call shapes (W6 public half, #453; the private half waits for
+a tag), the stem-examples suite (X2 first slice, #454 — `provisioning` and `catalog` run both ways in
+CI; the first run found that a library on disk is not a catalogue), and the per-store test (S3 ◐, #452
+— `fake-gcs-server` takes only signed-URL uploads, so the GCS gate is a real bucket). Beside it, the
+composition's bounded half: the composed effect enforced at the destination (#441/#443/#444) and the
+second door, a member's own mandated direct call (#447). Every ◐ row names what is left and why.
+
 ## The composed effect, enforced at the destination — 2026-09-29/30 (PRs #441, #443, #444, unreleased)
 
 `docs/design/composed-effect.md` §7 said *reconstructable, not enforced*; §9 moves the attribution and
