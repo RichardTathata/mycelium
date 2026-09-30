@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A test race that turned the v2.17.0 release commit's strict `Test` job red.**
+  `test_identity_anchor_recorded_and_conflict_flagged` poisoned the legacy `sys/identity/{A}` pair
+  and waited for the anchor-conflict tripwire; since identity and its proof travel as one sealed
+  record (2.14.0), the watcher reads `sys/identity-signed/{A}` first, so the legacy poison is
+  **masked** whenever A's sealed record has already reached B — the tripwire fired or not depending
+  on arrival order (green eight times on `main`, red on the ninth; one in eight locally). The test
+  now waits for the sealed record, asserts the masking (the sealed record is authoritative), then
+  poisons the record the watcher actually reads — the sealed record tombstoned, the legacy pair
+  carrying the foreign key — and the tripwire fires deterministically (ten of ten). The shipped code
+  is unchanged; the release stands.
+
 ### Added
 - **Two stem capability gaps closed (plan X2, second slice).** A hosting stem on the mesh path
   **re-serves its verified cache** (`serve_artifacts` over its `MeshArtifactSource`, advertised as
