@@ -364,6 +364,8 @@ impl ArtifactRuntime for WasmComponentRuntime {
         // Register the inbound serve handler *before* returning, so the advertisement the
         // provisioner makes on success always finds a live RPC receiver.
         let invoke_kind = cap_invoke_kind(&entry.provides.namespace, &entry.provides.name);
+        #[cfg(feature = "gateway")]
+        let bridge_kind: Arc<str> = Arc::from(invoke_kind.as_str());
         let rx = ctx.agent.service().rpc_rx(invoke_kind);
         let provides = format!("{}/{}", entry.provides.namespace, entry.provides.name);
         let served = Served {
@@ -375,13 +377,49 @@ impl ArtifactRuntime for WasmComponentRuntime {
             again: Reinstantiate { host: Arc::clone(&self.host), bytes: bytes.to_vec(), budget },
         };
         let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served));
-        Ok(Box::new(WasmInstalled { serve }))
+        #[cfg(feature = "gateway")]
+        let mcp_tool = if entry.provides.namespace.as_ref() == "tool" {
+            let agent = Arc::clone(&ctx.agent);
+            let kind = bridge_kind;
+            let schema = serde_json::json!({
+                "description": format!("{} — an installed WASM component, bridged over mcp.invoke", entry.provides.name),
+                "inputSchema": {"type": "object"},
+            });
+            Some(ctx.agent.mcp().register_mcp_tool(entry.provides.name.clone(), schema, move |args: serde_json::Value| {
+                let agent = Arc::clone(&agent);
+                let kind = Arc::clone(&kind);
+                async move {
+                    let out = agent
+                        .service()
+                        .rpc_call(agent.node_id().clone(), kind, args.to_string().into_bytes(), std::time::Duration::from_secs(30))
+                        .await
+                        .map_err(|e| format!("bridge: {e}"))?;
+                    if out.starts_with(b"component-error:") || out.starts_with(b"host-error:") {
+                        return Err(String::from_utf8_lossy(&out).into_owned());
+                    }
+                    Ok(serde_json::from_slice::<serde_json::Value>(&out)
+                        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&out).into_owned())))
+                }
+            }))
+        } else {
+            None
+        };
+        Ok(Box::new(WasmInstalled {
+            serve,
+            #[cfg(feature = "gateway")]
+            _mcp_tool: mcp_tool,
+        }))
     }
 }
 
 /// A live, serving WASM component installation.
 struct WasmInstalled {
     serve: tokio::task::JoinHandle<()>,
+    /// X2: a `tool/{name}` component is also an MCP tool `{name}` (`tools/{name}/{node}` in KV,
+    /// `tools/call` over `mcp.invoke`), forwarded to the component's serve loop. Dropped with the
+    /// install, so the tool disappears with the capability. Needs the node's gateway feature.
+    #[cfg(feature = "gateway")]
+    _mcp_tool: Option<mycelium::McpToolHandle>,
 }
 
 impl Installed for WasmInstalled {

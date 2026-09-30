@@ -211,13 +211,14 @@ check-full: check
 ## `make examples-both-ways DEMO=provisioning` runs the code binary and the stem fleet and greps the
 ## same markers from both. The publisher key in the units is the public half of seed 42…42: `make stem-keys`.
 COMPOSE_STEM   = docker compose -f docker/docker-compose.stem-examples.yml
-STEM_DEMOS    ?= provisioning catalog
+STEM_DEMOS    ?= provisioning catalog mcp_toolgrowth
 STEM_PUB_SEED ?= 4242424242424242424242424242424242424242424242424242424242424242
 .PHONY: test-stem-examples examples-both-ways stem-keys
 
 test-stem-examples:
 	@set -e; for demo in $(STEM_DEMOS); do \
 	    echo "== stem-examples: $$demo =="; \
+	    docker rm -f mycelium-stem-late >/dev/null 2>&1 || true; \
 	    $(COMPOSE_STEM) --profile $$demo down -v --remove-orphans 2>/dev/null || true; \
 	    $(COMPOSE_STEM) --profile $$demo up -d --build; \
 	    $(COMPOSE_STEM) --profile $$demo logs -f driver-$$demo & \
@@ -226,12 +227,13 @@ test-stem-examples:
 	        echo "-- driver failed: node logs (last 80 lines each) --"; \
 	        for c in $$($(COMPOSE_STEM) --profile $$demo ps -a --format '{{.Name}}'); do echo "-- $$c"; docker logs --tail 80 $$c 2>&1 || true; done; \
 	    fi; \
+	    docker rm -f mycelium-stem-late >/dev/null 2>&1 || true; \
 	    $(COMPOSE_STEM) --profile $$demo down -v --remove-orphans 2>/dev/null || true; \
 	    [ "$$EXIT" = "0" ] || exit $$EXIT; \
 	done
 
 examples-both-ways:
-	@test -n "$(DEMO)" || { echo "usage: make examples-both-ways DEMO=provisioning|catalog"; exit 2; }
+	@test -n "$(DEMO)" || { echo "usage: make examples-both-ways DEMO=provisioning|catalog|mcp_toolgrowth"; exit 2; }
 	@echo "== code run: $(DEMO) =="; \
 	out=$$(cargo run -q -p mycelium-coop-examples --features wasm --bin $(DEMO) 2>&1); \
 	echo "$$out" | grep -q "All assertions passed" || { echo "$$out" | tail -20; echo "code run failed"; exit 1; }; \

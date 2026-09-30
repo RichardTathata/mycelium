@@ -74,7 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match demo.as_str() {
         "provisioning" => provisioning(agent).await,
         "catalog" => catalog(agent).await,
-        other => Err(format!("unknown demo {other:?} (provisioning | catalog)").into()),
+        "mcp_toolgrowth" => mcp_toolgrowth(agent).await,
+        other => Err(format!("unknown demo {other:?} (provisioning | catalog | mcp_toolgrowth)").into()),
     }
 }
 
@@ -135,8 +136,9 @@ async fn provisioning(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error:
 }
 
 /// The catalog demo with the librarian and the installer as stem nodes: the driver is the caller.
-/// Phases 1–4 of `examples/coop/src/bin/catalog.rs`; the late joiner from a peer cache (phase 6)
-/// has no stem equivalent yet.
+/// Phases 1–4 of `examples/coop/src/bin/catalog.rs`, then phase 6 as stems: the librarian is
+/// killed and a late stem, started here on the suite's network, installs from the installer's
+/// re-served cache.
 async fn catalog(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Error>> {
     assert!(wait_until(60, || agent.peers().len() >= 2).await, "the librarian and installer stems must peer with the driver");
     assert!(wait_until(60, || !agent.capabilities().resolve(&CapFilter::new("artifact", "librarian")).is_empty()).await,
@@ -150,7 +152,70 @@ async fn catalog(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Erro
     let out = optimize(&agent, &node, Bytes::from_static(b"route me")).await?;
     assert_eq!(out.as_ref(), b"route me", "the installed component serves");
     println!("[phase 3] the caller invoked the installed optimizer and got its answer");
-    println!("\nAll assertions passed — runtime-read bytes → signed library → librarian stem → discovered pull → provisioned on an installer stem → served. (The late joiner's peer-cache install, phase 6 of the code run, is not recut.)");
+
+    // Phase 6 as stems: the origin dies, a late joiner installs from the peer's cache.
+    let librarian = std::env::var("STEM_LIBRARIAN_CONTAINER").unwrap_or_else(|_| "mycelium-stem-librarian".into());
+    let late_ip = std::env::var("STEM_LATE_IP").unwrap_or_else(|_| "172.40.0.23".into());
+    let installer_ip = std::env::var("STEM_INSTALLER_IP").unwrap_or_else(|_| "172.40.0.22".into());
+    // The installer advertises itself as a cache holder once its cache holds the bytes.
+    assert!(wait_until(60, || agent.capabilities().resolve(&CapFilter::new("artifact", "librarian")).len() >= 2).await,
+        "the installer stem re-serves its verified cache (a second artifact/librarian holder)");
+    println!("[phase 4] killing the librarian ({librarian}); the installer's cache is the only holder left …");
+    let st = std::process::Command::new("docker").args(["kill", &librarian]).status()?;
+    assert!(st.success(), "docker kill {librarian}");
+    let st = std::process::Command::new("docker")
+        .args(["run", "-d", "--name", "mycelium-stem-late", "--network", "mycelium-stem-net", "--ip", &late_ip,
+               "mycelium-stem:test", "--units", "/repo/examples/units/catalog/late.toml",
+               "--host", &late_ip, "-p", "57000", "-r", &format!("{installer_ip}:57000"), "--tick-ms", "300"])
+        .status()?;
+    assert!(st.success(), "docker run the late stem");
+    println!("[phase 5] a late stem joined at {late_ip}, wanting a second optimizer");
+    let late_node = NodeId::new(&late_ip, 57000)?;
+    assert!(wait_until(120, || live_optimizers(&agent).contains(&late_node)).await,
+        "the late joiner must install route/optimize from the installer's peer cache");
+    let out = optimize(&agent, &late_node, Bytes::from_static(b"late route")).await?;
+    assert_eq!(out.as_ref(), b"late route");
+    println!("[late] joined after the origin died — installed from a peer cache and ran it");
+    println!("\nAll assertions passed — runtime-read bytes → signed library → librarian stem → discovered pull → provisioned on an installer stem → served → origin killed → late stem installed from a peer cache.");
+    agent.shutdown().await;
+    Ok(())
+}
+
+/// The tool-growth demo with the library and the tool-host as stem nodes: the driver is the
+/// agent. The installed `tool/unit-convert` component is bridged as an MCP tool by the stem's
+/// runtime; the agent declares the need, finds the tool in KV, and calls it over `mcp.invoke`.
+async fn mcp_toolgrowth(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Error>> {
+    const TOOL: &str = "unit-convert";
+    assert!(wait_until(60, || agent.peers().len() >= 2).await, "the library and tool-host stems must peer with the driver");
+    let tool_offered = |a: &GossipAgent| -> Option<NodeId> {
+        a.kv().scan_prefix(&format!("tools/{TOOL}/")).into_iter().find_map(|(key, _)| {
+            key.strip_prefix(&format!("tools/{TOOL}/")).and_then(|n| n.parse().ok())
+        })
+    };
+    assert!(tool_offered(&agent).is_none(), "the tool is not offered before it's needed");
+    println!("[llm-agent] '{TOOL}' is not in the fabric yet — declaring the requirement");
+    let _req = agent.capabilities().declare_requirement(CapFilter::new("tool", TOOL), Duration::from_secs(600));
+    assert!(wait_until(120, || tool_offered(&agent).is_some()).await,
+        "the tool-host stem must install the component and bridge it as an MCP tool once demand appears");
+    let provider = tool_offered(&agent).expect("a tool provider node");
+    println!("[llm-agent] '{TOOL}' is now offered by {provider} — the converter code arrived over the mesh; invoking it over MCP");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": TOOL, "arguments": {"kg": 5000.0}},
+    });
+    let mut reply = None;
+    for attempt in 1..=5u32 {
+        match agent.service().rpc_call(provider.clone(), "mcp.invoke", call.to_string().into_bytes(), Duration::from_secs(10)).await {
+            Ok(r) => { reply = Some(r); break; }
+            Err(e) => { println!("[llm-agent] invoke attempt {attempt} failed ({e}); retrying"); tokio::time::sleep(Duration::from_millis(500)).await; }
+        }
+    }
+    let reply = reply.ok_or("MCP invoke reply after retries")?;
+    let resp: serde_json::Value = serde_json::from_slice(&reply)?;
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("").to_string();
+    println!("[llm-agent] MCP tool returned: {text}");
+    assert!(text.contains('5') && text.contains("tonnes"), "the converter must report 5 tonnes for 5000 kg — got {resp}");
+    println!("\nAll assertions passed — the tool was missing, the need was declared, a stem installed the component and bridged it as an MCP tool, and the agent used it.");
     agent.shutdown().await;
     Ok(())
 }

@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Two stem capability gaps closed (plan X2, second slice).** A hosting stem on the mesh path
+  **re-serves its verified cache** (`serve_artifacts` over its `MeshArtifactSource`, advertised as
+  `artifact/librarian` with `role = "cache"` once it holds something), so a late joiner installs from
+  a peer after the librarian is gone — the catalog demo's phase 6 now runs as stems in the
+  stem-examples suite. The WASM runtime **bridges a `tool/{name}` component as MCP tool `{name}`**
+  (feature `gateway`; the tool disappears with the install), so the tool-growth demo runs as stems
+  with its own marker. Gates: `a_hosting_stem_re_serves_its_verified_cache_to_a_late_joiner`,
+  `an_installed_tool_component_is_bridged_as_an_mcp_tool` (both seen failing first), and the two
+  suite profiles.
+
 ---
 
 ## [2.17.0] — 2026-09-30
