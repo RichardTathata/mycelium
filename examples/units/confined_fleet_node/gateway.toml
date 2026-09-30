@@ -1,0 +1,12 @@
+# the gateway role, as the caller it fronts: needs the skill under the depot mandate the operator grants at /grant.
+principal = "worker-a"
+
+[[requirement]]
+ns   = "depot"
+name = "dispatch"
+
+[[mandate]]
+holder     = "worker-a"
+scope      = "depot"
+operations = ["skill.invoke:skill:depot/dispatch"]
+

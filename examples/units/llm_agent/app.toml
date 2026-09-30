@@ -1,0 +1,26 @@
+# the agent loop: needs realtime data, an inference endpoint of the configured model, and a CPU tool node.
+principal = "app"
+
+[[requirement]]
+ns   = "data"
+name = "realtime"
+
+[[requirement]]
+ns   = "llm"
+name = "inference"
+  [requirement.attrs]
+  model = "llama3.2"
+  context = { gte = 8192 }
+
+[[requirement]]
+ns   = "compute"
+name = "cpu"
+
+# When a need is unmet, the loop looks for what could be installed (the installable tiers).
+[[requirement]]
+ns   = "data"
+name = "installable"
+
+[[requirement]]
+ns   = "llm"
+name = "installable"

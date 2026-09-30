@@ -1,0 +1,12 @@
+# The storyteller's weights (a blob placed for the local runtime): what it would provide once installed, its kind, and the footprint a host must have room for.
+kind             = "blob"
+bytes            = "../../../../mycelium-wasm-host/tests/fixtures/echo_component.wasm"
+est_install_secs = 1
+
+[provides]
+ns   = "llm"
+name = "storyteller-weights"
+
+[requires]
+disk_bytes = 4294967296
+mem_bytes  = 0

@@ -1,0 +1,10 @@
+# agent-c: the legacy GPU with no schema — the provider that predates versioning.
+principal = "agent-c"
+
+[[capability]]
+ns       = "compute"
+name     = "gpu"
+ttl_secs = 30
+  [capability.attrs]
+  vram_gb = 8
+

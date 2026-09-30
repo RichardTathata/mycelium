@@ -592,7 +592,7 @@ widening that world. The recut therefore comes in three tiers, decided here:
 
 **Tier 1 — every example that declares anything gets a units directory.** This is the universal
 recut and it costs nothing in code: each example that advertises a capability, declares a requirement,
-defines a group or names a lane gets `examples/<name>/units/` written in the §3 format, the checker
+defines a group or names a lane gets `examples/units/<name>/` written in the §3 format (*rev 0.9: the directory sits under `examples/units/`, since a single-file example has no directory of its own*), the checker
 runs on it in CI, and with D18 the example can start from its file instead of its `main`. The
 example keeps showing the API; the directory shows the same vocabulary as a declaration, and the two
 are gated to agree (R1's duplicate warning is the gate). This is what "stem cluster + requirements"
@@ -619,7 +619,7 @@ enforce. **Recorded, not decided.** It belongs with the guardrails plan, not her
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
-| **X1** | Tier 1: a units directory for every declaring example, `wire-check` over all of them in CI, a *declared* facet in `examples/README.md`'s matrix | Every directory exits 0; deleting one capability block from any directory turns its CI row red (seen failing first); the README's tutorial contract names the directory as part of the example |
+| **X1** ✅ *shipped 2026-09-30 — `examples/units/<example>/` (not `examples/<name>/units/`: single-file examples have no directory of their own), 16 directories, `scripts/wire-check-examples.sh` in CI, the *Declared* column with a link per row, and the two-way gate `tests/wire_check_examples.rs` (every directory clean; deleting the last provider of any advertised capability turns its directory red — which is why every advertised capability has its requirer written down; a redundant provider's block is deletable by design, so the exit gate's *any block* is read as *any capability*); the MCP-tool-only and env-driven examples are listed as not-here with the reason in `examples/units/README.md`* | Tier 1: a units directory for every declaring example, `wire-check` over all of them in CI, a *declared* facet in `examples/README.md`'s matrix | Every directory exits 0; deleting one capability block from any directory turns its CI row red (seen failing first); the README's tutorial contract names the directory as part of the example |
 | **X2** | Tier 2: the five artifact-shaped demos and `llm_agent` run from the stem image with `--units`; the both-ways target | Each demo's stem run reaches the same asserted outcome as its code run, in CI beside the coop smokes; the buyer deck's provisioning slide cites the stem run |
 
 X1 follows W2 and R1 and is mostly authoring; X2 follows R2. Neither changes any example's code path,

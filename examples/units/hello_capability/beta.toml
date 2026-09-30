@@ -1,0 +1,7 @@
+# beta: finds alpha by what it does, not by address.
+principal = "beta"
+
+[[requirement]]
+ns   = "math"
+name = "double"
+

@@ -1,0 +1,8 @@
+# the library node: the librarian that serves the tool's bytes.
+principal = "library"
+
+[[capability]]
+ns       = "artifact"
+name     = "librarian"
+ttl_secs = 30
+

@@ -1,0 +1,14 @@
+# the provider role: the depot/dispatch skill (the two MCP tools it also serves are not capabilities and have no row here).
+principal = "provider"
+
+[[capability]]
+ns       = "depot"
+name     = "dispatch"
+ttl_secs = 30
+
+[[rule]]
+actor            = "worker-a"
+operation        = "skill.invoke"
+resource         = "skill:depot/dispatch"
+requires_mandate = "depot"
+

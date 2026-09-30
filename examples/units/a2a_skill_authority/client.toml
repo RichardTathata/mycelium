@@ -1,0 +1,20 @@
+# the A2A client: calls all three, holding the depot remit for the two that need it.
+principal = "client"
+
+[[requirement]]
+ns   = "depot"
+name = "dispatch"
+
+[[requirement]]
+ns   = "ledger"
+name = "export"
+
+[[requirement]]
+ns   = "weather"
+name = "lookup"
+
+[[mandate]]
+holder     = "client"
+scope      = "depot-remit"
+operations = ["skill.invoke:skill:depot/dispatch", "skill.invoke:skill:ledger/export"]
+

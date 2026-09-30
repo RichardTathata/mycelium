@@ -35,6 +35,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PublishOutcome` gained `proposed`.
 - **Agent-authored functions, documented (plan F3):** guide 16 § *Agent-authored functions* (U1–U4,
   the five gates, the honest limit), the artifacts runbook's trust section, a doc-coverage row.
+- **The examples' declaration directories (plan X1).** `examples/units/<example>/` for every example
+  that advertises a capability, declares a requirement, defines a group or names a lane — sixteen
+  directories in the `capability_config` unit format, with `artifacts/` beside the ones that
+  provision. `scripts/wire-check-examples.sh` runs `mycelium wire-check` over all of them in CI; the
+  matrix in `examples/README.md` gains a *Declared* column linking each row to its directory; the
+  gate `tests/wire_check_examples.rs` holds both ways — every directory clean, and deleting any
+  capability's last provider turns its directory red (seen failing first, twice), which is why each
+  example's caller is written down as a requirer.
+
 - **Fuel by publisher (plan D19 / F1, `mycelium-wasm-host`).** `WasmHost::metered()` counts fuel
   without a default budget; `WasmHost::instantiate_with_fuel` / `provision_with_fuel` give each
   instance its own; `Provisioner::set_fuel_policy(FuelPolicy)` decides per entry from its verified
@@ -203,7 +212,6 @@ that carries a family-wildcard scope such as `llm:*` now **fails `validate()`** 
 anything, so rewrite it as the scopes it meant. `POST /gateway/kv`'s response gained fields beside
 the unchanged `ok`.
 
-### Added
 - **`POST /gateway/kv` returns the write's receipt** — `operation_id`, `local_durability`
   (`on_disk` · `buffered` · `not_configured` · `failed`), `local_durability_error` when failed —
   beside the unchanged `ok`. Until now the route discarded the receipt, so no HTTP or SDK client could
@@ -343,8 +351,6 @@ confinement report is always `Unverified` — the substrate cannot attest to an 
 Provider enforcement **fails closed without an evaluator**, which means a provider that attaches none
 enforces nothing; and a mandate carried to a provider is *carried, not verified*, until that provider
 verifies it.
-
-### Added
 
 - **The bypass matrix and the stop, in the cluster** (Boundary H closure plan C7 and C12, deployment variants).
   - The confined-fleet job now builds a node image (`docker/Dockerfile.confined-fleet`, `examples/confined_fleet_node`).
@@ -568,8 +574,6 @@ action** — the default is unchanged from 2.13.0.
 ~11% chance one node wins all three), which is why P10 stays. *Proofs required* is **not** *identity
 authenticated* — first sighting remains trust-on-first-use, which anchors close, not proofs. And the
 agreement repair establishes single-decree safety; it is not a proof of the whole protocol.
-
-### Added
 
 - **`with_a2a()` warns when it mounts an open surface.** `/a2a` has **no scope floor** — unlike
   `/mcp`, which requires `mcp:invoke`. Its auth is *optional* by design: a federation credential
@@ -867,8 +871,6 @@ agreement repair establishes single-decree safety; it is not a proof of the whol
   rather than *this reader is too new to parse it*. The fallback is now one named function
   (`decode_cap_entry`) instead of three inline copies.
 
-### Added
-
 - **The sealed identity record (`sys/identity-signed/{node}`, identity-auth Phase 3b)** — key
   history *and* its proof in **one** KV entry: `version(1) ‖ history ‖ proof(96)`.
 
@@ -1014,8 +1016,6 @@ agreement repair establishes single-decree safety; it is not a proof of the whol
   fifteen lines above its `elect` call). Both were only comments, because the wiki's assertions are
   **rule-agnostic** — which is precisely why they survived the rule change, and is the shape worth
   copying.
-
-### Added
 
 - **A supported way to join a group over HTTP** — `GET`/`POST`/`DELETE /gateway/mesh/group`
   (`mesh:read` / `mesh:write`).
@@ -1198,8 +1198,6 @@ agreement repair establishes single-decree safety; it is not a proof of the whol
   Pinned by `acceptor_memory_survives_a_restart`, `a_recovered_acceptance_reports_no_value` and
   `a_malformed_acceptor_record_is_no_record`.
 
-### Added
-
 - **`elect_leader_receipt` — a leadership answer that names the rung it reached.** Returns
   `Leadership { leader, epoch, basis }` where `basis` is `Decided` or `Observed`.
 
@@ -1275,8 +1273,6 @@ configuration `GossipConfig`'s own documentation tells operators to prefer — h
   `named_tokens_alone_still_close_the_gateway`, which asserts both halves (no bearer is 401, a
   named token still resolves to its own principal and is still bounded by its scopes) and fails
   when the fix is reverted.
-
-### Added
 
 - **The federation edge meters calls per partner** — the Phase-C audit's last open finding, closed
   as a decision with a mechanism. `GatewayPool` has metered slots per partner since PR 5 on the
@@ -1501,8 +1497,6 @@ rather than a bare 400. `CallPolicy::require_body_binding` defaults to `false` �
 window that gives **no integrity guarantee against an active attacker**; turn it on once every
 partner has upgraded.
 
-### Added
-
 - **`mycelium::preflight` is public**, so an enforcement point that is not this gateway can run the
   same checks this gateway runs. It was reachable only inside the crate, which meant a resource
   enforcing at its own boundary — AE2's shape — had no way to call anything but
@@ -1699,8 +1693,6 @@ own hash. Two evaluators had passed without noticing.
 `Execution` are now `#[non_exhaustive]`. For `Execution` that arm **must fail safe**: an execution a
 reader does not recognise is *we did not look*, never *nothing ran*.
 
-### Added
-
 - **Contract fixtures a replacement evaluator can actually run (AE4).** New public module
   `mycelium::ae_contract`: AE0 §9's negative cases stated **once**, in evaluator-neutral terms, so
   the same set holds the shipped reference evaluator and anybody else's.
@@ -1896,8 +1888,6 @@ adopter-facing page, [`docs/guide/deprecations.md`](docs/guide/deprecations.md).
   target. **Bundles already on disk read back unchanged** — the escape is new on the write side and
   the reader is strictly more faithful than before.
 
-### Added
-
 - **Fuzz targets for the parsers the axis put on a trust edge** (§12.6) — nine of them, across the
   three surfaces §12.6 names: the caller-context frame **and the envelope behind it**, the presented
   federation credential, the catalogue reply, the descriptor/policy pair, the trust bundle, the
@@ -1914,8 +1904,6 @@ adopter-facing page, [`docs/guide/deprecations.md`](docs/guide/deprecations.md).
   found nothing, because that sweep is far weaker than coverage-guided fuzzing and because a
   hand-rolled binary decoder reading bytes off disk is the shape behind the unbounded-allocation
   decode DoS that sat uncaught through M2 Run-20.
-
-### Added
 
 - **The action envelope binds a scoped mandate (AE1).** `ActionEnvelope` gains
   `mandate: Option<MandateBinding>` — *which* appointment (`holder`, `term`, `scope`, `epoch`) and
@@ -2118,8 +2106,6 @@ returns `WikiError::Io` carrying `MandateRevoked` instead of `WikiError::Conflic
 on `Conflict` will no longer retry that case — which is the point, since a replaced curator retrying
 refuses forever — but it *is* a change in what a caller sees. A genuine lost compare-and-swap race
 still returns `Conflict`. Stores with no mandate fence configured are unaffected, byte for byte.
-
-### Added
 
 - `mycelium_core::sim_seam::{pause_clock_for_replay, resume_clock_after_replay}` and `mono_instant`
   (feature `sim`, off in every shipped build; `sim` now also enables `tokio/test-util`).
@@ -3436,8 +3422,6 @@ unchanged; a backwards-compatible rolling upgrade.
 an exhaustive struct literal — the same class as `GossipConfig`'s field additions in 2.5.0.
 Reading and matching on fields is unaffected; construct it with `AeEvidence::for_decision`.
 
-### Added
-
 - **`AeEvidence::at_ms` — the decision's own event time**, carried from the envelope's
   `issued_at_ms` instead of being discarded. An exporter needs it, and needs it **stable**: record
   ids derive from journal position, so an exporter that re-reads after losing its cursor re-sends
@@ -3464,8 +3448,6 @@ evaluator, so an existing deployment behaves exactly as it did.
 **The one upgrade note:** a node that *does* attach an evaluator should also attach an evidence
 journal (`GossipAgent::with_evidence_journal`). Without one it enforces and records nothing, and
 warns at attach time saying so.
-
-### Added
 
 #### the execution record: what the gateway actually observed
 
@@ -3704,9 +3686,6 @@ Wire **v12** (PREV 11) unchanged — a backwards-compatible rolling upgrade; on-
 
 Everything else is additive: new types and verbs beside the existing ones, all `#[non_exhaustive]`
 with public constructors, and the pre-existing verbs keep their signatures and their meanings.
-
-### Added
-
 
 - **Contracts axis item 1 PR 3 — the required local sync, and the prepared write**
   (`KvHandle::set_requiring_sync` / `retry_requiring_sync` / `prepare_write` / `commit_prepared`;
@@ -4009,8 +3988,6 @@ between the two tags.
   Flagged as a "target for investigation" by the 2026-09-05 deterministic-replay design review, confirmed
   and fixed the same day; gate `regression_snapshot_aborts_when_wal_tail_is_unreadable`.
 
-### Added
-
 - **The language SDKs can authenticate to a token-protected gateway.** `mycelium-py` **0.2.4** —
   every handle (`MyceliumAgent`, `Wiki`, `TupleSpace`, `Blackboard`, `PromptSkillClient`,
   `ReasonClient`, `A2aClient`) takes `token=`; `mycelium-ts` **0.1.1** — every client class takes a
@@ -4110,8 +4087,6 @@ A **security PATCH** on the 2.4 line. Wire **v12** (`PREV = 11`) unchanged; no p
 - **`chacha20` 0.10.0 (yanked) → 0.10.2** — a yanked crate in the lock; `cargo audit` only warns
   on yanks, so it had passed CI (Run 60 finding).
 
-
-### Added
 
 - **`mycelium-reason` 0.6.0 — three imports from the NVIDIA PAIR comparison (2026-09-04).**
   A same-day comparative read of NVIDIA's Personal AI Router (a per-node inference placer over
@@ -4248,7 +4223,6 @@ fix** (46.0.2) — the v2.3.0 tag was cut from a lineage that predated the 2026-
 ships wasmtime 45.0.3 with that low-severity (3.8) advisory open; upgrade rather than build the
 v2.3.0 tag with the `wasm` feature in hardened environments.
 
-### Added
 - **`mycelium-wiki` `GitStore` — the git-as-truth `WikiStore`** (feature `git-store`, zero added
   dependencies): pages are real markdown files in a git checkout, every write a commit behind an
   atomic `update-ref` branch-head CAS (plumbing against a private temporary index — the caller's
@@ -4316,8 +4290,6 @@ library — no daemon, no control plane; your deployment is the audited system. 
 throughout, so a minor bump. Also the release-1 (R1) step of the identity Phase-3 rollout:
 `require_identity_proofs` ships **default-off** — enable it only after the whole fleet runs this
 release.
-
-### Added
 
 - **Native gateway TLS (WS-A):** `GossipConfig::gateway_tls` (`GatewayTlsConfig`) — server-side
   HTTPS on the gateway port (reuse the node cert or supply a hostname cert) so bearer tokens/JWTs
@@ -4421,8 +4393,6 @@ The minor bump reflects a small amount of additive public API and one behaviour 
   reason's own `log/`-key parser, silently dropping every trace event (CI-red until caught). Fixed +
   `trace_record_replay_round_trips` gate.
 
-### Added
-
 - **Input-fuzz gate (no panic on untrusted input)** — a suite of proptests that run under
   overflow-checks in `cargo test`, so unchecked arithmetic on a gossiped/config value fails the build:
   `store::fuzz_apply_observe_tick_never_panics`, `config::fuzz_validate_never_panics`,
@@ -4446,7 +4416,6 @@ The minor bump reflects a small amount of additive public API and one behaviour 
 
 Wire **v12** (PREV 11) — unchanged from v2.0.0; a fully backwards-compatible rolling upgrade.
 
-### Added
 - **`LockService` — the distributed-lock service** (`agent.consensus().locks()`): the ergonomic
   layer over `distributed_lock` with **blocking acquire** (`lock(name, ttl, wait)` waits out
   contention instead of failing immediately) and a **scoped critical section**
@@ -4592,7 +4561,6 @@ Wire **v12** (PREV 11) — unchanged from v2.0.0; a fully backwards-compatible r
   (no-op without a recorder). The `test-util` feature carries no runtime deps and never enters a
   production build.
 
-### Added
 - **Example-doc standard + index ([`examples/README.md`](examples/README.md)).** The example READMEs
   had drifted into three names for the same section and re-typed setup in each file; there was no
   index. Now: a front-door index of every example, one **shared-setup** section (Rust / Ollama /
@@ -4793,8 +4761,6 @@ the substrate and their APIs may still evolve within the 2.x line — pin exact 
   Before a production go-live, walk [`docs/operations/production-readiness.md`](docs/operations/production-readiness.md);
   for a first customer engagement, [`docs/operations/customer-pilot.md`](docs/operations/customer-pilot.md).
 
-### Added
-
 - **`mycelium-wiki` companion crate** — a group-scoped, LLM-curated wiki: the durable, curated third coordination primitive (long-term-memory sibling of the blackboard's working memory), built on the public `mycelium` API only. **Control-plane / data-plane**: the corpus lives in a node-independent pluggable store (the `WikiStore` trait + an `FsStore` reference impl — manifest-last, torn-read-safe); a single elected **curator** serialises writes while group agents **read the store directly, in parallel** (no curator on the read path). Curator **election + ring-failover** on the capability ring; an evaporating KV **proposal queue** (`wiki/{group}/proposal/`); a **single-writer reconcile** that groups proposals by section (`DirectReconciler` lossless append-merge, or `LlmReconciler` 3-way merge behind `llm`); a **change-driven lint** loop (structural dead-cross-link/empty-section checks always on, LLM self-consistency behind `llm`; runs only after a write); **MCP tools** (`wiki.read`/`query`/`propose`) and an **HTTP gateway** (`/gateway/wiki/*`, feature `gateway`) with Python/TS `Wiki` SDKs; and a membership-gated **access broker** (`Wiki::request_store_access` → `StoreGrant`, RPC point-to-point). `Wiki::shutdown` reclaims the curator's background tasks. Features `control-plane` / `llm` / `gateway`; cross-node `tests/{failover,gateway,access}.rs` + the `wiki_chat` worked example (`ci_smoke.sh`, both use-case corpora). Audited in analysis Run 32 (one Major finding found + fixed same-session). Design/plan: `docs/plans/mycelium-wiki.md`; companion page `docs/wiki/dev/companions/wiki.md`.
 - **Legible Emergence — coordinator-free fleet diagnosability** — make an emergent, coordinator-free fleet debuggable by a *non-designer* (Detect → Localize → Explain → Intervene) without a central collector: diagnostics are computed from each node's locally-held KV + HLC causal order + a **bounded** scatter-gather fan-out (`EXPLAIN_MAX_FANOUT`, with the skipped set *named* as `not_queried`, never silently dropped). Emergent tripwires + counters, a fleet snapshot, causal-order reconstruction, a fleet-state narrative, and the operator surface: `GET /gateway/explain` + `/gateway/diagnose` and the `make check` / `make check-full` pre-push gates. Phases 0–5. Plan: `docs/plans/legible-emergence.md`.
 - **`mycelium-blackboard` companion crate** — content-routed shared working memory (the peer of the tuple space, routing by a **predicate over fact attributes** rather than lane position): `claim(predicate)` is a competitive, non-blocking destructive claim (Linda's `in`), `read`/`rd` is shared, `ack` is the idempotent terminal, `release`/deadline re-queues (at-least-once). `BoardStore` (WAL, magic `MBBWAL`) + `Blackboard` (roles + RPC + failover, `Post`/`Ack`-only replication). HTTP gateway `/gateway/bb/*`, Python/TS SDKs, the community-microgrid worked example. WS-G / G3. Plan: `docs/plans/v2-wsg-g3-blackboard.md`.
@@ -4810,8 +4776,6 @@ the substrate and their APIs may still evolve within the 2.x line — pin exact 
 
 - **Decode allocation bound (remote DoS fix)** — `bincode_cfg()` now sets `.with_limit::<MAX_FRAME_BYTES>()`. Without it, a frame whose internal length prefix claimed a huge element count drove an unbounded `Vec::with_capacity` and the process OOM-aborted (SIGABRT) — one malformed frame from any connected peer, or a bit-flip on a non-TLS link, killed the node. `read_frame` capped the frame size but not the element counts decoded from inside it. All decoders share the config, so the whole wire surface (gossip, capability, signal, locality, WAL sync) was exposed. Found by a decoder mini-fuzz now kept in-suite (`mini_fuzz_decoders_survive_adversarial_bytes`, `fuzz-internals` feature) and wired into CI — the `fuzz/` targets existed but had never run in CI.
 - **Dependency advisories cleared** (lockfile bumps, no manifest changes): `bytes` 1.10.1 → 1.11.1 (RUSTSEC-2026-0007, integer overflow in `BytesMut::reserve` — `read_frame` calls `reserve` on the wire path, though the 10 MiB frame cap already bounded the input), `tracing-subscriber` 0.3.19 → 0.3.20 (RUSTSEC-2025-0055, ANSI-escape log poisoning), `tokio` 1.44.1 → 1.46.1 (RUSTSEC-2025-0023, broadcast-channel unsoundness). `cargo audit` now reports zero vulnerabilities; remaining unmaintained-crate warnings (notably `bincode`, the wire codec) are tracked as a roadmap concern.
-
-### Added
 
 - **A2A agent card: schema-aware skills** — `GET /.well-known/agent.json` now populates each skill's `description` from its gossiped input schema (`skills/{ns}/{name}/{node}/input`, published by SkillRunner) and exposes the raw JSON Schema as an additive `inputSchema` field. Tool-calling frameworks build properly-typed tools from it instead of guessing payload shapes from prose — previously the empty description left LangChain/AutoGen agents passing plain text to JSON-expecting skills, which failed with a parse error and let the agent silently fall back to answering from its own weights. The bundled `examples/a2a_langchain/` agents (ported to LangChain ≥ 1.0 `create_agent` and current AutoGen) now derive their tool signatures from `inputSchema`.
 
@@ -4852,8 +4816,6 @@ the substrate and their APIs may still evolve within the 2.x line — pin exact 
 
 ## [1.1.0] — 2026-06-07
 
-### Added
-
 - **Per-peer gossip rate-limiting** — `GossipConfig::max_inbound_frames_per_sec` (also `GOSSIP_MAX_INBOUND_FRAMES_PER_SEC` env var). When set to a non-zero value, frames received faster than this rate from a single peer are dropped with a warning log. Prevents a malicious or misbehaving peer from flooding the inbound processing pipeline. Default `0` = unlimited (existing behaviour preserved).
 - **`bulk_serve` handler concurrency cap** — `GossipConfig::max_concurrent_bulk_handlers` (also `GOSSIP_MAX_CONCURRENT_BULK_HANDLERS` env var). Limits the number of concurrent per-request background tasks spawned by `bulk_serve` via a `tokio::sync::Semaphore`. When the cap is reached, new bulk signals are dropped with a warning. Default `64`; set to `0` for unlimited.
 
@@ -4861,8 +4823,6 @@ the substrate and their APIs may still evolve within the 2.x line — pin exact 
 
 - **`GossipError::Config(String)` replaced by three structured variants** — `InvalidField { field: &'static str, reason: String }`, `FieldConflict { field_a, field_b, reason }`, `NodeIdMismatch { node_id, bind_addr }`. Callers can now match specific configuration failures without parsing error strings. All `validate()` and `apply_env_overrides()` error paths updated.
 - **`GossipError::Network(String)` replaced by two structured variants** — `FrameTooLarge { size: usize, limit: usize }` and `UnsupportedWireVersion { received: u8, current: u8, prev: u8, hint: &'static str }`. Framing errors are now fully typed; callers can distinguish oversized frames from version mismatches.
-
-### Added
 
 - **HTTP gateway bearer-token authentication** — `GossipConfig::gateway_auth_token: Option<String>` (also `GOSSIP_GATEWAY_AUTH_TOKEN` env var). When set, every `/gateway/**` request must carry `Authorization: Bearer <token>`; unauthenticated requests receive `401 Unauthorized`. Health, ready, stats, and metrics endpoints are always public. Suitable for deployments where `http_addr = "0.0.0.0"`.
 - **Error handling guide** — `docs/guide/error-handling.md` documents all eight public error types (`GossipError`, `ConsistencyError`, `RpcError`, `QuorumError`, `ScatterError`, `SchemaError`, `BulkError`, `ShardError`), their recoverability classification, propagation strategy, and a relationship diagram per handle.
@@ -4885,8 +4845,6 @@ the substrate and their APIs may still evolve within the 2.x line — pin exact 
 - `set_quorum` renamed to `set_with_min_acks` — name now reflects the actual semantics (wait for N gossip echo receipts, not consensus quorum).
 - Cargo.toml `description` improved: now accurately describes the three-layer substrate.
 - `a2a` and `llm` features now imply `gateway` (they expose HTTP endpoints).
-
-### Added
 
 - `Capability::with_schema_id` / `CapFilter::with_schema` — optional contract version gossip-propagated with every capability entry. Resolvers that call `with_schema` only match providers advertising the same `schema_id`; capabilities without a `schema_id` do not match (strict by default).
 - `Capability::with_input_schema` / `with_output_schema` — embed JSON Schema strings directly in the gossip-propagated capability entry so callers can inspect the invocation contract from `resolve()` results without a separate KV lookup. SkillRunner now embeds `.skill.toml` input/output schemas in the capability in addition to the existing `skills/.../input` KV keys.
@@ -4915,8 +4873,6 @@ the substrate and their APIs may still evolve within the 2.x line — pin exact 
 ---
 
 ## [1.0.0] - 2026-06-03
-
-### Added
 
 **Layer I — Gossip KV store**
 - Last-write-wins key-value store propagated over TCP gossip

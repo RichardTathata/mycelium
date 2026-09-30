@@ -1,0 +1,8 @@
+# tool-a: one role in the demo mesh, advertised as role/tool-a.
+principal = "tool-a"
+
+[[capability]]
+ns       = "role"
+name     = "tool-a"
+ttl_secs = 30
+

@@ -1,0 +1,8 @@
+# tool-sf: one role in the demo mesh, advertised as role/tool-sf.
+principal = "tool-sf"
+
+[[capability]]
+ns       = "role"
+name     = "tool-sf"
+ttl_secs = 30
+

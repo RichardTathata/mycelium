@@ -1,0 +1,8 @@
+# node: one role in the demo mesh, advertised as role/node.
+principal = "node"
+
+[[capability]]
+ns       = "role"
+name     = "node"
+ttl_secs = 30
+

@@ -1,0 +1,7 @@
+# coop-b: the other co-op, reading what coop-a offers.
+principal = "coop-b"
+
+[[requirement]]
+ns   = "route"
+name = "optimize"
+

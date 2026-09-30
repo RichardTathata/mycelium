@@ -1,0 +1,15 @@
+# the worker: needs an optimizer nobody deploys — a provider will install one — and drains the lane.
+principal = "worker"
+
+[[requirement]]
+ns   = "route"
+name = "optimize"
+
+[[lane]]
+name = "optimize"
+role = "consumes"
+
+[[lane]]
+name = "done"
+role = "produces"
+

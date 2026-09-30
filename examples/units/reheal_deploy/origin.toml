@@ -1,0 +1,25 @@
+# origin: hosts the storyteller's component and its weights (blob), and keeps one of each alive.
+principal = "origin"
+
+# Pulls bytes from whichever node advertises the librarian (MeshArtifactSource resolves it).
+[[requirement]]
+ns   = "artifact"
+name = "librarian"
+
+[hosts]
+kinds                = ["wasm-component", "blob"]
+install_budget_bytes = 8589934592
+headroom             = 0.8
+trusted_publishers   = ["ed25519:coop-ci"]
+placement_root       = "/var/lib/mycelium/artifacts"
+
+[[presence]]
+ns            = "llm"
+name          = "storyteller"
+min_providers = 1
+
+[[presence]]
+ns            = "llm"
+name          = "storyteller-weights"
+min_providers = 1
+

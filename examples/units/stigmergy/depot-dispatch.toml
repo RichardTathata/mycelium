@@ -1,0 +1,7 @@
+# dispatch: resolves an intake depot and drops the work signal.
+principal = "depot-dispatch"
+
+[[requirement]]
+ns   = "depot"
+name = "intake"
+

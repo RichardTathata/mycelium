@@ -1,0 +1,7 @@
+# the caller (and the late joiner): needs route/optimize.
+principal = "caller"
+
+[[requirement]]
+ns   = "route"
+name = "optimize"
+

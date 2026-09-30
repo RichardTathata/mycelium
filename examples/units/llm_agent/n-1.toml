@@ -1,0 +1,21 @@
+# n-1: the search + calculate node, and the installable vector-search data (examples/node_n1.toml).
+principal = "n-1"
+
+[[capability]]
+ns       = "compute"
+name     = "cpu"
+ttl_secs = 60
+  [capability.attrs]
+  provider = "n-1"
+  tools = "search,calculate"
+
+[[capability]]
+ns       = "data"
+name     = "installable"
+ttl_secs = 300
+  [capability.attrs]
+  name = "vector-search"
+  install_method = "pip"
+  est_secs = 15
+  size_mb = 45
+

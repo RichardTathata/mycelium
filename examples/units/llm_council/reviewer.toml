@@ -1,0 +1,15 @@
+# reviews the draft: approved, or back to revise.
+principal = "reviewer"
+
+[[lane]]
+name = "draft"
+role = "consumes"
+
+[[lane]]
+name = "approved"
+role = "produces"
+
+[[lane]]
+name = "revise"
+role = "produces"
+

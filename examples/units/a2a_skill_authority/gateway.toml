@@ -1,0 +1,35 @@
+# the gateway node: three skills, two of them under a remit rule (the reference evaluator's DepotRemit).
+principal = "gateway"
+
+[[capability]]
+ns       = "depot"
+name     = "dispatch"
+ttl_secs = 30
+
+[[capability]]
+ns       = "ledger"
+name     = "export"
+ttl_secs = 30
+
+[[capability]]
+ns       = "weather"
+name     = "lookup"
+ttl_secs = 30
+
+[[rule]]
+actor            = "client"
+operation        = "skill.invoke"
+resource         = "skill:depot/dispatch"
+requires_mandate = "depot-remit"
+
+[[rule]]
+actor            = "client"
+operation        = "skill.invoke"
+resource         = "skill:ledger/export"
+requires_mandate = "depot-remit"
+
+[[rule]]
+actor     = "client"
+operation = "skill.invoke"
+resource  = "skill:weather/lookup"
+

@@ -1,0 +1,11 @@
+# the allergen specialist: drains its lane and completes a partial.
+principal = "specialist-allergen"
+
+[[lane]]
+name = "spec.allergen"
+role = "consumes"
+
+[[lane]]
+name = "partials"
+role = "produces"
+

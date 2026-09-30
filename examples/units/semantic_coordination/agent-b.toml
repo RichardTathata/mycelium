@@ -1,0 +1,29 @@
+# agent-b: the render GPU (schema acme-render/v1) — and the requirer of every versioned shape the example resolves.
+principal = "agent-b"
+
+[[capability]]
+ns       = "compute"
+name     = "gpu"
+ttl_secs = 30
+schema_id = "acme-render/v1"
+  [capability.attrs]
+  vram_gb = 24
+
+[[requirement]]
+ns   = "compute"
+name = "gpu"
+
+[[requirement]]
+ns   = "compute"
+name = "gpu"
+schema_id = "acme-ml/v2"
+
+[[requirement]]
+ns   = "compute"
+name = "gpu"
+schema_id = "acme-render/v1"
+
+[[requirement]]
+ns   = "llm"
+name = "chat"
+

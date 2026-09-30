@@ -1,0 +1,8 @@
+# coop-a: advertises the optimizer whose AgentFacts coop-b fetches and verifies.
+principal = "coop-a"
+
+[[capability]]
+ns       = "route"
+name     = "optimize"
+ttl_secs = 30
+

@@ -1,0 +1,6 @@
+# The demo's own check: it reads the done lane's depth after each wave — the lane's consumer.
+principal = "observer"
+
+[[lane]]
+name = "done"
+role = "consumes"

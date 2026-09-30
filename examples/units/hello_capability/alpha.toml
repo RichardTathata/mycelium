@@ -1,0 +1,8 @@
+# alpha: advertises the one capability the ladder starts with.
+principal = "alpha"
+
+[[capability]]
+ns       = "math"
+name     = "double"
+ttl_secs = 30
+

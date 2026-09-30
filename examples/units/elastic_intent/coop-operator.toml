@@ -1,0 +1,13 @@
+# the operator: defines the rush pool over rush/worker and calls on it when intake surges.
+principal = "coop-operator"
+
+[[group]]
+name = "rush-pool"
+  [group.filter]
+  ns   = "rush"
+  name = "worker"
+
+[[requirement]]
+ns   = "rush"
+name = "worker"
+

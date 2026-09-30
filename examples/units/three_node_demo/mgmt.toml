@@ -1,0 +1,40 @@
+# mgmt: the management node — advertises its own role and resolves every other (with a 30 s liveness bound).
+principal = "mgmt"
+
+[[capability]]
+ns       = "role"
+name     = "mgmt"
+ttl_secs = 30
+
+[[requirement]]
+ns   = "role"
+name = "mgmt"
+
+[[requirement]]
+ns   = "role"
+name = "tool-a"
+
+[[requirement]]
+ns   = "role"
+name = "tool-b"
+
+[[requirement]]
+ns   = "role"
+name = "tool-sf"
+
+[[requirement]]
+ns   = "role"
+name = "tool-book"
+
+[[requirement]]
+ns   = "role"
+name = "verifier"
+
+[[requirement]]
+ns   = "role"
+name = "llm"
+
+[[requirement]]
+ns   = "role"
+name = "node"
+
