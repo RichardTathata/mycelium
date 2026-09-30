@@ -183,6 +183,11 @@ jobs:
           if cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/unwired; then
             echo "the unwired fixture must fail the check"; exit 1
           fi
+      # W4: a governed edge no declaration could authorise, exit 1.
+      - run: |
+          if cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/unauthorised; then
+            echo "the unauthorised fixture must fail the check"; exit 1
+          fi
       # W3: the schema window and an unknown schema, both named, exit 1.
       - run: |
           if cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/schema-window --schemas tests/fixtures/units/schemas; then

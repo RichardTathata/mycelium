@@ -7,6 +7,12 @@ role = "consumes"
 
 [[rule]]
 actor            = "worker"
-operation        = "route.optimize"
-resource         = "*"
+operation        = "skill.invoke"
+resource         = "skill:route/optimize"
+requires_mandate = "routing"
+
+[[rule]]
+actor            = "worker"
+operation        = "skill.invoke"
+resource         = "skill:depot/intake"
 requires_mandate = "routing"

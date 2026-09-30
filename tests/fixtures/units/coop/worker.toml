@@ -23,7 +23,9 @@ role = "consumes"
 name = "done"
 role = "produces"
 
+# The authority vocabulary this unit expects: what it may call, as a grant enumerates it
+# (`{operation}:{resource}` — the gateway's own form), and the rule that admits it.
 [[mandate]]
 holder     = "worker"
 scope      = "routing"
-operations = ["route.optimize", "route.complete"]
+operations = ["skill.invoke:skill:route/optimize", "skill.invoke:skill:depot/intake"]

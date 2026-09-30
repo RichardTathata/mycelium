@@ -194,6 +194,18 @@
       "kind": "would bind by provisioning",
       "unit": "worker",
       "message": "requirement route/optimize: no deployed provider; artifact \"route-optimizer\" (wasm-component) could be installed by depot-a|depot-b"
+    },
+    {
+      "severity": "warning",
+      "kind": "ungoverned edge",
+      "unit": "dispatcher",
+      "message": "requirement rush/worker: dispatcher declares no mandate and no rule, while other units do — this edge is outside the authority vocabulary"
+    },
+    {
+      "severity": "warning",
+      "kind": "ungoverned edge",
+      "unit": "dispatcher",
+      "message": "requirement logistics/intake: dispatcher declares no mandate and no rule, while other units do — this edge is outside the authority vocabulary"
     }
   ]
 }

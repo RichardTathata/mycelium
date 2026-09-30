@@ -20,7 +20,9 @@
 //! | `orphan lane` | a lane consumed and never produced, or produced and never consumed | error |
 //! | `unhostable entry` | an artifact would satisfy the filter but no unit's `[hosts]` names its kind with budget for its footprint | error |
 //! | `presence unhostable` | a `[[presence]]` floor cannot be met by deployed providers plus distinct hosting units | error |
+//! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
+//! | `ungoverned edge` | the requirer declares no mandate and no rule while other units do | warning |
 //! | `unranked ranking` | a ranking on an attribute no matching capability carries | warning |
 //! | `single provider` | a requirement with exactly one possible provider | warning |
 //!
@@ -96,11 +98,18 @@ impl ArtifactDescription {
 }
 
 /// Options for one check.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CheckOptions {
     /// Treat *would bind by provisioning* as an error: the deployment must be wired by what is
     /// deployed, not by what could be installed.
     pub strict_deployed: bool,
+    /// Run the **authority overlay** (W4): for every wired edge whose requirer has declared any
+    /// authority vocabulary (a `[[mandate]]` or a `[[rule]]`), whether some declared rule could ever
+    /// admit it — actor, operation and resource matching, and, where the rule requires a mandate
+    /// scope, a declared mandate held by the requirer's principal that enumerates the operation. It
+    /// does not evaluate policy; it finds edges that no declaration could ever authorise. On by
+    /// default; `--no-authority` turns it off.
+    pub authority: bool,
     /// The revision to stamp on the document (the git commit of the units directory), if known.
     pub revision: Option<String>,
     /// The schema ids the deployment's schema directory defines (guide 12's `schemas/` — each
@@ -108,6 +117,30 @@ pub struct CheckOptions {
     /// `schema_id` a unit or an artifact declares must be one of them, or the finding is
     /// `unknown schema`. `None` skips the check.
     pub known_schemas: Option<BTreeSet<String>>,
+}
+
+impl Default for CheckOptions {
+    fn default() -> Self {
+        Self { strict_deployed: false, authority: true, revision: None, known_schemas: None }
+    }
+}
+
+/// The operation a grant must enumerate for a call on a resource: `{operation}:{resource_key}`,
+/// with the resource key being everything before a provider's `@`. This is the gateway's own rule
+/// (`mycelium::mandate_operation`, gated behind the attesting build); the checker restates the
+/// string so it can run without a gateway, and a test under that build pins the two equal.
+pub fn mandate_operation_form(operation: &str, resource: &str) -> String {
+    format!("{operation}:{}", resource.split('@').next().unwrap_or(resource))
+}
+
+/// The two call shapes a capability edge could take at a provider, as the provider enforcement
+/// point derives them: a skill (`skill.invoke` on `skill:{ns}/{name}`) or an MCP tool
+/// (`tools/call` on `tool:{name}`). The overlay admits an edge if either is authorised.
+fn call_shapes(ns: &str, name: &str) -> [(String, String); 2] {
+    [
+        ("skill.invoke".to_string(), format!("skill:{ns}/{name}")),
+        ("tools/call".to_string(), format!("tool:{name}")),
+    ]
 }
 
 /// How serious a finding is: an `Error` makes the check exit 1; a `Warning` does not.
@@ -629,6 +662,94 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         }
     }
 
+    // ── authority overlay (W4) ─────────────────────────────────────────────────────────
+    // For an edge whose requirer has declared any authority vocabulary, some declared rule must be
+    // able to admit one of the call shapes the edge could take; a rule that requires a mandate
+    // scope needs a declared mandate, held by the requirer's principal, enumerating the operation.
+    if opts.authority {
+        let rules: Vec<&crate::capability_config::RuleDecl> = units.iter().flat_map(|u| u.config.rules.iter()).collect();
+        let mandates: Vec<&crate::capability_config::MandateDecl> = units.iter().flat_map(|u| u.config.mandates.iter()).collect();
+        let governed = |u: &Unit| !u.config.mandates.is_empty() || !u.config.rules.is_empty();
+        let any_vocabulary = !rules.is_empty() || !mandates.is_empty();
+        let unit_of = |name: &str| units.iter().find(|u| u.name == name);
+        for e in &edges {
+            if e.providers.is_empty() {
+                continue; // already `could not bind`; authority over nothing is not the finding
+            }
+            let Some(requirer) = unit_of(&e.requirer) else { continue };
+            if !governed(requirer) {
+                if any_vocabulary {
+                    findings.push(Finding {
+                        severity: Severity::Warning,
+                        kind:     "ungoverned edge".into(),
+                        unit:     Some(e.requirer.clone()),
+                        message:  format!(
+                            "requirement {}/{}: {} declares no mandate and no rule, while other units do — this edge is outside the authority vocabulary",
+                            e.ns, e.name, e.requirer
+                        ),
+                    });
+                }
+                continue;
+            }
+            let Some(principal) = requirer.config.principal.as_deref() else {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    kind:     "unauthorisable edge".into(),
+                    unit:     Some(e.requirer.clone()),
+                    message:  format!("requirement {}/{}: {} declares authority vocabulary but no principal, so no rule can name it", e.ns, e.name, e.requirer),
+                });
+                continue;
+            };
+            let mut admitted = false;
+            let mut nearest: Option<String> = None;
+            for (operation, resource) in call_shapes(&e.ns, &e.name) {
+                let enumerated = mandate_operation_form(&operation, &resource);
+                for r in &rules {
+                    let actor_ok = r.actor == "*" || r.actor == principal;
+                    let op_ok = r.operation == "*" || r.operation == operation;
+                    let res_ok = r.resource == "*" || r.resource == resource;
+                    if !(actor_ok && op_ok && res_ok) {
+                        continue;
+                    }
+                    match &r.requires_mandate {
+                        None => {
+                            admitted = true;
+                        }
+                        Some(scope) => {
+                            let held = mandates.iter().any(|m| m.holder == principal && &m.scope == scope && m.permits(&enumerated));
+                            if held {
+                                admitted = true;
+                            } else if nearest.is_none() {
+                                nearest = Some(format!(
+                                    "a rule admits {operation} on {resource} but requires mandate scope {scope:?}, and no declared mandate held by {principal:?} in that scope enumerates {enumerated:?}"
+                                ));
+                            }
+                        }
+                    }
+                    if admitted {
+                        break;
+                    }
+                }
+                if admitted {
+                    break;
+                }
+            }
+            if !admitted {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    kind:     "unauthorisable edge".into(),
+                    unit:     Some(e.requirer.clone()),
+                    message:  format!(
+                        "requirement {}/{}: {}",
+                        e.ns,
+                        e.name,
+                        nearest.unwrap_or_else(|| format!("no declared rule admits {principal:?} calling it as a skill or a tool"))
+                    ),
+                });
+            }
+        }
+    }
+
     // ── lanes ──────────────────────────────────────────────────────────────────────────
     let mut lanes: BTreeMap<String, Lane> = BTreeMap::new();
     for u in units {
@@ -827,6 +948,64 @@ mod tests {
         // Without a schema directory the same deployment reports only the window and the unwired route.
         let r = check(&units, &[], &CheckOptions::default());
         assert!(!kinds(&r).iter().any(|(k, _)| *k == "unknown schema"));
+    }
+
+    /// W4: the authority overlay. A governed requirer's edge must be admissible by some declared
+    /// rule; a rule that requires a mandate scope needs a mandate held by the requirer's principal
+    /// that enumerates the operation; an ungoverned unit beside governed ones is a warning; with
+    /// `authority` off, none of this runs.
+    #[test]
+    fn the_authority_overlay_finds_edges_no_declaration_could_authorise() {
+        let provider = unit("optimizer", "[[capability]]\nns=\"route\"\nname=\"optimize\"\n[[capability]]\nns=\"depot\"\nname=\"intake\"\n");
+        // Admitted: a rule requiring scope "routing", and a mandate in that scope enumerating the skill form.
+        let ok = unit("worker", concat!(
+            "principal=\"worker\"\n[[requirement]]\nns=\"route\"\nname=\"optimize\"\n",
+            "[[mandate]]\nholder=\"worker\"\nscope=\"routing\"\noperations=[\"skill.invoke:skill:route/optimize\"]\n",
+            "[[rule]]\nactor=\"worker\"\noperation=\"skill.invoke\"\nresource=\"skill:route/optimize\"\nrequires_mandate=\"routing\"\n",
+        ));
+        let r = check(&[provider.clone(), ok.clone()], &[], &CheckOptions::default());
+        assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+        assert!(r.findings.iter().all(|f| f.kind != "unauthorisable edge"), "{}", r.render_text());
+
+        // Refused: the rule requires a scope no declared mandate held by the principal enumerates.
+        let no_mandate = unit("worker", concat!(
+            "principal=\"worker\"\n[[requirement]]\nns=\"route\"\nname=\"optimize\"\n",
+            "[[rule]]\nactor=\"worker\"\noperation=\"skill.invoke\"\nresource=\"skill:route/optimize\"\nrequires_mandate=\"depot\"\n",
+        ));
+        let r = check(&[provider.clone(), no_mandate], &[], &CheckOptions::default());
+        let text = r.render_text();
+        assert!(kinds(&r).contains(&("unauthorisable edge", Severity::Error)), "{text}");
+        assert!(text.contains("requires mandate scope \"depot\", and no declared mandate held by \"worker\""), "{text}");
+
+        // Refused: a mandate exists but enumerates a different operation; no rule matches at all.
+        let wrong_op = unit("worker", concat!(
+            "principal=\"worker\"\n[[requirement]]\nns=\"depot\"\nname=\"intake\"\n",
+            "[[mandate]]\nholder=\"worker\"\nscope=\"routing\"\noperations=[\"skill.invoke:skill:route/optimize\"]\n",
+        ));
+        let r = check(&[provider.clone(), wrong_op], &[], &CheckOptions::default());
+        let text = r.render_text();
+        assert!(text.contains("no declared rule admits \"worker\" calling it as a skill or a tool"), "{text}");
+
+        // A wildcard rule without a mandate requirement admits; an ungoverned unit beside it warns.
+        let open = unit("auditor", "[[rule]]\nactor=\"*\"\noperation=\"*\"\nresource=\"*\"\n");
+        let plain = unit("dispatcher", "[[requirement]]\nns=\"depot\"\nname=\"intake\"\n");
+        let r = check(&[provider.clone(), ok.clone(), open, plain], &[], &CheckOptions::default());
+        assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+        assert!(kinds(&r).contains(&("ungoverned edge", Severity::Warning)), "{}", r.render_text());
+
+        // Off: nothing of the above.
+        let r = check(&[provider, ok], &[], &CheckOptions { authority: false, ..Default::default() });
+        assert!(r.findings.iter().all(|f| !f.kind.contains("edge")), "{}", r.render_text());
+    }
+
+    /// The overlay's operation string is the gateway's own rule, pinned equal under the build
+    /// that has it.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[test]
+    fn the_overlay_restates_the_gateway_mandate_operation_exactly() {
+        for (op, res) in [("tools/call", "tool:ledger@depot-node"), ("skill.invoke", "skill:depot/dispatch@x"), ("tools/call", "tool:bare")] {
+            assert_eq!(mandate_operation_form(op, res), crate::mandate_operation(op, res));
+        }
     }
 
     #[test]

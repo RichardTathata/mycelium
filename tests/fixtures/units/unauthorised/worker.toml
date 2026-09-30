@@ -1,0 +1,18 @@
+# Governed, and unauthorisable: the only rule that admits the call requires a mandate scope that
+# no declared mandate held by this principal enumerates. The W4 exit gate.
+principal = "worker"
+
+[[requirement]]
+ns   = "route"
+name = "optimize"
+
+[[rule]]
+actor            = "worker"
+operation        = "skill.invoke"
+resource         = "skill:route/optimize"
+requires_mandate = "depot"
+
+[[mandate]]
+holder     = "worker"
+scope      = "routing"
+operations = ["skill.invoke:skill:route/optimize"]
