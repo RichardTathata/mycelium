@@ -18,8 +18,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   greps one contract twice; the `stem-examples` job in `cluster-suites.yml` gates it. The hosting
   units' publisher key is the public half of the suite's seed (`make stem-keys`) — the stem refuses a
   placeholder the checker accepted. What is not recut, and why, is in the compose header.
+- **The GCS fixture (plan S3).** The object-store adapter's test runs once per configured store URL:
+  `MYCELIUM_S3_TEST_URL` (S3Mock, as before) and now `MYCELIUM_GCS_TEST_URL` against `fake-gcs-server`
+  in CI, reached through the GCS builder's `GOOGLE_BASE_URL` with a static `GOOGLE_BEARER_TOKEN` (the
+  put path fetches a credential regardless of skip-signature in `object_store` 0.14). The
+  same sequence — publish, manifest round trip, ranged staging, provenance and the streamed hash —
+  over both; with neither variable the local `file://` store stands in and the test says so. An
+  emulator proves the code path; only a real bucket proves the cloud (S4, open).
+- **The store test runs once per configured store (plan S3).** `MYCELIUM_S3_TEST_URL` (S3Mock in CI,
+  as before) and now `MYCELIUM_GCS_TEST_URL` — the same sequence (publish, manifest round trip, ranged
+  staging, provenance and the streamed hash) over each; with neither the local `file://` store stands
+  in and the test says so. **No GCS emulator runs in CI:** two runs against `fake-gcs-server` found the
+  crate's put path fetching a credential regardless of skip-signature (a static bearer answers that)
+  and then the emulator accepting only signed-URL uploads, which the crate's plain PUT is not. The
+  GCS gate is a real bucket (S4, open), where the test runs unchanged.
 
-### Added
 - **Proposed → shadow → accept (plan D20 / F2, `mycelium-wasm-host`).** An `InstallableEntry` gains
   `proposed` (inside the publisher's signature, under its own domain — flipping the byte breaks the
   signature) and `acceptance` (a reviewer's Ed25519 signature over the publisher's signed content

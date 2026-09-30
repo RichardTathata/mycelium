@@ -97,6 +97,16 @@ or when the node lists no trusted publishers (403), when the signer is a key a l
 node manages (409 — the librarian's manifest would tombstone it at the next sync; publish to the
 library instead), or malformed (400). The stem binary mounts the route when built with the
 `gateway` feature and the hosts table names trusted publishers.
+### Object stores: what CI proves and what it does not
+
+The adapter (`object_store` feature) is exercised in CI against S3Mock for `s3://`. For `gs://` the
+same test takes `MYCELIUM_GCS_TEST_URL` with the builder's credentials from the environment
+(workload identity or a service account), but **no GCS emulator runs in CI**: `fake-gcs-server`'s XML
+API accepts only signed-URL uploads, and `object_store` 0.14 puts with a plain PUT under a bearer, so
+the GCS path is proved only against a real bucket (plan S4). An emulator proves the code path — URL
+parsing, the manifest round trip, ranged staging under the memory bound, provenance and the streamed
+hash — and never the cloud: IAM, bucket policies, region and egress behaviour. Neither cloud's real
+run is recorded yet; this page will carry the dates when they are.
 
 ### Operational notes
 

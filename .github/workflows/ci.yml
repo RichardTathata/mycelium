@@ -217,6 +217,10 @@ jobs:
       AWS_ENDPOINT: http://localhost:9090
       AWS_ALLOW_HTTP: "true"
       AWS_REGION: us-east-1
+      # S3 (design-time-tooling.md §11): the test also takes MYCELIUM_GCS_TEST_URL, but no GCS
+      # emulator runs here — fake-gcs-server's XML API accepts only signed-URL uploads
+      # (X-Goog-Algorithm in the query), and object_store 0.14 puts with a plain PUT under a bearer,
+      # so two CI runs ended at "invalid uploadType". The GCS gate is a real bucket (S4).
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
