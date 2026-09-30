@@ -2,7 +2,7 @@
 
 ↑ [Operations](README.md) · beside the [shared-responsibility matrix](shared-responsibility-matrix.md)
 
-**As of 2026-09-28 (v2.16.0).** One dated page for the line between what CI proves on every merge,
+**As of 2026-09-30 (v2.17.0).** One dated page for the line between what CI proves on every merge,
 what has been demonstrated with its bound stated, and what has not yet been shown. Every line names
 its evidence. The places that used to restate this list — `CLAUDE.md` § Active work, the contracts-axis
 plan §10, the self-audit series, the publications ledger, both decks — now link here instead, and
@@ -27,6 +27,10 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 | A 4-node integration cluster, a 3-node overlay cluster, a **two-mesh federation that does not merge with the link cut**, and the confined fleet — **no retries** | the Docker cluster suites | `cluster-suites.yml` jobs `integration` · `overlay` · `federation` · `confined-fleet` |
 | Every companion crate's suite, both SDKs, the co-op and AFN smokes, `cargo audit`, the loom model | the per-crate jobs | `ci.yml` jobs `wasm-host` · `agentfacts` · `blackboard` · `effects` · `commitment` · `wiki` · `reason` · `guardrails` · `python-sdk` · `sdk-ts` · `coop-smoke` · `afn-smoke` · `audit` · `loom` |
 | A **composed effect** is refused at the destination unless it is attributed (the principal is the mandate's holder) and authorised (`ResourceAuthority::check`, now) — each leg planted missing leaves no row; the domain leg is carried, not re-verified | `mycelium-effects/tests/composed.rs`, written before the check and seen committing every planted leg | `ci.yml` job `effects` |
+| **The declared fleet checks offline and runs as stem nodes.** Every example's declaration directory checks clean and turns red when the last provider of any capability is deleted; the co-op fixtures name their ghost, their unauthorisable edge and their schema window; a proposed artifact is *would bind after acceptance*; the declaration document validates against its pinned schema | `tests/wire_check_examples.rs`, `tests/wire_check_fixtures.rs`, `tests/declaration_schema.rs`, `scripts/wire-check-examples.sh` | `ci.yml`; `docs/reference/declaration.schema.json` |
+| The `provisioning` and `catalog` (phases 1–4) demos reach the **same asserted outcome as stem nodes** fed only their declaration directories, including a provider killed for real | the stem-examples suite (`make test-stem-examples`) | `cluster-suites.yml` job `stem-examples`; `docker/docker-compose.stem-examples.yml` |
+| An agent-published entry that loops is **stopped at its fuel budget** and the record says so, the operator's runs unbounded; a **proposed** entry loads only into the shadow lane until a listed reviewer accepts it, and a forged acceptance changes nothing | `an_agent_published_entry_that_loops_is_stopped_at_its_budget_and_the_operators_is_not`, `a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it`, the co-op `provisioning` demo's wave 3 | `ci.yml` jobs `wasm-host`, `coop-smoke` |
+| A signed catalogue line published through the gateway **reaches a second node with provenance intact**, and every refusal answers by name | `mycelium-wasm-host/tests/gateway.rs` | `ci.yml` job `wasm-host` |
 | A regression is fixed only with a test **seen failing first** | the repository's bar since 2026-09-26; stated in each fix's commit | `CLAUDE.md`; the v2.15.1 and v2.16.0 changelog entries |
 
 ## Demonstrated, with the bound stated
@@ -42,18 +46,19 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 
 ## Not yet shown — and what would show it
 
-| Gap | State on 2026-09-28 | What would show it |
+| Gap | State on 2026-09-30 | What would show it |
 |---|---|---|
 | **A named third-party production deployment** | none. NovusLens is a design partner that consumes the evidence records; the council-minutes corpus is envelope-qualified, not live | a customer pilot run to the `customer-pilot.md` bar, named with consent |
 | **V1 — the nightly scale runner** | the hosted job (`scale-nightly.yml`) has never had a runner registered and queues silently; the local launchd runner's last four rows (2026-09-25/26) failed with exit 2 on the environment (Docker/VM), not on the substrate; last green 2026-09-24 | a registered runner and a window of green nightlies, recorded in `results.csv` |
 | **Performance under load** | only the micro-benchmarks above; no end-to-end throughput or latency figure for a cluster under sustained load, and the benches are not run in CI | a load run on a real network with the numbers in `tuning.md`, and a bench job with a stored baseline |
 | **AE4 — the four joint AWS/GCP runs** with the oversight consumer | the Cedar adapter and the signed exporter are implemented in the private companion, pinned to this release; the joint runs have not happened, and a local fixture does not stand in for them | the runs themselves; §6.8 of the axis plan says neither a fixture nor one cloud can close it |
-| **Models pulled from S3 or GCS** | the adapter exists (S2, 2026-09-28: `ObjectStoreFetcher` over the `object_store` crate — S3, GCS, Azure, HTTP, local — ranged, egress-gated, the manifest in the store), exercised in CI against an **S3-compatible mock** (Adobe's S3Mock) and locally over `file://`; **no real bucket has been used**, and no GCS fixture runs | `design-time-tooling.md` S3 (a GCS fixture) and S4 (real buckets, delivery evidence) |
+| **Models pulled from S3 or GCS** | the adapter exists (S2: `ObjectStoreFetcher` over the `object_store` crate — S3, GCS, Azure, HTTP, local — ranged, egress-gated, the manifest in the store), exercised in CI against an **S3-compatible mock** (Adobe's S3Mock) and locally over `file://`; the same test takes a GCS URL, but **no GCS emulator runs**: `fake-gcs-server` accepts only signed-URL uploads and the crate puts with a plain PUT (S3 ◐, two CI runs); **no real bucket has been used** | `design-time-tooling.md` S4 (real buckets, delivery evidence, dated) |
 | **The self-audit floor** | 7 / 7 / 7 for Modularity, Performance and Operational Readiness / Developer Experience across many runs (Run 62, 2026-09-26); the calibration ledger holds **48 entries** of scores later proven wrong | fresh execution evidence per dimension, not a re-asserted number — the M2 rule |
 | **Combined-feedback oscillation** | not posed — the three control loops share one state variable and neither isolation method can ask the question | a second state variable, or a different instrument |
 | **The check-then-act window** | narrowed and stated per site, not eliminated (`late_writes()` counts them) | it cannot be eliminated by this design; the count is the claim |
 | **Identity proofs required by default** | `require_identity_proofs` is default-off; a commitment signature's strength rests on it; `clock_sync` is always `Unverified` | a deployment that turns it on and a release that flips the default |
-| **The declared fleet** | the unit file, the offline check, the stem topology and agent-authored functions under a fuel budget and a second signature are a plan | `docs/plans/design-time-tooling.md`, W1 onward |
+| **The rest of the stem recut** | `provisioning`'s wave 3 (an acceptance is a manifest rewrite the stems re-read), `catalog`'s late joiner from a peer cache (a stem does not re-serve its cache), `mcp_toolgrowth` (no MCP bridge in the stem), `model_deploy` / `reheal_deploy` (no activation or probe hook, no `serve_model`), `llm_agent` (simulated pulls) | the stem capability gaps named in `docker/docker-compose.stem-examples.yml`, one at a time, each with the both-ways marker |
+| **The declaration as a consumer record** | the schema is pinned and every edge carries its call shapes (W6, public half); the private companion's `deployment_declaration` batch, conformance arm and join wait for **this tag**, since the companion pins by tag and none before it carried the checker | the companion bumps its pin to `v2.17.0` and ships the batch with its retry and join tests |
 
 ## What this page is not
 

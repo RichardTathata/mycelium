@@ -22,6 +22,11 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.17.0 release — 2026-09-30 (tag `v2.17.0`) — the design-time tooling MINOR
+
+Everything the entry below lists, tagged: the **design-time tooling** MINOR: the unit file and `mycelium wire-check` (findings by name, schemas, the authority overlay, DOT, JSON with a pinned schema and call shapes on every edge) · the artifact tool `mycelium-artifact publish|list|verify|accept` and the gateway door `POST /gateway/artifacts/publish` behind `artifact:publish` · ranged fetch, disk staging and the object-store adapter (S3 in CI; GCS per configured URL) · the stem node `mycelium-stem` and the stem-examples suite, two co-op demos run **both ways** · sixteen example declaration directories gated both ways · fuel by publisher (D19 — a trap poisons a wasmtime instance, now replaced) · proposed → shadow → accept (D20, manifest v2 byte-identical for v1 lines) · the composed effect enforced at the destination from both doors. Wire **v12** unchanged. **Upgrade notes:** `WasmHostError` gained `FuelExhausted` (a `match` needs an arm); `verify_library` / `verify_store` gained a `reviewers` parameter; `PublishOutcome`, `wire_check::Edge`, `HostsDecl` and `GossipConfig`-shaped literals gained fields (exhaustive literals break); `mesh`-side wire unchanged. **Not claimed:** the GCS path is proved only against a real bucket (none run yet); the declaration as a consumer record waits for the private companion's pin; the stem recuts `provisioning` and `catalog` phases 1–4 and names the rest. The tag exists in part so that the
+private companion, which pins by tag, can consume the checker (W6's private half).
+
 ## Design-time tooling delivered, and the composition's bounded half — 2026-09-27 → 30 (PRs #433–#454, unreleased)
 
 `docs/plans/design-time-tooling.md` (rev 0.9), built in its own order: the unit file and `mycelium

@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.17.0] — 2026-09-30
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.16.0 holds. The design-time tooling MINOR — the plan `docs/plans/design-time-tooling.md` (rev 0.9) and the composition's bounded half. **Upgrade notes:** `WasmHostError` gained `FuelExhausted` (a `match` needs an arm); `verify_library` / `verify_store` gained a `reviewers` parameter; `PublishOutcome`, `wire_check::Edge`, `HostsDecl` and `GossipConfig`-shaped literals gained fields (exhaustive literals break); `mesh`-side wire unchanged. **Not claimed:** the GCS path is proved only against a real bucket (none run yet); the declaration as a consumer record waits for the private companion's pin; the stem recuts `provisioning` and `catalog` phases 1–4 and names the rest.
+
 ### Added
 - **The stem-examples suite (plan X2, first slice).** One image (`docker/Dockerfile.stem`) carries
   `mycelium-stem`, `mycelium-artifact` and the co-op `stem_driver`; `docker/docker-compose.stem-examples.yml`
