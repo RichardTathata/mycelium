@@ -1,0 +1,11 @@
+# the perish specialist: drains its lane and completes a partial.
+principal = "specialist-perish"
+
+[[lane]]
+name = "spec.perish"
+role = "consumes"
+
+[[lane]]
+name = "partials"
+role = "produces"
+

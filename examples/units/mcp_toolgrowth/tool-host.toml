@@ -1,0 +1,15 @@
+# the tool host: installs the unit-converter component when the agent needs it.
+principal = "tool-host"
+
+# Pulls bytes from whichever node advertises the librarian (MeshArtifactSource resolves it).
+[[requirement]]
+ns   = "artifact"
+name = "librarian"
+
+[hosts]
+kinds                = ["wasm-component"]
+install_budget_bytes = 1073741824
+headroom             = 0.8
+trusted_publishers   = ["ed25519:coop-ci"]
+placement_root       = "/var/lib/mycelium/artifacts"
+

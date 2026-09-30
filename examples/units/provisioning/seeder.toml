@@ -1,0 +1,7 @@
+# the seeder: fills the optimize lane (a client, no capability of its own).
+principal = "seeder"
+
+[[lane]]
+name = "optimize"
+role = "produces"
+

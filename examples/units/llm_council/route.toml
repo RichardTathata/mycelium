@@ -1,0 +1,11 @@
+# the route specialist: drains its lane and completes a partial.
+principal = "specialist-route"
+
+[[lane]]
+name = "spec.route"
+role = "consumes"
+
+[[lane]]
+name = "partials"
+role = "produces"
+

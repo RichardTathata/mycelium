@@ -1,0 +1,7 @@
+# the agent: declares it needs a tool nobody has yet — the code arrives.
+principal = "llm-agent"
+
+[[requirement]]
+ns   = "tool"
+name = "unit-convert"
+

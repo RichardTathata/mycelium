@@ -1,0 +1,8 @@
+# verifier: one role in the demo mesh, advertised as role/verifier.
+principal = "verifier"
+
+[[capability]]
+ns       = "role"
+name     = "verifier"
+ttl_secs = 30
+

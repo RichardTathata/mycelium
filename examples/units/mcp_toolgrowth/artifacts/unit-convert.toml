@@ -1,0 +1,12 @@
+# The kg→tonnes unit converter: what it would provide once installed, its kind, and the footprint a host must have room for.
+kind             = "wasm-component"
+bytes            = "../../../../mycelium-wasm-host/tests/fixtures/unit_convert_component.wasm"
+est_install_secs = 1
+
+[provides]
+ns   = "tool"
+name = "unit-convert"
+
+[requires]
+disk_bytes = 0
+mem_bytes  = 67108864

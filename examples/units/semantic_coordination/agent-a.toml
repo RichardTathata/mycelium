@@ -1,0 +1,20 @@
+# agent-a: the ML GPU (schema acme-ml/v2) and the chat skill.
+principal = "agent-a"
+
+[[capability]]
+ns       = "compute"
+name     = "gpu"
+ttl_secs = 30
+schema_id = "acme-ml/v2"
+  [capability.attrs]
+  vram_gb = 40
+
+[[capability]]
+ns       = "llm"
+name     = "chat"
+ttl_secs = 30
+schema_id = "llm-chat/v1"
+  [capability.attrs]
+  model = "llama3-8b"
+  context = 128000
+

@@ -1,0 +1,3 @@
+# intake: receives the routed donation in its mailbox.
+principal = "depot-intake"
+

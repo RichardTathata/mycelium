@@ -1,0 +1,12 @@
+# The route optimizer: what it would provide once installed, its kind, and the footprint a host must have room for.
+kind             = "wasm-component"
+bytes            = "../../../../mycelium-wasm-host/tests/fixtures/echo_component.wasm"
+est_install_secs = 1
+
+[provides]
+ns   = "route"
+name = "optimize"
+
+[requires]
+disk_bytes = 0
+mem_bytes  = 67108864

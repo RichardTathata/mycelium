@@ -1,0 +1,7 @@
+# the archive: consumes approved plans.
+principal = "archive"
+
+[[lane]]
+name = "approved"
+role = "consumes"
+

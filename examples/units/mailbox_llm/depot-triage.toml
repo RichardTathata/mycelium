@@ -1,0 +1,7 @@
+# triage: asks the router where a donation should go.
+principal = "depot-triage"
+
+[[requirement]]
+ns   = "routing"
+name = "suggest"
+

@@ -1,0 +1,8 @@
+# tool-book: one role in the demo mesh, advertised as role/tool-book.
+principal = "tool-book"
+
+[[capability]]
+ns       = "role"
+name     = "tool-book"
+ttl_secs = 30
+

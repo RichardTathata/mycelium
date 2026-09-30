@@ -1,0 +1,15 @@
+# the seeder: one donation into each specialist lane.
+principal = "seeder"
+
+[[lane]]
+name = "spec.perish"
+role = "produces"
+
+[[lane]]
+name = "spec.route"
+role = "produces"
+
+[[lane]]
+name = "spec.allergen"
+role = "produces"
+

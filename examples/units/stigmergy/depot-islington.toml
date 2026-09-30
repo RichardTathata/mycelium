@@ -1,0 +1,10 @@
+# depot-islington: offers intake.
+principal = "depot-islington"
+
+[[capability]]
+ns       = "depot"
+name     = "intake"
+ttl_secs = 30
+  [capability.attrs]
+  borough = "islington"
+

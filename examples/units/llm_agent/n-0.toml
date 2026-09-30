@@ -1,0 +1,11 @@
+# n-0: the weather + ping tool node (the runtime file is examples/node_n0.toml).
+principal = "n-0"
+
+[[capability]]
+ns       = "data"
+name     = "realtime"
+ttl_secs = 60
+  [capability.attrs]
+  provider = "n-0"
+  tools = "weather,ping"
+

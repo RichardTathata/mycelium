@@ -149,3 +149,13 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
 - Integration suite: **13 Docker scenarios** (`make test`, 4-node cluster) + the consistency
   overlay (`make test-overlay`, 3-node consensus); scale suites in
   [testing/scale-tests](testing/scale-tests.md).
+
+## The declaration directories (X1, 2026-09-30)
+
+Every example that advertises a capability, declares a requirement, defines a group or names a lane
+has `examples/units/<example>/` — its units in the `capability_config` format, checked by
+`mycelium wire-check` in CI (`scripts/wire-check-examples.sh`) and by the two-way gate
+`tests/wire_check_examples.rs`: clean, and red the moment the last provider of any advertised capability is deleted, which
+forces each example's caller to be written down as a requirer. The matrix's *Declared* column links
+each row to its directory; `examples/units/README.md` names the examples that have none and why.
+

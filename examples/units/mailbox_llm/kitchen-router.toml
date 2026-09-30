@@ -1,0 +1,8 @@
+# the router: a prompt skill, advertised as routing/suggest.
+principal = "kitchen-router"
+
+[[capability]]
+ns       = "routing"
+name     = "suggest"
+ttl_secs = 30
+

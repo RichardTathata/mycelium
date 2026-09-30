@@ -1,0 +1,11 @@
+# picks up a revise and drafts again.
+principal = "reviser"
+
+[[lane]]
+name = "revise"
+role = "consumes"
+
+[[lane]]
+name = "draft"
+role = "produces"
+

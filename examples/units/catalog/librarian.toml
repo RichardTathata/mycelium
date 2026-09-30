@@ -1,0 +1,8 @@
+# the librarian: serves the catalogue and the bytes.
+principal = "librarian"
+
+[[capability]]
+ns       = "artifact"
+name     = "librarian"
+ttl_secs = 30
+

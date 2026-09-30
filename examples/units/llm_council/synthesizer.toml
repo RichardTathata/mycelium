@@ -1,0 +1,11 @@
+# merges partials into a draft.
+principal = "synthesizer"
+
+[[lane]]
+name = "partials"
+role = "consumes"
+
+[[lane]]
+name = "draft"
+role = "produces"
+

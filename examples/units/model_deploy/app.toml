@@ -1,0 +1,7 @@
+# the app: needs a storyteller.
+principal = "app"
+
+[[requirement]]
+ns   = "llm"
+name = "storyteller"
+

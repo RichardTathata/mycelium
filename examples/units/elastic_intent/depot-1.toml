@@ -1,0 +1,10 @@
+# depot-1: a rush-worker candidate.
+principal = "depot-1"
+
+[[capability]]
+ns       = "rush"
+name     = "worker"
+ttl_secs = 30
+  [capability.attrs]
+  shift = "morning"
+

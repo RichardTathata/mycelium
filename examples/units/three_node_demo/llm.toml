@@ -1,0 +1,8 @@
+# llm: one role in the demo mesh, advertised as role/llm.
+principal = "llm"
+
+[[capability]]
+ns       = "role"
+name     = "llm"
+ttl_secs = 30
+
