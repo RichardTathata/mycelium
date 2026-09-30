@@ -100,6 +100,8 @@ jobs:
       # argument value, denied by remit, and twice INDETERMINATE — which refuses. The fourth act
       # is the gate: an unmapped tool must never fall through to permit.
       - run: cargo run --example mcp_tool_authority --features tls,compliance
+      # composed-effect.md §9's demonstration: permitted at the gateway, refused at the resource.
+      - run: cargo run --example composed_commit --features tls,compliance
       # The OTHER door, and the unguarded one: `/a2a` requires no bearer, so the evaluator is the
       # whole gate there. Seven acts, including the streaming path — a refusal must arrive as a
       # `failed` task event and CLOSE the stream, not leave a subscriber waiting on silence.

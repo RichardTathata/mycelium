@@ -161,6 +161,9 @@ mycelium-core = { path = "mycelium-core", features = ["test-support"] }
 # scenario 13). Dev-dependency cycles are legal in Cargo: the companion's
 # normal dependency on `mycelium` is unaffected.
 mycelium-tuple-space = { path = "mycelium-tuple-space", features = ["gateway"] }
+# Companion crate, consumed by examples/composed_commit (composed-effect.md §9's demonstration):
+# a tool handler that commits at a destination with the composition built from its caller.
+mycelium-effects = { path = "mycelium-effects", features = ["envelope"] }
 tokio        = { version = "1.35", features = ["full", "test-util"] }
 criterion    = { version = "0.5", features = ["async_tokio"] }
 libc         = "0.2"
@@ -223,6 +226,13 @@ name              = "authority_drain"
 path              = "examples/authority_drain.rs"
 # Closure plan C12: T_admit and T_drain measured on a live node. `compliance` for the member-key
 # view a node's own grant is verified through (and it brings `gateway` and `tls`).
+required-features = ["compliance"]
+
+[[example]]
+name              = "composed_commit"
+path              = "examples/composed_commit.rs"
+# composed-effect.md §9's demonstration: a presented mandate verified at the provider, the effect
+# refused where it commits. `compliance` for the execution authority and the evidence journal.
 required-features = ["compliance"]
 
 [[example]]

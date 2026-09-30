@@ -270,7 +270,9 @@ bundle. A provider behind the gateway builds the composition from what the gatew
 `Composition::from_envelope(&envelope, &presented_mandate, origin_domain)` (feature `envelope`), or,
 in a tool handler, `Composition::from_caller(&caller, "tools/call", &format!("tool:{name}@{node}"), None)`
 from the `RequestPrincipal::Client` it receives (`from_carried` takes the same pieces apart) — and records a refusal with `AeEvidence::for_destination_refusal`, so the journal shows which point
-said no. Design: [`composed-effect.md`](../design/composed-effect.md) §9.
+said no. `cargo run --example composed_commit --features tls,compliance` is the whole thing end to end:
+permitted at the gateway, refused at the resource once it installs a newer epoch, both decisions in the
+journal. Design: [`composed-effect.md`](../design/composed-effect.md) §9.
 
 `EffectDestination` is the one trait to implement for your own destination (`apply(&Effect) ->
 Result<DestinationCommit, EffectRefusal>`). With the `tuple-space` feature, `TupleConsumer::new(space,

@@ -30,5 +30,12 @@ and observed to fail: with the composed path delegating without checks, every pl
   at enforcement point `destination`, `Deny`, `Execution::None`, the leg in `checked`; no new record
   kind, so the private exporter's mapping is untouched.
 
+- **The demonstration** `examples/composed_commit.rs` (CI): the gateway's gate and the resource's
+  `ResourceAuthority` are two values on purpose — moving the resource's epoch while the gateway's stays
+  is what shows *permitted at the gateway, refused at the resource*. A tool handler on the gateway
+  path receives `RequestPrincipal::Client` with the carried mandate, so `from_caller` applies; a direct
+  member call resolves to `RequestPrincipal::Node` and the handler has no mandate — the composition
+  for that path would need the request, which the handler API does not expose (open).
+
 **Pages touched:** guide 18 (the composed path, the `_` arm); `what-is-proven.md` (a proven-in-CI row);
 `CLAUDE.md`'s composed sentence; the buyer deck's evidence slide callout; `CHANGELOG.md`.

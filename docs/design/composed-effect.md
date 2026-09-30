@@ -169,6 +169,11 @@ replays; each leg planted missing — someone else's mandate, an operation not e
 superseded epoch, the wrong scope, an expired window — is refused by name and leaves no row; an
 epoch installed later at the resource supersedes an effect the earlier one authorised. Written
 before the check existed and observed to fail (every planted leg committed), per §8's own rule.
+**The demonstration** (`examples/composed_commit.rs`, in CI): a real `POST /mcp` through a real
+gateway with a real evaluator and a presented mandate verified at the provider; the tool handler
+builds the composition from its caller and commits at a ledger — `Fresh`, then `Replayed` — and when
+the ledger installs epoch 2 while the gateway's gate still holds epoch 1, the gateway **permits** and
+the ledger **refuses** as superseded, nothing applied, the refusal in the journal beside the permit.
 
 **Both halves of the join, the same day.** `Composition::from_envelope` (feature `envelope`)
 builds the composition from the `ActionEnvelope` the gateway assembled and the `PresentedMandate`

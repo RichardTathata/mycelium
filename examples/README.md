@@ -34,12 +34,12 @@ Every step is a run doc that follows the **tutorial contract** at the end of thi
 | **Understand the substrate** | [`hello_mesh`](../docs/guide/01-gossip-kv.md) → [`hello_capability`](../docs/guide/02-capabilities.md) → [`stigmergy`](coop/README.md) | change a capability's advertisement and watch discovery converge |
 | **Integrate an existing application** | a [Python](a2a_langchain/README.md) or [TypeScript](../mycelium-ts/README.md) client, or [`hello_mesh`](../docs/guide/01-gossip-kv.md) in Rust → your tool through MCP ([`mcp_tool_authority`](../docs/guide/20-authorising-actions.md)) or A2A ([`a2a_skill_authority`](../docs/guide/20-authorising-actions.md)) → the authority check refusing a call | one customer function runs through a named, observable boundary, and one refused call proves the boundary is there |
 | **Demonstrate adaptive operations** | [`provisioning_viz`](coop/README.md) → kill the active node → recovery → [`diagnostics`](coop/README.md) | recovery *and* the evidence of its limits, on one screen |
-| **Demonstrate governed autonomy** | [`procurement_authority`](coop/README.md) → a real gateway with an evaluator ([`mcp_tool_authority`](../docs/guide/20-authorising-actions.md)) → resource-side enforcement ([`authority_drain`](../docs/design/authority-at-execution.md)) → the consumer's evidence | permission, execution and outcome visibly distinguished; a bypass evidenced |
+| **Demonstrate governed autonomy** | [`procurement_authority`](coop/README.md) → a real gateway with an evaluator ([`mcp_tool_authority`](../docs/guide/20-authorising-actions.md)) → resource-side enforcement ([`authority_drain`](../docs/design/authority-at-execution.md)) → the effect refused where it commits ([`composed_commit`](../docs/design/composed-effect.md)) → the consumer's evidence | permission, execution and outcome visibly distinguished; a bypass evidenced |
 | **Operate across organisations** | [`federated_domains`](../docs/guide/17-federation.md) → disconnect → reconnect → revoke → [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md) | independent domains stay independent, and a revoked partner stays revoked |
 
 **By outcome** (the matrix's layer dots say *what a demo exercises*; these say *what it shows*):
 **recovery** — `provisioning`, `reheal_deploy`, `rotation`, `diagnostics`, `curator_handover` ·
-**authority** — `procurement_authority`, `mcp_tool_authority`, `a2a_skill_authority`, `authority_drain`,
+**authority** — `procurement_authority`, `mcp_tool_authority`, `a2a_skill_authority`, `authority_drain`, `composed_commit`,
 `coordinator_by_accretion` · **evidence** — `procurement_authority` (acts 5–6), `auditor_questions`,
 `receipt_ladder`, `replay_a_bundle` · **domain isolation** — `federated_domains`,
 `federation_trust_is_not_transitive`, `federation_facts`. A demo that is all-· in the matrix
@@ -105,6 +105,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`destination_commit`](../docs/operations/companions.md#mycelium-effects--the-transactional-destination) · [src](../mycelium-effects/examples/destination_commit.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ |
 | [`redistribution_cn`](../docs/guide/24-commitments.md#run-it) · [src](../mycelium-commitment/examples/redistribution_cn.rs) | · | ● | · | ● | Adv | CLI | · | · | · | ✓ |
 | [`authority_drain`](../docs/design/authority-at-execution.md#4-what-this-does-not-claim) · [src](authority_drain.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
+| [`composed_commit`](../docs/design/composed-effect.md#9-enforced-at-the-destination-2026-09-29) · [src](composed_commit.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
 | [`confined_fleet_node`](../docs/operations/confined-fleet.md#1-before-you-start-does-your-cni-enforce-networkpolicy) · [src](confined_fleet_node.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ |
 | **Coordination & identity integrity** | | | | | | | | | | |
 | [`coordination_integrity`](../docs/guide/04-consensus.md#what-a-successful-election-means) · [src](coordination_integrity.rs) | · | · | ● | ○ | Adv | CLI | · | · | · | ✓ |
