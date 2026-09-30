@@ -1,12 +1,17 @@
-//! `mycelium-artifact publish | list | verify` — the artifact tool
+//! `mycelium-artifact publish | list | verify | accept` — the artifact tool
 //! (`docs/plans/design-time-tooling.md` §10, D10 / A1; §11 S2 for a store URL; the functions
 //! are in `mycelium_wasm_host`).
 //!
 //! ```text
 //! mycelium-artifact publish <description.toml> --library <dir|url> (--key <seed-file> | --key-env <VAR>)
 //! mycelium-artifact list    <library-dir|url>
-//! mycelium-artifact verify  <library-dir|url> [--trusted ed25519:<hex>]... [--descriptions <dir>]
+//! mycelium-artifact verify  <library-dir|url> [--trusted ed25519:<hex>]... [--reviewer ed25519:<hex>]... [--descriptions <dir>]
+//! mycelium-artifact accept  <library-dir|url> <ns/name | artifact-hex> (--key <seed-file> | --key-env <VAR>)
 //! ```
+//!
+//! `accept` is D20's review step: a description with `proposed = true` publishes an entry that a
+//! provisioner loads only into a shadow lane; a reviewer's `accept` co-signs it, and it then loads
+//! for real on hosts that list the reviewer. A forged acceptance fails `verify` by name.
 //!
 //! A library is a directory, or — built with the `object_store` feature — a store URL:
 //! `s3://bucket/prefix`, `gs://bucket/prefix`, `az://…`, `https://host/prefix`, `file:///dir`,
@@ -16,14 +21,17 @@
 
 use std::path::PathBuf;
 
-use mycelium_wasm_host::{list_manifest, publish_artifact, publisher_from_str, signing_key_from_hex, verify_library, VerifyReport};
+use mycelium_wasm_host::{
+    accept_entry, list_manifest, publish_artifact, publisher_from_str, signing_key_from_hex, verify_library, VerifyReport,
+};
 
 fn usage() -> ! {
     eprintln!(
         "Usage:\n\
          \x20 mycelium-artifact publish <description.toml> --library <dir|url> (--key <seed-file> | --key-env <VAR>)\n\
          \x20 mycelium-artifact list    <library-dir|url>\n\
-         \x20 mycelium-artifact verify  <library-dir|url> [--trusted ed25519:<hex>]... [--descriptions <dir>]\n\
+         \x20 mycelium-artifact verify  <library-dir|url> [--trusted ed25519:<hex>]... [--reviewer ed25519:<hex>]... [--descriptions <dir>]\n\
+         \x20 mycelium-artifact accept  <library-dir|url> <ns/name | artifact-hex> (--key <seed-file> | --key-env <VAR>)\n\
          \n\
          A library is a directory or, with the object_store feature, a store URL (s3://, gs://, az://, https://, file://)\n\
          whose credentials come from the environment. A signing key is a 32-byte Ed25519 seed as 64 hex characters.\n\
@@ -68,6 +76,7 @@ fn main() {
         "publish" => publish(&args[1..]),
         "list" => list(&args[1..]),
         "verify" => verify(&args[1..]),
+        "accept" => accept(&args[1..]),
         _ => usage(),
     };
     std::process::exit(code);
@@ -75,15 +84,77 @@ fn main() {
 
 fn report_publish(out: mycelium_wasm_host::PublishOutcome) -> i32 {
     println!(
-        "published {}/{} as {} ({} B, {}) signed by {}",
+        "published {}/{} as {} ({} B, {}) signed by {}{}",
         out.provides.namespace,
         out.provides.name,
         out.artifact.to_hex(),
         out.size_bytes,
         mycelium_wasm_host::kind_name(out.kind),
-        out.signer
+        out.signer,
+        if out.proposed { " — proposed: loads only into a shadow lane until a reviewer accepts it" } else { "" }
     );
     0
+}
+
+/// `--key <seed-file>` / `--key-env <VAR>` → the seed text, shared by publish and accept.
+fn key_arg(flag: &str, it: &mut std::slice::Iter<'_, String>) -> Option<String> {
+    match flag {
+        "--key" => {
+            let path = it.next().unwrap_or_else(|| usage());
+            Some(std::fs::read_to_string(path).unwrap_or_else(|e| {
+                eprintln!("mycelium-artifact: {path}: {e}");
+                std::process::exit(2)
+            }))
+        }
+        "--key-env" => {
+            let var = it.next().unwrap_or_else(|| usage());
+            Some(std::env::var(var).unwrap_or_else(|_| {
+                eprintln!("mycelium-artifact: ${var} is not set");
+                std::process::exit(2)
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn accept(args: &[String]) -> i32 {
+    let mut positional: Vec<String> = Vec::new();
+    let mut key_text: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--key" | "--key-env" => key_text = key_arg(a, &mut it),
+            other if other.starts_with('-') => usage(),
+            other => positional.push(other.to_string()),
+        }
+    }
+    let ([library, selector], Some(key_text)) = (positional.as_slice(), key_text) else { usage() };
+    let key = match signing_key_from_hex(&key_text) {
+        Ok(k) => k,
+        Err(e) => return fail(format!("key: {e}")),
+    };
+    let report = |out: mycelium_wasm_host::AcceptOutcome| {
+        println!(
+            "accepted {}/{} ({}) published by {} — reviewer {}",
+            out.provides.namespace, out.provides.name, out.artifact.to_hex(), out.signer, out.reviewer
+        );
+        0
+    };
+    if is_url(library) {
+        #[cfg(feature = "object_store")]
+        {
+            return match open_store(library).and_then(|store| block_on(mycelium_wasm_host::accept_in_store(&store, selector, &key))) {
+                Ok(out) => report(out),
+                Err(e) => fail(e),
+            };
+        }
+        #[cfg(not(feature = "object_store"))]
+        return not_built(library);
+    }
+    match accept_entry(std::path::Path::new(library), selector, &key) {
+        Ok(out) => report(out),
+        Err(e) => fail(e),
+    }
 }
 
 fn publish(args: &[String]) -> i32 {
@@ -174,12 +245,17 @@ fn report_verify(r: VerifyReport) -> i32 {
 fn verify(args: &[String]) -> i32 {
     let mut library: Option<String> = None;
     let mut trusted = Vec::new();
+    let mut reviewers = Vec::new();
     let mut descriptions: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--trusted" => match publisher_from_str(it.next().unwrap_or_else(|| usage())) {
                 Ok(k) => trusted.push(k),
+                Err(e) => return fail(e),
+            },
+            "--reviewer" => match publisher_from_str(it.next().unwrap_or_else(|| usage())) {
+                Ok(k) => reviewers.push(k),
                 Err(e) => return fail(e),
             },
             "--descriptions" => descriptions = it.next().map(PathBuf::from),
@@ -194,7 +270,7 @@ fn verify(args: &[String]) -> i32 {
             if descriptions.is_some() {
                 eprintln!("mycelium-artifact: --descriptions is checked against a library directory; against a store, verify checks provenance and the streamed hash");
             }
-            return match open_store(&library).and_then(|store| block_on(mycelium_wasm_host::verify_store(&store, &trusted))) {
+            return match open_store(&library).and_then(|store| block_on(mycelium_wasm_host::verify_store(&store, &trusted, &reviewers))) {
                 Ok(r) => report_verify(r),
                 Err(e) => fail(e),
             };
@@ -202,7 +278,7 @@ fn verify(args: &[String]) -> i32 {
         #[cfg(not(feature = "object_store"))]
         return not_built(&library);
     }
-    match verify_library(std::path::Path::new(&library), &trusted, descriptions.as_deref()) {
+    match verify_library(std::path::Path::new(&library), &trusted, &reviewers, descriptions.as_deref()) {
         Ok(r) => report_verify(r),
         Err(e) => fail(e),
     }

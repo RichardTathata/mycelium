@@ -215,6 +215,10 @@ impl Stem {
                         operator_budget: h.operator_fuel_per_call,
                     });
                 }
+                if !h.trusted_reviewers.is_empty() {
+                    let keys = h.trusted_reviewers.iter().map(|s| parse_publisher("trusted_reviewers", s)).collect::<Result<Vec<_>, _>>()?;
+                    prov.require_reviewers(keys);
+                }
                 for p in &units.presence {
                     let filter = p.filter.to_filter().map_err(StemError)?;
                     match p.max_providers {

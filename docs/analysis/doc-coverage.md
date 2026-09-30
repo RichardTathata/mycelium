@@ -19,6 +19,8 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-09-30 — plan F3 (design-time-tooling.md §17):** one new row, *Agent-authored functions*, all five cells Clear by opening the pages written for it (guide 16 § Agent-authored functions; `operations/artifacts.md` § Trust & provenance). Not a full re-audit; every other row carried.
+
 - **2026-09-28 (design-time tooling, not a run)** — one new row, *capability lifecycle*: HOW·Ops is
   `capability-lifecycle.md` (declare · check · deploy · publish · watch · read, each step opened and
   its command run); HOW·Dev is the unit file's module doc and guide 02's two-column table; WHY is the
@@ -367,6 +369,7 @@ closed it.
 | Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ ᴿ¹⁷ | ✓ | ✓ ᴿ¹⁷ |
 | Data erasure (crypto-shred) | ✓ | ✓ ᴿ¹³ | ✓ ᴿ¹³ | ✓ | ✓ |
 | Artifacts / library | ✓ | ✓ | ✓ ᵀ² ᴿ⁹ | ✓ | ✓ |
+| Agent-authored functions (D19 fuel by publisher · D20 proposed → shadow → accept) — added 2026-09-30 (plan F3) | ✓ `design-time-tooling.md` §17 | ✓ guide 16 § Agent-authored functions (U1–U4, the five gates) | ✓ guide 16 § the five gates + the co-op `provisioning` demo's wave 3 (opened: the description's `proposed = true`, `mycelium-artifact accept`, `Provisioner::invocations()` are the shipped names) | ✓ `operations/artifacts.md` § Trust & provenance (the `[hosts]` keys by name) | ✓ same section: `accept`, `verify --reviewer`, the counter (opened; each command exists in the `mycelium-artifact` bin) |
 | Federation / AgentFacts (public discovery) | ✓ | ✓ | ✓ ᵀ¹ | ✓ | ✓ ᴿ¹⁷ |
 | Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ ᴿ¹⁶ |
 | Companions | ✓ | ✓ | ~ ᴿ¹⁷ (the wiki authority seam has no Dev walkthrough) | ✓ | ✓ ᵀ² |

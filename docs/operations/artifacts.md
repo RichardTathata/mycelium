@@ -62,6 +62,18 @@ example runs the whole durable flow, including the origin dying.
 
 ### Trust & provenance
 
+**Agent-authored entries (D19/D20).** A `[hosts]` table decides, per entry and from its *verified
+signer*, who pays for fuel and who may load for real: keys in `operator_publishers` (a subset of
+`trusted_publishers`) run unbounded or under `operator_fuel_per_call`; every other trusted key is an
+agent principal and runs under `fuel_per_call` — a call that runs past it is stopped and recorded as
+*fuel exhausted* with the budget named (`Provisioner::invocations()`; counter
+`mycelium_artifact_invocations_total{outcome}`). A description with `proposed = true` publishes an
+entry the host loads only into the shadow lane (`{ns}/{name}.shadow`, callable by name, never
+resolved by a requirer's filter) until a key in `trusted_reviewers` co-signs it with
+`mycelium-artifact accept <library> <ns/name> --key <reviewer-seed>`; `verify --reviewer` names a
+forged or unlisted acceptance. The four uses this envelope exists for, the five gates and the honest
+limit are in [guide 16 § Agent-authored functions](../guide/16-guardrails.md#agent-authored-functions-the-legitimate-uses-of-dynamic-load).
+
 The byte source is **untrusted**: `pull_artifact` / `MeshArtifactSource` verify
 the returned bytes against the requested **content address** (`ArtifactId`, a
 hash) on arrival — a peer cannot substitute different bytes. That covers
