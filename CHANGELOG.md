@@ -85,6 +85,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_stem_fleet_fills_a_presence_floor_and_reheals` (three stems, one librarian, a floor of two,
   a kill, a re-heal, and the checker's declaration compared with what bound).
   `Provisioner::refresh_catalog` / `catalog()` are new for it.
+- **The authority overlay** (W4, on by default; `--no-authority` off): for every wired edge whose
+  requirer declares any authority vocabulary (a `[[mandate]]` or a `[[rule]]`), the checker asks
+  whether some declared rule could ever admit the call — as a skill (`skill.invoke` on
+  `skill:{ns}/{name}`) or a tool (`tools/call` on `tool:{name}`), actor and operation and resource
+  matching — and, where that rule requires a mandate scope, whether a declared mandate held by the
+  requirer's principal enumerates the operation in the gateway's own `{operation}:{resource}` form.
+  `unauthorisable edge` (error) names the nearest reason; `ungoverned edge` (warning) marks a unit
+  that declares neither beside units that do. It does not evaluate policy; it finds edges no
+  declaration could ever authorise. Fixture `tests/fixtures/units/unauthorised`; the co-op fixture's
+  mandate and rules now use the canonical operation form.
 - **`mycelium wire-check --schemas <dir>`** (W3): the checker reads guide 12's schema directory —
   each `.json` file's path without the extension is a schema id — and reports `unknown schema` for a
   `schema_id` any unit or artifact declares that the directory does not define, beside the

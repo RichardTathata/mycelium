@@ -156,10 +156,11 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
             "--library" => library = it.next(),
             "--format" => format = it.next().unwrap_or_default(),
             "--strict-deployed" => opts.strict_deployed = true,
+            "--no-authority" => opts.authority = false,
             "--revision" => opts.revision = it.next(),
             "--schemas" => schemas = it.next(),
             "-h" | "--help" => {
-                eprintln!("Usage: mycelium wire-check <units-dir> [--library <artifacts-dir>] [--schemas <schemas-dir>] [--format text|json|dot] [--strict-deployed] [--revision <rev>]\n\
+                eprintln!("Usage: mycelium wire-check <units-dir> [--library <artifacts-dir>] [--schemas <schemas-dir>] [--format text|json|dot] [--strict-deployed] [--no-authority] [--revision <rev>]\n\
                            \n\
                            Applies the mesh's own match rule (CapFilter::matches) to a directory of unit files and reports\n\
                            what could not bind. It says *would bind under these declarations*, never *is bound*: liveness,\n\
@@ -285,7 +286,7 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed]\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

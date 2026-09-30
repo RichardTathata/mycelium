@@ -1,0 +1,5 @@
+principal = "optimizer"
+
+[[capability]]
+ns   = "route"
+name = "optimize"

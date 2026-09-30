@@ -144,3 +144,18 @@ fn the_schema_window_fixture_names_the_window_and_the_unknown_schema() {
     assert!(text.contains("unknown schema (consumer): requirement plan/route names schema \"plan/route/v9\""), "{text}");
     assert!(text.contains("schema-only mismatch (consumer): requirement llm/inference wants schema \"llm/inference/v2\"; offers match except for schema (llm/inference/v1)"), "{text}");
 }
+
+/// W4: a governed requirer whose only admitting rule requires a mandate scope nobody declares is
+/// `unauthorisable edge`; the co-op deployment, whose mandate and rules use the gateway's own
+/// operation form, stays green.
+#[test]
+fn the_unauthorised_fixture_names_the_edge_no_declaration_could_authorise() {
+    let r = check(&load_units("tests/fixtures/units/unauthorised"), &[], &CheckOptions::default());
+    assert_eq!(r.exit_code(), 1);
+    let text = r.render_text();
+    assert!(text.contains("unauthorisable edge (worker): requirement route/optimize"), "{text}");
+    assert!(text.contains("requires mandate scope \"depot\""), "{text}");
+    // Off, the same directory is green: the overlay is what found it.
+    let r = check(&load_units("tests/fixtures/units/unauthorised"), &[], &CheckOptions { authority: false, ..Default::default() });
+    assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+}
