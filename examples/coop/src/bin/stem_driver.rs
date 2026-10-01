@@ -77,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "mcp_toolgrowth" => mcp_toolgrowth(agent).await,
         "model_deploy" => model_deploy(agent).await,
         "reheal_deploy" => reheal_deploy(agent).await,
+        "llm_agent" => llm_agent(agent).await,
         other => Err(format!("unknown demo {other:?} (provisioning | catalog | mcp_toolgrowth)").into()),
     }
 }
@@ -297,6 +298,50 @@ async fn catalog(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Erro
     assert_eq!(out.as_ref(), b"late route");
     println!("[late] joined after the origin died — installed from a peer cache and ran it");
     println!("\nAll assertions passed — runtime-read bytes → signed library → librarian stem → discovered pull → provisioned on an installer stem → served → origin killed → late stem installed from a peer cache.");
+    agent.shutdown().await;
+    Ok(())
+}
+
+/// The llm_agent demo's subject with real artifacts: the driver is the agent. It finds the declared
+/// units, declares its need for the vector-search dataset and watches n-1 install it through the
+/// real loading tier, waits for n-2's served `llm/inference`, and routes a prompt.
+async fn llm_agent(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Error>> {
+    use mycelium_reason::{InferenceRouter, ModelQuery, RouterConfig};
+    assert!(wait_until(60, || agent.peers().len() >= 4).await, "n-0, n-1, n-2 and the librarian peer with the agent");
+    for (ns, name) in [("data", "realtime"), ("compute", "cpu")] {
+        assert!(wait_until(60, || !agent.capabilities().resolve(&CapFilter::new(ns, name)).is_empty()).await,
+            "{ns}/{name} is advertised from its unit file");
+    }
+    println!("[agent] config-driven capabilities are up: data/realtime (n-0), compute/cpu (n-1)");
+
+    // The dataset is wanted, not deployed: the demand pulls it in, and the loading tier says how far.
+    let _need = agent.capabilities().declare_requirement(CapFilter::new("data", "vector-search"), Duration::from_secs(900));
+    println!("[agent] declared a need for data/vector-search; watching the loading tier …");
+    let mut seen_pct: Vec<i64> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    while agent.capabilities().resolve(&CapFilter::new("data", "vector-search")).is_empty() {
+        for (_, cap) in agent.capabilities().resolve(&CapFilter::new("data", "loading")) {
+            if let Some(mycelium::CapValue::Integer(p)) = cap.attributes.get("pct")
+                && !seen_pct.contains(p)
+            {
+                seen_pct.push(*p);
+                println!("[agent]   data/loading pct={p}");
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "n-1 must install data/vector-search on demand");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    println!("[agent] data/vector-search is live — installed on demand from the library (loading steps seen: {seen_pct:?})");
+
+    assert!(wait_until(300, || !agent.capabilities().resolve(&CapFilter::new("llm", "inference")).is_empty()).await,
+        "n-2 must deploy the model into its Ollama and serve llm/inference");
+    let router = InferenceRouter::new(Arc::clone(&agent), RouterConfig::default());
+    let routed = router
+        .call(&ModelQuery::new("inference"), "Once upon a time, a co-op agent planned the day's rescue runs,", &HashMap::new(), None)
+        .await?;
+    assert!(!routed.output.trim().is_empty(), "the served model generated real tokens");
+    println!("[agent] llm/inference (n-2) answers: “{}”", routed.output.trim());
+    println!("\nAll assertions passed — config-driven capabilities, a dataset installed on demand through the real loading tier, and a model deployed and served by declaration, used by the agent.");
     agent.shutdown().await;
     Ok(())
 }

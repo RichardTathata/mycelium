@@ -1,0 +1,8 @@
+# the librarian: the catalogue and the model's bytes.
+principal = "librarian"
+
+[[capability]]
+ns       = "artifact"
+name     = "librarian"
+ttl_secs = 30
+

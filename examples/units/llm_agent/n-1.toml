@@ -1,4 +1,6 @@
-# n-1: the search + calculate node, and the installable vector-search data (examples/node_n1.toml).
+# n-1: the search + calculate node, and the host of the vector-search dataset. In the code demo
+# the dataset's install is simulated (fixed-interval ticks); as a stem it is a real blob, pulled from
+# the library on the agent's demand, with the real loading tier (`data/loading`, pct from bytes).
 principal = "n-1"
 
 [[capability]]
@@ -7,15 +9,17 @@ name     = "cpu"
 ttl_secs = 60
   [capability.attrs]
   provider = "n-1"
-  tools = "search,calculate"
+  tools    = "search,calculate"
 
-[[capability]]
-ns       = "data"
-name     = "installable"
-ttl_secs = 300
-  [capability.attrs]
-  name = "vector-search"
-  install_method = "pip"
-  est_secs = 15
-  size_mb = 45
+# Pulls bytes from the library the librarian serves.
+[[requirement]]
+ns   = "artifact"
+name = "librarian"
 
+[hosts]
+kinds                = ["blob"]
+install_budget_bytes = 8589934592
+headroom             = 0.8
+# The suite's test publisher: the public half of seed 42…42 (`make stem-keys`). A fixture, not a secret.
+trusted_publishers   = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"]
+placement_root       = "/var/lib/mycelium/artifacts"

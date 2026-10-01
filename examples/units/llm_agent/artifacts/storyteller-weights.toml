@@ -1,0 +1,14 @@
+# The storyteller's weights: a real GGUF (TinyStories 15M, q4_0, ~19 MB), placed for the local
+# runtime. The bytes are not in the repository — the stem-examples suite downloads them at run time
+# (`examples/units/model_deploy/prepare.sh`) beside this description.
+kind             = "blob"
+bytes            = "storyteller-weights.gguf"
+est_install_secs = 5
+
+[provides]
+ns   = "llm"
+name = "storyteller-weights"
+
+[requires]
+disk_bytes = 33554432
+mem_bytes  = 0

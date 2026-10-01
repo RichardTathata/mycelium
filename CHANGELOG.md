@@ -10,6 +10,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`llm_agent` as stems (plan X2, seventh slice — the row closes).** The stem-examples suite runs the
+  browser demo's subject with real artifacts: n-0 a declared unit; n-1 installs a real dataset blob
+  on the agent's demand, through the real `data/loading` tier; n-2 deploys a real model into its
+  Ollama and serves `llm/inference` by `[[serve]]`; the driver, as the agent, declares its need,
+  watches the loading tier and routes a prompt. The demo's MCP tools stay in-process code. The
+  `llm_agent` units now describe this recut (the browser demo still reads `examples/node_n*.toml`).
 - **SDK agents load their unit files (plan Q2).** `POST /gateway/units/declare` (scope `cap:write`)
   takes a unit file's text; the node parses and validates it with its own loader and declares its
   capabilities, requirements and groups under **one handle** that `DELETE /gateway/capability/{id}`

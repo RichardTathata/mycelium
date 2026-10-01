@@ -1,0 +1,13 @@
+# The vector-search dataset: a blob the agent's demand pulls in. The suite generates its bytes at run
+# time (`prepare.sh`) — a data pack standing in for an index; what is real is the install path.
+kind             = "blob"
+bytes            = "vector-search.pack"
+est_install_secs = 2
+
+[provides]
+ns   = "data"
+name = "vector-search"
+
+[requires]
+disk_bytes = 16777216
+mem_bytes  = 0
