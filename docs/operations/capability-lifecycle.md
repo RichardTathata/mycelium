@@ -95,6 +95,23 @@ Kill the host and a standby does the same. Watch it: `mycelium_artifact_*` in
 [metrics.md](metrics.md), `ineligible_skips` for a host that could not take an entry, and
 [dynamic-scaling.md](dynamic-scaling.md) for the governors above it.
 
+**Placed blobs that need a runtime.** A model or data pack is *placed* by a hosting unit, but a
+placed file serves nothing until the node-local runtime has it. A unit says how, per capability:
+
+```toml
+[[activation]]
+ns = "llm"; name = "storyteller"
+command = ["ollama", "create", "storyteller", "-f", "{rendered}"]
+probe   = ["ollama", "show", "storyteller"]
+resolve_artifact_refs = true      # the profile's `FROM artifact:<hex>` becomes the placed weights' path
+```
+
+The stem runs `command` after placement and before the capability is advertised, re-runs `probe`
+in the background, and withdraws the install when the probe fails — the next round reinstalls and
+re-activates. A profile that references weights not yet placed fails its activation and is retried,
+which is how the profile waits for its weights without a dependency resolver. The commands are the
+operator's, run with the stem's privileges, from a reviewed file: this is not a sandbox.
+
 ## 6 · Read — what actually bound
 
 The check's JSON is a **declaration**: what would bind. The fleet's own view — `resolve_wiring`,

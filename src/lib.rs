@@ -347,7 +347,7 @@ pub use capability::{
     WiredEmitOutcome, WiringProvider, WiringStatus,
 };
 pub use capability_config::{
-    CapDecl, CapabilityProbeEntry, FilterDecl, GroupDecl, HostsDecl, LaneDecl, LaneRole, MandateDecl,
+    CapDecl, CapabilityProbeEntry, FilterDecl, GroupDecl, HostsDecl, ActivationDecl, ACTIVATION_PLACEHOLDERS, LaneDecl, LaneRole, MandateDecl,
     NodeCapabilityConfig, PresenceDecl, ProbeEvent, ProbeState, RankingDecl, RuleDecl, SemverTriple,
     TomlCapValue, TomlConstraint, HOSTABLE_KINDS,
 };

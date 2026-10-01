@@ -448,7 +448,16 @@ pub struct BlobRuntime {
     chunk_bytes: u64,
     probe:       Arc<ProbeFn>,
     activate:    Option<Arc<ActivateFn>>,
+    entry_activate: Option<Arc<EntryActivateFn>>,
 }
+
+/// Post-placement activation that sees the whole entry (X2) — see
+/// [`BlobRuntime::with_entry_activation`]. It may return a health flag: the install's probe then
+/// also requires the flag, and whoever holds the other end (a stem's re-probe task) keeps it
+/// current. The probe only *reads* the flag, so nothing slow runs under the provisioner's lock.
+pub type EntryActivateFn = dyn Fn(&InstallableEntry, &std::path::Path) -> Result<Option<Arc<std::sync::atomic::AtomicBool>>, String>
+    + Send
+    + Sync;
 
 /// Health probe over the placed blob's path — see [`BlobRuntime::with_probe`].
 pub type ProbeFn = dyn Fn(&std::path::Path) -> bool + Send + Sync;
@@ -467,7 +476,22 @@ impl BlobRuntime {
             chunk_bytes: DEFAULT_BLOB_CHUNK_BYTES,
             probe:       Arc::new(|path| path.exists()),
             activate:    None,
+            entry_activate: None,
         }
+    }
+
+    /// Activation keyed on the entry (its capability, its content address), run on the blocking
+    /// pool after placement, before the capability goes live. An `Err` fails the install (the
+    /// placed file stays; the next round retries). An `Ok(Some(flag))` gates the probe on the flag.
+    pub fn with_entry_activation(
+        mut self,
+        activate: impl Fn(&InstallableEntry, &std::path::Path) -> Result<Option<Arc<std::sync::atomic::AtomicBool>>, String>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.entry_activate = Some(Arc::new(activate));
+        self
     }
 
     /// Override the ranged-pull chunk size (min 1; tests use tiny chunks to exercise streaming).
@@ -630,20 +654,31 @@ impl ArtifactRuntime for BlobRuntime {
         if let Some(activate) = &self.activate {
             activate(&dest).map_err(InstallError::Activation)?;
         }
+        let health = match &self.entry_activate {
+            Some(activate) => {
+                let (activate, entry, dest) = (Arc::clone(activate), entry.clone(), dest.clone());
+                tokio::task::spawn_blocking(move || activate(&entry, &dest))
+                    .await
+                    .map_err(|e| InstallError::Host(format!("activation task: {e}")))?
+                    .map_err(InstallError::Activation)?
+            }
+            None => None,
+        };
 
-        Ok(Box::new(BlobInstalled { path: dest, probe: Arc::clone(&self.probe) }))
+        Ok(Box::new(BlobInstalled { path: dest, probe: Arc::clone(&self.probe), health }))
     }
 }
 
 /// A placed (and activated) blob installation.
 struct BlobInstalled {
-    path:  std::path::PathBuf,
-    probe: Arc<ProbeFn>,
+    path:   std::path::PathBuf,
+    probe:  Arc<ProbeFn>,
+    health: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Installed for BlobInstalled {
     fn probe(&self) -> bool {
-        (self.probe)(&self.path)
+        (self.probe)(&self.path) && self.health.as_ref().is_none_or(|h| h.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     fn uninstall(self: Box<Self>) {
