@@ -1,11 +1,13 @@
-# provider-a: hosts what the fleet needs installed (a provisioner runs here; the other is the standby).
+# provider-a: hosts what the fleet needs installed (a provisioner runs here; the others are standbys).
 principal = "provider-a"
 
 [hosts]
 kinds                = ["wasm-component"]
 install_budget_bytes = 1073741824
 headroom             = 0.8
-# The suite's test publisher: the public half of seed 42…42 (`make stem-keys`). A fixture, not a secret.
-trusted_publishers   = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"]
+# The suite's test keys, public halves of fixed seeds (`make stem-keys`) — fixtures, not secrets:
+# the operator (42…42) publishes v1; an agent (43…43) proposes v2 (D20).
+trusted_publishers   = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "ed25519:22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6"]
+# The reviewer (44…44): only its acceptance promotes a proposal out of the shadow lane.
+trusted_reviewers    = ["ed25519:d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48"]
 placement_root       = "/var/lib/mycelium/artifacts"
-

@@ -1,0 +1,4 @@
+# The librarian: publishes the library's signed manifest into the gossiped catalogue (the stem's
+# `--librarian`). It declares nothing of its own — the `artifact/librarian` advertisement is the
+# librarian's runtime claim, not a unit's.
+principal = "librarian"

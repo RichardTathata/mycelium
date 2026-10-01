@@ -12,13 +12,17 @@
 # seed, and the stems. Static IPs: a node id is `ip:port`. No TLS: one private network.
 #
 # What each profile recuts, and what it does not:
-#   provisioning — providers a and b are stems over the shared library (`--library /lib`), and
-#                  provider-a is also its librarian (`--librarian`): a library on disk is not a
-#                  catalogue — the librarian is what publishes the manifest's lines into the
-#                  gossiped `installable/` catalogue the stems read each tick (the first CI run
-#                  found this: two quiet stems with a full library and an empty catalogue). The
-#                  driver seeds, drains, kills the active provider through the docker socket, and
-#                  drains again. Same markers as the code run ("self-healed"). Wave 3 (shadow-then-accept) is not recut: an
+#   provisioning — providers a and b are stems over the shared library (`--library /lib`), and a
+#                  librarian stem publishes the manifest into the gossiped catalogue (a library
+#                  on disk is not a catalogue — the first CI run found that). The driver seeds,
+#                  drains, kills the active provider through the docker socket, drains again
+#                  ("self-healed"); then wave 3 (D20): it starts provider-c, stores a v2 component
+#                  in the library and publishes it as an agent's *proposal*; the stems load it only
+#                  into the shadow lane while the incumbent serves; a stranger's acceptance changes
+#                  nothing; the reviewer's promotes it; the operator retires v1 from the manifest;
+#                  the incumbents die, and provider-c serves the accepted v2 — visible in its
+#                  replies ("shadow-then-accept complete"). Keys: operator 42…42, agent 43…43,
+#                  reviewer 44…44, stranger 45…45 — fixtures, in the clear on purpose. Wave 3 (shadow-then-accept) is not recut: an
 #                  acceptance is a manifest rewrite the driver would have to make in the library
 #                  volume and the stems re-read — open.
 #   catalog      — the librarian and the installer are stems (the installer pulls over the mesh);
@@ -65,9 +69,11 @@ services:
     environment:
       <<: *stem-env
       STEM_DRIVER_HOST: 172.40.0.10
-      STEM_PROVIDERS: "172.40.0.11=mycelium-stem-provider-a,172.40.0.12=mycelium-stem-provider-b"
+      STEM_PROVIDERS: "172.40.0.11=mycelium-stem-provider-a,172.40.0.12=mycelium-stem-provider-b,172.40.0.14=mycelium-stem-provider-c"
+      STEM_PROVIDER_C_IP: 172.40.0.14
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - "lib:/lib"
     depends_on:
       init-provisioning: { condition: service_completed_successfully }
     networks:
@@ -77,7 +83,7 @@ services:
     <<: *stem
     profiles: [provisioning]
     container_name: mycelium-stem-provider-a
-    command: ["--units", "/repo/examples/units/provisioning/provider-a.toml", "--library", "/lib", "--librarian", "/lib/manifest", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.11", "-p", "57000", "-r", "172.40.0.10:57000", "--tick-ms", "300"]
+    command: ["--units", "/repo/examples/units/provisioning/provider-a.toml", "--library", "/lib", "--host", "172.40.0.11", "-p", "57000", "-r", "172.40.0.10:57000", "--tick-ms", "300"]
     volumes: [ "lib:/lib" ]
     depends_on: [ driver-provisioning ]
     networks:
@@ -92,6 +98,16 @@ services:
     depends_on: [ driver-provisioning ]
     networks:
       stem-net: { ipv4_address: 172.40.0.12 }
+
+  librarian-provisioning:
+    <<: *stem
+    profiles: [provisioning]
+    container_name: mycelium-stem-librarian-provisioning
+    command: ["--units", "/repo/examples/units/provisioning/librarian.toml", "--library", "/lib", "--librarian", "/lib/manifest", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.13", "-p", "57000", "-r", "172.40.0.10:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-provisioning ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.13 }
 
   # ── catalog ─────────────────────────────────────────────────────────────────
   init-catalog:
@@ -197,6 +213,8 @@ services:
 
 volumes:
   lib:
+    # Named, so the provisioning driver can start provider-c on it with `docker run -v`.
+    name: mycelium-stem-lib
 
 networks:
   stem-net:
