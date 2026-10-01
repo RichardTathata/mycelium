@@ -76,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "catalog" => catalog(agent).await,
         "mcp_toolgrowth" => mcp_toolgrowth(agent).await,
         "model_deploy" => model_deploy(agent).await,
+        "reheal_deploy" => reheal_deploy(agent).await,
         other => Err(format!("unknown demo {other:?} (provisioning | catalog | mcp_toolgrowth)").into()),
     }
 }
@@ -296,6 +297,64 @@ async fn catalog(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Erro
     assert_eq!(out.as_ref(), b"late route");
     println!("[late] joined after the origin died — installed from a peer cache and ran it");
     println!("\nAll assertions passed — runtime-read bytes → signed library → librarian stem → discovered pull → provisioned on an installer stem → served → origin killed → late stem installed from a peer cache.");
+    agent.shutdown().await;
+    Ok(())
+}
+
+/// The reheal demo as stems: the origin deploys and serves `llm/storyteller`; the driver routes real
+/// inference, starts the survivor, kills the origin, and routes again — the survivor reheals the
+/// deployment into its own Ollama, serves the skill, and answers.
+async fn reheal_deploy(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Error>> {
+    use mycelium_reason::{InferenceRouter, ModelQuery, RouterConfig};
+    let (origin_ip, origin_name) = std::env::var("STEM_ORIGIN")?
+        .split_once('=')
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .ok_or("STEM_ORIGIN is ip=container")?;
+    let survivor_ip = std::env::var("STEM_SURVIVOR_IP")?;
+    let origin = NodeId::new(&origin_ip, 57000)?;
+    let survivor = NodeId::new(&survivor_ip, 57000)?;
+    let router = InferenceRouter::new(Arc::clone(&agent), RouterConfig::default());
+    let q = ModelQuery::new("storyteller");
+    let prompt = "Once upon a time, on the night of the great surplus-bread rescue,";
+
+    assert!(wait_until(60, || agent.peers().len() >= 2).await, "the librarian and the origin peer with the driver");
+    println!("[app] waiting for llm/storyteller: the origin places the weights and the profile, activates them into its Ollama, and serves …");
+    assert!(wait_until(300, || agent.capabilities().resolve(&CapFilter::new("llm", "storyteller")).iter().any(|(n, _)| *n == origin)).await,
+        "the origin must serve llm/storyteller");
+    let first = router.call(&q, prompt, &HashMap::new(), None).await?;
+    assert!(!first.output.trim().is_empty(), "the origin generated real tokens");
+    assert_eq!(first.provider, origin, "the first story came from the origin");
+    println!("[app] the origin speaks: “{}”", first.output.trim());
+
+    // The survivor joins late: the floor is met, so it idles.
+    let st = std::process::Command::new("docker")
+        .args(["run", "-d", "--name", "mycelium-stem-survivor", "--network", "mycelium-stem-net", "--ip", &survivor_ip,
+               "-v", "mycelium-stem-lib:/lib", "-e", "OLLAMA_HOST=http://172.40.0.56:11434", "mycelium-stem:test",
+               "--units", "/repo/examples/units/reheal_deploy/survivor.toml", "--library", "/lib",
+               "--host", &survivor_ip, "-p", "57000", "-r", &format!("{}:57000", std::env::var("STEM_DRIVER_HOST").unwrap_or_default()),
+               "--tick-ms", "300"])
+        .status()?;
+    assert!(st.success(), "docker run the survivor");
+    assert!(wait_until(60, || agent.peers().contains(&survivor)).await, "the survivor peers");
+    println!("[app] the survivor joined and idles — one deployment is the floor, and the origin holds it");
+
+    println!("[app] killing the origin ({origin_name}) …");
+    let st = std::process::Command::new("docker").args(["kill", &origin_name]).status()?;
+    assert!(st.success(), "docker kill {origin_name}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(360);
+    let second = loop {
+        if let Ok(r) = router.call(&q, prompt, &HashMap::new(), None).await
+            && r.provider == survivor
+            && !r.output.trim().is_empty()
+        {
+            break r;
+        }
+        assert!(std::time::Instant::now() < deadline,
+            "the survivor must reheal the deployment (install, activate into its own Ollama, serve) and answer");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+    println!("[app] after the origin died, the survivor speaks: “{}”", second.output.trim());
+    println!("\nAll assertions passed — a governed model deployed by a stem, served by declaration, rehealed onto the survivor after the origin died, and routed inference answered from both.");
     agent.shutdown().await;
     Ok(())
 }

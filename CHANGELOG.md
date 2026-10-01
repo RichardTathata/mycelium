@@ -18,6 +18,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   accepted and reported as `not_enforced`. SDK verbs: `declare_units` / `declare_from` and `UnitHandle`
   (`mycelium-py`), `declareUnits` and `UnitHandle` (`mycelium-ts`) — both carry the text, neither
   parses TOML. The lease watchdog the capability route had is now shared by both handle kinds.
+- **Declared model serving, and `reheal_deploy` as stems (plan D22, X2 sixth slice).** The unit file
+  gains `[[serve]]`: the prompt skill `{ns}/{name}` over an OpenAI-compatible endpoint, registered
+  **while** the install named by `while_live` is live on the node and retracted when it goes — the
+  `serve_model` bridge as a declaration, on core's `llm` feature (wasm-host feature `llm`; a stem
+  without it refuses a `[[serve]]` by name). `validate()` refuses a missing endpoint or model and a
+  skill that shares its key with the install it waits for; `wire-check` counts a served skill as an
+  offer. Gate: `a_served_skill_follows_the_install_it_waits_for` (seen failing first). The
+  stem-examples suite's `reheal_deploy` profile: two hosts each with its own Ollama and a floor of one
+  deployment; the driver routes real inference through `InferenceRouter`, starts the survivor, kills
+  the origin, and routes again to the survivor that rehealed. With it, every artifact-shaped demo
+  runs both ways.
+
 - **`model_deploy` as stems (plan X2, fifth slice).** The stem-examples suite deploys a real model:
   the TinyStories GGUF (~19 MB, downloaded at run time) and a governed profile naming it by content
   address are published to a library; a librarian stem serves them; the model-host stem places both
@@ -37,7 +49,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reinstalls. Gates: `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`
   (seen failing first) and `an_activation_resolves_artifact_references_to_placed_paths`.
 
-### Added
 - **Provisioning's wave 3 as stems (plan X2, third slice).** The stem-examples suite now runs the
   whole provisioning demo both ways: after the self-heal, the driver starts a late provider-c, an
   agent's v2 is stored in the shared library and proposed into the catalogue, the stems load it only
@@ -59,7 +70,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carrying the foreign key — and the tripwire fires deterministically (ten of ten). The shipped code
   is unchanged; the release stands.
 
-### Added
 - **Two stem capability gaps closed (plan X2, second slice).** A hosting stem on the mesh path
   **re-serves its verified cache** (`serve_artifacts` over its `MeshArtifactSource`, advertised as
   `artifact/librarian` with `role = "cache"` once it holds something), so a late joiner installs from

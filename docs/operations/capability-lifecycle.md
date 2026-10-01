@@ -106,6 +106,19 @@ probe   = ["ollama", "show", "storyteller"]
 resolve_artifact_refs = true      # the profile's `FROM artifact:<hex>` becomes the placed weights' path
 ```
 
+A model that should answer routed inference also needs a **routable skill**, which a placed and
+activated file is not. `[[serve]]` registers one while the install is live and retracts it when the
+install goes, so a router fails over instead of calling a node whose model was withdrawn:
+
+```toml
+[[serve]]
+name     = "storyteller"                       # the routable skill llm/storyteller
+endpoint = "http://localhost:11434/v1"         # this host's OpenAI-compatible runtime
+model    = "coop-storyteller"
+[serve.while_live]
+ns = "llm"; name = "storyteller-deploy"        # the install it waits for (a different name)
+```
+
 The stem runs `command` after placement and before the capability is advertised, re-runs `probe`
 in the background, and withdraws the install when the probe fails — the next round reinstalls and
 re-activates. A profile that references weights not yet placed fails its activation and is retried,

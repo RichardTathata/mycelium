@@ -65,6 +65,8 @@ pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFA
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{Stem, StemError, StemOptions, StemSource};
 pub mod activation;
+#[cfg(feature = "llm")]
+pub mod serve;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 #[cfg(feature = "gateway")]

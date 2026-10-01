@@ -105,6 +105,8 @@ pub struct Stem {
     _peer_serve: Option<tokio::task::JoinHandle<()>>,
     /// X2: the `[[activation]]` re-probe task, when the unit declares any.
     reprobe: Option<tokio::task::JoinHandle<()>>,
+    /// X2: the `[[serve]]` task, when the unit declares any (feature `llm`).
+    serve: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// `"ed25519:<64 hex>"` → the verifying key bytes; `field` names the table entry in the refusal.
@@ -130,6 +132,10 @@ impl Stem {
         let watch: crate::activation::WatchList = Arc::new(std::sync::Mutex::new(Vec::new()));
         units.validate().map_err(|e| StemError(e.to_string()))?;
 
+        #[cfg(not(feature = "llm"))]
+        if !units.serves.is_empty() {
+            return Err(StemError("[[serve]] needs a stem built with the `llm` feature".into()));
+        }
         let mut caps = Vec::new();
         for c in &units.capabilities {
             if c.probe_url.is_some() {
@@ -288,7 +294,11 @@ impl Stem {
         };
 
         let reprobe = (!units.activations.is_empty()).then(|| crate::activation::spawn_reprobe(watch, opts.reprobe_every));
-        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe })
+        #[cfg(feature = "llm")]
+        let serve = (!units.serves.is_empty()).then(|| crate::serve::spawn(Arc::clone(&agent), units.serves.clone(), opts.tick));
+        #[cfg(not(feature = "llm"))]
+        let serve: Option<tokio::task::JoinHandle<()>> = None;
+        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe, serve })
     }
 
     /// How many artifacts this stem currently hosts (as of its last tick).
@@ -309,6 +319,9 @@ impl Stem {
         }
         if let Some(r) = self.reprobe.take() {
             r.abort();
+        }
+        if let Some(s) = self.serve.take() {
+            s.abort();
         }
     }
 }
@@ -489,6 +502,43 @@ mod tests {
         std::fs::remove_file(&active).unwrap();
         assert!(wait_until(30, || stem.hosted_count() == 0).await, "a failing probe withdraws the install");
         assert!(wait_until(60, || stem.hosted_count() == 1 && active.exists()).await, "restart ≡ provisioning: re-activated");
+
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+    }
+
+    /// X2 (`reheal_deploy`'s bridge, declared): `[[serve]]` registers the routable skill while
+    /// the install it waits for is live here, and retracts it when the install goes — so a router
+    /// fails over. The backend is never called here; the test is about the skill's lifecycle.
+    /// Seen failing first: with the serve task not spawned, `llm/pack-model` never resolved.
+    #[cfg(feature = "llm")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_served_skill_follows_the_install_it_waits_for() {
+        let (seed, lib_dir, head, ids) = blob_library("serve", &[("pack", b"weights standing in")]).await;
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[presence]]\nns=\"data\"\nname=\"pack\"\nmin_providers=1\n\
+             [[activation]]\nns=\"data\"\nname=\"pack\"\ncommand=[\"sh\",\"-c\",\"test -f {{dir}}/allow && cp {{path}} {{path}}.active\"]\nprobe=[\"test\",\"-f\",\"{{path}}.active\"]\n\
+             [[serve]]\nname=\"pack-model\"\nendpoint=\"http://127.0.0.1:9/v1\"\nmodel=\"pack\"\n[serve.while_live]\nns=\"data\"\nname=\"pack\"\n"
+        )).unwrap();
+        // The activation runs only while `allow` exists, so the test decides when a reinstall may land.
+        let allow = lib_dir.join("placed").join("allow");
+        std::fs::create_dir_all(lib_dir.join("placed")).unwrap();
+        std::fs::write(&allow, b"").unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let stem = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        let skill = CapFilter::new("llm", "pack-model");
+        let served_here = |a: &Arc<GossipAgent>| a.capabilities().resolve(&skill).iter().any(|(n, _)| n == a.node_id());
+        assert!(wait_until(60, || stem.hosted_count() == 1 && served_here(&node)).await, "the skill is served once the install is live");
+
+        // The install goes (its probe fails and it is withdrawn): the skill goes with it.
+        let active = lib_dir.join("placed").join(format!("{}.active", ids[0].to_hex()));
+        std::fs::remove_file(&allow).unwrap();
+        std::fs::remove_file(&active).unwrap();
+        assert!(wait_until(30, || !served_here(&node)).await, "the skill is retracted when the install goes");
+        // And it comes back with the reinstall, once a reinstall may land.
+        std::fs::write(&allow, b"").unwrap();
+        assert!(wait_until(60, || served_here(&node)).await, "the skill returns with the reinstall");
 
         stem.stop().await;
         node.shutdown().await;

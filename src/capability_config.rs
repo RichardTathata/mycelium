@@ -101,6 +101,11 @@
 //! probe   = ["ollama", "show", "storyteller"]
 //! resolve_artifact_refs = true           # `FROM artifact:<hex>` → the placed path
 //!
+//! [[serve]]                              # a routable skill while a local install is live (X2)
+//! name = "storyteller"; endpoint = "http://localhost:11434/v1"; model = "storyteller"
+//!   [serve.while_live]
+//!   ns = "llm"; name = "storyteller-deploy"
+//!
 //! [[presence]]                           # keep 2–4 route optimizers alive fleet-wide (D17)
 //! ns = "route"; name = "optimize"
 //! min_providers = 2
@@ -171,6 +176,36 @@ pub struct NodeCapabilityConfig {
     /// check does not read it.
     #[serde(default, rename = "activation")]
     pub activations:  Vec<ActivationDecl>,
+    /// Routable model skills this unit serves while a local install is live (X2): the declared
+    /// form of `mycelium-reason`'s `serve_model` bridge. A stem only, built with `llm`.
+    #[serde(default, rename = "serve")]
+    pub serves:       Vec<ServeDecl>,
+}
+
+/// A `[[serve]]` — register the prompt skill `{ns}/{name}` (routable over `llm.invoke`, what an
+/// `InferenceRouter` resolves) backed by an OpenAI-compatible `endpoint` serving `model`, **while**
+/// this node hosts the install named by `while_live` (absent = always). When that install is
+/// withdrawn — its probe failed, the floor moved — the skill is retracted with it, so a router
+/// fails over to a node that still has the model. `max_tokens` / `temperature` are the template's.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServeDecl {
+    #[serde(default = "default_serve_ns")]
+    pub ns:   String,
+    pub name: String,
+    pub endpoint: String,
+    pub model:    String,
+    #[serde(default)]
+    pub while_live: Option<CapDecl>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+}
+
+fn default_serve_ns() -> String {
+    "llm".into()
 }
 
 /// An `[[activation]]` — after a blob providing `ns/name` is placed and verified, run `command`
@@ -674,6 +709,20 @@ impl NodeCapabilityConfig {
                 return Err(invalid("activation", format!("{at}: activations are for placed blobs, and this unit's [hosts] does not name the blob kind")));
             }
         }
+        for (i, sv) in self.serves.iter().enumerate() {
+            let at = format!("[{i}] {}/{}", sv.ns, sv.name);
+            if sv.endpoint.trim().is_empty() || sv.model.trim().is_empty() {
+                return Err(invalid("serve", format!("{at}: an endpoint and a model are both required")));
+            }
+            if let Some(w) = &sv.while_live
+                && w.ns == sv.ns
+                && w.name == sv.name
+            {
+                return Err(invalid("serve.while_live", format!(
+                    "{at}: the skill and the install it waits for share a capability key and would overwrite each other — name the install differently (e.g. `{}-deploy`)", sv.name
+                )));
+            }
+        }
         for (i, p) in self.presence.iter().enumerate() {
             p.filter.to_filter().map_err(|e| invalid("presence", format!("[{i}]: {e}")))?;
             if p.min_providers == 0 {
@@ -1052,6 +1101,11 @@ max_providers = 4
 
         let e = refused("[[mandate]]\nholder = \"h\"\nscope = \"s\"\n");
         assert!(e.contains("enumerates no operations"), "{e}");
+
+        let e = refused("[[serve]]\nname = \"m\"\nendpoint = \"\"\nmodel = \"x\"\n");
+        assert!(e.contains("an endpoint and a model"), "{e}");
+        let e = refused("[[serve]]\nname = \"m\"\nendpoint = \"http://o/v1\"\nmodel = \"x\"\n[serve.while_live]\nns = \"llm\"\nname = \"m\"\n");
+        assert!(e.contains("share a capability key"), "{e}");
 
         let e = refused("[hosts]\nkinds = [\"blob\"]\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = []\n");
         assert!(e.contains("activation.command"), "{e}");

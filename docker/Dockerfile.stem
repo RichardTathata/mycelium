@@ -10,7 +10,7 @@ WORKDIR /build
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,id=stem-bookworm-target,target=/build/target \
-    cargo build -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem,gateway && \
+    cargo build -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem,gateway,llm && \
     cargo build -p mycelium-coop-examples --bin stem_driver --features wasm && \
     cp target/debug/mycelium-stem target/debug/mycelium-artifact target/debug/stem_driver /
 

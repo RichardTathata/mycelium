@@ -36,6 +36,12 @@
 #                  creates the model under the profile's SYSTEM prompt — the capability goes live
 #                  only once Ollama has it. The driver is the app: it asserts the governed SYSTEM
 #                  prompt is what Ollama runs and that the model generates real tokens.
+#   reheal_deploy — the model reheals onto a survivor: two hosts, each with its own pinned Ollama,
+#                  a presence floor of one deployment. The origin deploys and, by its `[[serve]]`,
+#                  serves the routable `llm/storyteller` while its deployment is live; the driver
+#                  (the app) routes real inference through `InferenceRouter`, starts the survivor,
+#                  kills the origin, and routes again — the survivor installed, activated into its
+#                  own Ollama and served, and the tokens come from it.
 #   mcp_toolgrowth — the library and the tool-host are stems; the installed `tool/unit-convert`
 #                  component is bridged as an MCP tool by the runtime (gateway feature), and the
 #                  driver is the agent: it declares the need, finds the tool in KV, and calls it over
@@ -279,6 +285,76 @@ services:
     depends_on: [ driver-model_deploy ]
     networks:
       stem-net: { ipv4_address: 172.40.0.42 }
+
+  # ── reheal_deploy ───────────────────────────────────────────────────────────
+  ollama-origin:
+    profiles: [reheal_deploy]
+    image: ollama/ollama:0.9.0
+    container_name: mycelium-stem-ollama-origin
+    healthcheck: { test: ["CMD", "ollama", "list"], interval: 3s, timeout: 3s, retries: 40 }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.55 }
+
+  ollama-survivor:
+    profiles: [reheal_deploy]
+    image: ollama/ollama:0.9.0
+    container_name: mycelium-stem-ollama-survivor
+    healthcheck: { test: ["CMD", "ollama", "list"], interval: 3s, timeout: 3s, retries: 40 }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.56 }
+
+  init-reheal_deploy:
+    <<: *stem
+    profiles: [reheal_deploy]
+    container_name: mycelium-stem-init-reheal_deploy
+    entrypoint: ["sh", "/repo/examples/units/reheal_deploy/prepare.sh", "/lib"]
+    command: []
+    volumes: [ "lib:/lib" ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.6 }
+
+  driver-reheal_deploy:
+    <<: *stem
+    profiles: [reheal_deploy]
+    container_name: mycelium-stem-driver-reheal_deploy
+    entrypoint: ["stem_driver"]
+    command: ["reheal_deploy"]
+    environment:
+      <<: *stem-env
+      STEM_DRIVER_HOST: 172.40.0.50
+      STEM_ORIGIN: "172.40.0.52=mycelium-stem-origin"
+      STEM_SURVIVOR_IP: 172.40.0.53
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      init-reheal_deploy: { condition: service_completed_successfully }
+      ollama-origin: { condition: service_healthy }
+      ollama-survivor: { condition: service_healthy }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.50 }
+
+  librarian-reheal_deploy:
+    <<: *stem
+    profiles: [reheal_deploy]
+    container_name: mycelium-stem-librarian-reheal_deploy
+    command: ["--units", "/repo/examples/units/reheal_deploy/librarian.toml", "--library", "/lib", "--librarian", "/lib/manifest", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.51", "-p", "57000", "-r", "172.40.0.50:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-reheal_deploy ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.51 }
+
+  origin:
+    <<: *stem
+    profiles: [reheal_deploy]
+    container_name: mycelium-stem-origin
+    environment:
+      <<: *stem-env
+      OLLAMA_HOST: http://172.40.0.55:11434
+    command: ["--units", "/repo/examples/units/reheal_deploy/origin.toml", "--library", "/lib", "--host", "172.40.0.52", "-p", "57000", "-r", "172.40.0.50:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-reheal_deploy ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.52 }
 
 volumes:
   lib:
