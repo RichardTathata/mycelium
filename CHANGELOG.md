@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.18.0] — 2026-10-01
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.17.0 holds. **Upgrade notes:** `NodeCapabilityConfig` gained `activations` and `serves`, and `StemOptions` gained `reprobe_every` (an exhaustive literal breaks; `..Default::default()` is unaffected); `wire_check` counts a `[[serve]]` skill as an offer; `mycelium-wasm-host` gained feature `llm`. **Not claimed:** an activation command is the operator's, run with the stem's privileges — not a sandbox; the GCS path is still proved only against a real bucket, and none has run.
+
 ### Added
 - **`llm_agent` as stems (plan X2, seventh slice — the row closes).** The stem-examples suite runs the
   browser demo's subject with real artifacts: n-0 a declared unit; n-1 installs a real dataset blob

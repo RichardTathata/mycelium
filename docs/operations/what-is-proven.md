@@ -2,7 +2,7 @@
 
 ↑ [Operations](README.md) · beside the [shared-responsibility matrix](shared-responsibility-matrix.md)
 
-**As of 2026-09-30 (v2.17.0).** One dated page for the line between what CI proves on every merge,
+**As of 2026-10-01 (v2.18.0).** One dated page for the line between what CI proves on every merge,
 what has been demonstrated with its bound stated, and what has not yet been shown. Every line names
 its evidence. The places that used to restate this list — `CLAUDE.md` § Active work, the contracts-axis
 plan §10, the self-audit series, the publications ledger, both decks — now link here instead, and
@@ -28,7 +28,7 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 | Every companion crate's suite, both SDKs, the co-op and AFN smokes, `cargo audit`, the loom model | the per-crate jobs | `ci.yml` jobs `wasm-host` · `agentfacts` · `blackboard` · `effects` · `commitment` · `wiki` · `reason` · `guardrails` · `python-sdk` · `sdk-ts` · `coop-smoke` · `afn-smoke` · `audit` · `loom` |
 | A **composed effect** is refused at the destination unless it is attributed (the principal is the mandate's holder) and authorised (`ResourceAuthority::check`, now) — each leg planted missing leaves no row; the domain leg is carried, not re-verified | `mycelium-effects/tests/composed.rs`, written before the check and seen committing every planted leg | `ci.yml` job `effects` |
 | **The declared fleet checks offline and runs as stem nodes.** Every example's declaration directory checks clean and turns red when the last provider of any capability is deleted; the co-op fixtures name their ghost, their unauthorisable edge and their schema window; a proposed artifact is *would bind after acceptance*; the declaration document validates against its pinned schema | `tests/wire_check_examples.rs`, `tests/wire_check_fixtures.rs`, `tests/declaration_schema.rs`, `scripts/wire-check-examples.sh` | `ci.yml`; `docs/reference/declaration.schema.json` |
-| The `provisioning` and `catalog` (phases 1–4) demos reach the **same asserted outcome as stem nodes** fed only their declaration directories, including a provider killed for real | the stem-examples suite (`make test-stem-examples`) | `cluster-suites.yml` job `stem-examples`; `docker/docker-compose.stem-examples.yml` |
+| Every artifact-shaped co-op demo — `provisioning` (with shadow-then-accept), `catalog` (with the peer-cache late joiner), `mcp_toolgrowth`, `model_deploy`, `reheal_deploy`, `llm_agent` — reaches the **same asserted outcome as stem nodes** fed only their declaration directories; the three model demos against a **real model in Ollama** (placed, activated by `[[activation]]`, served by `[[serve]]`, real tokens, a survivor answering after the origin is killed) | the stem-examples suite (`make test-stem-examples`) | `cluster-suites.yml` job `stem-examples`; `docker/docker-compose.stem-examples.yml` |
 | An agent-published entry that loops is **stopped at its fuel budget** and the record says so, the operator's runs unbounded; a **proposed** entry loads only into the shadow lane until a listed reviewer accepts it, and a forged acceptance changes nothing | `an_agent_published_entry_that_loops_is_stopped_at_its_budget_and_the_operators_is_not`, `a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it`, the co-op `provisioning` demo's wave 3 | `ci.yml` jobs `wasm-host`, `coop-smoke` |
 | A signed catalogue line published through the gateway **reaches a second node with provenance intact**, and every refusal answers by name | `mycelium-wasm-host/tests/gateway.rs` | `ci.yml` job `wasm-host` |
 | A regression is fixed only with a test **seen failing first** | the repository's bar since 2026-09-26; stated in each fix's commit | `CLAUDE.md`; the v2.15.1 and v2.16.0 changelog entries |
@@ -46,7 +46,7 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 
 ## Not yet shown — and what would show it
 
-| Gap | State on 2026-09-30 | What would show it |
+| Gap | State on 2026-10-01 | What would show it |
 |---|---|---|
 | **A named third-party production deployment** | none. NovusLens is a design partner that consumes the evidence records; the council-minutes corpus is envelope-qualified, not live | a customer pilot run to the `customer-pilot.md` bar, named with consent |
 | **V1 — the nightly scale runner** | the hosted job (`scale-nightly.yml`) has never had a runner registered and queues silently; the local launchd runner's last four rows (2026-09-25/26) failed with exit 2 on the environment (Docker/VM), not on the substrate; last green 2026-09-24 | a registered runner and a window of green nightlies, recorded in `results.csv` |
@@ -57,7 +57,7 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 | **Combined-feedback oscillation** | not posed — the three control loops share one state variable and neither isolation method can ask the question | a second state variable, or a different instrument |
 | **The check-then-act window** | narrowed and stated per site, not eliminated (`late_writes()` counts them) | it cannot be eliminated by this design; the count is the claim |
 | **Identity proofs required by default** | `require_identity_proofs` is default-off; a commitment signature's strength rests on it; `clock_sync` is always `Unverified` | a deployment that turns it on and a release that flips the default |
-| **The rest of the stem recut** | `provisioning`'s wave 3 (an acceptance is a manifest rewrite the stems re-read), `catalog`'s late joiner from a peer cache (a stem does not re-serve its cache), `mcp_toolgrowth` (no MCP bridge in the stem), `model_deploy` / `reheal_deploy` (no activation or probe hook, no `serve_model`), `llm_agent` (simulated pulls) | the stem capability gaps named in `docker/docker-compose.stem-examples.yml`, one at a time, each with the both-ways marker |
+| **`llm_agent`'s MCP tools as stems** | the demo's tools (weather, ping, search, calculate) are in-process handlers; the unit format has no row for a tool, so its stem run recuts the capabilities, the dataset and the model, not the tools | a tool row in the unit format, or the tools rewritten as components bridged by the runtime (as `mcp_toolgrowth`'s converter is) |
 | **The declaration as a consumer record, rendered by the consumer** | the schema is pinned and every edge carries its call shapes (W6, public); the private companion ships the `deployment_declaration` batch on the `v2.17.0` pin, retry-identical, accepted by its stub consumer, the join tested on the co-op golden (companion PR #4, 2026-09-30) | the consumer (NovusLens) accepting a real batch and rendering a declared edge beside its observations — on their side of the handover |
 
 ## What this page is not
