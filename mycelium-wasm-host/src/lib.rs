@@ -64,6 +64,7 @@ pub use librarian::{
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{Stem, StemError, StemOptions, StemSource};
+pub mod activation;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 #[cfg(feature = "gateway")]
@@ -77,6 +78,6 @@ pub use tools::{
 pub use object_store_source::{accept_in_store, list_store, publish_to_store, verify_store, ObjectStoreFetcher};
 pub use resources::{ResourceProbe, SystemResourceProbe};
 pub use runtime::{
-    cap_invoke_kind, ArtifactRuntime, BlobRuntime, FuelPolicy, InstallError, Installed, InvocationLog,
+    cap_invoke_kind, ArtifactRuntime, BlobRuntime, EntryActivateFn, FuelPolicy, InstallError, Installed, InvocationLog,
     InvocationOutcome, InvocationRecord, ProgressFn, RuntimeCtx, WasmComponentRuntime, INVOCATION_LOG_CAP,
 };

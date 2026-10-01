@@ -10,6 +10,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Declared blob activation (plan D21, X2 fourth slice).** The unit file gains `[[activation]]`: per
+  capability, an argv `command` run after a blob is placed and an argv `probe` that gates the
+  capability, with `{path}` / `{dir}` / `{artifact}` / `{ns}` / `{name}` placeholders and
+  `resolve_artifact_refs` (render `artifact:<hex>` references to placed paths as `{rendered}`; one not
+  yet placed fails the activation and the next round retries). `validate()` refuses an empty command,
+  an unknown placeholder, `{rendered}` without the flag, a zero timeout, and an activation on a unit
+  whose `[hosts]` does not name the blob kind. A stem wires it through the new
+  `BlobRuntime::with_entry_activation`, whose probe reads only a per-install flag that a background
+  task keeps current (lock-order row 51) — a failing probe withdraws the install and the next round
+  reinstalls. Gates: `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`
+  (seen failing first) and `an_activation_resolves_artifact_references_to_placed_paths`.
+
+### Added
 - **Provisioning's wave 3 as stems (plan X2, third slice).** The stem-examples suite now runs the
   whole provisioning demo both ways: after the self-heal, the driver starts a late provider-c, an
   agent's v2 is stored in the shared library and proposed into the catalogue, the stems load it only

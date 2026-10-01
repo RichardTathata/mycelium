@@ -62,6 +62,8 @@ pub struct StemOptions {
     pub self_elect_p:       f64,
     /// Re-assertion interval for declared requirements and groups.
     pub declare_interval:   Duration,
+    /// How often a live `[[activation]]`'s probe is re-run (X2).
+    pub reprobe_every:      Duration,
 }
 
 impl Default for StemOptions {
@@ -71,6 +73,7 @@ impl Default for StemOptions {
             tick:             Duration::from_millis(500),
             self_elect_p:     0.5,
             declare_interval: Duration::from_secs(5),
+            reprobe_every:    Duration::from_secs(10),
         }
     }
 }
@@ -100,6 +103,8 @@ pub struct Stem {
     /// joiner's source once the librarian is gone), advertised as `artifact/librarian` with
     /// `role = "cache"` only once the cache holds something.
     _peer_serve: Option<tokio::task::JoinHandle<()>>,
+    /// X2: the `[[activation]]` re-probe task, when the unit declares any.
+    reprobe: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// `"ed25519:<64 hex>"` → the verifying key bytes; `field` names the table entry in the refusal.
@@ -122,6 +127,7 @@ impl Stem {
     /// Declare everything in `units` on `agent` and, if it hosts, start provisioning.
     /// `agent` must already be started.
     pub fn start(agent: Arc<GossipAgent>, units: &NodeCapabilityConfig, opts: StemOptions) -> Result<Self, StemError> {
+        let watch: crate::activation::WatchList = Arc::new(std::sync::Mutex::new(Vec::new()));
         units.validate().map_err(|e| StemError(e.to_string()))?;
 
         let mut caps = Vec::new();
@@ -196,7 +202,11 @@ impl Stem {
                 );
                 if h.kinds.iter().any(|k| k == "blob") {
                     let root = h.placement_root.clone().unwrap_or_else(|| "artifacts".into());
-                    prov.register_runtime(Arc::new(BlobRuntime::new(root)));
+                    let mut blob = BlobRuntime::new(root);
+                    if !units.activations.is_empty() {
+                        blob = blob.with_entry_activation(crate::activation::hook(units.activations.clone(), Arc::clone(&watch)));
+                    }
+                    prov.register_runtime(Arc::new(blob));
                 }
                 if let Some(b) = h.install_budget_bytes {
                     prov.set_install_budget(b);
@@ -277,7 +287,8 @@ impl Stem {
             }
         };
 
-        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve })
+        let reprobe = (!units.activations.is_empty()).then(|| crate::activation::spawn_reprobe(watch, opts.reprobe_every));
+        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe })
     }
 
     /// How many artifacts this stem currently hosts (as of its last tick).
@@ -295,6 +306,9 @@ impl Stem {
         }
         if let Some(s) = self._peer_serve.take() {
             s.abort();
+        }
+        if let Some(r) = self.reprobe.take() {
+            r.abort();
         }
     }
 }
@@ -402,6 +416,113 @@ mod tests {
     /// capability nobody deployed; kill one host and the third stem brings it back; and the
     /// offline check over the same files agrees with what the fleet did — the first
     /// declared-versus-observed comparison, run locally with no consumer.
+    /// A library of blobs with a librarian on `seed`, and a unit file over it: (seed, lib dir,
+    /// units text prefix) — shared by the two activation tests.
+    async fn blob_library(tag: &str, blobs: &[(&str, &[u8])]) -> (Arc<GossipAgent>, std::path::PathBuf, String, Vec<crate::artifact::ArtifactId>) {
+        let lib_dir = scratch(tag);
+        let lib = Arc::new(FsLibrarySource::open(&lib_dir).unwrap());
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let mut entries = Vec::new();
+        let mut ids = Vec::new();
+        for (name, bytes) in blobs {
+            let id = lib.store(bytes).unwrap();
+            ids.push(id);
+            entries.push(
+                InstallableEntry::new(Capability::new("data", *name), id)
+                    .with_kind(crate::artifact::ArtifactKind::Blob)
+                    .with_cost(bytes.len() as u64, 1)
+                    .signed_by(&key),
+            );
+        }
+        Manifest::from_entries(entries).save(&lib_dir.join(MANIFEST_FILE)).unwrap();
+        let seed = agent(alloc_port(), None).await;
+        let _librarian = spawn_librarian(
+            Arc::clone(&seed),
+            Arc::clone(&lib) as Arc<_>,
+            LibrarianConfig {
+                manifest_path: lib_dir.join(MANIFEST_FILE),
+                publisher:     key.verifying_key().to_bytes(),
+                sync_interval: Duration::from_millis(200),
+                manifest_source: None,
+            },
+        );
+        std::mem::forget(_librarian);
+        let publisher_hex: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let place = lib_dir.join("placed");
+        let head = format!(
+            "principal=\"stem\"\n[hosts]\nkinds=[\"blob\"]\ntrusted_publishers=[\"ed25519:{publisher_hex}\"]\nplacement_root=\"{}\"\n",
+            place.display()
+        );
+        (seed, lib_dir, head, ids)
+    }
+
+    fn stem_opts(lib_dir: &std::path::Path) -> StemOptions {
+        StemOptions {
+            source: StemSource::Library(lib_dir.to_path_buf()),
+            tick: Duration::from_millis(300),
+            self_elect_p: 1.0,
+            declare_interval: Duration::from_secs(2),
+            reprobe_every: Duration::from_millis(500),
+        }
+    }
+
+    /// X2 (the model demos' gap): a unit's `[[activation]]` hands a placed blob to the local
+    /// runtime — here a shell command standing in for `ollama create` — and gates the capability
+    /// on its probe. When the probe starts failing, the install is withdrawn and the next round
+    /// reinstalls and re-activates. Seen failing first: with the sections ignored, the activation
+    /// marker never appeared.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability() {
+        let (seed, lib_dir, head, ids) = blob_library("act", &[("pack", b"a data pack, standing in for weights")]).await;
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[presence]]\nns=\"data\"\nname=\"pack\"\nmin_providers=1\n\
+             [[activation]]\nns=\"data\"\nname=\"pack\"\ncommand=[\"sh\",\"-c\",\"cp {{path}} {{path}}.active\"]\nprobe=[\"test\",\"-f\",\"{{path}}.active\"]\n"
+        )).unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let stem = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        let active = lib_dir.join("placed").join(format!("{}.active", ids[0].to_hex()));
+        assert!(wait_until(60, || stem.hosted_count() == 1 && active.exists()).await, "placed, activated, live");
+        assert_eq!(std::fs::read(&active).unwrap(), b"a data pack, standing in for weights");
+
+        // The runtime loses it: the probe fails, the install is withdrawn, and the floor brings it
+        // back — re-placed and re-activated.
+        std::fs::remove_file(&active).unwrap();
+        assert!(wait_until(30, || stem.hosted_count() == 0).await, "a failing probe withdraws the install");
+        assert!(wait_until(60, || stem.hosted_count() == 1 && active.exists()).await, "restart ≡ provisioning: re-activated");
+
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+    }
+
+    /// `resolve_artifact_refs`: a profile naming its weights as `artifact:<hex>` is rendered with
+    /// the placed path, and activation waits for the weights — ordering by retry, no resolver.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_activation_resolves_artifact_references_to_placed_paths() {
+        let weights: &[u8] = b"the weights";
+        let weights_hex = crate::artifact::ArtifactId::of(weights).to_hex();
+        let profile = format!("FROM artifact:{weights_hex}\nSYSTEM be kind\n");
+        let (seed, lib_dir, head, _ids) =
+            blob_library("refs", &[("weights", weights), ("profile", profile.as_bytes())]).await;
+        let out = lib_dir.join("model.out");
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[presence]]\nns=\"data\"\nname=\"weights\"\nmin_providers=1\n[[presence]]\nns=\"data\"\nname=\"profile\"\nmin_providers=1\n\
+             [[activation]]\nns=\"data\"\nname=\"profile\"\nresolve_artifact_refs=true\ncommand=[\"cp\",\"{{rendered}}\",\"{}\"]\n",
+            out.display()
+        )).unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let stem = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        assert!(wait_until(60, || stem.hosted_count() == 2 && out.exists()).await, "both placed, the profile activated");
+        let text = std::fs::read_to_string(&out).unwrap();
+        let placed = lib_dir.join("placed").join(&weights_hex);
+        assert!(text.contains(&format!("FROM {}", placed.display())), "the reference became the placed path: {text}");
+        assert!(!text.contains("artifact:"), "{text}");
+
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+    }
+
     /// X2 (the catalog demo's phase 6, as stems): a hosting stem on the mesh path re-serves what
     /// it pulled and verified, advertised as a cache holder once it holds something — so when the
     /// librarian is gone, a late joiner installs from the peer. Seen failing first: with no
@@ -437,6 +558,7 @@ mod tests {
             tick: Duration::from_millis(300),
             self_elect_p: 1.0,
             declare_interval: Duration::from_secs(2),
+            reprobe_every: Duration::from_secs(1),
         };
 
         // The installer: pulls from the librarian, hosts, and — once its cache holds the bytes —
@@ -503,6 +625,7 @@ mod tests {
             tick: Duration::from_millis(300),
             self_elect_p: 1.0,
             declare_interval: Duration::from_secs(2),
+            reprobe_every: Duration::from_secs(1),
         };
         let mut fleet: Vec<(Arc<GossipAgent>, Stem)> = Vec::new();
         for _ in 0..3 {

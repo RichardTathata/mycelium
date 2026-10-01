@@ -95,6 +95,12 @@
 //! fuel_per_call = 50000000               # every other trusted key is an agent: metered (D19)
 //! placement_root = "/var/lib/mycelium/artifacts"
 //!
+//! [[activation]]                         # a placed blob, handed to the local runtime (X2)
+//! ns = "llm"; name = "storyteller"
+//! command = ["ollama", "create", "storyteller", "-f", "{rendered}"]
+//! probe   = ["ollama", "show", "storyteller"]
+//! resolve_artifact_refs = true           # `FROM artifact:<hex>` → the placed path
+//!
 //! [[presence]]                           # keep 2–4 route optimizers alive fleet-wide (D17)
 //! ns = "route"; name = "optimize"
 //! min_providers = 2
@@ -160,6 +166,51 @@ pub struct NodeCapabilityConfig {
     /// Presence policies this unit publishes — keep N..M providers alive (D17).
     #[serde(default, rename = "presence")]
     pub presence:     Vec<PresenceDecl>,
+    /// How a placed blob is handed to the node-local runtime, per capability (X2): the command
+    /// run after placement and the probe that gates the capability. A stem only — the offline
+    /// check does not read it.
+    #[serde(default, rename = "activation")]
+    pub activations:  Vec<ActivationDecl>,
+}
+
+/// An `[[activation]]` — after a blob providing `ns/name` is placed and verified, run `command`
+/// (argv, no shell unless you name one) and gate the capability on `probe` (argv; exit 0 is
+/// healthy; absent = the placed file exists). Placeholders: `{path}` the placed file, `{dir}` the
+/// placement root, `{artifact}` its content address, `{ns}`, `{name}`, and — with
+/// `resolve_artifact_refs` — `{rendered}`, a copy of the placed file in which every
+/// `artifact:<64 hex>` reference is replaced by that artifact's placed path (a Modelfile's
+/// `FROM artifact:…`). A reference not yet placed fails the activation, and the next round
+/// retries: ordering without a dependency resolver, as the model demo does in code.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActivationDecl {
+    pub ns:   String,
+    pub name: String,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub probe: Vec<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub resolve_artifact_refs: bool,
+}
+
+/// The placeholders an `[[activation]]` may use.
+pub const ACTIVATION_PLACEHOLDERS: &[&str] = &["path", "dir", "artifact", "ns", "name", "rendered"];
+
+impl ActivationDecl {
+    fn placeholders(argv: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for a in argv {
+            let mut rest = a.as_str();
+            while let Some(i) = rest.find('{') {
+                let after = &rest[i + 1..];
+                let Some(j) = after.find('}') else { break };
+                out.push(after[..j].to_string());
+                rest = &after[j + 1..];
+            }
+        }
+        out
+    }
 }
 
 /// A semantic-version triple written as `"major.minor.patch"`; parsed at load so a
@@ -603,6 +654,26 @@ impl NodeCapabilityConfig {
                 }
             }
         }
+        for (i, a) in self.activations.iter().enumerate() {
+            let at = format!("[{i}] {}/{}", a.ns, a.name);
+            if a.command.is_empty() {
+                return Err(invalid("activation.command", format!("{at}: an activation with no command does nothing")));
+            }
+            if a.timeout_secs == Some(0) {
+                return Err(invalid("activation.timeout_secs", format!("{at}: a timeout of 0 fails every activation")));
+            }
+            for p in ActivationDecl::placeholders(&a.command).into_iter().chain(ActivationDecl::placeholders(&a.probe)) {
+                if !ACTIVATION_PLACEHOLDERS.contains(&p.as_str()) {
+                    return Err(invalid("activation", format!("{at}: unknown placeholder {{{p}}} ({})", ACTIVATION_PLACEHOLDERS.join(" | "))));
+                }
+                if p == "rendered" && !a.resolve_artifact_refs {
+                    return Err(invalid("activation", format!("{at}: {{rendered}} needs resolve_artifact_refs = true")));
+                }
+            }
+            if !self.hosts.as_ref().is_some_and(|h| h.kinds.iter().any(|k| k == "blob")) {
+                return Err(invalid("activation", format!("{at}: activations are for placed blobs, and this unit's [hosts] does not name the blob kind")));
+            }
+        }
         for (i, p) in self.presence.iter().enumerate() {
             p.filter.to_filter().map_err(|e| invalid("presence", format!("[{i}]: {e}")))?;
             if p.min_providers == 0 {
@@ -981,6 +1052,17 @@ max_providers = 4
 
         let e = refused("[[mandate]]\nholder = \"h\"\nscope = \"s\"\n");
         assert!(e.contains("enumerates no operations"), "{e}");
+
+        let e = refused("[hosts]\nkinds = [\"blob\"]\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = []\n");
+        assert!(e.contains("activation.command"), "{e}");
+        let e = refused("[hosts]\nkinds = [\"blob\"]\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\", \"{weights}\"]\n");
+        assert!(e.contains("unknown placeholder {weights}"), "{e}");
+        let e = refused("[hosts]\nkinds = [\"blob\"]\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\", \"{rendered}\"]\n");
+        assert!(e.contains("resolve_artifact_refs"), "{e}");
+        let e = refused("[hosts]\nkinds = [\"wasm-component\"]\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\"]\n");
+        assert!(e.contains("does not name the blob kind"), "{e}");
+        let e = refused("[hosts]\nkinds = [\"blob\"]\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\"]\ntimeout_secs = 0\n");
+        assert!(e.contains("timeout of 0"), "{e}");
 
         let e = refused("[[presence]]\nns = \"a\"\nname = \"b\"\nmin_providers = 0\n");
         assert!(e.contains("floor of zero"), "{e}");
