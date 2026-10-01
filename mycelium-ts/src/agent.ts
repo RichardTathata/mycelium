@@ -4,6 +4,7 @@ import { Artifacts } from "./artifacts";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 import {
   CapabilityHandle,
+  UnitHandle,
   DemandStatus,
   LockGuard,
   LogEntry,
@@ -218,6 +219,44 @@ export class MyceliumAgent {
             await this._post(`/gateway/capability/${handleId}/heartbeat`, {});
           }
         : undefined,
+    );
+  }
+
+  /**
+   * Declare a unit file's capabilities, requirements and groups on the node, under one handle
+   * (design-time-tooling.md Q2). Pass the file's **text** — read it yourself (`fs.readFile`); the node
+   * parses and validates it with its own loader, so this SDK carries no TOML parser. Hosting sections
+   * (`[hosts]`, `[[presence]]`, `[[activation]]`) are a stem's and are refused (422). The handle's
+   * `drop()` retracts the whole unit; with `leaseSecs`, call `heartbeat()` within every window.
+   */
+  async declareUnits(
+    tomlText: string,
+    options: { intervalSecs?: number; leaseSecs?: number } = {},
+  ): Promise<UnitHandle> {
+    const data = (await this._post("/gateway/units/declare", {
+      toml: tomlText,
+      interval_secs: options.intervalSecs ?? 30,
+      ...(options.leaseSecs !== undefined ? { lease_secs: options.leaseSecs } : {}),
+    })) as {
+      handle_id: string;
+      principal: string | null;
+      declared: { capabilities: number; requirements: number; groups: number };
+      not_enforced: string[];
+    };
+    const handleId = data.handle_id;
+    return new UnitHandle(
+      handleId,
+      async () => {
+        await this._delete(`/gateway/capability/${handleId}`);
+      },
+      options.leaseSecs !== undefined
+        ? async () => {
+            await this._post(`/gateway/capability/${handleId}/heartbeat`, {});
+          }
+        : undefined,
+      data.principal,
+      data.declared,
+      data.not_enforced,
     );
   }
 

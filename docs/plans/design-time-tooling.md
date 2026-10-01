@@ -548,10 +548,14 @@ the first place §9's comparison runs end to end, so it doubles as W6's local fi
 
 - **Q1 — nothing binds a unit's code to its file.** **Answered by D18 / R1.**
 - **Q2 — SDK units.** D2 admits an SDK agent as a unit, but only the Rust node loads the file. A
-  Python or TypeScript unit has a file for the checker and nothing reading it at runtime. **Open.** The
-  candidate answer is that the SDKs gain a `declare_from(path)` verb over the existing gateway routes
-  (requirements and groups already have them; presence and hosts do not apply to an SDK agent), so it
-  rides on A3's SDK work and is a day once A3 exists.
+  Python or TypeScript unit has a file for the checker and nothing reading it at runtime. **Answered
+  2026-10-01.** The premise that requirements and groups already had gateway routes was wrong — only
+  capability advertisement did — so the answer is one route, `POST /gateway/units/declare` (scope
+  `cap:write`): the SDK posts the unit file's **text**, the node parses and validates it with its own
+  loader (no second parser in either SDK, the Q5 principle), declares its capabilities, requirements
+  and groups under one handle that the existing delete and heartbeat routes retract and renew, refuses
+  the hosting sections by name (a stem's), and reports lanes, mandates and rules as not enforced. SDK
+  verbs: `declare_units(text)` / `declare_from(path)` (Python), `declareUnits(text)` (TypeScript).
 - **Q3 — catalogue units.** **Answered by A2 / L1.**
 
 **Q5 — client-side signing in the SDKs** *(rev 0.9, 2026-09-30)*. A3 shipped with SDK verbs that
