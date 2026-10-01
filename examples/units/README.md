@@ -13,7 +13,7 @@ any directory turns its row red — precisely, deleting the last provider of any
 (`tests/wire_check_examples.rs`) — which is why every advertised capability has a requirer here: the
 example's own caller, written down.
 
-**The stem run (X2).** `make examples-both-ways DEMO=provisioning` (or `catalog`, `mcp_toolgrowth`, `model_deploy` — whose code run needs a local Ollama and `MODEL_GGUF`) runs the demo as the
+**The stem run (X2).** `make examples-both-ways DEMO=provisioning` (or `catalog`, `mcp_toolgrowth`, `model_deploy`, `reheal_deploy`, `llm_agent` — the model demos' code runs need a local Ollama and `MODEL_GGUF`; `llm_agent`'s units describe its stem recut, while the browser demo itself still reads `examples/node_n*.toml`) runs the demo as the
 in-process binary and as stem nodes from one image fed this directory
 (`docker/docker-compose.stem-examples.yml`), and greps the same markers from both. The hosting units'
 `trusted_publishers` is the public half of the suite's test seed (`make stem-keys`), a fixture.

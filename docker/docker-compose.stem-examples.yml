@@ -42,6 +42,11 @@
 #                  (the app) routes real inference through `InferenceRouter`, starts the survivor,
 #                  kills the origin, and routes again — the survivor installed, activated into its
 #                  own Ollama and served, and the tokens come from it.
+#   llm_agent    — the browser demo's subject with real artifacts: n-0 a declared unit, n-1 installs
+#                  a real dataset blob on the agent's demand (the real `data/loading` tier), n-2
+#                  deploys a real model into its Ollama and serves `llm/inference` (D21, D22). The
+#                  driver is the agent: it declares its needs, watches the loading tier, and routes
+#                  a prompt. The demo's MCP tools are in-process code and are not recut.
 #   mcp_toolgrowth — the library and the tool-host are stems; the installed `tool/unit-convert`
 #                  component is bridged as an MCP tool by the runtime (gateway feature), and the
 #                  driver is the agent: it declares the need, finds the tool in KV, and calls it over
@@ -355,6 +360,82 @@ services:
     depends_on: [ driver-reheal_deploy ]
     networks:
       stem-net: { ipv4_address: 172.40.0.52 }
+
+  # ── llm_agent ───────────────────────────────────────────────────────────────
+  ollama-llm_agent:
+    profiles: [llm_agent]
+    image: ollama/ollama:0.9.0
+    container_name: mycelium-stem-ollama-llm_agent
+    healthcheck: { test: ["CMD", "ollama", "list"], interval: 3s, timeout: 3s, retries: 40 }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.65 }
+
+  init-llm_agent:
+    <<: *stem
+    profiles: [llm_agent]
+    container_name: mycelium-stem-init-llm_agent
+    entrypoint: ["sh", "/repo/examples/units/llm_agent/prepare.sh", "/lib"]
+    command: []
+    volumes: [ "lib:/lib" ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.7 }
+
+  driver-llm_agent:
+    <<: *stem
+    profiles: [llm_agent]
+    container_name: mycelium-stem-driver-llm_agent
+    entrypoint: ["stem_driver"]
+    command: ["llm_agent"]
+    environment:
+      <<: *stem-env
+      STEM_DRIVER_HOST: 172.40.0.60
+    depends_on:
+      init-llm_agent: { condition: service_completed_successfully }
+      ollama-llm_agent: { condition: service_healthy }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.60 }
+
+  librarian-llm_agent:
+    <<: *stem
+    profiles: [llm_agent]
+    container_name: mycelium-stem-librarian-llm_agent
+    command: ["--units", "/repo/examples/units/llm_agent/librarian.toml", "--library", "/lib", "--librarian", "/lib/manifest", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.61", "-p", "57000", "-r", "172.40.0.60:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-llm_agent ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.61 }
+
+  n-0:
+    <<: *stem
+    profiles: [llm_agent]
+    container_name: mycelium-stem-n-0
+    command: ["--units", "/repo/examples/units/llm_agent/n-0.toml", "--host", "172.40.0.62", "-p", "57000", "-r", "172.40.0.60:57000", "--tick-ms", "300"]
+    depends_on: [ driver-llm_agent ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.62 }
+
+  n-1:
+    <<: *stem
+    profiles: [llm_agent]
+    container_name: mycelium-stem-n-1
+    command: ["--units", "/repo/examples/units/llm_agent/n-1.toml", "--library", "/lib", "--host", "172.40.0.63", "-p", "57000", "-r", "172.40.0.60:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-llm_agent ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.63 }
+
+  n-2:
+    <<: *stem
+    profiles: [llm_agent]
+    container_name: mycelium-stem-n-2
+    environment:
+      <<: *stem-env
+      OLLAMA_HOST: http://172.40.0.65:11434
+    command: ["--units", "/repo/examples/units/llm_agent/n-2.toml", "--library", "/lib", "--host", "172.40.0.64", "-p", "57000", "-r", "172.40.0.60:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-llm_agent ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.64 }
 
 volumes:
   lib:

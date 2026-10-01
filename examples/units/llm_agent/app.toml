@@ -1,4 +1,6 @@
-# the agent loop: needs realtime data, an inference endpoint of the configured model, and a CPU tool node.
+# The agent: needs realtime data, an inference skill, a CPU tool node, and the vector-search dataset
+# — the last one installed on demand. (Its MCP tools — weather, ping, search, calculate — are
+# in-process code in the demo and have no row in the unit format.)
 principal = "app"
 
 [[requirement]]
@@ -8,19 +10,11 @@ name = "realtime"
 [[requirement]]
 ns   = "llm"
 name = "inference"
-  [requirement.attrs]
-  model = "llama3.2"
-  context = { gte = 8192 }
 
 [[requirement]]
 ns   = "compute"
 name = "cpu"
 
-# When a need is unmet, the loop looks for what could be installed (the installable tiers).
 [[requirement]]
 ns   = "data"
-name = "installable"
-
-[[requirement]]
-ns   = "llm"
-name = "installable"
+name = "vector-search"

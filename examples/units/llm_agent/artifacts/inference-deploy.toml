@@ -1,0 +1,13 @@
+# The inference model's deployment profile, as an installable (`llm/inference-deploy`); the routable
+# skill `llm/inference` is what n-2's `[[serve]]` registers while it is live. Written by `prepare.sh`.
+kind             = "blob"
+bytes            = "storyteller.Modelfile"
+est_install_secs = 1
+
+[provides]
+ns   = "llm"
+name = "inference-deploy"
+
+[requires]
+disk_bytes = 4096
+mem_bytes  = 0
