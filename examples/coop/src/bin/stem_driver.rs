@@ -75,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "provisioning" => provisioning(agent).await,
         "catalog" => catalog(agent).await,
         "mcp_toolgrowth" => mcp_toolgrowth(agent).await,
+        "model_deploy" => model_deploy(agent).await,
         other => Err(format!("unknown demo {other:?} (provisioning | catalog | mcp_toolgrowth)").into()),
     }
 }
@@ -295,6 +296,42 @@ async fn catalog(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Erro
     assert_eq!(out.as_ref(), b"late route");
     println!("[late] joined after the origin died — installed from a peer cache and ran it");
     println!("\nAll assertions passed — runtime-read bytes → signed library → librarian stem → discovered pull → provisioned on an installer stem → served → origin killed → late stem installed from a peer cache.");
+    agent.shutdown().await;
+    Ok(())
+}
+
+/// The model demo with the librarian and the model host as stems and a pinned Ollama: the driver
+/// is the app. The capability goes live only once the model host's `[[activation]]` (D21) created
+/// the model in Ollama; the driver checks the governed SYSTEM prompt and generates real tokens.
+async fn model_deploy(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Error>> {
+    let ollama = std::env::var("OLLAMA_HOST").map_err(|_| "OLLAMA_HOST must name the suite's Ollama")?;
+    let post = |path: &str, body: &str| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let out = std::process::Command::new("curl")
+            .args(["-sf", &format!("{ollama}{path}"), "-H", "Content-Type: application/json", "-d", body])
+            .output()?;
+        if !out.status.success() {
+            return Err(format!("POST {path} failed: {}", String::from_utf8_lossy(&out.stderr)).into());
+        }
+        Ok(serde_json::from_slice(&out.stdout)?)
+    };
+    assert!(wait_until(60, || agent.peers().len() >= 2).await, "the librarian and model-host stems peer with the driver");
+    let _req = agent.capabilities().declare_requirement(CapFilter::new("llm", "storyteller"), Duration::from_secs(900));
+    println!("[app] needs llm/storyteller; the model host places the weights and the profile and activates them …");
+    assert!(wait_until(300, || !agent.capabilities().resolve(&CapFilter::new("llm", "storyteller")).is_empty()).await,
+        "llm/storyteller must go live: weights and profile placed, the profile rendered and created in Ollama, the probe passing");
+    println!("[app] llm/storyteller is live — the model host's activation created the model in Ollama");
+    let show = post("/api/show", r#"{"model":"coop-storyteller"}"#)?;
+    let system = show["system"].as_str().unwrap_or_default().to_string();
+    assert!(system.contains("newsletter storyteller"), "the deployed PROFILE's SYSTEM prompt is what Ollama runs: {show}");
+    println!("[app] Ollama runs the governed SYSTEM prompt: {system:?}");
+    let story = post(
+        "/api/generate",
+        r#"{"model":"coop-storyteller","prompt":"Once upon a time, on the night of the great surplus-bread rescue,","stream":false,"options":{"num_predict":48}}"#,
+    )?;
+    let text = story["response"].as_str().unwrap_or_default().trim().to_string();
+    assert!(!text.is_empty(), "the deployed model generated real tokens: {story}");
+    println!("\n[app] the deployed model speaks:\n      “{text}”\n");
+    println!("All assertions passed — a real model (weights + governed profile) published, placed by a stem, activated into Ollama by its declaration, and generated real tokens.");
     agent.shutdown().await;
     Ok(())
 }
