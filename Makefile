@@ -218,7 +218,7 @@ STEM_PUB_SEED ?= 424242424242424242424242424242424242424242424242424242424242424
 test-stem-examples:
 	@set -e; for demo in $(STEM_DEMOS); do \
 	    echo "== stem-examples: $$demo =="; \
-	    docker rm -f mycelium-stem-late >/dev/null 2>&1 || true; \
+	    docker rm -f mycelium-stem-late mycelium-stem-provider-c >/dev/null 2>&1 || true; \
 	    $(COMPOSE_STEM) --profile $$demo down -v --remove-orphans 2>/dev/null || true; \
 	    $(COMPOSE_STEM) --profile $$demo up -d --build; \
 	    $(COMPOSE_STEM) --profile $$demo logs -f driver-$$demo & \
@@ -227,7 +227,7 @@ test-stem-examples:
 	        echo "-- driver failed: node logs (last 80 lines each) --"; \
 	        for c in $$($(COMPOSE_STEM) --profile $$demo ps -a --format '{{.Name}}'); do echo "-- $$c"; docker logs --tail 80 $$c 2>&1 || true; done; \
 	    fi; \
-	    docker rm -f mycelium-stem-late >/dev/null 2>&1 || true; \
+	    docker rm -f mycelium-stem-late mycelium-stem-provider-c >/dev/null 2>&1 || true; \
 	    $(COMPOSE_STEM) --profile $$demo down -v --remove-orphans 2>/dev/null || true; \
 	    [ "$$EXIT" = "0" ] || exit $$EXIT; \
 	done

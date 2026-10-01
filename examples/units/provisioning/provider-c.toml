@@ -1,5 +1,5 @@
-# provider-b: the standby: the same host, idle until demand is unmet.
-principal = "provider-b"
+# provider-c: the depot that comes online in wave 3: it shadows the proposed v2, and serves it once accepted.
+principal = "provider-c"
 
 [hosts]
 kinds                = ["wasm-component"]

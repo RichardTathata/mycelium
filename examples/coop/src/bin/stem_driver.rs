@@ -130,8 +130,126 @@ async fn provisioning(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error:
     let done2 = ts.depth(Some(DONE)).await?.first().map(|s| s.depth).unwrap_or(0);
     assert_eq!(done2 as u64, 2 * N, "both waves fully optimized across the failover");
     println!("[phase 3] worker drained wave 2 → {done2} donations optimized in total");
-    println!("\nAll assertions passed — buffered, self-provisioned (WASM, from stem nodes fed the declaration directory), drained, and self-healed across a provider death.");
+
+    wave3(&agent, &ts, &providers, &active).await?;
+    println!("\nAll assertions passed — buffered, self-provisioned (WASM, from stem nodes fed the declaration directory), drained, self-healed across a provider death, and a proposed v2 shadowed then accepted (D20).");
     agent.shutdown().await;
+    Ok(())
+}
+
+/// Wave 3 (D20) as stems: an agent proposes v2, the stems shadow it, a stranger's acceptance
+/// changes nothing, the reviewer's promotes it, the operator retires v1, the incumbents die, and
+/// the late provider-c serves the accepted v2.
+async fn wave3(
+    agent: &Arc<GossipAgent>,
+    ts: &TupleSpace,
+    providers: &HashMap<String, String>,
+    killed: &NodeId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ed25519_dalek::SigningKey;
+    use mycelium::Capability;
+    use mycelium_wasm_host::{publish_installable, shadow_name, ArtifactId, FsLibrarySource, InstallableEntry, Manifest, MANIFEST_FILE};
+    const V1: &[u8] = include_bytes!("../../../../mycelium-wasm-host/tests/fixtures/echo_component.wasm");
+    const V2: &[u8] = include_bytes!("../../../../mycelium-wasm-host/tests/fixtures/unit_convert_component.wasm");
+    let (agent_key, reviewer, stranger) =
+        (SigningKey::from_bytes(&[0x43; 32]), SigningKey::from_bytes(&[0x44; 32]), SigningKey::from_bytes(&[0x45; 32]));
+    let lib = std::path::Path::new("/lib");
+
+    // Settle: the killed provider's advertisement ages out; what remains are the incumbents.
+    assert!(wait_until(60, || !live_optimizers(agent).contains(killed)).await, "the killed provider ages out");
+    let incumbents = live_optimizers(agent);
+    assert!(!incumbents.is_empty(), "an incumbent serves route/optimize");
+    let c_ip = std::env::var("STEM_PROVIDER_C_IP").unwrap_or_else(|_| "172.40.0.14".into());
+    let c_node = NodeId::new(&c_ip, 57000)?;
+    println!("[phase 4] incumbent(s): {}; provider-c comes online …", incumbents.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
+    let st = std::process::Command::new("docker")
+        .args(["run", "-d", "--name", "mycelium-stem-provider-c", "--network", "mycelium-stem-net", "--ip", &c_ip,
+               "-v", "mycelium-stem-lib:/lib", "mycelium-stem:test",
+               "--units", "/repo/examples/units/provisioning/provider-c.toml", "--library", "/lib",
+               "--host", &c_ip, "-p", "57000", "-r", &format!("{}:57000", std::env::var("STEM_DRIVER_HOST").unwrap_or_default()),
+               "--tick-ms", "300"])
+        .status()?;
+    assert!(st.success(), "docker run provider-c");
+    assert!(wait_until(60, || agent.peers().contains(&c_node)).await, "provider-c peers");
+
+    // The agent's proposal: the bytes into the library (blobs only — the manifest is the
+    // operator's), the signed proposed line into the catalogue.
+    let v2_id = FsLibrarySource::open(lib)?.store(V2)?;
+    assert_eq!(v2_id, ArtifactId::of(V2));
+    let proposal = InstallableEntry::new(Capability::new("route", "optimize"), v2_id)
+        .with_cost(V2.len() as u64, 1)
+        .as_proposed()
+        .signed_by(&agent_key);
+    assert!(publish_installable(&agent.kv(), &proposal));
+    println!("[phase 4] an agent published a PROPOSED v2 under its own key");
+    let shadow = CapFilter::new("route", shadow_name("optimize"));
+    assert!(wait_until(60, || !agent.capabilities().resolve(&shadow).is_empty()).await,
+        "the proposal loads into the shadow lane (route/optimize.shadow)");
+    assert_eq!(live_optimizers(agent), incumbents, "route/optimize resolves the incumbent(s) only — a shadow is never a provider");
+    println!("[phase 4] v2 is live in the shadow lane; route/optimize still resolves only the incumbent(s)");
+
+    // Wave 3a: the incumbents serve the whole wave; the shadow is compared on a sample by name.
+    for id in (2 * N + 1)..=(3 * N) {
+        ts.put(LANE, Donation::new(id, "new-covent-garden", "surplus veg", "wandsworth").to_bytes()).await?;
+    }
+    let mut served = 0u64;
+    for _ in 0..N {
+        let (id, payload) = ts.take(LANE, Duration::from_secs(10)).await?;
+        let node = live_optimizers(agent).into_iter().next().ok_or("no optimizer")?;
+        assert!(incumbents.contains(&node));
+        let out = optimize(agent, &node, payload).await?;
+        ts.complete(id, DONE, out).await?;
+        served += 1;
+    }
+    let (shadow_node, _) = agent.capabilities().resolve(&shadow).into_iter().next().expect("a shadow");
+    let sample = Bytes::from_static(br#"{"kg": 1500}"#);
+    let shadow_kind = format!("cap.invoke/route/{}", shadow_name("optimize"));
+    let shadow_out = agent.service().rpc_call(shadow_node, shadow_kind, sample.clone(), Duration::from_secs(5)).await?;
+    assert!(shadow_out.starts_with(b"{\"tonnes\""), "the shadow is the v2 component: {shadow_out:?}");
+    println!("[phase 4] wave 3a: {served}/{N} served by the incumbent(s); the shadow answered a sample with {:?}", String::from_utf8_lossy(&shadow_out));
+
+    // A stranger's acceptance changes nothing.
+    assert!(publish_installable(&agent.kv(), &proposal.clone().accepted_by(&stranger)?));
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    assert_eq!(live_optimizers(agent), incumbents, "a forged acceptance does not promote the proposal");
+    assert!(!agent.capabilities().resolve(&shadow).is_empty(), "still a shadow under a forged acceptance");
+    println!("[phase 4] a stranger's acceptance was published: still a shadow, incumbent unchanged");
+
+    // The reviewer's acceptance promotes it; the operator retires v1 from the manifest, and the
+    // librarian tombstones its catalogue line.
+    assert!(publish_installable(&agent.kv(), &proposal.clone().accepted_by(&reviewer)?));
+    assert!(wait_until(30, || agent.capabilities().resolve(&shadow).is_empty()).await, "accepted: the shadow is withdrawn");
+    let manifest_path = lib.join(MANIFEST_FILE);
+    let m = Manifest::load(&manifest_path)?;
+    let v1_id = ArtifactId::of(V1);
+    let v1_key = m.entries().iter().find(|e| e.artifact == v1_id).map(|e| e.kv_key()).ok_or("v1 in the manifest")?;
+    Manifest::from_entries(m.entries().iter().filter(|e| e.artifact != v1_id).cloned().collect()).save(&manifest_path)?;
+    assert!(wait_until(30, || agent.kv().get(&v1_key).is_none()).await, "the librarian tombstones the retired v1 line");
+    println!("[phase 4] the reviewer accepted v2 and the operator retired v1: shadow withdrawn; killing the incumbent(s) …");
+    for node in &incumbents {
+        let ip = node.to_socket_addr().ip().to_string();
+        let name = providers.get(&ip).cloned().ok_or("no container mapped for an incumbent")?;
+        let st = std::process::Command::new("docker").args(["kill", &name]).status()?;
+        assert!(st.success(), "docker kill {name}");
+    }
+
+    // Wave 3b: only provider-c is left, and the only loadable entry is the accepted v2.
+    for id in (3 * N + 1)..=(4 * N) {
+        ts.put(LANE, Bytes::from(format!(r#"{{"kg": {}}}"#, id * 250))).await?;
+    }
+    assert!(wait_until(120, || live_optimizers(agent) == vec![c_node.clone()]).await,
+        "provider-c must provision the ACCEPTED v2 to serve wave 3b");
+    let mut tonnes = 0u64;
+    for _ in 0..N {
+        let (id, payload) = ts.take(LANE, Duration::from_secs(10)).await?;
+        let out = optimize(agent, &c_node, payload).await?;
+        if out.starts_with(b"{\"tonnes\"") {
+            tonnes += 1;
+        }
+        ts.complete(id, DONE, out).await?;
+    }
+    assert_eq!(tonnes, N, "wave 3b is served by the accepted v2 — its replies say so");
+    println!("[phase 4] wave 3b: {tonnes}/{N} served by the accepted v2 on provider-c — shadow-then-accept complete");
     Ok(())
 }
 

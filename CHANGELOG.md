@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Provisioning's wave 3 as stems (plan X2, third slice).** The stem-examples suite now runs the
+  whole provisioning demo both ways: after the self-heal, the driver starts a late provider-c, an
+  agent's v2 is stored in the shared library and proposed into the catalogue, the stems load it only
+  into the shadow lane while the incumbent serves, a stranger's acceptance changes nothing, the
+  reviewer's promotes it, the operator retires v1 from the manifest (the librarian tombstones it),
+  and provider-c serves the accepted v2 — "shadow-then-accept complete" both ways. The provisioning
+  units trust the agent's key and name the reviewer; a librarian unit of its own replaces provider-a
+  doubling as librarian.
+
 ### Fixed
 - **A test race that turned the v2.17.0 release commit's strict `Test` job red.**
   `test_identity_anchor_recorded_and_conflict_flagged` poisoned the legacy `sys/identity/{A}` pair
