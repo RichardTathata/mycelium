@@ -1,13 +1,15 @@
-# model-host: hosts the storyteller's component and its weights (blob), and keeps one of each alive.
+# model-host: places the storyteller's weights and profile (both blobs), keeps one of each alive,
+# and hands the profile to the local Ollama (D21) — the capability goes live only once Ollama
+# has the model.
 principal = "model-host"
 
-# Pulls bytes from whichever node advertises the librarian (MeshArtifactSource resolves it).
+# Pulls bytes from the library the librarian serves.
 [[requirement]]
 ns   = "artifact"
 name = "librarian"
 
 [hosts]
-kinds                = ["wasm-component", "blob"]
+kinds                = ["blob"]
 install_budget_bytes = 8589934592
 headroom             = 0.8
 # The suite's test publisher: the public half of seed 42…42 (`make stem-keys`). A fixture, not a secret.
@@ -24,3 +26,13 @@ ns            = "llm"
 name          = "storyteller-weights"
 min_providers = 1
 
+# The profile's activation: render `FROM artifact:<hex>` to the placed weights, upload them to the
+# local Ollama and create the model under the profile's SYSTEM prompt. Until the weights are placed
+# the render fails and the next round retries. The probe gates the capability on Ollama having it.
+[[activation]]
+ns   = "llm"
+name = "storyteller"
+resolve_artifact_refs = true
+command      = ["sh", "/repo/examples/units/model_deploy/ollama-activate.sh", "{rendered}", "coop-storyteller"]
+probe        = ["sh", "/repo/examples/units/model_deploy/ollama-probe.sh", "coop-storyteller"]
+timeout_secs = 300

@@ -10,6 +10,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`model_deploy` as stems (plan X2, fifth slice).** The stem-examples suite deploys a real model:
+  the TinyStories GGUF (~19 MB, downloaded at run time) and a governed profile naming it by content
+  address are published to a library; a librarian stem serves them; the model-host stem places both
+  and, by its `[[activation]]`, uploads the weights to a pinned Ollama container (`ollama/ollama:0.9.0`)
+  and creates the model through the HTTP API; the driver asserts the profile's SYSTEM prompt is what
+  Ollama runs and that the model generates real tokens. The model_deploy units and artifact
+  descriptions now describe the real thing rather than echo stand-ins.
 - **Declared blob activation (plan D21, X2 fourth slice).** The unit file gains `[[activation]]`: per
   capability, an argv `command` run after a blob is placed and an argv `probe` that gates the
   capability, with `{path}` / `{dir}` / `{artifact}` / `{ns}` / `{name}` placeholders and

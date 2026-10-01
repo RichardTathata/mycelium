@@ -29,6 +29,13 @@
 #                  the driver is the caller. Then the code run's phase 6, as stems: the driver kills
 #                  the librarian and starts a late stem (`docker run`, the same image) that installs
 #                  from the installer's re-served cache and answers — "installed from a peer cache".
+#   model_deploy — a real model, both halves governed: the init (`prepare.sh`) downloads the
+#                  TinyStories GGUF (~19 MB), writes the profile naming it by content address, and
+#                  publishes both; a librarian stem serves them; the model-host stem places them
+#                  and, by its `[[activation]]` (D21), uploads the weights to a pinned Ollama and
+#                  creates the model under the profile's SYSTEM prompt — the capability goes live
+#                  only once Ollama has it. The driver is the app: it asserts the governed SYSTEM
+#                  prompt is what Ollama runs and that the model generates real tokens.
 #   mcp_toolgrowth — the library and the tool-host are stems; the installed `tool/unit-convert`
 #                  component is bridged as an MCP tool by the runtime (gateway feature), and the
 #                  driver is the agent: it declares the need, finds the tool in KV, and calls it over
@@ -210,6 +217,68 @@ services:
     depends_on: [ driver-mcp_toolgrowth ]
     networks:
       stem-net: { ipv4_address: 172.40.0.32 }
+
+  # ── model_deploy ────────────────────────────────────────────────────────────
+  ollama:
+    profiles: [model_deploy]
+    image: ollama/ollama:0.9.0
+    container_name: mycelium-stem-ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    networks:
+      stem-net: { ipv4_address: 172.40.0.45 }
+
+  init-model_deploy:
+    <<: *stem
+    profiles: [model_deploy]
+    container_name: mycelium-stem-init-model_deploy
+    entrypoint: ["sh", "/repo/examples/units/model_deploy/prepare.sh", "/lib"]
+    command: []
+    volumes: [ "lib:/lib" ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.5 }
+
+  driver-model_deploy:
+    <<: *stem
+    profiles: [model_deploy]
+    container_name: mycelium-stem-driver-model_deploy
+    entrypoint: ["stem_driver"]
+    command: ["model_deploy"]
+    environment:
+      <<: *stem-env
+      STEM_DRIVER_HOST: 172.40.0.40
+      OLLAMA_HOST: http://172.40.0.45:11434
+    depends_on:
+      init-model_deploy: { condition: service_completed_successfully }
+      ollama: { condition: service_healthy }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.40 }
+
+  librarian-model_deploy:
+    <<: *stem
+    profiles: [model_deploy]
+    container_name: mycelium-stem-librarian-model_deploy
+    command: ["--units", "/repo/examples/units/model_deploy/librarian.toml", "--library", "/lib", "--librarian", "/lib/manifest", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.41", "-p", "57000", "-r", "172.40.0.40:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-model_deploy ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.41 }
+
+  model-host:
+    <<: *stem
+    profiles: [model_deploy]
+    container_name: mycelium-stem-model-host
+    environment:
+      <<: *stem-env
+      OLLAMA_HOST: http://172.40.0.45:11434
+    command: ["--units", "/repo/examples/units/model_deploy/model-host.toml", "--library", "/lib", "--host", "172.40.0.42", "-p", "57000", "-r", "172.40.0.40:57000", "--tick-ms", "300"]
+    volumes: [ "lib:/lib" ]
+    depends_on: [ driver-model_deploy ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.42 }
 
 volumes:
   lib:
