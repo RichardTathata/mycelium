@@ -1,0 +1,15 @@
+# The storyteller's deployment profile, as an installable: `llm/storyteller-deploy` is the
+# *install* (the placed profile, activated into the host's Ollama); the routable skill
+# `llm/storyteller` is what the host's `[[serve]]` registers while this install is live. Two names,
+# because one capability key cannot be both. Written at run time by `prepare.sh`.
+kind             = "blob"
+bytes            = "storyteller.Modelfile"
+est_install_secs = 1
+
+[provides]
+ns   = "llm"
+name = "storyteller-deploy"
+
+[requires]
+disk_bytes = 4096
+mem_bytes  = 0

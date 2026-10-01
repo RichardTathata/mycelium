@@ -1841,7 +1841,7 @@ fn lease_watchdog(ctx: &HttpCtx, handle_id: &str, secs: u64) -> Arc<Notify> {
 /// declares its `[[capability]]`, `[[requirement]]` and `[[group]]` sections under **one handle**
 /// that `DELETE /gateway/capability/{handle_id}` retracts and the heartbeat route renews (with
 /// `lease_secs`, a missed window retracts it). Refused by name: an unparsable or invalid file
-/// (400), and the hosting sections — `[hosts]`, `[[presence]]`, `[[activation]]` (422) — which are
+/// (400), and the hosting sections — `[hosts]`, `[[presence]]`, `[[activation]]`, `[[serve]]` (422) — which are
 /// a stem's: an SDK agent hosts nothing. `[[lane]]`, `[[mandate]]` and `[[rule]]` are accepted as
 /// declarations and reported in `not_enforced`, as the stem reports them.
 async fn gw_units_declare(
@@ -1859,6 +1859,7 @@ async fn gw_units_declare(
     if units.hosts.is_some() { hosting.push("[hosts]"); }
     if !units.presence.is_empty() { hosting.push("[[presence]]"); }
     if !units.activations.is_empty() { hosting.push("[[activation]]"); }
+    if !units.serves.is_empty() { hosting.push("[[serve]]"); }
     if !hosting.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "error": "hosting sections",

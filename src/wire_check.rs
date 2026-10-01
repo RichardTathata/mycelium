@@ -570,6 +570,14 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                 source: Provider::Unit { unit: u.name.clone(), principal: u.config.principal.clone() },
             });
         }
+        // A `[[serve]]` skill is an offer too: the unit serves it (while its install is live —
+        // which the runtime decides, as it decides whether any capability is up).
+        for sv in &u.config.serves {
+            offers.push(Offer {
+                cap:    crate::Capability::new(sv.ns.as_str(), sv.name.as_str()),
+                source: Provider::Unit { unit: u.name.clone(), principal: u.config.principal.clone() },
+            });
+        }
     }
     // A group asserts its `provides` when it has any member: at design time, when its filter
     // matches at least one declared unit capability.
@@ -835,7 +843,9 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         .map(|u| UnitSummary {
             name:        u.name.clone(),
             principal:   u.config.principal.clone(),
-            offers:      u.config.capabilities.iter().map(|c| format!("{}/{}", c.ns, c.name)).collect(),
+            offers:      u.config.capabilities.iter().map(|c| format!("{}/{}", c.ns, c.name))
+                .chain(u.config.serves.iter().map(|s| format!("{}/{}", s.ns, s.name)))
+                .collect(),
             requires:    u.config.requirements.iter().map(|r| format!("{}/{}", r.ns, r.name)).collect(),
             groups:      u.config.groups.iter().map(|g| g.name.clone()).collect(),
             hosts_kinds: u.config.hosts.as_ref().map(|h| h.kinds.clone()).unwrap_or_default(),
