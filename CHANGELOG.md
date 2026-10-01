@@ -10,6 +10,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SDK agents load their unit files (plan Q2).** `POST /gateway/units/declare` (scope `cap:write`)
+  takes a unit file's text; the node parses and validates it with its own loader and declares its
+  capabilities, requirements and groups under **one handle** that `DELETE /gateway/capability/{id}`
+  retracts and the heartbeat route renews (`lease_secs`). The hosting sections — `[hosts]`,
+  `[[presence]]`, `[[activation]]` — are a stem's and are refused (422); lanes, mandates and rules are
+  accepted and reported as `not_enforced`. SDK verbs: `declare_units` / `declare_from` and `UnitHandle`
+  (`mycelium-py`), `declareUnits` and `UnitHandle` (`mycelium-ts`) — both carry the text, neither
+  parses TOML. The lease watchdog the capability route had is now shared by both handle kinds.
 - **`model_deploy` as stems (plan X2, fifth slice).** The stem-examples suite deploys a real model:
   the TinyStories GGUF (~19 MB, downloaded at run time) and a governed profile naming it by content
   address are published to a library; a librarian stem serves them; the model-host stem places both

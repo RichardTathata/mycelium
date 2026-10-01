@@ -114,6 +114,9 @@ struct GatewayCapHandle {
     /// restarts the lease watchdog's window; a full window with no beat
     /// retracts the advert exactly as `DELETE /gateway/capability/{id}` would.
     heartbeat: Option<Arc<Notify>>,
+    /// Whatever else this handle keeps alive (`POST /gateway/units/declare`: the unit's capability
+    /// registrations, requirement and group handles). Dropped with the entry, which retracts them.
+    _held:     Option<Box<dyn std::any::Any + Send>>,
 }
 
 /// Returns the process-wide Prometheus scrape handle, installing the recorder
@@ -185,6 +188,7 @@ pub(super) async fn run_http_server(
         .route("/capability/{handle_id}", delete(gw_cap_drop))
         .route("/capability/{handle_id}/heartbeat", post(gw_cap_heartbeat))
         .route("/capability/resolve",     get(gw_cap_resolve))
+        .route("/units/declare",          post(gw_units_declare))
         .route("/signal/emit",            post(gw_signal_emit))
         .route("/signal/sse/{kind}",      get(gw_signal_sse))
         .route("/demand",                 get(gw_demand))
@@ -710,6 +714,8 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/capability/{handle_id}" => "cap:write",
         "/gateway/capability/{handle_id}/heartbeat" => "cap:write",
         "/gateway/capability/resolve"     => "cap:read",
+        // Q2: an SDK agent's unit file — capabilities, requirements, groups — under one handle.
+        "/gateway/units/declare"          => "cap:write",
         "/gateway/shard/{ns}/{name}"      => "cap:read",
         // Layer II mesh messaging
         "/gateway/signal/emit"     => "mesh:write",
@@ -1782,39 +1788,124 @@ async fn gw_cap_advertise(
         Arc::clone(&ctx.agent_ctx.core), cancel_rx, shutdown_rx, kv_key, interval, payload_fn, None,
     ));
 
-    let handle_id = format!("{:x}", fastrand::u128(..));
+    let handle_id = new_handle_id();
 
     // Lease mode: the watchdog retracts through the same path as DELETE (map
     // removal drops the cancel sender). `remove` returning `None` means the
     // caller already retracted — exit without noise.
-    let heartbeat = body["lease_secs"].as_u64().map(|secs| {
-        let lease = Duration::from_secs(secs.max(1));
-        let hb = Arc::new(Notify::new());
-        let watchdog_hb = Arc::clone(&hb);
-        let caps = Arc::clone(&ctx.gateway_caps);
-        let hid = handle_id.clone();
-        let mut wshutdown = ctx.shutdown_rx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = wshutdown.wait_for(|v| *v) => return,
-                    beat = tokio::time::timeout(lease, watchdog_hb.notified()) => {
-                        if beat.is_ok() { continue; }
-                        if caps.lock().unwrap_or_else(|e| e.into_inner()).remove(&hid).is_some() {
-                            warn!(handle = %hid, "gateway capability lease expired without heartbeat — retracting");
-                        }
-                        return;
-                    }
-                }
-            }
-        });
-        hb
-    });
+    let heartbeat = body["lease_secs"].as_u64().map(|secs| lease_watchdog(&ctx, &handle_id, secs));
 
     ctx.gateway_caps.lock().unwrap_or_else(|e| e.into_inner())
-        .insert(handle_id.clone(), GatewayCapHandle { _cancel: cancel_tx, heartbeat });
+        .insert(handle_id.clone(), GatewayCapHandle { _cancel: cancel_tx, heartbeat, _held: None });
 
     Json(json!({ "handle_id": handle_id })).into_response()
+}
+
+/// An opaque gateway handle id. One mint for every handle kind, so the replay inventory counts
+/// one nondeterministic site, not one per route.
+fn new_handle_id() -> String {
+    format!("{:x}", fastrand::u128(..))
+}
+
+/// The lease watchdog every gateway handle with `lease_secs` shares: a full window without a
+/// heartbeat removes the handle from `gateway_caps`, which retracts whatever it holds — exactly as
+/// `DELETE` would.
+fn lease_watchdog(ctx: &HttpCtx, handle_id: &str, secs: u64) -> Arc<Notify> {
+    let lease = Duration::from_secs(secs.max(1));
+    let hb = Arc::new(Notify::new());
+    let watchdog_hb = Arc::clone(&hb);
+    let caps = Arc::clone(&ctx.gateway_caps);
+    let hid = handle_id.to_string();
+    let mut wshutdown = ctx.shutdown_rx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = wshutdown.wait_for(|v| *v) => return,
+                beat = tokio::time::timeout(lease, watchdog_hb.notified()) => {
+                    if beat.is_ok() { continue; }
+                    if caps.lock().unwrap_or_else(|e| e.into_inner()).remove(&hid).is_some() {
+                        warn!(handle = %hid, "gateway capability lease expired without heartbeat — retracting");
+                    }
+                    return;
+                }
+            }
+        }
+    });
+    hb
+}
+
+/// `POST /gateway/units/declare` — an SDK agent's unit file (design-time-tooling.md Q2).
+///
+/// Body: `{"toml": "<the unit file>", "interval_secs"?: n, "lease_secs"?: n}`. The node parses and
+/// validates the file with its own loader — the SDKs carry text, never a second parser — then
+/// declares its `[[capability]]`, `[[requirement]]` and `[[group]]` sections under **one handle**
+/// that `DELETE /gateway/capability/{handle_id}` retracts and the heartbeat route renews (with
+/// `lease_secs`, a missed window retracts it). Refused by name: an unparsable or invalid file
+/// (400), and the hosting sections — `[hosts]`, `[[presence]]`, `[[activation]]` (422) — which are
+/// a stem's: an SDK agent hosts nothing. `[[lane]]`, `[[mandate]]` and `[[rule]]` are accepted as
+/// declarations and reported in `not_enforced`, as the stem reports them.
+async fn gw_units_declare(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body):  Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(text) = body["toml"].as_str() else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing toml"}))).into_response();
+    };
+    let units = match crate::NodeCapabilityConfig::from_toml_str(text) {
+        Ok(u) => u,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid unit file", "detail": e.to_string()}))).into_response(),
+    };
+    let mut hosting = Vec::new();
+    if units.hosts.is_some() { hosting.push("[hosts]"); }
+    if !units.presence.is_empty() { hosting.push("[[presence]]"); }
+    if !units.activations.is_empty() { hosting.push("[[activation]]"); }
+    if !hosting.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": "hosting sections",
+            "detail": format!("{} belong to a stem (mycelium-stem): an SDK agent hosts nothing", hosting.join(", ")),
+        }))).into_response();
+    }
+    // Convert everything before declaring anything: a refusal leaves nothing half-declared.
+    let filters = match units.requirements.iter().map(|r| r.to_filter()).collect::<Result<Vec<_>, _>>() {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid unit file", "detail": e}))).into_response(),
+    };
+    let defs = match units.groups.iter().map(|g| g.to_def().map(|d| (g.name.clone(), d))).collect::<Result<Vec<_>, _>>() {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid unit file", "detail": e}))).into_response(),
+    };
+    let interval = Duration::from_secs(body["interval_secs"].as_u64().unwrap_or(30).max(1));
+    let caps = crate::agent::CapabilitiesHandle { ctx: Arc::clone(&ctx.agent_ctx) };
+    let mut held: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
+    for c in &units.capabilities {
+        held.push(Box::new(caps.advertise_capability(c.build_capability_public(), Duration::from_secs(c.ttl_secs.max(1)))));
+    }
+    for f in filters {
+        held.push(Box::new(caps.declare_requirement(f, interval)));
+    }
+    for (name, def) in defs {
+        held.push(Box::new(caps.define_capability_group(name.as_str(), def, interval)));
+    }
+    let mut not_enforced = Vec::new();
+    if !units.lanes.is_empty() { not_enforced.push("[[lane]]"); }
+    if !units.mandates.is_empty() { not_enforced.push("[[mandate]]"); }
+    if !units.rules.is_empty() { not_enforced.push("[[rule]]"); }
+
+    let handle_id = new_handle_id();
+    let heartbeat = body["lease_secs"].as_u64().map(|secs| lease_watchdog(&ctx, &handle_id, secs));
+    let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
+    ctx.gateway_caps.lock().unwrap_or_else(|e| e.into_inner())
+        .insert(handle_id.clone(), GatewayCapHandle { _cancel: cancel_tx, heartbeat, _held: Some(Box::new(held)) });
+    Json(json!({
+        "handle_id": handle_id,
+        "principal": units.principal,
+        "declared": {
+            "capabilities": units.capabilities.len(),
+            "requirements": units.requirements.len(),
+            "groups": units.groups.len(),
+        },
+        "not_enforced": not_enforced,
+    })).into_response()
 }
 
 /// `POST /gateway/capability/{handle_id}/heartbeat`
@@ -4433,6 +4524,62 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// Q2: an SDK agent's unit file declared through the gateway — the node's own loader parses
+    /// it, capabilities, requirements and groups land under one handle, `DELETE` retracts them all,
+    /// and the hosting sections and a broken file are refused by name. Seen failing first: before
+    /// the route existed the POST answered 404.
+    #[tokio::test]
+    async fn test_gateway_units_declare_one_handle_for_a_whole_unit() {
+        let (agent, base, client) = start_test_agent().await;
+        let node = agent.node_id().to_string();
+        let unit = "principal = \"sdk-planner\"\n\
+            [[capability]]\nns = \"plan\"\nname = \"route\"\nttl_secs = 30\n  [capability.attrs]\n  region = \"north\"\n\
+            [[requirement]]\nns = \"data\"\nname = \"realtime\"\n  [requirement.attrs]\n  hz = { gte = 10 }\n\
+            [[group]]\nname = \"routers\"\n  [group.filter]\n  ns = \"plan\"\n  name = \"route\"\n\
+            [[lane]]\nname = \"plans\"\nrole = \"produces\"\n";
+        let resp = client.post(format!("{base}/gateway/units/declare"))
+            .json(&serde_json::json!({ "toml": unit, "interval_secs": 1 }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["principal"], "sdk-planner");
+        assert_eq!(body["declared"], serde_json::json!({"capabilities": 1, "requirements": 1, "groups": 1}));
+        assert_eq!(body["not_enforced"], serde_json::json!(["[[lane]]"]));
+        let handle_id = body["handle_id"].as_str().unwrap().to_string();
+
+        let cap_key = format!("cap/{node}/plan/route");
+        let req_key = format!("req/{node}/data/realtime");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while agent.kv().get(&cap_key).is_none() || agent.kv().get(&req_key).is_none() || agent.kv().get("cap-group/routers").is_none() {
+            assert!(std::time::Instant::now() < deadline, "the capability, the requirement and the group were declared");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // One handle retracts the whole unit.
+        let del = client.delete(format!("{base}/gateway/capability/{handle_id}")).send().await.unwrap();
+        assert_eq!(del.status(), 200);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while agent.kv().get(&cap_key).is_some() || agent.kv().get(&req_key).is_some() {
+            assert!(std::time::Instant::now() < deadline, "DELETE retracted the capability and the requirement");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Refusals, by name.
+        let r = client.post(format!("{base}/gateway/units/declare"))
+            .json(&serde_json::json!({ "toml": "[hosts]\nkinds = [\"blob\"]\n" })).send().await.unwrap();
+        assert_eq!(r.status(), 422);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "hosting sections");
+        let r = client.post(format!("{base}/gateway/units/declare"))
+            .json(&serde_json::json!({ "toml": "[[presence]]\nns = \"a\"\nname = \"b\"\nmin_providers = 0\n" })).send().await.unwrap();
+        assert_eq!(r.status(), 400, "validate() runs: a floor of zero is refused before the hosting check");
+        let r = client.post(format!("{base}/gateway/units/declare"))
+            .json(&serde_json::json!({ "toml": "not = [toml" })).send().await.unwrap();
+        assert_eq!(r.status(), 400);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "invalid unit file");
+
+        agent.shutdown().await;
+    }
+
     /// The complement: heartbeats within the window keep a leased advert alive
     /// past many lease periods, and a lease-less handle rejects heartbeats (409).
     #[tokio::test]
@@ -5151,6 +5298,7 @@ mod tests {
         assert_eq!(required_scope(&Method::GET,  "/gateway/bb/depth"), "board:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/tuple/take"), "tuple:write");
         assert_eq!(required_scope(&Method::POST, "/gateway/artifacts/publish"), "artifact:publish");
+        assert_eq!(required_scope(&Method::POST, "/gateway/units/declare"), "cap:write");
         // deny-by-default: anything unmapped requires admin — including an unlisted companion path.
         assert_eq!(required_scope(&Method::POST, "/gateway/some/future/route"), "admin");
         assert_eq!(required_scope(&Method::POST, "/gateway/wiki/some/future/verb"), "admin");

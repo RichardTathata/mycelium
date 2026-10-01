@@ -1,6 +1,7 @@
 from .agent import (
     MyceliumAgent,
     CapabilityHandle,
+    UnitHandle,
     Signal,
     DemandStatus,
     RpcRequest,
@@ -29,6 +30,7 @@ __all__ = [
     "MyceliumAgent",
     "ProtectedKindError",
     "CapabilityHandle",
+    "UnitHandle",
     "Signal",
     "DemandStatus",
     "RpcRequest",

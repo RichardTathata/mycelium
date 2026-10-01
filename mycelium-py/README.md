@@ -530,6 +530,7 @@ All methods talk to the embedded HTTP gateway on the Rust node:
 | `subscribe_log` | `GET /gateway/overlay/log/subscribe` | SSE stream |
 | `subscribe_log_group` | `GET /gateway/overlay/log/group/subscribe` | SSE stream |
 | `emit_reliable` | `POST /gateway/overlay/emit_reliable` | |
+| `declare_from` / `declare_units` | `POST /gateway/units/declare` | `cap:write` — a unit file's capabilities, requirements and groups under one handle (plan Q2) |
 | `artifacts().publish` | `POST /gateway/artifacts/publish` | `artifact:publish` — one already-signed catalogue line (plan A3) |
 | `federation().domain` | `GET /gateway/federation/domain` | `federation:read` |
 | `federation().partners` | `GET /gateway/federation/partners` | `federation:read` |

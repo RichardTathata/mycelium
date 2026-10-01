@@ -456,4 +456,5 @@ MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
 | `federation().catalog` | `GET /gateway/federation/catalog/{domain}` | last observation, no network |
 | `federation().connect` | `POST /gateway/federation/connect` | `federation:invoke` |
 | `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |
+| `declareUnits` | `POST /gateway/units/declare` | `cap:write` — a unit file's capabilities, requirements and groups under one handle (plan Q2) |
 | `artifacts().publish` | `POST /gateway/artifacts/publish` | `artifact:publish` — one already-signed catalogue line (plan A3) |

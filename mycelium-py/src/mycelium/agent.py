@@ -137,6 +137,16 @@ class CapabilityHandle:
 
 
 @dataclass
+class UnitHandle(CapabilityHandle):
+    """Returned by :meth:`MyceliumAgent.declare_units` / :meth:`MyceliumAgent.declare_from`: one
+    handle for a whole unit file's declarations. :meth:`drop` retracts them all."""
+
+    principal:    str | None = None
+    declared:     dict[str, int] = field(default_factory=dict)
+    not_enforced: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Signal:
     """A signal received from the mesh via :meth:`MyceliumAgent.on_signal`."""
 
@@ -424,6 +434,44 @@ class MyceliumAgent:
             handle_id = resp.json()["handle_id"]
 
         return CapabilityHandle(_agent=self, handle_id=handle_id)
+
+    # ── Unit files (design-time-tooling.md Q2) ──────────────────────────────
+
+    def declare_units(
+        self,
+        toml_text: str,
+        *,
+        interval_secs: int = 30,
+        lease_secs:    int | None = None,
+    ) -> "UnitHandle":
+        """Declare a unit file's capabilities, requirements and groups on the node, under one handle.
+
+        The node parses and validates the text with its own loader — the same file ``mycelium
+        wire-check`` reads — so this SDK carries text and never a second parser. Hosting sections
+        (``[hosts]``, ``[[presence]]``, ``[[activation]]``) are a stem's and are refused (422);
+        ``[[lane]]``, ``[[mandate]]`` and ``[[rule]]`` are accepted as declarations and reported in
+        :attr:`UnitHandle.not_enforced`. Drop the handle (or exit its context) to retract the whole
+        unit; with ``lease_secs``, call :meth:`UnitHandle.heartbeat` within every window.
+        """
+        body: dict[str, Any] = {"toml": toml_text, "interval_secs": interval_secs}
+        if lease_secs is not None:
+            body["lease_secs"] = lease_secs
+        with self._pool.sync() as c:
+            resp = c.post("/gateway/units/declare", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        return UnitHandle(
+            _agent=self,
+            handle_id=data["handle_id"],
+            principal=data.get("principal"),
+            declared=data.get("declared", {}),
+            not_enforced=list(data.get("not_enforced", [])),
+        )
+
+    def declare_from(self, path: str, **kwargs: Any) -> "UnitHandle":
+        """:meth:`declare_units` over the unit file at ``path``."""
+        with open(path, encoding="utf-8") as f:
+            return self.declare_units(f.read(), **kwargs)
 
     # ── Capability resolution ───────────────────────────────────────────────
 

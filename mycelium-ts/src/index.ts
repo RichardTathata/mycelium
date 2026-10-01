@@ -1,6 +1,7 @@
 export { MyceliumAgent, ProtectedKindError } from "./agent";
 export {
   CapabilityHandle,
+  UnitHandle,
   CommitResult,
   DemandStatus,
   LocalDurability,

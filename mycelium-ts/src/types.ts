@@ -152,3 +152,25 @@ export class CapabilityHandle {
     return this._drop();
   }
 }
+
+/** One handle for a whole unit file's declarations (`MyceliumAgent.declareUnits`, design-time-tooling.md Q2): `drop()` retracts them all. */
+export class UnitHandle extends CapabilityHandle {
+  readonly principal: string | null;
+  readonly declared: { capabilities: number; requirements: number; groups: number };
+  /** Sections accepted as declarations but not enforced at runtime (`[[lane]]`, `[[mandate]]`, `[[rule]]`). */
+  readonly notEnforced: string[];
+
+  constructor(
+    handleId: string,
+    drop: () => Promise<void>,
+    heartbeat: (() => Promise<void>) | undefined,
+    principal: string | null,
+    declared: { capabilities: number; requirements: number; groups: number },
+    notEnforced: string[],
+  ) {
+    super(handleId, drop, heartbeat);
+    this.principal = principal;
+    this.declared = declared;
+    this.notEnforced = notEnforced;
+  }
+}
