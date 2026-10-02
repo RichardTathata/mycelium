@@ -20,7 +20,7 @@ operator's working set.
 | `domain_profile` | `open` | `GOSSIP_DOMAIN_PROFILE` | `open` \| `enforced` — a federated domain runs `enforced` on every node (TLS required at `validate()`) |
 | `control_max_staleness_ms` | `30000` | `GOSSIP_CONTROL_MAX_STALENESS_MS` | ms — the governors' confidence bound: the stalest heard peer may be at most this old; loosen **on evidence** ([control-profiles.md](control-profiles.md) step 2); `validate()` refuses 0 |
 | `control_min_peers_heard` | `1` | `GOSSIP_CONTROL_MIN_PEERS_HEARD` | peers — the other half of the bound; `validate()` refuses 0 |
-| `gateway_named_tokens` | `[]` | `GOSSIP_GATEWAY_NAMED_TOKENS` | `name\|token\|scope,scope;…` — the named-token table ([rbac.md §1](rbac.md)); a malformed entry refuses the whole variable at startup |
+| `gateway_named_tokens` | `[]` | `GOSSIP_GATEWAY_NAMED_TOKENS` | `name\|token\|scope,scope;…` — the named-token table ([rbac.md §1](rbac.md)); a malformed entry refuses the whole variable at startup. **Enforced only in a `--features compliance` build** — any other build (the default `mycelium` binary, the demo images) refuses to start with the table set, rather than ignore it and run an open gateway (since the 2026-10-02 fix) |
 | `propagation_window_secs` | `60` | `GOSSIP_PROPAGATION_WINDOW_SECS` | s |
 | `default_ttl` | `5` | `GOSSIP_DEFAULT_TTL` | hops |
 | `max_active_connections` | `0` (unlimited) | `GOSSIP_MAX_ACTIVE_CONNECTIONS` | connections |

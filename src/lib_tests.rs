@@ -10203,3 +10203,39 @@ mod member_removal {
         let _ = std::fs::remove_dir_all(&cert_dir);
     }
 }
+
+/// A token table the build cannot enforce must refuse to start, never run an open gateway
+/// (doc-coverage run 18, 2026-10-02). Named and scoped tokens are honoured only under
+/// `compliance` (`gateway_auth`'s `have_scoped`); without it the table was parsed, validated and
+/// ignored, and a node with no positional token served every gateway route to an anonymous
+/// caller — the 2.10.0–2.12.0 open-gateway defect reached by a different build.
+#[cfg(all(feature = "gateway", not(feature = "compliance")))]
+#[tokio::test]
+async fn a_token_table_this_build_cannot_enforce_refuses_to_start() {
+    use crate::{GatewayNamedToken, GatewayToken};
+    for named in [true, false] {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(alloc_port());
+        if named {
+            cfg.gateway_named_tokens =
+                vec![GatewayNamedToken { name: "ops".into(), token: "s3cret".into(), scopes: vec!["*".into()] }];
+        } else {
+            cfg.gateway_scoped_tokens = vec![GatewayToken { token: "s3cret".into(), scopes: vec!["*".into()] }];
+        }
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        let started = agent.start().await;
+        let field = if named { "gateway_named_tokens" } else { "gateway_scoped_tokens" };
+        match started {
+            Err(GossipError::InvalidField { field: f, reason }) => {
+                assert_eq!(f, field);
+                assert!(reason.contains("compliance"), "the refusal names the missing feature: {reason}");
+            }
+            other => {
+                let _ = agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+                panic!("{field} set without `compliance` must refuse to start, got {other:?}");
+            }
+        }
+    }
+}

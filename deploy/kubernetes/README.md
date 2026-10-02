@@ -96,7 +96,9 @@ is the gate. Notably:
   restarted pod rejoins as a fresh node. For durable identity/state, add a PVC per the deployment
   guide's "persistent identity + WAL volume" note.
 - **No gateway auth / Ingress.** The gateway is cluster-internal only. Set `GOSSIP_GATEWAY_AUTH_TOKEN`
-  and front it with an Ingress + TLS if you expose it.
+  and front it with an Ingress + TLS if you expose it. Named or scoped tokens
+  (`GOSSIP_GATEWAY_NAMED_TOKENS`) need an image built with `--features compliance`; the demo image
+  is not, and refuses to start with the variable set ([rbac](../../docs/operations/rbac.md) §1).
 - **Fixed resource requests.** The `requests`/`limits` are placeholders; size them from
   [`tuning.md`](../../docs/operations/tuning.md) for your workload.
 
