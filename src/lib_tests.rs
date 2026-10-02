@@ -2927,15 +2927,21 @@ fn test_group_quorum_excludes_ex_member() {
     // is written to Layer I.
     agent.mesh().join_group("workers");
 
-    // Emit a signal — deliver() records the sender in the sender_log.
+    // Emit until the signal is admitted — deliver() records the sender in the sender_log.
     // (deliver() always updates sender_log before checking handler registration.)
-    let _ = agent.mesh().emit("heartbeat", SignalScope::Group("workers".into()), Bytes::new());
+    //
+    // Not once: local delivery is shed with probability equal to the gossip shards' fill
+    // (`deliver_locally`), and this agent is never started, so the frame `join_group`'s KV write
+    // queued is never drained — fill 1/1024, and about one run in a thousand shed the only signal
+    // (the v2.18.1 release gate, 2026-10-02: "raw quorum should be satisfied"). Shedding is the
+    // product's behaviour; what this test is about is which admitted senders `group_quorum` counts.
+    let admitted = (0..50).any(|_| {
+        let _ = agent.mesh().emit("heartbeat", SignalScope::Group("workers".into()), Bytes::new());
+        agent.mesh().quorum("heartbeat", 1, Duration::from_secs(60))
+    });
 
     // Raw quorum is satisfied (1 sender, 1 required).
-    assert!(
-        agent.mesh().quorum("heartbeat", 1, Duration::from_secs(60)),
-        "raw quorum should be satisfied"
-    );
+    assert!(admitted, "raw quorum should be satisfied");
     // group_quorum should also be satisfied while the node is still a member.
     assert!(
         agent.mesh().group_quorum("workers", "heartbeat", 1, Duration::from_secs(60)),
