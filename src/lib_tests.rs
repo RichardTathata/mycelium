@@ -7491,7 +7491,16 @@ mod federation_transport {
         for n in [&b1, &b2] {
             assert!(n.consensus().consensus_get("fed/alpha-after").is_none() && n.consensus().consensus_get("fed/alpha").is_none());
         }
-        assert_eq!(gw2.peers().len(), 2, "the replacement gateway peers with its own mesh only");
+        // Its own mesh only: every peer is a domain-A node. The count waits for the failure detector —
+        // gw2 joined after gw1 was shut down, and can learn the dead gateway from a1/a2 by peer
+        // exchange before its eviction has propagated (PR #470's CI, 2026-10-02: left 3, right 2,
+        // with `assert_never_merged` above passing — the third peer was the dead gw-1, not a B node).
+        let a_side: Vec<String> = [a1.node_id(), a2.node_id(), gw1.node_id()].iter().map(|n| n.to_string()).collect();
+        for p in gw2.peers() {
+            assert!(a_side.iter().any(|a| a == &p.to_string()), "gw2 peers only with domain A: {p} is not an A node");
+        }
+        poll_until(|| gw2.peers().len() == 2, 30_000).await;
+        assert_eq!(gw2.peers().len(), 2, "the replacement gateway peers with its own mesh only, once the dead gateway is evicted");
 
         // ── 9. A plant on admission itself: a node holding B's CA cannot join A. ─────────────
         // Timing-bounded negative (it asserts something did *not* happen within a window), kept

@@ -14,3 +14,11 @@ of the suites found no other test with the pattern.
 
 **Noted, not changed:** shedding is proportional with no floor, so an idle node with one queued frame sheds
 ~0.1% of local non-`Individual` signals. Whether a small threshold belongs there is a design question.
+
+**A second one, found by this PR's own CI.** `the_release_gates_choreography_over_the_transport` asserted
+`gw2.peers().len() == 2` immediately after `assert_never_merged` passed, with no wait: gw2 joins after gw1
+is shut down and can learn the dead gateway from a1/a2 by peer exchange before the failure detector has
+evicted it — left 3, right 2, the third an A node. The assertion now checks every peer is a domain-A node
+(the claim), then waits up to 30 s for the eviction before the exact count. Same lesson as the
+lock-acquire flakes in [testing](../testing/testing.md): a count asserted without a structural poll is a
+timing assumption.
