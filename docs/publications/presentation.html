@@ -206,7 +206,7 @@
         <strong style="color:var(--text)">The engineer's deck — one coordinator-free fabric, every interaction pattern, not just RPC.</strong>
       </div>
       <div class="badges">
-        <span class="badge"><span class="dot dot-g"></span>5 crates tested · 13/13 scenarios passing</span>
+        <span class="badge"><span class="dot dot-g"></span>13 crates CI-tested · 13/13 scenarios passing</span>
         <span class="badge"><span class="dot dot-b"></span>Wire v12 · Ed25519 signed</span>
         <span class="badge"><span class="dot dot-p"></span>A2A · MCP · Prompt Skills · Python · TypeScript</span>
         <span class="badge"><span class="dot dot-m"></span>NANDA-federable</span>
@@ -856,8 +856,8 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
       <div>
         <div class="code-block" style="font-size:11px;">
 <span class="cm">// Publish once — gossips to every node, no registry to run</span>
-<span class="ck">let</span> entry = InstallableEntry::new(ns, name, artifact_id)
-  .<span class="cs">provides</span>([<span class="cv">"tool/translate"</span>]).<span class="cs">signed_by</span>(&amp;key);
+<span class="ck">let</span> entry = InstallableEntry::new(Capability::new(<span class="cv">"tool"</span>, <span class="cv">"translate"</span>), artifact_id)
+  .<span class="cs">signed_by</span>(&amp;key);
 <span class="cs">publish_installable</span>(&amp;agent.<span class="cs">kv</span>(), &amp;entry);
 
 <span class="cm">// A node missing a requirement self-provisions:</span>
@@ -866,7 +866,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
 <span class="cm">// Restart ≡ provisioning. Failure ≡ a fresh resolve.</span>
         </div>
         <div class="callout callout-orange" style="margin-top:10px;font-size:12px;">
-          <strong>Federation, shipped.</strong> Across domains a node publishes self-certified <strong>AgentFacts</strong> — a NANDA-shaped, Ed25519-signed quilt-patch — plus a CRDT-assembled domain view: sovereign discovery with no issuer authority. The internet-scale tier is no longer a future box on the stack.
+          <strong>Federation, shipped.</strong> Across domains a node publishes self-certified <strong>AgentFacts</strong> — a NANDA-shaped, Ed25519-signed quilt-patch — plus a CRDT-assembled domain view: sovereign discovery with no issuer authority. The internet-scale tier is no longer a future box on the stack. <strong>Declared, shipped (v2.17.0–v2.18.0).</strong> A unit file per deployable says what it offers, needs, hosts and may do; <code>mycelium wire-check</code> runs the mesh's matching rule over the whole declared fleet offline (JSON against a pinned schema); the stem node <code>mycelium-stem</code> runs the file as written — placement, <code>[[activation]]</code> after placement, <code>[[serve]]</code> while the install is live. Agent-published entries run under a per-publisher fuel budget and load only into a shadow lane until a listed reviewer accepts them. Every artifact-shaped co-op demo runs as stems in CI, three against a real model in Ollama. <em>Not claimed:</em> an activation command runs with the stem's privileges, not in a sandbox; models from S3/GCS are not shown (S3 emulator only, no real bucket, and a stem cannot yet read an object store).
         </div>
       </div>
     </div>
@@ -898,7 +898,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
       <div class="card-body">An election needs an <strong>electorate</strong>: a group whose roster a node cannot see is <em>refused</em>, never decided alone — <em>"I cannot see members"</em> must not become <em>"I may decide alone"</em>. The answer then <strong>names the rung it reached</strong> (<code>Decided</code>, a quorum chose this value at this ballot, bound to it by digest · <code>Observed</code>, this is what my replica says) and carries a <strong>fencing token</strong>. Underneath, votes are bound to the proposal they voted for, a node casts one vote per ballot in either role, a higher ballot adopts what was already accepted, and that memory survives a restart.<br><br><em>And the limit, said out loud:</em> no coordinator-free protocol can promise a leadership that stays true. LWW decides which <em>record</em> survives; it cannot undo work two callers each performed after being told they had won. Exclusivity is enforced <strong>at the resource</strong>, by refusing a stale token — never by a call returning success.</div>
     </div>
     <div class="callout callout-orange" style="margin-top:10px;font-size:12px;">
-      <strong>Labelled honestly.</strong> Every claim on this slide is <em>shipped under a tag</em> and carries a runnable demonstration that names what it does <em>not</em> establish — and several found real defects before release, including one whose own first explanation was wrong and had to be retracted. The gateway authorisation seam, its evidence journal and a reference policy engine ship here; a <strong>Cedar policy adapter and the signed evidence exporter are implemented</strong> in the private companion, pinned to this release, and their <strong>combined deployment acceptance is outstanding</strong> — the joint runs with the oversight consumer on both clouds have not happened, and a local fixture does not stand in for them.
+      <strong>Labelled honestly.</strong> Every claim on this slide is <em>shipped under a tag</em> and carries a runnable demonstration that names what it does <em>not</em> establish — and several found real defects before release, including one whose own first explanation was wrong and had to be retracted. The gateway authorisation seam, its evidence journal and a reference policy engine ship here, in a build with the <code>compliance</code> feature; a <strong>Cedar policy adapter and the signed evidence exporter are implemented</strong> in the private companion, pinned to this release, and their <strong>combined deployment acceptance is outstanding</strong> — the joint runs with the oversight consumer on both clouds have not happened, and a local fixture does not stand in for them.
     </div>
   </div>
 </div>
@@ -1126,7 +1126,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div class="card card-accent-green">
           <div class="card-title">CI-gated cross-node suites · 13 integration + 3 overlay scenarios</div>
-          <div class="card-body">Lib tests across the full feature matrix and the workspace crates (core, full, tuple-space, blackboard, AgentFacts, WASM-host, wiki), plus the multi-container Docker suites — <strong>now CI-gated, no retries</strong>: a real regression turns the gate red. Wiring them in is what surfaced (and fixed, each with a permanent gate) real defects the in-process tests couldn't reach — the discipline is honesty, not green-by-retry. Time-boxed libFuzzer runs cover the wire/capability decoders.</div>
+          <div class="card-body">Lib tests across the full feature matrix and the workspace crates (core, full, sim, tuple-space, blackboard, wiki, AgentFacts, WASM-host, reason, guardrails, effects, commitment, co-op), plus the multi-container Docker suites — <strong>now CI-gated, no retries</strong>: a real regression turns the gate red. Wiring them in is what surfaced (and fixed, each with a permanent gate) real defects the in-process tests couldn't reach — the discipline is honesty, not green-by-retry. Time-boxed libFuzzer runs cover the wire/capability decoders.</div>
         </div>
         <div class="card card-accent-blue">
           <div class="card-title">Wire version policy</div>
@@ -1142,7 +1142,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
         </div>
         <div class="card card-accent-green">
           <div class="card-title">v1.x compliance layer (<code>compliance</code> feature)</div>
-          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. The Production Readiness Gap, closed. <strong>v2.3 closes the SOC 2 audit gaps:</strong> native <strong>gateway TLS</strong>, <strong>audit export</strong> (<code>AuditSink</code>) with retention checkpointing, <strong>authenticated identity</strong> (CA-anchored, proof-chained rotation — a forged <code>sys/identity</code> write is rejected, not just detected), operator <strong>key revocation</strong>, and <strong>GDPR crypto-shred</strong> erasure (destroy the key, the data is cryptographically dead fleet-wide).</div>
+          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. The Production Readiness Gap, closed. <strong>v2.3 closes the SOC 2 audit gaps:</strong> native <strong>gateway TLS</strong>, <strong>audit export</strong> (<code>AuditSink</code>) with retention checkpointing, <strong>authenticated identity</strong> (CA-anchored, proof-chained rotation — with <code>require_identity_proofs</code> on — it is default-off — a forged <code>sys/identity</code> write is rejected, not just detected), operator <strong>key revocation</strong>, and <strong>GDPR crypto-shred</strong> erasure (destroy the key, the data is cryptographically dead fleet-wide).</div>
         </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;">
@@ -1171,8 +1171,8 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
 <div class="slide" id="sCoop">
   <div class="slide-top"><span class="eyebrow">Showcase</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
-    <div class="slide-title">One world. <em>Fourteen demos.</em></div>
-    <div class="slide-sub">The <strong>Food-Rescue Co-op</strong> (<code>examples/coop/</code>) — depot nodes rescuing surplus food, no central dispatcher. Not isolated API toys: one runnable demo per capability area, composed in a single constructive world, each calling out a pattern &amp; pitfall. Twelve run Docker-free and CI-gated (<code>coop-smoke</code>); two are manual real-model deploys.</div>
+    <div class="slide-title">One world. <em>Fifteen demos.</em></div>
+    <div class="slide-sub">The <strong>Food-Rescue Co-op</strong> (<code>examples/coop/</code>) — depot nodes rescuing surplus food, no central dispatcher. Not isolated API toys: one runnable demo per capability area, composed in a single constructive world, each calling out a pattern &amp; pitfall. Thirteen run Docker-free and CI-gated (<code>coop-smoke</code>); the two real-model deploys run by hand from code and, since v2.18.0, in CI as stem nodes against a real model in Ollama (<code>stem-examples</code>).</div>
     <div class="cols3" style="gap:12px;">
       <div class="card card-accent-blue" style="padding:14px 16px;">
         <div class="card-title">Self-organising fabric</div>
@@ -1188,7 +1188,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
       </div>
     </div>
     <div class="callout callout-green" style="font-size:12.5px;">
-      <strong>Why one world, not fourteen toys.</strong> Executing the suite — and the CI gate that now runs it — is how the fabric is hardened in anger: it has surfaced and fixed, each with a permanent regression gate, the governor-vs-auto-join race, the retained-key gap, the cross-node Individual-signal relay, a consumer-group split-brain, and — most tellingly — two <em>Critical</em> bugs in the distributed lock (no mutual exclusion; unreleasable) that reading the code never caught. The examples don't just <em>demonstrate</em> the substrate; they <em>exercise</em> it. <code>cargo run -p mycelium-coop-examples --features wasm --bin provisioning</code>
+      <strong>Why one world, not fifteen toys.</strong> Executing the suite — and the CI gate that now runs it — is how the fabric is hardened in anger: it has surfaced and fixed, each with a permanent regression gate, the governor-vs-auto-join race, the retained-key gap, the cross-node Individual-signal relay, a consumer-group split-brain, and — most tellingly — two <em>Critical</em> bugs in the distributed lock (no mutual exclusion; unreleasable) that reading the code never caught. The examples don't just <em>demonstrate</em> the substrate; they <em>exercise</em> it. <code>cargo run -p mycelium-coop-examples --features wasm --bin provisioning</code>
     </div>
   </div>
 </div>
@@ -1241,7 +1241,7 @@ MOCK_LLM=1 cargo run \
 
     </div>
     <div class="callout callout-blue" style="margin-top:14px;">
-      These are the <strong>protocol / interop</strong> demos. The <strong>capability tour</strong> is the fourteen-demo <a style="color:var(--accent);">Food-Rescue Co-op</a> (previous slide); the companion crates ship their own — the tuple-space <code>fluid_pipeline</code> and the blackboard <code>microgrid</code>. Plus <code>examples/</code>: Conway's Life on the GPU, semantic coordination (FIPA-ACL), cross-group consensus.
+      These are the <strong>protocol / interop</strong> demos. The <strong>capability tour</strong> is the fifteen-demo <a style="color:var(--accent);">Food-Rescue Co-op</a> (previous slide); the companion crates ship their own — the tuple-space <code>fluid_pipeline</code> and the blackboard <code>microgrid</code>. Plus <code>examples/</code>: Conway's Life on the GPU, semantic coordination (FIPA-ACL), cross-group consensus.
     </div>
     <div class="callout callout-green" style="margin-top:8px;">
       <strong>Want to <em>watch</em> it?</strong> Browser showcases render the running mesh live — a <code>/state</code> feed behind an HTML canvas: <code>conway</code> (Game of Life over gossip · <code>:8090</code>) · <code>microgrid_viz</code> (energy co-op, exactly-once · <code>:8091</code>) · <code>stigmergy_viz</code> (pheromone reroute · <code>:8092</code>) · <code>redistribution_viz</code> (pipeline flow · <code>:8093</code>) · <code>llm_council_viz</code> (fan-out · synthesis · refinement · <code>:8094</code>, no LLM key) · <code>wiki_council_viz</code> (live chat over a fleet of wiki-grounded specialists, each phrasing via a <strong>local model served on the mesh</strong> — Ollama, no cloud/key · <code>:8095</code>) · <code>guardrail_viz</code> (watch an agent <strong>structurally stopped</strong> at a Tier-C gate, with the tamper-evident denial proof · <code>:8096</code>). Open <code>http://127.0.0.1:80xx/</code>. See <code>examples/README.md</code>.
@@ -1290,7 +1290,7 @@ docker compose up --build --scale worker=10
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div class="card card-accent-green">
           <div class="card-title">Developer guide</div>
-          <div class="card-body"><code>docs/guide/README.md</code> — 17 chapters (00–16) covering every pattern from basic KV through Agentic Flow Networks, cross-group consensus, and the distributed lock service. Runnable examples throughout.</div>
+          <div class="card-body"><code>docs/guide/README.md</code> — 25 chapters (00–24) covering every pattern from basic KV through Agentic Flow Networks, cross-group consensus and the distributed lock service, to federation, receipts, replay, authorising actions, mandates and commitments. Runnable examples throughout.</div>
         </div>
         <div class="card card-accent-blue">
           <div class="card-title">Integration scenarios</div>
@@ -1314,11 +1314,11 @@ docker compose up --build --scale worker=10
   <div class="slide-top"><span class="eyebrow">What Is Proven</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title">Proven, demonstrated, <em>not yet shown.</em></div>
-    <div class="slide-sub">Three lists, kept on one dated page in the repository (<code>docs/operations/what-is-proven.md</code>, refreshed at every release). This slide is the page as of 2026-09-28.</div>
+    <div class="slide-sub">Three lists, kept on one dated page in the repository (<code>docs/operations/what-is-proven.md</code>, refreshed at every release). This slide is the page as of 2026-10-01 (v2.18.0).</div>
     <div class="cols3">
-      <div class="card card-accent-green"><div class="card-title">Proven in CI, every merge</div><div class="card-body">The authority bypass matrix (every door runs nothing after a revocation, by the handlers' own counters) · golden on-disk persistence fixtures replayed · the deterministic-replay corpus · the fails-first regression floor · twelve fuzz targets with a reachability registry · the co-op and AFN smokes · the Docker cluster suites (4-node, 3-node, two-mesh, confined fleet) with no retries.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Proven in CI, every merge</div><div class="card-body">The authority bypass matrix (every door runs nothing after a revocation, by the handlers' own counters; a <code>compliance</code> + <code>a2a</code> build) · a composed effect refused at the destination unless attributed and authorised · the declared fleet checked offline and every artifact-shaped co-op demo run as stem nodes, three against a real model in Ollama · agent-published code stopped at its fuel budget and held in the shadow lane until a reviewer accepts it · golden on-disk persistence fixtures replayed · the deterministic-replay corpus · the fails-first regression floor · twelve fuzz targets with a reachability registry · the co-op and AFN smokes · the Docker cluster suites (4-node, 3-node, two-mesh, confined fleet) with no retries.</div></div>
       <div class="card card-accent-blue"><div class="card-title">Demonstrated, bound stated</div><div class="card-body">Running work stops within its class's measured bound when authority lapses (<code>authority_drain</code>) · the ten-council git contention run · 100-node formation and convergence when the scale suite runs · a two-mesh federation that does not merge with the link cut · four CLI demonstrations that found real defects before release.</div></div>
-      <div class="card card-accent-orange"><div class="card-title">Not yet shown</div><div class="card-body">No named third-party production deployment. The nightly scale runner: the hosted job has no runner; the local runner's last rows failed on the environment. Performance: hot-path micro-benchmarks on one machine only, no end-to-end figure under load. The four joint AWS/GCP runs with the oversight consumer. Models pulled from S3 or GCS. The self-audit floor at 7/7/7 for the same three dimensions across many runs, with a 48-entry ledger of scores later proven wrong.</div></div>
+      <div class="card card-accent-orange"><div class="card-title">Not yet shown</div><div class="card-body">No named third-party production deployment. The nightly scale runner: the hosted job has no runner; the local runner's last rows failed on the environment. Performance: hot-path micro-benchmarks on one machine only, no end-to-end figure under load. The four joint AWS/GCP runs with the oversight consumer. Models pulled from S3 or GCS (an S3 emulator only; no real bucket). <code>llm_agent</code>'s MCP tools as stems. The declaration rendered by the oversight consumer. The self-audit floor at 7/7/7 for the same three dimensions across many runs, with a 48-entry ledger of scores later proven wrong.</div></div>
     </div>
     <div class="callout callout-orange"><strong>Why say it here.</strong> The gaps are each stated honestly elsewhere in the repository; a reviewer assembling them from six places assembles them against us. One page, one slide, one date.</div>
   </div>
@@ -1560,7 +1560,7 @@ agent.<span class="cs">consensus</span>().<span class="cs">cross_group_propose</
         </div>
         <div class="card card-accent-red">
           <div class="card-title">Signed KV writes</div>
-          <div class="card-body"><code>WireMessage::SignedData</code> — Ed25519 signature over key, value, timestamp, tombstone flag, and sender. A compromised node cannot inject false KV entries.</div>
+          <div class="card-body"><code>WireMessage::SignedData</code> — Ed25519 signature over key, value, timestamp, tombstone flag, and sender. A frame altered in transit, or a write claimed under a key the writer does not hold, fails verification and is dropped. A compromised node can still sign false entries under its own key — this is crash-fault tolerance with attribution, not Byzantine tolerance.</div>
         </div>
         <div class="card card-accent-green">
           <div class="card-title">Compliance layer <code style="font-size:10px;">--features compliance</code></div>

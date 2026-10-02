@@ -312,7 +312,7 @@ The critical word is *emergent*. The higher coordination layer is not designed i
 |---|---|---|
 | Village / small community | Informal gossip, reputation, voluntary reciprocity. No formal institutions needed at Dunbar-scale (~150). Local knowledge is sufficient for all decisions. | Layers I + II — gossip KV, signal mesh, capability resolution. Sufficient for small-to-medium clusters. No consensus invocation required. |
 | City / region | Emergent specialisation: guilds, councils, courts. Roles differentiate as the scale of interaction exceeds any individual's knowledge. Coordination is still local by domain — the trade council handles trade, the water board handles water. | Emergent capability groups, wiring, demand pressure. Specialised nodes form functional coalitions. Capability discovery handles routing without a central registry. |
-| Nation / federation | Federal institutions handling cross-boundary coordination problems that local governance cannot resolve alone. Invoked for the specific class of problems requiring collective binding commitment. Local governance remains primary. | Layer III — consensus, distributed locks, leader election. Invoked for operations requiring linearisable cross-node agreement. Opt-in. Does not replace Layers I and II; handles only what they cannot. |
+| Nation / federation | Federal institutions handling cross-boundary coordination problems that local governance cannot resolve alone. Invoked for the specific class of problems requiring collective binding commitment. Local governance remains primary. | Layer III — consensus, distributed locks, leader election. Invoked for operations requiring quorum-agreed cross-node agreement. Opt-in. Does not replace Layers I and II; handles only what they cannot. |
 
 ### Ostrom and polycentric governance
 
@@ -343,7 +343,7 @@ Mancur Olson worked out the mechanism for why this expansion happens in *The Log
 
 Together, Ostrom and Olson define the complete design problem. Building a coordinator-free substrate with correct emergent governance (Ostrom's prescription) is necessary but not sufficient. The capture-resistance of the Layer III coordination mechanisms — whether their control can be acquired cheaply by concentrated interests — determines whether the design survives contact with Olson dynamics at scale.
 
-> The subsidiarity principle is the ongoing corrective: **continuously ask whether the higher layer is invoked because it is genuinely necessary, or because it has become self-perpetuating.** In Mycelium this is structural: Layer III is opt-in and stateless between operations. It cannot expand to claim the substrate because the substrate does not depend on it. The architecture enforces subsidiarity by construction.
+> The subsidiarity principle is the ongoing corrective: **continuously ask whether the higher layer is invoked because it is genuinely necessary, or because it has become self-perpetuating.** In Mycelium this is structural: Layer III is opt-in and holds no standing authority over the substrate between operations (its acceptors remember what they voted, durably since v2.14.0, so a restart cannot re-vote a ballot — memory, not authority). It cannot expand to claim the substrate because the substrate does not depend on it. The architecture enforces subsidiarity by construction.
 
 ### The mandate TTL principle — Rojava and Democratic Confederalism
 
@@ -355,7 +355,7 @@ Abdullah Öcalan applied Bookchin's framework to create **Democratic Confederali
 
 The insight this adds to the Ostrom/Olson picture: Olson dynamics operate on coordination mechanisms from the *outside* (concentrated interests capturing the mechanism). The incumbency accumulation problem operates from the *inside* (role occupants capturing the mechanism through tenure). The mandate TTL is the structural response to the inside problem. It bounds the informational, relational, and normative advantages that incumbency accumulates, resetting each of them at every dissolution.
 
-In Mycelium, this principle is implemented structurally rather than by social convention. A `leader_election` result is a gossip KV entry with a TTL. When the TTL expires, the role dissolves and the substrate returns to the same state as before the election. No persistent coordination authority exists between operations. The next election starts fresh. No agent can accumulate incumbency in a role whose existence is bounded by a KV TTL that no single agent controls. Rojava provides the governance proof-of-concept; Mycelium's stateless Layer III encodes it as a technical invariant.
+In Mycelium, this principle is available structurally rather than by social convention. With epoch-leased commitments (`ConsensusConfig::committed_lease_secs`), a leader-election result carries a lease; when it expires, the role dissolves and the slot reopens. The next election starts fresh — renewal is a fresh quorum round, not a renewal RPC. No agent can accumulate incumbency in a role whose existence is bounded by a lease that no single agent controls. The lease is opt-in: a commitment is permanent unless it is set, and the decaying posture is the one this document recommends rather than the default. Rojava provides the governance proof-of-concept; Mycelium's leased Layer III encodes it as a technical mechanism.
 
 ### Epistemic symmetry and the coordination class
 

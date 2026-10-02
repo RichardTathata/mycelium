@@ -39,7 +39,7 @@ model weights). An earlier version of this line said twelve while `ci_smoke.sh` 
 the count is now checked against the script, not remembered. Everything shares the [repo setup](../README.md#shared-setup); then:
 
 ```bash
-./ci_smoke.sh          # the twelve CI demos, in order, with assertions (also the CI job)
+./ci_smoke.sh          # the thirteen CI demos, in order, with assertions (also the CI job)
 # or any single demo:
 cargo run -p mycelium-coop-examples --bin stigmergy
 ```

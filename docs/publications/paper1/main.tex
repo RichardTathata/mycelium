@@ -639,7 +639,7 @@ routing table.
 \subsection{Layer~III --- Consensus: Addressing the Coordinator Bottleneck}
 
 Layer~III provides epidemic consensus---\texttt{group\_propose},
-\texttt{system\_propose}, and \texttt{cross\_group\_propose}---implemented entirely
+\texttt{cluster\_propose} (formerly \texttt{system\_propose}, kept as a deprecated alias), and \texttt{cross\_group\_propose}---implemented entirely
 through the signal mesh. \texttt{PROPOSE}, \texttt{VOTE}, and \texttt{COMMIT} are
 signal payloads riding ordinary Layer~II frames. The substrate is unaware that
 consensus is happening.
@@ -993,16 +993,15 @@ composition above the substrate, not a matching engine inside it.
   agents may freely \emph{read} a posted surplus-solar fact and update their
   forecasts and prices---but when a ``store 3\,kWh from feeder~4'' task
   appears and two battery agents both match it, exactly one must win it: the
-  energy exists once. Reading is concurrent; acting is exactly-once.) (Concretely: in an incident-response scratchpad, any number of
-  diagnostic agents may freely \emph{read} a posted alert and add
-  observations---but when a ``roll back the deploy'' task appears and two
-  executor agents both match it, exactly one must win it. Reading is
-  concurrent; acting is exactly-once.) Building that as a companion crate---on the public API, with
+  energy exists once. Reading is concurrent; acting is exactly-once.) Building that as a companion crate---on the public API, with
   the tuple space's durability discipline---would extend the Section~8
   constructive proof to the workload class at the lane model's boundary, and
   to exactly the pattern agent frameworks are rebuilding ad
-  hoc~\cite{carvalho}. This is design-sketch stage in the repository, not yet
-  implemented.
+  hoc~\cite{carvalho}. This has since shipped as the \texttt{mycelium-blackboard}
+  companion crate (v2.0; public API only, with the tuple space's WAL
+  claim/ack/requeue discipline and the community-microgrid worked example);
+  what remains future work is the \emph{comparison}---the blackboard as a
+  measured second arm, not its construction.
 \end{itemize}
 
 % ─────────────────────────────────────────────────────────────────────────────
