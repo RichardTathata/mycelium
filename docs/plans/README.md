@@ -68,8 +68,8 @@ record, not duplicates of those.
 > configured · not in this build · not verifiable here*, and a node under a named profile refusing to start when one
 > it requires cannot be met (the 360 review's top recommendation; F1, a token table the build could not enforce, was
 > one instance). And a **rule catalogue with bounded decision tracing**, piloted on stem provisioning, that must
-> change no decision it records. The inventory comes first because writing a guarantee's row — its feature, its
-> setting, its enforcement point, what checks it at start — is what finds the next F1.
+> change no decision it records. The inventory comes first because auditing a guarantee's row — its feature, its
+> setting, its enforcement point, what checks it at start — is how the next F1 can be exposed.
 >
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).
