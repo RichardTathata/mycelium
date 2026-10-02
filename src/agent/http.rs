@@ -516,12 +516,6 @@ async fn gateway_auth(
         ).into_response();
     };
 
-    // Closure plan C1, the compatibility window: a token issued before `mesh:serve` existed served
-    // with `mesh:read` and responded with `mesh:write`. For one release it is still admitted to the
-    // serve routes, and told, once per request, that it should be reissued with `mesh:serve`.
-    #[cfg(feature = "compliance")]
-    let scopes = legacy_mesh_serve(scopes, required_scope_for_route);
-
     #[cfg(feature = "compliance")]
     if !scope_admits(&scopes, required_scope_for_route) {
         return (
@@ -675,20 +669,6 @@ fn resolve_token(cfg: &crate::config::GossipConfig, issuer: &str, presented: &st
     None
 }
 
-/// The `mesh:serve` compatibility window (closure plan C1). A token that lacks `mesh:serve` but holds
-/// `mesh:read` or `mesh:write` is admitted to the serve routes for one release, with a warning.
-#[cfg(feature = "compliance")]
-fn legacy_mesh_serve(mut scopes: Vec<String>, required: &str) -> Vec<String> {
-    if required == "mesh:serve"
-        && !scope_admits(&scopes, "mesh:serve")
-        && scopes.iter().any(|s| s == "mesh:read" || s == "mesh:write")
-    {
-        warn!("gateway: a token without `mesh:serve` used a serve route; admitted for one release — reissue it with `mesh:serve` (and without `mesh:write` if it only serves)");
-        scopes.push("mesh:serve".to_string());
-    }
-    scopes
-}
-
 /// True if `scopes` grants `required` (exact match or the `"*"` wildcard).
 #[cfg(feature = "compliance")]
 fn scope_admits(scopes: &[String], required: &str) -> bool {
@@ -723,7 +703,8 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/demand"          => "mesh:read",
         "/gateway/rpc/call"        => "mesh:write",
         // Closure plan C1: serving is its own scope, so an agent that serves skills needs no power
-        // to *call* (`mesh:write` also opens `rpc/call`). See `legacy_mesh_serve`.
+        // to *call* (`mesh:write` also opens `rpc/call`). The 2.15.0 window that admitted `mesh:read`/
+        // `mesh:write` here is closed (2.19.0).
         "/gateway/rpc/serve/{kind}" => "mesh:serve",
         "/gateway/rpc/respond"     => "mesh:serve",
         "/gateway/scatter"         => "mesh:write",
@@ -5606,9 +5587,8 @@ mod tests {
     }
 
     /// **Closure plan C1, the scope split.** `mesh:serve` serves and responds, and cannot call; a
-    /// `mesh:write` token is refused on the serve routes unless the compatibility window admits it,
-    /// which it does, for one release, for a token holding `mesh:read` or `mesh:write`. A token with
-    /// neither is refused.
+    /// `mesh:write` or `mesh:read` token is refused on the serve routes — the one-release
+    /// compatibility window from 2.15.0 is closed. A token with neither is refused too.
     #[cfg(feature = "compliance")]
     #[tokio::test]
     async fn mesh_serve_serves_and_responds_but_cannot_call() {
@@ -5646,10 +5626,14 @@ mod tests {
         let v: serde_json::Value = r.json().await.unwrap();
         assert_eq!(v["required_scope"], "mesh:write");
 
+        // The compatibility window (one release from 2.15.0) is closed: a token without `mesh:serve`
+        // is refused on the serve routes, naming the scope (360 review, 2026-10-02 — the window
+        // had outlived its promise by three releases).
         let r = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer legacy-tok")
             .send().await.unwrap();
-        assert_eq!(r.status(), 200, "the compatibility window admits a mesh:read token to serve");
-        drop(r);
+        assert_eq!(r.status(), 403, "a mesh:read token no longer serves");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["required_scope"], "mesh:serve");
         let r = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer kv-tok")
             .send().await.unwrap();
         assert_eq!(r.status(), 403, "a token with no mesh scope is refused");

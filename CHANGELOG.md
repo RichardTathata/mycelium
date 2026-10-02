@@ -9,6 +9,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The `mesh:serve` compatibility window is closed.** Closure plan C1 (2.15.0) admitted a `mesh:read` or
+  `mesh:write` token on the serve routes "for one release", with a warning; the window stayed open through
+  2.18.x (an independent review found the promise three releases overdue). Such a token now answers
+  `403 {"required_scope": "mesh:serve"}`. **Upgrade note:** reissue every serving client's token with
+  `mesh:serve`; the gateway log's warning since 2.15.0 named the ones still relying on the window.
+
 ---
 
 ## [2.18.1] — 2026-10-02

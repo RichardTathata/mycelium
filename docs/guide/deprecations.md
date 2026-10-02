@@ -198,12 +198,13 @@ against an active attacker**, because an absent binding is indistinguishable fro
 Turn it on once every partner has upgraded. `BodyNotBound` means upgrade the partner;
 `BodyMismatch` means someone is on the path.
 
-## 11. `mesh:read` / `mesh:write` admitted on the serve routes — one release (2.15.0)
+## 11. `mesh:read` / `mesh:write` admitted on the serve routes — one release (2.15.0) — **removed in 2.19.0**
 
 **What changes.** Registering to serve an RPC kind — `POST /gateway/rpc/serve/{kind}` and
-`/gateway/rpc/respond` — requires the new scope **`mesh:serve`**. In 2.15.x a token holding
-`mesh:read` or `mesh:write` is still admitted there, **with a warning in the gateway log**; the
-next MINOR refuses it with `403 {"required_scope": "mesh:serve"}`.
+`/gateway/rpc/respond` — requires the new scope **`mesh:serve`**. From 2.15.0 a token holding
+`mesh:read` or `mesh:write` was still admitted there, **with a warning in the gateway log**. The
+window was promised for one release and stayed open through 2.18.x; **2.19.0 closes it** — such a
+token now gets `403 {"required_scope": "mesh:serve"}`.
 
 **Why.** Serving and calling were one scope, so a token that could serve could also reach the
 raw call routes; separating them is what lets a skill server hold *only* `mesh:serve` (closure plan
