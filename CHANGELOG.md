@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **wasmtime 49.0.2 (RUSTSEC-2026-0325, -0326, -0327).** Three advisories published 2026-10-02 against the
+  49.0.1 the lock held, one of them GC-heap corruption from missing rooting across `try_call` (medium,
+  5.7). The WASM host is the boundary where third-party components run, so the lock moves to the fixed
+  release (the cranelift family to 0.136.2 with it). No API or wire change; `cargo audit` green again.
+
 ### Changed
 - **The `mesh:serve` compatibility window is closed.** Closure plan C1 (2.15.0) admitted a `mesh:read` or
   `mesh:write` token on the serve routes "for one release", with a warning; the window stayed open through
