@@ -21,6 +21,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Upgrade note:** a node that set a token table in a non-`compliance` build now fails at start;
   build with `--features compliance`, or use `gateway_auth_token`.
 
+### Fixed
+- **A verbose `[[activation]]` command no longer stalls into a false timeout.** The runner piped the
+  command's stderr and read it only after exit, so a command writing more than a pipe buffer blocked on
+  the write and was reported as *did not finish* — a false failure that could stall provisioning or a
+  re-heal. Stderr is now drained while the command runs, keeping a bounded tail (4 KiB) for the error.
+  Found by an independent review (360 review F3); tests written first and seen failing:
+  `a_verbose_command_that_succeeds_is_not_reported_as_a_timeout` and
+  `a_failing_command_reports_a_bounded_tail_of_its_stderr` (`mycelium-wasm-host/src/activation.rs`).
+
 ---
 
 ## [2.18.0] — 2026-10-01
