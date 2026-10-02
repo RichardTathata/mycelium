@@ -1,4 +1,4 @@
-# 2026-09-30 — X1: the examples' declaration directories
+## [2026-09-30] ingest | X1: the examples' declaration directories
 
 **What:** `docs/plans/design-time-tooling.md` §16 X1. Sixteen `examples/units/<example>/` directories
 (nine top-level and co-op examples with capabilities, the lane-only `llm_council`, the provisioning

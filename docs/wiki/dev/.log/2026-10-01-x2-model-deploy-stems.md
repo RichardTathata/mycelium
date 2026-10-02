@@ -1,4 +1,4 @@
-# 2026-10-01 — X2, fifth slice: a real model deployed by a stem
+## [2026-10-01] ingest | X2, fifth slice: a real model deployed by a stem
 
 **What:** the stem-examples suite's `model_deploy` profile — a pinned Ollama container, the TinyStories
 GGUF downloaded by `examples/units/model_deploy/prepare.sh`, a profile written with the weights' content

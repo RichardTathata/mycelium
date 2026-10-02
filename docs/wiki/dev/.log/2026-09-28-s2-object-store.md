@@ -1,4 +1,4 @@
-# 2026-09-28 — S2: the object-store adapter
+## [2026-09-28] ingest | S2: the object-store adapter
 
 **What:** `mycelium-wasm-host/src/object_store_source.rs` (`ObjectStoreFetcher`, `publish_to_store`,
 `list_store`, `verify_store`) behind feature `object_store` (the `object_store` crate 0.14, `aws` + `gcp`);

@@ -1,4 +1,4 @@
-# 2026-09-30 — the release commit's red job: a test race, not a defect
+## [2026-09-30] ingest | the release commit's red job: a test race, not a defect
 
 **What:** `v2.17.0`'s release commit (versions and docs only) turned `main`'s strict `Test` job red on
 `test_identity_anchor_recorded_and_conflict_flagged` — *conflict tripwire never fired* — after eight

@@ -1,4 +1,4 @@
-# 2026-09-28 — W2: the offline wire-check, and the lifecycle page (A2, L1, L2, R1's checker half)
+## [2026-09-28] ingest | W2: the offline wire-check, and the lifecycle page (A2, L1, L2, R1's checker half)
 
 **What:** `src/wire_check.rs` + `mycelium wire-check` in `src/main.rs`. Pure over `Unit`s
 (`NodeCapabilityConfig` per file) and `ArtifactDescription`s; runs `CapFilter::matches` (and the

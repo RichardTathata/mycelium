@@ -1,4 +1,4 @@
-# 2026-09-30 — F1: fuel by publisher (D19)
+## [2026-09-30] ingest | F1: fuel by publisher (D19)
 
 **What:** `docs/plans/design-time-tooling.md` §17 F1. `WasmHost::metered()` (count without a default
 budget) + `instantiate_with_fuel`/`provision_with_fuel` (per instance); `FuelPolicy` on

@@ -1,4 +1,4 @@
-# 2026-09-30 — W4: the authority overlay in the checker
+## [2026-09-30] ingest | W4: the authority overlay in the checker
 
 **What:** `wire_check::check` gains an overlay (`CheckOptions::authority`, default on): a governed
 requirer's edge must be admissible by some declared `[[rule]]`, and a rule that requires a mandate

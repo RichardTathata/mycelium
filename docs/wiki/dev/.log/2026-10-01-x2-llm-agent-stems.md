@@ -1,4 +1,4 @@
-# 2026-10-01 — X2 closes: llm_agent as stems
+## [2026-10-01] ingest | X2 closes: llm_agent as stems
 
 **What:** the stem-examples suite's `llm_agent` profile — n-0 (declared), n-1 (dataset host), n-2 (model
 host with `[[activation]]` and `[[serve]]`), a librarian, an Ollama, and the driver as the agent.

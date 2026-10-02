@@ -61,7 +61,10 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   (a `LOADS: &[Loads]` const, mirrored in a `## Loads` doc block) — the CLI analogue of the
   browser [concepts box](ui-example-contract.md), declaring **content · type · loaded-from**.
   `ci_smoke.sh` runs the twelve CI demos Docker-free (CI
-  `coop-smoke`). Plus one **manual** demo, `model_deploy` — real GGUF weights **and their
+  `coop-smoke`). Plus two **manual** code runs, `model_deploy` and `reheal_deploy`, which also run
+  **as stem nodes in CI** against a pinned Ollama (the stem-examples suite —
+  [testing](testing/testing.md#the-stem-examples-suite-the-same-demos-as-stem-nodes-x2-2026-09-30--10-01)).
+  `model_deploy` — real GGUF weights **and their
   deployment profile** (system prompt + parameters, referencing the weights by content
   address — design §4.3.1) deployed through the artifact library into Ollama, generating
   real tokens under the governed profile (needs the Ollama daemon; deliberately not in

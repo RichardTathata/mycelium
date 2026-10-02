@@ -295,11 +295,27 @@ invariant 2) and a tombstone. Record: `docs/design/contracts-receipts.md` §9.
 
 ## Coop demos: wasm is opt-in (fast non-wasm builds)
 
-`examples/coop` gates `mycelium-wasm-host` (→ wasmtime/cranelift) behind a `wasm` feature. Four
-bins need it (`required-features = ["wasm"]`): `provisioning`, `catalog`, `mcp_toolgrowth`, and
-the manual `model_deploy`; the other demos — e.g. `cargo run --bin diagnostics` — build
-**without** compiling wasmtime. `ci_smoke.sh` enables `--features wasm` for the three CI demos
-that need it; a dev iterating on any non-wasm demo skips the heavy build entirely.
+`examples/coop` gates `mycelium-wasm-host` (→ wasmtime/cranelift) behind a `wasm` feature. The bins
+that need it (`required-features = ["wasm"]`): `provisioning`, `catalog`, `mcp_toolgrowth` and their
+`*_viz` variants, the model demos `model_deploy` and `reheal_deploy` (code runs manual: they need a
+local Ollama and `MODEL_GGUF`), and `stem_driver`; the other demos — e.g. `cargo run --bin
+diagnostics` — build **without** compiling wasmtime. `ci_smoke.sh` enables `--features wasm` for the
+three CI demos that need it; a dev iterating on any non-wasm demo skips the heavy build entirely.
+
+## The stem-examples suite: the same demos, as stem nodes (X2, 2026-09-30 → 10-01)
+
+`make test-stem-examples` (CI: `cluster-suites.yml` job `stem-examples`, path-filtered like the
+other Docker suites) runs each artifact-shaped co-op demo as stem nodes from one image
+(`docker/Dockerfile.stem`) fed only its declaration directory (`examples/units/<demo>/`), with a
+driver (`examples/coop/src/bin/stem_driver.rs`) playing the roles the plan keeps as code and
+printing the **same markers** the code run prints — `make examples-both-ways DEMO=…` greps one
+contract twice. Profiles: `provisioning` (incl. shadow-then-accept), `catalog` (incl. the peer-cache
+late joiner), `mcp_toolgrowth`, and the three that run against a **real model in a pinned Ollama
+container** — `model_deploy`, `reheal_deploy` (the origin killed, the survivor answers routed
+inference), `llm_agent`. This is where the model demos run in CI at all: their code runs stay manual.
+The lessons it taught are dated in `.log/` (`2026-09-30-x2-stem-examples.md` onward): a library on
+disk is not a catalogue (a librarian publishes it); a librarian manages only its own key's lines; the
+checker accepted a placeholder publisher key the stem refused.
 
 CI additionally gates `tsc --noEmit` + `jest` (mycelium-ts — the node-free `auth.test.ts`; the live suite self-skips), the AFN smoke (pull+push), the coop
 smoke, time-boxed fuzz (skipped on PRs), and `cargo audit` (RUSTSEC). **Don't trust a

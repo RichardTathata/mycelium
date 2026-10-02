@@ -68,6 +68,16 @@ advertised capability's lifetime really is the node's. Canon: `src/agent/http.rs
 (`gw_cap_advertise`); both SDK bridges expose it (`leaseSecs` + `handle.heartbeat()` in
 `mycelium-ts`, `lease_secs` + `handle.heartbeat()` in `mycelium-py`).
 
+**An SDK agent's unit file goes through the same lease (Q2, 2026-10-01).** `POST /gateway/units/declare`
+(`cap:write`) takes a unit file's *text*: the node parses it with the same `NodeCapabilityConfig` a
+stem reads, refuses by name (422) what an SDK agent cannot hold — `[hosts]`, `[[presence]]`,
+`[[activation]]`, `[[serve]]` — and holds the rest under one handle with the lease above
+(`declare_from` in `mycelium-py`, `declareUnits` in `mycelium-ts`). **Publishing an artifact is a
+separate door with its own scope:** `POST /gateway/artifacts/publish` (`artifact:publish`, served by
+`mycelium-wasm-host`'s `artifact_router`, feature `gateway`, plan A3) adds a signed entry to the
+library's manifest; the operator's walk is [artifacts](../../operations/artifacts.md) and the scope
+row is in [rbac](../../operations/rbac.md).
+
 ## task_count reference (leak triage)
 
 Steady state after `start()`: 7 core loops (GC, health, anti-entropy, WAL-flush, reorder

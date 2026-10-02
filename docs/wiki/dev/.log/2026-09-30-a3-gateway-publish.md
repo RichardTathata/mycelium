@@ -1,4 +1,4 @@
-# 2026-09-30 — A3: the gateway publish door
+## [2026-09-30] ingest | A3: the gateway publish door
 
 **What:** `docs/plans/design-time-tooling.md` §10 A3. `POST /gateway/artifacts/publish` in
 `mycelium-wasm-host` (feature `gateway`, `src/gateway.rs`, `artifact_router`), merged through

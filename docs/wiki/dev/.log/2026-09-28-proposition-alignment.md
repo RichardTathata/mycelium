@@ -1,4 +1,4 @@
-# 2026-09-28 — proposition alignment: one sentence, one proof page, one path
+## [2026-09-28] ingest | proposition alignment: one sentence, one proof page, one path
 
 **What:** a step-back review of the story as the front doors tell it found four positioning sentences,
 the proof gaps stated in six places, three funnels with three first steps, and three defects (a GitHub

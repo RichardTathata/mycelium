@@ -1,4 +1,4 @@
-# 2026-10-01 — D22 and the last artifact-shaped demo as stems
+## [2026-10-01] ingest | D22 and the last artifact-shaped demo as stems
 
 **What:** `[[serve]]` (`src/capability_config.rs`, `mycelium-wasm-host/src/serve.rs`, feature `llm`), the
 checker counting served skills as offers (`src/wire_check.rs`), the `reheal_deploy` units and suite

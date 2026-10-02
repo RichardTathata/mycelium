@@ -1,4 +1,4 @@
-# 2026-09-29 — the composed effect, enforced at the destination
+## [2026-09-29] ingest | the composed effect, enforced at the destination
 
 **What:** `docs/design/composed-effect.md` §9. `mycelium-effects` gains `Composition` (principal,
 operation, mandate, origin domain), `ComposedEffect`, `CompositionLeg`, `check_composition`,
