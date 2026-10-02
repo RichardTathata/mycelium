@@ -107,13 +107,6 @@ Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.16.0 holds. The des
   greps one contract twice; the `stem-examples` job in `cluster-suites.yml` gates it. The hosting
   units' publisher key is the public half of the suite's seed (`make stem-keys`) — the stem refuses a
   placeholder the checker accepted. What is not recut, and why, is in the compose header.
-- **The GCS fixture (plan S3).** The object-store adapter's test runs once per configured store URL:
-  `MYCELIUM_S3_TEST_URL` (S3Mock, as before) and now `MYCELIUM_GCS_TEST_URL` against `fake-gcs-server`
-  in CI, reached through the GCS builder's `GOOGLE_BASE_URL` with a static `GOOGLE_BEARER_TOKEN` (the
-  put path fetches a credential regardless of skip-signature in `object_store` 0.14). The
-  same sequence — publish, manifest round trip, ranged staging, provenance and the streamed hash —
-  over both; with neither variable the local `file://` store stands in and the test says so. An
-  emulator proves the code path; only a real bucket proves the cloud (S4, open).
 - **The store test runs once per configured store (plan S3).** `MYCELIUM_S3_TEST_URL` (S3Mock in CI,
   as before) and now `MYCELIUM_GCS_TEST_URL` — the same sequence (publish, manifest round trip, ranged
   staging, provenance and the streamed hash) over each; with neither the local `file://` store stands

@@ -281,3 +281,42 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   2026-09-26. Both decks' GitHub links moved off the pre-move account. The dated source for every
   status line on both decks is now one page, `docs/operations/what-is-proven.md`. Not an overclaim
   finding; a consistency pass with one correction (`sV4`).
+
+- 2026-10-02 (lint run 4, after v2.18.0): **one overclaim class reached both decks and the
+  appendix, one undersell class reached every status slide.** *Critical, fixed:*
+  `presentation.html:1563` (A5) said *"a compromised node cannot inject false KV entries"* — a
+  Byzantine-shaped claim the code does not make: `SignedData` rejects an altered frame or a write
+  under a key the writer does not hold, and a compromised node still signs falsehoods under its own
+  key. *Major, fixed — the `compliance` qualifier:* the gateway enforcement point, evidence journal,
+  scoped RBAC and OIDC are all `compliance`-gated, and the default build (including the `mycelium`
+  binary) carries none of them — found the same day a named/scoped token table was shown to be
+  parsed and ignored without the feature (fix in flight). `customer-pitch.html:160` (wedge),
+  `:402` (Built: role-based access, OIDC, gateway authorisation), `presentation.html:901` (`sV4`)
+  and `:1319` (the bypass matrix, a `compliance`+`a2a` test) now say so; `:1145` gained
+  *with `require_identity_proofs` on — it is default-off* before "a forged `sys/identity` write is
+  rejected". *Major, fixed — "linearisable":* `philosophy.md:315`, `paper2a/main.tex:742`/`:925` and
+  `substrate_convergence.html:529`/`:714` sold Layer III as linearisable (run 3 grepped the `-z`
+  spelling only); now *quorum-agreed*. `philosophy.md:346`/`:358` and `paper2a/main.tex:926` called
+  Layer III *stateless* and every leader result *a KV entry with a TTL* — the lease is opt-in
+  (`committed_lease_secs`, default `None`) and acceptor memory is durable since v2.14.0; reworded.
+  *Major undersells, fixed:* the buyer deck's fleet slide still labelled the declaration file and the
+  offline check **planned — "nothing of it is built"**, and listed fuel budgets and the second
+  signature as plan; all shipped in v2.17.0/v2.18.0 — the card is now *shipped*, the callout keeps
+  the true limits (S3 emulator only, no real bucket, a stem cannot read an object store, an
+  activation is not a sandbox). The engineer deck gained the design-time tooling on `sV3`, both
+  proof summaries moved to 2026-10-01 with the new CI-proven rows (stems, real-model demos, fuel and
+  shadow lane, composed effect), the showcase now says fifteen demos / thirteen in `coop-smoke` and
+  that the two real-model deploys run in CI as stems, and the guide is 25 chapters not 17.
+  `paper1` (`paper.md:391`, `main.tex:1000`) called the blackboard companion *"not yet implemented"* —
+  shipped in v2.0; and both still named the `System` scope / `system_propose` (renamed 2026-07-10).
+  *Minor, fixed:* the hero's "5 crates tested" (13 are CI-tested), the `InstallableEntry` sample
+  (a `.provides()` builder that does not exist), and paper1's duplicated incident-response example
+  beside the microgrid one. *Flagged, author's call:* `presentation.html:744` "zero config" and
+  `:1122` "Production Ready" (both carried from run 3); `:1005` "Ops burden: Zero — no processes"
+  against the deck's own `sV1` ("zero ops isn't no processes"); `:910` "Two layers" beside the
+  three-layer model; `:640` "heals in under one health interval" (unsourced); `philosophy.md:192`
+  "no sidecar, no external certificate authority" beside the deck's SDK sidecar and the CA-anchored
+  identity; `substrate_convergence.html:984`/`:993`/`:1425`/`:1511`/`:1537` repeat the *stateless,
+  TTL'd leader* claim across a longer argument. Verified clean: wire v12/PREV 11, scope vocabulary in
+  the decks, no trustless/tamper-proof language, no crisis framing in the decks, no dead links;
+  `check-positioning.sh` exit 0. PDFs of paper1 and paper2a need re-rendering.
