@@ -57,7 +57,16 @@ fn expand(argv: &[String], entry: &InstallableEntry, path: &Path, rendered: Opti
         .collect()
 }
 
+/// How much of a failing command's stderr its error keeps — the tail, where the reason usually is.
+const STDERR_TAIL_BYTES: usize = 4096;
+
 /// Run `argv` to completion within `timeout`; `Err` names the command and why.
+///
+/// Stderr is **drained while the command runs**, on its own thread, keeping only the last
+/// [`STDERR_TAIL_BYTES`]: a command that writes more than a pipe buffer would otherwise block on
+/// the write and never exit, and be reported as a timeout (360 review F3, 2026-10-02). On timeout
+/// the command is killed and reaped. A descendant that inherited the pipe and outlives the command
+/// cannot hold the result hostage either: the tail is awaited only briefly after exit.
 pub fn run(argv: &[String], timeout: Duration) -> Result<(), String> {
     let (cmd, args) = argv.split_first().ok_or("empty command")?;
     let mut child = std::process::Command::new(cmd)
@@ -66,16 +75,31 @@ pub fn run(argv: &[String], timeout: Duration) -> Result<(), String> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("{cmd}: {e}"))?;
+    let tail = child.stderr.take().map(|mut pipe| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut kept: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = pipe.read(&mut buf) {
+                if n == 0 { break; }
+                kept.extend(&buf[..n]);
+                let excess = kept.len().saturating_sub(STDERR_TAIL_BYTES);
+                kept.drain(..excess);
+            }
+            let _ = tx.send(String::from_utf8_lossy(kept.make_contiguous()).into_owned());
+        });
+        rx
+    });
+    let read_tail = |rx: Option<std::sync::mpsc::Receiver<String>>| -> String {
+        rx.and_then(|rx| rx.recv_timeout(Duration::from_secs(1)).ok()).unwrap_or_default()
+    };
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait().map_err(|e| format!("{cmd}: {e}"))? {
             Some(status) if status.success() => return Ok(()),
             Some(status) => {
-                let mut err = String::new();
-                if let Some(mut e) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = e.read_to_string(&mut err);
-                }
+                let err = read_tail(tail);
                 return Err(format!("{cmd} exited {status}: {}", err.trim()));
             }
             None if Instant::now() >= deadline => {
@@ -174,4 +198,45 @@ pub fn spawn_reprobe(watch: WatchList, every: Duration) -> tokio::task::JoinHand
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(script: &str) -> Vec<String> {
+        vec!["sh".into(), "-c".into(), script.into()]
+    }
+
+    /// A verbose activation command must not stall on its own diagnostics (360 review F3,
+    /// 2026-10-02): the runner read stderr only after exit, so a child writing more than a pipe
+    /// buffer blocked on the write and was reported as a timeout.
+    #[test]
+    fn a_verbose_command_that_succeeds_is_not_reported_as_a_timeout() {
+        let started = Instant::now();
+        let got = run(&sh("head -c 1048576 /dev/zero | tr '\\0' x >&2; exit 0"), Duration::from_secs(10));
+        assert_eq!(got, Ok(()), "1 MiB of stderr then exit 0 must succeed");
+        assert!(started.elapsed() < Duration::from_secs(5), "and promptly: {:?}", started.elapsed());
+    }
+
+    /// A failing command's error carries the tail of what it said, bounded however much it said.
+    #[test]
+    fn a_failing_command_reports_a_bounded_tail_of_its_stderr() {
+        let err = run(
+            &sh("head -c 1048576 /dev/zero | tr '\\0' x >&2; echo ' the last words' >&2; exit 3"),
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(err.contains("the last words"), "the tail survives: {}", &err[err.len().saturating_sub(80)..]);
+        assert!(err.len() <= STDERR_TAIL_BYTES + 200, "bounded: {} bytes", err.len());
+    }
+
+    /// A command that genuinely hangs still times out, and is killed and reaped.
+    #[test]
+    fn a_hung_command_times_out() {
+        let started = Instant::now();
+        let err = run(&sh("sleep 30"), Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("did not finish"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5), "killed at the deadline: {:?}", started.elapsed());
+    }
 }
