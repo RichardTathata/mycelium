@@ -45,7 +45,9 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   eye. Extract every backticked `snake_case` identifier with two or more underscores from every
   wiki page **outside `.log/`** (`grep -rhoE '\`[a-z][a-z0-9]*(_[a-z0-9]+){2,}\`' docs/wiki
   --include='*.md'`, minus the `.log` trees) and `grep -rqF` each against the whole tree (`src/`,
-  every crate's `src/` and `tests/`, `tests/`, `examples/`, `scripts/`, `.github/`, `Makefile`).
+  every crate's `src/`, `tests/` and `examples/`, `tests/`, `examples/`, `scripts/`, `.github/`, `Makefile`)
+  — a companion's browser example (`mycelium-wiki/examples/wiki_council_viz.rs`) is cited by name, so
+  leaving crate `examples/` out of the tree reports it missing (2026-10-02).
   An identifier absent from the tree = a finding: a renamed or deleted test, function, constant or
   flag. `.log/` entries are dated records and are exempt; a clippy lint name cited in prose is a
   known false positive, dismiss it by hand. This replaced "every test cited by name still exists"
@@ -123,6 +125,12 @@ relevant wiki page/folder-note, not merely exist in `docs/design/`. A merged des
 companion/architecture pages embody but never reference = a coverage finding (add the pointer). This
 is a scope gap a prior pass hit: it counted `coordination-approaches.md` as "covered" because it
 existed user-facing, without checking the wiki linked it (ledger 2026-07-13).
+
+**A prose list of a manifest's set is an enumeration too — diff it against the manifest.** A sentence
+that names *which* bins carry `required-features`, which crates a feature pulls in, or which profiles a
+compose file has is a parallel copy of a `Cargo.toml`/compose fact, and it drifts like one: `testing.md`
+said *"Four bins need it"* (wasm) from 2026-07-07 while the manifest grew to nine, through five passes
+(ledger 2026-10-02). Derive the set from the manifest (`awk` over `[[bin]]` blocks) and diff the names.
 
 **Enumeration pages: audit by *category*, not by pinned count.** For pages that list a set
 (`dev/examples.md`, the sub-handle list, the feature list), a re-checked count is not coverage — a

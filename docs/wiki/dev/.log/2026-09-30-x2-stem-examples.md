@@ -1,4 +1,4 @@
-# 2026-09-30 — X2, the first slice: two demos both ways
+## [2026-09-30] ingest | X2, the first slice: two demos both ways
 
 **What:** `docker/Dockerfile.stem` (one image: the stem node, the artifact tool, the co-op
 `stem_driver`), `docker/docker-compose.stem-examples.yml` (profiles `provisioning`, `catalog`),

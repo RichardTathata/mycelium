@@ -296,3 +296,12 @@ Entry format:
   exactly the place a reader treats as documentation and a linter treats as decoration. No
   sharpening beyond the note: the sweep already covers it; keep it covering it.
 
+- 2026-10-02 (full pass): **§4 enumeration — a prose list of a manifest's set, stale for twelve weeks
+  through five passes.** `testing.md` § *Coop demos: wasm is opt-in* said *"Four bins need it"* and named
+  them, from 2026-07-07; `reheal_deploy` was wasm-gated the next day (#136), the two `*_viz` showcases on
+  07-15, `stem_driver` on 09-30 — nine by the manifest. Every pass since checked that page's *CI-gate*
+  list against the workflows and none diffed this sentence against `examples/coop/Cargo.toml`, because
+  the enumeration rule was scoped to *enumeration pages*, not to a sentence enumerating inside a
+  non-enumeration page. Found by reading the paragraph while checking the stem suite's coverage.
+  Sharpening (folded into §4): a prose list of a manifest's set is an enumeration; derive it from the
+  manifest and diff the names.

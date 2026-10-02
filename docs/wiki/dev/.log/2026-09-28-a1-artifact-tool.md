@@ -1,4 +1,4 @@
-# 2026-09-28 — A1: the artifact tool
+## [2026-09-28] ingest | A1: the artifact tool
 
 **What:** `mycelium-wasm-host/src/tools.rs` (`publish`, `list`, `verify`, `render_entry`,
 `signing_key_from_hex`, `publisher_from_str`, `kind_from_name`/`kind_name`) and the `mycelium-artifact`

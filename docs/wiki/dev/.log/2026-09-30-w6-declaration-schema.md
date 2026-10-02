@@ -1,4 +1,4 @@
-# 2026-09-30 — W6, the public half: the declaration's schema and its call shapes
+## [2026-09-30] ingest | W6, the public half: the declaration's schema and its call shapes
 
 **What:** `docs/reference/declaration.schema.json` pins `mycelium.design/declaration/1` (JSON Schema
 2020-12) and `tests/declaration_schema.rs` validates the golden and freshly generated reports against

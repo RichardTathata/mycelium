@@ -1,4 +1,4 @@
-# 2026-09-28 — S1: the HTTP artifact path streams, and refuses by name
+## [2026-09-28] ingest | S1: the HTTP artifact path streams, and refuses by name
 
 **What:** `design-time-tooling.md` §11 S1. `HttpLibrarySource::fetch_remote` read a whole body with
 `bytes()`, capped only by a declared `Content-Length` (512 MiB); a chunked response with no length was

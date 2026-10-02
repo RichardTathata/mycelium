@@ -1,4 +1,4 @@
-# 2026-09-30 — S3: the GCS fixture, and why the emulator half did not close
+## [2026-09-30] ingest | S3: the GCS fixture, and why the emulator half did not close
 
 **What:** the object-store adapter's test (`mycelium-wasm-host/src/object_store_source.rs`) runs its
 sequence once per configured store URL — `MYCELIUM_S3_TEST_URL` and now `MYCELIUM_GCS_TEST_URL` — so a

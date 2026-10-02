@@ -60,7 +60,17 @@ via wasm-host).
   `mycelium wire-check` (`src/wire_check.rs`, pure over unit files, the mesh's own `CapFilter::matches`)
   reports *would bind by provisioning* / *unhostable entry* / *presence unhostable* from artifact
   descriptions and `[hosts]` tables — the operator's walk is `docs/operations/capability-lifecycle.md`
-  (`.log/2026-09-28-w2-wire-check.md`);
+  (`.log/2026-09-28-w2-wire-check.md`); **the rest of the design-time tooling plan
+  ([`docs/plans/design-time-tooling.md`](../../../plans/design-time-tooling.md), 2026-09-28 → 10-01):**
+  the stem node `mycelium-stem` (R1/R2 — identical nodes that load what a unit file calls for), the
+  `object_store` adapter (S2; S3 in CI, GCS only against a real bucket — S3 ◐), fuel by publisher
+  (F1/D19 — `FuelPolicy`; a trap poisons a wasmtime instance, so the serve loop replaces it),
+  proposed → shadow → accept (F2/D20 — manifest v2, the `{name}.shadow` lane), the gateway publish door
+  (A3, `artifact_router`, feature `gateway`), declared blob activation (D21, `[[activation]]`,
+  `activation.rs`, re-probed off the provisioner's lock) and declared model serving (D22,
+  `[[serve]]`, `serve.rs`, feature `llm`) — each with its dated `.log/` entry, and the
+  stem-examples suite that runs every artifact-shaped demo both ways
+  ([testing](../testing/testing.md#the-stem-examples-suite-the-same-demos-as-stem-nodes-x2-2026-09-30--10-01));
   the probe is *consumed* — a per-round health pass withdraws failing installs (restart ≡
   provisioning is the health protocol). Real-model proof: the coop `model_deploy` demo.
   Security note: wasmtime is this crate's sandbox — keep

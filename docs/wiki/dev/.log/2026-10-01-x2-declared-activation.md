@@ -1,4 +1,4 @@
-# 2026-10-01 — D21: a placed blob's activation is declared
+## [2026-10-01] ingest | D21: a placed blob's activation is declared
 
 **What:** `[[activation]]` in the unit file (`src/capability_config.rs`), `BlobRuntime::with_entry_activation`
 (`mycelium-wasm-host/src/runtime.rs`), the declarative hook and re-probe task

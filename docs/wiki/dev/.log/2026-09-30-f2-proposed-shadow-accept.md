@@ -1,4 +1,4 @@
-# 2026-09-30 — F2/F3: proposed → shadow → accept (D20), and the guide section
+## [2026-09-30] ingest | F2/F3: proposed → shadow → accept (D20), and the guide section
 
 **What:** `docs/plans/design-time-tooling.md` §17 F2 + F3. Manifest v2 (`proposed` inside the
 publisher's signature, `Acceptance` outside it over the publisher's signature), the shadow lane in the
