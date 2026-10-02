@@ -433,3 +433,14 @@ an unauthenticated request proves nothing about the gate**, and a predicate list
 completeness claim of the lock-order-table kind — adding a source means adding a term. Pinned by
 `named_tokens_alone_still_close_the_gateway` (404-free negative, positive control, and the scope bound still
 applied), which fails when the fix is reverted.
+
+**The same hole, reached by a build (2026-10-02).** That fix lives behind `#[cfg(feature = "compliance")]`: the
+predicate's non-`compliance` arm is `have_scoped = false`, because only `compliance` can resolve a token to scopes.
+But the tables, and `GOSSIP_GATEWAY_NAMED_TOKENS`, are parsed and validated in **every** build — so the default
+`mycelium` binary, given a named-token table and no positional token, started cleanly and ran open, with no
+warning. Found by doc-coverage run 18 checking that the documented env var *works if followed literally* (the
+`GOSSIP_CLUSTER_NAME` class, here with security impact). The check lives in `start()`, not core's `validate()`:
+core's `compliance` feature can be unified on by another crate while this crate's is off, so a core-side check
+could pass while the gateway still ran open. Pinned by `a_token_table_this_build_cannot_enforce_refuses_to_start`
+(`src/lib_tests.rs`, `gateway` without `compliance`), seen failing on the unfixed code. The lesson extends the
+one above: **a configuration a build cannot enforce must fail closed at start**, not be accepted and ignored.

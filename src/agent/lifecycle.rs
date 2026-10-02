@@ -32,6 +32,27 @@ impl GossipAgent {
     /// Binds the TCP listener(s) and launches background loops.
     pub async fn start(&self) -> Result<(), GossipError> {
         self.config.validate()?;
+        // A token table this build cannot enforce fails closed. Named and scoped tokens are
+        // honoured only under `compliance` (`gateway_auth`'s `have_scoped`); without it they were
+        // parsed, validated and ignored, so a node with no positional token served every gateway
+        // route to an anonymous caller — the 2.10.0–2.12.0 open gateway, reached by a build
+        // instead of a predicate (doc-coverage run 18, 2026-10-02).
+        #[cfg(all(feature = "gateway", not(feature = "compliance")))]
+        for (field, set) in [
+            ("gateway_named_tokens", !self.config.gateway_named_tokens.is_empty()),
+            ("gateway_scoped_tokens", !self.config.gateway_scoped_tokens.is_empty()),
+        ] {
+            if set {
+                return Err(GossipError::InvalidField {
+                    field,
+                    reason: "a scoped or named token table is enforced only in a build with the \
+                             `compliance` feature; this build would ignore it and run an open \
+                             gateway. Build with `--features compliance`, or use \
+                             `gateway_auth_token`"
+                        .into(),
+                });
+            }
+        }
         let bind_ip: IpAddr = self.config.bind_address.parse().map_err(|e| {
             GossipError::InvalidField {
                 field:  "bind_address",

@@ -44,6 +44,15 @@ cfg.gateway_named_tokens = vec![
 // as `llm:*` is refused by `validate()` rather than silently admitting nothing.
 ```
 
+**Both token tables need a `compliance` build.** `gateway_named_tokens` and `gateway_scoped_tokens`
+are enforced only when the node is built with `--features compliance`. A build without it — the
+default `mycelium` binary and the demo images — **refuses to start** with either table set, naming
+the field and the feature. Before that fix (2026-10-02) such a build parsed the table, ignored it,
+and with no `gateway_auth_token` served every gateway route to an anonymous caller. **Check any
+deployment that sets a token table**: an unauthenticated `GET /gateway/kv/keys` must answer 401,
+and a node that now refuses to start was running open. The positional `gateway_auth_token` works
+in every build, as full access.
+
 Distribute the auto-generated `./mycelium-tls/ca-cert.pem` to every node (shared
 cluster CA) — see the TLS runbook in `09-security.md`.
 

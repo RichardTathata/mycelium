@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **A token table the build cannot enforce now refuses to start, instead of running an open
+  gateway.** `gateway_named_tokens` and `gateway_scoped_tokens` (and `GOSSIP_GATEWAY_NAMED_TOKENS`)
+  are honoured only under `compliance`. A build without it, including the default `mycelium`
+  binary, parsed the table, ignored it, and with no `gateway_auth_token` admitted every gateway
+  request anonymously, with no warning. `start()` now returns `InvalidField` naming the table and
+  the feature. **Check any deployment that sets a token table:** an unauthenticated
+  `GET /gateway/kv/keys` must answer 401. Found by the doc-coverage audit (run 18); regression test
+  `a_token_table_this_build_cannot_enforce_refuses_to_start`, seen failing on the unfixed code.
+  **Upgrade note:** a node that set a token table in a non-`compliance` build now fails at start;
+  build with `--features compliance`, or use `gateway_auth_token`.
+
 ---
 
 ## [2.18.0] — 2026-10-01
