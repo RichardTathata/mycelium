@@ -1,5 +1,8 @@
 # Mycelium FAQ — start here
 
+**Learning path:** [six developer tutorials](tutorials/README.md) connect stem declarations,
+acceptance, authority and runtime evidence with runnable examples.
+
 The rest of this guide is deep reference. This page is the **first read**: short
 answers that point you at the one doc or example you actually need. If a question
 here doesn't route you well, that's a docs bug — open an issue.
@@ -10,7 +13,7 @@ here doesn't route you well, that's a docs bug — open an issue.
 
 **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay. (That is the project's
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible. (That is the project's
 description — [`docs/positioning.md`](../positioning.md) — and the README opens with it.)
 
 Mycelium earns its keep when you have **many agents (or nodes) that must

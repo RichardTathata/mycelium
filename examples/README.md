@@ -20,10 +20,13 @@ every example by the stack **layer** it teaches *and* its facets — how deep (*
 <!-- path:start -->
 1. **[`hello_mesh`](hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
 2. **[`hello_capability`](hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
-3. **[the co-op `provisioning` demo](coop/README.md)** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+3. **[Your first stem fleet](../docs/guide/tutorials/01-first-stem-fleet.md)** — generic hosts discover and install a signed echo component, answer a call, and restore a declared provider floor after graceful removal.
 4. **[guide 20](../docs/guide/20-authorising-actions.md) with [`authority_drain`](authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
 5. **[`what-is-proven.md`](../docs/operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
+
+**Learn the newer surfaces:** [six developer tutorials](../docs/guide/tutorials/README.md) — stem fleets,
+declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
 
 The matrix below is complete and is the architect's view. These five paths are the integrator's:
 each answers *which example fits my situation*, *what must I change*, and *how do I know it worked*.
@@ -86,6 +89,8 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | **Start here** — the zero-setup ladder, one file each | | | | | | | | | | | |
 | [`hello_mesh`](../docs/guide/01-gossip-kv.md#the-example) · [src](hello_mesh.rs) | ● | · | · | · | Intro | CLI | · | · | · | · | · |
 | [`hello_capability`](../docs/guide/02-capabilities.md#02--capabilities-find-nodes-by-what-they-do) · [src](hello_capability.rs) | · | · | · | ● | Intro | CLI | · | · | · | · | [✓](units/hello_capability/) |
+| [`first_stem_fleet`](../docs/guide/tutorials/01-first-stem-fleet.md) · [src](../mycelium-wasm-host/examples/first_stem_fleet.rs) | ○ | · | · | ● | Intro | CLI | · | · | · | ✓ | · |
+| [`compare_stem_observations`](../docs/guide/tutorials/06-declared-versus-observed.md) · [src](compare_stem_observations.rs) | · | · | · | · | Intro | CLI | · | · | · | ✓ | · |
 | [`conway`](../docs/guide/01-gossip-kv.md#the-example) · [src](conway.rs) | ● | ○ | · | · | Intro | Web | · | · | ✓ | · | · |
 | [`distributed_lock`](../docs/guide/04-consensus.md#the-distributed-lock-service) · [src](distributed_lock.rs) | · | · | ● | · | Intro | CLI | · | · | · | · | · |
 | [`invoke_skill`](community/README.md#manual) · [src](invoke_skill.rs) | ○ | · | · | ● | Intro | CLI | · | · | · | · | · |

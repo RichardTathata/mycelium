@@ -1,4 +1,4 @@
-# 20 · Authorising Actions at the Gateway
+# 20 · Authorising Actions at Gateway, Provider and Resource
 
 Chapter 16 was about *what an agent may do* as a structural guardrail. This one is about the
 narrower, harder question at the moment of dispatch: **this caller, this operation, this resource,
@@ -9,7 +9,12 @@ It is grounded in
 [`src/agent/evidence_journal.rs`](../../src/agent/evidence_journal.rs). The design record is
 [`docs/design/action-envelope-ae0.md`](../design/action-envelope-ae0.md).
 
-Two questions this chapter answers:
+The gateway is the starting point. Provider admission and continuation, then the
+resource's commit boundary, have separate checks and evidence. Follow the
+[authority tutorial](tutorials/04-authority-boundaries.md) to run the complete
+teaching sequence; a gateway permit alone does not authorise a destination effect.
+
+Two questions the gateway portion answers:
 
 - **"I have an existing tool fleet. Where does authorisation go?"** At the gateway, as a preflight
   before dispatch, with a policy engine you supply. You do not rewrite the fleet.

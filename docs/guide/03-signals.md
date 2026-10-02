@@ -181,9 +181,10 @@ not create holes in the gossip graph. A temporarily overloaded node remains a
 routing participant; it just stops doing work.
 
 **Group-scoped signals and routing efficiency.** Group-scoped signals still
-flood the whole mesh; it's just that only group members act on them. For very
-large clusters where bandwidth matters, prefer the `Locality` scope to
-constrain propagation geographically.
+flood the whole mesh; it's just that only group members act on them. Locality ranks capability
+providers; it is not a signal scope and does not constrain propagation. Budget
+for flooding when sizing the transport; admission rules are not bandwidth or
+confidentiality boundaries.
 
 → Next: [04-consensus.md](04-consensus.md) — opt-in quorum agreement on top of this substrate.
 
@@ -295,7 +296,7 @@ let suppressing: bool = agent.mesh().is_suppressed(signal_kind::INVOKE);
 
 // ── Current fill ratio for a kind's handler channel ───────────────────────
 // 0.0 = empty (no load); 1.0 = full (completely saturated, opacity = 100%).
-// Corresponds to the probability that the next System/Group signal is shed.
+// Corresponds to the probability that the next Cluster/Group signal is shed.
 let load: f32 = agent.opacity(signal_kind::INVOKE);  // 0.0..=1.0
 
 // ── Proactive opacity notification governor ────────────────────────────────
@@ -357,7 +358,7 @@ fill_ratio  = 1.0 - (channel_remaining / channel_capacity)
 admit_prob  = 1.0 - fill_ratio
 ```
 
-When `fill_ratio = 0.6`, 60% of incoming `System` and `Group` signals are shed at the boundary
+When `fill_ratio = 0.6`, 60% of incoming `Cluster` and `Group` signals are shed at the boundary
 before reaching handlers. The node still **forwards every signal** — the network remains fully
 connected — it simply stops *reacting* to new arrivals. This is emergent backpressure: no
 coordinator involved, no explicit "I am busy" handshake, no barrier.

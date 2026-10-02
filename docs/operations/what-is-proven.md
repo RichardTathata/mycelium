@@ -13,6 +13,20 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 > every merge. *Demonstrated* means it was run and measured, with the bound or the condition stated,
 > but not on every change. *Not yet shown* means exactly that, with what would show it.
 
+## Developer teaching checks added 2026-10-02
+
+The [new learning path](../guide/tutorials/README.md) adds the
+`first_stem_fleet` example and `scripts/check-stem-observations.py` to the
+`wasm-host` CI job. The checks cover a signed echo component, useful invocation,
+graceful provider replacement, a schema-validated declaration/observation join,
+and missing-provider, unknown-unit, duplicate and invalid-schema refusals.
+The workflow is configured; its first hosted CI result is still pending. The local
+fleet run and all five consumer checks passed on 2026-10-02; validation scope is
+recorded in the [teaching-path ingest](../wiki/dev/.log/2026-10-02-developer-teaching-path.md).
+
+This is one local fleet and a scenario-specific consumer. It does **not** close
+the deployment, multi-machine recovery or NovusLens consumer-rendering gaps below.
+
 ## Proven in CI on every merge
 
 | Claim | Gate | Where |
@@ -60,7 +74,7 @@ stated honestly somewhere, and a reviewer assembling them from six places assemb
 | **`llm_agent`'s MCP tools as stems** | the demo's tools (weather, ping, search, calculate) are in-process handlers; the unit format has no row for a tool, so its stem run recuts the capabilities, the dataset and the model, not the tools | a tool row in the unit format, or the tools rewritten as components bridged by the runtime (as `mcp_toolgrowth`'s converter is) |
 | **A stem reading an object store** | a stem's byte sources are a library directory (`--library`) or a mesh pull from a librarian (`StemSource::Library`, `StemSource::Mesh`) — there is no store-backed `StemSource`, and the stem binary's librarian reads its manifest from a local file (`manifest_source: None`). A store-backed library reaches a stem only through a mounted or synced directory | a store-backed `StemSource` and a librarian `--manifest-source` flag, run against the S3 mock in the stem-examples suite |
 | **Large models over the mesh** | the mesh path rides the gossip frame, bounded by `MAX_FRAME_BYTES` (10 MiB), so a stem pulling a large model over the mesh cannot receive it; the model demos use `--library` on a mounted volume | a stem fetching a model past the frame cap over the bulk transport, in the suite |
-| **A keyed `[[serve]]` endpoint without a secret in the unit file** | `[[serve]].api_key` is a literal in the file (default `"none"`); there is no environment indirection, so a keyed endpoint puts a secret in a file the lifecycle page calls safe to commit. The workaround is a local unauthenticated proxy in front of the keyed endpoint | an `api_key_env` (or similar) field, read at stem start, with a test |
+| **A keyed `[[serve]]` endpoint without a secret in the unit file** | `[[serve]].api_key` is a literal in the file (default `"none"`); there is no environment indirection, so a keyed endpoint puts a secret in the unit file, which must then be kept out of source control. The workaround is a local unauthenticated proxy in front of the keyed endpoint | an `api_key_env` (or similar) field, read at stem start, with a test |
 | **The declaration as a consumer record, rendered by the consumer** | the schema is pinned and every edge carries its call shapes (W6, public); the private companion ships the `deployment_declaration` batch on the `v2.17.0` pin, retry-identical, accepted by its stub consumer, the join tested on the co-op golden (companion PR #4, 2026-09-30) | the consumer (NovusLens) accepting a real batch and rendering a declared edge beside its observations — on their side of the handover |
 
 ## What this page is not

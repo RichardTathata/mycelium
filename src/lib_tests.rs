@@ -178,6 +178,8 @@ fn spawn_handler(
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "tls")]
         membership: std::sync::OnceLock::new(),
+        #[cfg(feature = "a2a")]
+        a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         cohort_budget: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1169,6 +1171,8 @@ async fn test_subscribe_notified_via_gossip() {
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "tls")]
         membership: std::sync::OnceLock::new(),
+        #[cfg(feature = "a2a")]
+        a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         cohort_budget: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -10054,38 +10058,6 @@ async fn an_unjoined_group_yields_no_leadership() {
     }
 }
 
-/// **`/a2a` has no scope floor, and the open configuration warns.**
-///
-/// Unlike `/mcp`, which requires `mcp:invoke`, `/a2a` uses *optional* auth: a federation credential
-/// names a partner, a bearer resolves to a principal whose scopes are deliberately dropped, and
-/// nothing at all is anonymous. With an `ActionEvaluator` attached that is by design — the
-/// evaluator decides per call, a finer instrument than a scope. With **no** evaluator the seam is
-/// inert, and a probe on 2026-09-25 confirmed the consequence: an anonymous `tasks/send` returned
-/// `skill not found`, meaning it had passed every gate and failed only on resolution.
-///
-/// This pins the *condition* the warning is computed from. It cannot assert the log line itself
-/// without a subscriber, so it asserts the thing that would make the line wrong — if a scope floor
-/// is ever added to `/a2a`, or `with_a2a` starts requiring auth, this test should be revisited
-/// rather than quietly left passing.
-#[cfg(all(feature = "a2a", feature = "gateway"))]
-#[test]
-fn a2a_mounted_without_evaluator_or_bearer_is_the_open_configuration() {
-    // The bare configuration the warning is for.
-    let bare = GossipConfig::default();
-    assert!(bare.gateway_auth_token.is_none(), "no legacy bearer by default");
-    assert!(bare.gateway_scoped_tokens.is_empty(), "no scoped tokens by default");
-    assert!(bare.gateway_named_tokens.is_empty(), "no named tokens by default");
-
-    // And the configuration that silences it: any one bearer is enough to close the anonymous path.
-    let mut with_token = GossipConfig::default();
-    with_token.gateway_auth_token = Some("s3cret".into());
-    assert!(with_token.gateway_auth_token.is_some());
-
-    // The other way to close it is an evaluator, which is checked at `with_a2a` time via
-    // `task_ctx.action_evaluator`. That half is exercised by `procurement_authority` and
-    // `mcp_tool_authority`; what matters here is that BOTH doors exist, so an operator has a
-    // choice rather than an instruction.
-}
 
 /// **Boundary H closure plan C5: removing a member.** Three TLS nodes share a fleet CA; A and C take
 /// removals from an operator membership authority. The operator removes B at A.
@@ -10252,5 +10224,92 @@ async fn a_token_table_this_build_cannot_enforce_refuses_to_start() {
                 panic!("{field} set without `compliance` must refuse to start, got {other:?}");
             }
         }
+    }
+}
+
+/// An `[oidc]` table in a build without `compliance` must refuse to start, not vanish (I1 audit
+/// finding `gw.oidc`, 2026-10-02). The field is `#[cfg(feature = "compliance")]` and `GossipConfig`
+/// accepts unknown keys, so the table was dropped at parse time; `have_oidc` is `false` in that
+/// build; with no positional token the gateway ran open — a node the operator believed was behind
+/// SSO served every route to an anonymous caller.
+#[cfg(all(feature = "gateway", not(feature = "compliance")))]
+#[tokio::test]
+async fn an_oidc_table_this_build_cannot_enforce_refuses_to_start() {
+    let port = alloc_port();
+    let text = format!(
+        "bind_port = {port}\nhttp_port = {}\n\n[oidc]\nissuer = \"https://idp.coop.example\"\naudience = \"mycelium\"\n",
+        alloc_port()
+    );
+    let cfg: GossipConfig = toml::from_str(&text).expect("the table parses in every build");
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    match agent.start().await {
+        Err(GossipError::InvalidField { field, reason }) => {
+            assert_eq!(field, "oidc");
+            assert!(reason.contains("compliance"), "the refusal names the missing feature: {reason}");
+        }
+        other => {
+            let _ = agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+            panic!("an [oidc] table without `compliance` must refuse to start, got {other:?}");
+        }
+    }
+}
+
+/// A `[tls]` or `[gateway_tls]` table in a build without `tls` must refuse to start, not run
+/// plaintext (I1 audit findings `mesh.tls`, `gw.tls`, 2026-10-02). The TLS init and the HTTPS branch
+/// are compiled out, so the fields were accepted and ignored: gossip ran unauthenticated and the
+/// gateway served bearer tokens in cleartext, with no warning. `domain_profile = "enforced"` passed
+/// `validate()` the same way, since it only checks that `tls` is set.
+#[cfg(not(feature = "tls"))]
+#[tokio::test]
+async fn a_tls_table_this_build_cannot_enforce_refuses_to_start() {
+    for field in ["tls", "gateway_tls"] {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        match field {
+            "tls" => cfg.tls = Some(TlsConfig { auto_cert_dir: std::env::temp_dir().join(format!("tls-{port}")), ..Default::default() }),
+            _ => {
+                cfg.http_port = Some(alloc_port());
+                cfg.gateway_tls = Some(crate::GatewayTlsConfig { cert_pem_path: Some("c.pem".into()), key_pem_path: Some("k.pem".into()), ..Default::default() });
+            }
+        }
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        match agent.start().await {
+            Err(GossipError::InvalidField { field: f, reason }) => {
+                assert_eq!(f, field);
+                assert!(reason.contains("`tls`"), "the refusal names the missing feature: {reason}");
+            }
+            other => {
+                let _ = agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+                panic!("[{field}] without the `tls` feature must refuse to start, got {other:?}");
+            }
+        }
+    }
+}
+
+/// `/a2a` is anonymous skill dispatch unless an evaluator is attached — a configured bearer does not
+/// gate it (I1 audit `a2a.admission`, 2026-10-02). The attach-time warning said the opposite: it
+/// fired only with no evaluator **and** no bearer, so a node with a bearer and no evaluator — the
+/// production-readiness §2 case — got no warning, and an evaluator attached after `with_a2a` made
+/// it spurious. The predicate is now a start-time fact. This replaces
+/// `a2a_mounted_without_evaluator_or_bearer_is_the_open_configuration` (2026-09-25), which pinned the
+/// wrong condition — *any one bearer is enough to close the anonymous path* — and said to revisit it
+/// rather than leave it quietly passing.
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn a2a_is_anonymous_dispatch_whatever_bearer_is_configured() {
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = alloc_port();
+    cfg.http_port = Some(alloc_port());
+    cfg.gateway_auth_token = Some("s3cret".into());
+    let id = NodeId::new("127.0.0.1", cfg.bind_port).unwrap();
+    let plain = GossipAgent::new(id.clone(), cfg.clone());
+    assert!(!plain.a2a_dispatch_is_anonymous(), "nothing mounted, nothing exposed");
+    let mounted = GossipAgent::new(id, cfg).with_a2a();
+    assert!(mounted.a2a_dispatch_is_anonymous(), "a bearer does not gate /a2a");
+    #[cfg(feature = "tls")]
+    {
+        mounted.with_action_evaluator(Arc::new(crate::ReferenceEvaluator::new("rev-i1")));
+        assert!(!mounted.a2a_dispatch_is_anonymous(), "an evaluator attached after with_a2a counts");
     }
 }

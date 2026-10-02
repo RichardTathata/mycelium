@@ -24,10 +24,13 @@ any directory turns its row red — precisely, deleting the last provider of any
 example's own caller, written down.
 
 **The stem run (X2).** Prerequisites: Docker with Compose, which builds the stem image from
-`docker/Dockerfile.stem` on first run; for the model demos' code run, a local Ollama and `MODEL_GGUF`
-pointing at a GGUF file. `make examples-both-ways DEMO=provisioning` (or `catalog`, `mcp_toolgrowth`, `model_deploy`, `reheal_deploy`, `llm_agent` — the model demos' code runs need a local Ollama and `MODEL_GGUF`; `llm_agent`'s units describe its stem recut, while the browser demo itself still reads `examples/node_n*.toml`) runs the demo as the
-in-process binary and as stem nodes from one image fed this directory
-(`docker/docker-compose.stem-examples.yml`), and greps the same markers from both. The hosting units'
+`docker/Dockerfile.stem` on first run. `make examples-both-ways DEMO=provisioning`
+(or `catalog`, `mcp_toolgrowth`) runs the Rust binary and the stem version and checks
+both. `model_deploy` and `reheal_deploy` also support that target, but their code
+runs require local Ollama and `MODEL_GGUF`; only their stem versions run in CI.
+For `llm_agent`, the target explicitly skips the interactive browser code run and
+checks only the stem recut; the browser still reads `examples/node_n*.toml`.
+Stems use `docker/docker-compose.stem-examples.yml`. The hosting units'
 `trusted_publishers` is the public half of the suite's test seed (`make stem-keys`), a fixture.
 
 **Not here, and why:** `mcp_tool_authority`, `authority_drain`, `composed_commit` and

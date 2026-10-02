@@ -39,12 +39,16 @@ this page is the index + the gate.
 ## 2 · Authorization & the gateway edge
 
 - ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**. Bind it to loopback, or set
-  `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. `/health` `/ready` `/metrics` are
-  intentionally public for probes; everything else must be gated. → [rbac.md](rbac.md),
-  [sso.md](sso.md)
+  `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. **Token tables and `[oidc]` need a
+  `compliance` build, and `[gateway_tls]` a `tls` build** — a build without the feature refuses to
+  start with the table set (since 2026-10-02; before, it accepted and ignored it). Intentionally
+  public, in every build: `/health`, `/ready`, `/metrics`, **`/stats`** (node id, cluster name, peer
+  count, violation counters), `/bulk/{id}` (a capability URL), `/.well-known/agent.json`, and `/a2a`'s
+  optional auth (next item); everything else must be gated. → [rbac.md](rbac.md), [sso.md](sso.md)
 - ☐ **Gateway TLS** — the gateway is **plaintext HTTP by default**; bearer tokens/JWTs are then sent
-  in the clear. Set `gateway_tls` for native HTTPS, or terminate TLS with a proxy. Never expose a
-  plaintext gateway on a routable interface. → [gateway-tls.md](gateway-tls.md)
+  in the clear. Set `gateway_tls` for native HTTPS (a `tls` build — any other refuses to start with
+  it set), or terminate TLS with a proxy. Never expose a plaintext gateway on a routable interface.
+  → [gateway-tls.md](gateway-tls.md)
 - ☐ **RBAC / capability authz** configured if multi-tenant — signed role claims + capability ACLs.
   → [rbac.md](rbac.md)
 - ☐ **Egress allowlist** set if nodes reach external tool/LLM/MCP servers (WS3 egress gate). →
@@ -68,6 +72,8 @@ this page is the index + the gate.
   `tasks/send` naming a real skill must **not** dispatch it (the handler's methods are `tasks/send`,
   `tasks/sendSubscribe`, `tasks/get`, `tasks/cancel`; any other name is `-32601` and proves nothing) (the skill's own counter stays at zero,
   the response is a refusal, and the evidence journal records the denial if an evaluator is attached).
+  `start()` **warns** whenever `/a2a` is mounted with no evaluator, whatever bearer is configured
+  (before 2026-10-02 the warning required *no bearer* too, so this exact configuration was silent).
   `with_a2a()` warns when it mounts with none of these. → [rbac.md](rbac.md),
   `cargo run --example a2a_skill_authority --features tls,a2a` (the refused call is act two)
 

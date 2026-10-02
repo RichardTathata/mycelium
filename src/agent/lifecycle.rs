@@ -53,6 +53,48 @@ impl GossipAgent {
                 });
             }
         }
+        // The same class, three more settings (I1 audit of docs/plans/guarantees-and-rule-catalogue.md,
+        // 2026-10-02): a table whose enforcing code this build compiled out is refused by name, never
+        // accepted and ignored. `[oidc]` was dropped at parse time and left the gateway open; `[tls]`
+        // and `[gateway_tls]` were kept and ignored — unauthenticated gossip, bearers in cleartext.
+        #[cfg(not(feature = "compliance"))]
+        for set in [self.config.oidc.is_some()] {
+            if set {
+                return Err(GossipError::InvalidField {
+                    field: "oidc",
+                    reason: "an [oidc] table is enforced only in a build with the `compliance` \
+                             feature; this build would ignore it and run an open gateway. Build with \
+                             `--features compliance`, or use `gateway_auth_token`"
+                        .into(),
+                });
+            }
+        }
+        #[cfg(not(feature = "tls"))]
+        for (field, set) in [("tls", self.config.tls.is_some()), ("gateway_tls", self.config.gateway_tls.is_some())] {
+            if set {
+                return Err(GossipError::InvalidField {
+                    field,
+                    reason: "TLS is provided only by a build with the `tls` feature; this build would \
+                             ignore the table and run plaintext — unauthenticated gossip, bearer \
+                             tokens in cleartext. Build with `--features tls`"
+                        .into(),
+                });
+            }
+        }
+        // `/a2a` admits an absent bearer as anonymous and drops a present bearer's scopes, so a
+        // configured token does not gate it; only an attached evaluator stands between an anonymous
+        // caller and skill dispatch. Said here, at start, so attach order cannot make it spurious.
+        #[cfg(feature = "a2a")]
+        for exposed in [self.a2a_dispatch_is_anonymous()] {
+            if exposed {
+                tracing::warn!(
+                    "start: /a2a is mounted with NO action evaluator. A gateway bearer does not gate \
+                     this route (an absent bearer is anonymous, a present one's scopes are dropped), \
+                     so an ANONYMOUS caller reaches skill dispatch. Attach an evaluator \
+                     (`with_action_evaluator`) or do not expose this node beyond a trusted network."
+                );
+            }
+        }
         let bind_ip: IpAddr = self.config.bind_address.parse().map_err(|e| {
             GossipError::InvalidField {
                 field:  "bind_address",

@@ -149,7 +149,10 @@ production clusters.
 
 ---
 
-### 5 — The stem fleet (identical nodes that load what the declarations call for)
+### 4 — The stem fleet (identical nodes that load what the declarations call for)
+
+Start with [Your first stem fleet](tutorials/01-first-stem-fleet.md) for a runnable,
+model-free introduction before choosing deployment topology.
 
 A fleet of one image: every node is `mycelium-stem --units <unit.toml>` (the `mycelium-wasm-host`
 crate, feature `stem`) with the same unit file, a `[hosts]` table naming the kinds it can run, and
@@ -171,7 +174,7 @@ containers from one image — the `provisioning` profile kills the active provid
 takes over, and the `reheal_deploy` profile kills the host serving a real model and the survivor
 installs, activates and serves it.
 
-### 4 — Full bootstrap mesh (all nodes listed as seeds)
+### 5 — Full bootstrap mesh (all nodes listed as seeds)
 
 ```rust
 // Every node lists every other node
@@ -200,7 +203,7 @@ config to every existing node, which is operationally expensive.
 
 ---
 
-### 5 — Partial seeds with `max_active_connections` (large dynamic clusters)
+### 6 — Partial seeds with `max_active_connections` (large dynamic clusters)
 
 For clusters of 20+ nodes, O(N²) connections become expensive. The gossip
 still propagates cluster-wide with fewer connections because Ping messages

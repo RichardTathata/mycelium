@@ -2,6 +2,15 @@
 
 ↑ [dev/](dev.md)
 
+**Teaching the current surfaces.** [The developer tutorial sequence](../../guide/tutorials/README.md)
+connects stem differentiation, declarations, acceptance, authority, replay and observation.
+`mycelium-wasm-host/examples/first_stem_fleet.rs` is the model-free starting point;
+`examples/compare_stem_observations.rs` validates its exported declaration and joins
+one observed snapshot through an explicit node-to-unit mapping. The consumer is
+scenario-specific, not a generic monitor. Both run in the WASM-host CI job, including
+missing-provider, unknown-unit, duplicate and schema refusals. Existing provisioning, authority and replay examples
+remain the mechanism demonstrations; the tutorials do not duplicate their protocols.
+
 **Index + doc standard:** [`examples/README.md`](../../../examples/README.md) is the front-door
 index of every example, the shared-setup section (toolchain / Ollama / Python tier — so no README
 re-explains it), and the **doc template** all example READMEs follow (`## Objective` · `## How to

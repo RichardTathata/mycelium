@@ -1,5 +1,8 @@
 # Mycelium documentation — map
 
+**New developer?** Follow the [six practical tutorials](guide/tutorials/README.md)
+after the guide’s introductory gossip and capability examples.
+
 The front door for `docs/`. Eight categorized areas plus two **root-level stance
 anchors**. The convention: **root holds the foundational, cross-cutting "stance"
 documents** (what the system *is*, and what an attacker *gains*); **everything else

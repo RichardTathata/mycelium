@@ -134,3 +134,38 @@ hypothesis until I1 maps it to code**:
 - **Q3.** The private companions (AE, RA): do they register guarantees into the same registry through the
   public API? Proposed: yes — the registry is public API, and the private repo's `COMPATIBILITY.md` names
   what it registers.
+
+## 8 · I1 audit — findings (2026-10-02, read-only sweep of the baseline)
+
+The first exit gate of I1 says the finding list is published. The sweep covered every `#[cfg(feature)]`
+arm in the gateway, lifecycle, A2A, MCP, provider-enforcement, federation and TLS code, every `GossipConfig`
+field whose doc names a feature, every attached component, the consensus profile and the public routes.
+IDs are the proposed stable IDs for the registry.
+
+| ID | Guarantee | Depends on | What happened when missing | Verdict | State |
+|---|---|---|---|---|---|
+| `gw.token_tables` | scoped/named tokens close the gateway | `compliance` | parsed, ignored, gateway open | FINDING | fixed #468 |
+| `gw.oidc` | SSO closes the gateway | `compliance` | **dropped at parse time**, gateway open | FINDING (critical) | fixed, this PR |
+| `gw.tls` | gateway serves HTTPS | `tls` | plaintext, bearers in cleartext, no warning | FINDING (high) | fixed, this PR |
+| `mesh.tls` + `domain.enforced` | mTLS gossip; the enforced profile | `tls` | plaintext, unauthenticated; `validate()` passed on a dead field | FINDING (high) | fixed, this PR |
+| `a2a.admission` | `/a2a` is not anonymous dispatch | an evaluator | warning required *no bearer* too; exposed case silent; attach-order spurious | FINDING | fixed, this PR (warning; the profile refuses, I3) |
+| `audit.chain` / `audit.sink` | governance actions are sealed and exported | `compliance` + `config.tls` | nothing sealed, sink receives nothing, report said `Set` | FINDING (medium) | open — I2 |
+| `report.identity_proofs` / `report.ca_key_off_node` | report truthfulness | `tls` | said `Set` in a build where both are inert | FINDING (medium) | fixed, this PR |
+| `report.egress` | *substrate outbound fails closed* | `egress.allow_hosts` | federation client, bulk fetch and OIDC JWKS are ungated; report overclaims | FINDING (medium) | open — I1 fix, own PR |
+| `at_rest.cipher` | WAL/snapshot encrypted | attach before `start()` | attached after: plaintext, no warning | FINDING (low) | open — G13 |
+| `ae.recorded_before_dispatch` | the decision is journalled | `with_evidence_journal` | enforces, records nothing; warns at attach | WARN-ONLY | I3 requires it |
+| `gw.tls_runtime` | a bad gateway TLS config is fatal | — | HTTP task dies, `start()` returns Ok, node reports ready | WARN-ONLY | open — I2/I3 |
+| `persist.replay` | restart recovers KV and acceptor memory | `persistence` | replay failure warns, continues, then snapshots | WARN-ONLY (fail-open) | open — needs a test; may compact over unreadable state (unverified) |
+| `prov.enforcement` | protected work authorised where it runs | `with_provider_enforcement` | **on** + no evaluator refuses (closed); **off** checks nothing | OK / DOC-ONLY | I3 requires *on* |
+| `ae.authorised_at_seam` | gateway dispatch authorised | an evaluator | inert without one, by design | DOC-ONLY | I3 requires it |
+| `authz.durable_epochs`, `authz.execution_authority`, `gw.caller_attest`, `gw.not_open`, `id.peer_authenticated`, `mesh.frame_sig` | documented conditions | — | nothing validates them | DOC-ONLY | I3 candidates |
+| `cons.safety_profile` | fixed voter set, strict majority, trust slices | `ConsensusConfig` | defaults `quorum_size: 0`, `use_trust_slices: false`; nothing validates | DOC-ONLY | I3; membership-fixed and fencing are `NotVerifiableHere` |
+| `gw.extra_routes_auth` | merged companion routes are gated | path under `/gateway/` | a route outside `/gateway/`, `/a2a`, `/federation/` is public without notice | DOC-ONLY | document as a public class; I3 lists them |
+| public routes | the checklist names every public probe | — | `/stats`, `/bulk/{id}`, `/.well-known/agent.json` were missing from `production-readiness.md` | DOC drift | fixed, this PR |
+
+**The pattern behind the critical one:** a `#[cfg]`'d field plus a serde that tolerates unknown keys is a setting
+that *vanishes*; a field present in every build whose consumers are `#[cfg]`'d is a setting that *lies*. I2's
+report resolves both to `NotInBuild` by construction, which is why it comes before the profile.
+
+**Not audited:** `mycelium-wiki` with `execution-authority` off, `mycelium-effects` with `envelope` off.
+
