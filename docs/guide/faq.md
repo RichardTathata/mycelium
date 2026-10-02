@@ -8,7 +8,9 @@ here doesn't route you well, that's a docs bug — open an issue.
 
 ## Is Mycelium for me?
 
-**Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.** (That is the project's one
+**A fleet that grows the capabilities it lacks, under rules it can show it kept.**
+
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay. (That is the project's
 description — [`docs/positioning.md`](../positioning.md) — and the README opens with it.)
 
 Mycelium earns its keep when you have **many agents (or nodes) that must

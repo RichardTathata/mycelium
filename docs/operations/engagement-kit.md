@@ -6,7 +6,7 @@ names the existing page it packages and the template it adds. Its acceptance tes
 and it is the only test that matters: an engineer or consultant who did not write the system
 completes the bounded engagement without undocumented help.*
 
-**The sentence the kit sells.** Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.
+**What the kit sells.** **A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
 ([`docs/positioning.md`](../positioning.md)). The kit tells it in the buyer deck's order — what an agent
 *may* do · what it *did* · a fleet that fills itself · how · what is proven — and every claim it makes
 about status comes from [what-is-proven.md](what-is-proven.md), never from memory.

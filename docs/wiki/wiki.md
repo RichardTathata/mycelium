@@ -3,7 +3,7 @@
 The project's LLM Wiki (schema: [AGENTS.md](AGENTS.md) — read it before editing; **code is
 canon, the wiki cites it**). Start here, follow links down.
 
-Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.
+**A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
 (`docs/positioning.md`). Mycelium is an embedded, broker-less Rust library: a three-layer substrate (gossip KV /
 signal mesh / epidemic consensus) for AI agent fleets and storage replication, built on the
 thesis that a coordinator is not just slower but *epistemically incapable* for heterogeneous

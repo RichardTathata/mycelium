@@ -1,3 +1,7 @@
+> **Superseded wording, 2026-10-02.** The sentence this plan chose is replaced by a hero and a revised
+> sentence — [`docs/positioning.md`](../positioning.md) § *Revised 2026-10-02* says why. The plan's
+> method (one source, gated doors, the five-step path) stands.
+
 # Proposition alignment: one sentence, one proof page, one path (plan)
 
 **Status:** ✅ **executed 2026-09-28** (rev 0.2 — P1–P5 in one PR, #434, the same day the plan was written; the
