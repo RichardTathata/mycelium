@@ -20,6 +20,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_token_table_this_build_cannot_enforce_refuses_to_start`, seen failing on the unfixed code.
   **Upgrade note:** a node that set a token table in a non-`compliance` build now fails at start;
   build with `--features compliance`, or use `gateway_auth_token`.
+- **Three more settings of the same class refuse at start, found by the plan's own audit**
+  (`docs/plans/guarantees-and-rule-catalogue.md` I1, 2026-10-02). An **`[oidc]`** table in a build
+  without `compliance` was **dropped at parse time** (the field is compiled out and the config accepts
+  unknown keys), so a node the operator believed was behind SSO ran an open gateway; it now parses in
+  every build and `start()` refuses it by name. A **`[tls]`** or **`[gateway_tls]`** table in a build
+  without `tls` was accepted and ignored — unauthenticated gossip, bearer tokens in cleartext, and
+  `domain_profile = "enforced"` passing `validate()` on the strength of a dead field; both now refuse.
+  **Check any default-build deployment that sets one of these tables:** it was running without the
+  protection the table names. Regression tests `an_oidc_table_this_build_cannot_enforce_refuses_to_start`
+  and `a_tls_table_this_build_cannot_enforce_refuses_to_start`, seen failing on the unfixed code.
+- **`/a2a`'s exposure is stated correctly, and at start.** The attach-time warning fired only with no
+  evaluator *and* no bearer — but a bearer does not gate `/a2a` (an absent one is anonymous, a present
+  one's scopes are dropped), so the exact exposed configuration got no warning, and an evaluator attached
+  after `with_a2a()` made it spurious. `start()` now warns whenever `/a2a` is mounted with no evaluator.
+- **The confinement report no longer says `Set` for a setting the build cannot act on:**
+  `identity_proofs_required` and `ca_key_off_node` report `NotInBuild` without `tls`.
 
 ### Fixed
 - **A verbose `[[activation]]` command no longer stalls into a false timeout.** The runner piped the

@@ -9,7 +9,7 @@
 
 **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.
 It is a broker-less embedded Rust library: you embed it directly in your process — there is no
 daemon, no sidecar, no coordinator to run. Each node is simultaneously a participant in the mesh
 and a full peer; the mesh is the registry, the bus, and the scheduler all at once. The map of the
@@ -23,10 +23,13 @@ deterministic replay (chapters 18–24). The sentence is the project's one descr
 <!-- path:start -->
 1. **[`hello_mesh`](../../examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
 2. **[`hello_capability`](../../examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
-3. **[the co-op `provisioning` demo](../../examples/coop/README.md)** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+3. **[Your first stem fleet](tutorials/01-first-stem-fleet.md)** — generic hosts discover and install a signed echo component, answer a call, and restore a declared provider floor after graceful removal.
 4. **[guide 20](20-authorising-actions.md) with [`authority_drain`](../../examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
 5. **[`what-is-proven.md`](../operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
+
+**Learn the newer surfaces:** [six developer tutorials](tutorials/README.md) — stem fleets,
+declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
 
 ## Design philosophy
 
@@ -171,7 +174,7 @@ live outside `examples/` and are easy to miss:
 | [17](17-federation.md) | **Federation — two edges, kept apart.** *Part 1, public discovery:* self-certified AgentFacts anyone may pull, where trust is the fetcher's decision. *Part 2, federated domains:* who may invoke what between named partners — credentials bound to one export, filtered catalogues, budgets, partition and reconnect. The rule that separates them, and the invariant that federation **never joins the transports** | `cargo run -p mycelium-coop-examples --bin federation_facts` | 12 min |
 | [18](18-contracts-and-receipts.md) | **Contracts & receipts** — what an acknowledgement actually proves: the four rungs, why `Buffered` is not a softer `OnDisk`, operation identity and the retry rule, and why a timeout is `DeliveryUnknown` rather than a failure | `cargo run --example receipt_ladder` | 12 min |
 | [19](19-replay-and-simulation.md) | **Replay & simulation** — turning "it failed on the third run yesterday" into a file: why a seed is not a reproduction artefact, the nine choice kinds, exact vs scenario replay, and the witness that lets a bundle prove its own failure | `cargo run -p mycelium-sim --example replay_a_bundle` | 12 min |
-| [20](20-authorising-actions.md) | **Authorising actions at the gateway** — a preflight before dispatch with your own policy engine: three verdicts and why indeterminate is never permit, the envelope the enforcement point assembles from verified facts, the evidence journal, and what a gateway check can and cannot promise | `ReferenceEvaluator` + `with_evidence_journal` | 15 min |
+| [20](20-authorising-actions.md) | **Authorising actions at gateway, provider and resource** — a preflight before dispatch with your own policy engine: three verdicts and why indeterminate is never permit, the envelope the enforcement point assembles from verified facts, the evidence journal, and what a gateway check can and cannot promise | `ReferenceEvaluator` + `with_evidence_journal` | 15 min |
 | [21](21-mandates.md) | **Mandates** — is the caller still the one who was appointed? The decisive invariant, why a superseded mandate is *not* a conflict (the retry loop would launder the revocation), the fence as one transaction rather than two operations, and history inherited as history rather than as conclusions | `cargo run -p mycelium-wiki --example curator_handover --features git-store` | 12 min |
 | [22](22-stability-and-control.md) | **Stability & control** — deciding when *not* to act: why an isolated node is uncertain rather than fresh, the five action classes split by which mistake costs more, the four-rung profile ladder, and why a right cannot be soft state | `cargo run --example control_envelope_viz` | 15 min |
 | [23](23-knowledge.md) | **Knowledge** — keeping disagreement instead of resolving it: why judging is split from recording, why a self-assessment cannot count, the four verdicts (and why *we do not know* is not *we looked and it is bad*), and standing | `make gate-knowledge` | 12 min |

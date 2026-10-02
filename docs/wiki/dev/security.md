@@ -444,3 +444,15 @@ core's `compliance` feature can be unified on by another crate while this crate'
 could pass while the gateway still ran open. Pinned by `a_token_table_this_build_cannot_enforce_refuses_to_start`
 (`src/lib_tests.rs`, `gateway` without `compliance`), seen failing on the unfixed code. The lesson extends the
 one above: **a configuration a build cannot enforce must fail closed at start**, not be accepted and ignored.
+
+**The audit that followed found three more of the class the same day** (the plan
+`docs/plans/guarantees-and-rule-catalogue.md`, increment I1, §8). `[oidc]` was worse than the token tables: the
+field is `#[cfg(feature = "compliance")]` and `GossipConfig` tolerates unknown keys, so the table was **dropped at
+parse time** — a node the operator configured for SSO started clean and open. `[tls]` and `[gateway_tls]` exist in
+every build but their enforcing code does not, so they were kept and ignored (and `domain_profile = enforced`
+passed `validate()` on `tls.is_some()`, a dead field). All three now refuse in `start()` beside the token-table
+check; `[oidc]` parses in every build as `OidcNotInBuild` so it *can* be refused. Also found: `with_a2a`'s warning
+predicate required *no bearer*, though a bearer never gated `/a2a` — the exposed case was the silent one; the
+warning moved to `start()`. Tests seen failing first: `an_oidc_table_…`, `a_tls_table_…`. **The pattern:** a
+`#[cfg]`'d field plus a serde that ignores unknown keys is a setting that vanishes; a field present in every build
+with `#[cfg]`'d consumers is a setting that lies. The plan's I2 report is what makes both visible by construction.

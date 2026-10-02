@@ -28,9 +28,9 @@ offers, the `[[requirement]]` filters it needs, the `[[group]]`s it defines, the
 drains, the `[[mandate]]`s and `[[rule]]`s it expects, and — for a host — the `[hosts]` table (kinds,
 install budget, headroom, trusted publisher keys, placement root, fuel and reviewers), the
 `[[presence]]` floors it keeps, the `[[activation]]` that hands a placed blob to its local runtime, and
-the `[[serve]]` that makes a live install a routable model skill. No secrets, no addresses: the
-directory is safe to commit, and it is the thing the rest of this page checks, deploys and compares.
-The one exception is `[[serve]].api_key`, a literal — see the reference's limit note.
+the `[[serve]]` that makes a live install a routable model skill. The unit directory is the thing the rest of this page checks, deploys and compares.
+Keep credentials out of committed units.
+`[[serve]].api_key` is a literal secret: a directory containing one is not safe to commit; see the reference's limit note.
 
 ```
 deploy/

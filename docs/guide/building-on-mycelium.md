@@ -1,8 +1,11 @@
 # Building on Mycelium — an integrator on-ramp
 
+**Learning path:** [six developer tutorials](tutorials/README.md) connect stem declarations,
+acceptance, authority and runtime evidence with runnable examples.
+
 **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.
 
 You're building a **use case on top of Mycelium** (a coordinator, an agent fleet, a
 replication layer), not working on Mycelium itself. This page is your contract: what to

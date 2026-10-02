@@ -2,7 +2,7 @@
 
 TypeScript SDK for [Mycelium](https://github.com/RichardTathata/mycelium) — **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.
 
 Connects to a running Rust Mycelium node over loopback HTTP. No native extension —
 the HTTP gateway sidecar adds ~1 ms per call, invisible next to LLM inference latency.

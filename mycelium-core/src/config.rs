@@ -39,6 +39,30 @@ pub struct OidcConfig {
     pub jwks_uri: Option<String>,
 }
 
+/// What an `[oidc]` table becomes in a build without `compliance`: a value that **parses** — so the
+/// table is seen rather than dropped by `GossipConfig`'s unknown-key tolerance — and that
+/// `GossipAgent::start()` refuses by name, since nothing in this build can enforce it (I1 audit of
+/// `docs/plans/guarantees-and-rule-catalogue.md`, finding `gw.oidc`, 2026-10-02: the dropped table left
+/// the gateway open).
+#[cfg(not(feature = "compliance"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OidcNotInBuild;
+
+#[cfg(not(feature = "compliance"))]
+impl<'de> Deserialize<'de> for OidcNotInBuild {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(d).map(|_| OidcNotInBuild)
+    }
+}
+
+#[cfg(not(feature = "compliance"))]
+impl Serialize for OidcNotInBuild {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        s.serialize_map(Some(0))?.end()
+    }
+}
+
 #[cfg(feature = "compliance")]
 fn default_group_claim() -> String { "groups".to_string() }
 
@@ -789,7 +813,8 @@ pub struct GossipConfig {
     pub http_addr: String,
 
     /// Native server-side TLS for the HTTP gateway. `None` (default) = plaintext HTTP.
-    /// See [`GatewayTlsConfig`]. Only meaningful when `http_port` is `Some`.
+    /// See [`GatewayTlsConfig`]. Only meaningful when `http_port` is `Some`. Requires the `tls`
+    /// crate feature: a build without it refuses to start with this set, rather than serve plaintext.
     pub gateway_tls: Option<GatewayTlsConfig>,
 
     /// Local KV persistence configuration.
@@ -1020,6 +1045,11 @@ pub struct GossipConfig {
     #[cfg(feature = "compliance")]
     #[serde(default)]
     pub oidc: Option<OidcConfig>,
+    /// An `[oidc]` table in a build without `compliance`: parsed so it cannot vanish, and refused by
+    /// `GossipAgent::start()` by name — nothing in this build enforces it. See [`OidcNotInBuild`].
+    #[cfg(not(feature = "compliance"))]
+    #[serde(default)]
+    pub oidc: Option<OidcNotInBuild>,
 
     /// Mutual TLS configuration.
     ///
@@ -1027,8 +1057,8 @@ pub struct GossipConfig {
     /// connections with no authentication. Set to `Some(TlsConfig { .. })` to
     /// require mTLS: all peers must present a certificate signed by the cluster CA.
     ///
-    /// Requires the `tls` crate feature. Has no effect when the feature is
-    /// disabled even if set to `Some(...)`.
+    /// Requires the `tls` crate feature: a build without it **refuses to start** with this set
+    /// (`GossipAgent::start()`), rather than accept the table and run plaintext.
     pub tls: Option<TlsConfig>,
 }
 
@@ -1144,7 +1174,6 @@ impl Default for GossipConfig {
             control_min_peers_heard:       1,
             domain_profile:                DomainProfile::Open,
             egress:                        EgressPolicy::default(),
-            #[cfg(feature = "compliance")]
             oidc:                          None,
             tls:                           None,
         }

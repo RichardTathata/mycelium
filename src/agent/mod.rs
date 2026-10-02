@@ -541,6 +541,9 @@ pub(crate) struct TaskCtx {
     /// Closure plan C5: the membership authorities this node takes removals from.
     #[cfg(feature = "tls")]
     pub(crate) membership: std::sync::OnceLock<Arc<crate::membership::MembershipAuthorities>>,
+    /// Whether `/a2a` is mounted (`with_a2a`), so `start()` can say what that exposes.
+    #[cfg(feature = "a2a")]
+    pub(crate) a2a_mounted: AtomicBool,
     /// Closure plan C4: H6's cohort budget at this provider, set via `with_cohort_budget`.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) cohort_budget: std::sync::OnceLock<Arc<provider_enforcement::ProviderBudget>>,
@@ -994,6 +997,8 @@ impl GossipAgent {
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "tls")]
             membership: std::sync::OnceLock::new(),
+            #[cfg(feature = "a2a")]
+            a2a_mounted: AtomicBool::new(false),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             cohort_budget: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1369,30 +1374,14 @@ impl GossipAgent {
     #[cfg(feature = "a2a")]
     pub fn with_a2a(self) -> Self {
         // An open surface is a deployment decision; it must not be an accident. `/a2a` has no scope
-        // floor, so with neither an evaluator nor any bearer configured, an anonymous caller
-        // reaches skill dispatch. Verified by probe (2026-09-25): `tasks/send` from an
-        // unauthenticated client returned `skill not found` rather than a refusal — it had passed
-        // every gate and failed only on resolution.
-        // The AE seam only EXISTS under `gateway` + `tls` — the field is cfg'd out otherwise. In a
-        // build without them there cannot be an evaluator, so the seam is inert by construction,
-        // which makes this warning more warranted rather than less. (Caught by CI's Demo smoke,
-        // which builds `--features a2a` on default features: gateway, no tls.)
-        #[cfg(all(feature = "gateway", feature = "tls"))]
-        let no_evaluator = self.task_ctx.action_evaluator.get().is_none();
-        #[cfg(not(all(feature = "gateway", feature = "tls")))]
-        let no_evaluator = true;
-        let no_bearer = self.task_ctx.config.gateway_auth_token.is_none()
-            && self.task_ctx.config.gateway_scoped_tokens.is_empty()
-            && self.task_ctx.config.gateway_named_tokens.is_empty();
-        if no_evaluator && no_bearer {
-            tracing::warn!(
-                "with_a2a: /a2a is mounted with NO action evaluator and NO gateway bearer \
-                 configured. Unlike /mcp there is no scope floor on this route, so an ANONYMOUS \
-                 caller can reach skill dispatch. Attach an evaluator (`with_action_evaluator`), \
-                 configure a bearer, or require a federation credential before exposing this node \
-                 beyond a trusted network."
-            );
-        }
+        // floor and a bearer does not gate it, so without an evaluator an anonymous caller reaches
+        // skill dispatch. Verified by probe (2026-09-25): `tasks/send` from an unauthenticated
+        // client returned `skill not found` rather than a refusal — it had passed every gate and
+        // failed only on resolution. The warning is raised by `start()` from
+        // `a2a_dispatch_is_anonymous`, not here: an evaluator attached after this call counts, and
+        // the attach-time predicate once required *no bearer* too, so a node with a bearer and no
+        // evaluator — the exact exposed case — got no warning (I1 audit, 2026-10-02).
+        self.task_ctx.a2a_mounted.store(true, Ordering::Release);
 
         let ctx   = Arc::clone(&self.task_ctx);
         let tasks = Arc::new(papaya::HashMap::<String, a2a::A2aTask>::new());
@@ -1404,6 +1393,19 @@ impl GossipAgent {
 }
 
 impl GossipAgent {
+    /// Whether an anonymous caller to `/a2a` reaches skill dispatch on this node: the route is
+    /// mounted and no action evaluator is attached. A configured bearer does **not** change this —
+    /// `/a2a` admits an absent bearer as anonymous and drops a present one's scopes
+    /// (`a2a_optional_auth`). In a build without `gateway` + `tls` there cannot be an evaluator.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn a2a_dispatch_is_anonymous(&self) -> bool {
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let no_evaluator = self.task_ctx.action_evaluator.get().is_none();
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let no_evaluator = true;
+        self.task_ctx.a2a_mounted.load(Ordering::Acquire) && no_evaluator
+    }
+
     /// Creates an [`AgentStateMachine`] bound to this node.
     ///
     /// The state machine writes every committed transition to `agent/{node}/state`

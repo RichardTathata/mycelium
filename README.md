@@ -2,7 +2,7 @@
 
 **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.
 
 It is built in three layers — a gossip KV store, a signal mesh, and epidemic
 consensus — with capability discovery across them: no broker, no registry, no daemon, no control
@@ -20,10 +20,13 @@ what it can prove, and what it cannot yet, is one page: [`what-is-proven.md`](do
 <!-- path:start -->
 1. **[`hello_mesh`](examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
 2. **[`hello_capability`](examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
-3. **[the co-op `provisioning` demo](examples/coop/README.md)** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+3. **[Your first stem fleet](docs/guide/tutorials/01-first-stem-fleet.md)** — generic hosts discover and install a signed echo component, answer a call, and restore a declared provider floor after graceful removal.
 4. **[guide 20](docs/guide/20-authorising-actions.md) with [`authority_drain`](examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
 5. **[`what-is-proven.md`](docs/operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
+
+**Learn the newer surfaces:** [six developer tutorials](docs/guide/tutorials/README.md) — stem fleets,
+declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
 
 ## Hello, mesh — 30 seconds, no setup
 

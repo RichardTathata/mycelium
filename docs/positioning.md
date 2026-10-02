@@ -14,7 +14,7 @@ doors: [`docs/plans/proposition-alignment.md`](plans/proposition-alignment.md).
 ## The sentence
 
 <!-- sentence -->
-**Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.**
+**Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.**
 
 The hero says what is distinctive in a dozen words: the fleet *grows* — a node that lacks a capability
 acquires it — and it does so *under rules it can show it kept*, which is authority checked where the work
@@ -26,10 +26,12 @@ runs and a record someone else can read. The sentence makes each claim at the st
   node; an SDK agent or a plain `mycelium` node does not install anything.
 - *Re-heal what they declared when a provider dies* — presence floors: **what was declared**, not
   self-repair in general.
-- *Every action runs under explicit authority* — mandates, the action seam, enforcement at the provider.
-- *Leaves a record you can replay* — receipts, evidence, the replay seams. Deliberately not *proves it by
-  replay*: replay shows a recording is consistent with its captured inputs, not that every execution is
-  correct (the 360 review, 2026-10-02).
+- *Configured enforcement points check authority and can record their decisions* — mandates
+  and the action seam constrain covered routes. A node must attach the applicable evaluator,
+  authority and evidence journal; uncovered routes do not inherit the guarantee.
+- *Supported replay seams make captured executions reproducible* — replay checks a recording
+  against captured inputs. Evidence records and receipts are not automatically replay bundles,
+  and arbitrary application executions are not automatically covered.
 
 It contains no word that [`philosophy.md`](philosophy.md) § *What This Architecture Is Not* forbids.
 "Unique", "first" and any new-category claim stay reserved until the source-based prior-art comparison
@@ -39,7 +41,8 @@ exists ([`v3-contracts-axis.md`](plans/v3-contracts-axis.md) §13.1).
 account for each other's work with no coordinator, and proves it by replay* — said nothing about the fleet
 acquiring what it lacks, which v2.17.0–v2.18.0 made true, and its *proves it by replay* claimed more than
 replay shows. Its parts are not lost: *find* is the capability layer under *grows*; *authorise* and
-*account* are *explicit authority* and *a record*.
+*account* are the configured authority and evidence boundaries. The developer teaching pass
+also removed the universal *every action* claim and separated evidence from replay coverage.
 
 ## The three expansions
 
@@ -47,7 +50,7 @@ Each is one paragraph and opens with the hero and the sentence.
 
 **The visitor's** — README, the GitHub description, crates.io, docs.rs:
 
-> **A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay. It is built in three layers — a gossip
+> **A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible. It is built in three layers — a gossip
 > KV store, a signal mesh, and epidemic consensus — with capability discovery across them: no
 > broker, no registry, no daemon, no control plane. State converges by gossip; work is claimed, not
 > dispatched; roles are discovered, not assigned. It is probably overkill if you want to chain a few
@@ -74,7 +77,7 @@ text of the steps with link targets removed, since a relative link differs by di
 <!-- path:start -->
 1. **`hello_mesh`** — two embedded agents share state by gossip: 30 seconds, no setup.
 2. **`hello_capability`** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
-3. **the co-op `provisioning` demo** — a fleet fills an unmet need itself: a node pulls, verifies and serves a capability nobody deployed, and re-heals when it dies.
+3. **Your first stem fleet** — generic hosts discover and install a signed echo component, answer a call, and restore a declared provider floor after graceful removal.
 4. **guide 20 with `authority_drain`** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
 5. **`what-is-proven.md`** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->

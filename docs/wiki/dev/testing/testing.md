@@ -322,6 +322,23 @@ smoke, time-boxed fuzz (skipped on PRs), and `cargo audit` (RUSTSEC). **Don't tr
 memorised test count** — the counts grow every PR; run the suites for the live total (the
 CLAUDE.md count bullet drifted twice before this rule).
 
+## The root test build always has `tls` on — a `cfg(not(feature = "tls"))` test never runs (2026-10-02)
+
+`mycelium-effects` is a root dev-dependency with its `envelope` feature, and `envelope` enables
+`mycelium/gateway` and `mycelium/tls`. Cargo unifies dev-dependency features into every test build of the
+root crate, so `cargo test --lib --no-default-features --features gateway` still compiles the root with `tls`
+on. Two consequences, found writing I1's refusal tests (`docs/plans/guarantees-and-rule-catalogue.md` §8):
+a test gated `#[cfg(not(feature = "tls"))]` is silently absent from every `--lib` run (the filter matched
+three tests and ran two), and **the root's non-`tls` code paths — every `#[cfg(not(feature = "tls"))]` arm
+in `lifecycle.rs`, `http.rs`, `confinement.rs` — are not exercised by the library suite at all.** They are
+exercised only by a plain build of the binary (`cargo build --no-default-features --features cli,gateway
+--bin mycelium`), which takes no dev-dependencies. That is how `a_tls_table_this_build_cannot_enforce_refuses_to_start`
+was verified: the binary started with a `[tls]` table and listened in plaintext before the fix, and refuses
+by name after it; the lib test stays in the tree as the statement, and this note says why it is not the
+evidence. The same holds for `compliance`? No — nothing in the dev-dependencies enables it, so
+`not(feature = "compliance")` tests do run. Check `Cargo.toml`'s dev-dependency features before trusting a
+negative feature gate.
+
 ## Toolchain is pinned — bump it deliberately
 
 `rust-toolchain.toml` pins `channel = "1.96.0"` (was floating `stable`), and the CI jobs pin

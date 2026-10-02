@@ -51,7 +51,10 @@ the field and the feature. Before that fix (2026-10-02) such a build parsed the 
 and with no `gateway_auth_token` served every gateway route to an anonymous caller. **Check any
 deployment that sets a token table**: an unauthenticated `GET /gateway/kv/keys` must answer 401,
 and a node that now refuses to start was running open. The positional `gateway_auth_token` works
-in every build, as full access.
+in every build, as full access. **The same holds for an `[oidc]` table** ([sso.md](sso.md)): without
+`compliance` it was silently dropped at parse time; a build without the feature now refuses to start
+with one set. And **`[tls]` / `[gateway_tls]` need a `tls` build** — without it they were accepted and
+ignored (plaintext gossip, bearers in cleartext); such a build now refuses them by name.
 
 Distribute the auto-generated `./mycelium-tls/ca-cert.pem` to every node (shared
 cluster CA) — see the TLS runbook in `09-security.md`.

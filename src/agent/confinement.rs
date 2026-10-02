@@ -126,14 +126,22 @@ impl GossipAgent {
         let (action_evaluator, evidence_journal) = (Setting::NotInBuild, Setting::NotInBuild);
 
         // A node can see this one: whether the CA's private key sits in its own cert directory.
+        #[cfg(feature = "tls")]
         let ca_key_off_node = match &self.config.tls {
             Some(tls) => Setting::from_bool(!tls.auto_cert_dir.join("ca-key.pem").exists()),
             None => Setting::Unset,
         };
 
+        // `require_identity_proofs` is read only inside the TLS init: in a build without `tls` it
+        // is inert, and so is the CA-key question (I1 audit, 2026-10-02 — the report said `Set`).
+        #[cfg(not(feature = "tls"))]
+        let (identity_proofs_required, ca_key_off_node) = (Setting::NotInBuild, Setting::NotInBuild);
+        #[cfg(feature = "tls")]
+        let identity_proofs_required = Setting::from_bool(self.config.require_identity_proofs);
+
         ConfinementReport {
             egress_allow_list: Setting::from_bool(!self.config.egress.allow_hosts.is_empty()),
-            identity_proofs_required: Setting::from_bool(self.config.require_identity_proofs),
+            identity_proofs_required,
             audit_sink,
             action_evaluator,
             evidence_journal,
@@ -160,7 +168,10 @@ mod tests {
     fn a_default_node_reports_every_setting_unmet_and_the_network_unverified() {
         let r = agent(GossipConfig::default()).confinement_report();
         assert_eq!(r.egress_allow_list, Setting::Unset);
+        #[cfg(feature = "tls")]
         assert_eq!(r.identity_proofs_required, Setting::Unset);
+        #[cfg(not(feature = "tls"))]
+        assert_eq!(r.identity_proofs_required, Setting::NotInBuild, "inert without `tls`, and the report says so");
         assert_eq!(r.network_confinement, NetworkConfinement::Unverified);
         assert_eq!(r.clock_sync, ClockSync::Unverified, "a node cannot vouch for its own clock");
         assert!(r.unmet().contains(&"egress_allow_list"));
