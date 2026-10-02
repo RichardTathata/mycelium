@@ -2,7 +2,7 @@
 
 ↑ [Operations](README.md) · beside the [shared-responsibility matrix](shared-responsibility-matrix.md)
 
-**As of 2026-10-01 (v2.18.0).** One dated page for the line between what CI proves on every merge,
+**As of 2026-10-02 (v2.18.1).** One dated page for the line between what CI proves on every merge,
 what has been demonstrated with its bound stated, and what has not yet been shown. Every line names
 its evidence. The places that used to restate this list — `CLAUDE.md` § Active work, the contracts-axis
 plan §10, the self-audit series, the publications ledger, both decks — now link here instead, and
@@ -60,7 +60,7 @@ the deployment, multi-machine recovery or NovusLens consumer-rendering gaps belo
 
 ## Not yet shown — and what would show it
 
-| Gap | State on 2026-10-01 | What would show it |
+| Gap | State on 2026-10-02 | What would show it |
 |---|---|---|
 | **A named third-party production deployment** | none. NovusLens is a design partner that consumes the evidence records; the council-minutes corpus is envelope-qualified, not live | a customer pilot run to the `customer-pilot.md` bar, named with consent |
 | **V1 — the nightly scale runner** | the hosted job (`scale-nightly.yml`) has never had a runner registered and queues silently; the local launchd runner's last four rows (2026-09-25/26) failed with exit 2 on the environment (Docker/VM), not on the substrate; last green 2026-09-24 | a registered runner and a window of green nightlies, recorded in `results.csv` |

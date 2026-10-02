@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.18.1] — 2026-10-02
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.18.0 holds; no API change. **Check before upgrading:** a node that sets a token table, an `[oidc]` table, `[tls]` or `[gateway_tls]` in a build without the feature that enforces it now fails at start — it was running without that protection; build with `--features compliance` / `--features tls` or remove the table, and confirm an unauthenticated `GET /gateway/kv/keys` answers 401.
+
 ### Security
 - **A token table the build cannot enforce now refuses to start, instead of running an open
   gateway.** `gateway_named_tokens` and `gateway_scoped_tokens` (and `GOSSIP_GATEWAY_NAMED_TOKENS`)
