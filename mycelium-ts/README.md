@@ -127,6 +127,22 @@ const providers = await agent.resolveCapability("compute", "gpu", {
 
 Returns demand pressure. `demandPressure > 1.0` signals a supply gap.
 
+#### `declareUnits(tomlText, { intervalSecs?, leaseSecs? }) → Promise<UnitHandle>`
+
+Hands a unit file's text to the node, which validates it and declares its capabilities,
+requirements and groups under one handle. Hosting sections (`[hosts]`, `[[presence]]`,
+`[[activation]]`, `[[serve]]`) are refused (422); `[[lane]]`, `[[mandate]]`, `[[rule]]` come back in
+`notEnforced`.
+
+```typescript
+import { readFile } from "node:fs/promises";
+const unit = await agent.declareUnits(await readFile("units/matcher.toml", "utf8")); // a food co-op's matcher
+console.log(unit.principal, unit.declared, unit.notEnforced);
+await unit.drop();  // retracts the whole unit
+```
+
+See [guide 10 — Declaring a unit file](../docs/guide/10-language-bridges.md#declaring-a-unit-file-from-python-or-typescript).
+
 ---
 
 ### Signal mesh

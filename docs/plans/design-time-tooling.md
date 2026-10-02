@@ -1,6 +1,6 @@
 # Design-time tooling: declarations and the offline wire-check (plan)
 
-**Status:** proposed, rev 0.8, 2026-09-27 (rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; rev 0.6 added §13, the stem fleet — D17–D18, R1–R2, answering Q1 — and §15, the build order; rev 0.7 added §16, recutting the examples in three tiers — X1–X2, Q4 recorded; rev 0.8 added §17, agent-authored functions — U1–U4, D19–D20, F1–F3. **Complete as an argument at rev 0.8.**) Nothing here is built. This plan argues the declaration
+**Status:** delivered — in **v2.17.0** (2026-09-30: the unit file, `mycelium wire-check` W1–W6 (W6's private half in the companion, on the `v2.17.0` pin), the artifact tool and gateway door A1–A3, ranged fetch and object stores S1–S2, the stem node and fleet gate R1–R2, the examples' declaration directories X1 and the stem suite's first slices, fuel by publisher and proposed → shadow → accept F1–F3) and **v2.18.0** (2026-10-01: declared activation D21 and declared model serving D22, the model demos as stems — X2 complete — and Q2, an SDK agent's unit file through `POST /gateway/units/declare`). **Still open:** S4, real-bucket evidence (S3's GCS half closes with it, since no emulator takes the crate's upload); Q4, widening the component world (recorded, not decided); Q5's cross-language golden vectors (nobody has asked for the port). Revision history: rev 0.2 added D9, W6 and §9, the declaration as a consumer record; rev 0.3 added §10, registering an artifact — D10, A1–A3; rev 0.4 added §11, object stores — S3 and GCS as requirements, D11–D14, S1–S4; rev 0.5 added §12, the two ways a capability arrives — D15–D16, L1–L2; rev 0.6 added §13, the stem fleet — D17–D18, R1–R2, answering Q1 — and §15, the build order; rev 0.7 added §16, recutting the examples in three tiers — X1–X2, Q4 recorded; rev 0.8 added §17, agent-authored functions — U1–U4, D19–D20, F1–F3; rev 0.9 recorded Q5 and the delivery notes in each row. This plan argues the declaration
 format once so the code that follows does not re-argue it. It is additive on v2.16.0: no wire change, no
 new KV namespace, no runtime behaviour change.
 
@@ -86,11 +86,14 @@ schema_id = "llm.inference.v2"       # exact match, as CapFilter::schema_id
 [[group]]                            # new — define_capability_group, in a file
 name = "routers"
   [group.filter]
-  ns = "plan"; name = "route"
+  ns   = "plan"
+  name = "route"
   [[group.provides]]
-  ns = "plan"; name = "routing"
+  ns   = "plan"
+  name = "routing"
   [[group.requires]]
-  ns = "data"; name = "realtime"
+  ns   = "data"
+  name = "realtime"
 
 [[lane]]                             # new — a tuple-space stage this unit touches
 name = "stage-b"
@@ -102,7 +105,9 @@ scope  = "routers"
 operations = ["plan.route", "plan.reroute"]
 
 [[rule]]                             # new — reference-evaluator rules, same fields as Rule
-actor = "planner"; operation = "plan.route"; resource = "*"
+actor     = "planner"
+operation = "plan.route"
+resource  = "*"
 requires_mandate = "routers"
 ```
 
@@ -324,7 +329,8 @@ kind = "wasm-component"              # wasm-component | blob
 bytes = "build/route_optimizer.wasm" # relative; the content address is computed, never written
 est_install_secs = 1
   [provides]                         # a Capability, the same shape as [[capability]] in a unit
-  ns = "route"; name = "optimize"
+  ns   = "route"
+  name = "optimize"
   [provides.attrs]
   version = "1.4.0"
   [requires]                         # the signed footprint (artifacts.md §2)
@@ -500,7 +506,8 @@ hostable by at least `min_providers` distinct units' `[hosts]` (D15), or the fin
 
 ```toml
 [[presence]]                         # keep 2–4 route optimizers alive fleet-wide
-ns = "route"; name = "optimize"
+ns   = "route"
+name = "optimize"
 min_providers = 2
 max_providers = 4
 ```
@@ -586,7 +593,7 @@ ships a whole thing and the shipped defect goes first:
 11. **W6** — the consumer record, private repo, in parallel from step 3 on.
 12. **S4** — real buckets, when an account exists; delivery evidence, not a commit.
 
-What the plan leaves outside itself: Q2, Q4, a designer UI (§6, deliberately none), the enforced
+What the plan leaves outside itself: Q4, a designer UI (§6, deliberately none), the enforced
 composition (§8, the axis plan's §13 decides), and NovusLens's own rendering (their side of the
 handover).
 
@@ -635,7 +642,7 @@ enforce. **Recorded, not decided.** It belongs with the guardrails plan, not her
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | **X1** ✅ *shipped 2026-09-30 — `examples/units/<example>/` (not `examples/<name>/units/`: single-file examples have no directory of their own), 16 directories, `scripts/wire-check-examples.sh` in CI, the *Declared* column with a link per row, and the two-way gate `tests/wire_check_examples.rs` (every directory clean; deleting the last provider of any advertised capability turns its directory red — which is why every advertised capability has its requirer written down; a redundant provider's block is deletable by design, so the exit gate's *any block* is read as *any capability*); the MCP-tool-only and env-driven examples are listed as not-here with the reason in `examples/units/README.md`* | Tier 1: a units directory for every declaring example, `wire-check` over all of them in CI, a *declared* facet in `examples/README.md`'s matrix | Every directory exits 0; deleting one capability block from any directory turns its CI row red (seen failing first); the README's tutorial contract names the directory as part of the example |
-| **X2** ✅ *first slice 2026-09-30 — the stem image (`docker/Dockerfile.stem`: `mycelium-stem` + `mycelium-artifact` + the co-op `stem_driver`), the suite `docker/docker-compose.stem-examples.yml` (`make test-stem-examples`, in `cluster-suites.yml`), and `make examples-both-ways DEMO=…`, which runs the code binary and the stem fleet and greps the same markers from both. Recut: **`provisioning`** (providers a and b are stems from `examples/units/provisioning/`, the driver seeds, drains, kills the active provider through the docker socket, drains again — "self-healed" both ways) and **`catalog`** phases 1–4 (librarian and installer stems, the installer pulling over the mesh). **Second slice (same day):** a hosting stem on the mesh path **re-serves its verified cache** (advertised as `artifact/librarian` with `role = "cache"` once it holds something), so `catalog`'s phase 6 runs as stems — the driver kills the librarian and starts a late stem that installs from the peer; and the runtime **bridges a `tool/{name}` component as MCP tool `{name}`** (gateway feature), so `mcp_toolgrowth` runs as stems with its own marker. **Third slice (2026-10-01):** provisioning's wave 3 runs as stems — a librarian stem of its own, provider-c started late, the agent's v2 stored in the library and proposed into the catalogue, shadowed, a forged acceptance ignored, the reviewer's promoting it, v1 retired by editing the manifest the librarian publishes, and provider-c serving the accepted v2 (the units now carry the agent's key in `trusted_publishers` and the reviewer's in `trusted_reviewers`). **Fourth slice (2026-10-01):** the blob runtime's activation is now declarable (D21, `[[activation]]`), so a stem can hand a placed model to a local runtime and gate the capability on its probe — the model demos' missing piece. **Fifth slice (2026-10-01):** `model_deploy` runs as stems against a pinned Ollama container and the 19 MB TinyStories GGUF downloaded at run time — the model host's `[[activation]]` uploads the weights and creates the model through Ollama's HTTP API, and the driver asserts the governed SYSTEM prompt and real tokens. **Sixth slice (2026-10-01):** `reheal_deploy` runs as stems — `[[serve]]` (D22) bridges each host's live deployment into the routable `llm/storyteller`, two hosts each with their own Ollama, a floor of one deployment; the driver routes inference through `InferenceRouter`, kills the origin, and routes again to the survivor that reheals. **Seventh slice (2026-10-01):** `llm_agent`'s subject with real artifacts — n-1 installs a real dataset blob on the agent's demand through the real loading tier, n-2 deploys a real model and serves `llm/inference`, the agent routes a prompt; its MCP tools stay code. With it the row's six named demos all run as stems. Not recut, with reasons in the compose header: the MCP tools of `llm_agent` (in-process code, no row in the unit format); (the stem can now activate and probe a placed model (D21); the suite still needs a model runtime in CI, and `reheal_deploy` the `serve_model` bridge), `llm_agent` (its pulls are simulated and its model path has no `[hosts]`). The units' placeholder publisher key is now the real public half of seed 42…42 (`make stem-keys`), because the stem refuses a placeholder and the checker did not. The buyer deck's Presence card cites the stem run (first green `stem-examples` job 2026-09-30, PR #454)* | Tier 2: the five artifact-shaped demos and `llm_agent` run from the stem image with `--units`; the both-ways target | Each demo's stem run reaches the same asserted outcome as its code run, in CI beside the coop smokes; the buyer deck's provisioning slide cites the stem run |
+| **X2** ✅ *first slice 2026-09-30 — the stem image (`docker/Dockerfile.stem`: `mycelium-stem` + `mycelium-artifact` + the co-op `stem_driver`), the suite `docker/docker-compose.stem-examples.yml` (`make test-stem-examples`, in `cluster-suites.yml`), and `make examples-both-ways DEMO=…`, which runs the code binary and the stem fleet and greps the same markers from both. Recut: **`provisioning`** (providers a and b are stems from `examples/units/provisioning/`, the driver seeds, drains, kills the active provider through the docker socket, drains again — "self-healed" both ways) and **`catalog`** phases 1–4 (librarian and installer stems, the installer pulling over the mesh). **Second slice (same day):** a hosting stem on the mesh path **re-serves its verified cache** (advertised as `artifact/librarian` with `role = "cache"` once it holds something), so `catalog`'s phase 6 runs as stems — the driver kills the librarian and starts a late stem that installs from the peer; and the runtime **bridges a `tool/{name}` component as MCP tool `{name}`** (gateway feature), so `mcp_toolgrowth` runs as stems with its own marker. **Third slice (2026-10-01):** provisioning's wave 3 runs as stems — a librarian stem of its own, provider-c started late, the agent's v2 stored in the library and proposed into the catalogue, shadowed, a forged acceptance ignored, the reviewer's promoting it, v1 retired by editing the manifest the librarian publishes, and provider-c serving the accepted v2 (the units now carry the agent's key in `trusted_publishers` and the reviewer's in `trusted_reviewers`). **Fourth slice (2026-10-01):** the blob runtime's activation is now declarable (D21, `[[activation]]`), so a stem can hand a placed model to a local runtime and gate the capability on its probe — the model demos' missing piece. **Fifth slice (2026-10-01):** `model_deploy` runs as stems against a pinned Ollama container and the 19 MB TinyStories GGUF downloaded at run time — the model host's `[[activation]]` uploads the weights and creates the model through Ollama's HTTP API, and the driver asserts the governed SYSTEM prompt and real tokens. **Sixth slice (2026-10-01):** `reheal_deploy` runs as stems — `[[serve]]` (D22) bridges each host's live deployment into the routable `llm/storyteller`, two hosts each with their own Ollama, a floor of one deployment; the driver routes inference through `InferenceRouter`, kills the origin, and routes again to the survivor that reheals. **Seventh slice (2026-10-01):** `llm_agent`'s subject with real artifacts — n-1 installs a real dataset blob on the agent's demand through the real loading tier, n-2 deploys a real model and serves `llm/inference`, the agent routes a prompt; its MCP tools stay code. With it the row's six named demos all run as stems. Not recut, with reasons in the compose header: the MCP tools of `llm_agent` (in-process code, no row in the unit format). The units' placeholder publisher key is now the real public half of seed 42…42 (`make stem-keys`), because the stem refuses a placeholder and the checker did not. The buyer deck's Presence card cites the stem run (first green `stem-examples` job 2026-09-30, PR #454)* | Tier 2: the five artifact-shaped demos and `llm_agent` run from the stem image with `--units`; the both-ways target | Each demo's stem run reaches the same asserted outcome as its code run, in CI beside the coop smokes; the buyer deck's provisioning slide cites the stem run |
 
 X1 follows W2 and R1 and is mostly authoring; X2 follows R2. Neither changes any example's code path,
 so guide citations stay valid.

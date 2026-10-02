@@ -218,22 +218,15 @@ sentence — loops oscillating together while each is stable alone — is **not 
 three loops share one state variable and neither available isolation method can pose the question
 (measured 2026-09-22). So a session looking for public work should look at the open list above or
 §13's recorded questions, not at a phase gate. The plan's §10 is now a state of play rather than a
-queue (**rev 1.15**). **Design-time tooling + composition (2026-09-27 → 30, unreleased on `main`):**
-`docs/plans/design-time-tooling.md` (rev 0.9) is delivered except where it says why not — the unit file
-(`[[requirement]]`/`[[group]]`/`[[lane]]`/`[[mandate]]`/`[[rule]]`/`[hosts]`/`[[presence]]`), `mycelium
-wire-check` (W1–W5: findings by name, schemas, the authority overlay, DOT, JSON with a pinned schema
-`docs/reference/declaration.schema.json` and call shapes on every edge — W6's public half; the private
-half waits for a public tag, since none contains the checker), the artifact tool + gateway door
-(A1–A3: `mycelium-artifact publish|list|verify|accept`, `POST /gateway/artifacts/publish` behind
-`artifact:publish`, SDK verbs that carry the signed line and do not sign — Q5), ranged fetch + object
-stores (S1–S2; S3 ◐: the test runs per configured store, but `fake-gcs-server` takes only signed-URL
-uploads so the GCS gate is S4's real bucket), the stem node + fleet gate (R1–R2) and the stem image
-suite (X2 ◐: `provisioning` and `catalog` phases 1–4 run **both ways** in CI, `make examples-both-ways`;
-the rest named with reasons), the examples' declaration directories (X1, sixteen, gated both ways),
-fuel by publisher (F1, D19 — which found that a trap poisons a component instance) and
-proposed → shadow → accept (F2, D20; F3 the guide section). Composition's bounded half:
-`mycelium-effects` enforces the composed effect at the destination (`composed-effect.md` §9), from the
-gateway path and a member's own mandated direct call (`McpCall`). Open: S4 (real buckets — credentials,
-not a commit), W6's private half (a tag), X2's remainder (stem capability gaps), Q2/Q4/Q5. Delivery ledger:
+queue (**rev 1.15**). **Design-time tooling + composition (2026-09-27 → 10-01, released in v2.17.0 and v2.18.0):**
+`docs/plans/design-time-tooling.md` is delivered except where it says why not — the unit file (every
+section, one reference: `docs/reference/unit-file.md`), `mycelium wire-check` (W1–W6, JSON schema
+`docs/reference/declaration.schema.json`), the artifact tool + gateway publish door (A1–A3), ranged fetch +
+object stores (S1–S2), the stem node + fleet (R1–R2), declared activation and serving (D21, D22), every
+artifact-shaped demo run both ways as stems (X1–X2; `llm_agent`'s MCP tools stay code), SDK unit files (Q2),
+fuel by publisher (F1, D19), proposed → shadow → accept (F2, D20); and composition's bounded half, the
+composed effect enforced at the destination (`composed-effect.md` §9). Open: S4 (real buckets — credentials,
+not a commit), Q4, Q5's cross-language vectors; recorded code gaps: a stem cannot read an object store, and
+`[[serve]]`'s `api_key` is a literal (`docs/operations/what-is-proven.md`). Delivery ledger:
 [dev/history](docs/wiki/dev/history.md). Self-audit series: `docs/analysis/ratings.md`
 (run via `/mycelium-analysis`).

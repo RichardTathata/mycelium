@@ -31,7 +31,39 @@ WIT imports = the component's *requires*; WIT exports = its *provides* (M15's on
 a component imports the **mesh**, not other capabilities — a call to another skill is
 runtime-mesh-resolved, never link-time-bound into a deployment set.
 
-## Status (M12, in progress)
+## Status
+
+Shipped. The host, the catalog selection step, the provisioner and supervision (WS-E, v2.0) are
+complete; the stem node, the artifact tool, object stores, fuel by publisher and
+proposed → shadow → accept shipped in v2.17.0; declared activation (`[[activation]]`) and declared
+model serving (`[[serve]]`) in v2.18.0. The sections below record what landed, in the order it
+landed.
+
+## The stem, the artifact tool and object stores
+
+| Feature | What it adds |
+|---|---|
+| `stem` | the binaries `mycelium-stem` (a node that declares and provisions from a unit file) and `mycelium-artifact` (`publish \| list \| verify \| accept` over a library) |
+| `gateway` | `POST /gateway/artifacts/publish` (scope `artifact:publish`), mounted by the stem when its `[hosts]` names trusted publishers |
+| `llm` | `[[serve]]`: a stem registers a routable model skill while a local install is live; without it a stem with a `[[serve]]` section refuses to start |
+| `object_store` | `ObjectStoreFetcher`: a library in `s3://`, `gs://`, `az://`, `https://` or `file://` for `mycelium-artifact` and the librarian API |
+
+```bash
+cargo build -p mycelium-wasm-host --features stem,gateway,llm --bin mycelium-stem
+mycelium-stem --units examples/units/model_deploy/model-host.toml --library /lib \
+              --host 172.40.0.42 -p 57000 -r 172.40.0.40:57000
+```
+
+- **Every section of the unit file**, including `[[activation]]` (a command run after a blob is
+  placed, gated by a probe) and `[[serve]]`: [`docs/reference/unit-file.md`](../docs/reference/unit-file.md).
+- **Running a stem**, its flags and what it needs on the node:
+  [`docs/operations/capability-lifecycle.md`](../docs/operations/capability-lifecycle.md) §3.
+- **Publishing, verifying and accepting entries; object stores and their limits:**
+  [`docs/operations/artifacts.md`](../docs/operations/artifacts.md).
+
+An activation command is the operator's, run with the stem's privileges. It is not a sandbox.
+
+## What landed (history)
 
 **Landed:** crate scaffold; the WIT contract; `confine` (the enforcement point, unit-tested);
 `HostState` scoped operations proven against a live node; restricted WASI; `bindgen!` host-import

@@ -90,13 +90,17 @@ operator concern (wrap a KMS); the demo uses a fixed seed.
 
 A line the CI step already signed can be announced to a running cluster without touching the
 library's manifest: `POST /gateway/artifacts/publish` with `{"entry_hex": "<the manifest line>"}`
+(`entry_hex` is exactly one manifest line)
 under a bearer holding `artifact:publish` (both SDKs: `agent.artifacts().publish(line)`). The node
 verifies the line against its `[hosts].trusted_publishers` and writes it to `installable/`; the
 bytes stay at the library. It is refused by name when unsigned, untrusted, altered after signing,
 or when the node lists no trusted publishers (403), when the signer is a key a librarian on that
 node manages (409 — the librarian's manifest would tombstone it at the next sync; publish to the
 library instead), or malformed (400). The stem binary mounts the route when built with the
-`gateway` feature and the hosts table names trusted publishers.
+`gateway` feature and the hosts table names trusted publishers. The route is served by the node's
+HTTP gateway, so it exists only when the node's `GossipConfig` sets `http_port`, and a caller needs a
+bearer token whose scopes include `artifact:publish`.
+
 ### Object stores: what CI proves and what it does not
 
 The adapter (`object_store` feature) is exercised in CI against S3Mock for `s3://`. For `gs://` the
@@ -212,7 +216,9 @@ mycelium-artifact verify /srv/mycelium-library --trusted ed25519:<hex> --descrip
 ```
 
 `publish` stores the bytes content-addressed, builds and signs the entry, and appends the manifest
-line (idempotent: the same bytes are one line and one blob). `list` renders every line back into the
+line (idempotent: the same bytes are one line and one blob). The manifest (`manifest` in the
+library directory) is **line-hex**: one signed `InstallableEntry` per line, the lowercase hex of its
+canonical encoding, signature included. A malformed line is an error, not a skip. `list` renders every line back into the
 description shape with the content address and the signer shown. `verify` exits 1 naming each
 problem: a signer outside the trusted keys, bytes missing from the library or not hashing to their
 address, and — with `--descriptions` — a description whose bytes changed under an unchanged manifest,
@@ -279,11 +285,28 @@ stages to disk in pieces; every request is gated by the node's egress policy on 
 before a client is built. **The manifest lives in the store too**, at `<prefix>/manifest`: a
 librarian fronting the store reads it from there (`LibrarianConfig::manifest_source`), and
 `mycelium-artifact publish --library s3://bucket/prefix` writes blob and manifest through the same
-adapter, so nothing has to be synced down. For a library that stays a local file path
-(`LibrarianConfig::manifest_path`), so for a remote store, sync the manifest file
-down to the librarian node (CI artifact, cron `curl`, or a mounted volume) while
-the bytes stay remote — the librarian mirrors what its manifest names
-(`PrefetchingSource::prefetch_all`).
+adapter, so nothing has to be synced down. Without a `manifest_source` the librarian reads the
+manifest from the local file at `LibrarianConfig::manifest_path`. That is what the stem binary
+does: `mycelium-stem --librarian <manifest>` sets `manifest_source: None`, so a stem librarian
+in front of a remote store needs the manifest file synced down to its node (a CI artifact, a
+cron `curl`, or a mounted volume) while the bytes stay remote — the librarian mirrors what its
+manifest names (`PrefetchingSource::prefetch_all`). A stem itself cannot read an `s3://` or
+`gs://` library: its byte sources are a library directory (`--library`) or a mesh pull from a
+librarian (`StemSource::Library`, `StemSource::Mesh`).
+
+**The tool against a store.** `mycelium-artifact` opens a store URL only when built with the
+`object_store` feature, beside the `stem` feature the binary needs:
+
+```sh
+cargo build -p mycelium-wasm-host --features stem,object_store --bin mycelium-artifact
+```
+
+The stem Docker image (`docker/Dockerfile.stem`) builds the tool with `stem,gateway,llm` and
+**without** `object_store`, so its `mycelium-artifact` refuses an `s3://` library with *a store URL
+needs a build with the object_store feature*. The tool's store requests pass the egress policy read
+from `MYCELIUM_EGRESS_ALLOW_HOSTS` — a comma-separated host allowlist, where an entry starting with
+`.` matches that domain and its subdomains. Unset (or empty) allows every host, as `EgressPolicy`'s
+default does.
 
 ### 3 · How another node installs it
 

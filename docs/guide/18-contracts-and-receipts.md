@@ -247,7 +247,8 @@ use mycelium::{AttemptId, OperationId};
 // and the handler that performs the effect inside the same transaction as the dedup insert.
 let dest = Arc::new(SqliteDestination::open(path, "billing-writer", handler)?);
 
-let op = OperationId::generate();
+// `agent` is your running GossipAgent; `node_id()` returns `&NodeId`.
+let op = OperationId::generate(agent.node_id());
 let effect = Effect::new(op.clone(), AttemptId::fresh(&op), payload);
 match apply_within(dest.clone(), effect, Duration::from_secs(5)).await {
     Ok(commit)                                    => { /* rung 4: the receipt names the destination */ }
@@ -269,7 +270,7 @@ attempt is `Fresh`. The domain leg is carried, not re-verified here — a destin
 bundle. A provider behind the gateway builds the composition from what the gateway established —
 `Composition::from_envelope(&envelope, &presented_mandate, origin_domain)` (feature `envelope`), or,
 in a tool handler, `Composition::from_caller(&caller, "tools/call", &format!("tool:{name}@{node}"), None)`
-from the `RequestPrincipal::Client` it receives (`from_carried` takes the same pieces apart), or `Composition::from_call(&call, …)` from the
+from the `&GatewayCaller` it receives — the value inside `RequestPrincipal::Client(caller)` (`from_carried` takes the same pieces apart), or `Composition::from_call(&call, …)` from the
 `McpCall` a `register_mcp_tool_with_call` handler receives, which keeps the carried mandate on a
 member's own mandated direct call as well as on the gateway path — and records a refusal with `AeEvidence::for_destination_refusal`, so the journal shows which point
 said no. `cargo run --example composed_commit --features tls,compliance` is the whole thing end to end:

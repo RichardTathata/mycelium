@@ -218,6 +218,104 @@ for the full reference including SSE streaming and error types.
 
 ---
 
+## Declaring a unit file from Python or TypeScript
+
+A Rust node reads its unit file at start. An SDK agent has no such start, so it hands the file's
+text to its node instead. The node parses and validates it with its own loader — the same file
+`mycelium wire-check` reads — and declares the unit's `[[capability]]`, `[[requirement]]` and
+`[[group]]` sections under **one handle**. The SDKs carry text; neither ships a TOML parser.
+
+The verbs:
+
+| SDK | Call | Returns |
+|---|---|---|
+| `mycelium-py` | `agent.declare_units(toml_text, *, interval_secs=30, lease_secs=None)` | `UnitHandle` with `principal`, `declared`, `not_enforced` |
+| `mycelium-py` | `agent.declare_from(path, **kwargs)` — reads the file, then `declare_units` | the same |
+| `mycelium-ts` | `agent.declareUnits(tomlText, { intervalSecs?, leaseSecs? })` — read the file yourself | `UnitHandle` with `principal`, `declared`, `notEnforced` |
+
+Both call `POST /gateway/units/declare`, scope `cap:write`
+([rbac.md](../operations/rbac.md)). The body is `{"toml": "…", "interval_secs": n, "lease_secs"?: n}`;
+the answer is
+
+```json
+{"handle_id": "…", "principal": "coop-matcher",
+ "declared": {"capabilities": 1, "requirements": 1, "groups": 0},
+ "not_enforced": ["[[lane]]"]}
+```
+
+What the node refuses, and what it only records (`gw_units_declare`, `src/agent/http.rs`):
+
+- **400** — the text is not TOML, or the unit file's own `validate()` refuses it (an empty
+  `principal`, a bad constraint operator, a `[[mandate]]` with no operations, …). Nothing is
+  declared: the node converts every section before it declares any.
+- **422** — the file has a hosting section: `[hosts]`, `[[presence]]`, `[[activation]]` or
+  `[[serve]]`. Those belong to a stem (`mycelium-stem`); an SDK agent hosts nothing.
+- **Accepted, not enforced** — `[[lane]]`, `[[mandate]]` and `[[rule]]` are taken as declarations
+  and named in `not_enforced`. They inform `wire-check`; the node does not act on them.
+- A `[[capability]]`'s `probe_url` is not run on this path: the capability is advertised as
+  declared, for as long as the handle lives.
+
+`drop()` sends `DELETE /gateway/capability/{handle_id}` and retracts the whole unit — every
+capability, requirement and group it declared. Without `lease_secs` the node keeps re-asserting the
+unit until that `DELETE` or a node restart, even if your process dies. With `lease_secs`, call
+`heartbeat()` within every window (about a third of it is a safe beat); a missed window retracts
+the unit as `DELETE` would.
+
+A food-redistribution co-op's matcher, as a unit file (`units/matcher.toml`):
+
+```toml
+principal = "coop-matcher"
+
+[[capability]]
+ns = "food"
+name = "match"
+ttl_secs = 30
+  [capability.attrs]
+  region = "north"
+
+[[requirement]]
+ns = "food"
+name = "surplus-feed"
+  [requirement.attrs]
+  region = "north"
+
+[[lane]]
+name = "pickups"
+role = "produces"
+```
+
+From Python:
+
+```python
+from mycelium import MyceliumAgent
+
+agent = MyceliumAgent("127.0.0.1", 8300)
+with agent.declare_from("units/matcher.toml", lease_secs=30) as unit:
+    print(unit.principal, unit.declared, unit.not_enforced)
+    # coop-matcher {'capabilities': 1, 'requirements': 1, 'groups': 0} ['[[lane]]']
+    ...  # do the work; call unit.heartbeat() about every 10 s
+# leaving the block calls unit.drop(): the whole unit is retracted
+```
+
+From TypeScript:
+
+```ts
+import { readFile } from "node:fs/promises";
+import { MyceliumAgent } from "mycelium-ts";
+
+const agent = new MyceliumAgent("127.0.0.1", 8300);
+const unit = await agent.declareUnits(await readFile("units/matcher.toml", "utf8"), { leaseSecs: 30 });
+console.log(unit.principal, unit.declared, unit.notEnforced);
+const beat = setInterval(() => void unit.heartbeat(), 10_000);
+// … on shutdown:
+clearInterval(beat);
+await unit.drop();
+```
+
+The unit-file sections are described in [the unit-file reference](../reference/unit-file.md); how a
+unit file is checked, deployed and watched is
+[the capability lifecycle](../operations/capability-lifecycle.md).
+
 ## The HTTP surface behind the SDKs — and what it does not return
 
 A raw-HTTP client (or an SDK reader checking what a verb really does) needs the routes and their

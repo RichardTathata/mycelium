@@ -448,9 +448,9 @@ class MyceliumAgent:
 
         The node parses and validates the text with its own loader — the same file ``mycelium
         wire-check`` reads — so this SDK carries text and never a second parser. Hosting sections
-        (``[hosts]``, ``[[presence]]``, ``[[activation]]``) are a stem's and are refused (422);
-        ``[[lane]]``, ``[[mandate]]`` and ``[[rule]]`` are accepted as declarations and reported in
-        :attr:`UnitHandle.not_enforced`. Drop the handle (or exit its context) to retract the whole
+        (``[hosts]``, ``[[presence]]``, ``[[activation]]``, ``[[serve]]``) are a stem's and are
+        refused (422); ``[[lane]]``, ``[[mandate]]`` and ``[[rule]]`` are accepted as declarations and
+        reported in :attr:`UnitHandle.not_enforced`. Drop the handle (or exit its context) to retract the whole
         unit; with ``lease_secs``, call :meth:`UnitHandle.heartbeat` within every window.
         """
         body: dict[str, Any] = {"toml": toml_text, "interval_secs": interval_secs}

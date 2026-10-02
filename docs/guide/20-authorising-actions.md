@@ -444,6 +444,28 @@ replacement to the same bar, which is the only reason "replaceable" is a claim r
 
 ---
 
+## Checking authority before deployment: the `wire-check` overlay
+
+Everything above decides at run time. `mycelium wire-check <units-dir>` can find, before anything
+runs, the edges that no declaration could ever authorise. This is its **authority overlay** (W4,
+`src/wire_check.rs`). It does not evaluate policy; it reads the units' `[[rule]]` and `[[mandate]]`
+sections.
+
+For each wired edge whose requirer declares a `[[mandate]]` or a `[[rule]]`, the check tries the
+edge's two call shapes — `skill.invoke` on `skill:{ns}/{name}` and `tools/call` on `tool:{name}`:
+
+- **`unauthorisable edge`** (error): no declared rule admits the requirer's principal on either
+  shape (actor, operation and resource, with `"*"` as a wildcard), or the rule that would admit it
+  sets `requires_mandate` to a scope in which no declared mandate held by that principal enumerates
+  the operation. A governed requirer with no `principal` is reported the same way, because no rule
+  can name it.
+- **`ungoverned edge`** (warning): the requirer declares no mandate and no rule, while other units
+  do. Its edge is outside the authority vocabulary.
+
+An edge with no provider is skipped here; it is already reported as unwired. The overlay is on by
+default and `--no-authority` turns it off. An error makes the check exit 1. The whole
+declare-check-deploy loop is [the capability lifecycle](../operations/capability-lifecycle.md).
+
 ## What this does not establish
 
 - **Not hard prevention.** Only a check inside the resource's own effect boundary, with the epoch

@@ -45,27 +45,22 @@ record, not duplicates of those.
 > evidence leading the buyer story; one dated proof page (`what-is-proven.md`); one five-step path on every funnel.
 > **Executed the same day** (P1–P5, PR #434): the script red on seventeen doors and paths, then green.
 >
-> **Design-time tooling (proposed, 2026-09-27):** [`design-time-tooling.md`](design-time-tooling.md) — the
-> unit declaration file (requirements, groups, lanes, authority vocabulary beside today's `[[capability]]`) and an
-> offline `mycelium wire-check` that applies the mesh's own match rule to a directory of units before deployment.
-> Six phases W1–W6, decision register D1–D9 (rev 0.2: the checker's JSON is a versioned, revisioned record a consumer such
-> as NovusLens can join to its runtime observations — declared versus observed, never enforced; rev 0.3: registering an
-> artifact — a reviewable description, `mycelium artifact publish|list|verify`, *would bind by provisioning*, and a
-> gateway route for SDK teams; rev 0.4: **object stores** — S3 and GCS as requirements over one `object_store` adapter,
-> ranged pulls staged to disk, the HTTP source's 512 MiB in-memory cap closed, emulators in CI and real buckets as
-> delivery evidence; rev 0.5: the **two ways a capability arrives** — directly deployed or dynamically installed — a
-> `[hosts]` table so the checker knows whether anything could host an entry, and one runbook page owning the lifecycle
-> that `deployment.md`, `artifacts.md` and guide 02 point at; rev 0.6: the **stem fleet** — identical nodes loading what
-> `[[presence]]` and `[[requirement]]` declarations call for, a node that declares from its file at startup so file and
-> runtime vocabulary are one, and a CI topology beside the coop suites — with a single build order; rev 0.7: the
-> examples recut in **three tiers** (a units directory for every declaring example; the artifact-shaped coop demos run
-> from one stem image; mechanism demos untouched) — the host's four-interface WASM world is the stated limit; rev 0.8:
-> **agent-authored functions** — four legitimate uses of dynamic load (authored tools, reproducible evaluators, boundary
-> transforms, pure pipeline work), fuel on by default for an agent's entry, and *proposed → shadow lane → reviewer
-> co-signs* before it takes demand. **Complete as an argument at rev 0.8**; two questions (SDK units, widening the
-> component world) stay open); it says *would bind*, never *is bound*. **The design-time half of
-> the composition theme** — §13 of the axis plan is the runtime half (the records); this is the vocabulary they are
-> written in. Nothing built yet.
+> **Design-time tooling (delivered in v2.17.0, 2026-09-30, and v2.18.0, 2026-10-01):**
+> [`design-time-tooling.md`](design-time-tooling.md) — the unit file (requirements, groups, lanes, authority
+> vocabulary, `[hosts]`, `[[presence]]`, `[[activation]]` and `[[serve]]` beside `[[capability]]`; every field in
+> [`docs/reference/unit-file.md`](../reference/unit-file.md)) and an offline `mycelium wire-check` that applies the
+> mesh's own match rule to a directory of units before deployment, with JSON output pinned by
+> `docs/reference/declaration.schema.json`. Shipped beside them: the artifact tool `mycelium-artifact
+> publish|list|verify|accept` and the gateway door `POST /gateway/artifacts/publish`; ranged pulls staged to disk and the
+> `object_store` adapter (S3 in CI); the stem node `mycelium-stem`, which declares and provisions from its unit file;
+> fuel by publisher and *proposed → shadow lane → reviewer accepts* for agent-authored entries; declared activation and
+> model serving (v2.18.0); the examples' declaration directories, and the artifact-shaped co-op demos run both ways —
+> as code and as stems — in CI (`make test-stem-examples`); and an SDK agent's unit file through
+> `POST /gateway/units/declare` (Q2). The runbook is [`capability-lifecycle.md`](../operations/capability-lifecycle.md).
+> **Still open:** S4, real-bucket evidence (the GCS path has run against no bucket; no emulator takes the crate's
+> upload); Q4, widening the component world (recorded, not decided); Q5's cross-language golden vectors. It says
+> *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
+> runtime half (the records); this is the vocabulary they are written in.
 >
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).

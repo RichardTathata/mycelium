@@ -201,8 +201,11 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
   (scope `llm:invoke` / `llm:read`) — point any OpenAI client at `http://node:HTTP_PORT/gateway/reason/v1`;
   its `model` field becomes an `llm/{model}` route across the fleet and its API key is the gateway
-  bearer. `GET trace/{run_id}`, `GET`/`PUT blob/{id}` (`llm:read` / `llm:write`). A scoped-token
-  deployment grants the `llm:*` family — [rbac.md](rbac.md) §2.
+  bearer. `GET trace/{run_id}` and `GET blob/{id}` (`llm:read`), `PUT blob` (`llm:write`). A
+  scoped-token deployment grants these by name — `llm:invoke`, `llm:read`, `llm:write`
+  (`required_scope`, `src/agent/http.rs`). A family wildcard such as `llm:*` is **refused at start**:
+  `validate()` accepts only exact scopes or the single `"*"`, because a family wildcard matched
+  nothing at the gateway and admitted no one — [rbac.md](rbac.md) §2.
 - **Routing you can observe.** Each node ranks providers by advertised load (the pheromone) plus its
   own reservations (`RouterConfig::reservation_weight`, default 0.1), drops opaque nodes, and fails over
   down the candidate list; there is no proxy process to run or scale. Metrics family
@@ -244,7 +247,14 @@ an absent section.
   requirement; a second is refused and the first is never overwritten.
 - **An unknown award is not "no award".** A linearizable round that reached no commit answers
   `AwardUnknown`; retry, and it resolves as `AlreadyAwarded` or a fresh commit.
-- **Retention is yours.** The log streams grow with traffic. Nothing prunes them for you.
+- **Retention is yours.** The log streams grow with traffic and the crate never prunes them. The
+  verb is `KvHandle::compact_log(stream, before_hlc)` (`agent.kv().compact_log(…)`): it tombstones
+  every entry in `stream` with HLC below `before_hlc`, and the tombstones gossip like any delete. A
+  requirement's streams are `cn/{requirement}/offers`, `cn/{requirement}/reports` and
+  `cn/{requirement}/assessments`; `offers(requirement)` returns each offer with its HLC. Compact a
+  requirement's offers only **after its award is settled** (`award_of` returns it) — the award is
+  planned from those offers. Over HTTP the same tombstoning is `POST /gateway/overlay/log/compact`
+  with `{"stream", "before_hlc"}` (scope `consensus:write`); there is no `cn/`-specific route.
 - **Observe.** The KV heads and streams directly. No metrics.
 
 ### mycelium-effects — the transactional destination
@@ -257,7 +267,15 @@ an absent section.
   false `Replayed`. Do not add a dedup write outside that transaction.
 - **A deadline overrun does not cancel the apply.** `apply_within` returns `DeliveryUnknown` and the
   work may still land. The resolution is a retry under the same identity, never a second identity.
-- **Observe.** `committed_count()`. No metrics.
+- **A composed refusal leaves nothing here.** `apply_composed` refuses with
+  `EffectRefusal::Unauthorised { leg, reason }` before the transaction: no row, no dedup entry, and
+  the crate counts nothing. The durable trace is the one the **provider** writes — an
+  `AeEvidence::for_destination_refusal(&envelope, leg, reason)` record in its evidence journal
+  (enforcement point `destination`, verdict deny, `checked = ["composition:{leg}"]`;
+  `src/agent/action_evaluator.rs`, written by `examples/composed_commit.rs`). So watch the journal
+  exporter ([audit.md §9](audit.md#9-evidence-export--what-a-gap-looks-like-to-the-consumer)) for
+  destination-point refusals. A provider that does not write that record leaves no trace at all.
+- **Observe.** `committed_count()`. No metrics, and no refusal counter — a known gap in the code.
 - **See it:** `cargo run -p mycelium-effects --example destination_commit`.
 
 ### mycelium-guardrails — the structural gate

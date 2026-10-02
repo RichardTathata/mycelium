@@ -16,6 +16,7 @@
 //! | `schema-only mismatch` | it matches except for `schema_id` — the rollout-window case, named with both ids | error |
 //! | `type-cross constraint` | a constraint whose value type can never compare with the offered attribute's type | error |
 //! | `empty group` | no declared capability satisfies the group's filter, so nothing could join | error |
+//! | `unknown schema` | a unit or an artifact names a `schema_id` the schema directory does not define (only with a schema directory — `--schemas`) | error |
 //! | `group requires unmet` | a group's `requires` filter binds to nothing | error |
 //! | `orphan lane` | a lane consumed and never produced, or produced and never consumed | error |
 //! | `unhostable entry` | an artifact would satisfy the filter but no unit's `[hosts]` names its kind with budget for its footprint | error |
