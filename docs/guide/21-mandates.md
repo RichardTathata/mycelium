@@ -233,6 +233,85 @@ revocation, by the handlers' own counters — is `test_c7_the_bypass_matrix_no_d
 **Not claimed:** the check-then-act window is narrowed and stated per site, not eliminated (the wiki
 store counts `late_writes()`); `clock_sync` in the confinement report is always *unverified*.
 
+## Authority at execution in the wiki store
+
+The fence above stops a **superseded** curator. It cannot see a curator whose mandate has
+**expired**, one **revoked** by a checkpoint, or one that has **heard nothing** from its authority
+for longer than the freshness bound. `ExecutionGateAuthority` covers those three
+([`mycelium-wiki/src/execution.rs`](../../mycelium-wiki/src/execution.rs)). It is Mycelium's
+`ExecutionGate` wrapped as the store's `WriteAuthority` trait, whose one method is
+`authorize_write(&self) -> Result<(), String>`.
+
+- **Feature:** `execution-authority` on `mycelium-wiki` (it pulls in `control-plane`, `git-store` and
+  `mycelium/tls`).
+- **Constructor:** `ExecutionGateAuthority::new(gate: ExecutionGate, mandate: Mandate, external:
+  TrustedExternalIssuers, now_ms: impl Fn() -> u64 + Send + Sync + 'static)`. One per curator term;
+  a re-appointment is a new term and a new authority. The mandate must enumerate `WIKI_WRITE`
+  (`"wiki.write"`).
+- **The clock must be a wall clock.** The constructor's own words: a value that advances only on
+  events, such as `Hlc::current`, "stands still on a quiet node, and then a mandate never expires
+  and a checkpoint never goes stale: that fails open." Pass the host's wall clock, as
+  `Hlc::decision_now_ms` reads it.
+- **Attach:** `GitStoreConfig { authority: Some(..), .. }` for `GitStore`, or
+  `FsStore::open(root, group)?.with_authority(..)` for the filesystem store. `GitStore` asks before
+  every commit attempt and every push attempt; `FsStore` asks before each mutation. `None` (the
+  default) behaves exactly as before.
+- **Feed:** `offer_checkpoint(&signed, &members)` with each `SignedRevocationCheckpoint` the
+  authority issues; `install_epoch(epoch)` (or `install_epoch_durably`, with `with_durable_epochs`
+  attached) when a later epoch is installed.
+- **Fails closed.** Until a checkpoint is accepted, and again once it goes stale, every write is
+  refused as `RevocationUnknown`. Silence is a denial. The authority also starts its revocation view
+  at construction, so a checkpoint replayed from before a restart is refused.
+
+A refusal returns `WikiError::authority_refused(..)`, read back with `as_authority_refused()`. It is
+**not** a `Conflict` (a retry will not help), **not** a gate refusal (the content is not at fault,
+so the curator keeps its proposals queued), and **not** `MandateRevoked` (the appointment ref never
+moved).
+
+```rust
+use std::sync::Arc;
+use mycelium::mandate::authority::{ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier};
+use mycelium::mandate::ResourceAuthority;
+use mycelium_wiki::{ExecutionGateAuthority, FsStore, GitStore, GitStoreConfig};
+
+// The resource: the co-op's wiki scope at epoch 1.
+let gate = ExecutionGate::strict(
+    ResourceAuthority::new("riverside-coop", 1),
+    ResourceTier::Transactional,
+    ClockModel { skew_ms: 100 },
+    FreshnessPolicy { freshness_ms: 60_000, interval_ms: 20_000, delivery_ms: 5_000 },
+)?;
+// `mandate`: this curator term's `Mandate`, enumerating `WIKI_WRITE`.
+// `external`: a `TrustedExternalIssuers` holding the appointing authority's key.
+let authority = Arc::new(ExecutionGateAuthority::new(
+    gate, mandate, external,
+    mycelium::sim_seam::wall_now_ms, // a wall clock, never an event clock
+));
+
+// Attach it to the git store …
+let store = GitStore::open(GitStoreConfig {
+    dir: "coop-wiki".into(),
+    authority: Some(Arc::clone(&authority) as _),
+    ..Default::default()
+})?;
+// … or to the filesystem store.
+let fs = FsStore::open("coop-wiki-fs", "riverside-coop")?.with_authority(Arc::clone(&authority) as _);
+
+// Nothing is written until a fresh checkpoint is accepted. `members` is your live
+// member-key view (any `MemberKeySource`).
+let offer = authority.offer_checkpoint(&signed_checkpoint, &members);
+```
+
+The runnable reference is
+[`mycelium-wiki/tests/git_store_authority.rs`](../../mycelium-wiki/tests/git_store_authority.rs)
+(`cargo test -p mycelium-wiki --features execution-authority --test git_store_authority`): no
+checkpoint, an expired mandate, a revocation, silence past the bound, a superseded epoch, a
+restart, and the `FsStore` path each write nothing, beside a plant where the same write lands.
+
+**Not claimed:** the check runs before the write, not inside it. A pause between the check and the
+commit is not caught locally; `GitStore::late_writes()` counts it, and prevention for published
+writes belongs to the remote's pre-receive hook.
+
 ## What this does not establish
 
 - **Not a second fence.** One resource-side fence exists, in the wiki's git store. Another resource

@@ -68,6 +68,7 @@ board. Mycelium contributes only as a well-documented **vendor** in your CC9 ven
 | Wire/protocol change | **M** | `WIRE_VERSION` + documented N→N+1 rolling-upgrade policy, test-gated | Roll upgrades within the window |
 | Schema evolution | **M** | Registered migrations (`schema_evolution`), never silent coercion; `schema_mismatch` tripwire | Register your migrations |
 | Application change management | **D** | — | Your SDLC, approvals, deploy pipeline |
+| Stem activation commands (`[[activation]]`) | **D** | The stem runs the argv a unit file declares after a blob is placed, and its probe, with the stem process's own privileges and a timeout (default 300 s). **Not a sandbox**: no allowlist, no confinement — the WASM sandbox covers components, not these commands | Review unit files as code; run the stem as a least-privileged user; keep activation commands to the runtime you intend → [unit-file reference](../reference/unit-file.md#activation) |
 
 ## Confidentiality & Availability (optional TSC categories)
 

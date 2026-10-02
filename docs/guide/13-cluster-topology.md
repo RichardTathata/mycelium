@@ -165,7 +165,11 @@ supply chain, so the publisher keys in `[hosts].trusted_publishers` are the post
 which host installs a given artifact is decided at runtime — the offline check says a host *exists*,
 never which. The in-process fleet test `the_stem_fleet_fills_a_presence_floor_and_reheals` (three
 stems, one librarian, a floor of two, a kill and a re-heal, and the checker's declaration compared with
-what bound) is the shape's gate; a Docker cut of it is not yet built.
+what bound) is the shape's gate. The Docker cut runs too: the stem-examples suite (`make
+test-stem-examples`, `docker/docker-compose.stem-examples.yml`) runs kill-and-reheal as stem
+containers from one image — the `provisioning` profile kills the active provider and a standby stem
+takes over, and the `reheal_deploy` profile kills the host serving a real model and the survivor
+installs, activates and serves it.
 
 ### 4 — Full bootstrap mesh (all nodes listed as seeds)
 

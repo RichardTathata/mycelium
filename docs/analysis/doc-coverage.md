@@ -19,6 +19,43 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-10-02 (run 18)** — diff-gated over **41 commits since run 17** (v2.15.1 → v2.18.0: v2.16.0's
+  settings, the design-time tooling MINOR, the stem-fleet MINOR). Three parallel auditors (the stem fleet
+  and artifact delivery · the declaration format and unit files · v2.16.0's settings and run 17's `~`
+  cells), each opening the pages and running or diffing every must-work instruction against code. **Floor
+  before fixes: one security defect behind a documented setting, four instructions that fail if followed
+  literally, three Missing cells, about twenty Thin. After: 0 ✗, 0 failing instructions, five `~` that are
+  code gaps (named in the cells and on `operations/what-is-proven.md`).** Moves:
+  - **Security · HOW·Ops was ✗ in effect** (carried ✓ᴿ¹⁷): `GOSSIP_GATEWAY_NAMED_TOKENS` — and both token
+    tables — are honoured only under `compliance`, but parsed in every build; the default `mycelium`
+    binary, given a named-token table and no positional token, **ran an open gateway with no warning**.
+    A code defect, not a doc gap: fixed in its own PR (`start()` refuses, regression test
+    `a_token_table_this_build_cannot_enforce_refuses_to_start` seen failing), with `rbac.md` §1,
+    `tuning.md` and the Kubernetes README saying a token table needs a `compliance` build. Calibration
+    entry (the *setting that silently no-ops* class, **second hit**, now with security impact).
+  - **Capability lifecycle · HOW·Ops and WHAT·Dev ✓ → Thin → ✓**: the canonical unit-file example (the
+    `capability_config.rs` module doc) and `capability-lifecycle.md` §5 joined keys with `;` — **not
+    TOML**; pasted into a unit file they exit 2. Fixed, and the module-doc example is now a test
+    (`the_module_doc_unit_file_example_loads`, seen failing at the semicolon). §2 listed 11 of 15
+    findings and three of six flags; §4's `mycelium-artifact verify` exited with a usage error. New
+    `docs/reference/unit-file.md` — every section and field with defaults, who reads what. Calibration
+    entry (the 2026-09-28 row was Clear by opening the pages, not by pasting their snippets).
+  - **Effects · HOW·Dev ✓ → Thin → ✓**: guide 18 called `OperationId::generate()` with no argument
+    (it takes `&NodeId`) — did not compile. Fixed.
+  - **Run 17's `~` cells**: Adaptive stability · HOW·Ops ✓ (v2.16.0's `control_max_staleness_ms` /
+    `control_min_peers_heard`, env-applied); Replay · HOW·Ops ✓ (the `sim` binary's
+    `GOSSIP_RECORD_BUNDLE_DIR` capture path); Companions · HOW·Dev ✓ (guide 21's wiki execution-authority
+    section); Commitments · HOW·Ops ✓ — **it was never a code gap**: `KvHandle::compact_log` and
+    `POST /gateway/overlay/log/compact` existed; run 17 recorded a doc gap as a code gap (calibration).
+    Effects · HOW·Ops stays `~` (no refusal counter — code gap; the composed path now has an operator
+    landing).
+  - **New rows:** the stem node and fleet; declared activation and serving (D21, D22); artifact delivery
+    (tool, publish door, ranged fetch, object stores); the declaration schema; SDK unit files (Q2).
+  - **Staleness cleared:** the plan's *"Nothing here is built"* header, its X2 tail, `plans/README.md`'s
+    *"Nothing built yet"*, guide 13's *"Docker cut not yet built"*, the module doc's *"not declared at
+    startup yet"*, the wasm-host README's *"M12, in progress"*, the compose header's wave-3 sentence, the
+    Makefile's three-demo usage line (and `examples-both-ways DEMO=llm_agent`, which had no code half).
+
 - **2026-09-30 — plan F3 (design-time-tooling.md §17):** one new row, *Agent-authored functions*, all five cells Clear by opening the pages written for it (guide 16 § Agent-authored functions; `operations/artifacts.md` § Trust & provenance). Not a full re-audit; every other row carried.
 
 - **2026-09-28 (design-time tooling, not a run)** — one new row, *capability lifecycle*: HOW·Ops is
@@ -366,32 +403,37 @@ closed it.
 | Membership + cluster_name | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Groups (three kinds) | ✓ | ✓ ᵀ³ | ✓ | ✓ | ✓ |
 | Legible Emergence | ✓ ᵀ³ | ✓ | ✓ ᵀ³ | ✓ | ✓ |
-| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ ᴿ¹⁷ | ✓ | ✓ ᴿ¹⁷ |
+| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ ᴿ¹⁷ | ✓ | ✓ ᴿ¹⁷ ᴿ¹⁸ (a token table without `compliance` ran an open gateway — code fix + `rbac.md` §1) |
 | Data erasure (crypto-shred) | ✓ | ✓ ᴿ¹³ | ✓ ᴿ¹³ | ✓ | ✓ |
 | Artifacts / library | ✓ | ✓ | ✓ ᵀ² ᴿ⁹ | ✓ | ✓ |
 | Agent-authored functions (D19 fuel by publisher · D20 proposed → shadow → accept) — added 2026-09-30 (plan F3) | ✓ `design-time-tooling.md` §17 | ✓ guide 16 § Agent-authored functions (U1–U4, the five gates) | ✓ guide 16 § the five gates + the co-op `provisioning` demo's wave 3 (opened: the description's `proposed = true`, `mycelium-artifact accept`, `Provisioner::invocations()` are the shipped names) | ✓ `operations/artifacts.md` § Trust & provenance (the `[hosts]` keys by name) | ✓ same section: `accept`, `verify --reviewer`, the counter (opened; each command exists in the `mycelium-artifact` bin) |
 | Federation / AgentFacts (public discovery) | ✓ | ✓ | ✓ ᵀ¹ | ✓ | ✓ ᴿ¹⁷ |
 | Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ ᴿ¹⁶ |
-| Companions | ✓ | ✓ | ~ ᴿ¹⁷ (the wiki authority seam has no Dev walkthrough) | ✓ | ✓ ᵀ² |
+| Companions | ✓ | ✓ | ✓ ᴿ¹⁸ (guide 21 § authority at execution in the wiki store) | ✓ | ✓ ᵀ² |
 | Rolling upgrade (wire compat) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ² |
 | Contracts & receipts (item 1) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
-| Effects companion (`mycelium-effects`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (no metrics; the file is where the integrator put it) |
-| Replay & simulation (item 6) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (no operator capture path — code gap) |
-| Commitments (`mycelium-commitment`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (retention names no verb) |
-| Gateway / SDK receipt parity — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Effects companion (`mycelium-effects`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (guide 18 compiles: `generate(&NodeId)`) | ✓ ᴿ¹⁷ | ~ ᴿ¹⁸ (composed refusals now have a landing — the evidence journal; still no refusal counter — code gap) |
+| Replay & simulation (item 6) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`diagnostics.md` § capturing a replay bundle — `--features cli,sim`, `GOSSIP_RECORD_BUNDLE_DIR`) |
+| Commitments (`mycelium-commitment`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`companions.md`: `compact_log` / `POST /gateway/overlay/log/compact` on the `cn/` streams) |
+| Gateway / SDK receipt parity — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁸ (`POST /gateway/kv` returns its receipt since v2.16.0; the SDKs' `set()` discards it — code gap) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Gateway caller identity (item 7) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Action evaluator + evidence (AE) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Scoped mandates + authority at execution (item 5, Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Member removal + identity authentication (C5) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Confined fleet (H7) — new, run 17 | ✓ ᴿ¹⁷ | — | — | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
-| Adaptive stability / control (item 4) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁷ (`ConfidenceBound` untunable — code gap) |
+| Adaptive stability / control (item 4) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`control-profiles.md` step 2 + `tuning.md`: the two bound fields and env vars, applied at start) |
 | Knowledge layer (item 3 + Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Election / leadership (`mycelium::election`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Capability lifecycle — the two arrival paths, the unit file, `wire-check` (`operations/capability-lifecycle.md`, guide 02, `src/capability_config.rs`) — new, 2026-09-28 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Capability lifecycle — the two arrival paths, the unit file, `wire-check` (`operations/capability-lifecycle.md`, guide 02, `src/capability_config.rs`) — new, 2026-09-28 | ✓ | ✓ ᴿ¹⁸ (`reference/unit-file.md`; the module-doc example now a test) | ✓ | ✓ ᴿ¹⁸ (all 15 findings, six flags, exit codes) | ✓ ᴿ¹⁸ (snippets are TOML; `verify` runs) |
+| Stem node and fleet (`mycelium-stem`, R1/R2) — new, run 18 | ✓ plan §13 | ✓ ᴿ¹⁸ (wasm-host README; `reference/unit-file.md` § who reads what) | ✓ ᴿ¹⁸ (guide 13 §5; `examples/units/`; `make examples-both-ways`) | ✓ ᴿ¹⁸ (`capability-lifecycle.md` § Running a stem: every flag and default) | ~ ᴿ¹⁸ (a stem reads only a mounted library or the mesh, the mesh bounded by the frame cap — code gap, on `what-is-proven.md`) |
+| Declared activation and serving (`[[activation]]` D21, `[[serve]]` D22) — new, run 18 | ✓ plan D21/D22 | ✓ ᴿ¹⁸ (`reference/unit-file.md`, placeholders, defaults) | ✓ (`examples/units/model_deploy`, `reheal_deploy`, `llm_agent`) | ✓ ᴿ¹⁸ (not a sandbox — `shared-responsibility-matrix.md` CC8) | ~ ᴿ¹⁸ (`api_key` is a literal in a file the lifecycle page calls safe to commit — code gap; workaround stated) |
+| Artifact delivery — the tool, the publish door, ranged fetch, object stores (A1–A3, S1–S2) — new, run 18 | ✓ plan §10–§11 | ✓ (`artifacts.md` §2, § Remote blob stores) | ✓ | ✓ ᴿ¹⁸ (line-hex manifest; the route needs `http_port` + `artifact:publish`; the stem image has no `object_store`) | ✓ ᴿ¹⁸ (store build line with `stem,object_store`; `MYCELIUM_EGRESS_ALLOW_HOSTS`) |
+| The declaration schema (`reference/declaration.schema.json`, W6) — new, run 18 | ✓ plan §9 | ✓ ᴿ¹⁸ (`docs/README.md` reference row) | ~ ᴿ¹⁸ (linked with its `$id`; no consumer walkthrough — validating against it, the join key) | ✓ ᴿ¹⁸ (`capability-lifecycle.md` §2) | ~ ᴿ¹⁸ (same) |
+| SDK unit files (`POST /gateway/units/declare`, `declare_from` / `declareUnits`, Q2) — new, run 18 | ✓ plan §14 Q2 | ✓ ᴿ¹⁸ (both SDK READMEs; docstrings name `[[serve]]`) | ✓ ᴿ¹⁸ (guide 10 § Declaring a unit file — body, response, 400/422, `not_enforced`, lease) | ✓ (`rbac.md` `cap:write`) | ✓ ᴿ¹⁸ (`capability-lifecycle.md` §3) |
 
-ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
+ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 
 ## What was found, and how it was closed
 
@@ -624,12 +666,25 @@ skepticism, not a re-asserted ✓.
   *performs* it, not merely that the property is described. Fixed: `cert-rotation.md` step 2 (states
   unsigned + links `design/identity-authentication.md`); also this session, the `rotate_identity` code
   comments + `wiki/dev/security.md`, and the stale `/ready` row in `observability.md`.
+- 2026-10-02 (run 18): **Security·HOW·Ops was Clear in runs 13–17** but `GOSSIP_GATEWAY_NAMED_TOKENS`
+  (and both token tables) did nothing in a non-`compliance` build, which then ran an open gateway (found by
+  this run's literal-follow check of a v2.16.0 setting). Second hit of the *setting that silently no-ops*
+  class after `GOSSIP_CLUSTER_NAME`. **Sharpening:** for a security setting, *works if followed literally*
+  includes the build — check the setting's consumer is compiled into the build the doc tells the operator
+  to run, and send the unauthenticated request.
+- 2026-10-02 (run 18): **Capability lifecycle·HOW·Ops was Clear on 2026-09-28** (a row added by opening the
+  pages) but its `[[activation]]`/`[[serve]]` snippets and the module-doc reference block were not TOML, and
+  §4's `verify` exited 2 (found by pasting the snippets into the loader). **Sharpening:** a config snippet's
+  Clear needs it *loaded*, not read — and the canonical one is now a test.
+- 2026-10-02 (run 18): **Commitments·HOW·Ops was recorded `~` as a code gap in run 17** when the verb existed
+  (`compact_log`, and a gateway route). A miscalibration the other way: a doc gap filed as a code gap is a
+  gap nobody fixes. **Sharpening:** a "code gap" verdict cites the grep that found nothing.
 
 ## Re-run guidance
 
 The audit was a one-time systematic sweep; a re-run should be a **diff**. Re-audit a concept only
-when its code/docs changed since the last run (run 17 baseline: tag `v2.15.1` + PR #426 —
-`git log v2.15.1..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
+when its code/docs changed since the last run (run 18 baseline: tag `v2.18.0` —
+`git log v2.18.0..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
 above is the baseline: any cell dropping below ✓ is a regression. The method (four auditors, the
 Clear/Thin/Missing rubric, the exact prompts) is reproducible from this session's transcript. New
 concepts (a new sub-handle, a new companion, a new external standard) each need a fresh row audited

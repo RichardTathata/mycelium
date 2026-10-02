@@ -67,11 +67,14 @@
 //! [[group]]                              # define_capability_group, in a file
 //! name = "routers"
 //!   [group.filter]
-//!   ns = "plan"; name = "route"
+//!   ns   = "plan"
+//!   name = "route"
 //!   [[group.provides]]
-//!   ns = "plan"; name = "routing"
+//!   ns   = "plan"
+//!   name = "routing"
 //!   [[group.requires]]
-//!   ns = "data"; name = "realtime"
+//!   ns   = "data"
+//!   name = "realtime"
 //!
 //! [[lane]]                               # a tuple-space stage this unit touches
 //! name = "stage-b"
@@ -83,41 +86,64 @@
 //! operations = ["plan.route", "plan.reroute"]
 //!
 //! [[rule]]                               # reference-evaluator rules, the same fields as Rule
-//! actor = "planner"; operation = "plan.route"; resource = "*"
+//! actor     = "planner"
+//! operation = "plan.route"
+//! resource  = "*"
 //! requires_mandate = "routers"
 //!
 //! [hosts]                                # this unit runs a provisioner (D15)
 //! kinds = ["wasm-component", "blob"]
 //! install_budget_bytes = 8589934592
 //! headroom = 0.8
-//! trusted_publishers = ["ed25519:3f…", "ed25519:a7…"]
-//! operator_publishers = ["ed25519:3f…"]   # the operator's own key: unbounded
-//! fuel_per_call = 50000000               # every other trusted key is an agent: metered (D19)
+//! # a stem refuses anything but ed25519:<64 hex>; this key is the public half of the test seed 42…42
+//! trusted_publishers  = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"]
+//! operator_publishers = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"]
+//! fuel_per_call = 50000000               # every trusted key not in operator_publishers is an agent: metered (D19)
 //! placement_root = "/var/lib/mycelium/artifacts"
 //!
 //! [[activation]]                         # a placed blob, handed to the local runtime (X2)
-//! ns = "llm"; name = "storyteller"
+//! ns   = "llm"
+//! name = "storyteller-deploy"
 //! command = ["ollama", "create", "storyteller", "-f", "{rendered}"]
 //! probe   = ["ollama", "show", "storyteller"]
 //! resolve_artifact_refs = true           # `FROM artifact:<hex>` → the placed path
 //!
 //! [[serve]]                              # a routable skill while a local install is live (X2)
-//! name = "storyteller"; endpoint = "http://localhost:11434/v1"; model = "storyteller"
+//! name     = "storyteller"               # ns defaults to "llm"
+//! endpoint = "http://localhost:11434/v1"
+//! model    = "storyteller"
 //!   [serve.while_live]
-//!   ns = "llm"; name = "storyteller-deploy"
+//!   ns   = "llm"
+//!   name = "storyteller-deploy"
 //!
 //! [[presence]]                           # keep 2–4 route optimizers alive fleet-wide (D17)
-//! ns = "route"; name = "optimize"
+//! ns   = "route"
+//! name = "optimize"
 //! min_providers = 2
 //! max_providers = 4
 //! ```
 //!
-//! What the loader **does**: parse, then [`NodeCapabilityConfig::validate`] — an unknown
-//! constraint operator, a `Version` that does not parse, a ranking with an unknown order, a
-//! mandate that enumerates nothing, a presence floor of zero or a ceiling below it, a hosts
-//! table naming an unknown kind or a headroom outside `(0, 1]` are each refused **by name**.
-//! What it does **not** do (D8, taken by D18 as phase R1): nothing here is declared to the
-//! mesh at startup yet — the sections are the vocabulary the offline check (W2) reads.
+//! Every field, with its type and default, is in `docs/reference/unit-file.md`.
+//!
+//! What the loader **does**: parse, then [`NodeCapabilityConfig::validate`]. Each of these is
+//! refused **by name**: an empty `principal`; an unknown constraint operator, or a constraint table
+//! naming more than one; a `Version` that does not parse; a ranking with an unknown order; a group,
+//! lane or rule with an empty name or field; a mandate with an empty holder or scope, or one that
+//! enumerates nothing; a presence floor of zero or a ceiling below it; a `[hosts]` table naming an
+//! unknown kind, a headroom outside `(0, 1]`, a `fuel_per_call` or `operator_fuel_per_call` of `0`,
+//! or `operator_publishers` that are not all in `trusted_publishers`; an `[[activation]]` with an
+//! empty `command`, `timeout_secs = 0`, a placeholder outside `{path} {dir} {artifact} {ns} {name}
+//! {rendered}`, `{rendered}` without `resolve_artifact_refs = true`, or in a unit whose `[hosts]`
+//! does not name the `blob` kind; and a `[[serve]]` with an empty `endpoint` or `model`, or whose
+//! `while_live` names the skill itself.
+//!
+//! Who reads the file at runtime: a stem (`mycelium-stem --units <file>`, a binary of
+//! `mycelium-wasm-host` built with feature `stem`) declares every section at startup. An SDK agent
+//! declares the non-hosting sections through `POST /gateway/units/declare`, which refuses
+//! `[hosts]`, `[[presence]]`, `[[activation]]` and `[[serve]]` and reports lanes, mandates and rules
+//! as not enforced. The `mycelium` node binary does not read the file; an application drives the
+//! `[[capability]]` probe loop itself with [`run_capability_probes`]. `mycelium wire-check` reads
+//! every section except `[[activation]]`, and counts a `[[serve]]` skill as an offer.
 
 use crate::error::GossipError;
 use serde::{Deserialize, Serialize};
@@ -1079,6 +1105,30 @@ max_providers = 4
             assert_eq!(rule.requires_mandate.as_deref(), Some("routers"));
             assert_eq!(rule.requires_values[0], ("region".to_string(), serde_json::json!("north")));
         }
+    }
+
+    /// The unit-file example in this module's doc is the one most readers copy, so it must be a
+    /// file the loader accepts: parse the first fenced block after "## The unit file" and
+    /// validate it.
+    #[test]
+    fn the_module_doc_unit_file_example_loads() {
+        let src = include_str!("capability_config.rs");
+        let doc: Vec<&str> = src
+            .lines()
+            .take_while(|l| l.starts_with("//!"))
+            .map(|l| l.strip_prefix("//! ").or_else(|| l.strip_prefix("//!")).unwrap_or(l))
+            .collect();
+        let start = doc.iter().position(|l| l.starts_with("## The unit file")).expect("unit-file section");
+        let open = start + doc[start..].iter().position(|l| l.trim() == "```toml").expect("a toml fence");
+        let close = open + 1 + doc[open + 1..].iter().position(|l| l.trim() == "```").expect("a closing fence");
+        let block = doc[open + 1..close].join("\n");
+        let cfg = NodeCapabilityConfig::from_toml_str(&block)
+            .unwrap_or_else(|e| panic!("the module doc's unit-file example must load: {e}\n{block}"));
+        cfg.validate().expect("and validate");
+        assert!(cfg.principal.is_some() && !cfg.groups.is_empty() && !cfg.rules.is_empty());
+        assert!(!cfg.activations.is_empty() && !cfg.serves.is_empty() && !cfg.presence.is_empty());
+        assert_eq!(cfg.groups[0].provides.len(), 1);
+        assert_eq!(cfg.groups[0].requires.len(), 1);
     }
 
     fn refused(toml: &str) -> String {

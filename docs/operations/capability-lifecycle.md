@@ -22,12 +22,15 @@ what, and who could host what.
 
 ## 1 · Declare — one file per unit
 
-Every deployable unit gets a **unit file** (`src/capability_config.rs` is the reference; guide 02 has
-the summary): its `principal`, the `[[capability]]` blocks it offers, the `[[requirement]]` filters it
-needs, the `[[group]]`s it defines, the `[[lane]]`s it feeds or drains, the `[[mandate]]`s and
-`[[rule]]`s it expects, and — for a host — the `[hosts]` table (kinds, install budget, headroom, trusted
-publisher keys, placement root) and the `[[presence]]` floors it keeps. No secrets, no addresses: the
+Every deployable unit gets a **unit file** (the [unit-file reference](../reference/unit-file.md) has
+every field, type and default; guide 02 has the summary): its `principal`, the `[[capability]]` blocks it
+offers, the `[[requirement]]` filters it needs, the `[[group]]`s it defines, the `[[lane]]`s it feeds or
+drains, the `[[mandate]]`s and `[[rule]]`s it expects, and — for a host — the `[hosts]` table (kinds,
+install budget, headroom, trusted publisher keys, placement root, fuel and reviewers), the
+`[[presence]]` floors it keeps, the `[[activation]]` that hands a placed blob to its local runtime, and
+the `[[serve]]` that makes a live install a routable model skill. No secrets, no addresses: the
 directory is safe to commit, and it is the thing the rest of this page checks, deploys and compares.
+The one exception is `[[serve]].api_key`, a literal — see the reference's limit note.
 
 ```
 deploy/
@@ -44,13 +47,42 @@ one presence floor), with its README.
 cargo run --features cli --bin mycelium -- wire-check deploy/units --library deploy/artifacts
 ```
 
-The check applies the mesh's own match rule to the directory and prints what **could not bind**:
-`unwired requirement`, `schema-only mismatch`, `type-cross constraint`, `empty group`,
-`group requires unmet`, `orphan lane`, `unhostable entry`, `presence unhostable` (each an error,
-exit 1), and `would bind by provisioning`, `unranked ranking`, `single provider` (warnings; the first
-becomes an error with `--strict-deployed`). `--format json` emits the versioned declaration
-document, `--format dot` a Graphviz picture. Put it in CI beside the schema gate (guide 12): a red
-check stops a merge.
+The check applies the mesh's own match rule to the directory and prints what **could not bind**.
+Each finding has a `kind` a script can key on (`src/wire_check.rs`):
+
+| Kind | Severity |
+|---|---|
+| `unwired requirement` — no declared capability satisfies the filter | error |
+| `schema-only mismatch` — it matches except for `schema_id` | error |
+| `type-cross constraint` — a constraint's value type can never compare with the offered attribute | error |
+| `empty group` — nothing satisfies the group's filter | error |
+| `unknown schema` — a `schema_id` the schema directory does not define (only with `--schemas`) | error |
+| `group requires unmet` — a group's `requires` binds to nothing | error |
+| `orphan lane` — consumed and never produced, or the reverse | error |
+| `unhostable entry` — an artifact would satisfy the filter but no `[hosts]` can take it | error |
+| `presence unhostable` — a `[[presence]]` floor cannot be met | error |
+| `unauthorisable edge` — the requirer declares authority, and no declared rule and mandate could admit the call | error |
+| `would bind by provisioning` — no deployed provider, but a hostable artifact matches | warning; error with `--strict-deployed` |
+| `would bind after acceptance` — as above, but the artifact is **proposed** and loads only into a shadow lane until accepted | warning; error with `--strict-deployed` |
+| `ungoverned edge` — the requirer declares no mandate and no rule while other units do | warning |
+| `unranked ranking` — a ranking on an attribute no matching capability carries | warning |
+| `single provider` — exactly one possible provider | warning |
+
+Flags (`mycelium wire-check <units-dir> --help`):
+
+| Flag | Effect |
+|---|---|
+| `--library <dir>` | read every `*.toml` in `<dir>` as an artifact description |
+| `--schemas <dir>` | the schema directory (guide 12); every declared `schema_id` must name a `.json` file in it |
+| `--format text\|json\|dot` | text (default), the versioned JSON declaration document, or a Graphviz picture |
+| `--strict-deployed` | the two *would bind* warnings become errors |
+| `--no-authority` | skip the authority overlay (`unauthorisable edge`, `ungoverned edge`) |
+| `--revision <rev>` | the revision stamped on the JSON; defaults to `git rev-parse HEAD` in the units directory |
+
+Exit codes: **0** no errors, **1** at least one error, **2** a usage error or a file that does not
+load. The JSON output's schema is [`docs/reference/declaration.schema.json`](../reference/declaration.schema.json)
+(`$id` `mycelium.design/declaration/1`); a change to its shape is a new schema version. Put the check
+in CI beside the schema gate (guide 12): a red check stops a merge.
 
 What it cannot say, on its own `--help`: whether a provider is alive, which one is chosen, whether a
 group has members *now*, whether provisioning would actually fill a gap on the night, whether a
@@ -62,7 +94,13 @@ Deploy the units as your platform deploys anything ([deployment.md](deployment.m
 a seed, the CA identity). A **host** unit is a direct deployment too — the image carries the mesh
 binary, the wasm host and a provisioner, the runtimes for the kinds in its `[hosts]` table (the WASM
 sandbox is built in; a `blob` runtime needs its native consumer, an Ollama or ONNX process, already on
-the node), the publisher keys it trusts, reach to the library or store, and its egress policy. A fleet
+the node), the publisher keys it trusts, a way to read artifact bytes, and its egress policy. A stem
+reads bytes from a **library directory** on the node (`--library`, a local disk or a mounted volume) or
+**over the mesh** from a librarian. The mesh path rides the gossip frame and is bounded by
+`MAX_FRAME_BYTES` (10 MiB), so a large model needs `--library` on a mounted volume. A stem cannot
+read an S3 or GCS library itself: its sources are `StemSource::Library` and `StemSource::Mesh`, and
+the stem binary's librarian reads its manifest from a local file (`manifest_source: None`). Sync or
+mount a store-backed library onto the node ([artifacts.md](artifacts.md) § Remote blob stores). A fleet
 of identical hosts is the **stem fleet** (`docs/plans/design-time-tooling.md` §13): it holds nothing
 application-specific at deploy time and loads what the declarations call for.
 
@@ -74,13 +112,48 @@ pull them over the mesh from a librarian, `--librarian <manifest> --publisher ed
 the librarian role too. The file and the runtime vocabulary are then one thing; every declaration
 still travels as its own evaporating entry and no other node reads the file. A unit that declares in
 code keeps working; the `mycelium` node binary itself does not read the file, because the provisioner
-lives in the wasm-host crate and the dependency runs the other way.
+lives in the wasm-host crate and the dependency runs the other way. An **SDK agent's** unit file
+reaches its node through `POST /gateway/units/declare` (scope `cap:write`; [guide 10](../guide/10-language-bridges.md)):
+the node declares its capabilities, requirements and groups, refuses the hosting sections with 422, and
+reports lanes, mandates and rules as `not_enforced`.
+
+### Running a stem
+
+```sh
+cargo build -p mycelium-wasm-host --features stem,gateway,llm --bin mycelium-stem
+```
+
+The binary needs feature `stem`. `gateway` adds the publish route `POST /gateway/artifacts/publish`;
+without it there is no route. With it, the route is mounted only when `[hosts].trusted_publishers`
+is non-empty, served only when the node's config sets `http_port`, and admits only a bearer token
+holding `artifact:publish`. `llm` is needed for `[[serve]]`: a stem built without it refuses to start
+when the unit file has a `[[serve]]` section.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--units <file>` | required | the unit file to declare from |
+| `-c, --config <file>` | env overrides on `GossipConfig` defaults | the `GossipConfig` TOML |
+| `-p, --port <port>` | from the config | bind port |
+| `--host <ip>` | from the config | bind address |
+| `-r, --peers <ip:port,…>` | from the config | bootstrap peers |
+| `--library <dir>` | none: pull over the mesh (5 s per fetch) | read artifact bytes from this directory |
+| `--librarian <manifest>` | off | also take the librarian role over `--library` and this manifest file; needs `--library` and `--publisher` |
+| `--publisher ed25519:<hex>` | none | the manifest's publisher key (with `--librarian`) |
+| `--tick-ms <n>` | `500` (minimum `50`) | the provisioner's tick |
+| `--self-elect <p>` | `0.5` (clamped to `0..1`) | self-election probability per round |
+
+The `model-host` service of `docker/docker-compose.stem-examples.yml`, as a command:
+
+```sh
+mycelium-stem --units /repo/examples/units/model_deploy/model-host.toml --library /lib \
+              --host 172.40.0.42 -p 57000 -r 172.40.0.40:57000 --tick-ms 300
+```
 
 ## 4 · Publish — the catalogue
 
 For every artifact in `deploy/artifacts/`: build the bytes, then `mycelium-artifact publish
 <description> --library <dir> --key-env <SEED>` stores them, signs the entry and appends the manifest
-line; `mycelium-artifact verify --descriptions deploy/artifacts` in CI keeps the reviewable
+line; `mycelium-artifact verify <library> --trusted ed25519:<hex> --descriptions deploy/artifacts` in CI keeps the reviewable
 description and the signed manifest from drifting ([artifacts.md](artifacts.md) §2). A librarian reconciles the
 manifest to the gossiped catalogue, so every node sees the entry; the bytes travel only to the nodes
 that install. A large artifact reaches a host in `Range` pieces staged to disk, never through memory
@@ -96,11 +169,13 @@ Kill the host and a standby does the same. Watch it: `mycelium_artifact_*` in
 [dynamic-scaling.md](dynamic-scaling.md) for the governors above it.
 
 **Placed blobs that need a runtime.** A model or data pack is *placed* by a hosting unit, but a
-placed file serves nothing until the node-local runtime has it. A unit says how, per capability:
+placed file serves nothing until the node-local runtime has it. A unit says how, per capability
+(every field and placeholder: [`[[activation]]`](../reference/unit-file.md#activation)):
 
 ```toml
 [[activation]]
-ns = "llm"; name = "storyteller"
+ns   = "llm"
+name = "storyteller"
 command = ["ollama", "create", "storyteller", "-f", "{rendered}"]
 probe   = ["ollama", "show", "storyteller"]
 resolve_artifact_refs = true      # the profile's `FROM artifact:<hex>` becomes the placed weights' path
@@ -108,7 +183,8 @@ resolve_artifact_refs = true      # the profile's `FROM artifact:<hex>` becomes 
 
 A model that should answer routed inference also needs a **routable skill**, which a placed and
 activated file is not. `[[serve]]` registers one while the install is live and retracts it when the
-install goes, so a router fails over instead of calling a node whose model was withdrawn:
+install goes, so a router fails over instead of calling a node whose model was withdrawn (every
+field: [`[[serve]]`](../reference/unit-file.md#serve)):
 
 ```toml
 [[serve]]
@@ -116,7 +192,8 @@ name     = "storyteller"                       # the routable skill llm/storytel
 endpoint = "http://localhost:11434/v1"         # this host's OpenAI-compatible runtime
 model    = "coop-storyteller"
 [serve.while_live]
-ns = "llm"; name = "storyteller-deploy"        # the install it waits for (a different name)
+ns   = "llm"
+name = "storyteller-deploy"                    # the install it waits for (a different name)
 ```
 
 The stem runs `command` after placement and before the capability is advertised, re-runs `probe`

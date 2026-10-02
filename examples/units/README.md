@@ -6,14 +6,26 @@ deployable unit, its `principal` the node's name in the example. An example that
 `artifacts/` beside its units — the descriptions `wire-check --library` reads. The `*_viz` variants
 share their base's directory.
 
-They are the design-time half of each example: `mycelium wire-check examples/units/<example>` says
-whether the vocabulary is consistent *before* the fleet exists, and `scripts/wire-check-examples.sh`
-runs every one of them in CI. The gate that keeps them honest: deleting any capability block from
+They are the design-time half of each example. From the repository root,
+
+```sh
+cargo run --features cli --bin mycelium -- wire-check examples/units/<example>
+# an example with an artifacts/ directory needs it as the library:
+cargo run --features cli --bin mycelium -- wire-check examples/units/<example> --library examples/units/<example>/artifacts
+```
+
+says whether the vocabulary is consistent *before* the fleet exists. Pass `--library` only where an
+`artifacts/` directory exists; without it a provisioning example reports its installable
+capabilities as `unwired requirement` and exits 1. `scripts/wire-check-examples.sh` runs every
+directory this way in CI. Each directory is also a template: copy one, rename the units, and edit
+the sections — the [unit-file reference](../../docs/reference/unit-file.md) lists every field. The gate that keeps them honest: deleting any capability block from
 any directory turns its row red — precisely, deleting the last provider of any advertised capability
 (`tests/wire_check_examples.rs`) — which is why every advertised capability has a requirer here: the
 example's own caller, written down.
 
-**The stem run (X2).** `make examples-both-ways DEMO=provisioning` (or `catalog`, `mcp_toolgrowth`, `model_deploy`, `reheal_deploy`, `llm_agent` — the model demos' code runs need a local Ollama and `MODEL_GGUF`; `llm_agent`'s units describe its stem recut, while the browser demo itself still reads `examples/node_n*.toml`) runs the demo as the
+**The stem run (X2).** Prerequisites: Docker with Compose, which builds the stem image from
+`docker/Dockerfile.stem` on first run; for the model demos' code run, a local Ollama and `MODEL_GGUF`
+pointing at a GGUF file. `make examples-both-ways DEMO=provisioning` (or `catalog`, `mcp_toolgrowth`, `model_deploy`, `reheal_deploy`, `llm_agent` — the model demos' code runs need a local Ollama and `MODEL_GGUF`; `llm_agent`'s units describe its stem recut, while the browser demo itself still reads `examples/node_n*.toml`) runs the demo as the
 in-process binary and as stem nodes from one image fed this directory
 (`docker/docker-compose.stem-examples.yml`), and greps the same markers from both. The hosting units'
 `trusted_publishers` is the public half of the suite's test seed (`make stem-keys`), a fixture.

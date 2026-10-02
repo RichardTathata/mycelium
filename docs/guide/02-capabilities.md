@@ -87,7 +87,8 @@ The same file is the **unit file**: beside `[[capability]]` it can declare what 
 meaning equals), the `[[group]]`s it defines, the `[[lane]]`s it feeds or drains, the
 `[[mandate]]`s and `[[rule]]`s it expects, what it `[hosts]`, and the `[[presence]]` it keeps —
 the format `docs/plans/design-time-tooling.md` §3 argues, with every refusal by name at load
-(`NodeCapabilityConfig::validate`; the module doc of `src/capability_config.rs` is the reference).
+(`NodeCapabilityConfig::validate`). Every section and field, with types and defaults, is in the
+[unit-file reference](../reference/unit-file.md).
 A probe loop advertises health. The mesh control UI lets you apply any of 11
 topology presets and watch capability emergence in real time.
 

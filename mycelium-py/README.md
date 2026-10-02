@@ -123,6 +123,21 @@ providers = agent.resolve_capability("compute", "gpu", caller_id="orchestrator")
 Returns demand pressure: `DemandStatus(ns, name, providers, requirers, demand_pressure)`.
 `demand_pressure > 1.0` signals a supply gap.
 
+#### `declare_units(toml_text, *, interval_secs=30, lease_secs=None)` / `declare_from(path, **kwargs) → UnitHandle`
+
+Hands a unit file's text to the node, which validates it and declares its capabilities,
+requirements and groups under one handle. Hosting sections (`[hosts]`, `[[presence]]`,
+`[[activation]]`, `[[serve]]`) are refused (422); `[[lane]]`, `[[mandate]]`, `[[rule]]` come back in
+`not_enforced`.
+
+```python
+with agent.declare_from("units/matcher.toml") as unit:   # a food co-op's matcher unit
+    print(unit.principal, unit.declared, unit.not_enforced)
+# drop() on exit retracts the whole unit
+```
+
+See [guide 10 — Declaring a unit file](../docs/guide/10-language-bridges.md#declaring-a-unit-file-from-python-or-typescript).
+
 ---
 
 ### Signal mesh

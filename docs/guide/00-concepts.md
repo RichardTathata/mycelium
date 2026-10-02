@@ -206,8 +206,8 @@ handler it's a **Skill**, or if exposed over MCP a **Tool**. Artifact is the
 package; the rest are what it turns into once running. →
 [`provisioning`](../../examples/coop/src/bin/provisioning.rs); the catalogue
 itself — where it lives and how to author/publish to it — is the
-[`mycelium-wasm-host`](../../mycelium-wasm-host/) crate (a dedicated
-`operations/artifacts.md` lands with that workstream).
+[`mycelium-wasm-host`](../../mycelium-wasm-host/) crate, and publishing, verifying
+and accepting entries is [`operations/artifacts.md`](../operations/artifacts.md).
 
 **Node = Agent = Process.** One Mycelium **node** is one `GossipAgent` is one OS
 process is a full peer (registry + bus + scheduler in one). The coop demos name

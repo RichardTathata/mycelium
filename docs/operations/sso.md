@@ -47,7 +47,10 @@ cfg.oidc = Some(mycelium::OidcConfig {
   the main per-vendor knob (see §3).
 - **`group_scopes`** maps each IdP group to gateway scopes; a user's scopes are
   the union over their groups. The scope vocabulary is the same as
-  [`rbac.md`](rbac.md) §2.
+  [`rbac.md`](rbac.md) §2. Each scope is either a named scope (`llm:read`, `kv:write`, …) or the
+  single `"*"`. A family wildcard such as `llm:*` is refused by `validate()` at start
+  (`oidc.group_scopes`, `mycelium-core/src/config.rs`): it would match nothing at the gateway, so
+  list the family's scopes by name.
 - **`jwks_uri`** — leave `None` for standard discovery; set explicitly only if the
   IdP's JWKS is hosted off the discovery path. Keys are cached (TTL ~1h) and
   re-fetched on an unknown `kid`, so IdP key rotation is picked up automatically.

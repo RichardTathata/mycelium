@@ -233,11 +233,15 @@ test-stem-examples:
 	done
 
 examples-both-ways:
-	@test -n "$(DEMO)" || { echo "usage: make examples-both-ways DEMO=provisioning|catalog|mcp_toolgrowth"; exit 2; }
-	@echo "== code run: $(DEMO) =="; \
+	@test -n "$(DEMO)" || { echo "usage: make examples-both-ways DEMO=<one of: $(STEM_DEMOS)>"; exit 2; }
+	@if [ "$(DEMO)" = "llm_agent" ]; then \
+	    echo "== code run: llm_agent is the browser demo (cargo run --example llm_agent), which asserts nothing; running the stem half only =="; \
+	else \
+	echo "== code run: $(DEMO) =="; \
 	out=$$(cargo run -q -p mycelium-coop-examples --features wasm --bin $(DEMO) 2>&1); \
 	echo "$$out" | grep -q "All assertions passed" || { echo "$$out" | tail -20; echo "code run failed"; exit 1; }; \
-	echo "code run: All assertions passed"
+	echo "code run: All assertions passed"; \
+	fi
 	@$(MAKE) test-stem-examples STEM_DEMOS=$(DEMO)
 
 stem-keys:

@@ -22,9 +22,7 @@
 #                  nothing; the reviewer's promotes it; the operator retires v1 from the manifest;
 #                  the incumbents die, and provider-c serves the accepted v2 — visible in its
 #                  replies ("shadow-then-accept complete"). Keys: operator 42…42, agent 43…43,
-#                  reviewer 44…44, stranger 45…45 — fixtures, in the clear on purpose. Wave 3 (shadow-then-accept) is not recut: an
-#                  acceptance is a manifest rewrite the driver would have to make in the library
-#                  volume and the stems re-read — open.
+#                  reviewer 44…44, stranger 45…45 — fixtures, in the clear on purpose.
 #   catalog      — the librarian and the installer are stems (the installer pulls over the mesh);
 #                  the driver is the caller. Then the code run's phase 6, as stems: the driver kills
 #                  the librarian and starts a late stem (`docker run`, the same image) that installs
