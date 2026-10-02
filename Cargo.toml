@@ -4,7 +4,7 @@ version = "2.18.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
-description = "Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay. Embedded, broker-less: gossip KV, signal mesh, consensus, capability discovery."
+description = "A fleet that grows the capabilities it lacks, under rules it can show it kept. An embedded library for agent fleets with no coordinator: gossip KV, signal mesh, consensus, capability discovery, demand-driven provisioning."
 license = "AGPL-3.0-only"
 # Commercial embedding license available — see README §License or contact tathatasystems@proton.me
 repository = "https://github.com/RichardTathata/mycelium"

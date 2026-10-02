@@ -7,7 +7,9 @@
 > — the integrator contract (dependency, public-API-only rule, reserved KV prefixes,
 > invariants, and a copyable `CLAUDE.md` snippet).
 
-**Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.**
+**A fleet that grows the capabilities it lacks, under rules it can show it kept.**
+
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
 It is a broker-less embedded Rust library: you embed it directly in your process — there is no
 daemon, no sidecar, no coordinator to run. Each node is simultaneously a participant in the mesh
 and a full peer; the mesh is the registry, the bus, and the scheduler all at once. The map of the

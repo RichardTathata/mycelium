@@ -1,6 +1,8 @@
 # Operations
 
-Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.
+**A fleet that grows the capabilities it lacks, under rules it can show it kept.**
+
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.
 These are the DevOps-facing runbooks for deploying and operating such a cluster. The
 developer-side counterpart is the [guide cookbook](../guide/cookbook.md); the
 vocabulary is in [00 · Concepts](../guide/00-concepts.md); what the project can prove today, and

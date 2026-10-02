@@ -1,31 +1,53 @@
-# Positioning — the one sentence, and its three expansions
+# Positioning — the hero, the sentence, and its three expansions
 
 This file is the **single source** for how Mycelium describes itself. Every front door quotes the
-sentence below verbatim and links here; `scripts/check-positioning.sh` (in `make check`) fails when a
-door's copy differs, when a funnel's five-step path differs, or when a link still points at the
-repository's pre-move account. Edit the sentence **here and nowhere else**. Rationale and the list of
+hero and the sentence below verbatim and links here; `scripts/check-positioning.sh` (in `make check`)
+fails when a door's copy of either differs, when a funnel's five-step path differs, or when a link still points at the
+repository's pre-move account. Edit them **here and nowhere else**. Rationale and the list of
 doors: [`docs/plans/proposition-alignment.md`](plans/proposition-alignment.md).
+
+## The hero
+
+<!-- hero -->
+**A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
 ## The sentence
 
 <!-- sentence -->
-**Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no coordinator, and proves it by replay.**
+**Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay.**
 
-*Find* is discovery, the first half of the story. *Authorise* is mandates and the action seam, the
-second half. *Account* is receipts and evidence. *No coordinator* is the thesis. *Proves it by replay*
-is the method, and the one claim that needs the seams to make. It contains no word that
-[`philosophy.md`](philosophy.md) § *What This Architecture Is Not* forbids. "Unique", "first" and any
-new-category claim stay reserved until the source-based prior-art comparison exists
-([`v3-contracts-axis.md`](plans/v3-contracts-axis.md) §13.1).
+The hero says what is distinctive in a dozen words: the fleet *grows* — a node that lacks a capability
+acquires it — and it does so *under rules it can show it kept*, which is authority checked where the work
+runs and a record someone else can read. The sentence makes each claim at the strength the code supports:
+
+- *Embedded library, no coordinator* — the thesis, and the binding wording: a library, not a platform.
+- *Generic nodes install signed capabilities when demand goes unmet* — the stem node and demand-driven
+  provisioning (v2.17.0–v2.18.0). It is true of a **stem** — a node with a `[hosts]` table — not of every
+  node; an SDK agent or a plain `mycelium` node does not install anything.
+- *Re-heal what they declared when a provider dies* — presence floors: **what was declared**, not
+  self-repair in general.
+- *Every action runs under explicit authority* — mandates, the action seam, enforcement at the provider.
+- *Leaves a record you can replay* — receipts, evidence, the replay seams. Deliberately not *proves it by
+  replay*: replay shows a recording is consistent with its captured inputs, not that every execution is
+  correct (the 360 review, 2026-10-02).
+
+It contains no word that [`philosophy.md`](philosophy.md) § *What This Architecture Is Not* forbids.
+"Unique", "first" and any new-category claim stay reserved until the source-based prior-art comparison
+exists ([`v3-contracts-axis.md`](plans/v3-contracts-axis.md) §13.1).
+
+**Revised 2026-10-02.** The previous sentence — *Mycelium lets a fleet of AI agents find, authorise and
+account for each other's work with no coordinator, and proves it by replay* — said nothing about the fleet
+acquiring what it lacks, which v2.17.0–v2.18.0 made true, and its *proves it by replay* claimed more than
+replay shows. Its parts are not lost: *find* is the capability layer under *grows*; *authorise* and
+*account* are *explicit authority* and *a record*.
 
 ## The three expansions
 
-Each is one paragraph and opens with the sentence.
+Each is one paragraph and opens with the hero and the sentence.
 
 **The visitor's** — README, the GitHub description, crates.io, docs.rs:
 
-> Mycelium lets a fleet of AI agents find, authorise and account for each other's work with no
-> coordinator, and proves it by replay. It is an embedded Rust library in three layers — a gossip
+> **A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Every action runs under explicit authority and leaves a record you can replay. It is built in three layers — a gossip
 > KV store, a signal mesh, and epidemic consensus — with capability discovery across them: no
 > broker, no registry, no daemon, no control plane. State converges by gossip; work is claimed, not
 > dispatched; roles are discovered, not assigned. It is probably overkill if you want to chain a few
@@ -34,12 +56,12 @@ Each is one paragraph and opens with the sentence.
 > agents must coordinate and nobody should be in charge: fleets that partition and heal, edge and
 > on-prem meshes, systems where *who is in charge* must be emergent and recallable.
 
-**The buyer's** — both decks, the engagement kit, the pilot page — the sentence, then the order in
+**The buyer's** — both decks, the engagement kit, the pilot page — the hero and the sentence, then the order in
 the plan's §3: what an agent **may** do, checked where the work happens · what it **did**, as records
 a third party can audit · a fleet that **fills itself** · how: no coordinator · what is proven and what
 is not ([`what-is-proven.md`](operations/what-is-proven.md)).
 
-**The engineer's** — the guide, the integrator on-ramp, the crate doc — the sentence, then the map of
+**The engineer's** — the guide, the integrator on-ramp, the crate doc — the hero and the sentence, then the map of
 the contracts axis: *local decision-making · evidence-aware capability selection · scoped authority ·
 bounded federation · coordination contracts tested through deterministic replay*, then the layer table.
 

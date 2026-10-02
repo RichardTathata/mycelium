@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The positioning gate (docs/plans/proposition-alignment.md D1, D5, D6).
 #
-# 1. Every front door quotes the canonical sentence from docs/positioning.md verbatim.
+# 1. Every front door quotes the canonical hero and sentence from docs/positioning.md verbatim.
 # 2. Every funnel shows the five-step path with the same text (link targets stripped).
 # 3. No live artifact links the repository's pre-move account.
 set -u
@@ -11,6 +11,8 @@ say() { printf '%s\n' "$*" >&2; }
 
 sentence=$(grep -A1 '^<!-- sentence -->' docs/positioning.md | tail -1 | sed 's/^\*\*//; s/\*\*$//')
 [ -n "$sentence" ] || { say "check-positioning: no sentence found in docs/positioning.md"; exit 2; }
+hero=$(grep -A1 '^<!-- hero -->' docs/positioning.md | tail -1 | sed 's/^\*\*//; s/\*\*$//')
+[ -n "$hero" ] || { say "check-positioning: no hero found in docs/positioning.md"; exit 2; }
 
 # ── 1. the doors ────────────────────────────────────────────────────────────────
 doors=(
@@ -30,6 +32,9 @@ doors=(
 for f in "${doors[@]}"; do
   if ! grep -qF -- "$sentence" "$f"; then
     say "positioning: $f does not quote the sentence verbatim"; fail=1
+  fi
+  if ! grep -qF -- "$hero" "$f"; then
+    say "positioning: $f does not quote the hero verbatim"; fail=1
   fi
 done
 
