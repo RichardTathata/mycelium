@@ -13,7 +13,7 @@ here doesn't route you well, that's a docs bug — open an issue.
 
 **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible. (That is the project's
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays. (That is the project's
 description — [`docs/positioning.md`](../positioning.md) — and the README opens with it.)
 
 Mycelium earns its keep when you have **many agents (or nodes) that must
@@ -37,26 +37,16 @@ charge" must be emergent and recallable. The rationale is in
 
 ## Which primitive or companion do I want?
 
-Everything is built on the `mycelium-core` substrate (KV + signals + consensus).
-The companions are opinionated coordination patterns on top of the **public API**
-— pick by the shape of your problem:
+`mycelium-core` provides Layers I and II: gossip KV and the signal/boundary mesh.
+`mycelium` adds Layer III consensus, capabilities, services and optional gateway/security features.
 
-| Your problem | Use | Start with |
-|---|---|---|
-| Shared eventually-consistent state, events, opt-in quorum agreement | **core substrate** | [`three_node_demo`](../../README.md#run) · guide [01](01-gossip-kv.md)/[03](03-signals.md)/[04](04-consensus.md) |
-| Stage-by-stage work handoff, pull-based pipelines | **tuple-space** (position/coordination) | [`redistribution.rs`](../../mycelium-tuple-space/examples/redistribution.rs) · guide [07](07-pipelines.md) |
-| One shared pool of facts many agents read & refine | **blackboard** (content) | [`microgrid.rs`](../../mycelium-blackboard/examples/microgrid.rs) |
-| Durable, curated, queryable memory the fleet grounds on | **wiki** | [`wiki_chat.rs`](../../mycelium-wiki/examples/wiki_chat.rs) |
-| Ship code/policy to where the data is | **wasm-host** (code mobility) | [`mycelium-wasm-host`](../../mycelium-wasm-host/README.md) |
-| Cross-fleet identity & capability federation | **agentfacts** | [`mycelium-agentfacts`](../../mycelium-agentfacts/README.md) |
-| LLM agents that self-organise by meaning, not addresses | **semantic coordination** | [`semantic_coordination.rs`](../../examples/semantic_coordination.rs) · guide [11](11-semantic-coordination.md) |
+Use the [capability map](../capabilities.md) to choose by the task: discover and signal,
+coordinate work, acquire capabilities, constrain actions, or inspect evidence. Each entry connects
+an explanation to an example, operating guidance and the limits of the evidence.
 
-Two `mycelium` vs `mycelium-core` crate-choice questions are answered in the
-[README](../../README.md#which-crate--mycelium-vs-mycelium-core).
-
-Building your *own* coordinated service (a fourth companion)? The choice underneath these — a
-capability-ring single-writer vs the consensus-backed distributed lock, and why the three companions
-all pick the ring — is the [coordination-approaches design note](../design/coordination-approaches.md).
+Choose your [integration mode](installation.md) before copying an example. For your own companion,
+see the [coordination approaches](../design/coordination-approaches.md) and the
+[public API contract](building-on-mycelium.md).
 
 ---
 
@@ -67,7 +57,7 @@ all pick the ring — is the [coordination-approaches design note](../design/coo
    Layer-I substrate everything else builds on.
 2. Read guide [00-concepts.md](00-concepts.md) for the three-layer model and the
    sub-handle API (`kv()`, `mesh()`, `capabilities()`, `consensus()`).
-3. Skim a runnable example close to your problem from the table above.
+3. Skim a runnable example close to your problem from the capability map.
 
 For an interactive two-node REPL (`set`/`get` keys by hand) see the README
 [Run](../../README.md#run) section.
@@ -107,8 +97,7 @@ is the coordinator:
 - **Temporal / durable workflow engines** — give you a durable *scheduler you
   operate*. Mycelium removes the scheduler; there is nothing central to run.
 - **NATS / Kafka / a broker** — a broker *is* the coordinator: a separate process
-  you provision, scale, and monitor, and a single point of failure everything routes
-  through (when it degrades, so does every producer and consumer). Mycelium's mesh is
+  you provision, scale, and monitor, with availability depending on its deployment and replication design. Mycelium's mesh is
   the bus, registry, and scheduler at once, with no broker process to run.
 - **Erlang/OTP, Akka** — closest in spirit (supervision, location transparency),
   but still a managed cluster with explicit process addressing. Mycelium adds
@@ -135,7 +124,7 @@ don't want that dependency.
 - **Opacity/load is emergent, not commanded.** You don't "mark a node down"; nodes
   advertise load and peers route around it. See [00-concepts.md](00-concepts.md).
 - **Consistency is opt-in.** `kv()` is eventually consistent; reach for
-  `consensus()` only where you actually need linearisability (guide
+  `consensus()` only where you need quorum agreement and can satisfy its documented trust and durability assumptions (guide
   [04-consensus.md](04-consensus.md)).
 
 More failure modes: [14-patterns-and-pitfalls.md](14-patterns-and-pitfalls.md) and

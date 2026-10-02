@@ -1,5 +1,7 @@
 # 10 — Language Bridges: Python and TypeScript
 
+Choose and pin the source with [installation and integration modes](installation.md).
+
 ## Concept
 
 Mycelium is a Rust library, but most AI/ML work happens in Python, and much
@@ -7,7 +9,7 @@ of the tooling ecosystem is JavaScript/TypeScript. The language bridges solve
 this with a **sidecar pattern**: a Rust `GossipAgent` runs as a thin sidecar
 process alongside your Python or TypeScript code, exposing the full Mycelium
 API over a local HTTP gateway. Your non-Rust code talks to the sidecar over
-loopback (~1 ms overhead) and gets access to every primitive: KV, signals,
+loopback (measure overhead with [`gateway_overhead`](../../benches/gateway_overhead.rs)) and gets access to every primitive: KV, signals,
 capabilities, RPC, consensus, mailboxes.
 
 ```mermaid
@@ -33,7 +35,7 @@ standalone binary (`three_node_demo` in the demo binary or a dedicated
 `GossipAgent` in your application). The Python/TypeScript client is a thin
 HTTP wrapper — under 500 lines in both cases.
 
-This pattern is used in production in `examples/fluid_pipeline/`: 10 Python
+This pattern is demonstrated in `examples/fluid_pipeline/`: 10 Python
 workers each connect to their own Mycelium sidecar, advertise capabilities,
 and serve RPC calls — all from pure Python.
 

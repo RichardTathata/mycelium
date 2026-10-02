@@ -1,9 +1,6 @@
 # Deploying Mycelium
 
-**Mycelium is a library, not a platform.** There is no daemon, control plane,
-installer, or orchestrator to deploy. You embed the library in your process and
-call `GossipAgent::start()`; that process *is* a full mesh node. "Deploying
-Mycelium" means deploying *your* binary that embeds it.
+**Mycelium is a library, not a platform** — there is no control plane or orchestrator to deploy — **with several deployment modes.** Embed it in a Rust application, run a gateway process for Python/TypeScript clients, or run generic `mycelium-stem` hosts from unit declarations. Each mode operates mesh nodes without an obligatory central coordinator. Choose a mode and pin its source in [installation and integration modes](../guide/installation.md), then follow the port, identity, persistence and recovery guidance below.
 
 > Audience: **DevOps**. The developer-side "how do I embed it" is in the
 > [cookbook](../guide/cookbook.md).

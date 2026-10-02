@@ -81,7 +81,7 @@ Fix the clear factual findings directly (a wrong status, a dead link, a framing 
 crisis-framing) — flag with a recommendation rather than silently rewriting the author's voice; these
 are the author's call. Report findings by severity (Critical = a buyer/reviewer would be misled;
 Major = undersell or unsourced number; Minor = polish), name the file:location, and keep a running
-`## Overclaim ledger` note in `docs/publications/README.md` — dated lines recording any overclaim that
+`## Overclaim ledger` in `docs/publications/overclaim-ledger.md` (the README links it) — dated lines recording any overclaim that
 reached an external artifact, the calibration analogue that tells you whether this lint is catching
 them before the humans do. If a finding is a *product* gap (code behind the pitch), report it as that,
 not as a doc edit.

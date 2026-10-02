@@ -1,5 +1,8 @@
 # mycelium-wasm-host
 
+Use the [capability map](../docs/capabilities.md) to connect this material to other mechanisms, operating guidance and evidence.
+
+
 WASM Component host for Mycelium — the **install mechanism** (M12) plus the **catalog
 selection step** (M15) of the autonomic-provisioning chain (v2.0 **WS-E** M12 → M15 → M14;
 see [`docs/plans/v2.0.md`](../docs/plans/v2.0.md) §WS-E).

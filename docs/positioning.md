@@ -14,7 +14,7 @@ doors: [`docs/plans/proposition-alignment.md`](plans/proposition-alignment.md).
 ## The sentence
 
 <!-- sentence -->
-**Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.**
+**Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.**
 
 The hero says what is distinctive in a dozen words: the fleet *grows* — a node that lacks a capability
 acquires it — and it does so *under rules it can show it kept*, which is authority checked where the work
@@ -26,16 +26,25 @@ runs and a record someone else can read. The sentence makes each claim at the st
   node; an SDK agent or a plain `mycelium` node does not install anything.
 - *Re-heal what they declared when a provider dies* — presence floors: **what was declared**, not
   self-repair in general.
-- *Configured enforcement points check authority and can record their decisions* — mandates
-  and the action seam constrain covered routes. A node must attach the applicable evaluator,
-  authority and evidence journal; uncovered routes do not inherit the guarantee.
-- *Supported replay seams make captured executions reproducible* — replay checks a recording
-  against captured inputs. Evidence records and receipts are not automatically replay bundles,
-  and arbitrary application executions are not automatically covered.
+- *Where you configure an enforcement point* — gateway and provider enforcement need their features
+  (`compliance`, `tls`), an attached evaluator and deployment configuration; a route no enforcement point
+  fronts inherits nothing, and a declaration alone enforces nothing. Resource fencing has its own contract.
+- *It checks authority before work runs and records what it decided* — mandates and the action seam, with
+  the evidence journal attached; an evaluator without a journal enforces and records nothing.
+- *A recorded run replays* — replay checks a recording against its captured inputs and choices. It does not
+  reproduce external effects, and a decision journal is not a replay bundle. Deliberately not *proves it by
+  replay* (the 360 review, 2026-10-02).
 
 It contains no word that [`philosophy.md`](philosophy.md) § *What This Architecture Is Not* forbids.
 "Unique", "first" and any new-category claim stay reserved until the source-based prior-art comparison
 exists ([`v3-contracts-axis.md`](plans/v3-contracts-axis.md) §13.1).
+
+**Revised again the same day.** An interim wording — *Configured enforcement points check authority and can
+record their decisions; supported replay seams make captured executions reproducible* — reached every door in
+v2.18.1 (carried, unreviewed, by #474; see the changelog note). Every hedge in it was true, and the bullets
+above keep them; three hedges in one clause read as a disclaimer on a front page, so the sentence now says
+where the guarantee holds (*where you configure an enforcement point*) and what replay does (*a recorded
+run replays*) without qualifying each verb.
 
 **Revised 2026-10-02.** The previous sentence — *Mycelium lets a fleet of AI agents find, authorise and
 account for each other's work with no coordinator, and proves it by replay* — said nothing about the fleet
@@ -50,7 +59,7 @@ Each is one paragraph and opens with the hero and the sentence.
 
 **The visitor's** — README, the GitHub description, crates.io, docs.rs:
 
-> **A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible. It is built in three layers — a gossip
+> **A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays. It is built in three layers — a gossip
 > KV store, a signal mesh, and epidemic consensus — with capability discovery across them: no
 > broker, no registry, no daemon, no control plane. State converges by gossip; work is claimed, not
 > dispatched; roles are discovered, not assigned. It is probably overkill if you want to chain a few
