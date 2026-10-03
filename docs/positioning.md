@@ -2,7 +2,7 @@
 
 This file is the **single source** for how Mycelium describes itself. Every front door quotes the
 hero and the sentence below verbatim and links here; `scripts/check-positioning.sh` (in `make check`)
-fails when a door's copy of either differs, when a funnel's five-step path differs, or when a link still points at the
+fails when a door's copy of either differs, when a developer funnel's five-step path differs, or when a link still points at the
 repository's pre-move account. Edit them **here and nowhere else**. Rationale and the list of
 doors: [`docs/plans/proposition-alignment.md`](plans/proposition-alignment.md).
 
@@ -90,3 +90,5 @@ text of the steps with link targets removed, since a relative link differs by di
 4. **guide 20 with `authority_drain`** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
 5. **`what-is-proven.md`** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
+
+Audience navigation is role-specific: developers share the starter path; operators follow deployment, readiness, observation and recovery. The [documentation index](README.md) routes all four audiences. `scripts/check-materials.py` checks these links and capability-map coverage.

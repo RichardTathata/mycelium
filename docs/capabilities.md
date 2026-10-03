@@ -22,8 +22,7 @@ first; the [example index](../examples/README.md) carries run commands and prere
 Every row inherits the feature, configuration and demonstration bounds in the dated
 [what-is-proven ledger](operations/what-is-proven.md); examples demonstrate specific scenarios,
 not universal guarantees. Read the [threat model](threat-model.md) before treating a boundary as
-protection against a hostile participant. The guarantees and rule catalogue work is a
-[plan](plans/guarantees-and-rule-catalogue.md), not an additional shipped guarantee.
+protection against a hostile participant. The [guarantees and rule-catalogue record](plans/guarantees-and-rule-catalogue.md) is delivered end to end — the registry, startup report and profiles (v2.19.0), the rule catalogue and the decision trace (v2.20.0); what a decision-level replay of a whole agent cannot yet show is stated on [what-is-proven.md](operations/what-is-proven.md). A profile validates its stated conditions; it is not a universal security guarantee.
 
 [Prospect: scope a pilot](operations/customer-pilot.md) ·
 [Developer: build an integration](guide/building-on-mycelium.md) ·
@@ -32,5 +31,5 @@ protection against a hostile participant. The guarantees and rule catalogue work
 
 Maintainers: update this map when a capability changes. Keep API facts in the linked guide/code,
 run instructions in the example index, and evidence status in the ledger; do not copy changing
-release counts or benchmark results here. `scripts/check-positioning.sh` checks the hero, the
-sentence and the five-step path on every funnel.
+release counts or benchmark results here. `scripts/check-positioning.sh` checks the shared proposition and developer path;
+`scripts/check-materials.py` checks capability coverage, audience routes and local resource targets.

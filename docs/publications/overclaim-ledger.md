@@ -259,3 +259,5 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   TTL'd leader* claim across a longer argument. Verified clean: wire v12/PREV 11, scope vocabulary in
   the decks, no trustless/tamper-proof language, no crisis framing in the decks, no dead links;
   `check-positioning.sh` exit 0. PDFs of paper1 and paper2a need re-rendering.
+
+- 2026-10-03 (materials coherence follow-up, not a full publication-lint run): qualified the engineering deck's always-available gossip, never-reordering mailbox and no-operator claims; replaced the broad audit-readiness closure claim with mechanisms plus operator acceptance. Buyer three-verdict copy no longer implies every binary policy engine fails open. Research guide now distinguishes delivered I1–I3 from remaining rule tracing. Added structural coverage/resource checks; these do not establish claim truth or WCAG conformance. Browser verification covered both decks' navigation and reading mode, engineering mobile overflow, and the appendix heading.

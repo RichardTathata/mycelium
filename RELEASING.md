@@ -117,7 +117,7 @@ duplicate `### Added` blocks, and open a fresh empty `## [Unreleased]` at the to
 
 `ROADMAP.md` (Status line) · `docs/wiki/wiki.md` (Version state) · `docs/wiki/dev/history.md`
 (a dated release section) · `CLAUDE.md` (the on-ramp line) · **`docs/guide/building-on-mycelium.md`
-(the install snippet's `tag = "…"` pins** — an integrator copies that block, and it was one release
+(the install snippet's `tag = "…"` pins) and `docs/guide/installation.md` (`MYCELIUM_RELEASE_TAG`)** — an integrator copies that block, and it was one release
 behind within hours of v2.15.1 because nothing in this step named it; wiki-lint 2026-09-26). Keep
 the *wire version* claim honest (state whether it changed — a wrong wire-compat note misleads
 upgraders). **Also:** `docs/operations/what-is-proven.md` (re-date the header; move any line whose
