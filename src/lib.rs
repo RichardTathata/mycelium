@@ -255,7 +255,10 @@ pub mod membership;
 pub use mycelium_core::{config, error, hlc, signal};
 /// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
 /// can record and replay its own runs under the kernel (item 6; first used by CN2).
-#[cfg(feature = "sim")]
+/// Re-exported in every build, not only under `sim`: a companion routes its draws and clocks through
+/// the seam so a recording can own them — the non-`sim` arm is the plain implementation, and a call
+/// site that can only be seamed in a `sim` build is a call site nobody seams (the wasm host's
+/// self-election draw, 2026-10-03).
 pub use mycelium_core::sim_seam;
 pub(crate) use mycelium_core::{
     connection, framing, locality, node_id, persistence, seen, store, stream, tls, writer,

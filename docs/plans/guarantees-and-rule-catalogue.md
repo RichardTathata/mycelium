@@ -168,5 +168,13 @@ IDs are the proposed stable IDs for the registry.
 that *vanishes*; a field present in every build whose consumers are `#[cfg]`'d is a setting that *lies*. I2's
 report resolves both to `NotInBuild` by construction, which is why it comes before the profile.
 
+**Found by I4's reconnaissance of the pilot's path (2026-10-03), fixed before I4:** a failing initial
+activation probe was recorded as a live install (advertised, counted complete) until the next health
+pass — now an activation error; and the self-election draw was raw `fastrand` in a crate the seam lint
+does not scan — now the `select` stream, with an RNG-only lint over `mycelium-wasm-host`. **Still open,
+a baseline decision:** the host's ~140 file-system and timing call sites are outside the seam scan, so a
+stem's recording does not cover artifact fetch, placement or activation timing (I6 must state them
+unattributable).
+
 **Not audited:** `mycelium-wiki` with `execution-authority` off, `mycelium-effects` with `envelope` off.
 

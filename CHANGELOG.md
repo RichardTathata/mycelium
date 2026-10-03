@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A failing initial activation probe is an activation error, not a live install.** `[[activation]]`'s
+  probe gates the capability (D21), but the hook returned a healthy flag of `false` as a successful
+  install: the capability was advertised and counted complete, and only the next round's health pass
+  withdrew it. The install now fails at stage `activation`, nothing is advertised, and the next round
+  retries. Test `a_failing_initial_probe_is_an_activation_error`, seen failing on the unfixed hook.
+- **The provisioner's self-election draw goes through the replay seam.** It was raw `fastrand`, in a crate
+  the seam lint does not scan, so under `sim` the draw was not a kernel choice and a recording could not
+  reproduce which node installed. It draws from the `select` stream now, and `scripts/check-sim-seams.sh`
+  refuses a random draw outside the seam anywhere in `mycelium-wasm-host` (zero baseline) — seen failing
+  on the unfixed code. The host's file-system and timing sites stay outside the main scan; that is a
+  baseline decision of its own, recorded on the plan's table. With it, **`mycelium::sim_seam` is
+  re-exported in every build**, not only under `sim` — the non-`sim` arm is the plain implementation,
+  and a seam a companion can reach only in a `sim` build is a seam nobody routes through (additive).
+
 ---
 
 ## [2.19.0] — 2026-10-03

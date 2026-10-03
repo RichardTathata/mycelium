@@ -699,7 +699,10 @@ impl Provisioner {
 
     /// True if this node should self-elect to act this round (herd damping).
     fn self_elects(&self) -> bool {
-        fastrand::f64() < self.self_elect_p
+        // Through the seam: under `sim` the draw is a recorded kernel choice, so a replay reproduces
+        // who installed (the `select` stream, as the capability resolver's tie-break). Raw `fastrand`
+        // here was invisible to a recording (2026-10-03).
+        f64::from(mycelium::sim_seam::rng_f32("select")) < self.self_elect_p
     }
 
     /// One convergence pass over **both** desired-state sources, returning how many installs were
