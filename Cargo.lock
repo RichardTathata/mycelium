@@ -2618,6 +2618,7 @@ dependencies = [
  "metrics",
  "metrics-util 0.20.4",
  "mycelium",
+ "mycelium-sim",
  "object_store",
  "reqwest 0.12.28",
  "serde",

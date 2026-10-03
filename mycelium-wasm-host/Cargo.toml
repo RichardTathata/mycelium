@@ -15,6 +15,7 @@ categories = ["wasm", "network-programming"]
 # proof, same as mycelium-tuple-space). wasmtime is confined to THIS crate — it must
 # never leak into mycelium / mycelium-core (preserves core's small dep tree; WS-A).
 mycelium = { path = "..", default-features = false }
+mycelium-sim = { path = "../mycelium-sim", optional = true }
 
 # WASM Component Model runtime. component-model is the WIT/canonical-ABI half.
 wasmtime = "49"
@@ -63,6 +64,8 @@ serde_json = { version = "1.0", optional = true }
 
 [features]
 stem = ["dep:tracing-subscriber"]
+# Deterministic-replay seams in this crate's tests: the pilot's draw-count equivalence (plan I5).
+sim = ["mycelium/sim", "dep:mycelium-sim"]
 object_store = ["dep:object_store"]
 gateway = ["mycelium/gateway", "dep:axum", "dep:serde", "dep:serde_json"]
 # X2: `[[serve]]` — a stem bridges a live local install into a routable prompt skill (core's llm).

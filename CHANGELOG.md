@@ -9,6 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **The trace, completed** (plan I5/I6): `[[activation]]` and its probe are instrumented under the
+  install's token — `RuntimeCtx` carries the trace and the install token into the runtime, the
+  activation hook takes an `ActivationCtx`, `prov.activation` and `prov.probe` record their outcomes
+  with the trigger `install token N`, and a re-probe records only a change of verdict; `mycelium
+  explain` reads install → activation → probe as one chain. The node binary's
+  `GOSSIP_RECORD_BUNDLE_DIR` recording attaches `decisions.jsonl`, `coverage.json` and
+  `decisions.stats.json` to the bundle. `mycelium-wasm-host` gained a `sim` feature, and the pilot's
+  draw-count equivalence is shown under the replay kernel. A recording-versus-replay comparison of a
+  live node was **run** (`decision_trace_replay`, feature `sim`): the recording carries its decisions
+  into a bundle that reads back and explains — and the replay diverges at the kernel's 20th choice
+  (two periodic loops' timer ticks swap order), so a decision-level comparison of a live node waits on
+  the scheduler seam covering every periodic loop; the finding is on `what-is-proven.md`. **Upgrade note:**
+  `BlobRuntime::with_entry_activation`'s closure takes a third argument, `&ActivationCtx` (a
+  two-argument closure no longer compiles); `RuntimeCtx` gained `trace` and `install_token` (an
+  exhaustive literal breaks); `prov.probe` is catalogue revision 2 (a new reason, `probe_failed`).
 ### Changed
 - **`secure-single-domain` rev 2** (announced in v2.20.0, plan G12): the profile now also requires
   `id.ca_key_off_node` — a node certificate issued off-node (`mycelium tls issue`, `[tls] cert_pem` +

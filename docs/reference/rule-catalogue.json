@@ -458,7 +458,7 @@
         "an_activation_resolves_artifact_references_to_placed_paths",
         "a_verbose_command_that_succeeds_is_not_reported_as_a_timeout"
       ],
-      "trace": "catalogue_only",
+      "trace": "instrumented",
       "summary": "After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round."
     },
     {
@@ -935,7 +935,7 @@
     },
     {
       "id": "prov.probe",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::activation",
       "responsibilities": [
         "response"
@@ -963,7 +963,8 @@
         {
           "kind": "refusal",
           "reasons": [
-            "initial_probe_failed"
+            "initial_probe_failed",
+            "probe_failed"
           ]
         },
         {
@@ -994,8 +995,8 @@
         "a_failing_initial_probe_is_an_activation_error",
         "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability"
       ],
-      "trace": "catalogue_only",
-      "summary": "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on."
+      "trace": "instrumented",
+      "summary": "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. Recorded under the install's token; a re-probe records only a change of verdict."
     },
     {
       "id": "prov.promotion",

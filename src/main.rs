@@ -36,13 +36,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         return record::run_recorded(config, std::path::PathBuf::from(dir));
     }
 
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(config))
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(config, None))
 }
 
-async fn run(config: GossipConfig) -> Result<(), Box<dyn Error>> {
+async fn run(config: GossipConfig, trace: Option<Arc<mycelium::decision::DecisionSink>>) -> Result<(), Box<dyn Error>> {
     let node_id = NodeId::new(&config.bind_address, config.bind_port)?;
 
     let agent = Arc::new(GossipAgent::new(node_id, config));
+    // A recording carries the decision trace (plan I6): attached before start(), written into the
+    // bundle as `decisions.jsonl` beside `coverage.json` when the run ends.
+    if let Some(sink) = trace {
+        agent.with_decision_trace(sink);
+    }
 
     agent.start().await?;
 
@@ -522,14 +527,21 @@ mod record {
         });
         tracing::info!(dir = %dir.display(), seed, "recording this run into a replay bundle (current-thread runtime)");
 
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        let outcome = rt.block_on(run(config));
+        let outcome = rt.block_on(run(config, Some(Arc::clone(&sink))));
         drop(rt);
 
         match take() {
             Some(ctx) => {
                 std::fs::create_dir_all(&dir)?;
+                let coverage = mycelium::rule::Catalogue::gather_partial(&[mycelium::rules::RULES])
+                    .map(|(cat, _)| mycelium::decision::coverage_manifest(&cat.rules))
+                    .unwrap_or_else(|_| "{}".into());
                 Bundle::new(ctx.kernel.trace().clone())
+                    .with_attachment(mycelium_sim::bundle::DECISION_ATTACHMENT, sink.to_jsonl().into_bytes())
+                    .with_attachment(mycelium_sim::bundle::COVERAGE_MANIFEST, coverage.into_bytes())
+                    .with_attachment("decisions.stats.json", sink.stats_json().into_bytes())
                     .write(&dir)
                     .map_err(|e| format!("writing the bundle: {e:?}"))?;
                 tracing::info!(dir = %dir.display(), "bundle written — add a witness before you trust a replay");
