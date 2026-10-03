@@ -113,6 +113,18 @@ impl Kernel {
         self.cursor >= self.trace.len()
     }
 
+    /// Whether the next recorded choice is this request — the arbiter's question (zero-gaps Z5):
+    /// a timer due at the same instant as another is *not yet* when it is not next, which is an
+    /// answer rather than a divergence. `None` while recording (there is no next).
+    pub fn next_is(&self, node: Option<&str>, kind: ChoiceKind, stream: &str, request: &str) -> Option<bool> {
+        match self.mode {
+            Mode::Record => None,
+            Mode::Replay => Some(self.trace.entries().get(self.cursor).is_some_and(|rec| {
+                rec.node.as_deref() == node && rec.kind == kind && rec.stream == stream && rec.request == request
+            })),
+        }
+    }
+
     /// Make one decision.
     ///
     /// In `Record`, `produce` is called and its answer written down. In `Replay`, `produce` is

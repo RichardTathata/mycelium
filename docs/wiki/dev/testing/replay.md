@@ -165,7 +165,9 @@ governor's and signal admission's refusals (`GossipAgent::with_decision_trace`, 
 binary's `GOSSIP_RECORD_BUNDLE_DIR` recording attaches `decisions.jsonl` + `coverage.json` +
 `decisions.stats.json` itself (`src/main.rs`, `tests/decision_trace_replay.rs` — run with `--features
 sim,test-util`), and the recording-versus-replay comparison was run: a whole agent's replay diverges at
-the kernel's 20th choice (two periodic loops' timer ticks swap order) — `what-is-proven.md` § not yet
-shown; the test carries the recording half, the divergence is not yet a checked-in assertion. Read a
-trace with `mycelium explain`.
+the kernel's 20th choice (two periodic loops' timer ticks swap order) — **closed the same day by the
+scheduler seam's second arm** (zero-gaps Z5, `sim_seam::wait_turn`: a tick that is not the next recorded
+choice waits its turn; absolute deadlines; ticker state moved after the check-in), and the test's replay
+half is checked in: `a_recorded_node_replays_decision_for_decision`, in CI. Read a trace with
+`mycelium explain`.
 

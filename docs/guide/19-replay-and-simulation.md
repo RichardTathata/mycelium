@@ -183,10 +183,10 @@ under the seams and writes the bundle at shutdown (`GOSSIP_RECORD_SEED` picks th
 operator's capture path, [diagnostics.md § Capturing a replay bundle](../operations/diagnostics.md).
 An embedded agent records the way this section shows; there is no route or config field that starts
 a recording on a node built without `sim`. The scheduler seam (v2.9.0) is what makes a whole node
-replay without divergence; before it, task interleaving diverged. **Not every whole-agent recording
-replays yet:** a live node recorded with a decision sink diverged at the kernel's 20th choice (two periodic
-loops' timer ticks swapped order) — `operations/what-is-proven.md` § not yet shown records it, with what
-would close it (the scheduler seam over every periodic loop).
+replay without divergence; before it, task interleaving diverged. **A whole agent replays decision
+for decision** since 2026-10-03: a live node recorded with a decision sink had diverged at the kernel's 20th
+choice (two periodic loops' ticks due at one instant, in tokio's order) until the seam's second arm — a tick
+that is not the next recorded choice waits its turn (`docs/design/replay-nondeterminism-inventory.md` §3.1.2).
 
 ## Reading what a node decided: the decision trace
 

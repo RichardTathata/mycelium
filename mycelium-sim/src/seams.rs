@@ -321,6 +321,17 @@ impl<'k> Seams<'k> {
         Ok(effective)
     }
 
+    /// [`timer`](Self::timer), unless the replay's next recorded choice is a different request: then
+    /// `Ok(None)` — *not yet* — and the caller waits its turn (zero-gaps Z5, the scheduler seam's
+    /// second arm). Recording always decides.
+    pub fn timer_if_next(&mut self, op: &'static str, stream: &str, requested_ms: u64) -> Result<Option<u64>, Divergence> {
+        let request = format!("{op}({requested_ms}ms)");
+        if self.kernel.next_is(Some(&self.node), ChoiceKind::Timer, stream, &request) == Some(false) {
+            return Ok(None);
+        }
+        self.timer(op, stream, requested_ms, || requested_ms).map(Some)
+    }
+
     /// An external input — a token verification, an LLM reply, an MCP response.
     ///
     /// Inputs and faults are the *causal workload*: scenario replay keeps these and lets the kernel
