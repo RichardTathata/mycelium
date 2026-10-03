@@ -61,7 +61,7 @@ pub use librarian::{
     librarian_filter, spawn_librarian, LibrarianConfig, LibrarianHandle, ManifestSource, LIBRARIAN_NAME,
     LIBRARIAN_NS,
 };
-pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
+pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND, MeshRangedFetcher, ARTIFACT_SIZE_KIND, ARTIFACT_RANGE_KIND, MESH_RANGE_CHUNK_BYTES};
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{resolve_serve_key, Stem, StemError, StemOptions, StemSource};
 pub mod activation;

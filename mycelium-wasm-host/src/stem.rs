@@ -33,7 +33,8 @@ use crate::artifact::ArtifactSource;
 use crate::catalog::InstallableCatalog;
 use crate::host::WasmHost;
 use crate::librarian::{librarian_filter, LIBRARIAN_NAME, LIBRARIAN_NS};
-use crate::mesh_source::{serve_artifacts, MeshArtifactSource};
+use crate::http_source::DiskStagedSource;
+use crate::mesh_source::{serve_artifacts, MeshRangedFetcher};
 use crate::provisioner::Provisioner;
 use crate::resources::SystemResourceProbe;
 use crate::runtime::{BlobRuntime, FuelPolicy};
@@ -42,9 +43,10 @@ use crate::FsLibrarySource;
 /// Where a stem node pulls artifact bytes from.
 #[derive(Debug, Clone)]
 pub enum StemSource {
-    /// Peer pull over the mesh from a librarian discovered through the capability ring
-    /// (`artifact/librarian`) — the small-artifact path (bounded by the frame cap). Every
-    /// catalogue entry is prefetched on each tick, idempotently, so an install finds its bytes.
+    /// Peer pull over the mesh from whoever advertises the librarian (or a cache): a component in
+    /// one whole-object pull, a blob past the frame cap in ranges, both **staged to disk** and
+    /// verified before the runtime reads them (zero-gaps Z3) — nothing the stem pulls lives in
+    /// memory, and what it staged it re-serves to peers.
     Mesh { timeout: Duration },
     /// A library directory this node can read (a mounted volume, or the librarian's own store):
     /// ranged, so blobs stream to the placement root.
@@ -67,6 +69,9 @@ pub struct StemOptions {
     /// The decision trace (plan I5): a sink the provisioner records every round's decisions into,
     /// from values it already produced. `None` (the default) records nothing.
     pub trace:              Option<Arc<mycelium::decision::DecisionSink>>,
+    /// Where a mesh-sourced stem stages what it pulls (zero-gaps Z3); `None` is
+    /// `<placement_root>/stage`. Content-addressed and verified on read, so a stale stage is harmless.
+    pub stage_dir:          Option<std::path::PathBuf>,
 }
 
 impl Default for StemOptions {
@@ -78,6 +83,7 @@ impl Default for StemOptions {
             declare_interval: Duration::from_secs(5),
             reprobe_every:    Duration::from_secs(10),
             trace:            None,
+            stage_dir:        None,
         }
     }
 }
@@ -192,28 +198,27 @@ impl Stem {
                 let metered = h.fuel_per_call.is_some() || h.operator_fuel_per_call.is_some();
                 let host = if metered { WasmHost::metered() } else { WasmHost::new() }
                     .map_err(|e| StemError(format!("wasm host: {e}")))?;
-                let source: Arc<dyn ArtifactSource + Send + Sync> = match &opts.source {
+                // Zero-gaps Z3: the mesh path stages to disk through the same `DiskStagedSource` an
+                // object store fills — a component in one pull, a blob past the frame cap in ranges —
+                // under `<placement_root>/stage` (or `stage_dir`), so nothing pulled lives in memory
+                // and the provisioner streams it like a library blob.
+                let (source, mesh): (Arc<dyn ArtifactSource + Send + Sync>, Option<Arc<DiskStagedSource>>) = match &opts.source {
                     StemSource::Mesh { timeout } => {
-                        Arc::new(MeshArtifactSource::resolving(Arc::clone(&agent), librarian_filter(), *timeout))
+                        let stage_dir = opts.stage_dir.clone().unwrap_or_else(|| match &h.placement_root {
+                            Some(root) => std::path::Path::new(root).join("stage"),
+                            None => std::env::temp_dir().join(format!("mycelium-stem-stage-{}", agent.node_id().to_socket_addr().port())),
+                        });
+                        let fetcher = Arc::new(MeshRangedFetcher::resolving(Arc::clone(&agent), librarian_filter(), *timeout));
+                        let staged = Arc::new(DiskStagedSource::open(fetcher, &stage_dir)
+                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?);
+                        (Arc::clone(&staged) as Arc<dyn ArtifactSource + Send + Sync>, Some(staged))
                     }
-                    StemSource::Library(dir) => Arc::new(
+                    StemSource::Library(dir) => (Arc::new(
                         FsLibrarySource::open(dir).map_err(|e| StemError(format!("library {}: {e}", dir.display())))?,
-                    ),
+                    ), None),
                 };
-                let mesh: Option<Arc<MeshArtifactSource>> = match &opts.source {
-                    StemSource::Mesh { timeout } => {
-                        Some(Arc::new(MeshArtifactSource::resolving(Arc::clone(&agent), librarian_filter(), *timeout)))
-                    }
-                    StemSource::Library(_) => None,
-                };
-                // One source object must serve both roles for the mesh path, or the provisioner
-                // reads a cache the prefetcher never filled.
-                let (source, mesh) = match mesh {
-                    Some(m) => (Arc::clone(&m) as Arc<dyn ArtifactSource + Send + Sync>, Some(m)),
-                    None => (source, None),
-                };
-                // X2: whatever this stem pulls and verifies, it will answer for — a peer's pull
-                // finds an empty cache here as "not held" and moves on to the next holder.
+                // X2: whatever this stem staged and verified, it will answer for — in ranges too — so
+                // a peer's pull finds it here before the library of record.
                 let peer_serve = mesh.as_ref().map(|m| {
                     serve_artifacts(Arc::clone(&agent), Arc::clone(m) as Arc<dyn ArtifactSource + Send + Sync>)
                 });
@@ -285,15 +290,15 @@ impl Stem {
                         }
                         prov.refresh_catalog(InstallableCatalog::from_kv(&kv));
                         if let Some(m) = &mesh {
-                            // The mesh path carries small artifacts only (the frame cap); pulling
-                            // every entry once is bounded and idempotent.
+                            // Stage every catalogue entry once (idempotent: a staged id is a size
+                            // check, no request) — a component whole, a blob in ranges.
                             let ids: Vec<_> = prov.catalog().entries().iter().map(|e| e.artifact).collect();
                             for id in ids {
-                                let _ = m.prefetch(&id).await;
+                                let _ = m.stage_artifact(&id).await;
                             }
-                            // Once the cache holds something, say so: a peer holder, not the
+                            // Once the stage holds something, say so: a peer holder, not the
                             // library of record.
-                            if cache_cap.is_none() && m.cached_len() > 0 {
+                            if cache_cap.is_none() && m.stage().list().map(|l| !l.is_empty()).unwrap_or(false) {
                                 cache_cap = Some(cache_agent.capabilities().advertise_capability(
                                     Capability::new(LIBRARIAN_NS, LIBRARIAN_NAME).with("role", CapValue::Text(Arc::from("cache"))),
                                     Duration::from_secs(30),
@@ -507,6 +512,7 @@ mod tests {
             declare_interval: Duration::from_secs(2),
             reprobe_every: Duration::from_millis(500),
             trace: None,
+            stage_dir: None,
         }
     }
 
@@ -615,6 +621,26 @@ mod tests {
         seed.shutdown().await;
     }
 
+    /// Zero-gaps Z3 (D3): a **mesh-only** stem (no `--library`) installs a blob past the frame cap —
+    /// the model demos' shape, which until now every model host avoided with `--library /lib`. Seen
+    /// failing first: the whole-object mesh pull could not carry it and nothing was ever hosted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mesh_only_stem_installs_a_blob_past_the_frame_cap() {
+        let big: Vec<u8> = (0..12u32 * 1024 * 1024).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
+        let (seed, lib_dir, head, _ids) = blob_library("bigmesh", &[("weights", &big)]).await;
+        let units = NodeCapabilityConfig::from_toml_str(&format!("{head}[[presence]]\nns=\"data\"\nname=\"weights\"\nmin_providers=1\n")).unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let opts = StemOptions { source: StemSource::Mesh { timeout: Duration::from_secs(5) }, ..stem_opts(&lib_dir) };
+        let stem = Stem::start(Arc::clone(&node), &units, opts).unwrap();
+        assert!(wait_until(120, || stem.hosted_count() == 1).await, "the 12 MiB blob installs over the mesh");
+        let placed = lib_dir.join("placed");
+        let on_disk = std::fs::read_dir(&placed).unwrap().flatten().any(|e| e.metadata().map(|m| m.len() == big.len() as u64).unwrap_or(false));
+        assert!(on_disk, "the placed blob is on disk at its full size");
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+    }
+
     /// `resolve_artifact_refs`: a profile naming its weights as `artifact:<hex>` is rendered with
     /// the placed path, and activation waits for the weights — ordering by retry, no resolver.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -680,6 +706,7 @@ mod tests {
             declare_interval: Duration::from_secs(2),
             reprobe_every: Duration::from_secs(1),
             trace: None,
+            stage_dir: None,
         };
 
         // The installer: pulls from the librarian, hosts, and — once its cache holds the bytes —
@@ -748,6 +775,7 @@ mod tests {
             declare_interval: Duration::from_secs(2),
             reprobe_every: Duration::from_secs(1),
             trace: None,
+            stage_dir: None,
         };
         // Three stems, started so that the fleet is **deterministic**: with `self_elect_p: 1.0`
         // (no herd damping) three stems started together can all elect in one round — three hosts
