@@ -10,6 +10,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **An audit sink that would receive nothing refuses the start** (`audit.sink`, plan §8). Audit
+  records are sealed with the node identity, so on a node with no `[tls]` nothing is sealed and an
+  attached `AuditSink` is accepted and silently receives nothing — the class v2.18.1 closed for the
+  token tables. `start()` now refuses `with_audit_sink` without `[tls]` by name. The chain itself
+  without `[tls]` stays a reported `not_configured` (a `compliance` build without TLS is legitimate for
+  OIDC alone). Test seen failing on the unfixed code.
+
 - **The egress allow-list reaches the federation client and the OIDC provider** (`report.egress`,
   plan §8). `egress.allow_hosts` gated the MCP bridge, LLM calls, probes, the skillrunner and the wasm
   host, and the startup report said so — but a federation client dialled any partner endpoint, and
