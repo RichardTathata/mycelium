@@ -410,7 +410,12 @@ fn print_usage() {
              --host <ip>          Bind IP address (default: 127.0.0.1)\n\
          -r, --peers <list>       Comma-separated bootstrap peers (IP:port,...)\n\
          -i, --interactive        Start an interactive REPL\n\
-         -h, --help               Show this message"
+         -h, --help               Show this message\n\
+         \n\
+         Profiles (the config's `profile`, or GOSSIP_PROFILE): `dev` is the default and requires nothing,\n\
+         loudly; `secure-single-domain` refuses to start unless every guarantee it requires resolves on\n\
+         this node, naming each unmet one. The report: GET /gateway/guarantees, and one log block at\n\
+         start. Catalogue: docs/reference/guarantee-catalogue.md"
     );
 }
 

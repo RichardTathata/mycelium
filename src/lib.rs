@@ -314,7 +314,8 @@ pub use agent::guarantee::{
     GuaranteeDescriptor, GuaranteeEntry, GuaranteeId, GuaranteeKind, GuaranteeReport, ProfileRef,
     NodeView as GuaranteeNodeView, Profile as GuaranteeProfile, ProfileRefusal, Resolution as GuaranteeResolution,
     REPORT_SCHEMA as GUARANTEE_REPORT_SCHEMA, DEV as DEV_PROFILE, SECURE_SINGLE_DOMAIN as SECURE_SINGLE_DOMAIN_PROFILE,
-    check as check_profile, profile_named,
+    check as check_profile, profile_named, catalogue_markdown as guarantee_catalogue_markdown,
+    catalogue_json as guarantee_catalogue_json,
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
