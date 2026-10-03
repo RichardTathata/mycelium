@@ -65,6 +65,8 @@ pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFA
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{Stem, StemError, StemOptions, StemSource};
 pub mod activation;
+/// The provisioning rules, described — the catalogue entries the stem pilot instruments (plan I1).
+pub mod rules;
 #[cfg(feature = "llm")]
 pub mod serve;
 #[cfg(feature = "gateway")]

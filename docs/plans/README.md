@@ -62,7 +62,7 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Guarantees and the rule catalogue (I1–I3 delivered in v2.19.0, 2026-10-03; I4–I7 proposed):**
+> **Guarantees and the rule catalogue (I1–I3 delivered — I2/I3 in v2.19.0, I1's rule half on `main` 2026-10-03; I4–I7 proposed):**
 > [`guarantees-and-rule-catalogue.md`](guarantees-and-rule-catalogue.md) — one inventory, two readers. A
 > **supported secure profile**: every guarantee the substrate can claim, resolved at start to *enforced · not
 > configured · not in this build · not verifiable here*, and a node under a named profile refusing to start when one

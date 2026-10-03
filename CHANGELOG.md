@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **The rule catalogue** (`docs/plans/guarantees-and-rule-catalogue.md`, increment I1's rule half). A
+  *rule* is a decision point the substrate already has; `mycelium_core::rule::RuleDescriptor` describes
+  one — a stable id and semantic revision, the responsibilities it answers (propagation · admission ·
+  response · authority), its trigger and inputs with their scope and freshness, every outcome with typed
+  reasons, its effects, the guards it passes, the rules it may trigger, inhibit or depend on (hypotheses
+  until a trace or a test shows them), its symbol, docs and tests, and whether the decision trace
+  records it. A descriptor executes nothing; there is no rule engine. Each crate registers its own
+  (`mycelium::rules::RULES`, 11 substrate entries; `mycelium_wasm_host::rules::RULES`, the 15 the stem
+  provisioning pilot passes through), and `docs/reference/rule-catalogue.{json,md}` is generated from
+  them and checked in CI — unique ids, every relation resolving, every named test present in the tree,
+  the document current (`UPDATE_RULE_CATALOGUE=1` regenerates). Every entry is catalogue-only until the
+  pilot (I5) attaches a sink. Additive.
+
 ### Fixed
 - **A failing initial activation probe is an activation error, not a live install.** `[[activation]]`'s
   probe gates the capability (D21), but the hook returned a healthy flag of `false` as a successful

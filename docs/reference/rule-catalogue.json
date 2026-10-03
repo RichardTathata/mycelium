@@ -1,0 +1,1551 @@
+{
+  "schema": "mycelium.rules/1",
+  "rules": [
+    {
+      "id": "a2a.admission",
+      "revision": 1,
+      "subsystem": "mycelium::agent::a2a",
+      "responsibilities": [
+        "admission",
+        "authority"
+      ],
+      "trigger": "a request on `/a2a`",
+      "inputs": [
+        {
+          "source": "an optional bearer or federation credential",
+          "scope": "this request",
+          "freshness": "local"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "identified",
+            "anonymous"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "credential_invalid"
+          ]
+        }
+      ],
+      "effects": [
+        "a principal whose scopes are dropped; the AE preflight decides the rest"
+      ],
+      "guards": [],
+      "may_trigger": [
+        "ae.preflight"
+      ],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "http::a2a_optional_auth",
+      "docs": "docs/operations/production-readiness.md",
+      "tests": [
+        "a2a_is_anonymous_dispatch_whatever_bearer_is_configured"
+      ],
+      "trace": "catalogue_only",
+      "summary": "An absent credential is anonymous and a present bearer's scopes are dropped: a bearer does not gate this route, an evaluator does."
+    },
+    {
+      "id": "ae.preflight",
+      "revision": 1,
+      "subsystem": "mycelium::agent::http",
+      "responsibilities": [
+        "authority"
+      ],
+      "trigger": "a gateway dispatch that an evaluator covers",
+      "inputs": [
+        {
+          "source": "the action envelope, the presented mandate, the deployed policy revision",
+          "scope": "this request",
+          "freshness": "the decision clock"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "permit"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "deny",
+            "indeterminate",
+            "mandate_revoked",
+            "mandate_expired",
+            "stale_policy"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "inert_no_evaluator"
+          ]
+        }
+      ],
+      "effects": [
+        "the evidence journal record before dispatch; the audit chain reference under `compliance`"
+      ],
+      "guards": [
+        "authority"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [],
+      "depends_on": [
+        "gateway.auth"
+      ],
+      "symbol": "http::ae_preflight / ae_record",
+      "docs": "docs/guide/20-authorising-actions.md",
+      "tests": [
+        "an_expired_envelope_is_denied_before_the_evaluator_runs",
+        "test_c7_the_bypass_matrix_no_door_runs_revoked_work"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation."
+    },
+    {
+      "id": "cap.match",
+      "revision": 1,
+      "subsystem": "mycelium::capability",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "a resolve, a demand, the offline check, a group filter",
+      "inputs": [
+        {
+          "source": "`cap/` advertisements as gossiped",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; TTL-bounded"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "matched"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "ns_or_name_differs",
+            "schema_id_differs",
+            "constraint_unmet",
+            "opaque_skipped"
+          ]
+        }
+      ],
+      "effects": [],
+      "guards": [],
+      "may_trigger": [
+        "prov.demand_response"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "kv.propagation"
+      ],
+      "symbol": "capability::CapFilter::matches",
+      "docs": "docs/guide/02-capabilities.md",
+      "tests": [
+        "filter_matches_capability",
+        "constraint_matches_eq_ne",
+        "constraint_matches_ordering"
+      ],
+      "trace": "catalogue_only",
+      "summary": "The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch."
+    },
+    {
+      "id": "gateway.auth",
+      "revision": 1,
+      "subsystem": "mycelium::agent::http",
+      "responsibilities": [
+        "authority"
+      ],
+      "trigger": "every gateway request",
+      "inputs": [
+        {
+          "source": "the bearer or JWT presented, the token tables, `[oidc]`",
+          "scope": "this node",
+          "freshness": "local"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "admitted",
+            "anonymous_open_gateway"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "authentication_required",
+            "insufficient_scope"
+          ]
+        }
+      ],
+      "effects": [
+        "the resolved principal and granted scopes travel to the handler"
+      ],
+      "guards": [
+        "authority"
+      ],
+      "may_trigger": [
+        "ae.preflight"
+      ],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "http::gateway_auth / required_scope",
+      "docs": "docs/operations/rbac.md",
+      "tests": [
+        "named_tokens_alone_still_close_the_gateway",
+        "a_token_table_this_build_cannot_enforce_refuses_to_start"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start."
+    },
+    {
+      "id": "kv.expiry",
+      "revision": 1,
+      "subsystem": "mycelium-core::store",
+      "responsibilities": [
+        "propagation"
+      ],
+      "trigger": "the GC tick, and every read",
+      "inputs": [
+        {
+          "source": "the LWW store and its HLC",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        },
+        {
+          "source": "the entry's TTL and the wall clock through the seam",
+          "scope": "this node",
+          "freshness": "the decision clock"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "expired"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "live",
+            "no_ttl"
+          ]
+        }
+      ],
+      "effects": [
+        "the entry removed; a tombstone where the writer deleted"
+      ],
+      "guards": [],
+      "may_trigger": [
+        "prov.presence_floor"
+      ],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "store::Store::flush_expired",
+      "docs": "docs/guide/01-gossip-kv.md",
+      "tests": [
+        "flush_expired",
+        "is_expired",
+        "default_ttl_secs"
+      ],
+      "trace": "catalogue_only",
+      "summary": "An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between."
+    },
+    {
+      "id": "kv.propagation",
+      "revision": 1,
+      "subsystem": "mycelium-core::store / connection",
+      "responsibilities": [
+        "propagation"
+      ],
+      "trigger": "a local write, an incoming update, an anti-entropy round",
+      "inputs": [
+        {
+          "source": "the LWW store and its HLC",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        },
+        {
+          "source": "an incoming wire frame",
+          "scope": "one peer connection",
+          "freshness": "as received"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "applied_newer",
+            "forwarded"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "older_or_equal",
+            "seen"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "frame_too_large",
+            "signature_invalid",
+            "sender_removed"
+          ]
+        }
+      ],
+      "effects": [
+        "the store (LWW by HLC), the WAL after it, the gossip shards"
+      ],
+      "guards": [
+        "provenance"
+      ],
+      "may_trigger": [
+        "signal.admission"
+      ],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "store::apply_and_notify / connection::handle_connection",
+      "docs": "docs/guide/01-gossip-kv.md",
+      "tests": [
+        "gossip_spreads_membership_for_discovery",
+        "codec_matches_golden_wire_bytes"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention)."
+    },
+    {
+      "id": "membership.governed",
+      "revision": 1,
+      "subsystem": "mycelium::membership_governor",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "the governor tick",
+      "inputs": [
+        {
+          "source": "the governed group's roster and floor (`grp/`, `sys/`)",
+          "scope": "the group as this node sees it",
+          "freshness": "as gossiped; the confidence bound applies"
+        },
+        {
+          "source": "ViewConfidence (peers heard, staleness)",
+          "scope": "this node",
+          "freshness": "computed at the tick"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "declare_floor",
+            "release"
+          ]
+        },
+        {
+          "kind": "deferral",
+          "reasons": [
+            "view_not_confident",
+            "settling",
+            "spacing"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "in_bounds"
+          ]
+        }
+      ],
+      "effects": [
+        "membership intents under `sys/`; the control ledger"
+      ],
+      "guards": [
+        "settling",
+        "cooldown"
+      ],
+      "may_trigger": [
+        "prov.presence_floor"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "kv.propagation"
+      ],
+      "symbol": "agent::membership_governor",
+      "docs": "docs/guide/22-stability-and-control.md",
+      "tests": [
+        "a_membership_decision_classifies_by_cost_not_by_verb",
+        "a_stale_membership_intent_stops_declaring_a_floor",
+        "healthy_membership_in_bounds_does_not_trip"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A governor acts only on a confident view, with settling and spacing between acts; an intent it stops refreshing expires."
+    },
+    {
+      "id": "prov.activation",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::activation",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "a placed blob whose capability a `[[activation]]` names",
+      "inputs": [
+        {
+          "source": "the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)",
+          "scope": "this node",
+          "freshness": "read at start"
+        },
+        {
+          "source": "the placed path, and `artifact:<hex>` references rendered to placed paths",
+          "scope": "this node",
+          "freshness": "local"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "activated"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "command_failed",
+            "command_timed_out",
+            "reference_not_placed_yet",
+            "render_failed"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "no_declaration"
+          ]
+        }
+      ],
+      "effects": [
+        "the operator's command, run with the stem's privileges — not a sandbox"
+      ],
+      "guards": [
+        "other"
+      ],
+      "may_trigger": [
+        "prov.probe"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.install"
+      ],
+      "symbol": "activation::hook",
+      "docs": "docs/reference/unit-file.md",
+      "tests": [
+        "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability",
+        "an_activation_resolves_artifact_references_to_placed_paths",
+        "a_verbose_command_that_succeeds_is_not_reported_as_a_timeout"
+      ],
+      "trace": "catalogue_only",
+      "summary": "After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round."
+    },
+    {
+      "id": "prov.advertise",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "propagation"
+      ],
+      "trigger": "an install that completed, before its state swaps to `Live`",
+      "inputs": [
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "advertised"
+          ]
+        }
+      ],
+      "effects": [
+        "`cap/` advertisement of the entry's capability, held by the install; tombstoned on withdrawal"
+      ],
+      "guards": [],
+      "may_trigger": [
+        "prov.demand_response"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.install",
+        "prov.probe"
+      ],
+      "symbol": "provisioner::Provisioner::start_install_as",
+      "docs": "docs/guide/02-capabilities.md",
+      "tests": [
+        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's."
+    },
+    {
+      "id": "prov.demand_response",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "every provisioning round, per catalogue entry this node could host",
+      "inputs": [
+        {
+          "source": "capabilities().demand(filter) — `demand/` and `cap/` as gossiped",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; may be stale or partial"
+        },
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        },
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        },
+        {
+          "source": "the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)",
+          "scope": "this node",
+          "freshness": "read at start"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "unmet_demand_live",
+            "unmet_demand_shadow"
+          ]
+        },
+        {
+          "kind": "deferral",
+          "reasons": [
+            "self_election_declined",
+            "already_started_this_round"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "already_hosted",
+            "provenance_rejected",
+            "ineligible",
+            "rights_refused"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "no_demand",
+            "provider_present"
+          ]
+        }
+      ],
+      "effects": [
+        "start_install (live) or the shadow lane",
+        "`mycelium_artifact_shadow_installs_total`"
+      ],
+      "guards": [
+        "provenance",
+        "resource_budget",
+        "authority"
+      ],
+      "may_trigger": [
+        "prov.install"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.provenance",
+        "prov.loadable",
+        "prov.eligible",
+        "prov.self_election",
+        "prov.rights_admission"
+      ],
+      "symbol": "provisioner::Provisioner::provision_round",
+      "docs": "docs/operations/capability-lifecycle.md",
+      "tests": [
+        "a_hosting_stem_re_serves_its_verified_cache_to_a_late_joiner",
+        "a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install."
+    },
+    {
+      "id": "prov.eligible",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "a candidate entry that passed provenance",
+      "inputs": [
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        },
+        {
+          "source": "the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)",
+          "scope": "this node",
+          "freshness": "read at start"
+        },
+        {
+          "source": "ResourceProbe (memory, disk headroom)",
+          "scope": "this node",
+          "freshness": "sampled at the decision"
+        },
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "eligible"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "no_runtime",
+            "budget",
+            "memory",
+            "disk"
+          ]
+        }
+      ],
+      "effects": [
+        "`mycelium_artifact_ineligible_skips_total{reason}`"
+      ],
+      "guards": [
+        "resource_budget"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [
+        "prov.demand_response",
+        "prov.presence_floor"
+      ],
+      "depends_on": [
+        "prov.provenance"
+      ],
+      "symbol": "provisioner::Provisioner::eligible",
+      "docs": "docs/operations/capability-lifecycle.md",
+      "tests": [
+        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record."
+    },
+    {
+      "id": "prov.health_pass",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "every provisioning round, first",
+      "inputs": [
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        },
+        {
+          "source": "each live install's `probe()` (file present, and the activation health flag)",
+          "scope": "this node",
+          "freshness": "sampled under row 21"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "probe_failed"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "all_healthy"
+          ]
+        }
+      ],
+      "effects": [
+        "withdraw(): the capability's advertisement is tombstoned and the install removed",
+        "`mycelium_artifact_probe_withdrawals_total`"
+      ],
+      "guards": [
+        "health"
+      ],
+      "may_trigger": [
+        "prov.presence_floor",
+        "prov.demand_response"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.probe"
+      ],
+      "symbol": "provisioner::Provisioner::provision_round",
+      "docs": "docs/operations/capability-lifecycle.md",
+      "tests": [
+        "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability",
+        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back."
+    },
+    {
+      "id": "prov.install",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "an admitted install",
+      "inputs": [
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        },
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        },
+        {
+          "source": "the artifact bytes, by content address (library, mesh, or store)",
+          "scope": "wherever the source reaches",
+          "freshness": "verified against the entry's hash"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "completed"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "fetch",
+            "verify",
+            "place",
+            "activation",
+            "resources",
+            "host"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "superseded"
+          ]
+        }
+      ],
+      "effects": [
+        "`HostedState::Installing` → `Live` under the install token",
+        "the `{ns}/loading` tier while bytes arrive",
+        "`mycelium_artifact_installs_started_total`, `_completed_total`, `_failed_total{stage}`"
+      ],
+      "guards": [
+        "provenance"
+      ],
+      "may_trigger": [
+        "prov.activation",
+        "prov.advertise"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.rights_admission"
+      ],
+      "symbol": "provisioner::Provisioner::start_install_as",
+      "docs": "docs/operations/capability-lifecycle.md",
+      "tests": [
+        "the_stem_fleet_fills_a_presence_floor_and_reheals",
+        "an_installed_tool_component_is_bridged_as_an_mcp_tool"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it."
+    },
+    {
+      "id": "prov.loadable",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::catalog",
+      "responsibilities": [
+        "authority"
+      ],
+      "trigger": "a candidate entry",
+      "inputs": [
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        },
+        {
+          "source": "`[hosts].trusted_reviewers`",
+          "scope": "this node",
+          "freshness": "read at start"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "accepted",
+            "not_a_proposal"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "proposed_unaccepted"
+          ]
+        }
+      ],
+      "effects": [],
+      "guards": [
+        "authority"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.provenance"
+      ],
+      "symbol": "catalog::InstallableEntry::is_loadable",
+      "docs": "docs/guide/16-guardrails.md",
+      "tests": [
+        "a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20)."
+    },
+    {
+      "id": "prov.presence_floor",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "every provisioning round, per `[[presence]]` declaration",
+      "inputs": [
+        {
+          "source": "capabilities().demand(filter) — `demand/` and `cap/` as gossiped",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; may be stale or partial"
+        },
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        },
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        },
+        {
+          "source": "the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)",
+          "scope": "this node",
+          "freshness": "read at start"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "below_floor"
+          ]
+        },
+        {
+          "kind": "deferral",
+          "reasons": [
+            "self_election_declined"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "already_hosted",
+            "provenance_rejected",
+            "ineligible",
+            "no_loadable_candidate"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "floor_met"
+          ]
+        }
+      ],
+      "effects": [
+        "start_install of the smallest loadable candidate"
+      ],
+      "guards": [
+        "provenance",
+        "resource_budget"
+      ],
+      "may_trigger": [
+        "prov.install"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.provenance",
+        "prov.loadable",
+        "prov.eligible",
+        "prov.self_election"
+      ],
+      "symbol": "provisioner::Provisioner::provision_round",
+      "docs": "docs/reference/unit-file.md",
+      "tests": [
+        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry."
+    },
+    {
+      "id": "prov.probe",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::activation",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "after activation, and on every re-probe tick",
+      "inputs": [
+        {
+          "source": "the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)",
+          "scope": "this node",
+          "freshness": "read at start"
+        },
+        {
+          "source": "the declared probe argv's exit status",
+          "scope": "this node",
+          "freshness": "sampled"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "healthy"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "initial_probe_failed"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "no_probe_declared"
+          ]
+        }
+      ],
+      "effects": [
+        "the install's health flag, which `prov.health_pass` reads"
+      ],
+      "guards": [
+        "health"
+      ],
+      "may_trigger": [
+        "prov.health_pass"
+      ],
+      "may_inhibit": [
+        "prov.advertise"
+      ],
+      "depends_on": [
+        "prov.activation"
+      ],
+      "symbol": "activation::hook / activation::spawn_reprobe",
+      "docs": "docs/reference/unit-file.md",
+      "tests": [
+        "a_failing_initial_probe_is_an_activation_error",
+        "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability"
+      ],
+      "trace": "catalogue_only",
+      "summary": "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on."
+    },
+    {
+      "id": "prov.promotion",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "every provisioning round, after the health pass",
+      "inputs": [
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        },
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        },
+        {
+          "source": "the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)",
+          "scope": "this node",
+          "freshness": "read at start"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "accepted_withdraw_shadow"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "still_proposed",
+            "no_shadow_installs"
+          ]
+        }
+      ],
+      "effects": [
+        "withdraw() of the `{name}.shadow` install once the entry is accepted, so the live rule reinstalls it"
+      ],
+      "guards": [
+        "provenance"
+      ],
+      "may_trigger": [
+        "prov.demand_response"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.loadable"
+      ],
+      "symbol": "provisioner::Provisioner::provision_round",
+      "docs": "docs/guide/16-guardrails.md",
+      "tests": [
+        "a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20)."
+    },
+    {
+      "id": "prov.provenance",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "authority"
+      ],
+      "trigger": "a candidate entry, before any other check",
+      "inputs": [
+        {
+          "source": "the signed catalogue (`installable/` as gossiped, or the library manifest)",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; verified on read"
+        },
+        {
+          "source": "`[hosts].trusted_publishers`",
+          "scope": "this node",
+          "freshness": "read at start"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "signed_by_trusted_publisher",
+            "no_trust_list_configured"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "signature_invalid",
+            "publisher_untrusted"
+          ]
+        }
+      ],
+      "effects": [],
+      "guards": [
+        "provenance"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [
+        "prov.demand_response",
+        "prov.presence_floor"
+      ],
+      "depends_on": [],
+      "symbol": "provisioner::Provisioner::provenance_ok",
+      "docs": "docs/operations/artifacts.md",
+      "tests": [
+        "a_proposal_round_trips_as_v2_and_its_signature_is_its_own",
+        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says."
+    },
+    {
+      "id": "prov.rights_admission",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "authority"
+      ],
+      "trigger": "an install about to start, when install rights are configured",
+      "inputs": [
+        {
+          "source": "InstallRights::ledger (lock-order row 37)",
+          "scope": "this node's allocation",
+          "freshness": "local; the head is published after"
+        },
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "admitted"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "allocation_exhausted"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "would_refuse_shadow_mode",
+            "no_rights_configured"
+          ]
+        }
+      ],
+      "effects": [
+        "the ledger's admit record and published head",
+        "`mycelium_artifact_installs_refused_by_rights_total`"
+      ],
+      "guards": [
+        "authority",
+        "resource_budget"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [
+        "prov.install"
+      ],
+      "depends_on": [],
+      "symbol": "provisioner::Provisioner::admit_install",
+      "docs": "docs/guide/22-stability-and-control.md",
+      "tests": [
+        "an_install_is_refused_and_recorded_when_the_node_holds_no_rights"
+      ],
+      "trace": "catalogue_only",
+      "summary": "An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did."
+    },
+    {
+      "id": "prov.self_election",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "a candidate that passed every other check",
+      "inputs": [
+        {
+          "source": "`StemOptions::self_elect_p` and one draw from the `select` RNG stream (through the seam since 2026-10-03)",
+          "scope": "this node",
+          "freshness": "the draw"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "elected"
+          ]
+        },
+        {
+          "kind": "deferral",
+          "reasons": [
+            "declined"
+          ]
+        }
+      ],
+      "effects": [],
+      "guards": [
+        "cooldown"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [
+        "prov.demand_response",
+        "prov.presence_floor",
+        "prov.shed"
+      ],
+      "depends_on": [],
+      "symbol": "provisioner::Provisioner::self_elects",
+      "docs": "docs/operations/capability-lifecycle.md",
+      "tests": [
+        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam."
+    },
+    {
+      "id": "prov.shed",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "response"
+      ],
+      "trigger": "every provisioning round, per `[[presence]]` declaration with a ceiling",
+      "inputs": [
+        {
+          "source": "capabilities().demand(filter) — `demand/` and `cap/` as gossiped",
+          "scope": "the fleet as this node sees it",
+          "freshness": "as gossiped; may be stale or partial"
+        },
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "above_ceiling"
+          ]
+        },
+        {
+          "kind": "deferral",
+          "reasons": [
+            "self_election_declined"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "within_ceiling",
+            "not_hosting"
+          ]
+        }
+      ],
+      "effects": [
+        "withdraw() of this node's install"
+      ],
+      "guards": [],
+      "may_trigger": [],
+      "may_inhibit": [
+        "prov.presence_floor"
+      ],
+      "depends_on": [
+        "prov.self_election"
+      ],
+      "symbol": "provisioner::Provisioner::provision_round",
+      "docs": "docs/reference/unit-file.md",
+      "tests": [
+        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "More live providers than the declared ceiling makes a hosting node a candidate to withdraw its own install."
+    },
+    {
+      "id": "prov.withdraw",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::provisioner",
+      "responsibilities": [
+        "propagation",
+        "response"
+      ],
+      "trigger": "a health-pass failure, a promotion, a shed, or a superseded install",
+      "inputs": [
+        {
+          "source": "Provisioner::hosted (lock-order row 21)",
+          "scope": "this node",
+          "freshness": "local, atomic"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "withdrawn"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "not_hosted"
+          ]
+        }
+      ],
+      "effects": [
+        "the install removed under row 21, then uninstalled outside it; the advertisement tombstoned"
+      ],
+      "guards": [],
+      "may_trigger": [
+        "prov.presence_floor"
+      ],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "provisioner::Provisioner::withdraw",
+      "docs": "docs/operations/capability-lifecycle.md",
+      "tests": [
+        "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back."
+    },
+    {
+      "id": "provider.enforcement",
+      "revision": 1,
+      "subsystem": "mycelium::agent::provider_enforcement",
+      "responsibilities": [
+        "authority"
+      ],
+      "trigger": "a protected RPC kind arriving at a provider with enforcement on",
+      "inputs": [
+        {
+          "source": "the node's evaluator and execution authority; the carried mandate",
+          "scope": "this node",
+          "freshness": "the decision clock"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "permit"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "deny",
+            "no_evaluator",
+            "at_capacity"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "enforcement_off"
+          ]
+        }
+      ],
+      "effects": [
+        "the evidence journal; the handler never runs on a refusal"
+      ],
+      "guards": [
+        "authority",
+        "resource_budget"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "provider_enforcement::check",
+      "docs": "docs/guide/20-authorising-actions.md",
+      "tests": [
+        "test_c7_the_bypass_matrix_no_door_runs_revoked_work"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused, with it off nothing is checked."
+    },
+    {
+      "id": "signal.admission",
+      "revision": 1,
+      "subsystem": "mycelium-core::signal",
+      "responsibilities": [
+        "admission"
+      ],
+      "trigger": "a signal arriving at this node, local or forwarded",
+      "inputs": [
+        {
+          "source": "the signal's scope and this node's boundary groups (`grp/`)",
+          "scope": "this node",
+          "freshness": "local"
+        },
+        {
+          "source": "the gossip shards' fill and the handlers' fill",
+          "scope": "this node",
+          "freshness": "sampled"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "admitted"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "scope_not_admitted"
+          ]
+        },
+        {
+          "kind": "deferral",
+          "reasons": [
+            "shed_under_load"
+          ]
+        }
+      ],
+      "effects": [
+        "delivery to local handlers; the sender log"
+      ],
+      "guards": [
+        "other"
+      ],
+      "may_trigger": [
+        "signal.suppression"
+      ],
+      "may_inhibit": [],
+      "depends_on": [
+        "signal.forwarding"
+      ],
+      "symbol": "ops::deliver_locally",
+      "docs": "docs/guide/03-signals.md",
+      "tests": [
+        "individual_scope_bypasses_opacity",
+        "boundary_transition_signals_are_never_locally_shed",
+        "test_group_quorum_excludes_ex_member"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded."
+    },
+    {
+      "id": "signal.forwarding",
+      "revision": 1,
+      "subsystem": "mycelium-core::ops",
+      "responsibilities": [
+        "propagation"
+      ],
+      "trigger": "a signal emitted or received with TTL left",
+      "inputs": [
+        {
+          "source": "an incoming wire frame",
+          "scope": "one peer connection",
+          "freshness": "as received"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "forwarded"
+          ]
+        },
+        {
+          "kind": "no_action",
+          "reasons": [
+            "ttl_exhausted",
+            "terminates_here",
+            "seen"
+          ]
+        }
+      ],
+      "effects": [
+        "the gossip shards"
+      ],
+      "guards": [],
+      "may_trigger": [
+        "signal.admission"
+      ],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "ops::emit_signal / forward_hint",
+      "docs": "docs/wiki/dev/architecture/runtime-invariants.md",
+      "tests": [
+        "forwarding_is_unconditional_through_non_member_relay"
+      ],
+      "trace": "catalogue_only",
+      "summary": "Forwarding is unconditional (flood fallback); only admission is scoped, and a frame addressed to this node terminates here."
+    },
+    {
+      "id": "signal.suppression",
+      "revision": 1,
+      "subsystem": "mycelium-core::signal",
+      "responsibilities": [
+        "admission"
+      ],
+      "trigger": "an admitted signal of a suppressed kind",
+      "inputs": [
+        {
+          "source": "the suppression table",
+          "scope": "this node",
+          "freshness": "local"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "deferral",
+          "reasons": [
+            "suppressed_until"
+          ]
+        },
+        {
+          "kind": "action",
+          "reasons": [
+            "delivered",
+            "released_on_flush"
+          ]
+        }
+      ],
+      "effects": [
+        "held signals delivered on flush"
+      ],
+      "guards": [
+        "cooldown"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [],
+      "depends_on": [
+        "signal.admission"
+      ],
+      "symbol": "signal::SignalHandlers::deliver / flush_expired",
+      "docs": "docs/guide/03-signals.md",
+      "tests": [
+        "is_suppressed",
+        "is_suppressed_at",
+        "flush_expired_delivers_held_signals"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A kind can be held until a time; held signals are released on flush. Suppression never changes forwarding."
+    }
+  ]
+}
