@@ -44,7 +44,8 @@
 #                  a real dataset blob on the agent's demand (the real `data/loading` tier), n-2
 #                  deploys a real model into its Ollama and serves `llm/inference` (D21, D22). The
 #                  driver is the agent: it declares its needs, watches the loading tier, and routes
-#                  a prompt. The demo's MCP tools are in-process code and are not recut.
+#                  a prompt, and calls the four MCP tools — weather, ping, search, calculate — which
+#                  are components n-0 and n-1 host and the runtime bridges (zero-gaps Z4).
 #   mcp_toolgrowth — the library and the tool-host are stems; the installed `tool/unit-convert`
 #                  component is bridged as an MCP tool by the runtime (gateway feature), and the
 #                  driver is the agent: it declares the need, finds the tool in KV, and calls it over

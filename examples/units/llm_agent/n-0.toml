@@ -1,4 +1,5 @@
-# n-0: the weather + ping tool node (the runtime file is examples/node_n0.toml).
+# n-0: the weather + ping tool node (the runtime file is examples/node_n0.toml). As a stem the two
+# tools are components it hosts (zero-gaps Z4): `tool/weather` and `tool/ping`, kept alive by presence.
 principal = "n-0"
 
 [[capability]]
@@ -8,4 +9,27 @@ ttl_secs = 60
   [capability.attrs]
   provider = "n-0"
   tools = "weather,ping"
+
+# Pulls bytes from the library the librarian serves (over the mesh — no --library on this node).
+[[requirement]]
+ns   = "artifact"
+name = "librarian"
+
+[hosts]
+kinds                = ["wasm-component"]
+install_budget_bytes = 1073741824
+headroom             = 0.8
+# The suite's test publisher: the public half of seed 42…42 (`make stem-keys`). A fixture, not a secret.
+trusted_publishers   = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"]
+placement_root       = "/var/lib/mycelium/artifacts"
+
+[[presence]]
+ns            = "tool"
+name          = "weather"
+min_providers = 1
+
+[[presence]]
+ns            = "tool"
+name          = "ping"
+min_providers = 1
 

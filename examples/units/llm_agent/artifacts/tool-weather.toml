@@ -1,0 +1,15 @@
+# The llm_agent demo's `weather` tool as a capability component (zero-gaps Z4): what was in-process
+# code in `examples/llm_agent.rs` is now an installable the hosting node pulls, verifies and runs,
+# and the stem's runtime bridges it as the MCP tool `weather` — with the schema the component
+# describes for itself.
+kind             = "wasm-component"
+bytes            = "../../../../mycelium-wasm-host/tests/fixtures/weather_tool_component.wasm"
+est_install_secs = 1
+
+[provides]
+ns   = "tool"
+name = "weather"
+
+[requires]
+disk_bytes = 0
+mem_bytes  = 67108864
