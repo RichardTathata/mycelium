@@ -33,11 +33,6 @@ pub enum Setting {
     NotInBuild,
 }
 
-impl Setting {
-    fn from_bool(b: bool) -> Self {
-        if b { Setting::Set } else { Setting::Unset }
-    }
-}
 
 /// Whether agent pods can reach anything but their gateway. A node cannot observe this.
 #[non_exhaustive]
@@ -112,40 +107,25 @@ impl GossipAgent {
     /// The node-level settings the confined-fleet profile requires, as facts, and network
     /// confinement as `Unverified` — always, because a node cannot see its own network policy.
     pub fn confinement_report(&self) -> ConfinementReport {
-        #[cfg(feature = "compliance")]
-        let audit_sink = Setting::from_bool(self.task_ctx.audit_sink.get().is_some());
-        #[cfg(not(feature = "compliance"))]
-        let audit_sink = Setting::NotInBuild;
-
-        #[cfg(all(feature = "gateway", feature = "tls"))]
-        let (action_evaluator, evidence_journal) = (
-            Setting::from_bool(self.task_ctx.action_evaluator.get().is_some()),
-            Setting::from_bool(self.task_ctx.evidence_journal.get().is_some()),
-        );
-        #[cfg(not(all(feature = "gateway", feature = "tls")))]
-        let (action_evaluator, evidence_journal) = (Setting::NotInBuild, Setting::NotInBuild);
-
-        // A node can see this one: whether the CA's private key sits in its own cert directory.
-        #[cfg(feature = "tls")]
-        let ca_key_off_node = match &self.config.tls {
-            Some(tls) => Setting::from_bool(!tls.auto_cert_dir.join("ca-key.pem").exists()),
-            None => Setting::Unset,
+        // A view over the guarantee registry (plan I2): each setting is one guarantee, resolved
+        // **ignoring the node's role** — this profile is about a node that fronts agents, so a
+        // gateway guarantee that would read `NotApplicable` on a node with no `http_port` is read
+        // here as the setting it is. `Enforced` is `Set`; `NotInBuild` is `NotInBuild`; anything
+        // else is `Unset`.
+        let setting = |id: &str| -> Setting {
+            match super::guarantee::resolve_ignoring_role(&self.task_ctx, id) {
+                Some(super::guarantee::Resolution::Enforced) => Setting::Set,
+                Some(super::guarantee::Resolution::NotInBuild { .. }) => Setting::NotInBuild,
+                _ => Setting::Unset,
+            }
         };
-
-        // `require_identity_proofs` is read only inside the TLS init: in a build without `tls` it
-        // is inert, and so is the CA-key question (I1 audit, 2026-10-02 — the report said `Set`).
-        #[cfg(not(feature = "tls"))]
-        let (identity_proofs_required, ca_key_off_node) = (Setting::NotInBuild, Setting::NotInBuild);
-        #[cfg(feature = "tls")]
-        let identity_proofs_required = Setting::from_bool(self.config.require_identity_proofs);
-
         ConfinementReport {
-            egress_allow_list: Setting::from_bool(!self.config.egress.allow_hosts.is_empty()),
-            identity_proofs_required,
-            audit_sink,
-            action_evaluator,
-            evidence_journal,
-            ca_key_off_node,
+            egress_allow_list: setting("egress.allow_list"),
+            identity_proofs_required: setting("id.proofs_required"),
+            audit_sink: setting("audit.sink"),
+            action_evaluator: setting("ae.authorised_at_seam"),
+            evidence_journal: setting("ae.recorded_before_dispatch"),
+            ca_key_off_node: setting("id.ca_key_off_node"),
             network_confinement: NetworkConfinement::Unverified,
             clock_sync: ClockSync::Unverified,
         }
@@ -184,8 +164,16 @@ mod tests {
         let mut cfg = GossipConfig::default();
         cfg.egress.allow_hosts = vec!["gateway.internal".into()];
         cfg.require_identity_proofs = true;
+        // Proofs ride on the TLS identity: the flag is inert without `[tls]`, and since the guarantee
+        // registry (plan I2) the report says so — `Unset` until TLS is configured too.
+        assert_eq!(agent(cfg.clone()).confinement_report().identity_proofs_required, Setting::Unset, "inert without [tls]");
+        #[cfg(feature = "tls")]
+        {
+            cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: std::env::temp_dir().join(format!("confine-p-{}", crate::test_util::alloc_port())), ..Default::default() });
+        }
         let r = agent(cfg).confinement_report();
         assert_eq!(r.egress_allow_list, Setting::Set);
+        #[cfg(feature = "tls")]
         assert_eq!(r.identity_proofs_required, Setting::Set);
         assert!(!r.unmet().contains(&"egress_allow_list"));
         assert!(!r.unmet().contains(&"identity_proofs_required"));

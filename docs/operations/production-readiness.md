@@ -38,6 +38,13 @@ this page is the index + the gate.
 
 ## 2 · Authorization & the gateway edge
 
+- ☐ **Read the node's guarantee report first.** Every item in this section that is a *node setting* is
+  one line of `GET /gateway/guarantees` (scope `fleet:read`), and of the block the node logs at start:
+  `enforced`, or why not — `not_configured` names the setting, `not_in_build` names the feature,
+  `not_applicable` names the role fact. What the node cannot see (network confinement, clock sync, the
+  consensus profile) is listed as `not_verifiable_here` and is yours to evidence. A report whose
+  `late_attachments` is non-zero was logged before something was attached; the route recomputes live.
+  → [`src/agent/guarantee.rs`](../../src/agent/guarantee.rs), plan [`guarantees-and-rule-catalogue.md`](../plans/guarantees-and-rule-catalogue.md)
 - ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**. Bind it to loopback, or set
   `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. **Token tables and `[oidc]` need a
   `compliance` build, and `[gateway_tls]` a `tls` build** — a build without the feature refuses to

@@ -9,6 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **The guarantee registry and the startup report** (plan `guarantees-and-rule-catalogue.md`, I1's
+  guarantee half + I2). Twenty-three core guarantees — the gateway's, the transport's, identity,
+  authority and evidence, audit, egress, persistence, and the three a node cannot see — each with what it
+  needs and where it is enforced, resolved against this node *as built and configured*:
+  `GossipAgent::guarantee_report()`, `GET /gateway/guarantees` (`fleet:read`), and one log block at
+  `start()` after validation and before traffic. Five states: `enforced` · `not_configured` (the setting
+  named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named) ·
+  `not_verifiable_here` (listed, never counted). A companion registers its own with
+  `register_guarantee` before `start()`; duplicates and core-id overrides are refused. An attachment made
+  after `start()` is counted (`late_attachments`) and warned about — the at-rest cipher among them, which
+  silently left the WAL plaintext before. `ConfinementReport` is a view over the registry now, which
+  sharpened one reading: `require_identity_proofs` without `[tls]` is `Unset`, since the flag is inert
+  without the identity. The strongest sentence the report says is *node requirements satisfied*; a
+  profile that refuses on an unmet one is I3.
+
 ---
 
 ## [2.18.2] — 2026-10-03

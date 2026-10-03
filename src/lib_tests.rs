@@ -180,6 +180,10 @@ fn spawn_handler(
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
+        guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),
+        started: std::sync::atomic::AtomicBool::new(false),
+        late_attachments: std::sync::atomic::AtomicU32::new(0),
+        at_rest_cipher_attached: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         cohort_budget: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1173,6 +1177,10 @@ async fn test_subscribe_notified_via_gossip() {
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
+        guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),
+        started: std::sync::atomic::AtomicBool::new(false),
+        late_attachments: std::sync::atomic::AtomicU32::new(0),
+        at_rest_cipher_attached: std::sync::atomic::AtomicBool::new(false),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         cohort_budget: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]

@@ -28,6 +28,15 @@ the *diagnosis* agrees across nodes, while each keeps its own `view_confidence`)
 - **diagnose** — `GET /gateway/diagnose`: the "why is the fleet in this state" rule engine — a
   most-severe-first list of findings, each naming a pathology in actionable terms, with an RT1/RT2
   `caveat` when the observer's own view is partial.
+- **guarantees** — `GET /gateway/guarantees` (`fleet:read`): the node's **guarantee report** (plan
+  `guarantees-and-rule-catalogue.md` I2, `src/agent/guarantee.rs`) — every registered guarantee resolved
+  against this node *as built and configured*: `enforced` · `not_configured` (the setting or attachment
+  named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named — a node with no
+  `http_port` does not fail a gateway guarantee) · `not_verifiable_here` (external prerequisites: network
+  confinement, clock sync, the consensus profile — listed, never counted). The same report is logged as
+  one block at `start()`, after validation and before traffic (the G13 boundary); an attachment made
+  after that is counted (`late_attachments`) and warned about. The strongest sentence it says is *node
+  requirements satisfied*, never *deployment verified*. `ConfinementReport` is now a view over it.
 
 All three are also programmatic (**diagnostics as data**): `agent.fleet_snapshot()` /
 `fleet_diagnosis()`. Operator runbook (one entry per pathology + Prometheus alert recipes):
