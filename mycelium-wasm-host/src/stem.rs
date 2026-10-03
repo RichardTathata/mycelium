@@ -64,6 +64,9 @@ pub struct StemOptions {
     pub declare_interval:   Duration,
     /// How often a live `[[activation]]`'s probe is re-run (X2).
     pub reprobe_every:      Duration,
+    /// The decision trace (plan I5): a sink the provisioner records every round's decisions into,
+    /// from values it already produced. `None` (the default) records nothing.
+    pub trace:              Option<Arc<mycelium::decision::DecisionSink>>,
 }
 
 impl Default for StemOptions {
@@ -74,6 +77,7 @@ impl Default for StemOptions {
             self_elect_p:     0.5,
             declare_interval: Duration::from_secs(5),
             reprobe_every:    Duration::from_secs(10),
+            trace:            None,
         }
     }
 }
@@ -206,6 +210,9 @@ impl Stem {
                     source,
                     opts.self_elect_p,
                 );
+                if let Some(sink) = opts.trace.clone() {
+                    prov.with_decision_trace(sink);
+                }
                 if h.kinds.iter().any(|k| k == "blob") {
                     let root = h.placement_root.clone().unwrap_or_else(|| "artifacts".into());
                     let mut blob = BlobRuntime::new(root);
@@ -476,6 +483,7 @@ mod tests {
             self_elect_p: 1.0,
             declare_interval: Duration::from_secs(2),
             reprobe_every: Duration::from_millis(500),
+            trace: None,
         }
     }
 
@@ -609,6 +617,7 @@ mod tests {
             self_elect_p: 1.0,
             declare_interval: Duration::from_secs(2),
             reprobe_every: Duration::from_secs(1),
+            trace: None,
         };
 
         // The installer: pulls from the librarian, hosts, and — once its cache holds the bytes —
@@ -676,6 +685,7 @@ mod tests {
             self_elect_p: 1.0,
             declare_interval: Duration::from_secs(2),
             reprobe_every: Duration::from_secs(1),
+            trace: None,
         };
         let mut fleet: Vec<(Arc<GossipAgent>, Stem)> = Vec::new();
         for _ in 0..3 {

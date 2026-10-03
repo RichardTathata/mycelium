@@ -101,6 +101,7 @@ name = "echo"
         self_elect_p: 1.0,
         declare_interval: Duration::from_secs(2),
         reprobe_every: Duration::from_secs(1),
+        trace: None,
     };
     let mut fleet: Vec<(Arc<GossipAgent>, Stem)> = Vec::new();
     for _ in 0..3 {

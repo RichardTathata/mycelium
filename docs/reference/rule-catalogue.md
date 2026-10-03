@@ -15,18 +15,18 @@ Schema `mycelium.rules/1` · 26 rules.
 | [`membership.governed`](#membershipgoverned) | Response | catalogue only | A governor acts only on a confident view, with settling and spacing between acts; an intent it stops refreshing expires. |
 | [`prov.activation`](#provactivation) | Response | catalogue only | After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
-| [`prov.demand_response`](#provdemand_response) | Response | catalogue only | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
-| [`prov.eligible`](#proveligible) | Response | catalogue only | This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
-| [`prov.health_pass`](#provhealth_pass) | Response | catalogue only | A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back. |
-| [`prov.install`](#provinstall) | Response | catalogue only | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
+| [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
+| [`prov.eligible`](#proveligible) | Response | instrumented | This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
+| [`prov.health_pass`](#provhealth_pass) | Response | instrumented | A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back. |
+| [`prov.install`](#provinstall) | Response | instrumented | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
-| [`prov.presence_floor`](#provpresence_floor) | Response | catalogue only | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry. |
+| [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry. |
 | [`prov.probe`](#provprobe) | Response | catalogue only | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. |
-| [`prov.promotion`](#provpromotion) | Response | catalogue only | A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20). |
+| [`prov.promotion`](#provpromotion) | Response | instrumented | A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20). |
 | [`prov.provenance`](#provprovenance) | Authority | catalogue only | An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says. |
-| [`prov.rights_admission`](#provrights_admission) | Authority | catalogue only | An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did. |
-| [`prov.self_election`](#provself_election) | Response | catalogue only | Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam. |
-| [`prov.shed`](#provshed) | Response | catalogue only | More live providers than the declared ceiling makes a hosting node a candidate to withdraw its own install. |
+| [`prov.rights_admission`](#provrights_admission) | Authority | instrumented | An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did. |
+| [`prov.self_election`](#provself_election) | Response | instrumented | Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam. |
+| [`prov.shed`](#provshed) | Response | instrumented | More live providers than the declared ceiling makes a hosting node a candidate to withdraw its own install. |
 | [`prov.withdraw`](#provwithdraw) | Propagation, Response | catalogue only | Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back. |
 | [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused, with it off nothing is checked. |
 | [`signal.admission`](#signaladmission) | Admission | catalogue only | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
@@ -194,7 +194,7 @@ A completed install advertises its capability to the mesh; the advertisement's l
 
 ## `prov.demand_response`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install.
 
@@ -217,7 +217,7 @@ A requirement with demanding nodes and no provider, as this node sees it, makes 
 
 ## `prov.eligible`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.
 
@@ -238,7 +238,7 @@ This node hosts the entry's kind, has install budget left, and has memory and di
 
 ## `prov.health_pass`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back.
 
@@ -257,7 +257,7 @@ A live install whose probe fails this round is withdrawn; restart ≡ provisioni
 
 ## `prov.install`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it.
 
@@ -295,7 +295,7 @@ A proposed entry loads live only once a listed reviewer has accepted it; until t
 
 ## `prov.presence_floor`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry.
 
@@ -339,7 +339,7 @@ The probe gates the capability: a failing initial probe is an activation error (
 
 ## `prov.promotion`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20).
 
@@ -376,7 +376,7 @@ An entry is a candidate only if a trusted publisher signed it; an empty trust li
 
 ## `prov.rights_admission`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Authority · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Authority · trace: instrumented
 
 An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did.
 
@@ -395,7 +395,7 @@ An install takes a right from this node's allocation first; under the enforcing 
 
 ## `prov.self_election`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam.
 
@@ -411,7 +411,7 @@ Herd damping: a candidate acts this round with probability p, drawn after the gu
 
 ## `prov.shed`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
 More live providers than the declared ceiling makes a hosting node a candidate to withdraw its own install.
 

@@ -384,6 +384,11 @@ impl DecisionSink {
         }
     }
 
+    /// The counters as a JSON object, to write beside an export.
+    pub fn stats_json(&self) -> String {
+        serde_json::to_string_pretty(&self.stats()).unwrap_or_else(|_| "{}".into())
+    }
+
     /// Every record dropped, whatever the reason.
     pub fn dropped(&self) -> u64 {
         let s = self.stats();

@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use mycelium::control::ledger::{PublishedRightsHead, RightsLedger};
 use mycelium::mandate::PrincipalId;
+use mycelium::decision::{DecisionRecord, DecisionSink, InputSnapshot, OutcomeKind, Provenance, ViewStatus};
 use mycelium::{CapFilter, CapValue, Capability, CapabilityReg, GossipAgent};
 
 use crate::artifact::{ArtifactId, ArtifactKind, ArtifactSource};
@@ -149,6 +150,11 @@ pub struct Provisioner {
     /// Probability of self-electing to satisfy an unmet requirement on a given round (herd
     /// damping). `1.0` = always (fine for a single provisioner); lower it when many nodes run one.
     self_elect_p: f64,
+    /// The decision trace (plan I5): off unless attached. Every record is built from values the
+    /// round already produced — nothing is re-evaluated — and recorded with no lock held.
+    trace:        Option<Arc<Trace>>,
+    /// Rounds run here; the trigger every record of a round names.
+    rounds:       u64,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -185,6 +191,73 @@ pub struct Provisioner {
     invocations:  InvocationLog,
 }
 
+/// Every `prov.*` rule the pilot records is at semantic revision 1 (`rules::RULES`).
+const PILOT_RULE_REV: u32 = 1;
+
+/// The trace's stamps, taken once at attach time from the startup report, and its sink.
+struct Trace {
+    sink:          Arc<DecisionSink>,
+    node:          String,
+    build:         String,
+    config_digest: String,
+    profile:       Option<(String, u32)>,
+}
+
+/// One round's recorder: every decision point in `provision_round` hands it the values it already
+/// produced. G7: no clock (the record's `at_ms` is absent — the round reads none), no draw of its own,
+/// never under `hosted` (row 21), and the sink never waits (row 53).
+struct RoundTrace<'a> {
+    trace: &'a Trace,
+    round: u64,
+}
+
+impl RoundTrace<'_> {
+    fn record(&self, rule: &str, outcome: OutcomeKind, reason: &str, target: String, inputs: Vec<InputSnapshot>, effect: Option<String>) {
+        let t = self.trace;
+        let mut r = DecisionRecord::new(rule, PILOT_RULE_REV, format!("round {}", self.round), outcome, reason)
+            .node(t.node.as_str(), 0)
+            .build(t.build.as_str())
+            .config_digest(t.config_digest.as_str())
+            .target(target)
+            .no_parent()
+            .view(ViewStatus::Unknown);
+        if let Some((name, revision)) = &t.profile {
+            r = r.profile(name.as_str(), *revision);
+        }
+        for i in inputs {
+            r = r.input(i);
+        }
+        r = match effect {
+            Some(e) => r.effect(e),
+            None => r.no_effect(),
+        };
+        // A dropped record is the sink's counter to report, never this round's problem.
+        let _ = t.sink.record(r);
+    }
+}
+
+/// Why an install did or did not start — the value `prov.demand_response`, `prov.presence_floor` and
+/// `prov.rights_admission` record; `start_install` keeps its `bool` for callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartOutcome {
+    Started,
+    AlreadyHosted,
+    NoRuntime,
+    RightsRefused,
+}
+
+fn cap_target(entry: &InstallableEntry) -> String {
+    format!("{}/{}", entry.provides.namespace, entry.provides.name)
+}
+
+fn demand_inputs(demand: &mycelium::DemandStatus, hosted: usize) -> Vec<InputSnapshot> {
+    vec![
+        InputSnapshot::new("capabilities().demand(filter) — `demand/` and `cap/` as gossiped",
+            format!("providers={} demanding={}", demand.providers.len(), demand.demanding_nodes.len()), Provenance::Gossiped),
+        InputSnapshot::new("Provisioner::hosted (lock-order row 21)", format!("hosted={hosted}"), Provenance::Local),
+    ]
+}
+
 impl Provisioner {
     /// Build a provisioner that self-elects with probability `self_elect_p` (use `1.0` for a
     /// single provisioner; lower for a fleet of them). Registers the WASM-component runtime over
@@ -208,6 +281,8 @@ impl Provisioner {
             source,
             runtimes,
             self_elect_p,
+            trace: None,
+            rounds: 0,
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -423,6 +498,31 @@ impl Provisioner {
         self.trusted_publishers.is_empty() || entry.verify_provenance(&self.trusted_publishers)
     }
 
+    /// Attach the decision trace (plan I5). Every decision `provision_round` makes is then recorded
+    /// from the values it already produced — nothing is re-evaluated, no decision changes — and never
+    /// under `hosted`; the sink never blocks. The stamps (node, build, configuration digest, profile)
+    /// are taken once, here, from the startup report. Off unless called.
+    pub fn with_decision_trace(&mut self, sink: Arc<DecisionSink>) -> &mut Self {
+        let report = self.agent.guarantee_report();
+        self.trace = Some(Arc::new(Trace {
+            sink,
+            node: report.node_id.clone(),
+            build: report.version.to_string(),
+            config_digest: report.config_digest.clone(),
+            profile: report.profile.as_ref().map(|p| (p.name.to_string(), p.revision)),
+        }));
+        self
+    }
+
+    /// The attached decision sink, if any.
+    pub fn decision_trace(&self) -> Option<Arc<DecisionSink>> {
+        self.trace.as_ref().map(|t| Arc::clone(&t.sink))
+    }
+
+    fn round_trace(&self) -> Option<RoundTrace<'_>> {
+        self.trace.as_deref().map(|trace| RoundTrace { trace, round: self.rounds })
+    }
+
     /// True if this node *can* host `entry`: a runtime is registered for its kind, it fits the
     /// install budget, and its declared requirements fit this node's **resource headroom**
     /// (§4.4: `headroom × available − reserved-by-in-flight`; memory globally, disk at the
@@ -430,14 +530,14 @@ impl Provisioner {
     /// permissive). A miss is silent non-participation — some node that fits elects; this is
     /// the fleet's placement algorithm, with no scheduler and no resource gossip — plus a
     /// tripwire tick, see [`ineligible_skips`](Self::ineligible_skips).
-    fn eligible(&self, entry: &InstallableEntry) -> bool {
+    fn eligibility(&self, entry: &InstallableEntry) -> Result<(), &'static str> {
         let Some(runtime) = self.runtimes.get(&entry.kind) else {
             self.ineligible.fetch_add(1, Ordering::Relaxed);
             metrics::counter!("mycelium_artifact_ineligible_skips_total", "reason" => "no_runtime")
                 .increment(1);
             tracing::debug!(ns = %entry.provides.namespace, name = %entry.provides.name,
                 kind = ?entry.kind, "no runtime registered for kind — not electing");
-            return false;
+            return Err("no_runtime");
         };
         if let Some(max) = self.install_budget_bytes
             && entry.size_bytes > max
@@ -447,7 +547,7 @@ impl Provisioner {
                 .increment(1);
             tracing::debug!(ns = %entry.provides.namespace, name = %entry.provides.name,
                 size = entry.size_bytes, budget = max, "entry exceeds install budget — not electing");
-            return false;
+            return Err("budget");
         }
         if let Some((probe, headroom)) = &self.resource_policy
             && (entry.requires.mem_bytes > 0 || entry.requires.disk_bytes > 0)
@@ -464,7 +564,7 @@ impl Provisioner {
                 tracing::debug!(ns = %entry.provides.namespace, name = %entry.provides.name,
                     require = entry.requires.mem_bytes, reserved = reserved.mem_bytes,
                     available = avail, headroom, "memory requirement exceeds headroom — not electing");
-                return false;
+                return Err("memory");
             }
             if entry.requires.disk_bytes > 0
                 && let Some(root) = runtime.resource_root()
@@ -477,10 +577,10 @@ impl Provisioner {
                 tracing::debug!(ns = %entry.provides.namespace, name = %entry.provides.name,
                     require = entry.requires.disk_bytes, reserved = reserved.disk_bytes,
                     available = avail, headroom, "disk requirement exceeds headroom — not electing");
-                return false;
+                return Err("disk");
             }
         }
-        true
+        Ok(())
     }
 
     /// Tripwire counter: skip events for resolvable-but-ineligible entries (no runtime for the
@@ -512,7 +612,7 @@ impl Provisioner {
     /// ([`Installed::uninstall`] — abort the serve task, delete placed bytes). An **in-flight**
     /// install is cancelled by removing its reservation; the install task's token check tears the
     /// finished result down on completion. Cooperative self-removal — the symmetric counterpart
-    /// to [`start_install`](Self::start_install).
+    /// to [`try_start_install_as`](Self::try_start_install_as).
     fn withdraw(&mut self, artifact: &ArtifactId) -> bool {
         let removed = self.hosted.lock().unwrap().remove(artifact);
         match removed {
@@ -554,23 +654,17 @@ impl Provisioner {
     /// Start bringing one capability live on this node: **reserve** the artifact, then run the
     /// kind's runtime install as a background task (pull + verify + install), advertising the
     /// declared-provide and flipping the reservation to `Live` on success (on failure the
-    /// reservation is dropped, so a later round retries — restart ≡ provisioning). Returns `true`
-    /// if an install was newly started, `false` if already reserved/hosted or no runtime matches.
-    /// Shared by the demand and presence paths — the one resolve-and-pull path the architecture
-    /// promises.
-    fn start_install(&self, entry: InstallableEntry) -> bool {
-        self.start_install_as(entry, false)
-    }
-
-    /// [`start_install`](Self::start_install), into the shadow lane when `shadow` (D20): the
-    /// entry is installed and served under [`shadow_name`], so it is resolvable for comparison
-    /// and never for the incumbent's demand.
-    fn start_install_as(&self, mut entry: InstallableEntry, shadow: bool) -> bool {
+    /// reservation is dropped, so a later round retries — restart ≡ provisioning). Returns why it
+    /// did or did not start (`StartOutcome`) — the value the trace records. Shared by the demand and
+    /// presence paths — the one resolve-and-pull path the architecture promises. Into the shadow lane
+    /// when `shadow` (D20): the entry is installed and served under [`shadow_name`], so it is
+    /// resolvable for comparison and never for the incumbent's demand.
+    fn try_start_install_as(&self, mut entry: InstallableEntry, shadow: bool) -> StartOutcome {
         if shadow {
             entry.provides.name = Arc::from(shadow_name(&entry.provides.name));
         }
         let Some(runtime) = self.runtimes.get(&entry.kind).map(Arc::clone) else {
-            return false; // eligible() screens this; belt-and-braces for direct callers
+            return StartOutcome::NoRuntime; // eligible() screens this; belt-and-braces for direct callers
         };
 
         static INSTALL_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -580,17 +674,17 @@ impl Provisioner {
         // `Installing`. Reads and releases the ledger before `hosted` is taken (row 37 → row 21,
         // never nested).
         if self.is_hosted(&entry.artifact) {
-            return false;
+            return StartOutcome::AlreadyHosted;
         }
         if !self.admit_install() {
             tracing::info!(ns = %entry.provides.namespace, name = %entry.provides.name,
                 "install refused: the node holds too few install rights");
-            return false;
+            return StartOutcome::RightsRefused;
         }
         {
             let mut map = self.hosted.lock().unwrap();
             if map.contains_key(&entry.artifact) {
-                return false;
+                return StartOutcome::AlreadyHosted;
             }
             map.insert(
                 entry.artifact,
@@ -602,9 +696,18 @@ impl Provisioner {
         let agent = Arc::clone(&self.agent);
         let source = Arc::clone(&self.source);
         let hosted = Arc::clone(&self.hosted);
+        let trace = self.trace.clone();
+        let round = self.rounds;
         tokio::spawn(async move {
             let artifact = entry.artifact;
             let provides = entry.provides.clone();
+            let target = format!("{}/{}", provides.namespace, provides.name);
+            // `prov.install`'s record, after `hosted` is released (G7), from the outcome the task has.
+            let record = |outcome: OutcomeKind, reason: &str, effect: Option<String>| {
+                if let Some(t) = &trace {
+                    RoundTrace { trace: t, round }.record("prov.install", outcome, reason, target.clone(), Vec::new(), effect);
+                }
+            };
 
             // Loading tier: while the install runs, `{ns}/loading` is advertised with a `pct`
             // attribute stepped in tens — the capability-tier convention the llm_agent example
@@ -669,6 +772,7 @@ impl Provisioner {
                                 .increment(1);
                             tracing::info!(ns = %provides.namespace, name = %provides.name,
                                 "provisioned + serving capability");
+                            record(OutcomeKind::Action, "completed", Some(format!("install token {token}: live, advertised")));
                         }
                         Some((cap, installed)) => {
                             // Withdrawn (or superseded) while installing: nothing references
@@ -677,6 +781,7 @@ impl Provisioner {
                             installed.uninstall();
                             tracing::info!(ns = %provides.namespace, name = %provides.name,
                                 "install finished after withdraw — torn down");
+                            record(OutcomeKind::NoAction, "superseded", None);
                         }
                     }
                 }
@@ -685,16 +790,59 @@ impl Provisioner {
                         "stage" => e.stage()).increment(1);
                     tracing::warn!(ns = %provides.namespace, name = %provides.name, %e,
                         "provisioning failed");
-                    let mut map = hosted.lock().unwrap();
-                    if matches!(map.get(&artifact),
-                        Some(HostedState::Installing { token: t, .. }) if *t == token)
                     {
-                        map.remove(&artifact);
+                        let mut map = hosted.lock().unwrap();
+                        if matches!(map.get(&artifact),
+                            Some(HostedState::Installing { token: t, .. }) if *t == token)
+                        {
+                            map.remove(&artifact);
+                        }
                     }
+                    record(OutcomeKind::Refusal, e.stage(), None);
                 }
             }
         });
-        true
+        StartOutcome::Started
+    }
+
+    /// `eligible()`, with its `prov.eligible` record: the reason the live evaluation produced, never a
+    /// second evaluation (the check has side effects — counters — and is evaluated exactly once).
+    fn eligible_traced(&self, entry: &InstallableEntry, target: &str) -> bool {
+        let verdict = self.eligibility(entry);
+        if let Some(t) = self.round_trace() {
+            match verdict {
+                Ok(()) => t.record("prov.eligible", OutcomeKind::Action, "eligible", target.to_string(), Vec::new(), None),
+                Err(reason) => t.record("prov.eligible", OutcomeKind::Refusal, reason, target.to_string(), Vec::new(), None),
+            }
+        }
+        verdict.is_ok()
+    }
+
+    /// `self_elects()`, with its `prov.self_election` record — one draw, recorded after it was made.
+    fn self_elects_traced(&self, target: &str) -> bool {
+        let elected = self.self_elects();
+        if let Some(t) = self.round_trace() {
+            let (outcome, reason) = if elected { (OutcomeKind::Action, "elected") } else { (OutcomeKind::Deferral, "declined") };
+            t.record("prov.self_election", outcome, reason, target.to_string(),
+                vec![InputSnapshot::new("StemOptions::self_elect_p", format!("p={}", self.self_elect_p), Provenance::Configured)], None);
+        }
+        elected
+    }
+
+    /// The record for an install the demand or presence pass tried to start, from the outcome the
+    /// start produced; a rights refusal also records `prov.rights_admission`.
+    fn record_start(&self, target: &str, rule: &str, acted: &str, outcome: StartOutcome, inputs: Vec<InputSnapshot>) {
+        let Some(t) = self.round_trace() else { return };
+        match outcome {
+            StartOutcome::Started => t.record(rule, OutcomeKind::Action, acted, target.to_string(), inputs, Some("start_install".into())),
+            StartOutcome::AlreadyHosted => t.record(rule, OutcomeKind::Refusal, "already_hosted", target.to_string(), inputs, None),
+            StartOutcome::NoRuntime => t.record(rule, OutcomeKind::Refusal, "ineligible", target.to_string(), inputs, None),
+            StartOutcome::RightsRefused => {
+                t.record("prov.rights_admission", OutcomeKind::Refusal, "allocation_exhausted", target.to_string(),
+                    vec![InputSnapshot::new("InstallRights::ledger (lock-order row 37)", "allocation exhausted", Provenance::Local)], None);
+                t.record(rule, OutcomeKind::Refusal, "rights_refused", target.to_string(), inputs, None);
+            }
+        }
     }
 
     /// True if this node should self-elect to act this round (herd damping).
@@ -718,6 +866,8 @@ impl Provisioner {
     ///    first-time provisioning are the same path.
     pub fn provision_round(&mut self) -> usize {
         let mut started = 0;
+        self.rounds += 1;
+        let hosted_now = self.hosted_count();
 
         // ── Probe-gated health (§4.2) ────────────────────────────────────────
         // A Live install whose probe fails is withdrawn — advertisement retracted, runtime
@@ -735,11 +885,21 @@ impl Provisioner {
                 })
                 .collect()
         };
+        let any_unhealthy = !unhealthy.is_empty();
         for artifact in unhealthy {
             metrics::counter!("mycelium_artifact_probe_withdrawals_total").increment(1);
             tracing::warn!(artifact = %artifact,
                 "hosted install failed its probe — withdrawing (this round reinstalls if still wanted)");
             self.withdraw(&artifact);
+            if let Some(t) = self.round_trace() {
+                t.record("prov.health_pass", OutcomeKind::Action, "probe_failed", artifact.to_string(), Vec::new(), Some(format!("withdraw {artifact}")));
+            }
+        }
+        if !any_unhealthy
+            && hosted_now > 0
+            && let Some(t) = self.round_trace()
+        {
+            t.record("prov.health_pass", OutcomeKind::NoAction, "all_healthy", format!("{hosted_now} live"), Vec::new(), None);
         }
 
         // ── Promotion (D20) ──────────────────────────────────────────────────
@@ -756,6 +916,13 @@ impl Provisioner {
                 tracing::info!(artifact = %artifact, "shadow withdrawn: its entry was accepted or retired");
                 self.withdraw(&artifact);
             }
+            if let Some(t) = self.round_trace() {
+                if still_a_proposal {
+                    t.record("prov.promotion", OutcomeKind::NoAction, "still_proposed", artifact.to_string(), Vec::new(), None);
+                } else {
+                    t.record("prov.promotion", OutcomeKind::Action, "accepted_withdraw_shadow", artifact.to_string(), Vec::new(), Some(format!("withdraw {artifact}")));
+                }
+            }
         }
 
         // ── Demand-driven (M15) ──────────────────────────────────────────────
@@ -767,40 +934,88 @@ impl Provisioner {
         // invocation executes on both components (double side effects) (audit 2026-07-15 pass 5).
         let mut started_caps: std::collections::HashSet<(String, String)> = Default::default();
         for entry in entries {
-            if self.is_hosted(&entry.artifact) || !self.provenance_ok(&entry) {
+            let target = cap_target(&entry);
+            if self.is_hosted(&entry.artifact) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.demand_response", OutcomeKind::Refusal, "already_hosted", target, Vec::new(), None);
+                }
+                continue;
+            }
+            if !self.provenance_ok(&entry) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.demand_response", OutcomeKind::Refusal, "provenance_rejected", target, Vec::new(), None);
+                }
                 continue;
             }
             let cap_key = (entry.provides.namespace.to_string(), entry.provides.name.to_string());
             if started_caps.contains(&cap_key) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.demand_response", OutcomeKind::Deferral, "already_started_this_round", target, Vec::new(), None);
+                }
                 continue; // a sibling artifact for this capability already started this round
             }
             let filter =
                 CapFilter::new(entry.provides.namespace.clone(), entry.provides.name.clone());
             let demand = self.agent.capabilities().demand(&filter);
+            let inputs = || demand_inputs(&demand, hosted_now);
             if !self.loadable(&entry) {
                 // D20: a proposal without acceptance loads only into the shadow lane, and only
                 // where the capability is wanted at all — beside the incumbent, taking none of
                 // its demand. Its own dedup: one shadow per artifact (`is_hosted`, above).
-                if !demand.demanding_nodes.is_empty()
-                    && self.eligible(&entry)
-                    && self.self_elects()
-                    && self.start_install_as(entry, true)
-                {
+                if demand.demanding_nodes.is_empty() {
+                    if let Some(t) = self.round_trace() {
+                        t.record("prov.demand_response", OutcomeKind::NoAction, "no_demand", target, inputs(), None);
+                    }
+                    continue;
+                }
+                if !self.eligible_traced(&entry, &target) {
+                    if let Some(t) = self.round_trace() {
+                        t.record("prov.demand_response", OutcomeKind::Refusal, "ineligible", target, inputs(), None);
+                    }
+                    continue;
+                }
+                if !self.self_elects_traced(&target) {
+                    if let Some(t) = self.round_trace() {
+                        t.record("prov.demand_response", OutcomeKind::Deferral, "self_election_declined", target, inputs(), None);
+                    }
+                    continue;
+                }
+                let outcome = self.try_start_install_as(entry, true);
+                if outcome == StartOutcome::Started {
                     metrics::counter!("mycelium_artifact_shadow_installs_total").increment(1);
                     started += 1;
                 }
+                self.record_start(&target, "prov.demand_response", "unmet_demand_shadow", outcome, inputs());
                 continue;
             }
             let unmet = demand.providers.is_empty() && !demand.demanding_nodes.is_empty();
             if !unmet {
+                if let Some(t) = self.round_trace() {
+                    let reason = if demand.demanding_nodes.is_empty() { "no_demand" } else { "provider_present" };
+                    t.record("prov.demand_response", OutcomeKind::NoAction, reason, target, inputs(), None);
+                }
                 continue;
             }
             // Eligibility is checked only for entries this node would otherwise act on — an
             // idle catalog must not tick the tripwire every round.
-            if self.eligible(&entry) && self.self_elects() && self.start_install(entry) {
+            if !self.eligible_traced(&entry, &target) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.demand_response", OutcomeKind::Refusal, "ineligible", target, inputs(), None);
+                }
+                continue;
+            }
+            if !self.self_elects_traced(&target) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.demand_response", OutcomeKind::Deferral, "self_election_declined", target, inputs(), None);
+                }
+                continue;
+            }
+            let outcome = self.try_start_install_as(entry, false);
+            if outcome == StartOutcome::Started {
                 started += 1;
                 started_caps.insert(cap_key);
             }
+            self.record_start(&target, "prov.demand_response", "unmet_demand_live", outcome, inputs());
         }
 
         // ── Presence-driven (M14 supervision) ────────────────────────────────
@@ -809,7 +1024,16 @@ impl Provisioner {
             // Live provider count is freshness-aware: a crashed provider's cap/ entry ages out,
             // so `providers` reflects only currently-live providers (this is the self-heal trigger).
             let live = self.agent.capabilities().demand(&policy.filter).providers.len();
+            let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
+            let inputs = || vec![
+                InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
+                    format!("live={live} min={}", policy.min_providers), Provenance::Gossiped),
+                InputSnapshot::new("Provisioner::hosted (lock-order row 21)", format!("hosted={hosted_now}"), Provenance::Local),
+            ];
             if live >= policy.min_providers {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.presence_floor", OutcomeKind::NoAction, "floor_met", target, inputs(), None);
+                }
                 continue; // invariant already satisfied across the fleet
             }
             // Resolve the catalog for an artifact that would satisfy the invariant — a loadable
@@ -822,17 +1046,37 @@ impl Provisioner {
                 .min_by_key(|e| (e.size_bytes, e.est_install_secs))
                 .cloned()
             else {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.presence_floor", OutcomeKind::Refusal, "no_loadable_candidate", target, inputs(), None);
+                }
                 continue; // nothing loadable in the catalog provides it
             };
-            if self.is_hosted(&entry.artifact)
-                || !self.provenance_ok(&entry)
-                || !self.eligible(&entry)
-            {
+            let refused = if self.is_hosted(&entry.artifact) {
+                Some("already_hosted")
+            } else if !self.provenance_ok(&entry) {
+                Some("provenance_rejected")
+            } else if !self.eligible_traced(&entry, &target) {
+                Some("ineligible")
+            } else {
+                None
+            };
+            if let Some(reason) = refused {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.presence_floor", OutcomeKind::Refusal, reason, target, inputs(), None);
+                }
                 continue; // already reserved/hosted here, or fails policy
             }
-            if self.self_elects() && self.start_install(entry) {
+            if !self.self_elects_traced(&target) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.presence_floor", OutcomeKind::Deferral, "self_election_declined", target, inputs(), None);
+                }
+                continue;
+            }
+            let outcome = self.try_start_install_as(entry, false);
+            if outcome == StartOutcome::Started {
                 started += 1;
             }
+            self.record_start(&target, "prov.presence_floor", "below_floor", outcome, inputs());
         }
 
         // ── Shed-driven (Track 2b elastic sizing) ────────────────────────────
@@ -842,15 +1086,32 @@ impl Provisioner {
         for policy in &policies {
             let Some(max) = policy.max_providers else { continue };
             let live = self.agent.capabilities().demand(&policy.filter).providers.len();
+            let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
+            let inputs = || vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
+                format!("live={live} max={max}"), Provenance::Gossiped)];
             if live <= max {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target, inputs(), None);
+                }
                 continue; // within the band
             }
             let Some(artifact) = self.catalog.resolve_best(&policy.filter).map(|e| e.artifact)
             else {
                 continue;
             };
-            if self.is_hosted(&artifact) && self.self_elects() {
+            if !self.is_hosted(&artifact) {
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.shed", OutcomeKind::NoAction, "not_hosting", target, inputs(), None);
+                }
+                continue;
+            }
+            if self.self_elects_traced(&target) {
                 self.withdraw(&artifact); // cooperative self-removal
+                if let Some(t) = self.round_trace() {
+                    t.record("prov.shed", OutcomeKind::Action, "above_ceiling", target, inputs(), Some(format!("withdraw {artifact}")));
+                }
+            } else if let Some(t) = self.round_trace() {
+                t.record("prov.shed", OutcomeKind::Deferral, "self_election_declined", target, inputs(), None);
             }
         }
 
@@ -2129,6 +2390,92 @@ mod tests {
         wait_live(&prov, 1).await;
         assert_eq!(prov.ineligible_skips(), 3, "blob entry ticked again this round");
 
+        agent.shutdown().await;
+    }
+
+    /// I5's gate, half one — **the trace changes no decision**: the same scenario, one provisioner
+    /// with a sink and one without, decides and hosts identically; and the traced one says what it
+    /// decided, in order, with typed reasons: eligible → elected → `unmet_demand_live` → `completed`,
+    /// then next round `all_healthy` and `already_hosted`. (Draw-count equivalence under `sim` waits
+    /// for a `sim` build of this crate — stated on the plan, not claimed here.)
+    #[tokio::test]
+    async fn the_trace_changes_no_decision_and_says_what_the_round_decided() {
+        use mycelium::decision::{DecisionSink, OutcomeKind};
+        async fn scenario(sink: Option<Arc<DecisionSink>>) -> (usize, usize, Vec<(String, String, String)>) {
+            let agent = live_agent().await;
+            let host = Arc::new(WasmHost::new().expect("engine"));
+            let mut source = InMemorySource::new();
+            let id = source.insert(ECHO_COMPONENT.to_vec());
+            let mut catalog = InstallableCatalog::new();
+            catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id));
+            let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+            if let Some(s) = &sink {
+                prov.with_decision_trace(Arc::clone(s));
+            }
+            let _req = declare_and_await_demand(&agent, "text", "echo").await;
+            let started = prov.provision_round();
+            wait_live(&prov, 1).await;
+            let second = prov.provision_round();
+            assert_eq!(second, 0);
+            let records = match &sink {
+                Some(s) => {
+                    for _ in 0..100 {
+                        if s.snapshot().iter().any(|r| r.rule == "prov.install") { break }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    s.snapshot().into_iter().map(|r| (r.rule, format!("{:?}", r.outcome), r.reason)).collect()
+                }
+                None => Vec::new(),
+            };
+            let hosted = prov.hosted_count();
+            agent.shutdown().await;
+            (started, hosted, records)
+        }
+        let (off_started, off_hosted, off_records) = scenario(None).await;
+        let sink = Arc::new(DecisionSink::default());
+        let (on_started, on_hosted, on_records) = scenario(Some(Arc::clone(&sink))).await;
+        assert_eq!((off_started, off_hosted), (1, 1));
+        assert_eq!((on_started, on_hosted), (off_started, off_hosted), "trace on decides as trace off");
+        assert!(off_records.is_empty(), "no sink, no records");
+
+        let names: Vec<&str> = on_records.iter().map(|(r, _, _)| r.as_str()).collect();
+        let reasons: Vec<&str> = on_records.iter().map(|(_, _, s)| s.as_str()).collect();
+        // Round 1: eligible, elected, started; the install task's completion; round 2: healthy, hosted.
+        assert_eq!(&names[..3], ["prov.eligible", "prov.self_election", "prov.demand_response"], "{on_records:?}");
+        assert_eq!(&reasons[..3], ["eligible", "elected", "unmet_demand_live"], "{on_records:?}");
+        assert!(on_records.iter().any(|(r, o, s)| r == "prov.install" && o == "Action" && s == "completed"), "{on_records:?}");
+        let round2: Vec<&str> = on_records.iter().rev().take(2).map(|(_, _, s)| s.as_str()).collect();
+        assert_eq!(round2, ["already_hosted", "all_healthy"], "{on_records:?}");
+        assert_eq!(sink.dropped(), 0);
+        let one = sink.snapshot().remove(0);
+        assert_eq!(one.rule_revision, 1);
+        assert!(one.trigger.starts_with("round 1") && !one.build.is_empty() && one.at_ms.is_none());
+        assert!(one.config_digest.as_deref().is_some_and(|d| !d.is_empty()), "stamped with the configuration digest");
+        assert_eq!(one.outcome, OutcomeKind::Action);
+        let _ = OutcomeKind::Refusal;
+    }
+
+    /// I5's gate, half two — **saturation**: a sink of one record keeps one, drops the rest and counts
+    /// them, and the round still installs.
+    #[tokio::test]
+    async fn a_saturated_sink_drops_and_counts_and_the_round_still_installs() {
+        use mycelium::decision::{DecisionSink, SinkConfig};
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "echo"), id));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        let sink = Arc::new(DecisionSink::new(SinkConfig { max_records: 1, ..Default::default() }));
+        prov.with_decision_trace(Arc::clone(&sink));
+        let _req = declare_and_await_demand(&agent, "text", "echo").await;
+        assert_eq!(prov.provision_round(), 1, "the round installs whatever the sink keeps");
+        wait_live(&prov, 1).await;
+        let st = sink.stats();
+        assert_eq!((st.recorded, st.held), (1, 1));
+        assert!(st.dropped_full >= 2, "{st:?}");
+        assert_eq!(sink.snapshot()[0].rule, "prov.eligible", "the prefix, not the tail");
         agent.shutdown().await;
     }
 }
