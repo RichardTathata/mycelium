@@ -2,7 +2,7 @@
 //!
 //! The continuous, animated sibling of `provisioning.rs`. Same world, same mechanism — but instead
 //! of running a fixed sequence of assertions and exiting, it loops forever and streams the
-//! provisioning picture to a `<canvas>` dashboard at `http://127.0.0.1:8097/`.
+//! provisioning picture to a `<canvas>` dashboard at `http://127.0.0.1:8101/`.
 //!
 //! The world: a `buffer` (tuple-space Primary rendezvous), a `seeder` (fills the `optimize` lane
 //! with donations), a `worker` (declares it needs `route/optimize` and drains the lane), and two
@@ -33,7 +33,7 @@
 //! - **From** — InMemorySource (build-embedded fixture, single-process shortcut — see catalog for the cross-node path) → catalogue → autonomic Provisioner
 //!
 //! Run:  cargo run -p mycelium-coop-examples --features wasm,metrics --bin provisioning_viz
-//! Then open http://127.0.0.1:8097/
+//! Then open http://127.0.0.1:8101/
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -62,7 +62,7 @@ const LANE: &str = "optimize";
 const DONE: &str = "done";
 const N_DONATIONS: u64 = 4;
 /// Fixed HTTP port for the dashboard (kept clear of the gateway's OS-assigned depot ports).
-const HTTP_PORT: u16 = 8097;
+const HTTP_PORT: u16 = 8101; // :8097 is guardrail_viz's (zero-gaps Z8)
 
 /// The Mycelium concepts + services this demo exercises — injected into the dashboard's "what
 /// you're seeing" box (the UI-example contract; see docs/wiki/dev/ui-example-contract.md). `tag`

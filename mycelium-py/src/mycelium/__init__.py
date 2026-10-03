@@ -9,6 +9,7 @@ from .agent import (
     LogEntry,
     LockGuard,
     CommitResult,
+    KvReceipt,
     ProtectedKindError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
@@ -37,6 +38,8 @@ __all__ = [
     "MailboxEvent",
     "LogEntry",
     "LockGuard",
+    "CommitResult",
+    "KvReceipt",
     "A2aClient",
     "arguments_digest",
     "mandate_request_bytes",

@@ -12,6 +12,8 @@ categories = ["database", "asynchronous"]
 
 [features]
 default = []
+# The refusal counter also increments a Prometheus counter (`Counting<D>`, zero-gaps Z6).
+metrics = ["dep:metrics"]
 # The tuple-space consumer with effect recovery (item 1 PR 6): a worker that commits each item's
 # effect at a destination *before* acknowledging it, so a worker that dies between the two is
 # re-delivered and the second apply is `Replayed`. Optional so the crate's core — the destination
@@ -36,6 +38,8 @@ serde_json = { version = "1", optional = true }
 # engine and no system library is a hidden dependency. Quarantined to this crate: core carries no
 # database, and `-p` builds of the substrate never pay for it.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# `Counting<D>` also emits `mycelium_effects_refusals_total{kind, leg}` under this feature (zero-gaps Z6).
+metrics  = { version = "0.24", optional = true }
 tokio    = { version = "1.35", features = ["rt", "time"] }
 tracing  = "0.1"
 

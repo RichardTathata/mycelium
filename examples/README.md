@@ -195,7 +195,7 @@ links to its walkthrough README.
 | [`control_envelope_viz`](../docs/design/adaptive-stability.md) | `:8096` | `cargo run --example control_envelope_viz --features metrics` |
 | [`redistribution_viz`](../mycelium-tuple-space/examples/README.md) | `:8093` | `cargo run -p mycelium-tuple-space --example redistribution_viz --features gateway,metrics` |
 | [`llm_council_viz`](coop/README.md) | `:8094` | `cargo run -p mycelium-coop-examples --bin llm_council_viz --features metrics` |
-| [`provisioning_viz`](coop/README.md) ★ | `:8097` | `cargo run -p mycelium-coop-examples --features wasm,metrics --bin provisioning_viz` |
+| [`provisioning_viz`](coop/README.md) ★ | `:8101` | `cargo run -p mycelium-coop-examples --features wasm,metrics --bin provisioning_viz` |
 | [`catalog_viz`](coop/README.md) | `:8098` | `cargo run -p mycelium-coop-examples --features wasm,metrics --bin catalog_viz` |
 | [`wiki_council_viz`](../mycelium-wiki/examples/README.md) ★ | `:8095` | `cargo run -p mycelium-wiki --example wiki_council_viz --features gateway,llm,metrics` |
 | [`guardrail_viz`](../mycelium-guardrails/examples/README.md) ★ | `:8097` | `cargo run -p mycelium-guardrails --example guardrail_viz --features compliance,gateway,metrics-export` |

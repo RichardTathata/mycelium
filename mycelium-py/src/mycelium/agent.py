@@ -211,6 +211,24 @@ class LogEntry:
 
 
 @dataclass(frozen=True)
+class KvReceipt:
+    """The receipt ``set`` returns (zero-gaps Z7): what ``POST /gateway/kv`` has answered since
+    v2.16.0 — rung 1 (applied on the gateway node) always, rung 2 as ``local_durability`` with the
+    same names ``CommitResult`` uses (``"on_disk"`` · ``"buffered"`` · ``"not_configured"`` ·
+    ``"failed"``, with ``local_durability_error`` for the last). Every field is ``None`` on a
+    gateway that predates v2.16.0, which answered a bare ``{"ok": true}``.
+    """
+    operation_id: Optional[str]
+    local_durability: Optional[str] = None
+    local_durability_error: Optional[str] = None
+
+    @property
+    def on_disk(self) -> bool:
+        """The one state that establishes durability on the gateway node."""
+        return self.local_durability == "on_disk"
+
+
+@dataclass(frozen=True)
 class CommitResult:
     """Outcome of a consensus-backed write (``consistent_set``, ``cross_group_propose``).
 
@@ -641,18 +659,32 @@ class MyceliumAgent:
                 return None
             return base64.b64decode(data.get("value_b64", ""))
 
-    def set(self, key: str, value: bytes) -> None:
-        """Write a KV entry.
+    def set(self, key: str, value: bytes) -> KvReceipt:
+        """Write a KV entry and return its receipt.
 
         The write is gossiped to all peers. Existing values are overwritten
         when the local HLC timestamp is strictly greater (LWW semantics).
+        The receipt names what the gateway node established — rung 1 always, rung 2 as
+        ``local_durability`` — and nothing above it (``docs/design/contracts-receipts.md``).
         """
         body = {
             "key":       key,
             "value_b64": base64.b64encode(value).decode(),
         }
         with self._pool.sync() as c:
-            c.post("/gateway/kv", json=body).raise_for_status()
+            resp = c.post("/gateway/kv", json=body)
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        return KvReceipt(
+            operation_id=data.get("operation_id"),
+            local_durability=data.get("local_durability"),
+            local_durability_error=data.get("local_durability_error"),
+        )
 
     def delete(self, key: str) -> None:
         """Tombstone a KV entry.

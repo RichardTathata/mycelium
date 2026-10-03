@@ -96,7 +96,7 @@ artifact ones also print the `## Loads` banner.
 |---|:--:|---|---|
 | `stigmergy_viz` | `:8092` | `… --bin stigmergy_viz --features metrics` | dispatch reroutes around a busy depot (opacity pheromone) |
 | `llm_council_viz` | `:8094` | `… --bin llm_council_viz --features metrics` | fan-out · synthesis · critic↔reviser DAG (`EchoBackend`, no key) |
-| `provisioning_viz` ⭐ | `:8097` | `… --features wasm,metrics --bin provisioning_viz` | a capability **self-provisions**, then **heals onto a standby** when the active node is killed — no coordinator |
+| `provisioning_viz` ⭐ | `:8101` | `… --features wasm,metrics --bin provisioning_viz` | a capability **self-provisions**, then **heals onto a standby** when the active node is killed — no coordinator |
 | `catalog_viz` | `:8098` | `… --features wasm,metrics --bin catalog_viz` | the origin (librarian) **dies + its library is deleted**, yet a late node **installs from a verified peer cache** |
 
 (`…` = `cargo run -p mycelium-coop-examples`.) Each is the visual variant of its batch demo

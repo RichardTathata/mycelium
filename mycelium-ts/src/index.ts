@@ -4,6 +4,7 @@ export {
   UnitHandle,
   CommitResult,
   DemandStatus,
+  KvReceipt,
   LocalDurability,
   LockGuard,
   LogEntry,

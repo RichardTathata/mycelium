@@ -300,6 +300,7 @@ pub fn get_or_spawn_writer(
             }),
         _ => papaya::Operation::Abort(()),
     });
+    publish_connected_gauge(writers);
 
     if matches!(upgraded, papaya::Compute::Inserted(..) | papaya::Compute::Updated { .. }) {
         Some(tx)
@@ -348,6 +349,20 @@ pub fn reap_finished_writers(
             _                            => papaya::Operation::Abort(()),
         });
     }
+    publish_connected_gauge(writers);
+}
+
+/// Zero-gaps Z9 (D9): `gossip_peers_connected` is the number of **live writers** in `writers` —
+/// sockets, not the view (`mycelium_emergent_peers_known` is the view) — published where the map
+/// changes (a claim won, a reap) so it mirrors `/stats` `cached_connections` without a poll.
+pub fn publish_connected_gauge(writers: &papaya::HashMap<NodeId, WriterEntry>) {
+    #[cfg(feature = "metrics")]
+    {
+        let live = writers.pin().iter().filter(|(_, e)| e.is_live()).count();
+        metrics::gauge!("gossip_peers_connected").set(live as f64);
+    }
+    #[cfg(not(feature = "metrics"))]
+    let _ = writers;
 }
 
 /// Serialises and enqueues a `StateRequest` into `peer`'s writer channel,

@@ -43,12 +43,14 @@
 //! composes the two ([`tuple_consumer`]): effect first, acknowledgement second, so the pipeline's
 //! receipt never stands in for the destination's.
 
+pub mod counting;
 pub mod sqlite;
 #[cfg(feature = "tuple-space")]
 pub mod tuple_consumer;
 
 pub use mycelium::{AttemptId, DedupOutcome, DestinationCommit, OperationId, content_hash};
 pub use sqlite::SqliteDestination;
+pub use counting::{Counting, RefusalCounts, RefusalSnapshot};
 
 use std::sync::Arc;
 use std::time::Duration;

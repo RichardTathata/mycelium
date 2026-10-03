@@ -3,6 +3,7 @@ import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
 import {
+  KvReceipt,
   CapabilityHandle,
   UnitHandle,
   DemandStatus,
@@ -336,9 +337,22 @@ export class MyceliumAgent {
     return data.value_b64 !== null ? fromb64(data.value_b64) : null;
   }
 
-  /** Writes a key and queues it for gossip. */
-  async set(key: string, value: Buffer | Uint8Array): Promise<void> {
-    await this._post("/gateway/kv", { key, value_b64: b64(value) });
+  /**
+   * Writes a key and queues it for gossip; resolves to the write's receipt — rung 1 always, rung 2
+   * as `localDurability` (every field `null` on a pre-v2.16.0 gateway).
+   */
+  async set(key: string, value: Buffer | Uint8Array): Promise<KvReceipt> {
+    const data = (await this._post("/gateway/kv", { key, value_b64: b64(value) })) as {
+      operation_id?: string;
+      local_durability?: string;
+      local_durability_error?: string;
+    } | null;
+    return {
+      operationId: typeof data?.operation_id === "string" ? data.operation_id : null,
+      localDurability: typeof data?.local_durability === "string" ? data.local_durability : null,
+      localDurabilityError:
+        typeof data?.local_durability_error === "string" ? data.local_durability_error : null,
+    };
   }
 
   /** Tombstones a key and queues for gossip. */
