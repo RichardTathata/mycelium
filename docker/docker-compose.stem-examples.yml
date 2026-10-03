@@ -180,6 +180,88 @@ services:
     networks:
       stem-net: { ipv4_address: 172.40.0.22 }
 
+  # ── catalog_store — the catalog demo with the library in an object store (zero-gaps Z1) ───────
+  # S3Mock stands in for the bucket; the init publishes blob and manifest THROUGH the store adapter;
+  # the librarian stem reads the manifest from the store and mirrors the bytes to a stage; the
+  # installer stem's source is the store URL itself (no library directory, no mesh pull).
+  s3mock:
+    image: adobe/s3mock:latest
+    profiles: [catalog_store]
+    container_name: mycelium-stem-s3mock
+    environment: { initialBuckets: mycelium-test }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.30 }
+
+  init-catalog_store:
+    <<: *stem
+    profiles: [catalog_store]
+    container_name: mycelium-stem-init-catalog_store
+    entrypoint: ["sh", "-c"]
+    environment:
+      <<: *stem-env
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: http://172.40.0.30:9090
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: us-east-1
+    command:
+      - >-
+        set -e; i=0; until curl -sf -X PUT http://172.40.0.30:9090/mycelium-test >/dev/null 2>&1 || [ $$i -ge 60 ]; do i=$$((i+1)); sleep 1; done;
+        curl -sf http://172.40.0.30:9090/ | grep -q mycelium-test;
+        for d in /repo/examples/units/catalog/artifacts/*.toml; do
+        mycelium-artifact publish "$$d" --library s3://mycelium-test/library --key-env STEM_PUB_SEED; done;
+        mycelium-artifact list s3://mycelium-test/library
+    depends_on: [ s3mock ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.31 }
+
+  driver-catalog_store:
+    <<: *stem
+    profiles: [catalog_store]
+    container_name: mycelium-stem-driver-catalog_store
+    entrypoint: ["stem_driver"]
+    command: ["catalog_store"]
+    environment:
+      <<: *stem-env
+      STEM_DRIVER_HOST: 172.40.0.32
+    depends_on:
+      init-catalog_store: { condition: service_completed_successfully }
+    networks:
+      stem-net: { ipv4_address: 172.40.0.32 }
+
+  librarian-store:
+    <<: *stem
+    profiles: [catalog_store]
+    container_name: mycelium-stem-librarian-store
+    environment:
+      <<: *stem-env
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: http://172.40.0.30:9090
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: us-east-1
+    command: ["--units", "/repo/examples/units/catalog/librarian.toml", "--library", "s3://mycelium-test/library", "--librarian", "/tmp/manifest-unused", "--manifest-source", "s3://mycelium-test/library", "--publisher", "ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12", "--host", "172.40.0.33", "-p", "57000", "-r", "172.40.0.32:57000", "--tick-ms", "300"]
+    depends_on: [ driver-catalog_store ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.33 }
+
+  installer-store:
+    <<: *stem
+    profiles: [catalog_store]
+    container_name: mycelium-stem-installer-store
+    environment:
+      <<: *stem-env
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: http://172.40.0.30:9090
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: us-east-1
+    # The source is the store: no library directory, no mesh pull.
+    command: ["--units", "/repo/examples/units/catalog/installer.toml", "--library", "s3://mycelium-test/library", "--host", "172.40.0.34", "-p", "57000", "-r", "172.40.0.32:57000", "--tick-ms", "300"]
+    depends_on: [ driver-catalog_store ]
+    networks:
+      stem-net: { ipv4_address: 172.40.0.34 }
+
   # ── mcp_toolgrowth ──────────────────────────────────────────────────────────
   init-mcp_toolgrowth:
     <<: *stem

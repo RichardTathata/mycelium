@@ -31,6 +31,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **describe itself** (kind `describe` → `{description, inputSchema}`), publishing the component's own
   schema instead of the generic one. No tool section in the unit format: the description is the
   declaration. The proof page's "`llm_agent`'s MCP tools as stems" line closes.
+- **A stem reads an object store** (zero-gaps Z1, D1): `StemSource::Store { url }` — `mycelium-stem
+  --library s3://bucket/prefix` (or `gs://`, `file://`) stages every blob from the store by ranged pull
+  under `<placement_root>/stage`, credentials from the environment, the URL gated by the node's egress
+  policy, and re-serves what it staged; a librarian over a store (`--library <url> --librarian …
+  --manifest-source <url>`) reads the manifest from the store and mirrors what it names. The stem image
+  builds with `object_store`; the stem-examples suite gains the `catalog_store` profile (S3Mock, the
+  library published through the adapter, the installer's source the store). The proof page's "a stem
+  reading an object store" line closes; "models pulled from S3 or GCS" (a real bucket, S4) stays.
 - **A blob past the frame cap crosses the mesh in ranges** (zero-gaps Z3, D3): two RPC kinds beside
   `artifact.fetch` — `artifact.size` and `artifact.fetch_range` (4 MiB pieces, each a fraction of a
   frame) — served by every `serve_artifacts` holder (from disk when the source is ranged), and

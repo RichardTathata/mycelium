@@ -30,7 +30,9 @@ fn usage() -> ! {
          -p, --port <port>              bind port\n\
              --host <ip>                bind address\n\
          -r, --peers <ip:port,…>        bootstrap peers\n\
-             --library <dir>            read artifact bytes from this directory (default: mesh pull)\n\
+             --library <dir | url>      read artifact bytes from this directory, or from an object store by URL\n\
+                                        (s3://…, gs://…, file:///…; needs the object_store feature; default: mesh pull)\n\
+             --manifest-source <url>    with --librarian: read the manifest from the store at this URL, not a file\n\
              --stage-dir <dir>          where a mesh pull stages what it fetches (default: <placement_root>/stage)\n\
              --librarian <manifest>     also take the librarian role over --library and this manifest\n\
              --publisher ed25519:<hex>  the manifest's publisher key (with --librarian)\n\
@@ -56,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tick_ms: u64 = 500;
     let mut self_elect: f64 = 0.5;
     let mut trace_dir: Option<String> = None;
+    let mut manifest_source: Option<String> = None;
     let mut stage_dir: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
@@ -73,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--tick-ms" => tick_ms = val().parse().unwrap_or_else(|_| usage()),
             "--self-elect" => self_elect = val().parse().unwrap_or_else(|_| usage()),
             "--trace-dir" => trace_dir = Some(val()),
+            "--manifest-source" => manifest_source = Some(val()),
 
             "--stage-dir" => stage_dir = Some(val()),
             _ => usage(),
@@ -101,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.validate()?;
 
     let source = match &library {
+        Some(l) if l.contains("://") => StemSource::Store { url: l.clone() },
         Some(dir) => StemSource::Library(dir.into()),
         None => StemSource::Mesh { timeout: Duration::from_secs(5) },
     };
@@ -151,12 +156,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent.start().await?;
 
         let _librarian = match (&librarian, &library) {
+            (Some(manifest), Some(l)) if l.contains("://") => {
+                // Zero-gaps Z1: a librarian over a store — the manifest from the store, the bytes
+                // mirrored to a stage by ranged pull and served from there (D1, Q1).
+                #[cfg(feature = "object_store")]
+                {
+                    let publisher = librarian_publisher.expect("checked above");
+                    let egress = agent.egress_policy().clone();
+                    let store = Arc::new(mycelium_wasm_host::ObjectStoreFetcher::from_url(l, egress.clone())?);
+                    let stage_dir = stage_dir.clone().map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("mycelium-librarian-stage"));
+                    let staged = Arc::new(mycelium_wasm_host::DiskStagedSource::open(Arc::clone(&store) as Arc<_>, &stage_dir)?);
+                    let manifest_url = manifest_source.clone().unwrap_or_else(|| l.clone());
+                    let manifest_store: Arc<dyn mycelium_wasm_host::ManifestSource> =
+                        Arc::new(mycelium_wasm_host::ObjectStoreFetcher::from_url(&manifest_url, egress)?);
+                    // Mirror: every sync, stage what the manifest names, so this node answers for it.
+                    let (mirror_store, mirror_staged) = (Arc::clone(&store), Arc::clone(&staged));
+                    tokio::spawn(async move {
+                        // Through the timer seam (item 6), one stream for the mirror.
+                        let mut tick = mycelium::sim_seam::interval_ms("librarian/mirror", 5_000, tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            tick.tick().await;
+                            if let Ok(m) = mirror_store.read_manifest().await {
+                                let ids: Vec<_> = m.entries().iter().map(|e| e.artifact).collect();
+                                mirror_staged.stage_all(&ids).await;
+                            }
+                        }
+                    });
+                    Some(spawn_librarian(
+                        Arc::clone(&agent),
+                        staged as Arc<_>,
+                        LibrarianConfig { manifest_path: manifest.into(), publisher, sync_interval: Duration::from_secs(5), manifest_source: Some(manifest_store) },
+                    ))
+                }
+                #[cfg(not(feature = "object_store"))]
+                {
+                    let _ = manifest;
+                    return Err("a store URL needs a stem built with the `object_store` feature".into());
+                }
+            }
             (Some(manifest), Some(dir)) => {
                 let publisher = librarian_publisher.expect("checked above");
+                let manifest_store: Option<Arc<dyn mycelium_wasm_host::ManifestSource>> = match &manifest_source {
+                    #[cfg(feature = "object_store")]
+                    Some(url) => Some(Arc::new(mycelium_wasm_host::ObjectStoreFetcher::from_url(url, agent.egress_policy().clone())?)),
+                    #[cfg(not(feature = "object_store"))]
+                    Some(_) => return Err("--manifest-source needs a stem built with the `object_store` feature".into()),
+                    None => None,
+                };
                 Some(spawn_librarian(
                     Arc::clone(&agent),
                     Arc::new(FsLibrarySource::open(dir)?) as Arc<_>,
-                    LibrarianConfig { manifest_path: manifest.into(), publisher, sync_interval: Duration::from_secs(5), manifest_source: None },
+                    LibrarianConfig { manifest_path: manifest.into(), publisher, sync_interval: Duration::from_secs(5), manifest_source: manifest_store },
                 ))
             }
             (Some(_), None) => return Err("--librarian needs --library".into()),

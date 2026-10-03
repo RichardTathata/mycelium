@@ -212,7 +212,7 @@ check-full: check
 ## `make examples-both-ways DEMO=provisioning` runs the code binary and the stem fleet and greps the
 ## same markers from both. The publisher key in the units is the public half of seed 42…42: `make stem-keys`.
 COMPOSE_STEM   = docker compose -f docker/docker-compose.stem-examples.yml
-STEM_DEMOS    ?= provisioning catalog mcp_toolgrowth model_deploy reheal_deploy llm_agent
+STEM_DEMOS    ?= provisioning catalog catalog_store mcp_toolgrowth model_deploy reheal_deploy llm_agent
 STEM_PUB_SEED ?= 4242424242424242424242424242424242424242424242424242424242424242
 .PHONY: test-stem-examples examples-both-ways stem-keys
 
