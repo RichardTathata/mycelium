@@ -51,6 +51,11 @@ pub enum StemSource {
     /// A library directory this node can read (a mounted volume, or the librarian's own store):
     /// ranged, so blobs stream to the placement root.
     Library(std::path::PathBuf),
+    /// An object store by URL (`s3://bucket/prefix`, `gs://…`, `file:///dir`; zero-gaps Z1, D1): the
+    /// blobs and the manifest live there, credentials come from the environment, the node's egress
+    /// policy gates the URL, and what the stem pulls is staged to disk in ranges exactly as from a
+    /// mesh peer — and re-served to peers that have no credentials. Needs feature `object_store`.
+    Store { url: String },
 }
 
 /// How a stem node runs.
@@ -216,6 +221,24 @@ impl Stem {
                     StemSource::Library(dir) => (Arc::new(
                         FsLibrarySource::open(dir).map_err(|e| StemError(format!("library {}: {e}", dir.display())))?,
                     ), None),
+                    #[cfg(feature = "object_store")]
+                    StemSource::Store { url } => {
+                        let stage_dir = opts.stage_dir.clone().unwrap_or_else(|| match &h.placement_root {
+                            Some(root) => std::path::Path::new(root).join("stage"),
+                            None => std::env::temp_dir().join(format!("mycelium-stem-stage-{}", agent.node_id().to_socket_addr().port())),
+                        });
+                        let fetcher = Arc::new(
+                            crate::object_store_source::ObjectStoreFetcher::from_url(url, agent.egress_policy().clone())
+                                .map_err(|e| StemError(format!("store {url}: {e}")))?,
+                        );
+                        let staged = Arc::new(DiskStagedSource::open(fetcher, &stage_dir)
+                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?);
+                        (Arc::clone(&staged) as Arc<dyn ArtifactSource + Send + Sync>, Some(staged))
+                    }
+                    #[cfg(not(feature = "object_store"))]
+                    StemSource::Store { url } => {
+                        return Err(StemError(format!("a store URL ({url}) needs a stem built with the `object_store` feature")));
+                    }
                 };
                 // X2: whatever this stem staged and verified, it will answer for — in ranges too — so
                 // a peer's pull finds it here before the library of record.

@@ -323,6 +323,92 @@ mod tests {
 
     const DESCRIPTION: &str = "kind = \"blob\"\nbytes = \"weights.bin\"\n[provides]\nns = \"llm\"\nname = \"weights\"\n[requires]\ndisk_bytes = 3145728\nmem_bytes = 0\n";
 
+    /// Zero-gaps Z1 (D1): **a stem reads an object store.** The library is in the store (blob and
+    /// manifest, published through the adapter); a librarian stem reads the manifest from the store
+    /// and publishes the catalogue; a hosting stem whose source is the store URL stages the blob by
+    /// ranged pull and installs it — no library directory, no mesh pull. Written before
+    /// `StemSource::Store` existed and seen failing to compile. Runs against every configured store
+    /// URL (S3Mock in CI), `file://` otherwise.
+    #[cfg(feature = "stem")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_store_backed_stem_installs_from_the_bucket() {
+        use crate::{spawn_librarian, LibrarianConfig, Stem, StemOptions, StemSource};
+        use mycelium::{GossipAgent, NodeCapabilityConfig, NodeId};
+        use std::time::Duration;
+
+        fn alloc_port() -> u16 { std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port() }
+        async fn agent(port: u16, bootstrap: Option<u16>) -> Arc<GossipAgent> {
+            let cfg = mycelium::GossipConfig {
+                bind_port: port,
+                bootstrap_peers: bootstrap.map(|b| vec![NodeId::new("127.0.0.1", b).unwrap()]).unwrap_or_default(),
+                ..Default::default()
+            };
+            let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+            a.start().await.expect("agent start");
+            a
+        }
+
+        for (i, (url, is_bucket)) in test_store_urls(&scratch("z1-urls").join("store")).into_iter().enumerate() {
+            let dir = scratch(&format!("z1-{i}"));
+            // A prefix of this test's own: the sibling S2 test publishes to the configured prefix in
+            // parallel, and two upserts of one manifest key race (read-modify-write) — a lost entry
+            // here looked like a stem that never installed (CI, 2026-10-03).
+            let url = if url.starts_with("file://") { file_url(&dir.join("store")) } else { format!("{}/z1-{}", url.trim_end_matches('/'), std::process::id()) };
+            // Publish a blob (kind blob, data/pack) through the adapter — library and manifest in the store.
+            let bytes: Vec<u8> = (0..2u64 * 1024 * 1024).map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as u8).collect();
+            std::fs::write(dir.join("pack.bin"), &bytes).unwrap();
+            std::fs::write(dir.join("pack.toml"), "kind = \"blob\"\nbytes = \"pack.bin\"\n[provides]\nns = \"data\"\nname = \"pack\"\n[requires]\ndisk_bytes = 4194304\nmem_bytes = 0\n").unwrap();
+            let key = signing_key_from_hex(&format!("{:02x}", 0x61 + i as u8).repeat(32)).unwrap();
+            let store = ObjectStoreFetcher::from_url(&url, EgressPolicy::default()).unwrap();
+            let out = publish_to_store(&dir.join("pack.toml"), &store, &key).await.unwrap();
+            assert_eq!(out.artifact, ArtifactId::of(&bytes));
+
+            // A librarian stem over the store: the manifest from the store, bytes served from what it stages.
+            let seed = agent(alloc_port(), None).await;
+            let lib_stage = DiskStagedSource::open(Arc::new(ObjectStoreFetcher::from_url(&url, EgressPolicy::default()).unwrap()), dir.join("lib-stage")).unwrap();
+            let _librarian = spawn_librarian(
+                Arc::clone(&seed),
+                Arc::new(lib_stage) as Arc<_>,
+                LibrarianConfig {
+                    manifest_path: dir.join("unused"),
+                    publisher: key.verifying_key().to_bytes(),
+                    sync_interval: Duration::from_millis(200),
+                    manifest_source: Some(Arc::new(ObjectStoreFetcher::from_url(&url, EgressPolicy::default()).unwrap())),
+                },
+            );
+
+            // A hosting stem whose source IS the store.
+            let publisher_hex: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+            let place = dir.join("placed");
+            let units = NodeCapabilityConfig::from_toml_str(&format!(
+                "principal=\"stem\"\n[hosts]\nkinds=[\"blob\"]\ntrusted_publishers=[\"ed25519:{publisher_hex}\"]\nplacement_root=\"{}\"\n[[presence]]\nns=\"data\"\nname=\"pack\"\nmin_providers=1\n",
+                place.display()
+            )).unwrap();
+            let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+            let opts = StemOptions {
+                source: StemSource::Store { url: url.clone() },
+                tick: Duration::from_millis(300),
+                self_elect_p: 1.0,
+                declare_interval: Duration::from_secs(2),
+                reprobe_every: Duration::from_millis(500),
+                trace: None,
+                stage_dir: Some(dir.join("stem-stage")),
+            };
+            let stem = Stem::start(Arc::clone(&node), &units, opts).unwrap();
+            let mut hosted = false;
+            for _ in 0..600 {
+                if stem.hosted_count() == 1 { hosted = true; break; }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(hosted, "the stem installs data/pack from the store at {url}");
+            assert!(dir.join("stem-stage").join(out.artifact.to_hex()).exists(), "the blob was staged from the store, verified");
+            stem.stop().await;
+            node.shutdown().await;
+            seed.shutdown().await;
+            if is_bucket { eprintln!("a store-backed stem installed from {url}"); }
+        }
+    }
+
     /// S2's exit gate, and S3's over a second store: publish through the adapter, read the
     /// manifest back from the store, stage the blob by ranged pull to disk, verify provenance and
     /// the streamed hash — once per configured store URL.

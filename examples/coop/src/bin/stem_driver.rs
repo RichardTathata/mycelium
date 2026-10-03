@@ -74,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match demo.as_str() {
         "provisioning" => provisioning(agent).await,
         "catalog" => catalog(agent).await,
+        "catalog_store" => catalog_store(agent).await,
         "mcp_toolgrowth" => mcp_toolgrowth(agent).await,
         "model_deploy" => model_deploy(agent).await,
         "reheal_deploy" => reheal_deploy(agent).await,
@@ -298,6 +299,27 @@ async fn catalog(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Erro
     assert_eq!(out.as_ref(), b"late route");
     println!("[late] joined after the origin died — installed from a peer cache and ran it");
     println!("\nAll assertions passed — runtime-read bytes → signed library → librarian stem → discovered pull → provisioned on an installer stem → served → origin killed → late stem installed from a peer cache.");
+    agent.shutdown().await;
+    Ok(())
+}
+
+/// The catalog demo with the library in an object store (zero-gaps Z1): the librarian stem reads
+/// the manifest from the store, the installer stem's byte source is the store URL, and the caller
+/// (this driver) gets the installed component's answer — no library directory on any node.
+async fn catalog_store(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Error>> {
+    assert!(wait_until(60, || agent.peers().len() >= 2).await, "the librarian and installer stems must peer with the driver");
+    assert!(wait_until(90, || !agent.capabilities().resolve(&CapFilter::new("artifact", "librarian")).is_empty()).await,
+        "the librarian stem advertises artifact/librarian (its manifest read from the store)");
+    println!("[phase 1] librarian stem up over the store; installer stem up, its source the store URL");
+    let _req = agent.capabilities().declare_requirement(CapFilter::new("route", "optimize"), Duration::from_secs(600));
+    assert!(wait_until(180, || !live_optimizers(&agent).is_empty()).await,
+        "the installer stem must stage route/optimize from the store by ranged pull, verify and serve it");
+    let node = live_optimizers(&agent).into_iter().next().expect("a provider");
+    println!("[phase 2] route/optimize provisioned on {node} — pulled from the object store, verified by content address and provenance");
+    let out = optimize(&agent, &node, Bytes::from_static(b"route me")).await?;
+    assert_eq!(out.as_ref(), b"route me", "the installed component serves");
+    println!("[phase 3] the caller invoked the installed optimizer and got its answer");
+    println!("\nAll assertions passed — a library in an object store → a librarian reading the manifest from it → an installer whose source is the store → provisioned and served.");
     agent.shutdown().await;
     Ok(())
 }
