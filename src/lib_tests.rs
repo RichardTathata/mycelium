@@ -3377,6 +3377,14 @@ async fn test_cross_group_propose_requires_all_group_quorums() {
         && ab.mesh().group_members("alpha").len() >= 2,
         2_000,
     ).await;
+    // The poll above does not assert; a membership that had not gossiped in time used to surface
+    // later as a bare `Timeout` with zero votes (seen in CI 2026-09-28 and 2026-10-03). Say so here,
+    // with both views, so the next failure carries its evidence.
+    assert!(
+        aa.mesh().group_members("alpha").len() >= 2 && ab.mesh().group_members("alpha").len() >= 2,
+        "alpha membership did not gossip within 2 s: a sees {:?}, b sees {:?}",
+        aa.mesh().group_members("alpha"), ab.mesh().group_members("alpha"),
+    );
 
     // Require quorum from both "alpha" (has 2 voters) and "beta" (0 voters).
     let groups = vec![
@@ -3411,7 +3419,8 @@ async fn test_cross_group_propose_requires_all_group_quorums() {
 
     assert!(
         matches!(result_ok, ConsensusResult::Committed { .. }),
-        "alpha-only proposal must commit; got {result_ok:?}",
+        "alpha-only proposal must commit; got {result_ok:?} — a sees alpha {:?}, b sees alpha {:?}, a's peers {:?}, b's peers {:?}",
+        aa.mesh().group_members("alpha"), ab.mesh().group_members("alpha"), aa.peers(), ab.peers(),
     );
 
     pair.a.shutdown().await;
