@@ -357,6 +357,27 @@ pub struct PersistenceConfig {
     /// Also trigger a snapshot on this timer interval (seconds). Default: `300`.
     #[serde(default = "default_snapshot_interval_secs")]
     pub snapshot_interval_secs: u64,
+
+    /// What `start()` does when `snapshot.bin` or `wal.bin` is **unreadable** — corrupt, or
+    /// undecryptable with the configured cipher (a torn WAL tail is a crash's signature, not this).
+    /// Default [`OnUnreadable::Refuse`]: the node does not start, naming the file and the byte. With
+    /// [`OnUnreadable::Quarantine`] the unreadable files are moved aside (never deleted, never
+    /// compacted over) and the node starts from what was readable — an operator's explicit choice,
+    /// since a fleet peer re-fills the rest by anti-entropy.
+    #[serde(default)]
+    pub on_unreadable: OnUnreadable,
+}
+
+/// What a node does with persisted state it cannot read at start (`persist.replay`, plan §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnUnreadable {
+    /// Refuse to start, naming the file and the offset. The default: nothing is compacted over.
+    #[default]
+    Refuse,
+    /// Move `snapshot.bin` / `wal.bin` aside as `*.unreadable-N` and start from what was readable;
+    /// the files stay for a human. The fleet re-fills the rest by anti-entropy.
+    Quarantine,
 }
 
 fn default_snapshot_wal_threshold() -> usize { 10_000 }

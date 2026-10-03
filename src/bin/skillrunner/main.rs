@@ -178,7 +178,7 @@ fn build_gossip_config(sf: &SkillFile) -> Result<GossipConfig, GossipError> {
         .collect();
 
     if let Some(ref p) = sf.node.persistence {
-        cfg.persistence = Some(PersistenceConfig {
+        cfg.persistence = Some(PersistenceConfig { on_unreadable: Default::default(),
             base_path:               p.base_path.clone().into(),
             sync_mode:               if p.sync_flush { SyncMode::Flush } else { SyncMode::Async },
             snapshot_wal_threshold:  10_000,

@@ -327,7 +327,7 @@ async fn make_agent(
             // so data survives an unclean shutdown (SIGTERM with no explicit fsync).
             sync_mode:              SyncMode::Flush,
             snapshot_wal_threshold: 10_000,
-            snapshot_interval_secs: 300,
+            snapshot_interval_secs: 300, on_unreadable: Default::default(),
         });
     }
     // Apply `GOSSIP_*` environment overrides AFTER the explicit field setup above, so

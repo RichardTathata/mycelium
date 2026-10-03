@@ -94,7 +94,7 @@ fn persisted_config(port: u16, dir: &std::path::Path, sync_mode: SyncMode) -> Go
         base_path: dir.to_path_buf(),
         sync_mode,
         snapshot_wal_threshold: 10_000,
-        snapshot_interval_secs: 300,
+        snapshot_interval_secs: 300, on_unreadable: Default::default(),
     });
     cfg
 }

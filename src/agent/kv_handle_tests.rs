@@ -220,7 +220,7 @@ async fn a_peer_holding_the_write_acknowledges_it() {
             base_path: base,
             sync_mode: SyncMode::Async,
             snapshot_wal_threshold: 1_000_000,
-            snapshot_interval_secs: 3_600,
+            snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
         });
         GossipAgent::new(id, cfg)
     };
@@ -286,7 +286,7 @@ async fn an_acknowledged_replica_still_holds_the_record_after_restart() {
             base_path: base,
             sync_mode: SyncMode::Async,
             snapshot_wal_threshold: 1_000_000,
-            snapshot_interval_secs: 3_600,
+            snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
         });
         GossipAgent::new(id, cfg)
     };

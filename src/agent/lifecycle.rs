@@ -176,7 +176,21 @@ impl GossipAgent {
                     Ok(max_ts) => {
                         if max_ts > 0 { hlc.observe(max_ts); }
                     }
-                    Err(e) => warn!("persistence: replay failed: {e}"),
+                    // Unreadable persisted state (`persist.replay`, plan §8): refuse by default — a
+                    // node that starts over state it could not read would snapshot over it. Under
+                    // `quarantine` the files are moved aside, never deleted, and the node starts empty.
+                    Err(e) => match pcfg.on_unreadable {
+                        crate::config::OnUnreadable::Refuse => {
+                            return Err(GossipError::InvalidField {
+                                field: "persistence",
+                                reason: format!("{e}; set `persistence.on_unreadable = \"quarantine\"` to move the unreadable files aside and start empty (they are never deleted)"),
+                            });
+                        }
+                        crate::config::OnUnreadable::Quarantine => {
+                            let moved = crate::persistence::quarantine_unreadable(&dir);
+                            warn!("persistence: {e}; quarantined {moved:?} — starting from what was readable; the fleet re-fills the rest by anti-entropy");
+                        }
+                    },
                 }
 
                 // Inject the Layer-II opacity check the snapshot loop uses to defer

@@ -10,6 +10,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A node no longer starts over persisted state it could not read** (`persist.replay`, plan §8). A
+  corrupt or undecryptable `snapshot.bin` was logged and skipped — the node started from the WAL
+  alone and the next snapshot **overwrote** it; a corrupt WAL record stopped replay silently, and the
+  snapshot merge, stopping at the same place, **truncated** every record after it. Now `replay` tells a
+  **torn tail** (the file ends inside the last record: a crash's signature, still tolerated) from
+  **corruption** (a whole record that does not decode or decrypt, or a bad length with data after it),
+  and corruption is an error naming the file and the byte; `do_snapshot` aborts on one and leaves the
+  WAL as it is. `start()` then **refuses** by default (`persistence.on_unreadable = "refuse"`), or with
+  `"quarantine"` moves the files aside as `*.unreadable-N` — never deleted, never compacted over — and
+  starts from what was readable. New guarantee `persist.unreadable_refused`. Three tests seen failing
+  on the unfixed code. **Behaviour change:** a node with unreadable persisted state now fails to start
+  where it used to start and then overwrite it — including a node given the **wrong at-rest cipher
+  key**, which used to start empty and snapshot over the ciphertext; a torn tail is unaffected. **Upgrade note:**
+  `PersistenceConfig` gained `on_unreadable` (an exhaustive literal breaks; TOML and
+  `..Default::default()`-style construction are unaffected — the field defaults to `refuse`).
+  **Announced one release ahead (G12):** `secure-single-domain` rev 2 will require it, with
+  `id.ca_key_off_node`, in the next MINOR.
+
 - **A gateway that cannot come up fails `start()`** (`gw.tls_runtime`, plan §8). The bind and the
   gateway's TLS setup ran inside the spawned HTTP task, so a busy port or an unreadable certificate was
   logged as "HTTP server exited" while `start()` returned Ok and the node reported ready with no
