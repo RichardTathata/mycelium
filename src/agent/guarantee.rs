@@ -261,13 +261,12 @@ pub const DEV: Profile = Profile {
 /// sync, the consensus profile) are not in it — they cannot be; the report lists them unresolved.
 pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
     name: "secure-single-domain",
-    revision: 1,
-    // Not `id.ca_key_off_node`, though the checklist asks for it: `tls::load_or_create_ca` loads
-    // the CA *key* from the node's directory and regenerates a whole new CA without it, so today
-    // every TLS node must hold the fleet CA's private key at start. The guarantee is reported — it
-    // reads the disk truthfully — and cannot be required until the TLS init can start a node from
-    // a CA cert and a pre-issued node cert alone (plan §8, found by this profile's own acceptance
-    // test, 2026-10-03).
+    // Rev 2 (announced in v2.20.0, G12): `id.ca_key_off_node` — a node certificate issued off-node
+    // (`mycelium tls issue`, `[tls] cert_pem` + `key_pem`) so the fleet CA's private key is on no
+    // node — and `persist.unreadable_refused` (`persistence.on_unreadable = "refuse"`, the default).
+    // Rev 1 could not require the first: until v2.20.0 the TLS init re-signed the node cert with
+    // the CA key at every start and minted a CA where the key was absent.
+    revision: 2,
     required: &[
         "mesh.tls",
         "id.proofs_required",
@@ -284,6 +283,8 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
         "egress.allow_list",
         "persist.configured",
         "persist.sync_mode",
+        "persist.unreadable_refused",
+        "id.ca_key_off_node",
     ],
     about: "a node fronting agents in one trust domain: authenticated transport and identity, a closed \
             HTTPS gateway, authority checked and recorded at the gateway and the provider, revocation \
@@ -1021,12 +1022,12 @@ mod tests {
     /// bump and a release note), every id is a core guarantee, and none is an external prerequisite.
     #[test]
     fn the_secure_profiles_required_set_is_pinned() {
-        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 1);
+        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 2);
         assert_eq!(SECURE_SINGLE_DOMAIN.required, &[
             "mesh.tls", "id.proofs_required", "gw.not_open", "gw.tls", "gw.caller_profile",
             "ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "a2a.admission",
             "authz.execution_authority", "authz.durable_epochs", "audit.chain", "egress.allow_list",
-            "persist.configured", "persist.sync_mode",
+            "persist.configured", "persist.sync_mode", "persist.unreadable_refused", "id.ca_key_off_node",
         ]);
         let r = agent(GossipConfig::default()).guarantee_report();
         for id in SECURE_SINGLE_DOMAIN.required {
@@ -1047,7 +1048,7 @@ mod tests {
         cfg.profile = Some("secure-single-domain".into());
         let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
         let e = a.start().await.unwrap_err().to_string();
-        assert!(e.contains("profile `secure-single-domain` rev 1"), "{e}");
+        assert!(e.contains("profile `secure-single-domain` rev 2"), "{e}");
         for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"] {
             assert!(e.contains(id), "{id} is named: {e}");
         }

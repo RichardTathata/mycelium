@@ -10539,7 +10539,25 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
     cfg.http_addr = "127.0.0.1".to_string();
-    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    // Rev 2 requires `id.ca_key_off_node`: the fleet CA lives with an issuer, the node gets a
+    // certificate issued there and the CA *certificate* only. The issuer here is a throwaway node
+    // started once on its own directory (which mints the CA), then `issue_node_cert` on that
+    // directory — the operator's `mycelium tls issue`.
+    let ca_dir = root.join("issuer");
+    {
+        let issuer_port = alloc_port();
+        let mut icfg = GossipConfig::auto();
+        icfg.bind_port = issuer_port;
+        icfg.tls = Some(TlsConfig { auto_cert_dir: ca_dir.clone(), ..Default::default() });
+        let issuer = GossipAgent::new(NodeId::new("127.0.0.1", issuer_port).unwrap(), icfg);
+        issuer.start().await.expect("the issuer node mints the fleet CA");
+        issuer.shutdown().await;
+    }
+    assert!(ca_dir.join("ca-key.pem").exists(), "the CA key is with the issuer");
+    let (cert_pem, key_pem) = crate::issue_node_cert(&ca_dir, &id, &cert_dir).expect("a node certificate issued off-node");
+    std::fs::copy(ca_dir.join("ca-cert.pem"), cert_dir.join("ca-cert.pem")).unwrap();
+    assert!(!cert_dir.join("ca-key.pem").exists(), "and never on the node");
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), cert_pem: Some(cert_pem), key_pem: Some(key_pem), ca_cert_pem: None });
     cfg.gateway_tls = Some(crate::GatewayTlsConfig::default()); // the node cert serves the gateway too
     cfg.gateway_auth_token = Some("s3cret".into());
     cfg.require_identity_proofs = true;
@@ -10586,11 +10604,14 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     a.start().await.expect("and so the profile admits the node");
     let r = a.guarantee_report();
     assert!(r.started && r.node_requirements_satisfied(), "required unmet: {:?}", r.required_unmet());
-    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 1, true)));
+    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 2, true)));
+    assert!(!cert_dir.join("ca-key.pem").exists(), "start() minted no CA key on the node");
     assert_eq!(r.unresolved(), ["cons.safety_profile", "net.confinement", "clock.sync"], "what the node cannot see is still listed");
-    // The recorded gap, visible and not waived: the dev TLS init left the CA key here.
-    assert!(matches!(r.entry("id.ca_key_off_node").unwrap().resolution, Resolution::NotConfigured { .. }));
-    assert!(r.unmet().contains(&"id.ca_key_off_node") && !r.required_unmet().contains(&"id.ca_key_off_node"));
+    // Rev 2's two new requirements, met: the CA key is with the issuer, and unreadable persisted
+    // state refuses the start (the default).
+    assert!(matches!(r.entry("id.ca_key_off_node").unwrap().resolution, Resolution::Enforced), "{:?}", r.entry("id.ca_key_off_node").unwrap().resolution);
+    assert!(matches!(r.entry("persist.unreadable_refused").unwrap().resolution, Resolution::Enforced));
+    assert!(!r.unmet().contains(&"id.ca_key_off_node") && !r.unmet().contains(&"persist.unreadable_refused"));
     // Talk to the gateway the way a partner would: TLS pinned on the node's SPKI (the project's own
     // client path; a stock verifier does not negotiate with the Ed25519 node identity).
     let pin = crate::federation::pinning::ed25519_spki_sha256(&a.task_ctx.tls.get().expect("TLS is on").verifying_key_bytes());
