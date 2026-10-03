@@ -8,16 +8,6 @@ developer-side counterpart is the [guide cookbook](../guide/cookbook.md); the
 vocabulary is in [00 · Concepts](../guide/00-concepts.md); what the project can prove today, and
 what it cannot yet, is [what-is-proven.md](what-is-proven.md).
 
-## Start here — five steps
-
-<!-- path:start -->
-1. **[`hello_mesh`](../../examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
-2. **[`hello_capability`](../../examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
-3. **[Your first stem fleet](../guide/tutorials/01-first-stem-fleet.md)** — generic hosts discover and install a signed echo component, answer a call, and restore a declared provider floor after graceful removal.
-4. **[guide 20](../guide/20-authorising-actions.md) with [`authority_drain`](../../examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
-5. **[`what-is-proven.md`](what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
-<!-- path:end -->
-
 ## Operator journey
 
 1. Choose your [integration mode](../guide/installation.md) and follow [deployment](deployment.md).

@@ -11,6 +11,17 @@ on:
     - cron: '0 6 * * 1'
 
 jobs:
+  documentation:
+    name: Documentation coherence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: ./scripts/check-positioning.sh
+      - run: python3 scripts/test-check-materials.py
+
   test:
     name: Test
     runs-on: ubuntu-latest

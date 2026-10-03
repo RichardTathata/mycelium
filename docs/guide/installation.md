@@ -16,7 +16,9 @@ package. The copyable dependencies and feature choices live in the [integrator c
 For a reproducible example checkout:
 
 ```sh
-git clone --branch <release tag> https://github.com/RichardTathata/mycelium.git   # the current tag: building-on-mycelium.md §1
+# Set this to the tag selected from building-on-mycelium.md §1:
+MYCELIUM_RELEASE_TAG="v2.20.0"   # a release anchor: moved by the release script with building-on-mycelium.md §1
+git clone --branch "$MYCELIUM_RELEASE_TAG" https://github.com/RichardTathata/mycelium.git
 cd mycelium
 cargo run --example hello_mesh
 ```

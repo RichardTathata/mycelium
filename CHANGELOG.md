@@ -26,6 +26,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   two-argument closure no longer compiles); `RuntimeCtx` gained `trace` and `install_token` (an
   exhaustive literal breaks); `prov.probe` is catalogue revision 2 (a new reason, `probe_failed`).
 ### Changed
+- **Documentation coherence gate.** `scripts/check-materials.py` checks every live reader route, every
+  local link target (1,472 of them), a named list of retired claims, and the decks' accessibility
+  markers; `scripts/test-check-materials.py` proves four mutations fail it. Both run in `make check` and
+  a new CI job. `check-positioning.sh` now asks only *developer* funnels to share the five-step path;
+  operators have their own journey. The engineering deck's always-available-gossip, never-reordering
+  mailbox and no-operator claims are qualified (overclaim ledger 2026-10-03); mobile overflow and a
+  missing appendix heading fixed; `installation.md` uses a shell-safe `MYCELIUM_RELEASE_TAG`, which is a
+  release anchor. A third party's follow-up to #475, with its two plan-status sentences brought to
+  v2.20.0.
+
 - **`secure-single-domain` rev 2** (announced in v2.20.0, plan G12): the profile now also requires
   `id.ca_key_off_node` — a node certificate issued off-node (`mycelium tls issue`, `[tls] cert_pem` +
   `key_pem`) so the fleet CA's private key is on no node — and `persist.unreadable_refused` (the

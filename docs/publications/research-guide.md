@@ -42,7 +42,7 @@ rerun criteria with the result. Compare distributions and uncertainty, not just 
 - Test composition: does demand-driven installation preserve workload objectives while authority,
   capacity and network views change together? Stem demos establish scenarios, not that general result.
 - Evaluate rule interactions and trace completeness using the [guarantees and rule-catalogue plan](../plans/guarantees-and-rule-catalogue.md).
-  Planned secure profiles and common tracing must not be presented as already established guarantees.
+  The registry, startup report and profiles (v2.19.0) and the rule catalogue with its decision trace (v2.20.0) are delivered; a decision-level replay of a whole agent is not yet shown (`what-is-proven.md`). Test the profiles against their named checks rather than treating them as universal guarantees.
 - Compare discovery, propagation, admission, response and authority separately in prior-art work.
   Similar terminology is not architectural equivalence; claims of uniqueness require a source-based comparison.
 

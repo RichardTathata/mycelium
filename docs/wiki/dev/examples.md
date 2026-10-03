@@ -2,6 +2,15 @@
 
 ↑ [dev/](dev.md)
 
+**Reader routes and coverage.** The [documentation front door](../../README.md) separates prospect,
+developer, operator and researcher journeys; [capabilities](../../capabilities.md) maps mechanisms to
+examples, operations and evidence. It is a reader grouping, not an additional architecture layer.
+`scripts/check-materials.py` checks the resource targets and required routes; its mutation checks
+prevent missing routes and named claim regressions from silently passing. Both are included in CI
+and `make check`. HTML decks have reading mode, keyboard navigation and mobile layout; structural
+checks do not replace browser or screen-reader review.
+
+
 **Teaching the current surfaces.** [The developer tutorial sequence](../../guide/tutorials/README.md)
 connects stem differentiation, declarations, acceptance, authority, replay and observation.
 `mycelium-wasm-host/examples/first_stem_fleet.rs` is the model-free starting point;

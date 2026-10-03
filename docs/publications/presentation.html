@@ -203,7 +203,10 @@
   @media (max-width:760px) {
     .slide-top { padding:24px 20px 0; }
     .slide-body { padding-left:20px; padding-right:20px; }
-    .cols2,.cols3,.cols4 { grid-template-columns:1fr !important; }
+    .cols2,.cols3,.cols4,.sp-grid,.old-stack { grid-template-columns:minmax(0,1fr) !important; }
+    .slide-body * { min-width:0; overflow-wrap:anywhere; }
+    .layer-strip { flex-wrap:wrap; }
+    .code-block { overflow-wrap:normal; }
     .nav-bar { max-width:calc(100vw - 16px); gap:6px; }
     .code-block, .table-wrap { overflow:auto; max-width:100%; }
     .hero-title { overflow-wrap:anywhere; }
@@ -219,6 +222,7 @@
   }
 
 </style>
+<noscript><style>html,body,.deck{height:auto;overflow:auto}.slide{position:relative;opacity:1;transform:none;pointer-events:auto;overflow:visible;min-height:100vh}.slide-body{overflow:visible}.nav-bar,.progress-bar{display:none}</style></noscript>
 </head>
 <body>
 <div class="deck">
@@ -282,7 +286,7 @@
         </div>
         <div class="card card-accent-green">
           <div class="card-title">Ephemeral by nature</div>
-          <div class="card-body">Agents spawn, exhaust their purpose, and die. The fleet must heal around them automatically. No operator involvement.</div>
+          <div class="card-body">Agents spawn, exhaust their purpose, and die. The fleet must heal around them automatically. Recovery depends on configured capacity and deployment; operators monitor the outcome.</div>
         </div>
         <div class="card card-accent-green">
           <div class="card-title">Peer-to-peer intelligence</div>
@@ -350,7 +354,7 @@
       </div>
       <div class="card card-accent-purple" style="padding:15px 16px;">
         <div class="card-title">Actor Mailbox</div>
-        <div class="card-body"><code>deliver_event</code> · <code>open_mailbox</code> — a durable, HLC-ordered, addressed inbox. A conversation that survives a restart and never reorders under clock skew.</div>
+        <div class="card-body"><code>deliver_event</code> · <code>open_mailbox</code> — a durable, HLC-ordered, addressed inbox. An addressed conversation with persistence and HLC ordering; delivery and recovery depend on the configured storage and receipt contract.</div>
       </div>
       <div class="card card-accent-orange" style="padding:15px 16px;">
         <div class="card-title">Shared State / Stigmergy</div>
@@ -410,7 +414,7 @@
 
     <div class="cols2" style="gap:14px;margin-top:14px;">
       <div class="callout callout-green">
-        <strong>The gossip layer is always available.</strong> Discovery, state propagation, and event routing keep working even when nodes partition. No coordinator needed.
+        <strong>Local operation does not require a central coordinator.</strong> Reachable peers can continue exchanging state and events during a partition; views across the partition diverge until connectivity returns.
       </div>
       <div class="callout callout-purple">
         <strong>Consensus is a lightweight opt-in overlay.</strong> Reach for <code>consistent_set</code>, <code>distributed_lock</code>, or <code>elect_leader_receipt</code> only where your application actually demands ordering guarantees. A leadership answer names the rung it reached — <em>a quorum chose me</em> or <em>this is what my replica says</em> — and carries a fencing token, because exclusivity is enforced at the resource, never by the fact that a call returned success.
@@ -788,7 +792,7 @@
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card card-accent-green" style="padding:14px 16px;">
           <div class="card-title">Beyond the demo</div>
-          <div class="card-body">The demo uses identical workers that each carry all stage logic — vivid, but it <em>undersells</em> the model. In a real deployment: specialist workers advertising only one stage, heterogeneous teams shipping independent capability sets, zero-downtime rollout of <code>score_v2</code> alongside <code>score_v1</code>. The mesh assembles the topology from whatever is running. No operator involvement.</div>
+          <div class="card-body">The demo uses identical workers that each carry all stage logic — vivid, but it <em>undersells</em> the model. In a real deployment: specialist workers advertising only one stage, heterogeneous teams shipping independent capability sets, zero-downtime rollout of <code>score_v2</code> alongside <code>score_v1</code>. The mesh assembles the topology from whatever is running. Recovery depends on configured capacity and deployment; operators monitor the outcome.</div>
         </div>
         <div class="callout callout-blue" style="margin:0;">
           <strong>Demo assumption ≠ Mycelium's requirement.</strong> Fluid allocation works across a fully heterogeneous fleet — different images, different teams, different capabilities. Topology emerges bottom-up.
@@ -1175,7 +1179,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
         </div>
         <div class="card card-accent-green">
           <div class="card-title">v1.x compliance layer (<code>compliance</code> feature)</div>
-          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. The Production Readiness Gap, closed. <strong>v2.3 closes the SOC 2 audit gaps:</strong> native <strong>gateway TLS</strong>, <strong>audit export</strong> (<code>AuditSink</code>) with retention checkpointing, <strong>authenticated identity</strong> (CA-anchored, proof-chained rotation — with <code>require_identity_proofs</code> on — it is default-off — a forged <code>sys/identity</code> write is rejected, not just detected), operator <strong>key revocation</strong>, and <strong>GDPR crypto-shred</strong> erasure (destroy the key, the data is cryptographically dead fleet-wide).</div>
+          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. Deployment readiness also requires operator controls and acceptance testing. <strong>v2.3 added audit-supporting mechanisms:</strong> native <strong>gateway TLS</strong>, <strong>audit export</strong> (<code>AuditSink</code>) with retention checkpointing, <strong>authenticated identity</strong> (CA-anchored, proof-chained rotation — with <code>require_identity_proofs</code> on — it is default-off — a forged <code>sys/identity</code> write is rejected, not just detected), operator <strong>key revocation</strong>, and <strong>GDPR crypto-shred</strong> erasure (destroy the key, the data is cryptographically dead fleet-wide).</div>
         </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;">
@@ -2029,7 +2033,7 @@ wiki.<span class="cs">propose</span>(<span class="cv">"decisions/elm-street"</sp
   let cur = 0;
   let reading = matchMedia('(max-width:760px)').matches;
   slides.forEach((slide, i) => {
-    const heading = slide.querySelector('.slide-title, .hero-title, .big-quote');
+    const heading = slide.querySelector('.slide-title, .hero-title, .big-quote, .big');
     if (heading) {
       heading.setAttribute('role', 'heading');
       heading.setAttribute('aria-level', i === 0 ? '1' : '2');

@@ -140,7 +140,10 @@
   @media (max-width:760px) {
     .slide-top { padding:24px 20px 0; }
     .slide-body { padding-left:20px; padding-right:20px; }
-    .cols2,.cols3,.cols4 { grid-template-columns:1fr !important; }
+    .cols2,.cols3,.cols4,.sp-grid,.old-stack { grid-template-columns:minmax(0,1fr) !important; }
+    .slide-body * { min-width:0; overflow-wrap:anywhere; }
+    .layer-strip { flex-wrap:wrap; }
+    .code-block { overflow-wrap:normal; }
     .nav-bar { max-width:calc(100vw - 16px); gap:6px; }
     .code-block, .table-wrap { overflow:auto; max-width:100%; }
     .hero-title { overflow-wrap:anywhere; }
@@ -156,6 +159,7 @@
   }
 
 </style>
+<noscript><style>html,body,.deck{height:auto;overflow:auto}.slide{position:relative;opacity:1;transform:none;pointer-events:auto;overflow:visible;min-height:100vh}.slide-body{overflow:visible}.nav-bar,.progress-bar{display:none}</style></noscript>
 </head>
 <body>
 <div class="deck">
@@ -185,9 +189,9 @@
     <div class="slide-title good">Enforce your remits <em>where the agents actually act.</em></div>
     <div class="slide-sub">Put a gateway in front of the tools and endpoints your agents already call. Configured enforcement checks covered dispatches against your policy <strong>before</strong> they run; an enabled evidence journal records decisions and reasons.</div>
     <div class="cols3">
-      <div class="card card-accent-green"><div class="card-title">Three answers, not two</div><div class="card-body">Permit, deny, and <strong>indeterminate</strong> — authority could not be <em>established</em>. Nothing says the action is forbidden, only that nothing says it is allowed. A system with only yes and no has to guess, and it guesses in the permissive direction.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Three answers, not two</div><div class="card-body">Permit, deny, and <strong>indeterminate</strong> — authority could not be <em>established</em>. Nothing says the action is forbidden, only that nothing says it is allowed. An explicit indeterminate result lets callers distinguish missing evidence from a policy denial.</div></div>
       <div class="card card-accent-green"><div class="card-title">Attribution, or no action</div><div class="card-body">Under the strict profile a decision that cannot be <em>recorded</em> refuses the action — even one the policy permitted. Enforcement without attribution is an unlogged gate, not governance.</div></div>
-      <div class="card card-accent-green"><div class="card-title">Coverage is a field</div><div class="card-body">The evidence names the routes the enforcement point does <em>not</em> see. An auditor is never invited to read silence as an all-clear — which is the failure mode of every dashboard that only shows what it caught.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Coverage is a field</div><div class="card-body">The evidence names the routes the enforcement point does <em>not</em> see. An auditor is never invited to read silence as an all-clear — a risk when a dashboard shows only the decisions it observed.</div></div>
     </div>
     <div class="callout callout-orange">
       <strong>Stated precisely:</strong> gateway checks cover the routes it fronts. Configured provider enforcement checks work reached through other supported doors; resource fencing adds checks at the mutation boundary. Coverage depends on the evaluator and deployment configuration. The enforcement point, the three verdicts, the evidence journal and a reference policy engine ship in the substrate today, in a build with the <code>compliance</code> feature; production policy adapters and the evidence exporter are the commercial layer.
@@ -525,7 +529,7 @@
   let cur = 0;
   let reading = matchMedia('(max-width:760px)').matches;
   slides.forEach((slide, i) => {
-    const heading = slide.querySelector('.slide-title, .hero-title, .big-quote');
+    const heading = slide.querySelector('.slide-title, .hero-title, .big-quote, .big');
     if (heading) {
       heading.setAttribute('role', 'heading');
       heading.setAttribute('aria-level', i === 0 ? '1' : '2');

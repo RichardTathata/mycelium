@@ -1,5 +1,7 @@
 # mycelium-wasm-host
 
+New developers: start with [Your first stem fleet](../docs/guide/tutorials/01-first-stem-fleet.md), then the [tutorial sequence](../docs/guide/tutorials/README.md).
+
 Use the [capability map](../docs/capabilities.md) to connect this material to other mechanisms, operating guidance and evidence.
 
 
