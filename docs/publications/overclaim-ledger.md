@@ -155,7 +155,7 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   "feature-complete v2" all verified current. Papers: paper1 makes no empirical claims of its own
   (the "implemented + reproducible" line is a correctly-attributed *citation* of Rodriguez's repo)
   and — correctly — does **not** claim the pending council-scale work-distribution case study;
-  paper2a's numbers trace to its committed `data/` sweeps. **One Minor author-flag, not a fix:**
+  paper2a's numbers trace to its committed `data/` sweeps — **wrong, see 2026-10-03: they do not**. **One Minor author-flag, not a fix:**
   the capabilities slides predate v2.3.0's SOC-2 additions and the wiki git-substrate — absence is
   not mislabeling, but both are undersell *opportunities* (customer-pitch slide 354's security list
   and the presentation's compliance card could each gain a line) — the author's call on deck scope.
@@ -261,3 +261,45 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   `check-positioning.sh` exit 0. PDFs of paper1 and paper2a need re-rendering.
 
 - 2026-10-03 (materials coherence follow-up, not a full publication-lint run): qualified the engineering deck's always-available gossip, never-reordering mailbox and no-operator claims; replaced the broad audit-readiness closure claim with mechanisms plus operator acceptance. Buyer three-verdict copy no longer implies every binary policy engine fails open. Research guide now distinguishes delivered I1–I3 from remaining rule tracing. Added structural coverage/resource checks; these do not establish claim truth or WCAG conformance. Browser verification covered both decks' navigation and reading mode, engineering mobile overflow, and the appendix heading.
+
+- 2026-10-03 (lint run 5, after v2.19.0–v2.21.0): **no Critical. Nine Major in the papers and philosophy, six
+  on the decks, all drift behind shipped code, none ahead of it.** The one that is not a doc edit: **paper 2a's
+  latency table, its figure and the abstract's "two to three orders of magnitude" do not trace to the committed
+  `data/`** — the committed sweep gives a 10× (N=10) to 110× (N=40) mean gap, a flat gossip mean of 40–48 µs,
+  a broker p99 ceiling of 29 ms (not the 500 ms RPC-timeout tail the text narrates), and a broker N=40 run
+  that completed 323 of 1 000 decisions; the table's numbers have never been in any committed CSV, and run 4's
+  ledger line asserting traceability was wrong (corrected above). **Not rewritten here:** a published paper's
+  results are the author's correction (erratum or re-run with the CSVs committed), stated to the author.
+  **Fixed:** federation sold as roadmap in paper 1's limitations and future work (shipped v2.8.0, hardened to
+  v2.13.0); "5-node Docker cluster" in both papers (the harness is 4 nodes, as the buyer deck says); a stale
+  wire version (11 → 12); the blackboard and contract-net companions described as unbuilt in the philosophy
+  and paper 1 while paper 1 says three paragraphs later that the blackboard shipped; `suggest_leader` described
+  as a lexicographic rule it does not implement and the tuple-space election as lowest-id (both pre-v2.14.0);
+  Layer III "stateless" in paper 2a (acceptor memory is durable since v2.14.0); the 2026-06-08 working draft
+  `substrate_convergence.html` now carries a superseded banner and no longer says there is "no legal entity to
+  regulate or purchase"; the philosophy's "What This Architecture Is Not" gains the fault model it was the
+  ceiling for and never stated (crash-fault, not Byzantine; where authority is checked and by whom). Decks:
+  both proof slides said "as of 2026-10-01 (v2.18.0)" three releases on, while claiming refresh at every
+  release; neither named the guarantee report, the profile, the rule catalogue, the decision trace or the
+  fail-closed start (the hero sentence's own proof surfaces) — an undersell; the replay card said "a whole node
+  replays without divergence" where v2.21.0 found a live node diverging at the kernel's 20th choice;
+  federation attributed to the AgentFacts crate (public discovery) on two slides against the deck's own
+  "domains are not NANDA" card; "no downtime deploys" against the 2.14.0 consensus note; "four CLI
+  demonstrations that found real defects" vs the buyer deck's and the proof page's "two of which"; and
+  eighteen appendix details (three metric names that do not exist, a Bloom filter that is a hash map, a
+  `builder()` that does not exist, a `MembershipGovernor` type that does not exist, two scenario names, an
+  overlay count of 3 for 4, a port, a companion called built-in, a DOI called "submitted", three absolutes
+  the deck's own neighbours contradict). **Why three releases of drift reached the decks:** `RELEASING.md`
+  §6 names both decks as version-state anchors and none of the three same-day releases touched them — the
+  class the day's wiki-lint found in `CLAUDE.md`'s open list. *Flagged, author's call:* the "zero" absolutes
+  (`presentation.html` "Zero setup overhead", "One library. Zero infrastructure.", "Zero hardcoded endpoint
+  config", the sV1 "zero ops" framing carried from run 4); "no installer" / "no persistent queue" in the
+  philosophy beside the stem provisioner and the WAL'd tuple space (different senses, quotable); `related-
+  work.md` calling Layer II "the signal/boundary control plane"; paper 1's "305 unit tests" (not reproducible
+  at the tag; now dated to it); the unused `fig_three_arm.tex` caption overstating the drift effect (∼4×
+  where the committed data gives ∼3×, and pull degrades ∼2.4×). *Repository gaps, not deck retreats:*
+  `provisioning_viz` and `guardrail_viz` both bind :8097; `ROADMAP.md` is headed 2026-09-26 with v2.7.0 as
+  its newest line; the philosophy has no gate the way `positioning.md` does. Verified clean: no Byzantine /
+  trustless / tamper-proof / linearizable claim outside its negation; no crisis-framed example; wire v12 /
+  PREV 11; scopes; no dead link; `check-positioning.sh` and `check-materials.py` exit 0; every number with a
+  unit on the decks sourced. PDFs of paper 1 and 2a need re-rendering.

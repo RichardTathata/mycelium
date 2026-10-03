@@ -536,7 +536,7 @@
           Kulkarni et al. (2014) <em>Hybrid Logical Clocks</em> — causal ordering without NTP.
         </div>
         <div class="callout callout-green" style="margin-top:10px;font-size:12px;">
-          <strong>And producing:</strong> the theory runs both ways — <em>The Coordinator Trap</em> (2026, submitted) argues coordinator-freeness is epistemically <em>necessary</em>, not merely convenient (a Hayekian local-knowledge argument), and a second paper formalises substrate convergence. The design isn't decorated with citations after the fact; it is an executable instance of a published argument.
+          <strong>And producing:</strong> the theory runs both ways — <em>The Coordinator Trap</em> (2026, DOI 10.5281/zenodo.20665238) argues coordinator-freeness is epistemically <em>necessary</em>, not merely convenient (a Hayekian local-knowledge argument), and a second paper formalises substrate convergence. The design isn't decorated with citations after the fact; it is an executable instance of a published argument.
         </div>
       </div>
     </div>
@@ -816,7 +816,7 @@
         </div>
         <div class="card card-accent-blue">
           <div class="card-title">Elastic membership + self-heal</div>
-          <div class="card-body">A <code>MembershipGovernor</code> reconciles a group toward a min/max band and drains nodes cooperatively. Kill the governor — the cluster still self-heals; the intent lives in evaporating soft-state, owned by no one.</div>
+          <div class="card-body">A membership governor (the <code>sys/govern/membership/{group}</code> intent) reconciles a group toward a min/max band and drains nodes cooperatively. Kill the governor — the cluster still self-heals; the intent lives in evaporating soft-state, owned by no one.</div>
         </div>
         <div class="card card-accent-orange">
           <div class="card-title">Defends itself</div>
@@ -923,7 +923,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
       </div>
       <div class="card card-accent-blue">
         <div class="card-title">Replay — the verification engine <span style="opacity:.7;font-weight:400;">(shipped, v2.8.0–v2.9.0)</span></div>
-        <div class="card-body">A seed is not a durable reproduction artefact: it reproduces a run only while the code is unchanged, which is exactly when nobody needs it. The kernel records <em>what the code asked for and what it received</em>, so a replay against a changed build tells you <strong>where it first departed</strong>. A whole node replays without divergence.</div>
+        <div class="card-body">A seed is not a durable reproduction artefact: it reproduces a run only while the code is unchanged, which is exactly when nobody needs it. The kernel records <em>what the code asked for and what it received</em>, so a replay against a changed build tells you <strong>where it first departed</strong>. The recorded scenarios replay without divergence; a live node's first recording-versus-replay comparison (v2.21.0) diverged at the kernel's 20th choice where two periodic loops' ticks swapped — the scheduler seam over every loop is the open item.</div>
       </div>
       <div class="card card-accent-orange">
         <div class="card-title">Domains are not NANDA <span style="opacity:.7;font-weight:400;">(shipped, v2.8.0)</span></div>
@@ -933,6 +933,10 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
     <div class="card card-accent-green" style="margin-top:16px;">
       <div class="card-title">Coordination integrity — what a success <em>means</em> <span style="opacity:.7;font-weight:400;">(shipped, v2.14.0)</span></div>
       <div class="card-body">An election needs an <strong>electorate</strong>: a group whose roster a node cannot see is <em>refused</em>, never decided alone — <em>"I cannot see members"</em> must not become <em>"I may decide alone"</em>. The answer then <strong>names the rung it reached</strong> (<code>Decided</code>, a quorum chose this value at this ballot, bound to it by digest · <code>Observed</code>, this is what my replica says) and carries a <strong>fencing token</strong>. Underneath, votes are bound to the proposal they voted for, a node casts one vote per ballot in either role, a higher ballot adopts what was already accepted, and that memory survives a restart.<br><br><em>And the limit, said out loud:</em> no coordinator-free protocol can promise a leadership that stays true. LWW decides which <em>record</em> survives; it cannot undo work two callers each performed after being told they had won. Exclusivity is enforced <strong>at the resource</strong>, by refusing a stale token — never by a call returning success.</div>
+    </div>
+    <div class="card card-accent-blue" style="margin-top:10px;">
+      <div class="card-title">Guarantees you can read, decisions you can trace <span style="opacity:.7;font-weight:400;">(shipped, v2.19.0–v2.21.0)</span></div>
+      <div class="card-body">A node says <strong>which guarantees it enforces, and why not the rest</strong> — each resolved against the node as built and configured to <em>enforced · not configured · not in this build · not applicable · not verifiable here</em> (<code>GET /gateway/guarantees</code>, one log block at start). A <strong>profile</strong> (<code>secure-single-domain</code>) makes <code>start()</code> refuse unless every guarantee it requires holds, naming each unmet one — including a node certificate issued off-node, so the fleet CA's key is on no node; a setting a build cannot enforce refuses too, never runs ignored. Every decision point the substrate has is a <strong>catalogue entry</strong> with a stable id — trigger, inputs, typed outcomes, guards, code and tests — generated and gated in CI; a bounded <strong>decision trace</strong> records what an instrumented point read and why it decided, shown to change no decision, read with <code>mycelium explain</code>. Not claimed: a whole agent replayed decision for decision (see <em>not yet shown</em>).</div>
     </div>
     <div class="callout callout-orange" style="margin-top:10px;font-size:12px;">
       <strong>Labelled honestly.</strong> Every claim on this slide is <em>shipped under a tag</em> and carries a runnable demonstration that names what it does <em>not</em> establish — and several found real defects before release, including one whose own first explanation was wrong and had to be retracted. The gateway authorisation seam, its evidence journal and a reference policy engine ship here, in a build with the <code>compliance</code> feature; a <strong>Cedar policy adapter and the signed evidence exporter are implemented</strong> in the private companion, pinned to this release, and their <strong>combined deployment acceptance is outstanding</strong> — the joint runs with the oversight consumer on both clouds have not happened, and a local fixture does not stand in for them.
@@ -1001,11 +1005,11 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
           </div>
         </div>
         <div class="card card-accent-purple">
-          <div class="card-title">Internet scale — federation, <em>shipped</em></div>
-          <div class="card-body">Each node serves <code>/.well-known/agent-facts.json</code>: a self-certified, Ed25519-signed <strong>AgentFacts</strong> quilt-patch (NANDA-shaped) plus a CRDT-assembled domain view, with a Merkle revocation-transparency log. Sovereign discovery, no issuer authority — your domain joins the agent internet on its own terms.</div>
+          <div class="card-title">Internet scale — two edges, both <em>shipped</em></div>
+          <div class="card-body"><strong>Public discovery:</strong> each node serves <code>/.well-known/agent-facts.json</code>, a self-certified, Ed25519-signed <strong>AgentFacts</strong> quilt-patch (NANDA-shaped) plus a CRDT-assembled domain view, with a Merkle revocation-transparency log — sovereign discovery, no issuer authority. <strong>Federation</strong> (<code>src/federation</code>, v2.8.0 → v2.13.0): named partners, a signed export catalogue, a credential carried on A2A, TLS pinned on an SPKI, per-partner slots — and transports that never join: two meshes proven not to merge with the link cut.</div>
         </div>
         <div class="callout callout-green">
-          <strong>Not a future box on the stack.</strong> Federation is the <code>mycelium-agentfacts</code> companion crate, on the public API — A2A/MCP surfaces and the signed facts edge are live today, not a roadmap promise.
+          <strong>Not a future box on the stack.</strong> Public discovery is the <code>mycelium-agentfacts</code> companion crate and federation is the substrate's own edge, both on the public API — A2A/MCP surfaces, the signed facts edge and the federation edge are live today, not a roadmap promise.
         </div>
       </div>
     </div>
@@ -1037,7 +1041,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
           <tr><td>Cluster sharding</td><td class="td-yes td-my">Built-in (FNV hash ring)</td><td>Via JetStream</td><td class="td-no">No</td><td>Yes (coordinator)</td><td class="td-no">You build it</td></tr>
           <tr><td>Agentic Flow Networks</td><td class="td-yes td-my">Built-in (5 properties)</td><td class="td-no">No</td><td class="td-no">No</td><td>Akka Streams (partial)</td><td class="td-no">You build it</td></tr>
           <tr><td>Prompt Skills (LLM)</td><td class="td-yes td-my">Built-in (llm feature)</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">You build it</td></tr>
-          <tr><td>Fleet inference routing</td><td class="td-yes td-my">Built-in — load + local reservations · failover · OpenAI-compatible façade</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">You build it</td></tr>
+          <tr><td>Fleet inference routing</td><td class="td-yes td-my">Companion crate (<code>mycelium-reason</code>) — load + local reservations · failover · OpenAI-compatible façade</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">You build it</td></tr>
           <tr><td>Air-gapped / edge</td><td class="td-yes td-my">Yes — zero external deps</td><td>Complex</td><td>Complex</td><td>Possible</td><td>Possible</td></tr>
           <tr><td>Ops burden</td><td class="td-yes td-my">Embedded nodes or gateway/stem processes</td><td>Broker + config</td><td>Registry + agents</td><td>Cluster manager</td><td class="td-no">Everything</td></tr>
         </tbody>
@@ -1162,12 +1166,12 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
     <div class="cols2" style="gap:20px;margin-top:8px;">
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div class="card card-accent-green">
-          <div class="card-title">CI-gated cross-node suites · 13 integration + 3 overlay scenarios</div>
+          <div class="card-title">CI-gated cross-node suites · 13 integration + 4 overlay scenarios</div>
           <div class="card-body">Lib tests across the full feature matrix and the workspace crates (core, full, sim, tuple-space, blackboard, wiki, AgentFacts, WASM-host, reason, guardrails, effects, commitment, co-op), plus the multi-container Docker suites — <strong>now CI-gated, no retries</strong>: a real regression turns the gate red. Wiring them in is what surfaced (and fixed, each with a permanent gate) real defects the in-process tests couldn't reach — the discipline is honesty, not green-by-retry. Time-boxed libFuzzer runs cover the wire/capability decoders.</div>
         </div>
         <div class="card card-accent-blue">
           <div class="card-title">Wire version policy</div>
-          <div class="card-body">Wire v12 current (Merkle anti-entropy; <code>bincode</code> retired for an in-tree codec). <code>PREV_WIRE_VERSION = 11</code> — the rolling-upgrade window keeps the whole cluster online during version transitions. No downtime deploys.</div>
+          <div class="card-body">Wire v12 current (Merkle anti-entropy; <code>bincode</code> retired for an in-tree codec). <code>PREV_WIRE_VERSION = 11</code> — the rolling-upgrade window keeps gossip, signals and the capability ring online across a version transition; one 2.14.0 note applies to consensus — proposals from an upgraded proposer time out until every voter is upgraded.</div>
         </div>
         <div class="card card-accent-purple">
           <div class="card-title">Durable persistence</div>
@@ -1179,15 +1183,15 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
         </div>
         <div class="card card-accent-green">
           <div class="card-title">v1.x compliance layer (<code>compliance</code> feature)</div>
-          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. Deployment readiness also requires operator controls and acceptance testing. <strong>v2.3 added audit-supporting mechanisms:</strong> native <strong>gateway TLS</strong>, <strong>audit export</strong> (<code>AuditSink</code>) with retention checkpointing, <strong>authenticated identity</strong> (CA-anchored, proof-chained rotation — with <code>require_identity_proofs</code> on — it is default-off — a forged <code>sys/identity</code> write is rejected, not just detected), operator <strong>key revocation</strong>, and <strong>GDPR crypto-shred</strong> erasure (destroy the key, the data is cryptographically dead fleet-wide).</div>
+          <div class="card-body">Signed-identity <strong>RBAC</strong> + OAuth2 gateway ACLs, <strong>generic-OIDC SSO</strong> (Entra/Okta/Auth0/Keycloak), a <strong>tamper-evident</strong> Ed25519 hash-chained <strong>audit trail</strong>, crown-jewel <strong>data-at-rest encryption + egress policy</strong> (with a blast-radius threat model), and <strong>hot key rotation</strong> with no cluster disruption. Since 2.18.1 a setting the build cannot enforce — a token table or <code>[oidc]</code> without <code>compliance</code>, <code>[tls]</code> or <code>[gateway_tls]</code> without <code>tls</code> — <strong>refuses to start</strong> rather than running an open gateway or plaintext; since 2.19.0 the node reports which guarantees it enforces and a <code>secure-single-domain</code> profile refuses on an unmet one. Deployment readiness also requires operator controls and acceptance testing. <strong>v2.3 added audit-supporting mechanisms:</strong> native <strong>gateway TLS</strong>, <strong>audit export</strong> (<code>AuditSink</code>) with retention checkpointing, <strong>authenticated identity</strong> (CA-anchored, proof-chained rotation — with <code>require_identity_proofs</code> on — it is default-off — a forged <code>sys/identity</code> write is rejected, not just detected), operator <strong>key revocation</strong>, and <strong>GDPR crypto-shred</strong> erasure (destroy the key, the data is cryptographically dead fleet-wide).</div>
         </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card-title" style="font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px;">13 Integration Scenarios — All Passing</div>
         <ul class="scenario-list">
           <li><span class="sc-num">1</span>KV propagation across cluster<span class="sc-pass">PASS</span></li>
-          <li><span class="sc-num">2</span>Signal broadcast + boundary enforcement<span class="sc-pass">PASS</span></li>
-          <li><span class="sc-num">3</span>Consensus proposal acceptance<span class="sc-pass">PASS</span></li>
+          <li><span class="sc-num">2</span>Management API returns JSON and serves the dashboard<span class="sc-pass">PASS</span></li>
+          <li><span class="sc-num">3</span>KV state survives a container restart (persistence)<span class="sc-pass">PASS</span></li>
           <li><span class="sc-num">4</span>Full cluster restart + state recovery<span class="sc-pass">PASS</span></li>
           <li><span class="sc-num">5</span>Anti-entropy late joiner catch-up<span class="sc-pass">PASS</span></li>
           <li><span class="sc-num">6</span>Signal propagation boundaries<span class="sc-pass">PASS</span></li>
@@ -1209,7 +1213,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
   <div class="slide-top"><span class="eyebrow">Showcase</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title">One world. <em>Fifteen demos.</em></div>
-    <div class="slide-sub">The <strong>Food-Rescue Co-op</strong> (<code>examples/coop/</code>) — depot nodes rescuing surplus food, no central dispatcher. Not isolated API toys: one runnable demo per capability area, composed in a single constructive world, each calling out a pattern &amp; pitfall. Thirteen run Docker-free and CI-gated (<code>coop-smoke</code>); the two real-model deploys run by hand from code and, since v2.18.0, in CI as stem nodes against a real model in Ollama (<code>stem-examples</code>).</div>
+    <div class="slide-sub">The <strong>Food-Rescue Co-op</strong> (<code>examples/coop/</code>) — depot nodes rescuing surplus food, no central dispatcher. Not isolated API toys: one runnable demo per capability area, composed in a single constructive world, each calling out a pattern &amp; pitfall. Thirteen run Docker-free and CI-gated (<code>coop-smoke</code>); the two real-model deploys — and <code>llm_agent</code>, three in all — run by hand from code and, since v2.18.0, in CI as stem nodes against a real model in Ollama (<code>stem-examples</code>).</div>
     <div class="cols3" style="gap:12px;">
       <div class="card card-accent-blue" style="padding:14px 16px;">
         <div class="card-title">Self-organising fabric</div>
@@ -1334,8 +1338,8 @@ docker compose up --build --scale worker=10
           <div class="card-body"><code>make test</code> runs all 13 Docker scenarios unattended — now CI-gated. Each scenario is a runnable reference implementation of a specific pattern.</div>
         </div>
         <div class="card card-accent-purple">
-          <div class="card-title">Federation (shipped)</div>
-          <div class="card-body">Mount the <code>mycelium-agentfacts</code> lens: each node serves a self-certified, signed AgentFacts quilt-patch at <code>/.well-known/agent-facts.json</code>. Sovereign discovery on the agent internet — no issuer authority.</div>
+          <div class="card-title">Discovery and federation (shipped)</div>
+          <div class="card-body">Mount the <code>mycelium-agentfacts</code> lens for public discovery: each node serves a self-certified, signed AgentFacts quilt-patch at <code>/.well-known/agent-facts.json</code>, no issuer authority. Federation between named partners is the substrate's own edge — a signed export catalogue, bilateral trust, meshes that never merge.</div>
         </div>
         <div class="callout callout-green">
           <strong>Philosophy:</strong> if you need to manage infrastructure to use Mycelium, something has gone wrong — embed it, start it, forget it. Agent fleets are churny, heterogeneous, and partially-trusted: exactly the envelope this substrate commits to, so new coordination patterns become <em>packaging exercises, not substrate changes</em>. A foundation for next-generation agentic AI — not another framework to outgrow.
@@ -1351,11 +1355,11 @@ docker compose up --build --scale worker=10
   <div class="slide-top"><span class="eyebrow">What Is Proven</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title">Proven, demonstrated, <em>not yet shown.</em></div>
-    <div class="slide-sub">Three lists, kept on one dated page in the repository (<code>docs/operations/what-is-proven.md</code>, refreshed at every release). This slide is the page as of 2026-10-01 (v2.18.0).</div>
+    <div class="slide-sub">Three lists, kept on one dated page in the repository (<code>docs/operations/what-is-proven.md</code>, refreshed at every release). This slide is the page as of 2026-10-03 (v2.21.0).</div>
     <div class="cols3">
-      <div class="card card-accent-green"><div class="card-title">Proven in CI, every merge</div><div class="card-body">The authority bypass matrix (every door runs nothing after a revocation, by the handlers' own counters; a <code>compliance</code> + <code>a2a</code> build) · a composed effect refused at the destination unless attributed and authorised · the declared fleet checked offline and every artifact-shaped co-op demo run as stem nodes, three against a real model in Ollama · agent-published code stopped at its fuel budget and held in the shadow lane until a reviewer accepts it · golden on-disk persistence fixtures replayed · the deterministic-replay corpus · the fails-first regression floor · twelve fuzz targets with a reachability registry · the co-op and AFN smokes · the Docker cluster suites (4-node, 3-node, two-mesh, confined fleet) with no retries.</div></div>
-      <div class="card card-accent-blue"><div class="card-title">Demonstrated, bound stated</div><div class="card-body">Running work stops within its class's measured bound when authority lapses (<code>authority_drain</code>) · the ten-council git contention run · 100-node formation and convergence when the scale suite runs · a two-mesh federation that does not merge with the link cut · four CLI demonstrations that found real defects before release.</div></div>
-      <div class="card card-accent-orange"><div class="card-title">Not yet shown</div><div class="card-body">No named third-party production deployment. The nightly scale runner: the hosted job has no runner; the local runner's last rows failed on the environment. Performance: hot-path micro-benchmarks on one machine only, no end-to-end figure under load. The four joint AWS/GCP runs with the oversight consumer. Models pulled from S3 or GCS (an S3 emulator only; no real bucket). <code>llm_agent</code>'s MCP tools as stems. The declaration rendered by the oversight consumer. The self-audit floor at 7/7/7 for the same three dimensions across many runs, with a 48-entry ledger of scores later proven wrong.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Proven in CI, every merge</div><div class="card-body">The authority bypass matrix (every door runs nothing after a revocation, by the handlers' own counters; a <code>compliance</code> + <code>a2a</code> build) · a composed effect refused at the destination unless attributed and authorised · the declared fleet checked offline and every artifact-shaped co-op demo run as stem nodes, three against a real model in Ollama · agent-published code stopped at its fuel budget and held in the shadow lane until a reviewer accepts it · golden on-disk persistence fixtures replayed · the deterministic-replay corpus · the fails-first regression floor · twelve fuzz targets with a reachability registry · the co-op and AFN smokes · the Docker cluster suites (4-node, 3-node, two-mesh, confined fleet) with no retries · <strong>a node says which guarantees it enforces and why not the rest</strong>, resolved against the node as built and configured, and under <code>secure-single-domain</code> refuses to start naming each unmet one · every decision point catalogued, generated and gated, with a trace shown to change no decision.</div></div>
+      <div class="card card-accent-blue"><div class="card-title">Demonstrated, bound stated</div><div class="card-body">Running work stops within its class's measured bound when authority lapses (<code>authority_drain</code>) · the ten-council git contention run · 100-node formation and convergence when the scale suite runs · a two-mesh federation that does not merge with the link cut · four CLI demonstrations, two of which found real defects before release · a TLS node started from a certificate issued off-node, the fleet CA's key on no node.</div></div>
+      <div class="card card-accent-orange"><div class="card-title">Not yet shown</div><div class="card-body">No named third-party production deployment. The nightly scale runner: the hosted job has no runner; the local runner's last rows failed on the environment. Performance: hot-path micro-benchmarks on one machine only, no end-to-end figure under load. The four joint AWS/GCP runs with the oversight consumer. Models pulled from S3 or GCS (an S3 emulator only; no real bucket). <code>llm_agent</code>'s MCP tools as stems. The declaration rendered by the oversight consumer. The self-audit floor at 7/7/7 for the same three dimensions across many runs, with a 48-entry ledger of scores later proven wrong. A live node's recording replayed <em>decision for decision</em>: the first comparison run diverged at the kernel's 20th choice (two periodic loops' ticks swapped order) — the scheduler seam over every loop is the open item. A model larger than one gossip frame (10 MiB) pulled over the mesh. A keyed <code>[[serve]]</code> endpoint without a secret in the unit file.</div></div>
     </div>
     <div class="callout callout-orange"><strong>Why say it here.</strong> The gaps are each stated honestly elsewhere in the repository; a reviewer assembling them from six places assembles them against us. One page, one slide, one date.</div>
   </div>
@@ -1410,11 +1414,11 @@ docker compose up --build --scale worker=10
     <div class="cols3" style="gap:12px;margin-bottom:12px;">
       <div class="card card-accent-green">
         <div class="card-title">Layer I — KV Store</div>
-        <div class="card-body">Last-write-wins gossip over TCP. HLC causal ordering. TTL per key. Anti-entropy on reconnect. Bloom-filtered dedup. WAL persistence.</div>
+        <div class="card-body">Last-write-wins gossip over TCP. HLC causal ordering. TTL per key. Anti-entropy on reconnect. A sharded nonce seen-set, bounded and scaled from cluster size, for dedup. WAL persistence.</div>
       </div>
       <div class="card card-accent-blue">
         <div class="card-title">Layer II — Signal Mesh</div>
-        <div class="card-body">Ephemeral scoped events. Cluster / group / individual scopes. Opacity composition for admission control. Pheromone attenuation at group boundaries.</div>
+        <div class="card-body">Ephemeral scoped events. Cluster / group / individual scopes. Opacity composition for admission control. Signal boundary groups; opacity pheromones withhold signals from loaded nodes.</div>
       </div>
       <div class="card card-accent-purple">
         <div class="card-title">Layer III — Consensus</div>
@@ -1449,11 +1453,11 @@ docker compose up --build --scale worker=10
             <strong>Anti-entropy</strong> — on reconnect, late joiners catch up fully<br>
             <strong>TTL per key</strong> — tombstones expire; no deregister calls<br>
             <strong>WAL persistence</strong> — survives unclean shutdown<br>
-            <strong>Bloom seen-set</strong> — deduplicates without per-key overhead
+            <strong>Sharded nonce seen-set</strong> — exact dedup, bounded by <code>max_seen_entries</code>
           </div>
         </div>
         <div class="callout callout-green">
-          <strong>Why no separate registry:</strong> the KV layer <em>is</em> the registry. Every node holds a complete, eventually-consistent cluster view at all times.
+          <strong>Why no separate registry:</strong> the KV layer <em>is</em> the registry. Every node holds an eventually convergent cluster view — local reads, no round-trip.
         </div>
       </div>
       <div>
@@ -1548,7 +1552,7 @@ agent.<span class="cs">mesh</span>().<span class="cs">suppress</span>(<span clas
           <div class="card-body"><code>cross_group_propose</code> + <code>GroupQuorum</code> — multiple groups each act as an independent voting bloc. Models multi-AZ durability gates and hierarchical approval.</div>
         </div>
         <div class="callout callout-purple">
-          <strong>Why not Raft:</strong> Raft requires a stable leader. Agent fleets have constant churn. Epidemic consensus tolerates node turnover without stalling progress.
+          <strong>Why not Raft:</strong> Raft requires a stable leader. Agent fleets have constant churn. Epidemic consensus tolerates node turnover without a leader to re-elect; progress still needs a live quorum.
         </div>
       </div>
       <div>
@@ -1614,7 +1618,7 @@ GossipConfig {
 }
         </div>
         <div class="callout callout-red" style="margin-top:10px;">
-          <strong>Threat model:</strong> mTLS stops external injection. KV-write signing stops a compromised cluster node from injecting modified KV frames. Both layers required for full integrity.
+          <strong>Threat model:</strong> mTLS stops external injection. KV-write signing stops a compromised cluster node from injecting modified KV frames. Both layers are required for the integrity the threat model claims — crash-fault, attributed.
         </div>
         <div class="callout callout-orange" style="margin-top:10px;">
           <strong>HTTP gateway:</strong> no auth by default — bind to loopback or set <code>gateway_auth_token</code>. <code>/health</code>, <code>/ready</code>, <code>/metrics</code> intentionally public for load-balancer probes.
@@ -1646,9 +1650,9 @@ GossipConfig {
             gossip_messages_received_total<br>
             gossip_frames_dropped_total<br>
             gossip_store_entries<br>
-            gossip_peers_connected<br>
-            signal_emitted_total{scope,kind}<br>
-            consensus_proposals_total{outcome}
+            mycelium_emergent_peers_known<br>
+            gossip_signals_emitted_total / _delivered_total / _rejected_total<br>
+            mycelium_consensus_timeouts_total · mycelium_consensus_commit_conflicts
           </div>
         </div>
         <div class="card card-accent-blue">
@@ -1657,7 +1661,7 @@ GossipConfig {
         </div>
         <div class="card card-accent-green">
           <div class="card-title">Fleet diagnosability — <em>Legible Emergence</em></div>
-          <div class="card-body">Per-node metrics answer "is <em>this node</em> healthy?"; an emergent fleet needs "why is the <em>whole fleet</em> in this state?" <strong>Detect → Localize → Explain → Intervene</strong>, computed <strong>coordinator-free</strong> from each node's local KV + HLC causal order + a <strong>bounded</strong> scatter-gather — no central collector, and the skipped set is <em>named</em> (<code>not_queried</code>), never silently dropped. <code>GET /gateway/explain</code> reconstructs a key's cross-node causal history; <code>GET /gateway/diagnose</code> narrates the fleet's state for a non-designer.</div>
+          <div class="card-body">Per-node metrics answer "is <em>this node</em> healthy?"; an emergent fleet needs "why is the <em>whole fleet</em> in this state?" <strong>Detect → Localize → Explain → Intervene</strong> (and, since v2.19.0, <code>GET /gateway/guarantees</code> beside <code>/diagnose</code> and <code>/explain</code>: what this node enforces, and why not the rest), computed <strong>coordinator-free</strong> from each node's local KV + HLC causal order + a <strong>bounded</strong> scatter-gather — no central collector, and the skipped set is <em>named</em> (<code>not_queried</code>), never silently dropped. <code>GET /gateway/explain</code> reconstructs a key's cross-node causal history; <code>GET /gateway/diagnose</code> narrates the fleet's state for a non-designer.</div>
         </div>
       </div>
       <div>
@@ -1719,9 +1723,8 @@ agent.<span class="cs">shutdown_with_timeout</span>(Duration::from_secs(<span cl
       <div>
         <div class="code-block" style="font-size:11.5px;">
 <span class="cm">// Enable A2A</span>
-<span class="ck">let</span> agent = GossipAgent::builder()
-  .<span class="cs">with_a2a</span>()
-  .<span class="cs">build</span>().await?;
+<span class="ck">let</span> agent = GossipAgent::new(node_id, cfg)
+  .<span class="cs">with_a2a</span>();
 
 <span class="cm">// Shard routing</span>
 <span class="ck">let</span> owner = agent.<span class="cs">service</span>().<span class="cs">shard_for</span>(
@@ -1980,7 +1983,7 @@ agent.<span class="cs">service</span>().<span class="cs">deliver_event</span>(&a
     <div class="cols2">
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card card-accent-blue">
-          <div class="card-title">Control plane / data plane</div>
+          <div class="card-title">Curator path / read path</div>
           <div class="card-body">The corpus is <strong>not</strong> in gossiped KV — it lives in a node-independent, pluggable store (shared FS / S3 / doc store). A single elected <strong>curator</strong> serialises writes; every agent <strong>reads the store directly, in parallel</strong> — no curator on the read path. Curator election + ring-failover ride the capability ring; if the curator vanishes the wiki stays readable and a new one self-elects.</div>
         </div>
         <div class="card card-accent-green">
