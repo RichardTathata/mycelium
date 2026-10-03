@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.20.0] — 2026-10-03
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.19.0 holds. **Upgrade notes:** `StemOptions` gained `trace` and `TracePolicy` gained `Partial` (an exhaustive literal or `match` breaks; `..Default::default()` is unaffected); `mycelium::sim_seam` is re-exported in every build; `PersistenceConfig` gained `on_unreadable` (default `refuse`; an exhaustive literal breaks); `ClientError` gained `Egress` (`#[non_exhaustive]`). **Behaviour changes — each a refusal at `start()` where a node used to start degraded:** unreadable persisted state, or the wrong at-rest key (`persistence.on_unreadable = "quarantine"` to move the files aside); a gateway that cannot bind or load its certificate; an `[oidc]` issuer the egress list denies; an audit sink without `[tls]`. **Not claimed:** the node binary's bundle recording attaches no trace; no recording-versus-replay comparison has been run; activation and probe stay catalogue-only, so install → activation → probe is not linked by an operation id.
+
 ### Fixed
 - **A node can start without the fleet CA's private key** (`id.ca_key_off_node`, the guarantee the
   startup report could report but no running node could meet). `TlsConfig::cert_pem` was declared and
