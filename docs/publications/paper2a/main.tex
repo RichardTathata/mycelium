@@ -904,8 +904,9 @@ outcome---a minimal consensus mechanism is invoked. The mechanism is:
 \item scoped to the specific operation, and
 \item dissolved after the operation completes.
 \end{enumerate}
-The mechanism does not own persistent state and does not sit on the critical
-path of normal substrate operations.
+The mechanism holds no standing authority between operations---its acceptors keep
+durable ballot memory (since v2.14.0) so a restart cannot re-vote, memory rather
+than authority---and does not sit on the critical path of normal substrate operations.
 \end{property}
 
 Property 4 is the most delicate of the four because it appears, on its face,
@@ -1006,7 +1007,7 @@ Transient; dissolved after the operation completes; substrate does not depend on
 \addlinespace
 State ownership &
 Owns persistent state; other agents depend on the coordinator's state &
-Stateless between operations; no persistent state outside the substrate \\
+No standing authority between operations; durable acceptor memory, no state outside the substrate \\
 \addlinespace
 Critical path &
 All normal operations route through or depend on the coordinator &
@@ -1266,8 +1267,10 @@ mechanisms, and its decision authority out of existence:
   convention; a standby mirrors items via replication and promotes itself
   when the advertisement evaporates---failure detection \emph{is} the
   capability ring. Role election under the \texttt{Auto} policy is
-  likewise emergent (candidates observe the ring and self-assign, with a
-  deterministic lowest-identifier tie-break), matching the
+  likewise emergent (candidates observe the ring and self-assign by rendezvous
+  selection---\texttt{mycelium::election}, since v2.14.0, so different rings pick
+  different winners; the earlier lowest-identifier tie-break put every single-writer
+  role on one node), matching the
   designed-in-versus-emergent distinction of \S\ref{sec:emergent}: the
   failover coalition forms from local rules in response to a specific
   event and holds no standing authority over the substrate.
@@ -1282,7 +1285,7 @@ mechanisms, and its decision authority out of existence:
 \end{itemize}
 
 The behavioural claims are verified by the crate's test suite against real
-clusters (loopback TCP and a five-node Docker deployment; all counts at
+clusters (loopback TCP and a four-node Docker deployment; all counts at
 the commit accompanying this paper). Three results carry the empirical
 weight:
 

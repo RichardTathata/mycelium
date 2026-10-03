@@ -115,7 +115,7 @@ not have:
    Mycelium's claim is the *integrated three layers* — causal KV (HLC) **+** signal/boundary mesh **+**
    epidemic consensus — with recallable-role failover, such that the layers compose.
 3. **The recursion.** None demonstrate the substrate *generating multiple distinct coordination primitives*
-   on one public API (§8, the five companion crates). That composability evidence is unique to this work.
+   on one public API (§8, the companion crates — five at the time of writing, twelve by 2026-10). That composability evidence is unique to this work.
 
 Two useful contrast lines fall out: **Terrarium** inverts the load story — it treats context-overflow as
 an *attack surface to defend*, where Mycelium treats overload as a *signal to route on* (defence vs

@@ -731,8 +731,9 @@ correctly on a substrate that eliminates the coordinator.
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Evaluation}
 
-Mycelium's correctness across its three-layer architecture is validated by 305
-unit tests and 13 integration scenarios run against a live 5-node Docker cluster.
+Mycelium's correctness across its three-layer architecture is validated (at tag
+\texttt{paper-submission-v2}, 2026-06-12) by 305 unit tests and 13 integration
+scenarios run against a live 4-node Docker cluster.
 Scenarios cover KV replication under partition and reconnection, signal delivery
 and boundary admission, capability group formation and dissolution, consensus
 quorum under node failure, cross-group voting, the full Agentic Flow Networks
@@ -766,9 +767,9 @@ point's availability is maintained by substrate evaporation and emergent
 promotion, and its decision authority is zero because it makes no decisions.
 
 The implementation is publicly available at
-\url{https://github.com/RichardEko/mycelium} (tag \texttt{paper-submission-v2}) under the AGPL-3.0 licence.
+\url{https://github.com/RichardTathata/mycelium} (tag \texttt{paper-submission-v2}) under the AGPL-3.0 licence.
 The integration test harness is included in the repository and reproducible with a
-single \texttt{make test} invocation against a Docker-composed 5-node cluster.
+single \texttt{make test} invocation against a Docker-composed 4-node cluster.
 The AGPL-3.0 licence is intentional: applications that deploy Mycelium as part of a
 networked service must publish their source under the same terms, closing the
 SaaS loophole that permissive licences leave open. Organisations requiring
@@ -862,8 +863,10 @@ necessity.
 
 \subsection{Limitations}
 
-Mycelium assumes a cluster the operator owns. Mycelium's scope is intra-cluster;
-cross-organisational discovery requires external registry infrastructure.
+Mycelium assumes a cluster the operator owns. Cross-domain federation exists in the
+implementation---bilateral trust bundles, exported services only, no shared registry
+and no membership merge, proven in CI across two Docker meshes with the link cut---but
+cross-organisational \emph{discovery} through a shared registry is outside it.
 Mycelium's conforming A2A endpoint makes it reachable from any A2A-speaking
 registry without modification to either side.
 
@@ -884,7 +887,7 @@ cluster---substantially reduces this surface, but owned clusters still contain
 buggy or compromised nodes. The \texttt{tls} feature addresses node identity:
 each node holds an Ed25519 keypair; mTLS authenticates every TCP connection;
 KV writes under the \texttt{tls} feature are Ed25519-signed at the frame level
-(introduced at wire protocol version~10; current protocol version is~11),
+(introduced at wire protocol version~10; current protocol version is~12),
 making undetected mutation of replicated state infeasible for
 an attacker who has not compromised the originating node's private key. The
 current implementation does not provide capability-claim attestation---a node
@@ -909,13 +912,15 @@ once, with no duplicate execution under any failure scenario.
 two upstream outputs) are not expressible in exactly-named lanes today; the
 keyed-exact-match \texttt{take} discussed below (\texttt{take\_by\_key}, shipped as
 M13 in v2.0, 2026-06-20) covers pairwise joins, and arbitrary cross-stage predicates belong to the blackboard
-companion (Future Work). An orchestrated DAG engine (Airflow, Dagster) remains
+companion (\texttt{mycelium-blackboard}). An orchestrated DAG engine (Airflow, Dagster) remains
 right where centralised control is itself the requirement---human approval
 gates, one pane for dependency state---a coordinator adopted deliberately.
 \emph{Long-term log retention}---where TTL evaporation is a correctness property;
 applications requiring replay capability must use a separate append-only store.
 \emph{Cross-cluster fan-out at scale}---where the gossip mesh operates within a
-single cluster; multi-cluster deployments require a federation layer.
+single cluster; multi-cluster deployments go through the federation edge (shipped
+after this paper's tag: a signed credential carried on A2A, bilateral trust, the
+meshes never merging).
 
 \textbf{Lane-addressed claiming, and where Linda's matching earns its keep.}
 The Section~8 realisation replaces associative template retrieval with named
@@ -934,7 +939,7 @@ general matching; (ii)~\emph{contract-net claiming}, where a multi-dimensional
 predicate lives on the item, makes per-item matching irreducible;
 (iii)~\emph{blackboard working memory}---opportunistic reasoning over shared
 typed facts, with no stages because the flow topology is emergent per item; the
-one missing primitive is a competitive destructive claim-by-predicate with the
+one further primitive---which the blackboard companion supplies---is a competitive destructive claim-by-predicate with the
 tuple space's exactly-once discipline, and this is precisely the pattern
 Carvalho~\cite{carvalho} observes agent frameworks rebuilding ad hoc;
 (iv)~\emph{semantic claiming}---similarity between task content and agent
@@ -965,15 +970,17 @@ composition above the substrate, not a matching engine inside it.
   outcomes---end-to-end job latency, throughput, idle-while-work-exists time,
   and fairness---under heterogeneous and drifting worker service times. The
   companion paper's framework predicts the prediction arms degrade with
-  heterogeneity while pull does not; that prediction is what remains untested.
+  heterogeneity while pull does not; a 108-run pilot ($N=20$, three seeds per
+  cell) is committed under \texttt{data/three\_arm/} and not yet reported; the
+  phase-2 axes are open.
 
 \item \textbf{Formal verification} of the signal/boundary substrate properties
   using TLA+ or similar.
 
-\item \textbf{Cross-cluster federation}---practical experience deploying multiple
-  independent Mycelium clusters registered with an internet-scale A2A
-  gateway~\cite{nanda}, measuring discovery latency and trust propagation across
-  organisational boundaries.
+\item \textbf{Cross-cluster federation at internet scale}---the federation edge is
+  built (bilateral trust bundles, two-mesh non-merger proven in CI); what remains is
+  practical experience with an internet-scale A2A registry~\cite{nanda}, measuring
+  discovery latency and trust propagation across organisational boundaries.
 
 \item \textbf{Byzantine fault tolerance}---the current consensus layer is
   crash-fault tolerant only. Extending it to tolerate actively malicious nodes
