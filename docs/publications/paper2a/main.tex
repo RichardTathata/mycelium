@@ -124,8 +124,8 @@ is expressed: a worker that claims work when ready makes the only promise a
 distributed agent can always keep, because making it and keeping it are the
 same event. We anchor the framework in the computing domain in both grades:
 a measurement on a single substrate in which broker-mediated decisions
-exhibit mean latency two to three orders of magnitude higher than locally
-evaluated ones (the within-paradigm gradient the theorem predicts), and a
+exhibit mean latency thirty to a hundred times higher (one to two orders of
+magnitude) than locally evaluated ones (the within-paradigm gradient the theorem predicts), and a
 constructive pull instantiation---a tuple-space layer built entirely from
 the substrate's public primitives---whose test suite verifies exactly-once-effect
 distribution with no participant holding a view of any other's state, and
@@ -1126,8 +1126,10 @@ the empirical companion to the paper's full claim; that overstated it.
 \subsection{Experimental Design}
 
 The \texttt{coordinator\_comparison} binary
-(\path{examples/coordinator_comparison.rs} in the Mycelium repository,
-commit accompanying this paper) spawns $N$ worker agents, one client agent,
+(\path{examples/coordinator_comparison.rs} in the Mycelium repository; the
+sweep reported here was run on 2026-10-03, its per-decision CSVs, summary and
+machine description committed under \path{docs/publications/paper2a/data/},
+from which the table and figure are generated) spawns $N$ worker agents, one client agent,
 and (in broker mode) one broker agent, all in a single process over the
 TCP loopback. Each worker publishes a synthetic load value as a KV entry
 (\texttt{wkr/\{node\}/load}) at 10\,Hz, drifting via a pseudo-random walk
@@ -1163,58 +1165,61 @@ data appears as Figure~\ref{fig:coordinator-latency}.
 \toprule
 \textbf{Mode} & \textbf{$N$} & \textbf{Mean ($\mu s$)} & \textbf{p95 ($\mu s$)} & \textbf{p99 ($\mu s$)} & \textbf{Mean staleness} \\
 \midrule
-gossip & 10 &     15.7 &    28 &     46 & 0.109 \\
-broker & 10 &  5\,857.7 & 1\,428 & 501\,328 & 0.043 \\
-gossip & 20 &     17.8 &    38 &     60 & 0.120 \\
-broker & 20 &  1\,113.1 & 6\,933 &  11\,218 & 0.086 \\
-gossip & 40 &     27.9 &    61 &    102 & 0.196 \\
-broker & 40 & 10\,896.4 & 27\,912 & 500\,831 & 0.149 \\
+gossip & 10 &     27.6 &     38 &     62 & 0.110 \\
+broker & 10 &    875.7 &  2\,231 &  4\,089 & 0.045 \\
+gossip & 20 &     35.0 &     62 &    128 & 0.157 \\
+broker & 20 &  3\,028.4 & 16\,067 & 23\,450 & 0.121 \\
+gossip & 40 &     26.7 &     51 &     58 & 0.224 \\
+broker & 40 &  2\,781.0 & 15\,847 & 25\,901 & 0.185 \\
 \bottomrule
 \end{tabular}
 \caption{Aggregate metrics from a single $20$-second run per $(mode, N)$ pair
 at $50$\,Hz decision rate. Staleness is the absolute difference between
 \emph{perceived\_load} (used by the decision) and \emph{true\_load}
-(measured at action time). The broker p99 values at $N{=}10$ and $N{=}40$
-include decisions that hit the $500$\,ms RPC timeout entirely.}
+(measured at action time). No decision in this sweep reached the $500$\,ms RPC
+timeout; the broker tail is serialisation queueing. Sweep of 2026-10-03,
+\path{data/summary.csv}.}
 \label{tab:empirical}
 \end{table}
 
-\textbf{Decision latency.} Gossip mode mean latency grows from $15.7$ to
-$27.9$\,$\mu s$ across a $4\times$ cluster scale. This is consistent with
+\textbf{Decision latency.} Gossip mode mean latency stays between $26.7$ and
+$35.0$\,$\mu s$ across a $4\times$ cluster scale---flat, not growing. This is consistent with
 the framework's prediction: a locally-resolved decision is a scan of the
 client's local KV, with cost linear in the number of entries scanned, and
 that cost stays in the tens of microseconds at the tested scale. Broker
-mode mean latency is between $1$\,ms and $11$\,ms — two to three orders
-of magnitude higher than gossip. The substrate is not slow; the serialisation
+mode mean latency is between $0.9$\,ms and $3.0$\,ms---roughly $30\times$ at
+$N{=}10$ and $100\times$ at $N{=}40$ the gossip mean, one to two orders of
+magnitude higher. The substrate is not slow; the serialisation
 through a single coordinating agent is. We read this as a concrete computing-domain
 instance of the latency gradient the Coordinator Trap predicts---not as a measurement
 of a general scaling law, which a single run per condition cannot support.
 
-The broker p99 tail at $N{=}10$ and $N{=}40$ is dominated by the $500$\,ms RPC
-timeout, and should be read as a separate \emph{failure tail} rather than ordinary
-routing latency: it reflects requests that did not complete within the timeout, and
-its magnitude is partly an artefact of the chosen timeout value and this broker
-implementation, not of the coordinator trap as such. A claim resting on the tail
-would be fragile; the result we rely on is the order-of-magnitude gap in \emph{mean}
-routing latency between the two paradigms on the same substrate. A fuller breakdown---
-timeout rate, median, and mean computed with and without timed-out calls, reported
-separately from the tail---would harden the evidence and is the natural next
-measurement; the present table does not yet decompose it.
+The broker p99 tail ($4$--$26$\,ms) is ordinary serialisation queueing at the
+single coordinating agent: no decision in this sweep reached the $500$\,ms RPC
+timeout (the per-decision CSVs show a maximum of $44$\,ms, at $N{=}40$). An
+earlier, uncommitted sweep on which the first version of this table rested carried
+a timeout-dominated tail at $N{=}10$ and $N{=}40$ and a larger mean gap; the
+committed sweep of 2026-10-03 supersedes it, and the result we rely on is the
+order-of-magnitude gap in \emph{mean} routing latency between the two paradigms on
+the same substrate, not the tail. A claim resting on the tail would be fragile in
+either sweep.
 
-\textbf{Staleness.} The mean per-decision staleness — the magnitude by which
-the perceived load differs from the actual load — is small in both modes
-but consistently larger in broker mode at $N{=}40$ than the gossip mean
-at any tested $N$. The broker's view is one gossip-round stale plus the
-RPC round-trip; the client's local view is one gossip-round stale only.
-The broker's lower staleness at $N{=}10$ reflects an artefact of the
-small-cluster regime where the broker's gossip view converges quickly and
-the broker's reduced effective decision rate (it answers fewer requests
-per second) means each one is, on average, sampled closer to a load update.
-The pattern reverses at $N{=}20$ and $N{=}40$, with broker staleness
-exceeding gossip staleness at the largest tested cluster.
+\textbf{Staleness.} The mean per-decision staleness---the magnitude by which
+the perceived load differs from the actual load---is small in both modes and,
+in this sweep, lower in broker mode at every tested $N$ ($0.045$ against $0.110$
+at $N{=}10$; $0.185$ against $0.224$ at $N{=}40$), both growing with $N$. The
+broker's view is one gossip round stale plus the RPC round-trip, the client's
+local view one gossip round stale only; but the broker answers fewer decisions
+per second, so each is on average sampled closer to a load update, and at this
+scale that effect wins---the broker buys its lower staleness with the two
+orders of magnitude in latency above. An earlier sweep showed the ordering
+reverse at $N{=}40$. A single run per condition cannot support either ordering
+as a law, and we do not read staleness as evidence for the framework in either
+direction here. The misroute rate follows staleness (broker $0.3$--$2.3\%$,
+gossip $1.8$--$3.5\%$).
 
-\textbf{Throughput.} Gossip mode achieved $743$--$901$ completed decisions
-per $20$-second window; broker mode achieved $499$--$724$. The substrate
+\textbf{Throughput.} Gossip mode completed $889$--$893$ decisions per
+$20$-second window (of $1\,000$ attempted); broker mode $731$--$882$. The substrate
 itself is not the constraint — the throughput gap is the broker's
 serialisation behaviour at the tested decision rate.
 

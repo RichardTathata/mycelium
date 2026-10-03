@@ -172,6 +172,11 @@ def svg_figure(rows):
     return "".join(parts)
 
 def pgf_figure(rows):
+    _g, _b = by_mode(rows, "gossip"), by_mode(rows, "broker")
+    gmin, gmax = min(r["mean_us"] for r in _g), max(r["mean_us"] for r in _g)
+    _ratios = [b["mean_us"] / g["mean_us"] for g, b in zip(_g, _b)]
+    rmin, rmax = min(_ratios), max(_ratios)
+    bp99max = max(r["p99_us"] for r in _b)
     """Compile-ready TikZ/pgfplots fragment for the LaTeX paper."""
     g = by_mode(rows, "gossip")
     b = by_mode(rows, "broker")
@@ -226,9 +231,9 @@ def pgf_figure(rows):
 \caption{Decision latency (log scale, panel a) and routing-decision staleness
 (panel b) for the locally-resolved gossip mode and the broker-mediated mode
 on the same Mycelium substrate. Each point is the aggregate of one 20-second
-run at 50 decisions/second. Gossip mean grows from 15.7 to 27.9 $\mu s$ over a
-4$\times$ cluster scale; broker mean is two to three orders of magnitude
-higher and p99 includes timeouts at the RPC ceiling.}
+run at 50 decisions/second. Gossip mean stays between """ + f"{gmin:.1f}" + r""" and """ + f"{gmax:.1f}" + r""" $\mu s$ over a
+4$\times$ cluster scale; broker mean is """ + f"{rmin:.0f}" + r"""--""" + f"{rmax:.0f}" + r"""$\times$ higher (one to two
+orders of magnitude), with a p99 tail below """ + f"{bp99max/1000:.0f}" + r""" ms.}
 \label{fig:coordinator-latency}
 \end{figure}
 """
