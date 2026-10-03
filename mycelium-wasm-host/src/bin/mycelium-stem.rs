@@ -168,6 +168,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::create_dir_all(dir)?;
             std::fs::write(dir.join(mycelium::decision::DECISION_ATTACHMENT), sink.to_jsonl())?;
             std::fs::write(dir.join("decisions.stats.json"), sink.stats_json())?;
+            // The coverage manifest beside it (G8): which rules this stem could have recorded.
+            if let Ok(cat) = mycelium::rule::Catalogue::gather(&[mycelium::rules::RULES, mycelium_wasm_host::rules::RULES]) {
+                std::fs::write(dir.join("coverage.json"), mycelium::decision::coverage_manifest(&cat.rules))?;
+            }
             tracing::info!(dir = %dir.display(), held = sink.stats().held, dropped = sink.dropped(), "decision trace written");
         }
         agent.shutdown().await;

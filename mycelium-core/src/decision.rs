@@ -409,6 +409,160 @@ impl DecisionSink {
     }
 }
 
+/// The canonical decision tuple (plan I6): what a replay must reproduce — the rule and revision, the
+/// trigger, the target, the outcome and its reason. Not the sequence number, the stamps or the inputs'
+/// rendering, which may legitimately differ between a recording and its replay.
+pub fn canonical(r: &DecisionRecord) -> String {
+    format!("{}@{} | {} | {} | {:?} | {}", r.rule, r.rule_revision, r.trigger, r.target.as_deref().unwrap_or("-"), r.outcome, r.reason)
+}
+
+/// Can a replay be expected to reproduce this decision? Only when every input it read is one the
+/// seams cover (local state, configuration, a supplied value). A gossiped or sampled input arrives
+/// from outside the recording's seams, so a difference there is **unattributable** — the trace cannot
+/// say whether the decision or its world changed.
+pub fn attributable(r: &DecisionRecord) -> bool {
+    r.inputs.iter().all(|i| !matches!(i.provenance, Provenance::Gossiped | Provenance::Sampled))
+}
+
+/// One position where two traces differ.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Divergence {
+    /// Index into both traces (the first trace's record is `left`, the second's `right`; `None` where
+    /// one trace has ended).
+    pub index: usize,
+    pub left: Option<String>,
+    pub right: Option<String>,
+    /// `true` when both records read only seam-covered inputs, so the difference is the decision's.
+    pub attributable: bool,
+}
+
+/// The result of comparing two traces position by position on their canonical tuples.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Comparison {
+    pub compared: usize,
+    pub divergences: Vec<Divergence>,
+    /// Divergences whose records read inputs outside the seams — reported, never counted as a
+    /// reproduction failure.
+    pub unattributable: usize,
+}
+
+impl Comparison {
+    /// The traces agree on every attributable decision (an unattributable divergence is stated, not
+    /// counted).
+    pub fn reproduces(&self) -> bool {
+        self.divergences.iter().all(|d| !d.attributable)
+    }
+}
+
+/// Compare two traces deterministically: position by position on [`canonical`] tuples, each divergence
+/// marked attributable or not by [`attributable`].
+pub fn compare(left: &[DecisionRecord], right: &[DecisionRecord]) -> Comparison {
+    let n = left.len().max(right.len());
+    let mut c = Comparison { compared: n, ..Default::default() };
+    for i in 0..n {
+        let (l, r) = (left.get(i), right.get(i));
+        let (lc, rc) = (l.map(canonical), r.map(canonical));
+        if lc != rc {
+            let attributable = l.is_none_or(attributable) && r.is_none_or(attributable);
+            if !attributable { c.unattributable += 1; }
+            c.divergences.push(Divergence { index: i, left: lc, right: rc, attributable });
+        }
+    }
+    c
+}
+
+/// The coverage manifest (plan I6, G8): which rules a trace could have recorded, by trace policy, so a
+/// reader of a bundle knows that an absent rule is *not recorded here*, never *did not decide*.
+pub fn coverage_manifest(rules: &[&crate::rule::RuleDescriptor]) -> String {
+    #[derive(Serialize)]
+    struct Row<'a> { id: &'a str, revision: u32, trace: crate::rule::TracePolicy }
+    #[derive(Serialize)]
+    struct Manifest<'a> { schema: &'static str, record_schema: &'static str, rules: Vec<Row<'a>> }
+    let rows = rules.iter().map(|r| Row { id: r.id, revision: r.revision, trace: r.trace }).collect();
+    serde_json::to_string_pretty(&Manifest { schema: "mycelium.coverage/1", record_schema: RECORD_SCHEMA, rules: rows }).unwrap_or_else(|_| "{}".into())
+}
+
+/// Render a decision trace (one JSON record per line, as [`DecisionSink::to_jsonl`] writes it) as what
+/// each target went through, in order: the round, the rule, how it ended and why, what it read and
+/// what it caused. With a catalogue document (`docs/reference/rule-catalogue.json`), each rule used is
+/// summarised once at the end. The footer says what the trace cannot: a dropped record is the sink's
+/// counter, not a line here; a decision that read gossiped or sampled inputs is unattributable under
+/// replay. Lines that do not parse are counted, never silently skipped. `target` narrows the output.
+pub fn explain(jsonl: &str, catalogue_json: Option<&str>, target: Option<&str>) -> String {
+    use std::collections::BTreeMap;
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    let mut unparsed = 0usize;
+    for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) => records.push(v),
+            Err(_) => unparsed += 1,
+        }
+    }
+    let summaries: BTreeMap<String, String> = catalogue_json
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+        .and_then(|c| c.get("rules").and_then(|r| r.as_array()).cloned())
+        .map(|rules| rules.iter().filter_map(|r| Some((r.get("id")?.as_str()?.to_string(), r.get("summary")?.as_str()?.to_string()))).collect())
+        .unwrap_or_default();
+    let str_of = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("-").to_string();
+
+    let mut order: Vec<String> = Vec::new();
+    let mut by_target: BTreeMap<String, Vec<&serde_json::Value>> = BTreeMap::new();
+    for r in &records {
+        let t = str_of(r, "target");
+        if let Some(want) = target && t != want { continue; }
+        if !by_target.contains_key(&t) { order.push(t.clone()); }
+        by_target.entry(t).or_default().push(r);
+    }
+    let mut out = String::new();
+    let mut rules_used: BTreeMap<String, ()> = BTreeMap::new();
+    let (mut unattributable, mut truncated) = (0usize, 0usize);
+    for t in &order {
+        out.push_str(&format!("{t}\n"));
+        for r in &by_target[t] {
+            let rule = str_of(r, "rule");
+            rules_used.insert(rule.clone(), ());
+            let outcome = str_of(r, "outcome");
+            let reason = str_of(r, "reason");
+            let trigger = str_of(r, "trigger");
+            let mut line = format!("  {trigger} · {rule} → {outcome} {reason}");
+            if let Some(effect) = r.get("effect").and_then(|e| e.as_str()) {
+                line.push_str(&format!(" ⇒ {effect}"));
+            }
+            if let Some(inputs) = r.get("inputs").and_then(|i| i.as_array()) && !inputs.is_empty() {
+                let reads: Vec<String> = inputs.iter().map(|i| {
+                    let v = i.get("value").and_then(|x| x.as_str()).unwrap_or("-");
+                    let cut = if i.get("truncated").and_then(|x| x.as_bool()).unwrap_or(false) { "…" } else { "" };
+                    format!("{v}{cut}")
+                }).collect();
+                line.push_str(&format!(" (reads: {})", reads.join("; ")));
+                if inputs.iter().any(|i| matches!(i.get("provenance").and_then(|p| p.as_str()), Some("gossiped" | "sampled"))) {
+                    unattributable += 1;
+                }
+            }
+            if r.pointer("/completeness/inputs_truncated").and_then(|x| x.as_bool()).unwrap_or(false) {
+                truncated += 1;
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    if !summaries.is_empty() && !rules_used.is_empty() {
+        out.push_str("\nRules:\n");
+        for rule in rules_used.keys() {
+            if let Some(sum) = summaries.get(rule) {
+                out.push_str(&format!("  {rule} — {sum}\n"));
+            }
+        }
+    }
+    let shown: usize = by_target.values().map(Vec::len).sum();
+    out.push_str(&format!(
+        "\n{shown} record(s) over {} target(s); {unattributable} read gossiped or sampled inputs (unattributable under replay); {truncated} with truncated inputs; {unparsed} line(s) did not parse. \
+Records the sink dropped are in its counters (decisions.stats.json), not here.\n",
+        order.len()
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +655,68 @@ mod tests {
         assert_eq!(v["completeness"]["effect_unreferenced"], true);
         assert_eq!(v["view"], "unknown");
         assert_eq!(v["outcome"], "action");
+    }
+
+    /// Two traces that decided the same compare equal whatever their sequence numbers and stamps; a
+    /// different reason is an attributable divergence when the inputs were seam-covered, and
+    /// unattributable when one was gossiped — stated, and not counted against reproduction.
+    #[test]
+    fn comparison_is_on_the_canonical_tuple_and_names_what_it_cannot_attribute() {
+        let a = rec("declined");
+        let mut b = rec("declined");
+        b.seq = 99; b.node = "other".into();
+        assert_eq!(canonical(&a), canonical(&b));
+        assert!(compare(std::slice::from_ref(&a), std::slice::from_ref(&b)).reproduces());
+
+        let c = rec("elected");
+        let cmp = compare(std::slice::from_ref(&a), std::slice::from_ref(&c));
+        assert_eq!(cmp.divergences.len(), 1);
+        assert!(cmp.divergences[0].attributable && !cmp.reproduces());
+
+        let g = rec("elected").input(InputSnapshot::new("demand/", "providers=0", Provenance::Gossiped));
+        let cmp = compare(&[a], &[g]);
+        assert_eq!((cmp.unattributable, cmp.divergences[0].attributable), (1, false));
+        assert!(cmp.reproduces(), "an unattributable divergence is reported, not counted");
+        let cmp = compare(&[c], &[]);
+        assert_eq!(cmp.divergences[0].right, None);
+    }
+
+    /// The coverage manifest lists every rule with its trace policy.
+    #[test]
+    fn the_coverage_manifest_names_each_rule_and_its_policy() {
+        use crate::rule::{Outcome, OutcomeKind, Responsibility, RuleDescriptor, TracePolicy};
+        static R: RuleDescriptor = RuleDescriptor {
+            id: "t.one", revision: 2, subsystem: "t", responsibilities: &[Responsibility::Response], trigger: "t", inputs: &[],
+            outcomes: &[Outcome { kind: OutcomeKind::Action, reasons: &["done"] }], effects: &[], guards: &[], may_trigger: &[],
+            may_inhibit: &[], depends_on: &[], symbol: "t::t", docs: "d", tests: &["t"], trace: TracePolicy::Instrumented, summary: "s",
+        };
+        let m: serde_json::Value = serde_json::from_str(&coverage_manifest(&[&R])).unwrap();
+        assert_eq!(m["schema"], "mycelium.coverage/1");
+        assert_eq!(m["rules"][0]["id"], "t.one");
+        assert_eq!(m["rules"][0]["revision"], 2);
+        assert_eq!(m["rules"][0]["trace"], "instrumented");
+    }
+
+    /// The explanation groups by target in first-seen order, says each step's rule, outcome, reason,
+    /// reads and effect, summarises the rules used from a catalogue, and counts what it cannot say.
+    #[test]
+    fn the_explanation_reads_as_what_each_target_went_through() {
+        let s = DecisionSink::default();
+        s.record(DecisionRecord::new("prov.eligible", 1, "round 1", OutcomeKind::Action, "eligible").target("text/echo").no_parent().no_effect()).unwrap();
+        s.record(DecisionRecord::new("prov.demand_response", 1, "round 1", OutcomeKind::Action, "unmet_demand_live").target("text/echo")
+            .input(InputSnapshot::new("demand/", "providers=0 demanding=1", Provenance::Gossiped)).effect("start_install")).unwrap();
+        s.record(DecisionRecord::new("prov.presence_floor", 1, "round 1", OutcomeKind::NoAction, "floor_met").target("route/optimize").no_parent().no_effect()).unwrap();
+        let jsonl = s.to_jsonl() + "not json\n";
+        let catalogue = r#"{"schema":"mycelium.rules/1","rules":[{"id":"prov.eligible","summary":"Can host it."}]}"#;
+        let text = explain(&jsonl, Some(catalogue), None);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "text/echo");
+        assert_eq!(lines[1], "  round 1 · prov.eligible → action eligible");
+        assert_eq!(lines[2], "  round 1 · prov.demand_response → action unmet_demand_live ⇒ start_install (reads: providers=0 demanding=1)");
+        assert_eq!(lines[3], "route/optimize");
+        assert!(text.contains("  prov.eligible — Can host it."), "{text}");
+        assert!(text.contains("3 record(s) over 2 target(s); 1 read gossiped or sampled inputs") && text.contains("1 line(s) did not parse"), "{text}");
+        let only = explain(&jsonl, None, Some("route/optimize"));
+        assert!(only.starts_with("route/optimize\n") && !only.contains("text/echo"));
     }
 }

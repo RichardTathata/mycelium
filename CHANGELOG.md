@@ -43,6 +43,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Upgrade note:** `StemOptions` gained `trace` (an exhaustive literal breaks; `..Default::default()`
   is unaffected). **Not claimed:** the install → activation → probe chain is not linked by an
   operation id yet, and activation and probe stay catalogue-only.
+- **Replay and explanation for the decision trace** (plan I6). A replay bundle can carry the trace:
+  `Bundle::attachments` with `decisions.jsonl` and `coverage.json` (which rules the trace could have
+  recorded) — a bundle written before them still reads, and `has_decision_trace()` says *unavailable*,
+  never *empty*. Two traces compare deterministically on the canonical decision tuple (rule and
+  revision, trigger, target, outcome, reason — not the sequence or the stamps), and a divergence whose
+  records read gossiped or sampled inputs is reported as *unattributable* rather than counted as a
+  reproduction failure (`decision::compare`, `canonical`, `attributable`, `coverage_manifest`). Two
+  subcommands on the existing CLI: `mycelium rules [--format md|json]` exports the catalogue this
+  binary registers, and `mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>]
+  [--target <t>]` renders a trace as what each target went through, ending with what the trace cannot
+  say. `mycelium-stem --trace-dir` writes `coverage.json` beside the trace. **Not claimed:** the node
+  binary's bundle recording does not attach a trace (nothing in that binary is instrumented), and no
+  recording-versus-replay comparison has been run.
 
 ### Fixed
 - **A failing initial activation probe is an activation error, not a live install.** `[[activation]]`'s
