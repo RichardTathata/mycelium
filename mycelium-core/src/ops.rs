@@ -32,8 +32,16 @@ fn deliver_locally(
     signal_handlers: &SignalHandlers,
     signal: &Signal,
     combined_fill: f32,
+    sink: Option<&crate::decision::DecisionSink>,
 ) {
-    if !signal_boundary.read().admits(&signal.scope) { return; }
+    if !signal_boundary.read().admits(&signal.scope) {
+        // `signal.admission`, refusals only (plan I7): the admitted path is the hot path and records
+        // nothing; a refusal is rare and is what a reader asks about.
+        if let Some(s) = sink {
+            let _ = s.record(admission_record(signal, crate::decision::OutcomeKind::Refusal, "scope_not_admitted", combined_fill));
+        }
+        return;
+    }
     let admit = match &signal.scope {
         SignalScope::Individual(_) => true,
         // Boundary-transition announcements are control-plane, not work. Shedding the very
@@ -50,7 +58,21 @@ fn deliver_locally(
     };
     if admit {
         signal_handlers.deliver(signal);
+    } else if let Some(s) = sink {
+        let _ = s.record(admission_record(signal, crate::decision::OutcomeKind::Deferral, "shed_under_load", combined_fill));
     }
+}
+
+/// A `signal.admission` record from the values `deliver_locally` already had — the fill it was handed
+/// (sampled by the caller) and the signal's kind and scope; no clock, no draw of its own.
+fn admission_record(signal: &Signal, outcome: crate::decision::OutcomeKind, reason: &str, combined_fill: f32) -> crate::decision::DecisionRecord {
+    use crate::decision::{DecisionRecord, InputSnapshot, Provenance};
+    DecisionRecord::new("signal.admission", 1, "signal", outcome, reason)
+        .target(signal.kind.to_string())
+        .input(InputSnapshot::new("the signal's scope", format!("{:?}", signal.scope), Provenance::Supplied))
+        .input(InputSnapshot::new("combined fill (handlers, shards)", format!("{combined_fill:.2}"), Provenance::Sampled))
+        .no_parent()
+        .no_effect()
 }
 
 /// Generates a nonce, marks it seen, delivers locally (boundary + opacity checks),
@@ -77,7 +99,7 @@ pub fn emit_signal(
     if !nonce_claimed {
         let handler_fill = ctx.signal_handlers.fill_ratio(&kind);
         let combined = handler_fill.max(crate::framing::gossip_shard_fill(&ctx.gossip_txs));
-        deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &sig, combined);
+        deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &sig, combined, ctx.decision_sink());
     }
     let hint = forward_hint(&sig.scope);
     #[cfg(feature = "metrics")]
@@ -114,7 +136,7 @@ pub fn emit_signal_ordered(
     if !nonce_claimed {
         let handler_fill = ctx.signal_handlers.fill_ratio(&kind);
         let combined = handler_fill.max(crate::framing::gossip_shard_fill(&ctx.gossip_txs));
-        deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &sig, combined);
+        deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &sig, combined, ctx.decision_sink());
     }
     let hint = forward_hint(&sig.scope);
     dispatch_gossip_try_send(
@@ -142,7 +164,7 @@ pub async fn emit_signal_async(
     deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &Signal {
         kind: Arc::clone(&kind), scope: scope.clone(),
         payload: payload.clone(), sender: ctx.node_id.clone(), nonce,
-    }, combined);
+    }, combined, ctx.decision_sink());
     let hint = forward_hint(&scope);
     dispatch_gossip_send(
         &ctx.gossip_txs,
@@ -562,16 +584,46 @@ mod delivery_shed_tests {
         let mut work_rx   = handlers.register_with_capacity(Arc::from("work"), 4);
 
         // Sanity: an ordinary Cluster-scoped signal IS shed deterministically at fill 1.0.
-        deliver_locally(&boundary, &handlers, &sig("work", SignalScope::Cluster, node.clone()), 1.0);
+        deliver_locally(&boundary, &handlers, &sig("work", SignalScope::Cluster, node.clone()), 1.0, None);
         assert!(work_rx.try_recv().is_err(), "ordinary Cluster signal is shed at fill 1.0");
 
         // The fix: boundary-transition control signals must still be delivered locally at fill 1.0.
-        deliver_locally(&boundary, &handlers, &sig(signal_kind::BOUNDARY_OPAQUE, SignalScope::Cluster, node.clone()), 1.0);
+        deliver_locally(&boundary, &handlers, &sig(signal_kind::BOUNDARY_OPAQUE, SignalScope::Cluster, node.clone()), 1.0, None);
         assert!(opaque_rx.try_recv().is_ok(),
             "BOUNDARY_OPAQUE must be delivered locally even at fill 1.0 (control signals are not load-shed)");
 
-        deliver_locally(&boundary, &handlers, &sig(signal_kind::BOUNDARY_TRANSPARENT, SignalScope::Cluster, node.clone()), 1.0);
+        deliver_locally(&boundary, &handlers, &sig(signal_kind::BOUNDARY_TRANSPARENT, SignalScope::Cluster, node.clone()), 1.0, None);
         assert!(clear_rx.try_recv().is_ok(),
             "BOUNDARY_TRANSPARENT must be delivered locally even at fill 1.0");
+    }
+
+    /// I7's gate for admission: with a sink, the same signals are delivered or shed exactly as
+    /// without one (the draw is unchanged — at fill 1.0 the shed is deterministic, at 0.0 there is
+    /// none), a shed and a boundary refusal are recorded with their typed reasons, and an admitted
+    /// signal records nothing (the hot path).
+    #[test]
+    fn admission_records_refusals_and_sheds_only_and_changes_no_delivery() {
+        use crate::decision::{DecisionSink, OutcomeKind};
+        let node = NodeId::new("127.0.0.1", 9001).unwrap();
+        let boundary = RwLock::new(Boundary::new(node.clone()));
+        let handlers = SignalHandlers::new(Duration::from_secs(60));
+        let mut work_rx = handlers.register_with_capacity(Arc::from("work"), 8);
+        let sink = DecisionSink::default();
+
+        deliver_locally(&boundary, &handlers, &sig("work", SignalScope::Cluster, node.clone()), 0.0, Some(&sink));
+        assert!(work_rx.try_recv().is_ok(), "admitted at fill 0.0, with a sink as without");
+        assert_eq!(sink.stats().recorded, 0, "an admission records nothing");
+
+        deliver_locally(&boundary, &handlers, &sig("work", SignalScope::Cluster, node.clone()), 1.0, Some(&sink));
+        assert!(work_rx.try_recv().is_err(), "shed at fill 1.0, with a sink as without");
+        let other = NodeId::new("127.0.0.1", 9002).unwrap();
+        deliver_locally(&boundary, &handlers, &sig("work", SignalScope::Group(Arc::from("not-mine")), other), 0.0, Some(&sink));
+        assert!(work_rx.try_recv().is_err(), "a group this node is not in is not admitted");
+
+        let got = sink.drain();
+        let v: Vec<(&str, OutcomeKind, &str)> = got.iter().map(|r| (r.rule.as_str(), r.outcome, r.reason.as_str())).collect();
+        assert_eq!(v, [("signal.admission", OutcomeKind::Deferral, "shed_under_load"), ("signal.admission", OutcomeKind::Refusal, "scope_not_admitted")]);
+        assert_eq!(got[0].target.as_deref(), Some("work"));
+        assert!(!crate::decision::attributable(&got[0]), "the fill is sampled: unattributable under replay, by its own record");
     }
 }

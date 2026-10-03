@@ -124,6 +124,7 @@ fn spawn_handler(
         seen,
         hlc: Arc::new(crate::hlc::Hlc::new()),
         signal_boundary: Arc::new(RwLock::new(Boundary::new(node_id))),
+        decision_sink: std::sync::OnceLock::new(),
         signal_handlers: Arc::new(SignalHandlers::new(Duration::from_secs(600))),
         gossip_txs,
         default_ttl: max_ttl,
@@ -736,6 +737,62 @@ async fn test_governor_node_targeted_intent() {
     assert_eq!(ceiling_of(&a), None, "a non-targeted node ignores the intent");
 }
 
+/// I7's gate for the governor: with a decision sink on every node, membership still converges up to
+/// `min` exactly as without one (the roll, spacing and settling are untouched), and the sinks say what
+/// each node decided — every record is `membership.governed`, at least `min` of them are `join`
+/// actions, none were dropped, and a `hold` carries the roll it was decided on.
+#[tokio::test]
+async fn test_membership_governor_with_a_decision_trace_decides_as_without_and_says_so() {
+    use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+    use mycelium_core::decision::{DecisionSink, OutcomeKind};
+    let ports: Vec<u16> = (0..3).map(|_| alloc_port()).collect();
+    let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+    let mut agents = Vec::new();
+    let mut sinks = Vec::new();
+    for i in 0..3 {
+        let mut cfg = GossipConfig::auto();
+        cfg.bind_port = ports[i];
+        cfg.bootstrap_peers = ids.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, id)| id.clone()).collect();
+        cfg.health_check_interval_secs = 1;
+        cfg.health_check_max_jitter_ms = 50;
+        let a = GossipAgent::new(ids[i].clone(), cfg);
+        let sink = Arc::new(DecisionSink::default());
+        a.with_decision_trace(Arc::clone(&sink));
+        a.with_decision_trace(Arc::new(DecisionSink::default())); // a second attach warns and is ignored
+        sinks.push(sink);
+        agents.push(a);
+    }
+    for a in &agents { a.start().await.unwrap(); }
+    let mut regs = Vec::new();
+    for a in &agents {
+        regs.push(a.capabilities().advertise_capability(Capability::new("svc", "worker"), Duration::from_secs(30)));
+    }
+    let _grp = agents[0].capabilities().define_capability_group(
+        "pool",
+        CapabilityGroupDef { filter: CapFilter::new("svc", "worker"), topology_policy: None, provides: vec![], requires: vec![] },
+        Duration::from_secs(30));
+    for a in &agents { a.start_membership_governor(); }
+    poll_until(|| agents.iter().all(|a| !a.peers().is_empty()), 3_000).await;
+    let _ = agents[0].publish_membership_intent(crate::MembershipIntent::new("pool", 2, None));
+    let joined = |agents: &[GossipAgent]| -> usize {
+        agents.iter().filter(|a| a.groups().iter().any(|g| g.as_ref() == "pool")).count()
+    };
+    poll_until(|| joined(&agents) >= 2, 20_000).await;
+    assert!(joined(&agents) >= 2, "membership converges up to min=2 with a trace as without (got {})", joined(&agents));
+
+    let records: Vec<_> = sinks.iter().flat_map(|s| s.snapshot()).collect();
+    assert!(records.iter().all(|r| r.rule == "membership.governed" && r.target.as_deref() == Some("pool")), "{records:?}");
+    let joins = records.iter().filter(|r| r.outcome == OutcomeKind::Action && r.reason == "join").count();
+    assert!(joins >= 2, "at least min join actions across the fleet: {records:?}");
+    assert_eq!(sinks.iter().map(|s| s.dropped()).sum::<u64>(), 0);
+    if let Some(hold) = records.iter().find(|r| r.reason == "hold") {
+        assert!(hold.inputs.iter().any(|i| i.value.starts_with("roll=")), "a hold says what it rolled: {hold:?}");
+    }
+    let report = agents[0].guarantee_report();
+    assert_eq!(report.late_attachments, 0, "attached before start()");
+    for a in agents { a.shutdown().await; }
+}
+
 /// Track 2a: a `MembershipIntent { min }` makes eligible nodes self-elect into the group until
 /// the member count converges up to `min` — coordinator-free elastic sizing.
 #[tokio::test]
@@ -1121,6 +1178,7 @@ async fn test_subscribe_notified_via_gossip() {
             seen: Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)),
             hlc: Arc::new(crate::hlc::Hlc::new()),
             signal_boundary: Arc::new(RwLock::new(Boundary::new(node_id))),
+            decision_sink: std::sync::OnceLock::new(),
             signal_handlers: Arc::new(SignalHandlers::new(Duration::from_secs(600))),
             gossip_txs,
             default_ttl: 5,

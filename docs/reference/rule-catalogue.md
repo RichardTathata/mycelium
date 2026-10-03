@@ -12,7 +12,7 @@ Schema `mycelium.rules/1` · 26 rules.
 | [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start. |
 | [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
 | [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
-| [`membership.governed`](#membershipgoverned) | Response | catalogue only | A governor acts only on a confident view, with settling and spacing between acts; an intent it stops refreshing expires. |
+| [`membership.governed`](#membershipgoverned) | Response | instrumented | This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view. |
 | [`prov.activation`](#provactivation) | Response | catalogue only | After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
 | [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
@@ -29,7 +29,7 @@ Schema `mycelium.rules/1` · 26 rules.
 | [`prov.shed`](#provshed) | Response | instrumented | More live providers than the declared ceiling makes a hosting node a candidate to withdraw its own install. |
 | [`prov.withdraw`](#provwithdraw) | Propagation, Response | catalogue only | Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back. |
 | [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused, with it off nothing is checked. |
-| [`signal.admission`](#signaladmission) | Admission | catalogue only | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
+| [`signal.admission`](#signaladmission) | Admission | partial — refusals and sheds only; an admitted signal is the hot path and records nothing | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
 | [`signal.forwarding`](#signalforwarding) | Propagation | catalogue only | Forwarding is unconditional (flood fallback); only admission is scoped, and a frame addressed to this node terminates here. |
 | [`signal.suppression`](#signalsuppression) | Admission | catalogue only | A kind can be held until a time; held signals are released on flush. Suppression never changes forwarding. |
 
@@ -138,19 +138,19 @@ Every update converges by last-writer-wins on the HLC; propagation is unconditio
 
 ## `membership.governed`
 
-rev 1 · `mycelium::membership_governor` · Response · trace: catalogue only
+rev 1 · `mycelium::membership_governor` · Response · trace: instrumented
 
-A governor acts only on a confident view, with settling and spacing between acts; an intent it stops refreshing expires.
+This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view.
 
 - **Trigger:** the governor tick
 - **Reads:**
   - `the governed group's roster and floor (`grp/`, `sys/`)` — scope: the group as this node sees it; freshness: as gossiped; the confidence bound applies
   - `ViewConfidence (peers heard, staleness)` — scope: this node; freshness: computed at the tick
 - **Outcomes:**
-  - Action: `declare_floor`, `release`
+  - Action: `join`, `leave`
   - Deferral: `view_not_confident`, `settling`, `spacing`
-  - NoAction: `in_bounds`
-- **Effects:** membership intents under `sys/`; the control ledger
+  - NoAction: `hold`
+- **Effects:** this node joins or leaves the group (`grp/`); the control ledger
 - **Guards:** Settling, Cooldown
 - **May trigger:** [`prov.presence_floor`](#provpresence_floor)
 - **Depends on:** [`kv.propagation`](#kvpropagation)
@@ -463,7 +463,7 @@ Authority where the work happens: a protected call is checked at the provider wh
 
 ## `signal.admission`
 
-rev 1 · `mycelium-core::signal` · Admission · trace: catalogue only
+rev 1 · `mycelium-core::signal` · Admission · trace: partial — refusals and sheds only; an admitted signal is the hot path and records nothing
 
 Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded.
 

@@ -13,6 +13,7 @@
 //! Reuses the emergent-group machinery (`emit_membership`, `CapabilityGroupDef` filter) and the
 //! Track-1 `read_fresh_intent` / `publish_intent` transport; the engine is the self-election only.
 
+use mycelium_core::decision::{DecisionRecord, InputSnapshot, OutcomeKind, Provenance, ViewStatus};
 use crate::agent::{GossipAgent, TaskCtx};
 use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
 use crate::node_id::NodeId;
@@ -185,6 +186,12 @@ pub fn classify(action: &MembershipAction, n: usize, is_drain: bool) -> Option<A
     }
 }
 
+/// The view a *held* decision rested on, as the record states it — from the `ViewConfidence` the pass
+/// already computed: no peer heard inside the window is a partial view, otherwise a stale one.
+fn held_view_status(view: &super::emergent::ViewConfidence) -> ViewStatus {
+    if view.staleness_known() { ViewStatus::Stale } else { ViewStatus::Partial }
+}
+
 fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut HashMap<String, GroupState>) {
     let me = &ctx.node_id;
     let my_load = mycelium_core::framing::gossip_shard_fill(&ctx.gossip_txs) as f64;
@@ -220,10 +227,28 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
         }
         // Spacing — the cooldown, unchanged in meaning — then settling: no proposal on an actuator
         // whose last action is unobserved and inside the settle timeout. Past it, settled as unknown.
+        // `membership.governed`'s records (plan I7), from the values this pass already has; built
+        // only when a sink is attached, never under a lock, never a draw or a clock of their own.
+        let trace = |outcome: OutcomeKind, reason: &str, view: ViewStatus, extra: Option<InputSnapshot>| {
+            if let Some(sink) = ctx.decision_sink() {
+                let mut r = DecisionRecord::new("membership.governed", 1, "governor tick", outcome, reason)
+                    .node(me.to_string(), 0)
+                    .target(group.to_string())
+                    .view(view)
+                    .no_parent()
+                    .no_effect()
+                    .input(InputSnapshot::new("group members and the intent's band (`grp/`, `sys/govern/membership/` as gossiped)",
+                        format!("n={n} min={} max={:?} member={am_member}", intent.min, intent.max), Provenance::Gossiped));
+                if let Some(e) = extra { r = r.input(e); }
+                let _ = sink.record(r);
+            }
+        };
         if !control::spacing_allows(spec, state.last_action_ms, now_ms) {
+            trace(OutcomeKind::Deferral, "spacing", ViewStatus::Unknown, None);
             continue; // recently acted — damp flap
         }
         if control::may_propose(&state.settle, spec, now_ms).is_err() {
+            trace(OutcomeKind::Deferral, "settling", ViewStatus::Unknown, None);
             continue;
         }
         if matches!(state.settle, SettleState::Pending { .. }) {
@@ -246,7 +271,10 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
         // The roll comes from the `govern` stream (inventory §2.2), so a replay rolls the same.
         let roll = f64::from(mycelium_core::sim_seam::rng_f32("govern"));
         let action = decide(am_member, is_drain, join_p, leave_p, roll);
+        let roll_input = || InputSnapshot::new("the `govern` draw against join/leave probability",
+            format!("roll={roll:.3} join_p={join_p:.3} leave_p={leave_p:.3} eligible={am_eligible} drain={is_drain}"), Provenance::Local);
         if matches!(action, MembershipAction::Hold) {
+            trace(OutcomeKind::NoAction, "hold", ViewStatus::Unknown, Some(roll_input()));
             continue;
         }
 
@@ -275,12 +303,14 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
                 }
                 Decision::Held(why) => {
                     debug!(group, ?class, ?why, "membership: held on uncertainty");
+                    trace(OutcomeKind::Deferral, "view_not_confident", held_view_status(&view), Some(roll_input()));
                     continue;
                 }
             }
         }
 
         let leaving = matches!(action, MembershipAction::Leave);
+        trace(OutcomeKind::Action, if leaving { "leave" } else { "join" }, ViewStatus::Unknown, Some(roll_input()));
         state.seq += 1;
         let id = ActionId { governor: spec.governor.clone(), actuator: group.to_string(), seq: state.seq };
         if leaving {

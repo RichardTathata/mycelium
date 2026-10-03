@@ -56,6 +56,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   say. `mycelium-stem --trace-dir` writes `coverage.json` beside the trace. **Not claimed:** the node
   binary's bundle recording does not attach a trace (nothing in that binary is instrumented), and no
   recording-versus-replay comparison has been run.
+- **The decision trace on a node** (plan I7): `GossipAgent::with_decision_trace(sink)`, set once before
+  `start()`. The membership governor records every decision it makes — spacing, settling, a hold with
+  the roll it rested on, held on an unconfident view, join, leave — and signal admission records its
+  refusals and sheds (an admitted signal is the hot path and records nothing; the catalogue says so as
+  a *partial* policy). From the values each already produced: no decision changes, the draw and the
+  clock reads are untouched, nothing is recorded under a lock, the sink never waits. Off unless attached.
+  Shown by a governor fleet converging to its floor identically with and without sinks, and by admission
+  at the deterministic fills. `TracePolicy` gained `Partial(&str)` (a `match` needs an arm).
 
 ### Fixed
 - **A failing initial activation probe is an activation error, not a live install.** `[[activation]]`'s

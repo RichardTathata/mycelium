@@ -159,8 +159,9 @@ both when present and a bundle without them reads as before. **Absent means *tra
 *no decisions*** (`Bundle::has_decision_trace`). Two traces compare on the canonical tuple — rule@rev ·
 trigger · target · outcome · reason — never on the sequence number or the stamps; a divergence whose
 records read gossiped or sampled inputs is *unattributable* and is stated, not counted
-(`decision::compare`, `Comparison::reproduces`). Today the only instrumented decision points are the
-stem provisioner's (`Provisioner::with_decision_trace`, `mycelium-stem --trace-dir`), which is a
-different binary from the one that records bundles, so a trace reaches a bundle by hand; no
+(`decision::compare`, `Comparison::reproduces`). Today the instrumented decision points are the stem
+provisioner's (`Provisioner::with_decision_trace`, `mycelium-stem --trace-dir`), the membership
+governor's and signal admission's refusals (`GossipAgent::with_decision_trace`, I7); the node binary that
+records bundles still attaches no trace, so a trace reaches a bundle by hand; no
 recording-versus-replay comparison has been run yet. Read a trace with `mycelium explain`.
 
