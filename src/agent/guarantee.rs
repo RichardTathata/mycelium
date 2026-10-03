@@ -796,8 +796,8 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               { let _ = c; Resolution::NotInBuild { feature: "compliance" } }
           }),
         g("egress.allow_list", 1, "egress", Node,
-          "the substrate's own outbound calls are restricted to an allow-list (MCP bridge, LLM, probes, skillrunner, the wasm host, the wiki sink)",
-          "`egress.allow_hosts` non-empty (empty allows all). Not gated today: the federation client, bulk fetch of a peer-supplied URL, OIDC JWKS",
+          "the substrate's own outbound calls are restricted to an allow-list (MCP bridge, LLM, probes, skillrunner, the wasm host, the wiki sink, the federation client, OIDC)",
+          "`egress.allow_hosts` non-empty (empty allows all); the federation client (the node's policy applied to clients it is handed, `FederationClient::with_egress` elsewhere) and OIDC discovery + JWKS since 2026-10-03 (a denied issuer refuses `start()`). An `HttpLibrarySource` built outside an agent is gated only when built `with_egress`",
           &["config::EgressPolicy::permits_url"], "docs/operations/crown-jewel.md",
           always,
           |c| if c.config.egress.allow_hosts.is_empty() { Resolution::NotConfigured { missing: "egress.allow_hosts (empty allows all)" } } else { Resolution::Enforced }),

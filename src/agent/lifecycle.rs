@@ -69,6 +69,25 @@ impl GossipAgent {
                 });
             }
         }
+        // The identity provider is an outbound the substrate chooses (`report.egress`, plan §8): an
+        // `[oidc]` table whose issuer or JWKS host a non-empty `egress.allow_hosts` does not permit
+        // is a contradiction — the gateway would hold no keys and refuse every token — refused by
+        // name here rather than discovered behind a 401.
+        #[cfg(feature = "compliance")]
+        if let Some(oidc) = &self.config.oidc
+            && !self.config.egress.allow_hosts.is_empty()
+        {
+            for (what, url) in [("issuer", Some(&oidc.issuer)), ("jwks_uri", oidc.jwks_uri.as_ref())] {
+                if let Some(url) = url
+                    && !self.config.egress.permits_url(url)
+                {
+                    return Err(GossipError::InvalidField {
+                        field: "oidc",
+                        reason: format!("egress.allow_hosts does not permit the OIDC {what} `{url}`; the gateway could fetch no keys and would refuse every token — add its host to egress.allow_hosts or remove the [oidc] table"),
+                    });
+                }
+            }
+        }
         #[cfg(not(feature = "tls"))]
         for (field, set) in [("tls", self.config.tls.is_some()), ("gateway_tls", self.config.gateway_tls.is_some())] {
             if set {

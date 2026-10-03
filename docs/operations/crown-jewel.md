@@ -90,8 +90,10 @@ The gate is enforced at every outbound HTTP path the substrate *chooses* to make
 | LLM backend calls (SkillRunner) | ✓ `EgressPolicy` | gated against the node's `egress_policy()` before the call |
 | Capability HTTP probes | ✓ `EgressPolicy` | a blocked probe URL fails the probe (capability not advertised) |
 | A2A **client** | — | client lives in the SDKs (Python/TS), not the substrate; restrict at the SDK / network layer |
+| Federation client (`FederationClient`) | ✓ `EgressPolicy` (since 2026-10-03) | the node's policy applies to the clients it is handed (`with_federation_clients`); a client used outside an agent is built `.with_egress(policy)`. A denied endpoint is `ClientError::Egress`, refused before any byte is sent |
+| OIDC JWKS / discovery | ✓ `EgressPolicy` (since 2026-10-03) | an `[oidc]` issuer or `jwks_uri` the allow-list does not permit **refuses `start()`** by name; at runtime a denied host is never dialled (no keys, every token refused). Add the IdP's host to `allow_hosts` |
+| Artifact HTTP library source (`HttpLibrarySource`) | ✓ when built `.with_egress(policy)` | a companion type constructed by the operator; `new()` alone allows all — documented on the type |
 | Bulk transport peer fetch | n/a | intra-cluster (peer URLs), not external egress — deliberately not gated |
-| OIDC JWKS / discovery | n/a | operator-configured auth infra the node must reach; allowlist the IdP at the network layer if you restrict egress |
 
 For the non-gated rows, enforce egress at the **network layer** (firewall rules,
 security groups, an egress proxy with its own allowlist).

@@ -1375,6 +1375,11 @@ impl GossipAgent {
     ) -> Self {
         let mut kept: Vec<Arc<crate::federation::client::FederationClient>> = Vec::new();
         for c in clients {
+            // The node's outbound allow-list reaches a client built without one (`report.egress`,
+            // plan §8); a client that carries its own policy keeps it.
+            if !self.config.egress.allow_hosts.is_empty() && c.set_egress(self.config.egress.clone()) {
+                tracing::debug!(partner = %c.partner(), "with_federation_clients: the node's egress policy applies to this client");
+            }
             if kept.iter().any(|k| k.partner() == c.partner()) {
                 tracing::warn!(partner = %c.partner(), "with_federation_clients: a client for this partner is already configured; dropping the duplicate");
                 continue;
