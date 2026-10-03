@@ -79,7 +79,10 @@ use mycelium::{GossipConfig, TlsConfig};
 let mut cfg = GossipConfig::default();
 cfg.tls = Some(TlsConfig::default());
 // TlsConfig::default() generates an ephemeral Ed25519 keypair.
-// To persist the identity across restarts, provide a key path:
+// To start from a certificate issued off-node (the CA key stays with the issuer —
+// `mycelium tls issue`, `mycelium::issue_node_cert`), set cert_pem + key_pem; auto_cert_dir
+// must then hold ca-cert.pem, and the node never mints. With only auto_cert_dir, the node
+// re-signs its certificate at every start with the CA key, which must be on the node.
 cfg.tls = Some(TlsConfig {
     key_pem:  Some(PathBuf::from("/etc/mycelium/node.key")),
     cert_pem: Some(PathBuf::from("/etc/mycelium/node.crt")),
@@ -216,7 +219,8 @@ gated since 2026-09-05; before that they answered without a bearer.
 
 **Serving is not calling (2.15.0).** Registering to *serve* an RPC kind (`POST /gateway/rpc/serve/{kind}`,
 `/gateway/rpc/respond`) needs the scope **`mesh:serve`**; a `mesh:read`/`mesh:write` token is admitted
-there for one release with a warning and then refused. And the raw routes (`rpc/call`, `scatter`,
+there for one release with a warning; **since 2.18.2 it is refused** — `403 {"required_scope":
+"mesh:serve"}` — so reissue every serving client's token with `mesh:serve`. And the raw routes (`rpc/call`, `scatter`,
 `signal/emit`, `mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`) answer **`403 {"error":
 "protected_kind"}`** for `mcp.invoke`, `skill.invoke` and `llm.invoke` (plus anything in
 `protected_rpc_kinds` / `GOSSIP_PROTECTED_RPC_KINDS`): those kinds go through `/mcp`, `/a2a` or

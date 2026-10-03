@@ -145,7 +145,9 @@ which is the point. Operational detail: [`operations/rbac.md`](../operations/rba
 
 `GossipConfig`, `BoardConfig` and the operator-constructed config structs beside them are **not**
 `#[non_exhaustive]` today. Every release adds config fields, and each addition silently breaks an
-exhaustive struct literal — 2.5.0, 2.7.0 and 2.8.0 each did. Marking them `#[non_exhaustive]` at
+exhaustive struct literal — 2.5.0, 2.7.0, 2.8.0, 2.19.0 (`GossipConfig.profile`), 2.20.0
+(`PersistenceConfig.on_unreadable`, which has no `Default`, so the literal must list it; `StemOptions.trace`)
+and 2.21.0 (`RuntimeCtx.trace` + `install_token`) each did. Marking them `#[non_exhaustive]` at
 `3.0.0` trades that series of unannounced breaks for one announced one.
 
 ```rust
@@ -198,12 +200,12 @@ against an active attacker**, because an absent binding is indistinguishable fro
 Turn it on once every partner has upgraded. `BodyNotBound` means upgrade the partner;
 `BodyMismatch` means someone is on the path.
 
-## 11. `mesh:read` / `mesh:write` admitted on the serve routes — one release (2.15.0) — **removed in 2.19.0**
+## 11. `mesh:read` / `mesh:write` admitted on the serve routes — one release (2.15.0) — **removed in 2.18.2**
 
 **What changes.** Registering to serve an RPC kind — `POST /gateway/rpc/serve/{kind}` and
 `/gateway/rpc/respond` — requires the new scope **`mesh:serve`**. From 2.15.0 a token holding
 `mesh:read` or `mesh:write` was still admitted there, **with a warning in the gateway log**. The
-window was promised for one release and stayed open through 2.18.x; **2.19.0 closes it** — such a
+window was promised for one release and stayed open through 2.18.1; **2.18.2 closes it** — such a
 token now gets `403 {"required_scope": "mesh:serve"}`.
 
 **Why.** Serving and calling were one scope, so a token that could serve could also reach the
@@ -226,3 +228,30 @@ to remove; `""` is the explicit way to write an empty value.
 **Migration.** Send `value_b64` always (`""` for empty). `mycelium-py` ≥ 0.2.4 and `mycelium-ts`
 ≥ 0.1.1 already do; a raw HTTP client is the one to check.
 
+## 13. `#[non_exhaustive]` enums gain variants — 2.20.0 (`TracePolicy::Partial`, `ClientError::Egress`)
+
+**What changes.** Two enums that were already `#[non_exhaustive]` gained a variant: `TracePolicy`
+(`mycelium_core::rule`) gained `Partial(&'static str)` — a decision point traced in part, the missing
+part named — and the federation `ClientError` gained `Egress` — a partner `base_url` the node's
+`egress.allow_hosts` denies, refused before any byte is sent.
+
+**Will the compiler tell me?** Only if your `match` was already exhaustive without a `_` arm, in which
+case it never compiled against a `#[non_exhaustive]` enum from another crate. A `_` arm compiles and
+silently takes the new variant.
+
+**Migration.** The same rule as `CallRefusal` (§9): a `_` arm over a refusal **fails closed** — treat an
+unrecognised `ClientError` as *not delivered*, never as success. For `TracePolicy`, `Partial` reads as
+*instrumented, with a stated gap*; `mycelium rules` prints the gap beside the entry.
+
+## 14. `BlobRuntime::with_entry_activation` takes a three-argument closure (2.21.0)
+
+**What changes.** The activation hook's closure is `Fn(&InstallableEntry, &Path, &ActivationCtx) ->
+Result<Option<Arc<AtomicBool>>, String>` (`mycelium-wasm-host/src/runtime.rs`); a two-argument closure no
+longer compiles. `ActivationCtx { install_token, trace }` carries the install token and the decision trace,
+so `prov.activation` and `prov.probe` record under the install that placed the blob. `RuntimeCtx` gained
+`trace` and `install_token` — an exhaustive literal breaks; use `..`. `prov.probe` is catalogue rev 2
+(new reason `probe_failed`: a failing *initial* probe is an activation error, never a live install).
+
+**Will the compiler tell me?** Yes — the closure's arity is in the trait bound.
+
+**Migration.** Ignore the context: `|entry, path, _ctx| …`. Use it to record: `_ctx.trace.as_ref()`.

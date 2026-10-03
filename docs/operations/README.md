@@ -31,6 +31,11 @@ declarations, shadow acceptance, authority boundaries, replay, and declared vers
   coordinator-free fleet.
 - **Need to prove what happened?** → [audit.md](audit.md) — the tamper-evident trail,
   revocation transparency proofs, and proving a guardrail stopped an agent.
+- **Proving what this node enforces?** → [production-readiness.md § 2](production-readiness.md) — the
+  startup report (`GET /gateway/guarantees`), the `secure-single-domain` profile that refuses to start
+  on an unmet guarantee, the generated [guarantee catalogue](../reference/guarantee-catalogue.md) and
+  [rule catalogue](../reference/rule-catalogue.md), and `mycelium explain` over a decision trace
+  ([diagnostics.md](diagnostics.md) § replay bundles).
 
 | Doc | What it covers |
 |---|---|

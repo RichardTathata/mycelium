@@ -16,7 +16,7 @@ key is needed for these tutorials. Only tutorial 2's stem comparison needs Docke
 | [2 · From code to declarations](02-code-to-declarations.md) | What moves out of application code? | The same provisioning scenario in Rust and stem units |
 | [3 · A capability earns permission to run](03-shadow-and-acceptance.md) | When may proposed code become live? | Shadow execution and reviewer acceptance |
 | [4 · Authority at every boundary](04-authority-boundaries.md) | Does a gateway permit authorise the final effect? | Provider admission, revocation, destination refusal |
-| [5 · Explain and replay a decision](05-replay-a-decision.md) | What must be recorded for reproduction? | A replay bundle and a controlled divergence |
+| [5 · Replay a bundle](05-replay-a-decision.md) | What must be recorded for reproduction? | A replay bundle and a controlled divergence (the decision trace and `mycelium explain` are guide 19 § reading what a node decided) |
 | [6 · Declared versus observed](06-declared-versus-observed.md) | Does a live snapshot match the design? | Schema validation, explicit identity mapping, missing providers |
 
 **Keep four distinctions visible.** Bootstrap addresses introduce peers; discovery

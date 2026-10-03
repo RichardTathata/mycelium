@@ -161,7 +161,11 @@ trigger · target · outcome · reason — never on the sequence number or the s
 records read gossiped or sampled inputs is *unattributable* and is stated, not counted
 (`decision::compare`, `Comparison::reproduces`). Today the instrumented decision points are the stem
 provisioner's (`Provisioner::with_decision_trace`, `mycelium-stem --trace-dir`), the membership
-governor's and signal admission's refusals (`GossipAgent::with_decision_trace`, I7); the node binary that
-records bundles still attaches no trace, so a trace reaches a bundle by hand; no
-recording-versus-replay comparison has been run yet. Read a trace with `mycelium explain`.
+governor's and signal admission's refusals (`GossipAgent::with_decision_trace`, I7); since v2.21.0 the node
+binary's `GOSSIP_RECORD_BUNDLE_DIR` recording attaches `decisions.jsonl` + `coverage.json` +
+`decisions.stats.json` itself (`src/main.rs`, `tests/decision_trace_replay.rs` — run with `--features
+sim,test-util`), and the recording-versus-replay comparison was run: a whole agent's replay diverges at
+the kernel's 20th choice (two periodic loops' timer ticks swap order) — `what-is-proven.md` § not yet
+shown; the test carries the recording half, the divergence is not yet a checked-in assertion. Read a
+trace with `mycelium explain`.
 

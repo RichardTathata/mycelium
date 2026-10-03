@@ -242,6 +242,9 @@ let agent = GossipAgent::new(id, cfg)
     .with_federation_clients([Arc::new(client)])    // before start(), like the edge
 ```
 
+The node's `egress.allow_hosts` now covers the client: a partner `base_url` the list denies returns
+`ClientError::Egress` before any byte (2.20.0; `#[non_exhaustive]`, so a `_` arm must fail closed).
+
 | Route | Scope | What it does |
 |---|---|---|
 | `GET /gateway/federation/domain` | `federation:read` | this node's own domain, exports and policy revision |

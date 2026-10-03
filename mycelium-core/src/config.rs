@@ -269,9 +269,10 @@ pub struct GatewayNamedToken {
 /// nothing is centrally assigned. An empty `allow_hosts` (the default) permits
 /// all egress — behaviour is unchanged until an operator opts in.
 ///
-/// Enforced at the MCP client bridge (`connect_mcp_server`) — the canonical
-/// "twin reaches an external tool server" egress. Other outbound paths (LLM
-/// backends, capability probes) are operator-responsibility; see the egress
+/// Enforced at every outbound path the substrate opens: the MCP client bridge
+/// (`connect_mcp_server`), LLM backends, capability probes, and — since 2.20.0 —
+/// the federation client and the gateway's OIDC discovery/JWKS fetch (a denied
+/// issuer refuses `start()`). A path your own code opens is yours; see the egress
 /// runbook and threat model for the full posture.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EgressPolicy {
@@ -1062,14 +1063,15 @@ pub struct GossipConfig {
     /// The **guarantee profile** this node starts under (`docs/plans/guarantees-and-rule-catalogue.md`
     /// I3). `None` is `dev`: nothing required, said loudly in the startup report. `secure-single-domain`
     /// makes `GossipAgent::start()` refuse unless every node-enforced guarantee it requires resolves
-    /// `enforced` on this node — see `mycelium::guarantee::SECURE_SINGLE_DOMAIN` for the set. Env
+    /// `enforced` on this node — see `mycelium::SECURE_SINGLE_DOMAIN_PROFILE` for the set. Env
     /// `GOSSIP_PROFILE`. An unknown name is refused by `validate()` ([`PROFILE_NAMES`]).
     #[serde(default)]
     pub profile: Option<String>,
 
     /// Outbound egress allow-policy (WS3). Default: empty = allow all. Set
     /// `allow_hosts` to constrain which external hosts the substrate may reach
-    /// (enforced at the MCP client bridge). A node-local posture, not a coordinator.
+    /// (the MCP bridge, LLM backends, probes, the federation client, OIDC). A
+    /// node-local posture, not a coordinator.
     #[serde(default)]
     pub egress: EgressPolicy,
 

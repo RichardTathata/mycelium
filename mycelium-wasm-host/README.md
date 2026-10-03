@@ -60,7 +60,9 @@ mycelium-stem --units examples/units/model_deploy/model-host.toml --library /lib
 ```
 
 - **Every section of the unit file**, including `[[activation]]` (a command run after a blob is
-  placed, gated by a probe) and `[[serve]]`: [`docs/reference/unit-file.md`](../docs/reference/unit-file.md).
+  placed, gated by a probe; a failing initial probe is an activation error, and both record on the
+  decision trace under the install's token — `ActivationCtx`, the activation hook's third argument
+  since 2.21.0) and `[[serve]]`: [`docs/reference/unit-file.md`](../docs/reference/unit-file.md).
 - **Running a stem**, its flags and what it needs on the node:
   [`docs/operations/capability-lifecycle.md`](../docs/operations/capability-lifecycle.md) §3.
 - **Publishing, verifying and accepting entries; object stores and their limits:**

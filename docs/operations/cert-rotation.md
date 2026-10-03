@@ -132,8 +132,10 @@ With `cert_pem` set, `start()` loads the CA certificate and the node's certifica
 key, looks for none, and **never mints a CA** — a missing `ca-cert.pem` is an error naming the path, and
 `cert_pem` without `key_pem` is refused by name. Rotation (§1) then means **re-issuing**: `generate_rotation`
 needs the CA key and errors without it, by design. The startup report resolves `id.ca_key_off_node` as
-`enforced` only on such a node; `secure-single-domain` **rev 2 will require it** in the next MINOR
-(announced here one release ahead, per the plan's G12).
+`enforced` only on such a node; `secure-single-domain` **rev 2 (v2.21.0) requires it** — a node under
+the profile whose certificate was minted on-node refuses to start, naming `id.ca_key_off_node`
+(announced in v2.20.0, one release ahead, per the plan's G12). The issuer's `mycelium` binary needs
+`--features tls`; without it `tls issue` exits 2 saying so.
 
 ### Authenticated identity — enabling proof enforcement (identity-auth Phase 2/3)
 

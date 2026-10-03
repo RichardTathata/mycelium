@@ -157,6 +157,7 @@ cfg.persistence = Some(PersistenceConfig {
     sync_mode:              SyncMode::Flush,   // fdatasync per write (~1 ms on SSD); Async = OS-buffered
     snapshot_wal_threshold: 10_000,            // compact the WAL into a snapshot every N records …
     snapshot_interval_secs: 300,               // … or every 5 min, whichever first
+    on_unreadable:          Default::default(), // "refuse" — unreadable state fails closed (2.20.0)
 });
 ```
 

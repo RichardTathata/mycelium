@@ -387,6 +387,7 @@ seed_config.persistence = Some(PersistenceConfig {
     sync_mode:              SyncMode::Flush,
     snapshot_wal_threshold: 10_000,
     snapshot_interval_secs: 300,
+    on_unreadable:          Default::default(),   // "refuse" (2.20.0; the struct has no Default)
 });
 ```
 

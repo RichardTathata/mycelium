@@ -528,6 +528,30 @@ logged at the boundary did not see it. Attach before `start()` in production. Th
 are `src/agent/guarantee.rs`; the plan is `docs/plans/guarantees-and-rule-catalogue.md` (I2); a profile
 that *refuses* to start on an unmet guarantee is its I3.
 
+**Making the report binding — a profile.** Set it before `start()`:
+
+```rust
+cfg.profile = Some("secure-single-domain".into());   // or GOSSIP_PROFILE=secure-single-domain
+```
+
+`start()` then returns `Err(InvalidField { field: "profile", .. })` naming each guarantee the profile
+requires that is not `enforced` (or `not_applicable` to this node's role), what is missing and where to
+read; `dev` (the default) requires nothing and the startup log says so. The required set is
+`mycelium::SECURE_SINGLE_DOMAIN_PROFILE` (rev 2: seventeen ids), `mycelium::check_profile` runs it against
+any report, and `profile_named` resolves a name. The profile needs a `compliance` + `tls` build and — since
+rev 2 — a node certificate **issued off-node**, so the fleet CA's key is on no node:
+
+```rust
+// On the issuer's host (the `mycelium tls issue` CLI wraps this):
+let (cert, key) = mycelium::issue_node_cert(&ca_dir, &node_id, &out_dir)?;
+// On the node: start from the issued pair; `auto_cert_dir` holds ca-cert.pem only.
+cfg.tls = Some(TlsConfig { cert_pem: Some(cert), key_pem: Some(key), auto_cert_dir: node_dir, ..Default::default() });
+```
+
+The operator's side — the checklist, the catalogue of every guarantee's state under reference
+configurations, and the issuing runbook — is `operations/production-readiness.md` §2,
+`reference/guarantee-catalogue.md` and `operations/cert-rotation.md`.
+
 ## Where to go next
 
 | You want | Read |

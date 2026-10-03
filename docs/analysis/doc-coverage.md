@@ -19,6 +19,57 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-10-03 (run 19)** — diff-gated over **31 commits since run 18** (v2.18.2 → v2.21.0: the guarantees
+  MINOR, the decision-trace MINOR, profile rev 2, the fail-closed start refusals, the materials pass). Three
+  parallel auditors (guarantees · profiles · refusals — the rule catalogue · the decision trace · what the
+  trace does not show — the existing rows the window touched), each opening the pages and running or diffing
+  every must-work instruction against code (`GOSSIP_PROFILE=secure-single-domain` on a default build: refuses
+  naming 14 unmet; `mycelium tls issue --help`; `mycelium rules` / `explain`; `on_unreadable = "quarantine"`
+  and `[egress]` through the real loader; the catalogue gate; the seven "changes no decision" tests; tutorial
+  05's example; both materials gates). **Floor before fixes: 0 ✗ cells but one HOW instruction that fails if
+  followed literally, one documented setting that silently no-ops when placed where the page implies, two
+  non-compiling config literals, two `start()` refusals with no operator landing, twelve stale sentences, two
+  claims resting on tests CI did not run. After: 0 ✗, 0 failing instructions, every refusal landed, the two
+  tests in CI; three `~` that are recorded gaps.** Moves:
+  - **Seven new rows** (below): the guarantee report; profiles (rev 2); a node certificate issued off-node;
+    the fail-closed start refusals; the rule catalogue; the decision trace; what the trace does not show.
+  - **Profiles · WHAT·Ops was stale on the go-live checklist**: `production-readiness.md` § 2 listed rev 1's
+    fifteen under a "rev 2" heading and said `id.ca_key_off_node` "cannot be required yet" — followed
+    literally, an operator ticking the item on a node that minted its own certificate gets a refusal the page
+    says cannot happen. Rewritten (seventeen ids, the two settings, the issuing step); the same sentence on
+    `cert-rotation.md`, `what-is-proven.md` and the plan's own header ("Nothing here is built").
+  - **Fail-closed refusals · WHAT/HOW·Ops**: the gateway bind/cert-load refusal and the audit-sink-without-
+    `[tls]` refusal had no landing outside CHANGELOG — `gateway-tls.md` (which still said "inert, stays
+    plaintext") and `audit.md` (which still said "logged, not written") carry them now; `sso.md` says the
+    issuer host must be in `egress.allow_hosts` or the node does not start; `federation.md` and guide 17 name
+    `ClientError::Egress`; `crown-jewel.md`'s two wrong troubleshooting rows corrected; `EgressPolicy`'s
+    rustdoc no longer says "MCP bridge only".
+  - **KV persistence · HOW·Ops Thin → ✓**: `on_unreadable` was shown as a bare key and no page showed the
+    `[persistence]` table — a top-level paste is silently ignored (no `deny_unknown_fields`); the table is on
+    `deployment.md` now. **HOW·Dev ✓ → ✗ → ✓**: guide 01's and guide 13's exhaustive `PersistenceConfig`
+    literals lacked `on_unreadable` since v2.20.0 (E0063; the struct has no `Default`) — the in-tree examples
+    were fixed with the release, the guides were not. Fourth hit of the config-literal class run 16 swept.
+  - **Security · HOW·Ops**: the `mesh:serve` window's closure was dated to 2.19.0 on `rbac.md` and
+    `deprecations.md` (it is 2.18.2, `718dbc1c`) and guide 09 still described it as open; `rbac.md`'s scope
+    table gained the two families it omitted (`fleet:read` incl. `/gateway/guarantees`, `govern:*`).
+  - **Decision trace · HOW·Dev Thin → ✓**: no page showed how to attach a sink; guide 19 gained the snippet
+    (`DecisionSink::new(SinkConfig {..})`, `with_decision_trace`, `StemOptions.trace`, the bundle attachment
+    in the recording snippet) and its `mycelium-stem --units ./units` — a directory where the flag takes one
+    file — corrected. **WHAT/HOW·Ops Thin → ✓**: `diagnostics.md` § reading what a node decided (the
+    catalogue, `mycelium rules`, `mycelium explain`, the three bundle files, absent ⇒ unavailable);
+    `operations/README.md` routes an operator to the report, the profile and the two catalogues.
+  - **What the trace does not show**: `what-is-proven.md` now says precisely what `tests/decision_trace_replay.rs`
+    carries (the recording half) and that the 20th-choice divergence was observed by hand; the inventory
+    gained the row; guide 19 cross-links the finding. **Two claims rested on hand-run tests**: that file and
+    `the_trace_makes_no_extra_draw_under_the_replay_seams` were in no CI job — both added (`ci.yml`, the
+    `cli,sim` step). Still `~`: the divergence is not a checked-in assertion.
+  - **Upgrade notes**: `deprecations.md` §6&7 named 2.5.0–2.8.0 only; now 2.19.0–2.21.0 too, plus two new
+    sections (the three-argument activation closure; `TracePolicy::Partial` / `ClientError::Egress` gaining
+    variants). Tutorial 05 retitled *Replay a bundle* — it never mentioned a decision.
+  - **Glossary**: `00-concepts.md` gained *guarantee report · profile*, *rule catalogue*, *decision trace*.
+  - **Calibration entry**: Confined fleet · HOW·Ops (✓ᴿ¹⁷) asserted "the substrate's own outbound paths fail
+    closed" while the federation client and OIDC fetch were ungated until v2.20.0.
+
 - **2026-10-02 (run 18)** — diff-gated over **41 commits since run 17** (v2.15.1 → v2.18.0: v2.16.0's
   settings, the design-time tooling MINOR, the stem-fleet MINOR). Three parallel auditors (the stem fleet
   and artifact delivery · the declaration format and unit files · v2.16.0's settings and run 17's `~`
@@ -392,7 +443,7 @@ closed it.
 | Concept | WHY | WHAT·Dev | HOW·Dev | WHAT·Ops | HOW·Ops |
 |---|:--:|:--:|:--:|:--:|:--:|
 | Layer I — Gossip KV | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ |
-| KV persistence (WAL + snapshot) — split from Layer I, run 16 | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ ᴿ¹⁷ |
+| KV persistence (WAL + snapshot) — split from Layer I, run 16 | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ ᴿ¹⁹ (guide 01 + 13 literals carry `on_unreadable` — the struct has no `Default`) | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ ᴿ¹⁷ ᴿ¹⁹ (`deployment.md`: the `[persistence]` table — a bare key no-ops) |
 | Layer II — Signal mesh | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Layer III — Consensus | ✓ | ✓ | ✓ ᵀ² ᴿ¹⁶ ᴿ¹⁷ | ✓ ᵀ¹ | ✓ ᵀ¹ |
 | Capabilities / groups | ✓ | ✓ | ✓ ᴿ¹⁷ | ✓ | ✓ |
@@ -403,27 +454,27 @@ closed it.
 | Membership + cluster_name | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Groups (three kinds) | ✓ | ✓ ᵀ³ | ✓ | ✓ | ✓ |
 | Legible Emergence | ✓ ᵀ³ | ✓ | ✓ ᵀ³ | ✓ | ✓ |
-| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ ᴿ¹⁷ | ✓ | ✓ ᴿ¹⁷ ᴿ¹⁸ (a token table without `compliance` ran an open gateway — code fix + `rbac.md` §1) |
+| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ ᴿ¹⁷ ᴿ¹⁹ (guide 09: the serve window is closed since 2.18.2; `cert_pem` means an issued certificate) | ✓ ᴿ¹⁹ (`rbac.md`: `fleet:read` + `govern:*` rows; the window dated right) | ✓ ᴿ¹⁷ ᴿ¹⁸ ᴿ¹⁹ (`gateway-tls.md`: refuses, not inert, and the start-time bind; `audit.md`: a sink without `[tls]` refuses the start) |
 | Data erasure (crypto-shred) | ✓ | ✓ ᴿ¹³ | ✓ ᴿ¹³ | ✓ | ✓ |
 | Artifacts / library | ✓ | ✓ | ✓ ᵀ² ᴿ⁹ | ✓ | ✓ |
 | Agent-authored functions (D19 fuel by publisher · D20 proposed → shadow → accept) — added 2026-09-30 (plan F3) | ✓ `design-time-tooling.md` §17 | ✓ guide 16 § Agent-authored functions (U1–U4, the five gates) | ✓ guide 16 § the five gates + the co-op `provisioning` demo's wave 3 (opened: the description's `proposed = true`, `mycelium-artifact accept`, `Provisioner::invocations()` are the shipped names) | ✓ `operations/artifacts.md` § Trust & provenance (the `[hosts]` keys by name) | ✓ same section: `accept`, `verify --reviewer`, the counter (opened; each command exists in the `mycelium-artifact` bin) |
 | Federation / AgentFacts (public discovery) | ✓ | ✓ | ✓ ᵀ¹ | ✓ | ✓ ᴿ¹⁷ |
 | Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ ᴿ¹⁶ |
 | Companions | ✓ | ✓ | ✓ ᴿ¹⁸ (guide 21 § authority at execution in the wiki store) | ✓ | ✓ ᵀ² |
-| Rolling upgrade (wire compat) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ² |
+| Rolling upgrade (wire compat) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ² ᴿ¹⁹ (`deprecations.md`: 2.19.0–2.21.0's literal breaks and two `#[non_exhaustive]` enums gaining variants) |
 | Contracts & receipts (item 1) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Effects companion (`mycelium-effects`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (guide 18 compiles: `generate(&NodeId)`) | ✓ ᴿ¹⁷ | ~ ᴿ¹⁸ (composed refusals now have a landing — the evidence journal; still no refusal counter — code gap) |
-| Replay & simulation (item 6) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`diagnostics.md` § capturing a replay bundle — `--features cli,sim`, `GOSSIP_RECORD_BUNDLE_DIR`) |
+| Replay & simulation (item 6) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (guide 19: the recording snippet attaches the trace; the stem command takes a unit *file*) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ ᴿ¹⁹ (`diagnostics.md`: the bundle layout carries the three trace files) |
 | Commitments (`mycelium-commitment`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`companions.md`: `compact_log` / `POST /gateway/overlay/log/compact` on the `cn/` streams) |
 | Gateway / SDK receipt parity — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ~ ᴿ¹⁸ (`POST /gateway/kv` returns its receipt since v2.16.0; the SDKs' `set()` discards it — code gap) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Gateway caller identity (item 7) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Action evaluator + evidence (AE) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Scoped mandates + authority at execution (item 5, Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Member removal + identity authentication (C5) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
-| Confined fleet (H7) — new, run 17 | ✓ ᴿ¹⁷ | — | — | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Confined fleet (H7) — new, run 17 | ✓ ᴿ¹⁷ | — | — | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁹ (calibration: ✓ᴿ¹⁷ asserted every outbound path failed closed while the federation client and OIDC fetch were ungated until v2.20.0; the row says so now) |
 | Adaptive stability / control (item 4) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`control-profiles.md` step 2 + `tuning.md`: the two bound fields and env vars, applied at start) |
 | Knowledge layer (item 3 + Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
-| Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (guide 17: `ClientError::Egress`) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (`federation.md`: the client under `egress.allow_hosts`; `sso.md`: a denied issuer refuses `start()`) |
 | Election / leadership (`mycelium::election`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Capability lifecycle — the two arrival paths, the unit file, `wire-check` (`operations/capability-lifecycle.md`, guide 02, `src/capability_config.rs`) — new, 2026-09-28 | ✓ | ✓ ᴿ¹⁸ (`reference/unit-file.md`; the module-doc example now a test) | ✓ | ✓ ᴿ¹⁸ (all 15 findings, six flags, exit codes) | ✓ ᴿ¹⁸ (snippets are TOML; `verify` runs) |
@@ -432,8 +483,15 @@ closed it.
 | Artifact delivery — the tool, the publish door, ranged fetch, object stores (A1–A3, S1–S2) — new, run 18 | ✓ plan §10–§11 | ✓ (`artifacts.md` §2, § Remote blob stores) | ✓ | ✓ ᴿ¹⁸ (line-hex manifest; the route needs `http_port` + `artifact:publish`; the stem image has no `object_store`) | ✓ ᴿ¹⁸ (store build line with `stem,object_store`; `MYCELIUM_EGRESS_ALLOW_HOSTS`) |
 | The declaration schema (`reference/declaration.schema.json`, W6) — new, run 18 | ✓ plan §9 | ✓ ᴿ¹⁸ (`docs/README.md` reference row) | ~ ᴿ¹⁸ (linked with its `$id`; no consumer walkthrough — validating against it, the join key) | ✓ ᴿ¹⁸ (`capability-lifecycle.md` §2) | ~ ᴿ¹⁸ (same) |
 | SDK unit files (`POST /gateway/units/declare`, `declare_from` / `declareUnits`, Q2) — new, run 18 | ✓ plan §14 Q2 | ✓ ᴿ¹⁸ (both SDK READMEs; docstrings name `[[serve]]`) | ✓ ᴿ¹⁸ (guide 10 § Declaring a unit file — body, response, 400/422, `not_enforced`, lease) | ✓ (`rbac.md` `cap:write`) | ✓ ᴿ¹⁸ (`capability-lifecycle.md` §3) |
+| Guarantee report (`guarantee_report()`, `GET /gateway/guarantees`, five resolutions, `register_guarantee`) — new, run 19 | ✓ plan §1, §3 G4/G10/G11/G13 | ✓ ᴿ¹⁹ (`00-concepts.md` glossary; `reference/guarantee-catalogue.md`; the rustdoc) | ✓ guide 20 § the guarantee report (verified: `GuaranteeDescriptor::new`'s ten arguments) | ✓ `production-readiness.md` § 2 (the five states) · `diagnostics.md` | ✓ `GET /gateway/guarantees` under `fleet:read` (`rbac.md` ᴿ¹⁹); `operations/README.md` routes to it ᴿ¹⁹ |
+| Profiles (`dev` · `secure-single-domain` rev 2, `profile` / `GOSSIP_PROFILE`) — new, run 19 | ✓ plan G3/G5/G12, §8 | ✓ ᴿ¹⁹ (glossary; `config.rs` names the public path) | ✓ ᴿ¹⁹ (guide 20: `cfg.profile`, `SECURE_SINGLE_DOMAIN_PROFILE`, `check_profile`; the refusal was run: 14 unmet on a default build) | ✓ ᴿ¹⁹ (`production-readiness.md` § 2: seventeen ids, the two settings — was rev 1's fifteen under a rev-2 heading) | ✓ `tuning.md` + `production-readiness.md`: `profile = …` loaded, `GOSSIP_PROFILE` applied (`config.rs:1818`) |
+| A node certificate issued off-node (`mycelium tls issue`, `issue_node_cert`, `id.ca_key_off_node`) — new, run 19 | ✓ `design/member-removal.md` (a node holding the CA key can re-mint a removed member) | ✓ `config.rs` `cert_pem` doc; guide 09's snippet comment ᴿ¹⁹ | ✓ ᴿ¹⁹ (guide 20: `issue_node_cert` + the `TlsConfig` the node starts from — was Missing) | ✓ `cert-rotation.md` § off-node (rev 2 requires it ᴿ¹⁹) | ✓ `cert-rotation.md`: the command matches `main.rs` flag for flag, the output names match `tls.rs`; the `--features tls` build note ᴿ¹⁹ |
+| Fail-closed start refusals (token tables / `[oidc]` / `[tls]` / `[gateway_tls]` without their feature; unreadable state; the gateway bind; a denied OIDC issuer; an audit sink without `[tls]`; a late cipher) — new, run 19 | ✓ plan §8, CHANGELOG 2.18.1 / 2.20.0 / 2.21.0 | ✓ ᴿ¹⁹ (`EgressPolicy` rustdoc names every gated path; `on_unreadable` doc) | ~ (guide 09 routes to `rbac.md` for the build refusals; `crown-jewel.md` for the cipher — no single Dev chapter lists all eight, and the operator pages are the landing) | ✓ ᴿ¹⁹ (`production-readiness.md`, `deployment.md`, `gateway-tls.md`, `audit.md`, `sso.md`, `crown-jewel.md` — each refusal named, with its why) | ✓ ᴿ¹⁹ (each page says what the error names and what to change; `on_unreadable` and `[egress]` were loaded through the real loader) |
+| Rule catalogue (`mycelium_core::rule`, `RULES`, `reference/rule-catalogue.{md,json}`, `mycelium rules`) — new, run 19 | ✓ plan §3 G1/G2/G8, §6 (a catalogue entry is a claim about code, checked by a test) | ✓ `rule.rs` module doc · `docs/README.md` reference row · glossary ᴿ¹⁹ | ✓ ᴿ¹⁹ (regeneration works literally and the gate was run; guide 19 § adding a decision point — the `kv.expiry` template, what `check` refuses) | ✓ ᴿ¹⁹ (`diagnostics.md` § reading what a node decided — was Thin: only `capability-lifecycle.md`'s aside) | ✓ ᴿ¹⁹ (`mycelium rules [--format md\|json]` on `diagnostics.md`; run: 11 rules, the cross-crate note) |
+| Decision trace (`mycelium_core::decision`, `with_decision_trace`, `--trace-dir`, `decisions.jsonl` + `coverage.json`, `mycelium explain`) — new, run 19 | ✓ plan G7/G8, §6 (diagnostics, not the audit trail) | ✓ `decision.rs` module doc; guide 19 § reading what a node decided; glossary ᴿ¹⁹ | ✓ ᴿ¹⁹ (the sink snippet — `DecisionSink::new(SinkConfig {..})`, `with_decision_trace`, `StemOptions.trace`, the bundle attachment — was Missing; every identifier verified) | ✓ `capability-lifecycle.md` § `--trace-dir` (stem) · `diagnostics.md` ᴿ¹⁹ (node binary) | ✓ `capability-lifecycle.md` (works literally) · `diagnostics.md` ᴿ¹⁹ (`mycelium explain … --catalogue …`, matches `main.rs`); the seven "changes no decision / bounded / never blocks" tests run green |
+| What the trace does not show (the whole-agent replay diverging at the kernel's 20th choice; draw-count equivalence) — new, run 19 | ✓ plan I5/I6 rows | ✓ `tests/decision_trace_replay.rs` module doc · guide 19 ᴿ¹⁹ (cross-link) · the inventory row ᴿ¹⁹ | ~ ᴿ¹⁹ (the invocation is documented — `--features sim,test-util`, now in CI — but the divergence is a prose finding, not a checked-in assertion: a code gap, `grep -n "Kernel::replaying" tests/decision_trace_replay.rs` → none) | ✓ `what-is-proven.md` § not yet shown (what would show it) | — (an operator cannot act beyond not expecting a decision-for-decision replay, which the page says) |
 
-ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
+ᴿ¹⁹ closed in run 19 (2026-10-03) · ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 
 ## What was found, and how it was closed
 
@@ -679,12 +737,25 @@ skepticism, not a re-asserted ✓.
 - 2026-10-02 (run 18): **Commitments·HOW·Ops was recorded `~` as a code gap in run 17** when the verb existed
   (`compact_log`, and a gateway route). A miscalibration the other way: a doc gap filed as a code gap is a
   gap nobody fixes. **Sharpening:** a "code gap" verdict cites the grep that found nothing.
+- 2026-10-03 (run 19): **Confined fleet·HOW·Ops was Clear in run 17** (`confined-fleet.md`: "the substrate's own
+  outbound paths fail closed" under `egress.allow_hosts`) while the federation client dialled any partner and
+  the gateway fetched OIDC discovery and JWKS from any host — gated only in v2.20.0 (CHANGELOG § [2.20.0];
+  `lifecycle.rs` and `federation/client.rs`). Found by diffing the row against the 2.20.0 entry. Same class as
+  the 2026-07-15 "signed" hit: *asserted guarantee not confirmed in code* — the run-17 auditor opened the page
+  and the confinement report, not the two clients' dial paths. **Sharpening:** a confinement claim's Clear
+  enumerates the outbound call sites (`grep -rn "reqwest::\|Client::new\|connect(" src/ mycelium-*/src/`)
+  and names the gate on each.
+- 2026-10-03 (run 19), not a miss but recorded: **KV persistence·HOW·Dev (✓ᴿ¹⁶)** — the two guide literals
+  compiled when scored and broke with v2.20.0's `on_unreadable` (no `Default` on the struct); the release fixed
+  the in-tree examples and not the guides. A regression of a swept class, caught one run later. The structural
+  answer stays the one run 16 named: guide snippets that are exhaustive literals should be doctests or
+  examples CI compiles.
 
 ## Re-run guidance
 
 The audit was a one-time systematic sweep; a re-run should be a **diff**. Re-audit a concept only
-when its code/docs changed since the last run (run 18 baseline: tag `v2.18.0` —
-`git log v2.18.0..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
+when its code/docs changed since the last run (run 19 baseline: tag `v2.21.0` plus #501 —
+`git log v2.21.0..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
 above is the baseline: any cell dropping below ✓ is a regression. The method (four auditors, the
 Clear/Thin/Missing rubric, the exact prompts) is reproducible from this session's transcript. New
 concepts (a new sub-handle, a new companion, a new external standard) each need a fresh row audited

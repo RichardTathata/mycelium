@@ -167,6 +167,7 @@ run_the_node().await;                                   // every choice goes thr
 let ctx = take().expect("the recording");
 Bundle::new(ctx.kernel.trace().clone())
     .witnessed_by("the assertion that failed", Some("the toggle that makes it fail again".into()))
+    .with_attachment(mycelium_sim::bundle::DECISION_ATTACHMENT, sink.to_jsonl().into_bytes()) // if a sink was attached
     .write(&dir)?;
 
 // Replay: the same node, the bundle's trace, the wall clock held still.
@@ -182,7 +183,10 @@ under the seams and writes the bundle at shutdown (`GOSSIP_RECORD_SEED` picks th
 operator's capture path, [diagnostics.md § Capturing a replay bundle](../operations/diagnostics.md).
 An embedded agent records the way this section shows; there is no route or config field that starts
 a recording on a node built without `sim`. The scheduler seam (v2.9.0) is what makes a whole node
-replay without divergence; before it, task interleaving diverged.
+replay without divergence; before it, task interleaving diverged. **Not every whole-agent recording
+replays yet:** a live node recorded with a decision sink diverged at the kernel's 20th choice (two periodic
+loops' timer ticks swapped order) — `operations/what-is-proven.md` § not yet shown records it, with what
+would close it (the scheduler seam over every periodic loop).
 
 ## Reading what a node decided: the decision trace
 
@@ -197,10 +201,40 @@ activation and probe, under the install's token), the membership governor's
 recording made with `GOSSIP_RECORD_BUNDLE_DIR` carries the trace into its bundle; the [rule catalogue](../reference/rule-catalogue.md) says which, per rule:
 
 ```bash
-mycelium-stem --units ./units --library ./artifacts --trace-dir ./trace
+mycelium-stem --units examples/units/model_deploy/model-host.toml --library ./artifacts --trace-dir ./trace
+# (`--units` takes one unit file, not a directory)
 # … on shutdown: ./trace/decisions.jsonl, decisions.stats.json, coverage.json
 mycelium explain ./trace/decisions.jsonl --catalogue docs/reference/rule-catalogue.json
 ```
+
+An embedded node attaches the sink itself — one sink, before `start()`; a second attach warns and is
+ignored — and writes it out when it chooses:
+
+```rust
+use std::sync::Arc;
+use mycelium::decision::{DecisionSink, SinkConfig};
+
+let sink = Arc::new(DecisionSink::new(SinkConfig { max_records: 4096, max_bytes: 1 << 20, max_input_bytes: 256 }));
+agent.with_decision_trace(Arc::clone(&sink));          // GossipAgent::with_decision_trace(&self, Arc<DecisionSink>)
+agent.start().await?;
+// … later, or at shutdown:
+std::fs::write("trace/decisions.jsonl", sink.to_jsonl())?;
+std::fs::write("trace/decisions.stats.json", sink.stats_json())?;
+
+// A stem host hands the same sink to its provisioner through the options:
+let opts = mycelium_wasm_host::StemOptions { trace: Some(Arc::clone(&sink)), ..Default::default() };
+```
+
+`SinkConfig::default()` is 4096 records, 1 MiB, 256 bytes per input value; at either bound the newest
+record is dropped and counted in `stats()`. A node built with `sim` and started with
+`GOSSIP_RECORD_BUNDLE_DIR` does all of this for you and writes the three files into the bundle.
+
+**Adding a decision point.** A catalogue entry is a `RuleDescriptor` in `mycelium::rules::RULES` (or the
+wasm host's `rules::RULES`) — copy `kv.expiry` in `src/rules.rs` as the template; `rule::check` refuses an
+id that is not `subsystem.name`, a relation to an unknown id, or a `tests:` name that does not exist as a
+`fn` in the tree. Then `UPDATE_RULE_CATALOGUE=1 cargo test -p mycelium-wasm-host --features stem --test
+rule_catalogue` regenerates the reference and the gate keeps it current. Only an entry whose code records
+through a `DecisionSink` is `Instrumented`; the rest are `CatalogueOnly`, and `coverage.json` says which.
 
 A bundle can carry the trace as `decisions.jsonl` beside `coverage.json`, which says which rules it
 *could* have recorded; a bundle without them means **trace unavailable, never no decisions**. Two

@@ -37,7 +37,7 @@ A "blocked" result with no positive control proves nothing.
 
 | Setting | Value | Why |
 |---|---|---|
-| `egress.allow_hosts` | The hosts the gateway itself must reach, and nothing else | The substrate's own outbound paths fail closed |
+| `egress.allow_hosts` | The hosts the gateway itself must reach, and nothing else — including the OIDC issuer and every federation partner | The substrate's own outbound paths fail closed — the MCP bridge, LLM backends, probes, and since v2.20.0 the federation client and OIDC discovery/JWKS (a denied issuer refuses `start()`) |
 | `require_identity_proofs` | `true` | Issuer binding's member path rests on it |
 | An audit sink | Attached (`with_audit_sink`) | Keeps original bytes; a reissued audit suffix is detectable |
 | An action evaluator **and** an evidence journal | Both attached | Everything an agent does through the gateway is authorised and recorded, fsynced, before dispatch |
