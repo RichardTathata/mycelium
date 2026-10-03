@@ -133,14 +133,19 @@ struct CachedKeys {
 /// per gateway; `verify` is cheap on the hot path (a read-lock + cached keys),
 /// fetching only on cold cache, TTL expiry, or an unknown `kid`.
 pub(crate) struct OidcVerifier {
-    cfg:   OidcConfig,
-    http:  reqwest::Client,
-    cache: tokio::sync::RwLock<Option<CachedKeys>>,
+    cfg:    OidcConfig,
+    http:   reqwest::Client,
+    /// The node's outbound allow-list (`report.egress`, plan §8): discovery and the JWKS fetch are
+    /// outbound calls the substrate chooses, and a host the policy denies is never dialled — the
+    /// verifier then holds no keys and refuses every token. `start()` refuses the contradiction
+    /// first, so this is the runtime's belt to that brace.
+    egress: crate::config::EgressPolicy,
+    cache:  tokio::sync::RwLock<Option<CachedKeys>>,
 }
 
 impl OidcVerifier {
-    pub(crate) fn new(cfg: OidcConfig) -> Self {
-        Self { cfg, http: reqwest::Client::new(), cache: tokio::sync::RwLock::new(None) }
+    pub(crate) fn new(cfg: OidcConfig, egress: crate::config::EgressPolicy) -> Self {
+        Self { cfg, http: reqwest::Client::new(), egress, cache: tokio::sync::RwLock::new(None) }
     }
 
     /// The IdP issuer every accepted JWT was validated against — the authority that qualifies an
@@ -196,6 +201,10 @@ impl OidcVerifier {
             Some(u) => u,
             None => return Vec::new(),
         };
+        if !self.egress.permits_url(&jwks_uri) {
+            tracing::warn!(%jwks_uri, "oidc: the egress policy does not permit the JWKS host; no keys, every token refused");
+            return Vec::new();
+        }
         let jwks: jsonwebtoken::jwk::JwkSet = match self.http.get(&jwks_uri).send().await {
             Ok(r) => match r.json().await {
                 Ok(j) => j,
@@ -218,6 +227,10 @@ impl OidcVerifier {
         }
         // OIDC discovery.
         let disco = format!("{}/.well-known/openid-configuration", self.cfg.issuer.trim_end_matches('/'));
+        if !self.egress.permits_url(&disco) {
+            tracing::warn!(%disco, "oidc: the egress policy does not permit the issuer host; discovery skipped");
+            return None;
+        }
         let doc: serde_json::Value = self.http.get(&disco).send().await.ok()?.json().await.ok()?;
         doc.get("jwks_uri")?.as_str().map(str::to_string)
     }

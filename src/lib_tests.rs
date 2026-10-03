@@ -10569,3 +10569,77 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `report.egress` (plan §8): the OIDC identity provider is an outbound the substrate chooses, so a
+/// non-empty `egress.allow_hosts` that does not permit it is a **contradiction refused at start**, by
+/// name — not a JWKS fetch that fails later behind a gateway that then refuses every token.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn an_oidc_issuer_the_egress_policy_denies_refuses_the_start() {
+    let port = alloc_port();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.oidc = Some(crate::OidcConfig { issuer: "https://idp.example".into(), audience: "mycelium".into(), group_claim: "groups".into(), group_scopes: Default::default(), jwks_uri: None });
+    cfg.egress.allow_hosts = vec!["api.allowed.example".into()];
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg.clone());
+    let e = a.start().await.expect_err("an issuer the egress policy denies must refuse the start");
+    assert!(e.to_string().contains("egress") && e.to_string().contains("idp.example"), "{e}");
+    a.shutdown().await;
+
+    cfg.egress.allow_hosts.push("idp.example".into());
+    let b = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    b.start().await.expect("the issuer permitted, the node starts");
+    b.shutdown().await;
+}
+
+/// `report.egress` (plan §8): a federation client refuses an endpoint the egress policy denies
+/// **before any byte is sent** — the link stays down and nothing is dialled — and the agent applies
+/// the node's policy to the clients it is handed.
+#[tokio::test]
+async fn a_federation_client_refuses_an_endpoint_the_egress_policy_denies() {
+    use crate::federation::client::{ClientError, FederationClient, GatewayEndpoint};
+    use crate::federation::session::LinkState;
+    use crate::federation::DomainId;
+    let (sk, _vk) = {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        (sk, vk)
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let dialled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let dialled = Arc::clone(&dialled);
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                if listener.accept().is_ok() { dialled.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    }
+    let client = FederationClient::new(
+        DomainId::new("beta").unwrap(), "svc/billing", sk, DomainId::new("alpha").unwrap(),
+        vec![GatewayEndpoint { id: "gw".into(), base_url: format!("http://127.0.0.1:{port}") }],
+        1, Duration::from_secs(30),
+    ).with_egress(crate::EgressPolicy { allow_hosts: vec!["partner.example".into()] });
+    let r = client.connect().await;
+    assert!(matches!(r, Err(ClientError::Egress { .. })), "{r:?}");
+    assert_eq!(client.link_state(), LinkState::Down);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(dialled.load(std::sync::atomic::Ordering::SeqCst), 0, "refused before any byte was sent");
+
+    // The agent hands its own policy to clients that carry none.
+    let port2 = alloc_port();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port2;
+    cfg.egress.allow_hosts = vec!["partner.example".into()];
+    let bare = Arc::new(FederationClient::new(
+        DomainId::new("beta").unwrap(), "svc/billing", ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]), DomainId::new("alpha").unwrap(),
+        vec![GatewayEndpoint { id: "gw".into(), base_url: format!("http://127.0.0.1:{port}") }],
+        1, Duration::from_secs(30),
+    ));
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", port2).unwrap(), cfg).with_federation_clients([Arc::clone(&bare)]);
+    assert!(matches!(bare.connect().await, Err(ClientError::Egress { .. })), "the node's policy applies to a client handed to it");
+    drop(agent);
+}

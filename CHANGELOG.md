@@ -10,6 +10,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **The egress allow-list reaches the federation client and the OIDC provider** (`report.egress`,
+  plan §8). `egress.allow_hosts` gated the MCP bridge, LLM calls, probes, the skillrunner and the wasm
+  host, and the startup report said so — but a federation client dialled any partner endpoint, and
+  the gateway fetched OIDC discovery and JWKS from any host. Now a `FederationClient` is held to a
+  policy (`with_egress`; `with_federation_clients` applies the node's policy to clients built
+  without one) and refuses a denied endpoint before any byte is sent (`ClientError::Egress`, a new
+  variant of a `#[non_exhaustive]` enum); and an `[oidc]` issuer or `jwks_uri` the allow-list does
+  not permit **refuses `start()`** by name, with the runtime fetch gated as the belt to that brace.
+  The guarantee `egress.allow_list` names what it covers, and that an `HttpLibrarySource` is gated
+  only when built `with_egress`. Two tests seen failing on the unfixed code. **Behaviour change:** a
+  node with a non-empty allow-list and an `[oidc]` table whose issuer it does not permit no longer
+  starts; add the IdP's host.
+
 - **A node no longer starts over persisted state it could not read** (`persist.replay`, plan §8). A
   corrupt or undecryptable `snapshot.bin` was logged and skipped — the node started from the WAL
   alone and the next snapshot **overwrote** it; a corrupt WAL record stopped replay silently, and the

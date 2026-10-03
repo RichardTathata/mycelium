@@ -199,7 +199,7 @@ pub(super) async fn run_http_server(
         .config
         .oidc
         .clone()
-        .map(|c| Arc::new(super::oidc::OidcVerifier::new(c)));
+        .map(|c| Arc::new(super::oidc::OidcVerifier::new(c, ctx.config.egress.clone())));
 
     let state = Arc::new(HttpCtx {
         agent_ctx:    ctx,
@@ -4383,7 +4383,7 @@ async fn gw_federation_call(
         let observed = match &outcome {
             Ok(_) => Execution::Completed,
             Err(ClientError::Link(_)) | Err(ClientError::Resolve(_)) | Err(ClientError::Principal(_))
-            | Err(ClientError::Tls(_)) => Execution::None,
+            | Err(ClientError::Tls(_)) | Err(ClientError::Egress { .. }) => Execution::None,
             Err(ClientError::Outcome(crate::federation::gateway::CallOutcome::NoCapacity { .. })) => Execution::None,
             Err(ClientError::Refused { .. }) => Execution::Failed,
             Err(_) => Execution::Unknown,

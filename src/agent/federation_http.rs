@@ -211,6 +211,8 @@ pub(crate) fn call_refusal(e: &ClientError) -> Response {
         ClientError::Principal(_) => (StatusCode::BAD_REQUEST, "principal", false, "none"),
         ClientError::Outcome(CallOutcome::NoCapacity { .. }) => (StatusCode::TOO_MANY_REQUESTS, "capacity", false, "none"),
         ClientError::Tls(_) => (StatusCode::BAD_GATEWAY, "tls", false, "none"),
+        // The node's own outbound allow-list refused the endpoint: nothing was dialled.
+        ClientError::Egress { .. } => (StatusCode::FORBIDDEN, "egress", false, "none"),
         // The partner answered.
         ClientError::Refused { .. } => (StatusCode::BAD_GATEWAY, "refused", true, "refused"),
         ClientError::Catalogue(_) => (StatusCode::BAD_GATEWAY, "catalogue", true, "refused"),

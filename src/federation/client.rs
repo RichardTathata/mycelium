@@ -86,6 +86,10 @@ pub enum ClientError {
     /// could mint and neither side could re-parse. Refusing here keeps the accept-set and the
     /// emit-set the same on our side too.
     Principal(String),
+    /// Refused locally, before any byte was sent: the node's outbound allow-list
+    /// (`egress.allow_hosts`) does not permit this endpoint's host (`report.egress`, plan §8).
+    /// Like [`Self::Tls`], not a [`CallOutcome::DeliveryUnknown`] — the partner received nothing.
+    Egress { gateway: String, base_url: String },
 }
 
 /// Why the transport was refused before it carried anything. See [`ClientError::Tls`].
@@ -130,6 +134,7 @@ impl std::fmt::Display for ClientError {
             Self::Catalogue(r) => write!(f, "catalogue: {r}"),
             Self::Tls(r) => write!(f, "tls: {r}"),
             Self::Principal(why) => write!(f, "principal: {why}"),
+            Self::Egress { gateway, base_url } => write!(f, "egress: the allow-list does not permit {gateway} at {base_url}"),
         }
     }
 }
@@ -216,6 +221,11 @@ pub struct FederationClient {
     connect_timeout: Duration,
     request_timeout: Duration,
     http: reqwest::Client,
+    /// The outbound allow-list this client is held to (`report.egress`, plan §8). Unset: allow all
+    /// — the agent sets its own policy on a client it is handed ([`Self::set_egress`]), and a client
+    /// used outside an agent should be built [`Self::with_egress`]. Set once: a client built with its
+    /// own policy keeps it. A once-cell, not a lock.
+    egress: std::sync::OnceLock<crate::config::EgressPolicy>,
     /// Lock-order row 39: leaf, µs, never held across the HTTP await (two critical sections
     /// around it, by construction of `call`).
     state: Mutex<ClientState>,
@@ -281,6 +291,7 @@ impl FederationClient {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             http: http_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, &[]),
+            egress: std::sync::OnceLock::new(),
             state: Mutex::new(ClientState {
                 link: PartnerLink::new(partner),
                 pool,
@@ -289,6 +300,25 @@ impl FederationClient {
                 highest_revision: None,
             }),
         }
+    }
+
+    /// Hold this client to an outbound allow-list: an endpoint whose host it does not permit is
+    /// refused **before any byte is sent** ([`ClientError::Egress`]). Set once.
+    pub fn with_egress(self, policy: crate::config::EgressPolicy) -> Self {
+        self.set_egress(policy);
+        self
+    }
+
+    /// [`Self::with_egress`] on a shared client — what the agent does to the clients it is handed
+    /// (`with_federation_clients`), so the node's policy reaches a client built without one. A
+    /// client that already carries a policy keeps it; the call then returns `false`.
+    pub fn set_egress(&self, policy: crate::config::EgressPolicy) -> bool {
+        self.egress.set(policy).is_ok()
+    }
+
+    /// Does the policy this client is held to permit `base_url`? No policy ⇒ allow all.
+    fn egress_permits(&self, base_url: &str) -> bool {
+        self.egress.get().is_none_or(|p| p.permits_url(base_url))
     }
 
     /// How long a minted credential is valid for. Must be within the partner's
@@ -417,6 +447,11 @@ impl FederationClient {
         let presented = self.present(&self.principal, CATALOG_EXPORT, None);
         let mut last: Option<ClientError> = None;
         for gw in &self.endpoints {
+            if !self.egress_permits(&gw.base_url) {
+                // Refused locally: the policy does not permit the host, so nothing is dialled.
+                last = Some(ClientError::Egress { gateway: gw.id.clone(), base_url: gw.base_url.clone() });
+                continue;
+            }
             let url = format!("{}{}", gw.base_url, CATALOG_PATH);
             let sent = self.http.get(&url).header(HEADER_FEDERATED_CALL, presented.to_header_value()).send().await;
             let resp = match sent {
@@ -599,6 +634,11 @@ impl FederationClient {
             // which is how a binding becomes a source of false refusals instead of a guarantee.
             let body_bytes = serde_json::to_vec(&body).expect("a request we constructed serialises");
             let presented = self.present(principal, export, Some(&body_bytes));
+            if !self.egress_permits(&ep.base_url) {
+                // Refused before any byte is sent — not a `DeliveryUnknown`: the partner received
+                // nothing, so the call is safe to retry once the policy or the endpoint changes.
+                return Err(ClientError::Egress { gateway: ep.id.clone(), base_url: ep.base_url.clone() });
+            }
             let sent = self
                 .http
                 .post(format!("{}/a2a", ep.base_url))
