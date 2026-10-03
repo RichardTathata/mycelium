@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.22.0] — 2026-10-03
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.21.0 holds. **Upgrade notes:** `StemOptions` gained `stage_dir` (an exhaustive literal breaks; `..Default::default()` is unaffected); `mycelium_wasm_host::serve::spawn` takes each `[[serve]]` with its resolved key (`Stem::start` callers unaffected); a mesh-sourced stem now writes under `<placement_root>/stage`; `mycelium-effects` gained feature `metrics`. **Not claimed:** a real S3/GCS bucket (S4 — S3Mock is a mock), the `select!` branch seam (inventory row 142), `require_identity_proofs` on by default, and everything on the proof page's third table that needs a counterparty or hardware.
+
+**Summary.** the **zero-gaps MINOR** (plan `zero-gaps.md`, Z1–Z9 delivered): the nine code-shaped gaps the repository recorded are closed — a stem reads an **object store** (`StemSource::Store`, `--library s3://…`, `--manifest-source`, a store-backed librarian that mirrors, the `catalog_store` suite profile against S3Mock); `[[serve]].api_key_env`, read once at start and **refusing the start by name** when unset; a blob past the frame cap crosses the mesh **in ranges** (`artifact.size` / `artifact.fetch_range`, `MeshRangedFetcher`; the stem's mesh path stages to disk and re-serves); the `llm_agent` tools as **self-describing components** (`describe` → the component's own schema, no tool section in the unit format); the scheduler seam's **second arm** — a tick due at the same paused instant as another waits its recorded turn, so **a live node replays decision for decision** (the v2.21.0 finding closed, `tests/decision_trace_replay.rs` the assertion); `mycelium-effects` `Counting<D>` + `RefusalCounts`; both SDKs' `set()` return `KvReceipt` (py 0.2.5, ts 0.1.2); `gossip_peers_connected`; `provisioning_viz` on :8101. Wire **v12** unchanged.
+
 ### Added
 - **Zero gaps, the small four** (`docs/plans/zero-gaps.md` Z6–Z9): `mycelium-effects` gains
   `Counting<D>` + `RefusalCounts` — a destination whose refusals are counted by kind and leg, with
