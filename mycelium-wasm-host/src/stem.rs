@@ -728,12 +728,19 @@ mod tests {
         // ── kill one host: the standby brings the floor back ────────────────────
         let victim = hosting[0];
         let (dead_agent, dead_stem) = fleet.remove(victim);
+        let dead_id = dead_agent.node_id().clone();
         dead_stem.stop().await;
         dead_agent.shutdown().await;
-        let dropped = wait_until(60, || live(&seed) < 2).await;
-        assert!(dropped, "the dead host's advertisement evaporates");
-        let rehealed = wait_until(90, || live(&seed) == 2).await;
-        assert!(rehealed, "the standby re-provisions: {} live", live(&seed));
+        // The dead host's advertisement evaporates (its 5 s TTL) and the standby re-provisions
+        // within a tick of that — so `live < 2` can hold for less than one poll interval and a
+        // count-based wait could miss it (seen twice under a loaded full run, 2026-10-03). The
+        // structural conditions: the victim is gone from the seed's providers for good, and the
+        // floor is back with two providers neither of which is the victim.
+        let providers = |n: &Arc<GossipAgent>| n.capabilities().resolve(&filter).into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        let gone = wait_until(60, || !providers(&seed).contains(&dead_id)).await;
+        assert!(gone, "the dead host's advertisement evaporates: {:?}", providers(&seed));
+        let rehealed = wait_until(90, || { let p = providers(&seed); p.len() == 2 && !p.contains(&dead_id) }).await;
+        assert!(rehealed, "the standby re-provisions: {:?}", providers(&seed));
         assert!(wait_until(30, || hosts_of(&fleet).len() == 2).await, "both remaining stems now host: {:?}", hosts_of(&fleet));
 
         for (a, s) in fleet {
