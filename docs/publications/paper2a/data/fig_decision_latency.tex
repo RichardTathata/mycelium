@@ -14,13 +14,13 @@
   title style={font=\small},
   name=plota,
 ]
-\addplot[mark=*, thick, green!60!black] coordinates { (10,15.7) (20,17.8) (40,27.9) };
+\addplot[mark=*, thick, green!60!black] coordinates { (10,27.6) (20,35.0) (40,26.7) };
 \addlegendentry{gossip mean};
-\addplot[mark=o, thick, green!60!black, dashed] coordinates { (10,46) (20,60) (40,102) };
+\addplot[mark=o, thick, green!60!black, dashed] coordinates { (10,62) (20,128) (40,58) };
 \addlegendentry{gossip p99};
-\addplot[mark=square*, thick, red!70!black] coordinates { (10,5857.7) (20,1113.1) (40,10896.4) };
+\addplot[mark=square*, thick, red!70!black] coordinates { (10,875.7) (20,3028.4) (40,2781.0) };
 \addlegendentry{broker mean};
-\addplot[mark=square, thick, red!70!black, dashed] coordinates { (10,501328) (20,11218) (40,500831) };
+\addplot[mark=square, thick, red!70!black, dashed] coordinates { (10,4089) (20,23450) (40,25901) };
 \addlegendentry{broker p99};
 \end{semilogyaxis}
 \begin{axis}[
@@ -36,17 +36,17 @@
   title={(b) Mean staleness},
   title style={font=\small},
 ]
-\addplot[mark=*, thick, green!60!black] coordinates { (10,0.109) (20,0.12) (40,0.196) };
+\addplot[mark=*, thick, green!60!black] coordinates { (10,0.11) (20,0.157) (40,0.224) };
 \addlegendentry{gossip};
-\addplot[mark=square*, thick, red!70!black] coordinates { (10,0.043) (20,0.086) (40,0.149) };
+\addplot[mark=square*, thick, red!70!black] coordinates { (10,0.045) (20,0.121) (40,0.185) };
 \addlegendentry{broker};
 \end{axis}
 \end{tikzpicture}
 \caption{Decision latency (log scale, panel a) and routing-decision staleness
 (panel b) for the locally-resolved gossip mode and the broker-mediated mode
 on the same Mycelium substrate. Each point is the aggregate of one 20-second
-run at 50 decisions/second. Gossip mean grows from 15.7 to 27.9 $\mu s$ over a
-4$\times$ cluster scale; broker mean is two to three orders of magnitude
-higher and p99 includes timeouts at the RPC ceiling.}
+run at 50 decisions/second. Gossip mean stays between 26.7 and 35.0 $\mu s$ over a
+4$\times$ cluster scale; broker mean is 32--104$\times$ higher (one to two
+orders of magnitude), with a p99 tail below 26 ms.}
 \label{fig:coordinator-latency}
 \end{figure}

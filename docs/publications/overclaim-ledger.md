@@ -303,3 +303,11 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   trustless / tamper-proof / linearizable claim outside its negation; no crisis-framed example; wire v12 /
   PREV 11; scopes; no dead link; `check-positioning.sh` and `check-materials.py` exit 0; every number with a
   unit on the decks sourced. PDFs of paper 1 and 2a need re-rendering.
+
+- 2026-10-03 (run 5 follow-up, option 1 chosen by the author): **paper 2a's sweep re-run and committed.**
+  The full {gossip, broker} × {10, 20, 40} grid ran on the runner's defaults; no decision reached the 500 ms
+  timeout; the table, the figure (its caption now computed from `summary.csv`), the abstract's magnitude
+  ("thirty to a hundred times", one to two orders) and §8's latency, tail, staleness and throughput
+  paragraphs read from the committed data. The staleness ordering **reversed** against the earlier sweep
+  (broker lower at every N here) and the text now says a single run supports neither ordering. The Zenodo
+  record needs a new version; the PDF needs re-rendering.
