@@ -4770,6 +4770,27 @@ async fn a_gateway_that_cannot_come_up_fails_the_start() {
     b.shutdown().await;
 }
 
+/// `audit.sink` (plan §8): an audit sink attached to a node with no `[tls]` would receive nothing —
+/// records are sealed with the node identity, and without it nothing is sealed. That is a setting
+/// accepted and ignored, the class v2.18.1 closed for the token tables; `start()` refuses it by name.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn an_audit_sink_without_tls_refuses_the_start() {
+    struct Nowhere;
+    impl crate::AuditSink for Nowhere {
+        fn export(&self, _: &crate::SignedAuditRecord) {}
+    }
+    let port = alloc_port();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.tls = None;
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    a.with_audit_sink(Arc::new(Nowhere));
+    let e = a.start().await.expect_err("a sink that would receive nothing must refuse the start");
+    assert!(e.to_string().contains("audit") && e.to_string().contains("[tls]"), "{e}");
+    a.shutdown().await;
+}
+
 /// Regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8): with
 /// **no persistence configured**, `Committed { persisted }` reads `true` — "nothing was promised" is
 /// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`

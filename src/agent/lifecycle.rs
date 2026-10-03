@@ -88,6 +88,19 @@ impl GossipAgent {
                 }
             }
         }
+        // An audit sink on a node with no `[tls]` would receive nothing — records are sealed with
+        // the node identity (`audit.chain`), and without it nothing is sealed — a setting accepted
+        // and ignored, the class v2.18.1 closed for the token tables (`audit.sink`, plan §8).
+        #[cfg(feature = "compliance")]
+        if self.task_ctx.audit_sink.get().is_some() && self.config.tls.is_none() {
+            return Err(GossipError::InvalidField {
+                field: "audit_sink",
+                reason: "with_audit_sink needs [tls]: audit records are sealed with the node identity, and \
+                         without it nothing is sealed and the sink receives nothing. Configure [tls] or \
+                         remove the sink"
+                    .into(),
+            });
+        }
         #[cfg(not(feature = "tls"))]
         for (field, set) in [("tls", self.config.tls.is_some()), ("gateway_tls", self.config.gateway_tls.is_some())] {
             if set {
