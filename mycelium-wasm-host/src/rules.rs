@@ -3,6 +3,9 @@
 //! Metadata only; the mechanism is in `provisioner.rs`, `runtime.rs` and `activation.rs`.
 //!
 //! Relationships here are hypotheses from reading the code (plan §6); the trace is what will show them.
+//! Nine are `Instrumented` by the pilot (I5, `Provisioner::with_decision_trace`); provenance, loadable,
+//! activation, probe, advertise and withdraw stay catalogue-only — the first two have no typed reason at
+//! the decision point today, the rest decide inside a runtime hook or under the hosted lock.
 
 use mycelium::rule::{Guard, Input, Outcome, OutcomeKind::*, Responsibility::*, RuleDescriptor, TracePolicy::*};
 
@@ -23,7 +26,7 @@ pub static RULES: &[RuleDescriptor] = &[
         guards: &[Guard::Health], may_trigger: &["prov.presence_floor", "prov.demand_response"], may_inhibit: &[], depends_on: &["prov.probe"],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/operations/capability-lifecycle.md",
         tests: &["a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability", "the_stem_fleet_fills_a_presence_floor_and_reheals"],
-        trace: CatalogueOnly,
+        trace: Instrumented,
         summary: "A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back.",
     },
     RuleDescriptor {
@@ -34,7 +37,7 @@ pub static RULES: &[RuleDescriptor] = &[
         effects: &["withdraw() of the `{name}.shadow` install once the entry is accepted, so the live rule reinstalls it"],
         guards: &[Guard::Provenance], may_trigger: &["prov.demand_response"], may_inhibit: &[], depends_on: &["prov.loadable"],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/guide/16-guardrails.md",
-        tests: &["a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it"], trace: CatalogueOnly,
+        tests: &["a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it"], trace: Instrumented,
         summary: "A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20).",
     },
     RuleDescriptor {
@@ -52,7 +55,7 @@ pub static RULES: &[RuleDescriptor] = &[
         may_trigger: &["prov.install"], may_inhibit: &[], depends_on: &["prov.provenance", "prov.loadable", "prov.eligible", "prov.self_election", "prov.rights_admission"],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/operations/capability-lifecycle.md",
         tests: &["a_hosting_stem_re_serves_its_verified_cache_to_a_late_joiner", "a_proposed_entry_loads_only_into_the_shadow_lane_until_a_listed_reviewer_accepts_it"],
-        trace: CatalogueOnly,
+        trace: Instrumented,
         summary: "A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install.",
     },
     RuleDescriptor {
@@ -69,7 +72,7 @@ pub static RULES: &[RuleDescriptor] = &[
         guards: &[Guard::Provenance, Guard::ResourceBudget], may_trigger: &["prov.install"], may_inhibit: &[],
         depends_on: &["prov.provenance", "prov.loadable", "prov.eligible", "prov.self_election"],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/reference/unit-file.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: CatalogueOnly,
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: Instrumented,
         summary: "Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry.",
     },
     RuleDescriptor {
@@ -79,7 +82,7 @@ pub static RULES: &[RuleDescriptor] = &[
         outcomes: &[Outcome { kind: Action, reasons: &["above_ceiling"] }, Outcome { kind: Deferral, reasons: &["self_election_declined"] }, Outcome { kind: NoAction, reasons: &["within_ceiling", "not_hosting"] }],
         effects: &["withdraw() of this node's install"], guards: &[], may_trigger: &[], may_inhibit: &["prov.presence_floor"], depends_on: &["prov.self_election"],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/reference/unit-file.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: CatalogueOnly,
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: Instrumented,
         summary: "More live providers than the declared ceiling makes a hosting node a candidate to withdraw its own install.",
     },
     RuleDescriptor {
@@ -109,7 +112,7 @@ pub static RULES: &[RuleDescriptor] = &[
         outcomes: &[Outcome { kind: Action, reasons: &["eligible"] }, Outcome { kind: Refusal, reasons: &["no_runtime", "budget", "memory", "disk"] }],
         effects: &["`mycelium_artifact_ineligible_skips_total{reason}`"], guards: &[Guard::ResourceBudget], may_trigger: &[], may_inhibit: &["prov.demand_response", "prov.presence_floor"], depends_on: &["prov.provenance"],
         symbol: "provisioner::Provisioner::eligible", docs: "docs/operations/capability-lifecycle.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: CatalogueOnly,
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: Instrumented,
         summary: "This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.",
     },
     RuleDescriptor {
@@ -120,7 +123,7 @@ pub static RULES: &[RuleDescriptor] = &[
         effects: &["the ledger's admit record and published head", "`mycelium_artifact_installs_refused_by_rights_total`"],
         guards: &[Guard::Authority, Guard::ResourceBudget], may_trigger: &[], may_inhibit: &["prov.install"], depends_on: &[],
         symbol: "provisioner::Provisioner::admit_install", docs: "docs/guide/22-stability-and-control.md",
-        tests: &["an_install_is_refused_and_recorded_when_the_node_holds_no_rights"], trace: CatalogueOnly,
+        tests: &["an_install_is_refused_and_recorded_when_the_node_holds_no_rights"], trace: Instrumented,
         summary: "An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did.",
     },
     RuleDescriptor {
@@ -130,7 +133,7 @@ pub static RULES: &[RuleDescriptor] = &[
         outcomes: &[Outcome { kind: Action, reasons: &["elected"] }, Outcome { kind: Deferral, reasons: &["declined"] }],
         effects: &[], guards: &[Guard::Cooldown], may_trigger: &[], may_inhibit: &["prov.demand_response", "prov.presence_floor", "prov.shed"], depends_on: &[],
         symbol: "provisioner::Provisioner::self_elects", docs: "docs/operations/capability-lifecycle.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: CatalogueOnly,
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: Instrumented,
         summary: "Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam.",
     },
     RuleDescriptor {
@@ -141,7 +144,7 @@ pub static RULES: &[RuleDescriptor] = &[
         effects: &["`HostedState::Installing` → `Live` under the install token", "the `{ns}/loading` tier while bytes arrive", "`mycelium_artifact_installs_started_total`, `_completed_total`, `_failed_total{stage}`"],
         guards: &[Guard::Provenance], may_trigger: &["prov.activation", "prov.advertise"], may_inhibit: &[], depends_on: &["prov.rights_admission"],
         symbol: "provisioner::Provisioner::start_install_as", docs: "docs/operations/capability-lifecycle.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "an_installed_tool_component_is_bridged_as_an_mcp_tool"], trace: CatalogueOnly,
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "an_installed_tool_component_is_bridged_as_an_mcp_tool"], trace: Instrumented,
         summary: "Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it.",
     },
     RuleDescriptor {

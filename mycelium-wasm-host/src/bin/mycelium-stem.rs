@@ -5,7 +5,7 @@
 //! ```text
 //! mycelium-stem --units <unit.toml> [-c <gossip.toml>] [-p <port>] [--host <ip>] [-r <peers>]
 //!               [--library <dir>] [--librarian <manifest> --publisher ed25519:<hex>]
-//!               [--tick-ms <n>] [--self-elect <p>]
+//!               [--tick-ms <n>] [--self-elect <p>] [--trace-dir <dir>]
 //! ```
 //!
 //! With `--library` the node reads artifact bytes from that directory (a mounted volume, or its
@@ -35,6 +35,7 @@ fn usage() -> ! {
              --publisher ed25519:<hex>  the manifest's publisher key (with --librarian)\n\
              --tick-ms <n>              provisioner tick (default 500)\n\
              --self-elect <p>           self-election probability per round (default 0.5)\n\
+             --trace-dir <dir>          write the decision trace (decisions.jsonl + its counters) there on shutdown\n\
          -h, --help"
     );
     std::process::exit(2)
@@ -53,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut publisher: Option<String> = None;
     let mut tick_ms: u64 = 500;
     let mut self_elect: f64 = 0.5;
+    let mut trace_dir: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -68,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--publisher" => publisher = Some(val()),
             "--tick-ms" => tick_ms = val().parse().unwrap_or_else(|_| usage()),
             "--self-elect" => self_elect = val().parse().unwrap_or_else(|_| usage()),
+            "--trace-dir" => trace_dir = Some(val()),
             _ => usage(),
         }
     }
@@ -97,10 +100,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(dir) => StemSource::Library(dir.into()),
         None => StemSource::Mesh { timeout: Duration::from_secs(5) },
     };
+    // The decision trace (plan I5): off unless asked for; written as `decisions.jsonl` beside its
+    // counters on shutdown, so a reader knows what the trace is missing.
+    let sink = trace_dir.as_ref().map(|_| Arc::new(mycelium::decision::DecisionSink::default()));
     let opts = StemOptions {
         source,
         tick: Duration::from_millis(tick_ms.max(50)),
         self_elect_p: self_elect.clamp(0.0, 1.0),
+        trace: sink.clone(),
         ..StemOptions::default()
     };
 
@@ -156,6 +163,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::signal::ctrl_c().await?;
         tracing::info!("shutting down");
         stem.stop().await;
+        if let (Some(dir), Some(sink)) = (&trace_dir, &sink) {
+            let dir = std::path::Path::new(dir);
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(dir.join(mycelium::decision::DECISION_ATTACHMENT), sink.to_jsonl())?;
+            std::fs::write(dir.join("decisions.stats.json"), sink.stats_json())?;
+            tracing::info!(dir = %dir.display(), held = sink.stats().held, dropped = sink.dropped(), "decision trace written");
+        }
         agent.shutdown().await;
         Ok::<(), Box<dyn std::error::Error>>(())
     })

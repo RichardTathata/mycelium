@@ -30,6 +30,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at a bound, `try_lock` only, no clock or random draw of its own. Off unless a decision point is handed
   a sink; nothing is instrumented yet (I5). A replay bundle will carry it as `decisions.jsonl`, and a
   bundle without it means *trace unavailable*, never *no decisions*. Additive.
+- **The stem provisioning pilot of the decision trace** (plan I5). `Provisioner::with_decision_trace(sink)`
+  records every decision a provisioning round makes — health pass, promotion, demand response, presence
+  floor, shed, eligibility, self-election, rights admission, and the install's outcome from its task —
+  from the values the round already produced: guard order, the self-election draw and policy are
+  unchanged, nothing is re-evaluated, nothing is recorded under the hosted lock, and the sink never
+  waits. `StemOptions::trace` hands a stem one; `mycelium-stem --trace-dir <dir>` writes
+  `decisions.jsonl` and its counters (`DecisionSink::stats_json`) there on shutdown. Off by default. Shown by a test that runs the
+  same scenario with and without a sink (same decisions, same hosted state; the traced one reads
+  eligible → elected → unmet demand → completed, then healthy and already hosted) and one that
+  saturates the sink (one record kept, the rest dropped and counted, the install still happens).
+  **Upgrade note:** `StemOptions` gained `trace` (an exhaustive literal breaks; `..Default::default()`
+  is unaffected). **Not claimed:** the install → activation → probe chain is not linked by an
+  operation id yet, and activation and probe stay catalogue-only.
 
 ### Fixed
 - **A failing initial activation probe is an activation error, not a live install.** `[[activation]]`'s
