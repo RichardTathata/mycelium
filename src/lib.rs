@@ -263,6 +263,9 @@ pub use mycelium_core::sim_seam;
 /// The rule catalogue's descriptor types (plan I1): each crate registers its decision points as
 /// `&'static [RuleDescriptor]`; this crate's are `rules::RULES`.
 pub use mycelium_core::rule;
+/// The decision trace core (plan I4): a bounded, nonblocking sink of records a decision point fills from
+/// values it already produced. Off unless a decision point is handed a sink.
+pub use mycelium_core::decision;
 /// This crate's decision points, described — the catalogue's core entries (plan I1).
 pub mod rules;
 pub(crate) use mycelium_core::{
