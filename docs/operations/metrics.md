@@ -39,6 +39,7 @@ The hot-path layer-I/II counters and gauges from `mycelium-core`. The
 | Metric | Type | Labels | Meaning | Watch for / alert |
 |---|---|---|---|---|
 | `gossip_store_entries` | gauge | — | live KV keys held by this node | unbounded growth = tombstones not GC'd or a writer looping (mirrors `/stats` `store_entries`) |
+| `gossip_peers_connected` | gauge | — | live outbound writers — sockets this node holds to peers, set where the writer map changes and at the GC sweep (mirrors `/stats` `cached_connections`; the *view* is `mycelium_emergent_peers_known`) | `0` while `peers_known > 0` = this node can see peers it cannot reach; a sawtooth = writers idling out and re-dialling |
 | `gossip_kv_writes_total` | counter | — | KV writes applied | a sudden spike locates a hot writer |
 | `gossip_kv_deletes_total` | counter | — | KV deletes (tombstones) applied | — |
 | `gossip_anti_entropy_rounds_total` | counter | — | Merkle anti-entropy reconciliation rounds run | flat-lining while peers are up = anti-entropy stalled |

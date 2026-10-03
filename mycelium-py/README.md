@@ -226,7 +226,7 @@ replies = agent.scatter_gather(
 ### KV store
 
 ```python
-agent.set("my/key", b"value")              # write + gossip
+rcpt  = agent.set("my/key", b"value")      # write + gossip → KvReceipt (rung 1; rung 2 as .local_durability)
 val   = agent.get("my/key")               # → bytes | None
 agent.delete("my/key")                    # tombstone + gossip
 keys  = agent.keys(prefix="my/")          # → list[str]

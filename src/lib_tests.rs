@@ -3717,6 +3717,50 @@ async fn forwarding_is_unconditional_through_non_member_relay() {
     member.shutdown().await;
 }
 
+/// Zero-gaps Z9 (D9): `gossip_peers_connected` is the number of **live writers** — sockets, not the
+/// view (`mycelium_emergent_peers_known` is the view) — set where the writer map changes and at the
+/// GC sweep, mirroring `/stats` `cached_connections`. Written before the gauge existed and seen
+/// failing (no such series on `/metrics`).
+#[cfg(all(feature = "gateway", feature = "metrics"))]
+#[tokio::test]
+async fn the_connected_peer_gauge_counts_live_writers() {
+    let (pa, pb) = (alloc_port(), alloc_port());
+    let http_a = alloc_port();
+    let mut ca = GossipConfig::default();
+    ca.bind_port = pa;
+    ca.http_port = Some(http_a);
+    ca.health_check_interval_secs = 1;
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", pa).unwrap(), ca);
+    a.start().await.expect("a starts");
+    let mut cb = GossipConfig::default();
+    cb.bind_port = pb;
+    cb.bootstrap_peers = vec![NodeId::new("127.0.0.1", pa).unwrap()];
+    cb.health_check_interval_secs = 1;
+    let b = GossipAgent::new(NodeId::new("127.0.0.1", pb).unwrap(), cb);
+    b.start().await.expect("b starts");
+    poll_until(|| !a.peers().is_empty() && a.system_stats().cached_connections >= 1, 10_000).await;
+    assert!(a.system_stats().cached_connections >= 1, "a has a live writer to b");
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{http_a}/metrics");
+    let mut seen: Option<f64> = None;
+    for _ in 0..100 {
+        if let Ok(resp) = client.get(&url).send().await
+            && let Ok(text) = resp.text().await
+        {
+            seen = text.lines()
+                .find(|l| l.starts_with("gossip_peers_connected"))
+                .and_then(|l| l.split_whitespace().last())
+                .and_then(|v| v.parse::<f64>().ok());
+            if seen.is_some_and(|v| v >= 1.0) { break; }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(seen.is_some_and(|v| v >= 1.0), "gossip_peers_connected on /metrics should count a's live writer to b; saw {seen:?}");
+    b.shutdown().await;
+    a.shutdown().await;
+}
+
 /// Audit 2026-07-15 pass 4 (#21 Operational Readiness): `/ready` reflects STARTUP COMPLETION, not
 /// soft-state advertisement. A node that advertises no capability (a pure KV/signal node) is ready
 /// as soon as it has started — previously it returned 503 forever, so a k8s readiness gate never

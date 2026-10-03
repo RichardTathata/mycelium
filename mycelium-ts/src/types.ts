@@ -79,6 +79,17 @@ export interface CommitResult {
 }
 
 /**
+ * The receipt `set()` resolves to (zero-gaps Z7): what `POST /gateway/kv` has answered since
+ * v2.16.0 — rung 1 (applied on the gateway node) always, rung 2 as `localDurability` with the same
+ * names `CommitResult` uses. Every field is `null` on a gateway that predates v2.16.0.
+ */
+export interface KvReceipt {
+  operationId: string | null;
+  localDurability: LocalDurability | null;
+  localDurabilityError: string | null;
+}
+
+/**
  * The local-durability rung, as the gateway names it: `"on_disk"` (the forced fdatasync
  * returned — the one state that establishes durability) · `"buffered"` (accepted by the WAL, not
  * yet synced; never produced by a consensus commit, which forces the sync) · `"not_configured"`

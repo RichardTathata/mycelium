@@ -217,7 +217,7 @@ const replies = await agent.scatterGather(
 ### KV store
 
 ```typescript
-await agent.set("my/key", Buffer.from("value"));   // write + gossip
+const rcpt = await agent.set("my/key", Buffer.from("value")); // write + gossip → KvReceipt (rung 1; rung 2 as .localDurability)
 const val = await agent.get("my/key");             // → Buffer | null
 await agent.delete("my/key");                      // tombstone + gossip
 const keys = await agent.keys("my/");              // → string[]

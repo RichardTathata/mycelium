@@ -103,7 +103,7 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   pipeline flow) · `llm_council_viz` (`cargo run -p mycelium-coop-examples --bin llm_council_viz --features metrics` →
   `:8094`, the fan-out · synthesis · critic↔reviser-refinement DAG; `EchoBackend`, **no LLM key**) ·
   `provisioning_viz` (`cargo run -p mycelium-coop-examples --features wasm,metrics --bin provisioning_viz`
-  → `:8097`, the **autonomic self-heal** loop — a capability self-provisions then heals onto a standby
+  → `:8101`, the **autonomic self-heal** loop — a capability self-provisions then heals onto a standby
   when the active node is killed, no coordinator) · `catalog_viz` (`… --bin catalog_viz` → `:8098`,
   **origin-death survival** — the librarian dies + its library is deleted, yet a late node still installs
   from a verified peer cache). Each opens `http://127.0.0.1:80xx/`. The six `*_viz` are **visual
