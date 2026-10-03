@@ -62,14 +62,18 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Guarantees and the rule catalogue (proposed, 2026-10-02):**
+> **Guarantees and the rule catalogue (I1–I3 delivered in v2.19.0, 2026-10-03; I4–I7 proposed):**
 > [`guarantees-and-rule-catalogue.md`](guarantees-and-rule-catalogue.md) — one inventory, two readers. A
 > **supported secure profile**: every guarantee the substrate can claim, resolved at start to *enforced · not
 > configured · not in this build · not verifiable here*, and a node under a named profile refusing to start when one
 > it requires cannot be met (the 360 review's top recommendation; F1, a token table the build could not enforce, was
 > one instance). And a **rule catalogue with bounded decision tracing**, piloted on stem provisioning, that must
 > change no decision it records. The inventory comes first because auditing a guarantee's row — its feature, its
-> setting, its enforcement point, what checks it at start — is how the next F1 can be exposed.
+> setting, its enforcement point, what checks it at start — is how the next F1 can be exposed. **It was:** I1's audit
+> found three more settings a build could not enforce (v2.18.1), and I3's own acceptance test found that today's TLS
+> init needs the fleet CA's private key on every node (§8). Shipped: the registry and the startup report
+> (`guarantee_report()`, `GET /gateway/guarantees`, the log block at `start()`), and the profiles `dev` and
+> `secure-single-domain`. Next: the trace core (I4) and the stem-provisioning pilot (I5).
 >
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).
