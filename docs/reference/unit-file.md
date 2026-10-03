@@ -310,3 +310,13 @@ cargo run --features cli --bin mycelium -- wire-check <units-dir> --library <art
 
 A file that does not load makes the check exit 2 and names the field. The findings, flags and exit
 codes are in [capability-lifecycle.md](../operations/capability-lifecycle.md) §2.
+
+## Tool components
+
+A component whose description provides `ns = "tool"` (kind `wasm-component`) is also an **MCP tool**
+on the node that hosts it: a stem built with `gateway` registers `{name}` under `tools/{name}/{node}`
+in KV and forwards `tools/call` to the component over `mcp.invoke`, and the tool disappears with the
+install. A component that answers kind `describe` with `{"description": …, "inputSchema": …}`
+publishes **its own** schema; one that does not gets the generic `{"type": "object"}`. There is no
+tool section in the unit file — the artifact description is the declaration (zero-gaps Z4;
+`examples/units/llm_agent/artifacts/tool-*.toml`, `mycelium-wasm-host/tests/fixtures/*-tool-component/`).

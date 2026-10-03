@@ -1,6 +1,6 @@
-# The agent: needs realtime data, an inference skill, a CPU tool node, and the vector-search dataset
-# — the last one installed on demand. (Its MCP tools — weather, ping, search, calculate — are
-# in-process code in the demo and have no row in the unit format.)
+# The agent: needs realtime data, an inference skill, a CPU tool node, the vector-search dataset —
+# installed on demand — and its four MCP tools, which are components the tool nodes host and the
+# runtime bridges (zero-gaps Z4; `artifacts/tool-*.toml`). The browser demo keeps them in-process.
 principal = "app"
 
 [[requirement]]
@@ -18,3 +18,19 @@ name = "cpu"
 [[requirement]]
 ns   = "data"
 name = "vector-search"
+
+[[requirement]]
+ns   = "tool"
+name = "weather"
+
+[[requirement]]
+ns   = "tool"
+name = "ping"
+
+[[requirement]]
+ns   = "tool"
+name = "search"
+
+[[requirement]]
+ns   = "tool"
+name = "calculate"

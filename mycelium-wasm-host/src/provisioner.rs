@@ -1576,6 +1576,51 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// Zero-gaps Z4 (D4): a `tool/{name}` component that answers `describe` publishes **its own**
+    /// input schema and description as the MCP tool, not the bridge's generic `{"type":"object"}` —
+    /// so an agent reading `tools/{name}/{node}` learns the arguments. Seen failing first: the bridge
+    /// published the generic schema whatever the component said.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn a_tool_component_publishes_its_own_schema() {
+        use crate::catalog::InstallableEntry;
+        use ed25519_dalek::SigningKey;
+
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let key = SigningKey::from_bytes(&[41u8; 32]);
+        let mut source = InMemorySource::new();
+        let id = source.insert(include_bytes!("../tests/fixtures/calculate_tool_component.wasm").to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("tool", "calculate"), id).signed_by(&key));
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        let _req = agent.capabilities().declare_requirement(CapFilter::new("tool", "calculate"), Duration::from_secs(30));
+        for _ in 0..40 {
+            if !agent.capabilities().demand(&CapFilter::new("tool", "calculate")).demanding_nodes.is_empty() { break; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(prov.provision_round(), 1);
+        wait_live(&prov, 1).await;
+
+        let key = format!("tools/calculate/{}", agent.node_id());
+        let mut schema = None;
+        for _ in 0..80 {
+            if let Some(v) = agent.kv().get(&key) { schema = serde_json::from_slice::<serde_json::Value>(&v).ok(); break; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let schema = schema.expect("the bridged tool is in KV");
+        assert_eq!(schema["inputSchema"]["properties"]["expression"]["type"], "string", "the component's own schema: {schema}");
+        assert!(schema["description"].as_str().unwrap_or("").contains("arithmetic"), "the component's own description: {schema}");
+
+        // And the bridge still answers a call with the component's arithmetic.
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "calculate", "arguments": {"expression": "330 * 1024"}}});
+        let reply = agent.service().rpc_call(agent.node_id().clone(), "mcp.invoke", call.to_string().into_bytes(), Duration::from_secs(10)).await.expect("the tool answers over mcp.invoke");
+        let resp: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("").to_string();
+        assert!(text.contains("337920"), "330 × 1024 from inside the component: {resp}");
+        agent.shutdown().await;
+    }
+
     /// D20's gate (plan F2): a proposed entry loads only into the shadow lane — resolvable as
     /// `{name}.shadow` for comparison, never by the incumbent's filter — a stranger's acceptance
     /// changes nothing, and a listed reviewer's acceptance promotes it. Seen failing first: with

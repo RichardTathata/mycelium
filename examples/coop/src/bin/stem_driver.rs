@@ -313,6 +313,42 @@ async fn llm_agent(agent: Arc<GossipAgent>) -> Result<(), Box<dyn std::error::Er
             "{ns}/{name} is advertised from its unit file");
     }
     println!("[agent] config-driven capabilities are up: data/realtime (n-0), compute/cpu (n-1)");
+    // Zero-gaps Z4: the four tools are components the tool nodes host — they arrive over the mesh,
+    // the runtime bridges them as MCP tools with the schema each describes, and the agent calls them.
+    let tool_offered = |a: &GossipAgent, tool: &str| -> Option<NodeId> {
+        a.kv().scan_prefix(&format!("tools/{tool}/")).into_iter().find_map(|(key, _)| key.strip_prefix(&format!("tools/{tool}/")).and_then(|n| n.parse().ok()))
+    };
+    for tool in ["weather", "ping", "search", "calculate"] {
+        assert!(wait_until(120, || tool_offered(&agent, tool).is_some()).await, "the stem hosting tool/{tool} must install the component and bridge it as an MCP tool");
+        if let Some(raw) = agent.kv().get(&format!("tools/{tool}/{}", tool_offered(&agent, tool).unwrap())) {
+            let schema: serde_json::Value = serde_json::from_slice(&raw)?;
+            assert!(schema["inputSchema"]["properties"].is_object() && !schema["inputSchema"]["properties"].as_object().unwrap().is_empty(),
+                "tool/{tool} publishes the schema it describes for itself, not the generic one: {schema}");
+        }
+    }
+    println!("[agent] all four tools are offered by stems, each with its own schema — calling two of them over MCP");
+    let call_tool = |tool: &'static str, args: serde_json::Value| {
+        let agent = Arc::clone(&agent);
+        async move {
+            let provider = tool_offered(&agent, tool).expect("a provider");
+            let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}});
+            let mut reply = None;
+            for attempt in 1..=5u32 {
+                match agent.service().rpc_call(provider.clone(), "mcp.invoke", call.to_string().into_bytes(), Duration::from_secs(10)).await {
+                    Ok(r) => { reply = Some(r); break; }
+                    Err(e) => { println!("[agent] {tool} attempt {attempt} failed ({e}); retrying"); tokio::time::sleep(Duration::from_millis(500)).await; }
+                }
+            }
+            let resp: serde_json::Value = serde_json::from_slice(&reply.expect("an MCP reply")).expect("json");
+            resp["result"]["content"][0]["text"].as_str().unwrap_or("").to_string()
+        }
+    };
+    let calc = call_tool("calculate", serde_json::json!({"expression": "330 * 1024"})).await;
+    assert!(calc.contains("337920"), "calculate must answer 330 × 1024 from inside the component — got {calc}");
+    let weather = call_tool("weather", serde_json::json!({"city": "Bristol"})).await;
+    assert!(weather.contains("Bristol") && weather.contains("temp_c"), "weather must answer for the city — got {weather}");
+    println!("[agent] calculate → {calc}");
+    println!("[agent] weather   → {weather}");
 
     // The dataset is wanted, not deployed: the demand pulls it in, and the loading tier says how far.
     let _need = agent.capabilities().declare_requirement(CapFilter::new("data", "vector-search"), Duration::from_secs(900));

@@ -411,8 +411,23 @@ impl ArtifactRuntime for WasmComponentRuntime {
             Some(p) => p.budget_for(&entry.signer),
             None => self.host.fuel_per_call(),
         };
-        let instance = self.host.instantiate_with_fuel(&bytes, state, budget)?;
+        #[allow(unused_mut)]
+        let mut instance = self.host.instantiate_with_fuel(&bytes, state, budget)?;
         progress(entry.size_bytes, entry.size_bytes);
+
+        // Zero-gaps Z4 (D4): a `tool/*` component may describe itself — kind `describe` answering
+        // `{"description", "inputSchema"}` — and then the MCP tool carries the component's own schema
+        // rather than the bridge's generic one. A component that does not answer (an error, or no
+        // `inputSchema`) keeps the generic schema; the manifest line and its signature are untouched.
+        #[cfg(feature = "gateway")]
+        let described: Option<serde_json::Value> = if entry.provides.namespace.as_ref() == "tool" {
+            match instance.invoke("describe", b"{}".to_vec()) {
+                Ok(Ok(out)) => serde_json::from_slice::<serde_json::Value>(&out).ok().filter(|v| v.get("inputSchema").is_some()),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         // Register the inbound serve handler *before* returning, so the advertisement the
         // provisioner makes on success always finds a live RPC receiver.
@@ -434,10 +449,14 @@ impl ArtifactRuntime for WasmComponentRuntime {
         let mcp_tool = if entry.provides.namespace.as_ref() == "tool" {
             let agent = Arc::clone(&ctx.agent);
             let kind = bridge_kind;
-            let schema = serde_json::json!({
-                "description": format!("{} — an installed WASM component, bridged over mcp.invoke", entry.provides.name),
-                "inputSchema": {"type": "object"},
-            });
+            let generic = format!("{} — an installed WASM component, bridged over mcp.invoke", entry.provides.name);
+            let schema = match described {
+                Some(d) => serde_json::json!({
+                    "description": d.get("description").and_then(|s| s.as_str()).map(str::to_string).unwrap_or(generic),
+                    "inputSchema": d["inputSchema"].clone(),
+                }),
+                None => serde_json::json!({ "description": generic, "inputSchema": {"type": "object"} }),
+            };
             Some(ctx.agent.mcp().register_mcp_tool(entry.provides.name.clone(), schema, move |args: serde_json::Value| {
                 let agent = Arc::clone(&agent);
                 let kind = Arc::clone(&kind);
