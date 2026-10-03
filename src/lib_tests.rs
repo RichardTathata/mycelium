@@ -4717,12 +4717,14 @@ async fn test_ws3_data_at_rest_cipher_encrypts_wal_and_round_trips() {
     );
     a2.shutdown_with_timeout(Duration::from_secs(5)).await;
 
-    // ── Phase 3: wrong key cannot read it ────────────────────────────────
+    // ── Phase 3: wrong key cannot read it — and the node says so ─────────
+    // Since 2026-10-03 (`persist.replay`): persisted state that does not decode under the configured
+    // cipher is *unreadable*, and a node refuses to start over it rather than starting empty and
+    // snapshotting over the ciphertext. The cipher is load-bearing in both directions.
     let a3 = Arc::new(mk());
     a3.with_data_at_rest_cipher(Arc::new(XorCipher { key: 0x11 }));
-    a3.start().await.unwrap();
-    // Give replay a chance to run; the record must NOT decode under the wrong key.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let e = a3.start().await.expect_err("a wrong key must refuse the start, not recover nothing");
+    assert!(e.to_string().contains("persistence") && e.to_string().contains("quarantine"), "{e}");
     assert!(
         a3.kv().get("secret/1").is_none(),
         "wrong-key replay must not recover the record (cipher is load-bearing)"
@@ -4812,6 +4814,11 @@ async fn a_node_refuses_to_start_over_an_unreadable_snapshot_unless_told_to_quar
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8): with
+/// **no persistence configured**, `Committed { persisted }` reads `true` — "nothing was promised" is
+/// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`
+/// beside it; this pin is what that PR changes, in the open.
+#[cfg(feature = "consensus")]
 #[tokio::test]
 async fn floor_committed_persisted_is_true_when_persistence_unconfigured() {
     use crate::{ConsensusConfig, ConsensusResult};

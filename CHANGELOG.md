@@ -21,7 +21,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `"quarantine"` moves the files aside as `*.unreadable-N` — never deleted, never compacted over — and
   starts from what was readable. New guarantee `persist.unreadable_refused`. Three tests seen failing
   on the unfixed code. **Behaviour change:** a node with unreadable persisted state now fails to start
-  where it used to start and then overwrite it; a torn tail is unaffected. **Upgrade note:**
+  where it used to start and then overwrite it — including a node given the **wrong at-rest cipher
+  key**, which used to start empty and snapshot over the ciphertext; a torn tail is unaffected. **Upgrade note:**
   `PersistenceConfig` gained `on_unreadable` (an exhaustive literal breaks; TOML and
   `..Default::default()`-style construction are unaffected — the field defaults to `refuse`).
   **Announced one release ahead (G12):** `secure-single-domain` rev 2 will require it, with
