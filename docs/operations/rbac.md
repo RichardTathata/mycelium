@@ -87,6 +87,13 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `artifact:publish` | `mycelium-wasm-host` (feature `gateway`, plan A3): `POST /gateway/artifacts/publish` — one **already-signed** catalogue line, verified against the node's `[hosts].trusted_publishers` and written to `installable/`. Its own family, not `kv:write`, because it is a narrower power with a check the raw KV route does not make; note that `kv:write` can still write `installable/` through `POST /gateway/kv`, so the defence that holds in every case is the provisioner's `require_provenance` |
 | `admin` | the deny-by-default fallback for any route not in the table — including any companion path not listed above |
 
+> **The gate's reach is a path prefix, and that is the public class** (`gw.extra_routes_auth`, plan §8):
+> the bearer-then-scope boundary covers `/gateway/*`, `/a2a`, `/federation/*`, `/mcp`, `/signals/*` and
+> `/consensus/*`. A router merged with `with_http_routes` that mounts a route **outside** those prefixes
+> answers without a bearer, by construction — the library cannot know a path it has never seen is
+> sensitive. Mount companion routes under `/gateway/<family>/…` (every in-tree companion does) and treat
+> any other path as public; `wire_check` does not see HTTP routes, so this is a review rule, not a gate.
+
 > **Since 2026-09-04** companion routes (merged via `with_http_routes`) sit behind this gate at
 > all. Before, they answered without a bearer even when the library's own routes demanded one.
 > A scoped-token deployment that used companion routes must now grant the family scopes above.

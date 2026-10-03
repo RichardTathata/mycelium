@@ -1074,6 +1074,13 @@ impl GossipAgent {
         cipher: Arc<dyn crate::persistence::DataAtRestCipher>,
     ) {
         self.note_attachment("with_data_at_rest_cipher");
+        // G13: after the lifecycle boundary the writer has already read its cipher, so an attach now
+        // would be accepted and do nothing — plaintext on disk with a report saying `enforced`. It
+        // is **rejected**: not set, not reported, and counted (`late_attachments`).
+        if self.task_ctx.started.load(Ordering::Acquire) {
+            tracing::error!("with_data_at_rest_cipher after start(): rejected — the WAL writer already runs without it; attach before start()");
+            return;
+        }
         self.task_ctx.at_rest_cipher_attached.store(true, Ordering::Release);
         if self.data_at_rest_cipher.set(cipher).is_err() {
             tracing::warn!("with_data_at_rest_cipher called more than once; keeping the first cipher");

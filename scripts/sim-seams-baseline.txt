@@ -16,6 +16,17 @@
 2 mycelium-core/src/swim_membership.rs
 10 mycelium-core/src/swim.rs
 3 mycelium-core/src/writer.rs
+6 mycelium-wasm-host/src/activation.rs
+8 mycelium-wasm-host/src/artifact.rs
+2 mycelium-wasm-host/src/bin/mycelium-artifact.rs
+4 mycelium-wasm-host/src/bin/mycelium-stem.rs
+3 mycelium-wasm-host/src/catalog.rs
+4 mycelium-wasm-host/src/http_source.rs
+1 mycelium-wasm-host/src/librarian.rs
+6 mycelium-wasm-host/src/runtime.rs
+1 mycelium-wasm-host/src/serve.rs
+1 mycelium-wasm-host/src/stem.rs
+5 mycelium-wasm-host/src/tools.rs
 7 src/agent/a2a.rs
 2 src/agent/bulk.rs
 9 src/agent/capability_handle.rs

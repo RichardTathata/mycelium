@@ -131,9 +131,11 @@ hypothesis until I1 maps it to code**:
   logged, and the binary's `--help` naming the secure profile.
 - **Q2.** Whether the guarantee report is gossiped (fleet-wide visibility, a new `sys/` key family) or stays
   node-local behind the gateway. Proposed: node-local first; gossip only with a reason.
+  **Decided 2026-10-03: not gossiped.** The report is node-local (`guarantee_report()`, `GET /gateway/guarantees`), and fleet-wide visibility is the operator's aggregation over the gateways — the thing a central reader would want. A `sys/` family would carry every node's configuration digest and enforcement states to every node, which is more than a peer needs to admit or serve it, and would make the report a gossip object with its own freshness problem; the report's whole value is that it is computed over this node's frozen configuration at its own boundary (G13).
 - **Q3.** The private companions (AE, RA): do they register guarantees into the same registry through the
   public API? Proposed: yes — the registry is public API, and the private repo's `COMPATIBILITY.md` names
   what it registers.
+  **Decided 2026-10-03: the same registry, through `register_guarantee` before `start()`**, which rejects a duplicate id and cannot override a core result (G11). The private companions ship `ae_guarantees()` / `ra_guarantees()` descriptor sets and a `register_with(&agent)` helper; the private pin's `COMPATIBILITY.md` records it.
 
 ## 8 · I1 audit — findings (2026-10-02, read-only sweep of the baseline)
 
@@ -154,7 +156,7 @@ IDs are the proposed stable IDs for the registry.
 | `id.ca_key_off_node` (I3, 2026-10-03) | the fleet CA's private key is not on this node | `tls::load_or_create_ca` | loads the key from the node's directory and **regenerates a whole CA without it** — every TLS node holds the key at start, so the guarantee can be reported but never enforced on a running node | FINDING (medium; the C5 removal argument rests on custody the init forces onto every node) | **fixed 2026-10-03** — `[tls] cert_pem` + `key_pem` (issued off-node by `mycelium tls issue` / `tls::issue_node_cert`) start from the CA certificate alone: no CA key loaded or looked for, nothing minted, `a_pre_issued_node_cert_starts_without_the_ca_key_and_mints_nothing` seen failing first (the unfixed init minted a fresh CA, key included, into the node's directory); the guarantee resolves `enforced` only with a pre-issued cert. Not yet required by `secure-single-domain` (rev 1): announced for rev 2 in the next MINOR (G12) |
 
 | `report.egress` | *substrate outbound fails closed* | `egress.allow_hosts` | federation client, bulk fetch and OIDC JWKS are ungated; report overclaims | FINDING (medium) | **fixed 2026-10-03** — the federation client is held to the policy (`with_egress` / `set_egress`, `ClientError::Egress` before any byte; the agent applies its policy to clients it is handed) and OIDC discovery + JWKS are gated, a denied issuer refusing `start()` by name; the guarantee's text now says what is gated and that `HttpLibrarySource` is gated only when built `with_egress`. Two tests seen failing first |
-| `at_rest.cipher` | WAL/snapshot encrypted | attach before `start()` | attached after: plaintext, no warning | FINDING (low) | open — G13 |
+| `at_rest.cipher` | WAL/snapshot encrypted | attach before `start()` | attached after: plaintext, no warning | FINDING (low) | **fixed 2026-10-03** — a cipher attached after `start()` is **rejected** (not set, not reported as enforced, counted as a late attachment; `a_cipher_attached_after_start_is_rejected_and_the_report_says_so`) — G13's *rejected where the API allows it* |
 | `ae.recorded_before_dispatch` | the decision is journalled | `with_evidence_journal` | enforces, records nothing; warns at attach | WARN-ONLY | I3 requires it |
 | `persist.replay` | restart recovers KV and acceptor memory | `persistence` | replay failure warns, continues, then snapshots | WARN-ONLY (fail-open) | **fixed 2026-10-03** — verified first: a corrupt snapshot was skipped and overwritten by the next snapshot, and the merge truncated past a corrupt WAL record (three tests seen failing). Now torn tail ≠ corruption (`WalEnd`), corruption is an error, the snapshot aborts on it, `start()` refuses by default (`persistence.on_unreadable`, `quarantine` moves files aside and never deletes), guarantee `persist.unreadable_refused`; rev 2 of the profile announced |
 
@@ -163,7 +165,7 @@ IDs are the proposed stable IDs for the registry.
 | `ae.authorised_at_seam` | gateway dispatch authorised | an evaluator | inert without one, by design | DOC-ONLY | I3 requires it |
 | `authz.durable_epochs`, `authz.execution_authority`, `gw.caller_attest`, `gw.not_open`, `id.peer_authenticated`, `mesh.frame_sig` | documented conditions | — | nothing validates them | DOC-ONLY | I3 candidates |
 | `cons.safety_profile` | fixed voter set, strict majority, trust slices | `ConsensusConfig` | defaults `quorum_size: 0`, `use_trust_slices: false`; nothing validates | DOC-ONLY | I3; membership-fixed and fencing are `NotVerifiableHere` |
-| `gw.extra_routes_auth` | merged companion routes are gated | path under `/gateway/` | a route outside `/gateway/`, `/a2a`, `/federation/` is public without notice | DOC-ONLY | document as a public class; I3 lists them |
+| `gw.extra_routes_auth` | merged companion routes are gated | path under `/gateway/` | a route outside `/gateway/`, `/a2a`, `/federation/` is public without notice | DOC-ONLY | **documented 2026-10-03** as the public class it is (`docs/operations/rbac.md`: the gate's reach is a path prefix; mount companion routes under `/gateway/<family>/`; a review rule, not a gate) |
 | public routes | the checklist names every public probe | — | `/stats`, `/bulk/{id}`, `/.well-known/agent.json` were missing from `production-readiness.md` | DOC drift | fixed, this PR |
 
 **The pattern behind the critical one:** a `#[cfg]`'d field plus a serde that tolerates unknown keys is a setting
@@ -173,10 +175,7 @@ report resolves both to `NotInBuild` by construction, which is why it comes befo
 **Found by I4's reconnaissance of the pilot's path (2026-10-03), fixed before I4:** a failing initial
 activation probe was recorded as a live install (advertised, counted complete) until the next health
 pass — now an activation error; and the self-election draw was raw `fastrand` in a crate the seam lint
-does not scan — now the `select` stream, with an RNG-only lint over `mycelium-wasm-host`. **Still open,
-a baseline decision:** the host's ~140 file-system and timing call sites are outside the seam scan, so a
-stem's recording does not cover artifact fetch, placement or activation timing (I6 must state them
-unattributable).
+does not scan — now the `select` stream, with an RNG-only lint over `mycelium-wasm-host`. **Decided 2026-10-03:** the host's file-system and timing call sites — 41 in 11 files, not the ~140 the earlier estimate said — are **inside the seam scan now** (`scripts/check-sim-seams.sh` scans `mycelium-wasm-host/src`; the existing sites are admitted in the baseline as the host's own — artifact fetch, placement, probe timeouts, re-probe sleeps — so a new one fails the gate), and they stay outside the *seams*: a stem's recording does not cover artifact fetch, placement or activation timing, which the inventory states and I6 reports as unattributable.
 
 **Not audited:** `mycelium-wiki` with `execution-authority` off, `mycelium-effects` with `envelope` off.
 

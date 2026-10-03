@@ -4791,6 +4791,35 @@ async fn an_audit_sink_without_tls_refuses_the_start() {
     a.shutdown().await;
 }
 
+/// G13 (`at_rest.cipher`, plan §8): a cipher attached **after** `start()` is rejected — not set, not
+/// reported as enforced, and counted as a late attachment — because the WAL writer read its cipher
+/// at start and an attach now would be accepted and do nothing. Before the fix the report said
+/// `enforced` for a node writing plaintext.
+#[tokio::test]
+async fn a_cipher_attached_after_start_is_rejected_and_the_report_says_so() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    struct Xor;
+    impl crate::DataAtRestCipher for Xor {
+        fn encrypt(&self, b: &[u8]) -> Vec<u8> { b.iter().map(|x| x ^ 0x5A).collect() }
+        fn decrypt(&self, b: &[u8]) -> Option<Vec<u8>> { Some(b.iter().map(|x| x ^ 0x5A).collect()) }
+    }
+    let port = alloc_port();
+    let base = std::env::temp_dir().join(format!("mycelium-late-cipher-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(PersistenceConfig { base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 10, snapshot_interval_secs: 300, on_unreadable: OnUnreadable::Refuse });
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    a.start().await.unwrap();
+    a.with_data_at_rest_cipher(Arc::new(Xor));
+    let r = a.guarantee_report();
+    let st = r.entries.iter().find(|e| e.id == "at_rest.cipher").map(|e| format!("{:?}", e.resolution)).unwrap_or_default();
+    assert!(st.contains("NotConfigured"), "a late cipher is not reported as enforced: {st}");
+    assert_eq!(a.late_attachments(), 1, "counted, so the startup report is known stale");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8): with
 /// **no persistence configured**, `Committed { persisted }` reads `true` — "nothing was promised" is
 /// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`
