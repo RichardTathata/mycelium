@@ -300,10 +300,23 @@ impl GossipAgent {
             })?;
             let http_bind = SocketAddr::new(http_addr, port);
             let ctx   = Arc::clone(&self.task_ctx);
+            // Bind and resolve the gateway's TLS material here, so a busy port or an unreadable
+            // certificate is `start()`'s error and never a dead task behind a node that reports
+            // ready (`gw.tls_runtime`, plan §8).
+            let prepared = match super::http::prepare_gateway(http_bind, &ctx) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.state.store(AgentState::Idle as u8, Ordering::Release);
+                    return Err(GossipError::InvalidField {
+                        field:  "gateway",
+                        reason: format!("the gateway cannot come up on {http_bind}: {e}"),
+                    });
+                }
+            };
             let srx   = self.shutdown_tx.subscribe();
             let extra = self.extra_routes.lock().unwrap_or_else(|e| e.into_inner()).take();
             self.spawn_task(async move {
-                if let Err(e) = super::http::run_http_server(http_bind, ctx, srx, extra).await {
+                if let Err(e) = super::http::run_http_server(prepared, ctx, srx, extra).await {
                     tracing::error!("HTTP server exited: {e}");
                 }
             });
