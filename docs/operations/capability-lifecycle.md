@@ -141,7 +141,7 @@ when the unit file has a `[[serve]]` section.
 | `--publisher ed25519:<hex>` | none | the manifest's publisher key (with `--librarian`) |
 | `--tick-ms <n>` | `500` (minimum `50`) | the provisioner's tick |
 | `--self-elect <p>` | `0.5` (clamped to `0..1`) | self-election probability per round |
-| `--trace-dir <dir>` | off | the **decision trace**: every provisioning decision (what it read, how it ended, the typed reason) recorded from the values the round produced, written as `<dir>/decisions.jsonl` with `decisions.stats.json` (what was dropped) on shutdown. It changes no decision and never waits; the catalogue of what each record means is [`docs/reference/rule-catalogue.md`](../reference/rule-catalogue.md) |
+| `--trace-dir <dir>` | off | the **decision trace**: every provisioning decision (what it read, how it ended, the typed reason) recorded from the values the round produced, written as `<dir>/decisions.jsonl` with `decisions.stats.json` (what was dropped) and `coverage.json` (which rules this stem could record) on shutdown; read it with `mycelium explain <dir>/decisions.jsonl --catalogue docs/reference/rule-catalogue.json`. It changes no decision and never waits; the catalogue of what each record means is [`docs/reference/rule-catalogue.md`](../reference/rule-catalogue.md) |
 
 The `model-host` service of `docker/docker-compose.stem-examples.yml`, as a command:
 

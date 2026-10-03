@@ -10,6 +10,8 @@
 //!   inputs/           # every external input, in arrival order, redacted
 //!   choices.trace     # the ordered choice log — the reproduction itself
 //!   witness.json      # the assertion that failed, and the toggle that must make it fail again
+//!   decisions.jsonl   # optional: the decision trace (`mycelium_core::decision`), one record per line
+//!   coverage.json     # optional: which rules the trace covers (instrumented · catalogue only · unsupported)
 //! ```
 //!
 //! # The witness is the part people skip
@@ -93,7 +95,19 @@ pub struct Bundle {
     pub trace: Trace,
     /// What failed, and the toggle that makes it fail again.
     pub witness: Option<Witness>,
+    /// Optional, versioned attachments written beside the trace by name (plan I6): the decision
+    /// trace under [`DECISION_ATTACHMENT`] and its coverage manifest under [`COVERAGE_MANIFEST`].
+    /// A bundle without them means *trace unavailable*, never *no decisions* (G8); a bundle written
+    /// before they existed reads with none.
+    pub attachments: BTreeMap<String, Vec<u8>>,
 }
+
+/// The decision trace's file name in a bundle: one JSON record per line.
+pub const DECISION_ATTACHMENT: &str = "decisions.jsonl";
+/// The coverage manifest's file name in a bundle: which rules the trace could have recorded.
+pub const COVERAGE_MANIFEST: &str = "coverage.json";
+/// The attachment names [`Bundle::read`] looks for; any other name is the scenario's to read.
+pub const KNOWN_ATTACHMENTS: &[&str] = &[DECISION_ATTACHMENT, COVERAGE_MANIFEST];
 
 impl Bundle {
     /// A bundle around `trace`.
@@ -105,6 +119,17 @@ impl Bundle {
     pub fn witnessed_by(mut self, assertion: impl Into<String>, toggle: Option<String>) -> Self {
         self.witness = Some(Witness { assertion: assertion.into(), toggle });
         self
+    }
+
+    /// Attach a named file (an attachment name is a bare file name, never a path).
+    pub fn with_attachment(mut self, name: impl Into<String>, bytes: Vec<u8>) -> Self {
+        self.attachments.insert(name.into(), bytes);
+        self
+    }
+
+    /// Does the bundle carry a decision trace? `false` means *trace unavailable* — not *no decisions*.
+    pub fn has_decision_trace(&self) -> bool {
+        self.attachments.contains_key(DECISION_ATTACHMENT)
     }
 
     /// Is this bundle able to demonstrate the failure it was written for?
@@ -132,6 +157,12 @@ impl Bundle {
             // Numbered, because arrival order is part of the reproduction.
             std::fs::write(dir.join("inputs").join(format!("{i:04}-{name}")), bytes)?;
         }
+        for (name, bytes) in &self.attachments {
+            if name.contains('/') || name.contains("..") {
+                return Err(BundleError::Io(std::io::Error::other(format!("attachment name `{name}` is not a bare file name"))));
+            }
+            std::fs::write(dir.join(name), bytes)?;
+        }
         if let Some(w) = &self.witness {
             let mut fields = BTreeMap::new();
             fields.insert("assertion".to_string(), w.assertion.clone());
@@ -157,7 +188,15 @@ impl Bundle {
             })
         };
         let config = parse_object(&read_optional(&dir.join("config.json"))?);
-        Ok(Self { build, config, trace, witness, ..Default::default() })
+        let mut attachments = BTreeMap::new();
+        for name in KNOWN_ATTACHMENTS {
+            match std::fs::read(dir.join(name)) {
+                Ok(bytes) => { attachments.insert((*name).to_string(), bytes); }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(BundleError::Io(e)),
+            }
+        }
+        Ok(Self { build, config, trace, witness, attachments, ..Default::default() })
     }
 
     /// Where a bundle for `name` conventionally lives under `root`.
@@ -612,5 +651,30 @@ mod fidelity_tests {
             rustc:    "rustc 1.88.0 (\"stable\")".into(),
         };
         assert_eq!(b, parse_build(&json_object(&build_fields(&b))));
+    }
+
+    /// Attachments round-trip by name; a bundle written without them reads with none (an old bundle
+    /// still reads), and `has_decision_trace` says *unavailable*, not *empty*.
+    #[test]
+    fn attachments_round_trip_and_an_old_bundle_reads_with_none() {
+        let dir = std::env::temp_dir().join(format!("mycelium-bundle-attach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plain = Bundle::new(Trace::default());
+        plain.write(&dir).unwrap();
+        let back = Bundle::read(&dir).unwrap();
+        assert!(back.attachments.is_empty() && !back.has_decision_trace());
+
+        let with = Bundle::new(Trace::default())
+            .with_attachment(DECISION_ATTACHMENT, b"{\"rule\":\"prov.install\"}\n".to_vec())
+            .with_attachment(COVERAGE_MANIFEST, b"{}".to_vec());
+        with.write(&dir).unwrap();
+        let back = Bundle::read(&dir).unwrap();
+        assert!(back.has_decision_trace());
+        assert_eq!(back.attachments[DECISION_ATTACHMENT], with.attachments[DECISION_ATTACHMENT]);
+        assert_eq!(back.attachments.len(), 2);
+
+        let bad = Bundle::new(Trace::default()).with_attachment("../escape", Vec::new());
+        assert!(bad.write(&dir).is_err(), "an attachment name is a bare file name");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -14,6 +14,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().nth(1).as_deref() == Some("wire-check") {
         std::process::exit(wire_check_cli(std::env::args().skip(2).collect()));
     }
+    // `mycelium rules` and `mycelium explain` — the rule catalogue this binary registers, and a
+    // decision trace rendered as an explanation (docs/plans/guarantees-and-rule-catalogue.md I6).
+    // Both are pure over files; neither starts a node.
+    match std::env::args().nth(1).as_deref() {
+        Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
+        Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
+        _ => {}
+    }
 
     let config = parse_args()?;
 
@@ -284,9 +292,70 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
     report.exit_code()
 }
 
+/// `mycelium rules [--format md|json]` — the rule catalogue this binary registers
+/// (`mycelium::rules::RULES`), generated from the descriptors. The fleet's whole catalogue, with the
+/// stem host's provisioning rules, is the checked-in `docs/reference/rule-catalogue.md`.
+fn rules_cli(args: Vec<String>) -> i32 {
+    use mycelium::rule::Catalogue;
+    const USAGE: &str = "Usage: mycelium rules [--format md|json]";
+    let mut format = "md".to_string();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--format" => format = it.next().unwrap_or_default(),
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    let (cat, external) = match Catalogue::gather_partial(&[mycelium::rules::RULES]) {
+        Ok(c) => c,
+        Err(errs) => { for e in errs { eprintln!("{e}"); } return 1; }
+    };
+    if !external.is_empty() {
+        eprintln!("note: {} relation(s) name rules another crate registers (the stem host's provisioning rules); the fleet's whole catalogue is docs/reference/rule-catalogue.md", external.len());
+    }
+    match format.as_str() {
+        "json" => println!("{}", cat.to_json()),
+        "md" => print!("{}", cat.to_markdown()),
+        other => { eprintln!("unknown format `{other}` (md|json)"); return 2; }
+    }
+    0
+}
+
+/// `mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <t>]` — a
+/// decision trace (a stem's `--trace-dir`, or a bundle's `decisions.jsonl`) rendered as what each
+/// target went through: the round, the rule, how it ended and why, what it read and caused; with a
+/// catalogue, each rule used summarised. Exits 2 when a file does not load.
+fn explain_cli(args: Vec<String>) -> i32 {
+    const USAGE: &str = "Usage: mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]";
+    let (mut file, mut catalogue, mut target): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--catalogue" => catalogue = it.next(),
+            "--target" => target = it.next(),
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            _ if file.is_none() => file = Some(a),
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    let Some(file) = file else { eprintln!("{USAGE}"); return 2; };
+    let jsonl = match std::fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{file}: {e}"); return 2; }
+    };
+    let catalogue = match catalogue.map(std::fs::read_to_string) {
+        None => None,
+        Some(Ok(s)) => Some(s),
+        Some(Err(e)) => { eprintln!("catalogue: {e}"); return 2; }
+    };
+    print!("{}", mycelium::decision::explain(&jsonl, catalogue.as_deref(), target.as_deref()));
+    0
+}
+
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

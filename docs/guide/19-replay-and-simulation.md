@@ -184,6 +184,27 @@ An embedded agent records the way this section shows; there is no route or confi
 a recording on a node built without `sim`. The scheduler seam (v2.9.0) is what makes a whole node
 replay without divergence; before it, task interleaving diverged.
 
+## Reading what a node decided: the decision trace
+
+A recording says what happened; the **decision trace** says what each decision point *decided* and why
+— the rule (from the [rule catalogue](../reference/rule-catalogue.md)), what it read, how it ended and
+the typed reason, what it caused. It is off unless a decision point is handed a sink, it changes no
+decision (it reuses the values the code already produced, reads no clock, draws nothing, never waits),
+and it is bounded: at its bound the newest record is dropped and counted, so a trace is a prefix plus
+its drop counts. Today the instrumented decision points are the stem provisioner's:
+
+```bash
+mycelium-stem --units ./units --library ./artifacts --trace-dir ./trace
+# … on shutdown: ./trace/decisions.jsonl, decisions.stats.json, coverage.json
+mycelium explain ./trace/decisions.jsonl --catalogue docs/reference/rule-catalogue.json
+```
+
+A bundle can carry the trace as `decisions.jsonl` beside `coverage.json`, which says which rules it
+*could* have recorded; a bundle without them means **trace unavailable, never no decisions**. Two
+traces compare on the canonical tuple — rule and revision, trigger, target, outcome, reason — and a
+divergence whose records read gossiped or sampled inputs is reported *unattributable*: the seams do
+not cover that input, so the trace cannot say whether the decision or its world changed.
+
 ## What this does not establish
 
 - **Not a multi-node schedule.** The scheduler seam's first arm covers one node's waits.

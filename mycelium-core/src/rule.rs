@@ -246,6 +246,21 @@ impl<'a> Catalogue<'a> {
         if errs.is_empty() { Ok(Catalogue { schema: CATALOGUE_SCHEMA, rules }) } else { Err(errs) }
     }
 
+    /// Gather one crate's descriptors on their own: a relation naming a rule another crate registers
+    /// is returned beside the catalogue as an *external* reference rather than refusing it (the full
+    /// gate, [`gather`](Self::gather), still refuses). Every other structural error still fails.
+    pub fn gather_partial(sets: &[&'a [RuleDescriptor]]) -> Result<(Self, Vec<CatalogueError>), Vec<CatalogueError>> {
+        let mut rules: Vec<&RuleDescriptor> = sets.iter().flat_map(|s| s.iter()).collect();
+        rules.sort_by_key(|r| r.id);
+        let (external, hard): (Vec<_>, Vec<_>) = check(&rules).into_iter().partition(|e| matches!(e, CatalogueError::UnknownReference(..)));
+        if hard.is_empty() { Ok((Catalogue { schema: CATALOGUE_SCHEMA, rules }, external)) } else { Err(hard) }
+    }
+
+    /// The catalogue as pretty JSON (the shape of `docs/reference/rule-catalogue.json`).
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into())
+    }
+
     /// The human-readable catalogue, one section per rule, generated — never hand-edited.
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
@@ -318,6 +333,18 @@ mod tests {
         assert!(errs.contains(&CatalogueError::MissingTests("d.one".into())));
         assert!(errs.contains(&CatalogueError::MalformedReason("e.one".into(), "Not-Snake".into())));
         assert_eq!(errs.len(), 5, "{errs:?}");
+    }
+
+    /// A partial gather keeps a relation into another crate as an external reference and still refuses
+    /// a hard error.
+    #[test]
+    fn a_partial_gather_reports_external_references_and_refuses_hard_errors() {
+        static X: RuleDescriptor = r("a.one", &["other.crate"], OK, &["t"]);
+        let (c, external) = Catalogue::gather_partial(&[std::slice::from_ref(&X)]).expect("external references are not refused");
+        assert_eq!((c.rules.len(), external.len()), (1, 1));
+        assert!(Catalogue::gather(&[std::slice::from_ref(&X)]).is_err(), "the full gate still refuses");
+        static D: RuleDescriptor = r("d.one", &[], OK, &[]);
+        assert!(Catalogue::gather_partial(&[std::slice::from_ref(&D)]).is_err(), "no test is a hard error");
     }
 
     /// A clean set gathers, sorts by id, and renders with its schema and one section per rule.
