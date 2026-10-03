@@ -42,7 +42,7 @@ a **security PATCH**: wasmtime 49.0.2 for three advisories published 2026-10-02 
 
 a **security + correctness PATCH** from an independent 360 review, doc-coverage run 18 and the first increment of the guarantees plan: four settings a build could not enforce were accepted and ignored — a named or scoped **token table** and an **`[oidc]`** table without `compliance` (the latter dropped at parse time), a **`[tls]`** or **`[gateway_tls]`** table without `tls` — so the default `mycelium` binary ran an **open gateway** or **plaintext**; `start()` now refuses each by name · `/a2a`'s exposure warning fired for the wrong condition (a bearer never gated it) and is now a start-time fact · the confinement report no longer says `Set` for a setting the build cannot act on · a verbose `[[activation]]` command no longer stalls into a false timeout (stderr drained while it runs). Wire **v12** unchanged, no API change. **Check before upgrading:** a node that sets a token table, an `[oidc]` table, `[tls]` or `[gateway_tls]` in a build without the feature that enforces it now fails at start — it was running without that protection; build with `--features compliance` / `--features tls` or remove the table, and confirm an unauthenticated `GET /gateway/kv/keys` answers 401. Delivered in #468 and #469 on top of v2.18.0. The same review's restore-fold defect
 (F2) is in the private accounting companion, fixed there (private #6); its `mesh:serve` finding — a
-one-release window still open three releases on — closes in the next MINOR, as a behaviour change.
+one-release window still open three releases on — closes in the next MINOR, as a behaviour change (it closed in v2.18.2, a PATCH, above).
 
 ## v2.18.0 release — 2026-10-01 (tag `v2.18.0`) — the stem fleet
 
