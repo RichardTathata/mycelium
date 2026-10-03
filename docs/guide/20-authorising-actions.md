@@ -485,6 +485,49 @@ declare-check-deploy loop is [the capability lifecycle](../operations/capability
 
 ---
 
+## The guarantee report — what this node enforces, and why not the rest
+
+Everything above is conditional: the seam needs an evaluator, the journal needs attaching, the provider
+check needs `with_provider_enforcement`, and each needs the feature that compiles it. The node says where
+it stands, once, at `start()` — after validation and before it admits traffic — and on demand:
+
+```rust
+let report = agent.guarantee_report();            // also GET /gateway/guarantees (scope fleet:read)
+for e in &report.entries {
+    println!("{:<28} {:?}", e.id, e.resolution); // Enforced · NotConfigured{missing} · NotInBuild{feature}
+}                                                 // · NotApplicable{because} · NotVerifiableHere{evidence}
+assert!(report.node_requirements_satisfied());    // every node-enforced guarantee that applies is enforced
+assert_eq!(report.unresolved(), ["cons.safety_profile", "net.confinement", "clock.sync"]); // yours to evidence
+```
+
+`NotApplicable` carries the role fact — a node with no `http_port` does not fail a gateway guarantee —
+and is never a waiver. `NotInBuild` is the state the four start-time refusals of 2.18.1 were missing:
+a setting whose enforcing code this build does not have reads so here rather than silently nothing. The
+strongest sentence the report makes is *node requirements satisfied*; what a node cannot see (network
+confinement, clock sync, the consensus profile a proposer picks per call) is listed as unresolved and
+never counted.
+
+A companion registers its own guarantees **before `start()`**; a duplicate id, a core id, or a late
+registration is refused by name:
+
+```rust
+use mycelium::{GuaranteeDescriptor, GuaranteeKind, GuaranteeResolution as R};
+let store = my_store.clone();
+agent.register_guarantee(GuaranteeDescriptor::new(
+    "wiki.execution_authority", 1, "wiki", GuaranteeKind::NodeEnforced,
+    "a wiki write is refused unless a live, unrevoked mandate authorises it",
+    "feature `execution-authority`; `GitStoreConfig::authority`",
+    &["mycelium_wiki::execution::WriteAuthority"], "docs/guide/21-mandates.md",
+    |_view| None,                                     // applies on every node that hosts the store
+    move |_view| if store.has_authority() { R::Enforced } else { R::NotConfigured { missing: "GitStoreConfig::authority" } },
+))?;
+```
+
+An attachment made after `start()` is counted (`agent.late_attachments()`) and warned about: the block
+logged at the boundary did not see it. Attach before `start()` in production. The registry and the report
+are `src/agent/guarantee.rs`; the plan is `docs/plans/guarantees-and-rule-catalogue.md` (I2); a profile
+that *refuses* to start on an unmet guarantee is its I3.
+
 ## Where to go next
 
 | You want | Read |

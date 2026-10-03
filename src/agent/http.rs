@@ -225,7 +225,8 @@ pub(super) async fn run_http_server(
         // ── Legible Emergence Phase 3: the causal event ring (explain) ─────────
         .route("/explain",                        get(gw_explain))
         // ── Legible Emergence Phase 4: the fleet narrative (why / diagnose) ────
-        .route("/diagnose",                       get(gw_diagnose));
+        .route("/diagnose",                       get(gw_diagnose))
+        .route("/guarantees",                     get(gw_guarantees));
 
     // ── Consensus + the consistency/lock/election overlays built on it ────────
     // (v2 M2 feature gate). The ordered-log and reliable-delivery overlays above
@@ -752,6 +753,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/fleet"               => "fleet:read",
         "/gateway/explain"             => "fleet:read",
         "/gateway/diagnose"            => "fleet:read",
+        "/gateway/guarantees"          => "fleet:read",
         // Companion-crate gateway surfaces (merged via `with_http_routes`; behind this
         // layer since 2026-09-04). Exact paths only — a companion route not listed here
         // stays deny-by-default `admin`, like any other unmapped route.
@@ -1253,6 +1255,14 @@ async fn gw_fleet_snapshot(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse
 /// engineer who did not build the system can act on. Every diagnosis is qualified by the observer's
 /// own RT1/RT2 view health (`caveat`), so a clean read from a blind node is not mistaken for a
 /// healthy fleet. Scope `fleet:read`.
+/// `GET /gateway/guarantees` — the node's guarantee report (plan I2), recomputed live: every
+/// registered guarantee resolved to `enforced` / `not_configured` / `not_in_build` /
+/// `not_applicable` (with the role fact) / `not_verifiable_here`, with the configuration digest it was
+/// computed over. Read-only; scope `fleet:read`.
+async fn gw_guarantees(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
+    Json(super::guarantee::report(&ctx.agent_ctx)).into_response()
+}
+
 async fn gw_diagnose(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
     Json(super::emergent::compute_fleet_diagnosis(&ctx.agent_ctx)).into_response()
 }

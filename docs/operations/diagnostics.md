@@ -11,6 +11,7 @@ Three verbs, three endpoints (all scope `fleet:read`; `localize` + `diagnose` ar
 | Verb | "…" | Endpoint | API |
 |---|---|---|---|
 | **localize** | *what* is off, and *where* | `GET /gateway/fleet` | `agent.fleet_snapshot()` |
+| **guarantees** | which guarantees this node enforces, and why not the rest | `GET /gateway/guarantees` | `agent.guarantee_report()` |
 | **explain** | the *sequence* that produced it | `GET /gateway/explain?since=` | *(cross-node event ring)* |
 | **diagnose** | *why*, and what to do | `GET /gateway/diagnose` | `agent.fleet_diagnosis()` |
 

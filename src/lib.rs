@@ -294,6 +294,10 @@ pub use agent::{
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::ae_contract;
 pub use agent::confinement::{ClockSync, ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
+pub use agent::guarantee::{
+    GuaranteeDescriptor, GuaranteeEntry, GuaranteeId, GuaranteeKind, GuaranteeReport, ProfileRef,
+    NodeView as GuaranteeNodeView, Resolution as GuaranteeResolution, REPORT_SCHEMA as GUARANTEE_REPORT_SCHEMA,
+};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
     arguments_digest, mandate_operation, possession_request, resource_key, Assessment, ExecutionAuthority, PresentedMandate,

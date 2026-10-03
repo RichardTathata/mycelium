@@ -310,6 +310,11 @@ impl ExecutionAuthority {
     /// **Keep installed epochs across restarts** (closure plan C8). The journal's floor for this
     /// gate's scope is installed now, if it is higher than what is configured; later epochs go through
     /// [`install_epoch_durably`](Self::install_epoch_durably). Set once.
+    /// Whether installed epochs are journalled before they take effect (`with_durable_epochs`).
+    pub fn has_durable_epochs(&self) -> bool {
+        self.durable.get().is_some()
+    }
+
     pub fn with_durable_epochs(&self, durable: std::sync::Arc<crate::mandate::authority::DurableEpochs>) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(floor) = durable.floor(st.gate.scope()) {

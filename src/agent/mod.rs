@@ -38,6 +38,7 @@ mod overlay_consistent;
 mod overlay_reliable;
 mod rpc;
 pub(crate) mod gateway_caller;
+pub(crate) mod guarantee;
 /// The AE evaluator seam lives exactly where it is enforced: a gateway that can attest (`tls`
 /// carries both the caller attestation and `sha2` for the argument digest). In any other build it
 /// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
@@ -544,6 +545,15 @@ pub(crate) struct TaskCtx {
     /// Whether `/a2a` is mounted (`with_a2a`), so `start()` can say what that exposes.
     #[cfg(feature = "a2a")]
     pub(crate) a2a_mounted: AtomicBool,
+    /// The guarantee registry (plan I1/I2): the core set at construction, a companion's before `start()`.
+    pub(crate) guarantees: parking_lot::Mutex<Vec<guarantee::GuaranteeDescriptor>>,
+    /// Past the lifecycle boundary (plan G13): the startup report has been computed and logged.
+    pub(crate) started: AtomicBool,
+    /// Attachments made after the boundary, each warned about — the logged report is stale by that many.
+    pub(crate) late_attachments: std::sync::atomic::AtomicU32,
+    /// Mirror of `GossipAgent::data_at_rest_cipher` being set, for the guarantee resolver (which reads
+    /// the task context, not the agent).
+    pub(crate) at_rest_cipher_attached: AtomicBool,
     /// Closure plan C4: H6's cohort budget at this provider, set via `with_cohort_budget`.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) cohort_budget: std::sync::OnceLock<Arc<provider_enforcement::ProviderBudget>>,
@@ -999,6 +1009,10 @@ impl GossipAgent {
             membership: std::sync::OnceLock::new(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),
+            guarantees: parking_lot::Mutex::new(guarantee::core_guarantees()),
+            started: AtomicBool::new(false),
+            late_attachments: std::sync::atomic::AtomicU32::new(0),
+            at_rest_cipher_attached: AtomicBool::new(false),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             cohort_budget: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1058,6 +1072,8 @@ impl GossipAgent {
         &self,
         cipher: Arc<dyn crate::persistence::DataAtRestCipher>,
     ) {
+        self.note_attachment("with_data_at_rest_cipher");
+        self.task_ctx.at_rest_cipher_attached.store(true, Ordering::Release);
         if self.data_at_rest_cipher.set(cipher).is_err() {
             tracing::warn!("with_data_at_rest_cipher called more than once; keeping the first cipher");
         }
@@ -1074,6 +1090,7 @@ impl GossipAgent {
     /// outside the guarantee, and the evidence must say so. Settable once; a second call is ignored.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn with_action_evaluator(&self, evaluator: Arc<dyn action_evaluator::ActionEvaluator>) {
+        self.note_attachment("with_action_evaluator");
         // A build without `compliance` has no audit chain, so decisions cannot be recorded. The
         // gateway will still enforce — and that is enforcement without attribution, which is a
         // materially weaker thing than it looks like. Say so at attach time rather than leaving an
@@ -1105,6 +1122,7 @@ impl GossipAgent {
     /// should not have to infer it from an empty evidence stream.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn with_evidence_journal(&self, journal: Arc<evidence_journal::EvidenceJournal>) {
+        self.note_attachment("with_evidence_journal");
         if self.task_ctx.evidence_journal.set(journal).is_err() {
             tracing::warn!("with_evidence_journal: a journal is already attached; ignoring");
         }
@@ -1126,6 +1144,7 @@ impl GossipAgent {
     /// gateway is no longer the only door that asks.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn with_provider_enforcement(&self) {
+        self.note_attachment("with_provider_enforcement");
         self.task_ctx.provider_enforcement.store(true, std::sync::atomic::Ordering::Release);
     }
 
@@ -1178,6 +1197,7 @@ impl GossipAgent {
     /// and the envelope's window is clamped to the mandate's. Without one, the gateway binds no
     /// mandate, exactly as before. Set once; a second call is ignored with a warning.
     pub fn with_execution_authority(&self, authority: Arc<gateway_authority::ExecutionAuthority>) {
+        self.note_attachment("with_execution_authority");
         // Closure plan C8: this reader starts now, so a checkpoint replayed from before the start
         // cannot refresh its revocation view.
         authority.mark_started(self.task_ctx.hlc.decision_now_ms());
@@ -1246,6 +1266,7 @@ impl GossipAgent {
     /// (first sink wins). Needs the `compliance` feature and `GossipConfig::tls`.
     #[cfg(feature = "compliance")]
     pub fn with_audit_sink(&self, sink: Arc<dyn audit::AuditSink>) {
+        self.note_attachment("with_audit_sink");
         if self.task_ctx.audit_sink.set(sink).is_err() {
             tracing::warn!("with_audit_sink called more than once; keeping the first sink");
         }
@@ -1280,6 +1301,7 @@ impl GossipAgent {
     /// # Ok(()) }
     /// ```
     pub fn with_http_routes(&self, routes: axum::Router) {
+        self.note_attachment("with_http_routes");
         // Merge, don't replace: callers compose routers (`with_a2a()` +
         // application routes) and a last-caller-wins slot silently dropped
         // every earlier registration — skillrunner's management dashboard
@@ -1404,6 +1426,37 @@ impl GossipAgent {
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let no_evaluator = true;
         self.task_ctx.a2a_mounted.load(Ordering::Acquire) && no_evaluator
+    }
+
+    /// **Every registered guarantee, resolved against this node as built and configured** — the
+    /// startup report (`docs/plans/guarantees-and-rule-catalogue.md` I2), recomputed live. Its
+    /// strongest sentence is `node_requirements_satisfied()`; what a node cannot see is `unresolved()`.
+    pub fn guarantee_report(&self) -> guarantee::GuaranteeReport {
+        guarantee::report(&self.task_ctx)
+    }
+
+    /// Register a guarantee from outside the core set — a companion's — **before `start()`**. A
+    /// duplicate id, a core id, or a registration after the boundary is refused by name (plan G11).
+    pub fn register_guarantee(&self, desc: guarantee::GuaranteeDescriptor) -> Result<(), crate::error::GossipError> {
+        guarantee::register(&self.task_ctx, desc)
+    }
+
+    /// How many attachments were made after the lifecycle boundary. Non-zero means the report logged
+    /// at `start()` is stale; `guarantee_report()` is live.
+    pub fn late_attachments(&self) -> u32 {
+        self.task_ctx.late_attachments.load(Ordering::Relaxed)
+    }
+
+    /// Plan G13: an attachment after `start()` is counted and said, because the startup report was
+    /// computed without it — and for the at-rest cipher, because the WAL has been written without it.
+    pub(crate) fn note_attachment(&self, what: &'static str) {
+        if self.task_ctx.started.load(Ordering::Acquire) {
+            self.task_ctx.late_attachments.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "{what}: attached after start(). The guarantee report logged at start did not see it; \
+                 call `guarantee_report()` for the live view, and attach before start() in production"
+            );
+        }
     }
 
     /// Creates an [`AgentStateMachine`] bound to this node.

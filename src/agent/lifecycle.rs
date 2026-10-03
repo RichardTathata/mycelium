@@ -95,6 +95,10 @@ impl GossipAgent {
                 );
             }
         }
+        // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
+        // is. Resolve every registered guarantee against this node and say so, once, before traffic.
+        self.task_ctx.started.store(true, std::sync::atomic::Ordering::Release);
+        super::guarantee::log_report(&super::guarantee::report(&self.task_ctx));
         let bind_ip: IpAddr = self.config.bind_address.parse().map_err(|e| {
             GossipError::InvalidField {
                 field:  "bind_address",
