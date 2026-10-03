@@ -129,6 +129,20 @@ fn parse_publisher(field: &str, s: &str) -> Result<[u8; 32], StemError> {
     Ok(out)
 }
 
+/// Zero-gaps Z2 (D2): the bearer a `[[serve]]` sends — `api_key` as written, or the value of the
+/// variable `api_key_env` names, read once here. An unset variable is a refusal that names it.
+pub fn resolve_serve_key(d: &mycelium::ServeDecl) -> Result<Option<String>, StemError> {
+    if let Some(lit) = &d.api_key {
+        return Ok(Some(lit.clone()));
+    }
+    match &d.api_key_env {
+        None => Ok(None),
+        Some(var) => std::env::var(var).map(Some).map_err(|_| StemError(format!(
+            "[[serve]] {}/{}: api_key_env `{var}` is not set — export it on this host, or use api_key for a literal", d.ns, d.name
+        ))),
+    }
+}
+
 impl Stem {
     /// Declare everything in `units` on `agent` and, if it hosts, start provisioning.
     /// `agent` must already be started.
@@ -302,7 +316,16 @@ impl Stem {
 
         let reprobe = (!units.activations.is_empty()).then(|| crate::activation::spawn_reprobe(watch, opts.reprobe_every));
         #[cfg(feature = "llm")]
-        let serve = (!units.serves.is_empty()).then(|| crate::serve::spawn(Arc::clone(&agent), units.serves.clone(), opts.tick));
+        let serve = if units.serves.is_empty() {
+            None
+        } else {
+            // Zero-gaps Z2: every key resolved here, before anything is served — an unset variable
+            // refuses the start by name rather than serving a skill with no key.
+            let resolved = units.serves.iter()
+                .map(|d| resolve_serve_key(d).map(|k| (d.clone(), k)))
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(crate::serve::spawn(Arc::clone(&agent), resolved, opts.tick))
+        };
         #[cfg(not(feature = "llm"))]
         let serve: Option<tokio::task::JoinHandle<()>> = None;
         Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe, serve })
@@ -549,6 +572,45 @@ mod tests {
         assert!(wait_until(60, || served_here(&node)).await, "the skill returns with the reinstall");
 
         stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+    }
+
+    /// Zero-gaps Z2 (D2): a `[[serve]]` key comes from the environment by name, resolved **at
+    /// start**: a literal stays a literal, a named variable is read once, and an unset variable is
+    /// a refusal that names it. Written before `api_key_env` existed and seen failing to compile.
+    #[test]
+    fn a_served_skill_reads_its_key_from_the_environment() {
+        let decl = |literal: Option<&str>, env: Option<&str>| mycelium::ServeDecl {
+            ns: "llm".into(), name: "m".into(), endpoint: "http://127.0.0.1:9/v1".into(), model: "x".into(),
+            while_live: None, api_key: literal.map(str::to_string), api_key_env: env.map(str::to_string),
+            max_tokens: None, temperature: None,
+        };
+        #[allow(unused_unsafe)]
+        unsafe { std::env::set_var("MYCELIUM_TEST_SERVE_KEY_SET_7F", "sk-test-7f"); }
+        assert_eq!(resolve_serve_key(&decl(None, None)).unwrap(), None, "no key: none sent");
+        assert_eq!(resolve_serve_key(&decl(Some("sk-lit"), None)).unwrap().as_deref(), Some("sk-lit"));
+        assert_eq!(resolve_serve_key(&decl(None, Some("MYCELIUM_TEST_SERVE_KEY_SET_7F"))).unwrap().as_deref(), Some("sk-test-7f"));
+        let e = resolve_serve_key(&decl(None, Some("MYCELIUM_TEST_SERVE_KEY_UNSET_7F"))).unwrap_err();
+        assert!(e.to_string().contains("MYCELIUM_TEST_SERVE_KEY_UNSET_7F") && e.to_string().contains("api_key_env"), "{e}");
+    }
+
+    /// Zero-gaps Z2 (D2): a stem whose `[[serve]]` names an unset variable **refuses to start**,
+    /// naming the variable — never a skill served with no key, never a silent `"none"`. Seen failing
+    /// first: the unknown field was ignored and the stem started.
+    #[cfg(feature = "llm")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_serve_whose_key_variable_is_unset_refuses_the_start() {
+        let (seed, lib_dir, head, _ids) = blob_library("keyenv", &[("pack", b"weights standing in")]).await;
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[serve]]\nname=\"keyed\"\nendpoint=\"http://127.0.0.1:9/v1\"\nmodel=\"pack\"\napi_key_env=\"MYCELIUM_TEST_SERVE_KEY_UNSET_7F\"\n"
+        )).unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let err = match Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)) {
+            Ok(stem) => { stem.stop().await; panic!("a serve whose key variable is unset must refuse the start") }
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("MYCELIUM_TEST_SERVE_KEY_UNSET_7F") && err.contains("api_key_env"), "{err}");
         node.shutdown().await;
         seed.shutdown().await;
     }

@@ -224,6 +224,10 @@ pub struct ServeDecl {
     pub while_live: Option<CapDecl>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// The name of an environment variable holding the bearer, read **once at stem start**; an unset
+    /// variable refuses the start by name. One of `api_key` / `api_key_env`, never both (zero-gaps Z2).
+    #[serde(default)]
+    pub api_key_env: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
@@ -740,6 +744,12 @@ impl NodeCapabilityConfig {
             if sv.endpoint.trim().is_empty() || sv.model.trim().is_empty() {
                 return Err(invalid("serve", format!("{at}: an endpoint and a model are both required")));
             }
+            if sv.api_key.is_some() && sv.api_key_env.is_some() {
+                return Err(invalid("serve.api_key", format!("{at}: set one of api_key (a literal) or api_key_env (a variable name), not both")));
+            }
+            if sv.api_key_env.as_deref().is_some_and(|v| v.trim().is_empty()) {
+                return Err(invalid("serve.api_key_env", format!("{at}: api_key_env is empty — name the variable that holds the key")));
+            }
             if let Some(w) = &sv.while_live
                 && w.ns == sv.ns
                 && w.name == sv.name
@@ -1156,6 +1166,11 @@ max_providers = 4
         assert!(e.contains("an endpoint and a model"), "{e}");
         let e = refused("[[serve]]\nname = \"m\"\nendpoint = \"http://o/v1\"\nmodel = \"x\"\n[serve.while_live]\nns = \"llm\"\nname = \"m\"\n");
         assert!(e.contains("share a capability key"), "{e}");
+        // Zero-gaps Z2: one key form, and a variable name that is a name.
+        let e = refused("[[serve]]\nname = \"m\"\nendpoint = \"http://o/v1\"\nmodel = \"x\"\napi_key = \"sk\"\napi_key_env = \"KEY\"\n");
+        assert!(e.contains("api_key") && e.contains("api_key_env"), "{e}");
+        let e = refused("[[serve]]\nname = \"m\"\nendpoint = \"http://o/v1\"\nmodel = \"x\"\napi_key_env = \"\"\n");
+        assert!(e.contains("api_key_env") && e.contains("empty"), "{e}");
 
         let e = refused("[hosts]\nkinds = [\"blob\"]\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = []\n");
         assert!(e.contains("activation.command"), "{e}");

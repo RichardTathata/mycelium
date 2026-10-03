@@ -19,16 +19,19 @@ fn is_live_here(agent: &GossipAgent, decl: &ServeDecl) -> bool {
 
 /// One task for all of a unit's `[[serve]]` sections: every `tick`, register what is live here and
 /// retract what is not. Abort the task to retract everything.
-pub fn spawn(agent: Arc<GossipAgent>, decls: Vec<ServeDecl>, tick: Duration) -> tokio::task::JoinHandle<()> {
+///
+/// `decls` carries each section with its bearer already resolved (`stem::resolve_serve_key`, at
+/// start): a literal, a variable's value, or none. The key is never logged.
+pub fn spawn(agent: Arc<GossipAgent>, decls: Vec<(ServeDecl, Option<String>)>, tick: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut held: HashMap<usize, PromptSkillHandle> = HashMap::new();
         loop {
-            for (i, d) in decls.iter().enumerate() {
+            for (i, (d, key)) in decls.iter().enumerate() {
                 let live = is_live_here(&agent, d);
                 if live && !held.contains_key(&i) {
                     let backend: Arc<dyn LlmBackend> = Arc::new(OpenAiBackend::new(
                         d.endpoint.clone(),
-                        d.api_key.clone().unwrap_or_else(|| "none".into()),
+                        key.clone().unwrap_or_else(|| "none".into()),
                         d.model.clone(),
                     ));
                     let template = PromptTemplate {
