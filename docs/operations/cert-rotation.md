@@ -109,6 +109,32 @@ ever held so the removed node cannot come back under an older one.
 (`rbac.md`); and a CA key that *is* on a node can still mint a fresh identity — which is why step 1
 is a precondition, not advice. Design record: `docs/design/member-removal.md`.
 
+### Issuing node certificates off-node — the CA key stays with you (`id.ca_key_off_node`)
+
+By default a node re-signs its own certificate at every start with the fleet CA's **private key**, which
+must therefore be in its certificate directory (and is minted there when absent). The removal argument
+above (C5) rests on the opposite: a node that holds the CA key could mint a removed member a new
+identity. The guarantee `id.ca_key_off_node` holds only for a node that starts from a **pre-issued**
+certificate and the CA **certificate** alone:
+
+```bash
+# on the issuer's host, where ca-cert.pem + ca-key.pem live (never on a node):
+mycelium tls issue --ca-dir ./fleet-ca --node 10.0.0.7:8080 --out ./issued
+# → ./issued/10_0_0_7_8080.cert.pem and .key.pem
+# on the node: copy both plus ./fleet-ca/ca-cert.pem (the certificate only) into its directory, and
+[tls]
+auto_cert_dir = "/var/lib/mycelium/tls"      # holds ca-cert.pem; no ca-key.pem
+cert_pem      = "/var/lib/mycelium/tls/10_0_0_7_8080.cert.pem"
+key_pem       = "/var/lib/mycelium/tls/10_0_0_7_8080.key.pem"
+```
+
+With `cert_pem` set, `start()` loads the CA certificate and the node's certificate and key, needs no CA
+key, looks for none, and **never mints a CA** — a missing `ca-cert.pem` is an error naming the path, and
+`cert_pem` without `key_pem` is refused by name. Rotation (§1) then means **re-issuing**: `generate_rotation`
+needs the CA key and errors without it, by design. The startup report resolves `id.ca_key_off_node` as
+`enforced` only on such a node; `secure-single-domain` **rev 2 will require it** in the next MINOR
+(announced here one release ahead, per the plan's G12).
+
 ### Authenticated identity — enabling proof enforcement (identity-auth Phase 2/3)
 
 Every TLS node now publishes a signed `sys/identity-proof/{self}` alongside its identity, and

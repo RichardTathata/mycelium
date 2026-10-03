@@ -10,6 +10,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A node can start without the fleet CA's private key** (`id.ca_key_off_node`, the guarantee the
+  startup report could report but no running node could meet). `TlsConfig::cert_pem` was declared and
+  never read: the node cert was re-signed at every start with the CA key, which therefore had to be on
+  every node — and when it was absent, `start()` minted a **new CA, key included**, into the node's
+  directory. Now `cert_pem` + `key_pem` name a certificate **issued off-node** — `mycelium tls issue
+  --ca-dir <dir> --node <ip:port> --out <dir>` (`mycelium::issue_node_cert`) on the host that holds the CA —
+  and such a node starts from `ca-cert.pem` alone: no CA key loaded or looked for, nothing minted, a
+  missing CA certificate an error naming the path, `cert_pem` without `key_pem` refused by name.
+  Rotation on such a node means re-issuing (`generate_rotation` needs the CA key, by design). The
+  guarantee resolves `enforced` only with a pre-issued certificate; `ConfinementReport.ca_key_off_node`
+  follows. Test seen failing on the unfixed init. **Announced one release ahead (G12):**
+  `secure-single-domain` rev 2 will require `id.ca_key_off_node` in the next MINOR — a deployment meets
+  it by configuration (issue its node certificates off-node) before upgrading.
+
 - **An audit sink that would receive nothing refuses the start** (`audit.sink`, plan §8). Audit
   records are sealed with the node identity, so on a node with no `[tls]` nothing is sealed and an
   attached `AuditSink` is accepted and silently receives nothing — the class v2.18.1 closed for the

@@ -239,11 +239,32 @@ mod imp {
             }
         };
 
-        // ── 2. CA cert + key ──────────────────────────────────────────────
-        let (ca_cert_der, ca_key_pair) = load_or_create_ca(cfg)?;
-
-        // ── 3. Node cert (regenerated every startup, signed by CA) ───────
-        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+        // ── 2 + 3. The CA, and the node cert ─────────────────────────────
+        // A **pre-issued** node certificate (`cert_pem`, issued off-node by `issue_node_cert`) needs
+        // the CA *certificate* only: the CA key is neither loaded nor looked for, and nothing is
+        // minted — the init that lets `id.ca_key_off_node` hold on a running node (plan §8,
+        // 2026-10-03). Without one, the node cert is re-signed at every start with the CA key,
+        // which must then be on this node (and is minted here when absent).
+        let (ca_cert_der, node_cert_der) = match &cfg.cert_pem {
+            Some(cert_path) => {
+                if cfg.key_pem.is_none() {
+                    return Err(GossipError::InvalidField {
+                        field: "tls",
+                        reason: "TLS: `cert_pem` names a pre-issued certificate, so `key_pem` must name its key (the node cannot re-sign a certificate it was issued)".into(),
+                    });
+                }
+                let ca_cert_der = load_ca_cert_only(cfg)?;
+                let pem = fs::read_to_string(cert_path).map_err(|e| GossipError::InvalidField {
+                    field: "tls", reason: format!("TLS: read node cert {cert_path:?}: {e}"),
+                })?;
+                (ca_cert_der, pem_cert_to_der(&pem)?)
+            }
+            None => {
+                let (ca_cert_der, ca_key_pair) = load_or_create_ca(cfg)?;
+                let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+                (ca_cert_der, node_cert_der)
+            }
+        };
 
         // ── 4. Build rustls configs ───────────────────────────────────────
         let (server_config, client_config, gateway_server_config) =
@@ -291,6 +312,48 @@ mod imp {
         })
     }
 
+    /// **Issue a node certificate off-node** (`id.ca_key_off_node`, plan §8). Runs where the CA key
+    /// is — an operator's workstation, a signing host — never on the node: loads the existing CA
+    /// from `ca_dir` (never mints one), generates a fresh Ed25519 identity for `node_id`, signs its
+    /// certificate exactly as `load_or_generate` would, and writes `<node>.cert.pem` and
+    /// `<node>.key.pem` (PKCS#8) under `out_dir`. The node then starts with `[tls] cert_pem` /
+    /// `key_pem` pointing at them and `ca-cert.pem` (the certificate only) in its directory, and
+    /// `load_or_generate` neither needs nor looks for the CA key. Returns the two paths.
+    pub fn issue_node_cert(ca_dir: &Path, node_id: &NodeId, out_dir: &Path) -> Result<(std::path::PathBuf, std::path::PathBuf), GossipError> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let err = |reason: String| GossipError::InvalidField { field: "tls", reason };
+        let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
+        let (_ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
+        let signing_key = generate_key()?;
+        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+        fs::create_dir_all(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
+        let sanitized = node_id.as_str().replace([':', '.'], "_");
+        let cert_path = out_dir.join(format!("{sanitized}.cert.pem"));
+        let key_path = out_dir.join(format!("{sanitized}.key.pem"));
+        let pkcs8 = signing_key.to_pkcs8_der().map_err(|e| err(format!("TLS: encode node key: {e}")))?;
+        let b64 = STANDARD.encode(pkcs8.as_bytes());
+        let mut key_pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            key_pem.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
+            key_pem.push('\n');
+        }
+        key_pem.push_str("-----END PRIVATE KEY-----\n");
+        fs::write(&cert_path, cert_der_to_pem(node_cert_der.as_ref())).map_err(|e| err(format!("TLS: write {cert_path:?}: {e}")))?;
+        fs::write(&key_path, key_pem).map_err(|e| err(format!("TLS: write {key_path:?}: {e}")))?;
+        Ok((cert_path, key_path))
+    }
+
+    /// The CA **certificate** alone (`ca_cert_pem`, else `{auto_cert_dir}/ca-cert.pem`): load-only,
+    /// an error naming the path when absent — never a mint. The path a pre-issued node cert takes.
+    fn load_ca_cert_only(cfg: &TlsConfig) -> Result<CertificateDer<'static>, GossipError> {
+        let ca_cert_path = cfg.ca_cert_pem.clone().unwrap_or(cfg.auto_cert_dir.join("ca-cert.pem"));
+        let pem = fs::read_to_string(&ca_cert_path).map_err(|e| GossipError::InvalidField {
+            field: "tls", reason: format!("TLS: a pre-issued node cert needs the CA cert ({ca_cert_path:?}): {e}"),
+        })?;
+        pem_cert_to_der(&pem)
+    }
+
     /// Load the existing cluster CA cert + key (load-only; errors if absent —
     /// unlike `load_or_generate`, rotation must never mint a new CA).
     fn load_existing_ca(cfg: &TlsConfig) -> Result<(CertificateDer<'static>, KeyPair), GossipError> {
@@ -298,11 +361,11 @@ mod imp {
         let auto_ca_key_path  = cfg.auto_cert_dir.join("ca-key.pem");
         let ca_cert_path = cfg.ca_cert_pem.clone().unwrap_or(auto_ca_cert_path);
         let pem = fs::read_to_string(&ca_cert_path).map_err(|e| GossipError::InvalidField {
-            field: "tls", reason: format!("TLS: rotation needs an existing CA cert ({ca_cert_path:?}): {e}"),
+            field: "tls", reason: format!("TLS: needs an existing CA cert ({ca_cert_path:?}) — never minted here: {e}"),
         })?;
         let ca_cert_der = pem_cert_to_der(&pem)?;
         let key_pem = fs::read_to_string(&auto_ca_key_path).map_err(|e| GossipError::InvalidField {
-            field: "tls", reason: format!("TLS: rotation needs the CA key ({auto_ca_key_path:?}): {e}"),
+            field: "tls", reason: format!("TLS: needs the CA key ({auto_ca_key_path:?}) — rotation and issuance sign with it, a node never needs it: {e}"),
         })?;
         let ca_key_pair = KeyPair::from_pem(&key_pem).map_err(|e| GossipError::InvalidField {
             field: "tls", reason: format!("TLS: parse CA key: {e}"),
@@ -648,7 +711,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, load_or_generate, sign_bytes, verify_bytes};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, issue_node_cert, load_or_generate, sign_bytes, verify_bytes};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -747,5 +810,40 @@ mod ca_race_tests {
         assert!(!dir.join("ca-cert.pem").exists(), "no CA was generated behind the lock");
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
+    /// `id.ca_key_off_node` (plan §8): a node given a **pre-issued** certificate starts from the CA
+    /// *certificate* alone — it neither needs nor looks for the CA key, and never mints a CA.
+    /// Before the fix, `load_or_generate` ignored `cert_pem`, re-signed a node cert with the CA key,
+    /// and — the key being absent — minted a **new CA** into the node's directory, key included.
+    #[test]
+    fn a_pre_issued_node_cert_starts_without_the_ca_key_and_mints_nothing() {
+        use crate::node_id::NodeId;
+        let ca_dir = fresh_dir("issuer");
+        let node_dir = fresh_dir("node");
+        let node = NodeId::new("127.0.0.1", 9400).unwrap();
+        let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.clone(), ..TlsConfig::default() };
+        let ca_cert = load_or_create_ca(&ca_cfg).unwrap().0.as_ref().to_vec();
+        let (cert_pem, key_pem) = super::imp::issue_node_cert(&ca_dir, &node, &node_dir).unwrap();
+        std::fs::copy(ca_dir.join("ca-cert.pem"), node_dir.join("ca-cert.pem")).unwrap();
+        assert!(!node_dir.join("ca-key.pem").exists(), "the key stays with the issuer");
+
+        let cfg = TlsConfig { auto_cert_dir: node_dir.clone(), cert_pem: Some(cert_pem.clone()), key_pem: Some(key_pem.clone()), ca_cert_pem: None };
+        let removed = Arc::new(crate::removal::RemovedSet::default());
+        super::imp::load_or_generate(&cfg, &node, Arc::clone(&removed)).expect("a pre-issued cert and the CA certificate are enough");
+        assert!(!node_dir.join("ca-key.pem").exists(), "the node never minted a CA key");
+        assert!(!node_dir.join("ca.lock").exists());
+        let on_disk = super::imp::pem_cert_to_der(&std::fs::read_to_string(node_dir.join("ca-cert.pem")).unwrap()).unwrap();
+        assert_eq!(on_disk.as_ref(), ca_cert.as_slice(), "the issuer's CA, not a fresh one");
+
+        // A certificate without its key is refused by name; a missing CA certificate is an error, not a mint.
+        let half = TlsConfig { key_pem: None, ..cfg.clone() };
+        let Err(e) = super::imp::load_or_generate(&half, &node, Arc::clone(&removed)) else { panic!("a cert without its key must be refused") };
+        assert!(e.to_string().contains("key_pem"), "{e}");
+        std::fs::remove_file(node_dir.join("ca-cert.pem")).unwrap();
+        let Err(e) = super::imp::load_or_generate(&cfg, &node, removed) else { panic!("a missing CA cert must be an error, not a mint") };
+        assert!(e.to_string().contains("CA cert"), "{e}");
+        assert!(!node_dir.join("ca-cert.pem").exists() && !node_dir.join("ca-key.pem").exists(), "nothing minted");
+        let _ = std::fs::remove_dir_all(&ca_dir);
+        let _ = std::fs::remove_dir_all(&node_dir);
+    }
+}

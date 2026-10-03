@@ -673,7 +673,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           }),
         g("id.ca_key_off_node", 1, "identity", Node,
           "the fleet CA's private key is not on this node, so a removed member cannot mint itself a new identity here",
-          "`tls`; `[tls]`; no `ca-key.pem` in this node's certificate directory",
+          "`tls`; `[tls] cert_pem` + `key_pem` (a node certificate issued off-node: `mycelium tls issue`); no `ca-key.pem` in this node's certificate directory",
           &["membership removal (closure plan C5)"], "docs/operations/cert-rotation.md",
           always,
           |c| {
@@ -681,6 +681,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               {
                   match &c.config.tls {
                       None => Resolution::NotConfigured { missing: "[tls]" },
+                      Some(t) if t.cert_pem.is_none() => Resolution::NotConfigured { missing: "[tls] cert_pem — without a pre-issued node certificate, start() re-signs one with the CA key, which must then be on this node" },
                       Some(t) if t.auto_cert_dir.join("ca-key.pem").exists() => Resolution::NotConfigured { missing: "the CA private key is in this node's certificate directory (the `auto_cert_dir` development default)" },
                       // No CA here at all: start() mints one into this directory, key included — the
                       // report is computed before that, so say what is about to be true.
