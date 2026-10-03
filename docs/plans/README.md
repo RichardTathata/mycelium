@@ -62,7 +62,7 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Zero gaps (adopted 2026-10-03):** [`zero-gaps.md`](zero-gaps.md) — the nine code-shaped gaps the repository
+> **Zero gaps (delivered 2026-10-03, v2.22.0 — #507–#512):** [`zero-gaps.md`](zero-gaps.md) — the nine code-shaped gaps the repository
 > recorded after the guarantees plan closed (five on `what-is-proven.md`, two `~` cells on the doc-coverage matrix,
 > two from the publication lint of the same day), each with its seam named by `file:line`, a decision, and an
 > increment with a test seen failing first: an object-store stem source (D1), `[[serve]].api_key_env` resolved at
