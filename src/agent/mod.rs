@@ -921,6 +921,7 @@ impl GossipAgent {
             seen:            Arc::new(ShardedSeen::new(seen_shards)),
             hlc:             Arc::new(crate::hlc::Hlc::with_max_drift(config.max_clock_drift_ms)),
             signal_boundary: Arc::new(RwLock::new(Boundary::new(node_id.clone()))),
+            decision_sink: std::sync::OnceLock::new(),
             signal_handlers: Arc::new(SignalHandlers::new(signal_window)),
             gossip_txs,
             default_ttl,
@@ -1108,6 +1109,18 @@ impl GossipAgent {
         }
         if self.task_ctx.action_evaluator.set(evaluator).is_err() {
             tracing::warn!("with_action_evaluator: an evaluator is already attached; ignoring");
+        }
+    }
+
+    /// Attach the **decision trace** (`docs/plans/guarantees-and-rule-catalogue.md` I7): the
+    /// membership governor records every decision it makes and signal admission records its refusals
+    /// and sheds, from the values each already produced — no decision changes, nothing is recorded
+    /// under a lock, the sink never waits. Set once, before `start()`; a second call warns and is
+    /// ignored. Off unless called. The records are read with `mycelium explain`.
+    pub fn with_decision_trace(&self, sink: Arc<mycelium_core::decision::DecisionSink>) {
+        self.note_attachment("with_decision_trace");
+        if self.task_ctx.core.decision_sink.set(sink).is_err() {
+            tracing::warn!("with_decision_trace: a sink is already attached; ignoring");
         }
     }
 

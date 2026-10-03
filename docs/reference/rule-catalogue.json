@@ -352,8 +352,8 @@
         {
           "kind": "action",
           "reasons": [
-            "declare_floor",
-            "release"
+            "join",
+            "leave"
           ]
         },
         {
@@ -367,12 +367,12 @@
         {
           "kind": "no_action",
           "reasons": [
-            "in_bounds"
+            "hold"
           ]
         }
       ],
       "effects": [
-        "membership intents under `sys/`; the control ledger"
+        "this node joins or leaves the group (`grp/`); the control ledger"
       ],
       "guards": [
         "settling",
@@ -392,8 +392,8 @@
         "a_stale_membership_intent_stops_declaring_a_floor",
         "healthy_membership_in_bounds_does_not_trip"
       ],
-      "trace": "catalogue_only",
-      "summary": "A governor acts only on a confident view, with settling and spacing between acts; an intent it stops refreshing expires."
+      "trace": "instrumented",
+      "summary": "This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view."
     },
     {
       "id": "prov.activation",
@@ -1445,7 +1445,9 @@
         "boundary_transition_signals_are_never_locally_shed",
         "test_group_quorum_excludes_ex_member"
       ],
-      "trace": "catalogue_only",
+      "trace": {
+        "partial": "refusals and sheds only; an admitted signal is the hot path and records nothing"
+      },
       "summary": "Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded."
     },
     {

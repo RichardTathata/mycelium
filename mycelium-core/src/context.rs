@@ -120,6 +120,9 @@ pub struct CoreCtx {
 
     // ── Layer II — Signal mesh ───────────────────────────────────────────────────
     pub signal_boundary:  Arc<RwLock<Boundary>>,
+    /// The decision trace's sink (`crate::decision`, plan I7): set once, before start, by the
+    /// agent's `with_decision_trace`; absent means no decision point records.
+    pub decision_sink:    std::sync::OnceLock<Arc<crate::decision::DecisionSink>>,
     pub signal_handlers:  Arc<SignalHandlers>,
     /// Receiver-side causal reorder buffer for `emit_ordered` signals.
     /// `None` when `config.signal_ordered_delivery = false` (the default).
@@ -212,5 +215,12 @@ impl CoreCtx {
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         self.task_handles.lock().unwrap_or_else(|e| e.into_inner()).spawn(fut);
+    }
+}
+
+impl CoreCtx {
+    /// The attached decision sink, if any (plan I7).
+    pub fn decision_sink(&self) -> Option<&crate::decision::DecisionSink> {
+        self.decision_sink.get().map(|a| a.as_ref())
     }
 }

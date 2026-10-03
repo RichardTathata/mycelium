@@ -105,6 +105,9 @@ pub enum TracePolicy {
     Instrumented,
     /// Described here; no sink at the decision point yet.
     CatalogueOnly,
+    /// Instrumented for the named subset of its outcomes only (a hot path records its refusals, not
+    /// its admissions); the rest is catalogue-only, and the subset is stated here.
+    Partial(&'static str),
     /// Tracing this point is not supported, for a stated reason (a hot path, a lock-sensitive site).
     Unsupported,
 }
@@ -299,8 +302,13 @@ The plan is `docs/plans/guarantees-and-rule-catalogue.md`.\n\n");
 
 fn anchor(id: &str) -> String { id.replace('.', "") }
 fn join_dbg<T: std::fmt::Debug>(xs: &[T]) -> String { xs.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join(", ") }
-fn fmt_trace(t: TracePolicy) -> &'static str {
-    match t { TracePolicy::Instrumented => "instrumented", TracePolicy::CatalogueOnly => "catalogue only", TracePolicy::Unsupported => "unsupported" }
+fn fmt_trace(t: TracePolicy) -> String {
+    match t {
+        TracePolicy::Instrumented => "instrumented".into(),
+        TracePolicy::CatalogueOnly => "catalogue only".into(),
+        TracePolicy::Partial(what) => format!("partial — {what}"),
+        TracePolicy::Unsupported => "unsupported".into(),
+    }
 }
 
 #[cfg(test)]
