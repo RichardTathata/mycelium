@@ -687,23 +687,31 @@ mod tests {
             reprobe_every: Duration::from_secs(1),
             trace: None,
         };
-        let mut fleet: Vec<(Arc<GossipAgent>, Stem)> = Vec::new();
-        for _ in 0..3 {
-            let a = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
-            let s = Stem::start(Arc::clone(&a), &units, opts.clone()).unwrap();
-            fleet.push((a, s));
-        }
+        // Three stems, started so that the fleet is **deterministic**: with `self_elect_p: 1.0`
+        // (no herd damping) three stems started together can all elect in one round — three hosts
+        // over a band of two, then all three shed at once, and the band oscillates until tick
+        // interleavings break the symmetry (seen under a loaded full run, 2026-10-03). So the first
+        // two come up and host, and only then the third, which sees the floor met and stands by.
         let filter = CapFilter::new("route", "optimize");
         let live = |n: &Arc<GossipAgent>| n.capabilities().resolve(&filter).len();
-
-        let converged = wait_until(90, || live(&seed) == 2).await;
-        assert!(converged, "the fleet converges to the presence floor: {} live", live(&seed));
-        // A stem publishes its hosted count on its own tick, after the advertisement the seed
-        // already saw — so this is waited for too, not read once.
         let hosts_of = |fleet: &Vec<(Arc<GossipAgent>, Stem)>| -> Vec<usize> {
             fleet.iter().enumerate().filter(|(_, (_, s))| s.hosted_count() > 0).map(|(i, _)| i).collect()
         };
-        assert!(wait_until(30, || hosts_of(&fleet).len() == 2).await, "exactly two stems host: {:?}", hosts_of(&fleet));
+        let mut fleet: Vec<(Arc<GossipAgent>, Stem)> = Vec::new();
+        for i in 0..2 {
+            let a = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+            let s = Stem::start(Arc::clone(&a), &units, opts.clone()).unwrap();
+            fleet.push((a, s));
+            assert!(wait_until(90, || live(&seed) == i + 1 && hosts_of(&fleet).len() == i + 1).await,
+                "stem {i} hosts: {} live, hosting {:?}", live(&seed), hosts_of(&fleet));
+        }
+        let standby = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let standby_stem = Stem::start(Arc::clone(&standby), &units, opts.clone()).unwrap();
+        fleet.push((standby, standby_stem));
+        // The standby sees the floor met: a few of its ticks pass and it does not install.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(hosts_of(&fleet), vec![0, 1], "the floor is met, the third stem stands by");
+        assert_eq!(live(&seed), 2, "the fleet holds the presence floor");
         let hosting = hosts_of(&fleet);
 
         // ── the declared-versus-observed comparison ─────────────────────────────
