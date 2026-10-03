@@ -20,7 +20,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   release anchor. A third party's follow-up to #475, with its two plan-status sentences brought to
   v2.20.0.
 
-### Changed
 - **`secure-single-domain` rev 2** (announced in v2.20.0, plan G12): the profile now also requires
   `id.ca_key_off_node` — a node certificate issued off-node (`mycelium tls issue`, `[tls] cert_pem` +
   `key_pem`) so the fleet CA's private key is on no node — and `persist.unreadable_refused` (the
