@@ -145,8 +145,48 @@ fn prometheus_handle(cluster_name: Option<&str>) -> metrics_exporter_prometheus:
 /// `extra_routes` is an optional `Router<()>` (state already attached by the
 /// caller) that is merged into the library router so application-level
 /// handlers share the same port without a second TCP listener.
+/// The gateway's listener and, when configured, its TLS server config — everything that can fail
+/// before a request is served, prepared **inside `start()`** so the failure is `start()`'s
+/// (`gw.tls_runtime`, plan §8). Before this, the bind and the TLS setup ran in the spawned task: a
+/// busy port or an unreadable certificate was logged as "HTTP server exited" while the node started
+/// and reported ready without a gateway.
+pub(super) struct PreparedGateway {
+    listener: tokio::net::TcpListener,
+    #[cfg(feature = "tls")]
+    server_config: Option<std::sync::Arc<rustls::ServerConfig>>,
+}
+
+/// Bind the gateway and resolve its TLS material; an error here fails `start()`.
+pub(super) fn prepare_gateway(addr: SocketAddr, ctx: &Arc<TaskCtx>) -> Result<PreparedGateway, std::io::Error> {
+    // SO_REUSEADDR, like the gossip listener (`tasks::new_listener`): without it, a fast
+    // process restart on a fixed port can hit AddrInUse from lingering TIME_WAIT tuples
+    // (server-side-closed HTTP connections linger ~60 s) and panic the whole node — seen as
+    // scenario 03's restart killing node-a on a CPU-starved hosted runner (#156 gate, PR
+    // #159 run). Plain `TcpListener::bind` sets no socket options; do it explicitly.
+    let sock = if addr.is_ipv6() {
+        tokio::net::TcpSocket::new_v6()
+    } else {
+        tokio::net::TcpSocket::new_v4()
+    }?;
+    sock.set_reuseaddr(true)?;
+    sock.bind(addr).map_err(|e| std::io::Error::new(e.kind(), format!("bind {addr}: {e}")))?;
+    let listener = sock.listen(1024)?;
+    #[cfg(feature = "tls")]
+    let server_config = match ctx.config.gateway_tls.clone() {
+        Some(gw_tls) => Some(build_gateway_server_config(ctx, &gw_tls)?),
+        None => None,
+    };
+    #[cfg(not(feature = "tls"))]
+    let _ = ctx;
+    Ok(PreparedGateway {
+        listener,
+        #[cfg(feature = "tls")]
+        server_config,
+    })
+}
+
 pub(super) async fn run_http_server(
-    addr:         SocketAddr,
+    prepared:     PreparedGateway,
     ctx:          Arc<TaskCtx>,
     shutdown_rx:  watch::Receiver<bool>,
     extra_routes: Option<axum::Router>,
@@ -160,10 +200,6 @@ pub(super) async fn run_http_server(
         .oidc
         .clone()
         .map(|c| Arc::new(super::oidc::OidcVerifier::new(c)));
-
-    // Keep a ctx handle for the gateway-TLS branch below (`state` is moved into the router).
-    #[cfg(feature = "tls")]
-    let tls_ctx = Arc::clone(&ctx);
 
     let state = Arc::new(HttpCtx {
         agent_ctx:    ctx,
@@ -330,25 +366,13 @@ pub(super) async fn run_http_server(
         app
     };
 
-    // SO_REUSEADDR, like the gossip listener (`tasks::new_listener`): without it, a fast
-    // process restart on a fixed port can hit AddrInUse from lingering TIME_WAIT tuples
-    // (server-side-closed HTTP connections linger ~60 s) and panic the whole node — seen as
-    // scenario 03's restart killing node-a on a CPU-starved hosted runner (#156 gate, PR
-    // #159 run). Plain `TcpListener::bind` sets no socket options; do it explicitly.
-    let sock = if addr.is_ipv6() {
-        tokio::net::TcpSocket::new_v6()
-    } else {
-        tokio::net::TcpSocket::new_v4()
-    }?;
-    sock.set_reuseaddr(true)?;
-    sock.bind(addr)?;
-    let listener = sock.listen(1024)?;
+    let listener = prepared.listener;
 
     // Native gateway TLS (SOC 2 WS-A): when GossipConfig::gateway_tls is set, serve HTTPS
-    // over a hand-rolled tokio-rustls accept loop; otherwise the plain axum::serve path.
+    // over a hand-rolled tokio-rustls accept loop; otherwise the plain axum::serve path. The
+    // material was resolved in `prepare_gateway`, inside `start()`.
     #[cfg(feature = "tls")]
-    if let Some(gw_tls) = tls_ctx.config.gateway_tls.clone() {
-        let server_config = build_gateway_server_config(&tls_ctx, &gw_tls)?;
+    if let Some(server_config) = prepared.server_config {
         info!(addr = %listener.local_addr().unwrap(), "HTTPS gateway listening (native TLS)");
         return serve_https(listener, app, server_config, shutdown_rx).await;
     }

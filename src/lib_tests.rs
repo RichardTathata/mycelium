@@ -4732,6 +4732,42 @@ async fn test_ws3_data_at_rest_cipher_encrypts_wal_and_round_trips() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// `gw.tls_runtime` (plan §8): a gateway that cannot come up is a **start() error**, not a dead task
+/// behind a node that reports ready. Before the fix the bind and the TLS setup ran inside the spawned
+/// task: a bad certificate path or a busy port was logged as "HTTP server exited" while `start()`
+/// returned Ok.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[tokio::test]
+async fn a_gateway_that_cannot_come_up_fails_the_start() {
+    // A busy port.
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy_port = busy.local_addr().unwrap().port();
+    let port = alloc_port();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.http_port = Some(busy_port);
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    let e = a.start().await.expect_err("a port the gateway cannot bind must fail the start");
+    assert!(e.to_string().contains("gateway"), "{e}");
+    a.shutdown().await;
+    drop(busy);
+
+    // A certificate path that does not exist.
+    let port = alloc_port();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.http_port = Some(alloc_port());
+    cfg.gateway_tls = Some(crate::GatewayTlsConfig {
+        cert_pem_path: Some("/nonexistent/gateway.cert.pem".into()),
+        key_pem_path: Some("/nonexistent/gateway.key.pem".into()),
+    });
+    let b = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    let e = b.start().await.expect_err("an unreadable gateway certificate must fail the start");
+    assert!(e.to_string().contains("gateway"), "{e}");
+    assert!(!b.is_ready(), "a node whose gateway did not come up is not ready");
+    b.shutdown().await;
+}
+
 /// Regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8): with
 /// **no persistence configured**, `Committed { persisted }` reads `true` — "nothing was promised" is
 /// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`

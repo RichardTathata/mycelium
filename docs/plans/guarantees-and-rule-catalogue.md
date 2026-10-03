@@ -155,7 +155,7 @@ IDs are the proposed stable IDs for the registry.
 | `report.egress` | *substrate outbound fails closed* | `egress.allow_hosts` | federation client, bulk fetch and OIDC JWKS are ungated; report overclaims | FINDING (medium) | open — I1 fix, own PR |
 | `at_rest.cipher` | WAL/snapshot encrypted | attach before `start()` | attached after: plaintext, no warning | FINDING (low) | open — G13 |
 | `ae.recorded_before_dispatch` | the decision is journalled | `with_evidence_journal` | enforces, records nothing; warns at attach | WARN-ONLY | I3 requires it |
-| `gw.tls_runtime` | a bad gateway TLS config is fatal | — | HTTP task dies, `start()` returns Ok, node reports ready | WARN-ONLY | open — I2/I3 |
+| `gw.tls_runtime` | a bad gateway TLS config is fatal | — | HTTP task dies, `start()` returns Ok, node reports ready | WARN-ONLY | **fixed 2026-10-03** — the bind and the TLS material are prepared inside `start()` (`http::prepare_gateway`); a busy port or an unreadable certificate is `start()`'s error naming the gateway, the node is not ready. Unconditional (G6), so no registry row. `a_gateway_that_cannot_come_up_fails_the_start` seen failing first |
 | `persist.replay` | restart recovers KV and acceptor memory | `persistence` | replay failure warns, continues, then snapshots | WARN-ONLY (fail-open) | open — needs a test; may compact over unreadable state (unverified) |
 | `prov.enforcement` | protected work authorised where it runs | `with_provider_enforcement` | **on** + no evaluator refuses (closed); **off** checks nothing | OK / DOC-ONLY | I3 requires *on* |
 | `ae.authorised_at_seam` | gateway dispatch authorised | an evaluator | inert without one, by design | DOC-ONLY | I3 requires it |

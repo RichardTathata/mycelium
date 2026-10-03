@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A gateway that cannot come up fails `start()`** (`gw.tls_runtime`, plan §8). The bind and the
+  gateway's TLS setup ran inside the spawned HTTP task, so a busy port or an unreadable certificate was
+  logged as "HTTP server exited" while `start()` returned Ok and the node reported ready with no
+  gateway. Both are prepared inside `start()` now (`http::prepare_gateway`); a failure is `start()`'s
+  error, naming the gateway and the address, and the node is not ready. Test seen failing on the
+  unfixed code. **Behaviour change:** a node whose gateway port is taken, or whose `[gateway_tls]`
+  paths do not load, no longer starts without it.
+
 ### Added
 - **The rule catalogue** (`docs/plans/guarantees-and-rule-catalogue.md`, increment I1's rule half). A
   *rule* is a decision point the substrate already has; `mycelium_core::rule::RuleDescriptor` describes
