@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.19.0] — 2026-10-03
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.18.2 holds. **Upgrade notes:** `GossipConfig` gained `profile` (an exhaustive literal breaks; `..Default::default()` is unaffected); no node changes behaviour unless it sets a profile; `ConfinementReport` reads `require_identity_proofs` without `[tls]` as `Unset` now (the flag is inert without the identity). **Not claimed:** `id.ca_key_off_node` is reported but not required — today's TLS init needs the fleet CA's private key on every node at start.
+
 ### Added
 - **The guarantee registry and the startup report** (plan `guarantees-and-rule-catalogue.md`, I1's
   guarantee half + I2). Twenty-three core guarantees — the gateway's, the transport's, identity,
