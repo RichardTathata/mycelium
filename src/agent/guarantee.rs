@@ -858,6 +858,51 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
     ]
 }
 
+
+/// The guarantee catalogue, generated (plan I2's deferred golden, delivered 2026-10-03): every core
+/// descriptor — id, revision, subsystem, kind, promise, what it needs, its enforcement points and
+/// docs — and a **state matrix**: each guarantee's resolution on an unstarted node under a few
+/// reference configurations, in the build the generator ran under. Never hand-edited; the gate
+/// (`guarantee::tests::the_checked_in_guarantee_catalogue_is_current`) fails when the descriptors or
+/// their resolutions move, and `UPDATE_GUARANTEE_CATALOGUE=1` regenerates.
+pub fn catalogue_markdown(matrix: &[(&str, GuaranteeReport)]) -> String {
+    let descs = core_guarantees();
+    let mut out = String::new();
+    out.push_str("# Guarantee catalogue\n\n**Generated** from `core_guarantees()` (`src/agent/guarantee.rs`); do not edit. Regenerate with `UPDATE_GUARANTEE_CATALOGUE=1 cargo test --lib --features compliance,a2a the_checked_in_guarantee_catalogue_is_current`. A guarantee is a claim the startup report resolves against the node as built and configured — `enforced` · `not_configured` (the setting named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named) · `not_verifiable_here` (external prerequisites, never counted). The plan is `docs/plans/guarantees-and-rule-catalogue.md`; the live report is `guarantee_report()` / `GET /gateway/guarantees`.\n\n");
+    out.push_str(&format!("Schema `{REPORT_SCHEMA}` · {} core guarantees.\n\n", descs.len()));
+    out.push_str("## The descriptors\n\n| Id | Rev | Subsystem | Kind | Promise | Needs | Enforcement points | Docs |\n|---|---|---|---|---|---|---|---|\n");
+    let esc = |t: &str| t.replace('|', "\\|");
+    for d in &descs {
+        out.push_str(&format!("| `{}` | {} | {} | {:?} | {} | {} | {} | `{}` |\n", d.id, d.revision, d.subsystem, d.kind, esc(d.promise), esc(d.needs),
+            d.enforcement_points.iter().map(|e| format!("`{}`", esc(e))).collect::<Vec<_>>().join(", "), d.docs));
+    }
+    out.push_str("\n## The state matrix\n\nEach guarantee's resolution on an **unstarted** node (nothing attached) under the reference configurations, in the build the generator ran under (`compliance,a2a`, which implies `gateway` + `tls`). A column is a configuration, a cell is the state the report would log at `start()`; what is missing or not applicable is on the report itself, not here.\n\n");
+    out.push_str("| Id |");
+    for (name, _) in matrix { out.push_str(&format!(" {name} |")); }
+    out.push_str("\n|---|");
+    for _ in matrix { out.push_str("---|"); }
+    out.push('\n');
+    for d in &descs {
+        out.push_str(&format!("| `{}` |", d.id));
+        for (_, r) in matrix {
+            out.push_str(&format!(" {} |", r.entry(d.id).map(|e| e.resolution.state()).unwrap_or("—")));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The catalogue's JSON half: the descriptors, build-independent.
+pub fn catalogue_json() -> String {
+    #[derive(Serialize)]
+    struct Row<'a> { id: &'a str, revision: u32, subsystem: &'a str, kind: GuaranteeKind, promise: &'a str, needs: &'a str, enforcement_points: &'a [&'a str], docs: &'a str }
+    #[derive(Serialize)]
+    struct Doc<'a> { schema: &'static str, guarantees: Vec<Row<'a>> }
+    let descs = core_guarantees();
+    let rows = descs.iter().map(|d| Row { id: d.id, revision: d.revision, subsystem: d.subsystem, kind: d.kind, promise: d.promise, needs: d.needs, enforcement_points: d.enforcement_points, docs: d.docs }).collect();
+    serde_json::to_string_pretty(&Doc { schema: REPORT_SCHEMA, guarantees: rows }).unwrap_or_else(|_| "{}".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,5 +1132,37 @@ mod tests {
         assert_eq!(v["schema"], REPORT_SCHEMA);
         let states: std::collections::BTreeSet<String> = v["entries"].as_array().unwrap().iter().map(|e| e["resolution"]["state"].as_str().unwrap().to_string()).collect();
         for s in states { assert!(["enforced", "not_configured", "not_in_build", "not_applicable", "not_verifiable_here"].contains(&s.as_str()), "{s}"); }
+    }
+
+    /// Plan I2's deferred golden, delivered: the generated guarantee catalogue — descriptors and the
+    /// state matrix over reference configurations — is checked in and current. Gated under the CI
+    /// feature set the matrix is generated in (`compliance,a2a`), so a resolver that moves, a new
+    /// guarantee, or a changed descriptor fails here until the document is regenerated in the open.
+    #[cfg(all(feature = "compliance", feature = "a2a"))]
+    #[test]
+    fn the_checked_in_guarantee_catalogue_is_current() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tmp = std::env::temp_dir().join(format!("mycelium-gcat-{}", std::process::id()));
+        let mut persisted = GossipConfig::default();
+        persisted.persistence = Some(crate::config::PersistenceConfig { base_path: tmp.clone(), sync_mode: crate::config::SyncMode::Flush, snapshot_wal_threshold: 10, snapshot_interval_secs: 300, on_unreadable: Default::default() });
+        persisted.egress.allow_hosts = vec!["api.example".into()];
+        let mut dev = GossipConfig::default();
+        dev.profile = Some("dev".into());
+        let mut gateway = GossipConfig::default();
+        gateway.http_port = Some(1);
+        gateway.gateway_auth_token = Some("t".into());
+        let configs = [("default", GossipConfig::default()), ("`dev` profile", dev), ("persistence + egress", persisted), ("gateway + bearer", gateway)];
+        let matrix: Vec<(&str, GuaranteeReport)> = configs.iter().map(|(n, c)| (*n, agent(c.clone()).guarantee_report())).collect();
+        let md = catalogue_markdown(&matrix);
+        let json = catalogue_json();
+        let (mp, jp) = (root.join("docs/reference/guarantee-catalogue.md"), root.join("docs/reference/guarantee-catalogue.json"));
+        if std::env::var("UPDATE_GUARANTEE_CATALOGUE").is_ok() {
+            std::fs::write(&mp, &md).unwrap();
+            std::fs::write(&jp, &json).unwrap();
+            return;
+        }
+        let have_md = std::fs::read_to_string(&mp).unwrap_or_default();
+        let have_json = std::fs::read_to_string(&jp).unwrap_or_default();
+        assert!(have_md == md && have_json == json, "docs/reference/guarantee-catalogue.{{md,json}} are stale: regenerate with UPDATE_GUARANTEE_CATALOGUE=1 cargo test --lib --features compliance,a2a the_checked_in_guarantee_catalogue_is_current");
     }
 }

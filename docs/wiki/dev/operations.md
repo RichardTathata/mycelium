@@ -29,7 +29,7 @@ the *diagnosis* agrees across nodes, while each keeps its own `view_confidence`)
   most-severe-first list of findings, each naming a pathology in actionable terms, with an RT1/RT2
   `caveat` when the observer's own view is partial.
 - **guarantees** — `GET /gateway/guarantees` (`fleet:read`): the node's **guarantee report** (plan
-  `guarantees-and-rule-catalogue.md` I2, `src/agent/guarantee.rs`; its sibling is the **rule catalogue**, I1 — `mycelium_core::rule`, entries in `src/rules.rs` and `mycelium-wasm-host/src/rules.rs`, generated to `docs/reference/rule-catalogue.md` and gated by `mycelium-wasm-host/tests/rule_catalogue.rs`) — every registered guarantee resolved
+  `guarantees-and-rule-catalogue.md` I2, `src/agent/guarantee.rs`; its golden is `docs/reference/guarantee-catalogue.md` (descriptors + a state matrix, gated by `the_checked_in_guarantee_catalogue_is_current`); its sibling is the **rule catalogue**, I1 — `mycelium_core::rule`, entries in `src/rules.rs` and `mycelium-wasm-host/src/rules.rs`, generated to `docs/reference/rule-catalogue.md` and gated by `mycelium-wasm-host/tests/rule_catalogue.rs`) — every registered guarantee resolved
   against this node *as built and configured*: `enforced` · `not_configured` (the setting or attachment
   named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named — a node with no
   `http_port` does not fail a gateway guarantee) · `not_verifiable_here` (external prerequisites: network

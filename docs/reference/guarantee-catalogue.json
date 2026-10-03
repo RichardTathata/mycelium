@@ -1,0 +1,295 @@
+{
+  "schema": "mycelium.guarantees/1",
+  "guarantees": [
+    {
+      "id": "gw.not_open",
+      "revision": 1,
+      "subsystem": "gateway",
+      "kind": "node_enforced",
+      "promise": "the HTTP gateway requires a credential on every non-public route",
+      "needs": "`gateway_auth_token`, or (`compliance`) a token table or `[oidc]`",
+      "enforcement_points": [
+        "gateway_auth"
+      ],
+      "docs": "docs/operations/rbac.md"
+    },
+    {
+      "id": "gw.token_tables",
+      "revision": 1,
+      "subsystem": "gateway",
+      "kind": "node_enforced",
+      "promise": "scoped or named tokens close the gateway with a per-route scope floor",
+      "needs": "`compliance`; `gateway_scoped_tokens` / `gateway_named_tokens`",
+      "enforcement_points": [
+        "gateway_auth",
+        "required_scope"
+      ],
+      "docs": "docs/operations/rbac.md"
+    },
+    {
+      "id": "gw.oidc",
+      "revision": 1,
+      "subsystem": "gateway",
+      "kind": "node_enforced",
+      "promise": "human operators authenticate to the gateway through the IdP, groups mapped to scopes",
+      "needs": "`compliance`; `[oidc]`",
+      "enforcement_points": [
+        "gateway_auth",
+        "oidc::OidcVerifier"
+      ],
+      "docs": "docs/operations/sso.md"
+    },
+    {
+      "id": "gw.tls",
+      "revision": 1,
+      "subsystem": "gateway",
+      "kind": "node_enforced",
+      "promise": "the gateway serves HTTPS, so bearers and JWTs do not cross the wire in cleartext",
+      "needs": "`tls`; `[gateway_tls]` (or TLS terminated by a proxy in front — not visible here)",
+      "enforcement_points": [
+        "http::serve_https"
+      ],
+      "docs": "docs/operations/gateway-tls.md"
+    },
+    {
+      "id": "gw.caller_profile",
+      "revision": 1,
+      "subsystem": "gateway",
+      "kind": "node_enforced",
+      "promise": "a provider sees the gateway's client as the caller, attested by the gateway's identity",
+      "needs": "`tls`; `[tls]`; `gateway_caller_profile = secure` (the default)",
+      "enforcement_points": [
+        "gateway_caller::attest",
+        "gateway_caller::verify"
+      ],
+      "docs": "docs/guide/20-authorising-actions.md"
+    },
+    {
+      "id": "mesh.tls",
+      "revision": 1,
+      "subsystem": "transport",
+      "kind": "node_enforced",
+      "promise": "gossip is mTLS: every peer presents a certificate signed by the fleet CA",
+      "needs": "`tls`; `[tls]`",
+      "enforcement_points": [
+        "lifecycle::start (tls init)",
+        "connection::handshake"
+      ],
+      "docs": "docs/guide/09-security.md"
+    },
+    {
+      "id": "id.proofs_required",
+      "revision": 1,
+      "subsystem": "identity",
+      "kind": "node_enforced",
+      "promise": "an identity entry this node cannot authenticate is rejected (issuer binding rests on it)",
+      "needs": "`tls`; `[tls]`; `require_identity_proofs = true` (default off)",
+      "enforcement_points": [
+        "lifecycle (identity-proof check)"
+      ],
+      "docs": "docs/design/identity-authentication.md"
+    },
+    {
+      "id": "id.ca_key_off_node",
+      "revision": 1,
+      "subsystem": "identity",
+      "kind": "node_enforced",
+      "promise": "the fleet CA's private key is not on this node, so a removed member cannot mint itself a new identity here",
+      "needs": "`tls`; `[tls] cert_pem` + `key_pem` (a node certificate issued off-node: `mycelium tls issue`); no `ca-key.pem` in this node's certificate directory",
+      "enforcement_points": [
+        "membership removal (closure plan C5)"
+      ],
+      "docs": "docs/operations/cert-rotation.md"
+    },
+    {
+      "id": "ae.authorised_at_seam",
+      "revision": 1,
+      "subsystem": "authority",
+      "kind": "node_enforced",
+      "promise": "every gateway dispatch is authorised by policy before it runs — permit, deny or indeterminate",
+      "needs": "`gateway` + `tls`; `with_action_evaluator`",
+      "enforcement_points": [
+        "http::ae_preflight"
+      ],
+      "docs": "docs/guide/20-authorising-actions.md"
+    },
+    {
+      "id": "ae.recorded_before_dispatch",
+      "revision": 1,
+      "subsystem": "authority",
+      "kind": "node_enforced",
+      "promise": "every authorisation decision is journalled, fsynced, before dispatch",
+      "needs": "`gateway` + `tls`; `with_action_evaluator` and `with_evidence_journal`",
+      "enforcement_points": [
+        "http::ae_record"
+      ],
+      "docs": "docs/guide/20-authorising-actions.md"
+    },
+    {
+      "id": "prov.enforcement",
+      "revision": 1,
+      "subsystem": "authority",
+      "kind": "node_enforced",
+      "promise": "protected work (`mcp.invoke`, `skill.invoke`, …) is authorised where it runs, not only at a gateway",
+      "needs": "`gateway` + `tls`; `with_provider_enforcement` (with an evaluator; without one every protected call is refused)",
+      "enforcement_points": [
+        "provider_enforcement::check"
+      ],
+      "docs": "docs/guide/20-authorising-actions.md"
+    },
+    {
+      "id": "a2a.admission",
+      "revision": 1,
+      "subsystem": "authority",
+      "kind": "node_enforced",
+      "promise": "`/a2a` is not anonymous skill dispatch",
+      "needs": "`a2a`; an evaluator that denies anonymous principals — a bearer does not gate this route",
+      "enforcement_points": [
+        "http::a2a_optional_auth",
+        "a2a preflight"
+      ],
+      "docs": "docs/operations/production-readiness.md"
+    },
+    {
+      "id": "authz.execution_authority",
+      "revision": 1,
+      "subsystem": "authority",
+      "kind": "node_enforced",
+      "promise": "mandates are established and verified at this node (scoped authority, revocation)",
+      "needs": "`gateway` + `tls`; `with_execution_authority`",
+      "enforcement_points": [
+        "gateway_authority::ExecutionAuthority"
+      ],
+      "docs": "docs/guide/21-mandates.md"
+    },
+    {
+      "id": "authz.durable_epochs",
+      "revision": 1,
+      "subsystem": "authority",
+      "kind": "node_enforced",
+      "promise": "a restart does not restore revoked authority: installed epochs are journalled first",
+      "needs": "`gateway` + `tls`; `ExecutionAuthority::with_durable_epochs`",
+      "enforcement_points": [
+        "gateway_authority::install_epoch_durably"
+      ],
+      "docs": "docs/guide/21-mandates.md"
+    },
+    {
+      "id": "audit.chain",
+      "revision": 1,
+      "subsystem": "audit",
+      "kind": "node_enforced",
+      "promise": "governance actions at the gateway are sealed into the tamper-evident chain",
+      "needs": "`compliance`; `[tls]` (records are sealed with the node identity)",
+      "enforcement_points": [
+        "audit::seal_and_write"
+      ],
+      "docs": "docs/operations/audit.md"
+    },
+    {
+      "id": "audit.sink",
+      "revision": 1,
+      "subsystem": "audit",
+      "kind": "node_enforced",
+      "promise": "sealed records are mirrored to an external sink (SIEM / WORM), original bytes kept",
+      "needs": "`compliance`; `[tls]`; `with_audit_sink`",
+      "enforcement_points": [
+        "lifecycle (sink drain)"
+      ],
+      "docs": "docs/operations/audit.md"
+    },
+    {
+      "id": "egress.allow_list",
+      "revision": 1,
+      "subsystem": "egress",
+      "kind": "node_enforced",
+      "promise": "the substrate's own outbound calls are restricted to an allow-list (MCP bridge, LLM, probes, skillrunner, the wasm host, the wiki sink, the federation client, OIDC)",
+      "needs": "`egress.allow_hosts` non-empty (empty allows all); the federation client (the node's policy applied to clients it is handed, `FederationClient::with_egress` elsewhere) and OIDC discovery + JWKS since 2026-10-03 (a denied issuer refuses `start()`). An `HttpLibrarySource` built outside an agent is gated only when built `with_egress`",
+      "enforcement_points": [
+        "config::EgressPolicy::permits_url"
+      ],
+      "docs": "docs/operations/crown-jewel.md"
+    },
+    {
+      "id": "persist.configured",
+      "revision": 1,
+      "subsystem": "persistence",
+      "kind": "node_enforced",
+      "promise": "a restart recovers the KV and acceptor memory from disk",
+      "needs": "`[persistence]`",
+      "enforcement_points": [
+        "lifecycle (WAL replay, snapshot)"
+      ],
+      "docs": "docs/operations/deployment.md"
+    },
+    {
+      "id": "persist.sync_mode",
+      "revision": 1,
+      "subsystem": "persistence",
+      "kind": "node_enforced",
+      "promise": "a WAL acknowledgement is a durability claim: the write is on disk before the ack",
+      "needs": "`[persistence]` with `sync_mode` other than `async`",
+      "enforcement_points": [
+        "wal::append (SyncMode)"
+      ],
+      "docs": "docs/design/contracts-receipts.md"
+    },
+    {
+      "id": "persist.unreadable_refused",
+      "revision": 1,
+      "subsystem": "persistence",
+      "kind": "node_enforced",
+      "promise": "a node does not start over persisted state it could not read — nothing is compacted over an unreadable snapshot or WAL",
+      "needs": "`[persistence]` with `on_unreadable = \"refuse\"` (the default)",
+      "enforcement_points": [
+        "lifecycle (replay; `persistence::quarantine_unreadable`)",
+        "persistence::do_snapshot (aborts on a corrupt record)"
+      ],
+      "docs": "docs/operations/deployment.md"
+    },
+    {
+      "id": "at_rest.cipher",
+      "revision": 1,
+      "subsystem": "persistence",
+      "kind": "node_enforced",
+      "promise": "the WAL and snapshot are encrypted at rest",
+      "needs": "`[persistence]`; `with_data_at_rest_cipher`, before `start()`",
+      "enforcement_points": [
+        "lifecycle (cipher read once at start)"
+      ],
+      "docs": "docs/operations/crown-jewel.md"
+    },
+    {
+      "id": "cons.safety_profile",
+      "revision": 1,
+      "subsystem": "consensus",
+      "kind": "external_prerequisite",
+      "promise": "safety-sensitive agreement runs the supported profile: a fixed voter set, a strict-majority quorum, identical trust slices",
+      "needs": "chosen per proposal in `ConsensusConfig`; nothing validates it (plan §8)",
+      "enforcement_points": [
+        "consensus::propose"
+      ],
+      "docs": "docs/threat-model.md"
+    },
+    {
+      "id": "net.confinement",
+      "revision": 1,
+      "subsystem": "deployment",
+      "kind": "external_prerequisite",
+      "promise": "agent pods reach nothing but their gateway",
+      "needs": "the network: separate pods, an enforcing CNI, a NetworkPolicy",
+      "enforcement_points": [],
+      "docs": "docs/design/confined-fleet.md"
+    },
+    {
+      "id": "clock.sync",
+      "revision": 1,
+      "subsystem": "deployment",
+      "kind": "external_prerequisite",
+      "promise": "this node's wall clock is within the bound every expiry and freshness check assumes",
+      "needs": "deployment time-sync (NTP or equivalent)",
+      "enforcement_points": [],
+      "docs": "docs/threat-model.md"
+    }
+  ]
+}
