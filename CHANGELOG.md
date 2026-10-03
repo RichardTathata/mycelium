@@ -22,6 +22,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   them and checked in CI — unique ids, every relation resolving, every named test present in the tree,
   the document current (`UPDATE_RULE_CATALOGUE=1` regenerates). Every entry is catalogue-only until the
   pilot (I5) attaches a sink. Additive.
+- **The decision trace core** (plan I4): `mycelium_core::decision` — a `DecisionRecord` (rule and
+  revision, build, config digest and profile, node and incarnation, local sequence, target, trigger and
+  parent *when known*, bounded inputs with age and provenance, view status, outcome and typed reason,
+  effect reference, completeness flags) and a `DecisionSink` that keeps a bounded number of them without
+  blocking the decision that produced one: bounded by count and by bytes, the newest dropped and counted
+  at a bound, `try_lock` only, no clock or random draw of its own. Off unless a decision point is handed
+  a sink; nothing is instrumented yet (I5). A replay bundle will carry it as `decisions.jsonl`, and a
+  bundle without it means *trace unavailable*, never *no decisions*. Additive.
 
 ### Fixed
 - **A failing initial activation probe is an activation error, not a live install.** `[[activation]]`'s
