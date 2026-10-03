@@ -48,7 +48,7 @@ this page is the index + the gate.
 - ☐ **Start under the `secure-single-domain` profile** (`profile = "secure-single-domain"` or
   `GOSSIP_PROFILE`). The node then **refuses to start** unless each of these resolves `enforced` (or
   `not_applicable` to its role), and names every one that does not, with what is missing and where to
-  read — rev 1: `mesh.tls` · `id.proofs_required` · `gw.not_open` · `gw.tls` ·
+  read — rev 2 (v2.21.0; rev 1 was v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` · `gw.not_open` · `gw.tls` ·
   `gw.caller_profile` · `ae.authorised_at_seam` · `ae.recorded_before_dispatch` · `prov.enforcement` ·
   `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
   `egress.allow_list` · `persist.configured` · `persist.sync_mode`. It needs a `compliance` + `tls` build
@@ -78,7 +78,7 @@ this page is the index + the gate.
   [crown-jewel.md](crown-jewel.md)
 - ☐ **Data-at-rest** cipher hook wired if the KV/WAL holds sensitive state. → [crown-jewel.md](crown-jewel.md)
 - ☐ **Audit trail** enabled if you need a tamper-evident record (`--features compliance`, hash-chained).
-  → [audit.md](audit.md)
+  → [audit.md](audit.md) · `persist.unreadable_refused` (the default `on_unreadable = "refuse"`) · `id.ca_key_off_node` (a node certificate issued off-node — `mycelium tls issue`, `[tls] cert_pem` + `key_pem` — so the fleet CA's key is on no node).
 
 - ☐ **`/a2a` is not an open surface** — unlike `/mcp` (which requires `mcp:invoke`), the A2A route
   has **no scope floor**: a federation credential names a partner, a bearer resolves to a principal

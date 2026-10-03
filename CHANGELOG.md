@@ -10,6 +10,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **`secure-single-domain` rev 2** (announced in v2.20.0, plan G12): the profile now also requires
+  `id.ca_key_off_node` — a node certificate issued off-node (`mycelium tls issue`, `[tls] cert_pem` +
+  `key_pem`) so the fleet CA's private key is on no node — and `persist.unreadable_refused` (the
+  default `persistence.on_unreadable = "refuse"`). A node under the profile that still re-signs its own
+  certificate with the CA key **refuses to start**, naming the guarantee and the setting; the acceptance
+  test issues its certificate off-node and proves no CA key is minted on the node. **Check before
+  upgrading** a deployment that sets `profile = "secure-single-domain"`: issue each node's certificate
+  where the CA key lives and copy only `ca-cert.pem` to the node, or the node will not start.
 - **A data-at-rest cipher attached after `start()` is rejected** (plan G13, `at_rest.cipher`): the WAL
   writer read its cipher at start, so a later attach was accepted and did nothing while the report said
   `enforced`. It is now not set, not reported, and counted as a late attachment. Test seen failing on the
