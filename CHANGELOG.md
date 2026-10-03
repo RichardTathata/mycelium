@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.21.0] — 2026-10-03
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.20.0 holds. **Upgrade notes:** a deployment under `profile = "secure-single-domain"` must issue each node's certificate where the CA key lives and copy only `ca-cert.pem` to the node, or it will not start (rev 2); `BlobRuntime::with_entry_activation`'s closure takes a third argument (`&ActivationCtx`); `RuntimeCtx` gained `trace` and `install_token` (an exhaustive literal breaks); `prov.probe` is catalogue rev 2; a `with_data_at_rest_cipher` after `start()` is now ignored and counted rather than silently inert. **Not claimed:** a decision-level replay of a whole agent — it waits on the scheduler seam covering every periodic loop.
+
 ### Added
 - **The trace, completed** (plan I5/I6): `[[activation]]` and its probe are instrumented under the
   install's token — `RuntimeCtx` carries the trace and the install token into the runtime, the
