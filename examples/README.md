@@ -1,5 +1,8 @@
 # Mycelium examples
 
+Use the [capability map](../docs/capabilities.md) to connect this material to other mechanisms, operating guidance and evidence.
+
+
 Every example is a real, runnable program built on the **public API** — no private hooks. This page
 is the index, the shared setup (so no example re-explains it), and the **doc template** all example
 READMEs follow.

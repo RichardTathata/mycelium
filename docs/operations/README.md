@@ -2,7 +2,7 @@
 
 **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.
 These are the DevOps-facing runbooks for deploying and operating such a cluster. The
 developer-side counterpart is the [guide cookbook](../guide/cookbook.md); the
 vocabulary is in [00 · Concepts](../guide/00-concepts.md); what the project can prove today, and
@@ -17,6 +17,16 @@ what it cannot yet, is [what-is-proven.md](what-is-proven.md).
 4. **[guide 20](../guide/20-authorising-actions.md) with [`authority_drain`](../../examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
 5. **[`what-is-proven.md`](what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
+
+## Operator journey
+
+1. Choose your [integration mode](../guide/installation.md) and follow [deployment](deployment.md).
+2. Complete the [production readiness checklist](production-readiness.md), including trust and persistence.
+3. [Observe the fleet](observability.md) and establish a baseline before changing it.
+4. [Diagnose faults](diagnostics.md), then use the [recovery procedure](deployment.md#backup--restore).
+5. Compare your acceptance results with [what is proven](what-is-proven.md); hand over using the [engagement kit](engagement-kit.md).
+
+For a mechanism-level explanation or example, use the [capability map](../capabilities.md).
 
 **Learn the newer surfaces:** [six developer tutorials](../guide/tutorials/README.md) — stem fleets,
 declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.

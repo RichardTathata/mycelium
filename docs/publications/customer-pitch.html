@@ -123,6 +123,38 @@
   #cs1{background:radial-gradient(ellipse at 70% 10%,rgba(63,185,80,.10) 0%,transparent 55%),
     radial-gradient(ellipse at 25% 85%,rgba(88,166,255,.08) 0%,transparent 50%),var(--bg);}
   #csEnd{background:radial-gradient(ellipse at 50% 30%,rgba(63,185,80,.10) 0%,transparent 60%),var(--bg);}
+
+  /* Accessible reading mode retains the deck palette and typography. */
+  a { color:var(--accent); text-underline-offset:3px; }
+  a:focus-visible, button:focus-visible { outline:3px solid var(--accent4); outline-offset:4px; }
+  .slide-body { overflow:auto; min-height:0; padding-bottom:100px; justify-content:safe center; }
+  .mode-btn { width:auto; font-size:13px; white-space:nowrap; }
+  .resource-links { display:flex; flex-wrap:wrap; gap:10px 20px; margin-top:18px; font-size:14px; }
+  body.reading { height:auto; overflow:auto; }
+  body.reading .deck { height:auto; overflow:visible; }
+  body.reading .slide { position:relative; inset:auto; height:auto; min-height:100vh; opacity:1; transform:none; pointer-events:auto; overflow:visible; border-bottom:1px solid var(--border); }
+  body.reading .slide-body { overflow:visible; flex:none; padding-top:32px; }
+  body.reading .card-body, body.reading .sp-body { font-size:16px; }
+  body.reading .nav-bar { bottom:12px; }
+  body.reading .progress-bar { display:none; }
+  @media (max-width:760px) {
+    .slide-top { padding:24px 20px 0; }
+    .slide-body { padding-left:20px; padding-right:20px; }
+    .cols2,.cols3,.cols4 { grid-template-columns:1fr !important; }
+    .nav-bar { max-width:calc(100vw - 16px); gap:6px; }
+    .code-block, .table-wrap { overflow:auto; max-width:100%; }
+    .hero-title { overflow-wrap:anywhere; }
+    .resource-links { flex-direction:column; }
+  }
+  @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }
+  @media print {
+    html,body { height:auto !important; overflow:visible !important; }
+    .deck { height:auto !important; overflow:visible !important; }
+    .slide { position:relative !important; inset:auto !important; opacity:1 !important; transform:none !important; height:auto !important; min-height:0 !important; overflow:visible !important; break-after:page; }
+    .slide-body { overflow:visible !important; padding:24px; }
+    .nav-bar,.progress-bar { display:none !important; }
+  }
+
 </style>
 </head>
 <body>
@@ -133,13 +165,13 @@
   <div class="slide-top"><span class="eyebrow">Mycelium · Tathata Systems</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="hero-center">
-      <div class="hero-title">Mycelium</div>
+      <div class="hero-title">Mycelium</div><nav class="resource-links" aria-label="Supporting resources"><a href="../capabilities.md">Capability map</a><a href="../../examples/README.md">Runnable examples</a><a href="../operations/what-is-proven.md">Evidence and limits</a><a href="../operations/customer-pilot.md">Pilot</a><a href="research-guide.md">Research guide</a></nav><p style="font-size:12px;margin-top:8px">Local links use the accompanying repository. <a href="https://github.com/RichardTathata/mycelium/blob/main/docs/README.md">Online documentation</a></p>
       <div class="hero-tagline">A fleet that grows the capabilities it lacks, under rules it can show it kept.</div>
-      <div class="hero-sub" style="margin-bottom:12px">Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.</div>
+      <div class="hero-sub" style="margin-bottom:12px">Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.</div>
       <div class="hero-sub"><strong>The buyer's deck.</strong> In order: what an agent <em>may</em> do, checked where the work happens · what it <em>did</em>, as records a third party can audit · a fleet that fills itself · how — no coordinator, on the infrastructure you already operate · and what is proven today against what is not. An embedded substrate for your existing applications <em>and</em> your AI agents; no obligatory central coordinator, no party that has to hold everyone's state.</div>
       <div class="badges">
         <span class="badge"><span class="dot dot-g"></span>Data-sovereign by construction</span>
-        <span class="badge"><span class="dot dot-b"></span>No single point of failure</span>
+        <span class="badge"><span class="dot dot-b"></span>No obligatory central coordinator</span>
         <span class="badge"><span class="dot dot-p"></span>Open-source · embeddable · polyglot</span>
       </div>
     </div>
@@ -151,14 +183,14 @@
   <div class="slide-top"><span class="eyebrow eyebrow-green">What an agent may do</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
     <div class="slide-title good">Enforce your remits <em>where the agents actually act.</em></div>
-    <div class="slide-sub">Put a gateway in front of the tools and endpoints your agents already call. Every dispatch is checked against your policy <strong>before</strong> it runs, and every decision is recorded with the reason — including the ones that said yes.</div>
+    <div class="slide-sub">Put a gateway in front of the tools and endpoints your agents already call. Configured enforcement checks covered dispatches against your policy <strong>before</strong> they run; an enabled evidence journal records decisions and reasons.</div>
     <div class="cols3">
       <div class="card card-accent-green"><div class="card-title">Three answers, not two</div><div class="card-body">Permit, deny, and <strong>indeterminate</strong> — authority could not be <em>established</em>. Nothing says the action is forbidden, only that nothing says it is allowed. A system with only yes and no has to guess, and it guesses in the permissive direction.</div></div>
       <div class="card card-accent-green"><div class="card-title">Attribution, or no action</div><div class="card-body">Under the strict profile a decision that cannot be <em>recorded</em> refuses the action — even one the policy permitted. Enforcement without attribution is an unlogged gate, not governance.</div></div>
       <div class="card card-accent-green"><div class="card-title">Coverage is a field</div><div class="card-body">The evidence names the routes the enforcement point does <em>not</em> see. An auditor is never invited to read silence as an all-clear — which is the failure mode of every dashboard that only shows what it caught.</div></div>
     </div>
     <div class="callout callout-orange">
-      <strong>Stated precisely:</strong> this is self-imposed prevention <em>for the routes this gateway fronts</em>, and nothing for routes it does not. Only a check inside the resource itself is stronger. The enforcement point, the three verdicts, the evidence journal and a reference policy engine ship in the substrate today, in a build with the <code>compliance</code> feature; production policy adapters and the evidence exporter are the commercial layer.
+      <strong>Stated precisely:</strong> gateway checks cover the routes it fronts. Configured provider enforcement checks work reached through other supported doors; resource fencing adds checks at the mutation boundary. Coverage depends on the evaluator and deployment configuration. The enforcement point, the three verdicts, the evidence journal and a reference policy engine ship in the substrate today, in a build with the <code>compliance</code> feature; production policy adapters and the evidence exporter are the commercial layer.
     </div>
   </div>
 </div>
@@ -187,7 +219,7 @@
     <div class="cols3">
       <div class="card card-accent-green"><div class="card-title">The catalogue — shipped</div><div class="card-body">A signed entry per artifact: the capability it will provide, its kind, its content address, its resource footprint inside the signature. Bytes are pulled by content address from a library and verified on arrival; no registry server exists to run or to lose.</div></div>
       <div class="card card-accent-green"><div class="card-title">Presence — shipped</div><div class="card-body">"Keep at least two of these alive, at most four." Every node reconciles that locally: sees the gap, self-elects with a probability that damps the herd, checks its own runtime and headroom, installs. Restart is the same path as first install. Runs in CI as the co-op <code>provisioning</code> demo — and, since 2026-09-30, <em>both ways</em>: the same demo with its providers as stem nodes from one image, fed only the example's declaration directory (<code>make examples-both-ways DEMO=provisioning</code>), reaching the same asserted outcome.</div></div>
-      <div class="card card-accent-green"><div class="card-title">Declarations — shipped</div><div class="card-body">One file per unit: what it offers, needs, hosts, and may do — checked <em>before</em> deployment by <code>mycelium wire-check</code>, which runs the mesh's own matching rule offline, and run as written by the stem node, which places, activates and serves what the file declares (v2.17.0–v2.18.0). Every artifact-shaped co-op demo runs this way in CI, three of them against a real model in Ollama. Shipping the declaration to your oversight tool as the target state is built on our side; the consumer rendering it is outstanding.</div></div>
+      <div class="card card-accent-green"><div class="card-title">Declarations — shipped</div><div class="card-body">One file per unit: what it offers, needs, hosts, and may do — checked <em>before</em> deployment by <code>mycelium wire-check</code>, which runs the mesh's own matching rule offline, and interpreted by the stem node for supported placement, activation and serving sections. Authority declarations require separate runtime enforcement (v2.17.0–v2.18.0). Every artifact-shaped co-op demo runs this way in CI, three of them against a real model in Ollama. Shipping the declaration to your oversight tool as the target state is built on our side; the consumer rendering it is outstanding.</div></div>
     </div>
     <div class="callout callout-orange"><strong>Labelled.</strong> The loop, the catalogue, the declaration file, the offline check, and agent-authored functions under a per-publisher fuel budget that load only into a shadow lane until a second signature accepts them all ship today and are exercised in CI. Models pulled from S3 or GCS are not shown: the object-store adapter is tested only against an S3 emulator, no real bucket has run, and a stem node cannot yet read from an object store. An activation command runs with the stem's own privileges — it is not a sandbox. And a WASM component can only handle a request, read its own confined state, and emit; it cannot take work from a lane or call another capability.</div>
   </div>
@@ -301,8 +333,8 @@
 <div class="slide" id="cs6">
   <div class="slide-top"><span class="eyebrow eyebrow-green">Value · Sovereignty</span><span class="slide-num">·· / ··</span></div>
   <div class="slide-body">
-    <div class="slide-title good">Your data <em>never leaves your control.</em></div>
-    <div class="slide-sub">There is no central custodian — by construction, not by policy. Each node holds its own state. Identity is self-certified (no central authority issues it). Across organisations or borders, domains <strong>federate as sovereign peers</strong> — each self-certifies, none surrenders custody.</div>
+    <div class="slide-title good">Choose your data and <em>trust boundaries.</em></div>
+    <div class="slide-sub">There is no obligatory central custodian. Shared mesh state propagates within a domain, so define its membership and data policy deliberately. Public AgentFacts are self-certified; mesh admission is CA-anchored. Domains <strong>federate as sovereign peers</strong> under explicit trust and disclosure policies.</div>
     <div class="cols3">
       <div class="card card-accent-green"><div class="card-title">Regulated industries</div><div class="card-body">Finance, health: "who holds the data" is a compliance question with legal weight — answered structurally, because the answer is "you do." And when the law says <em>erase</em>: per-subject <strong>crypto-shred</strong> — destroy one key and that subject's data is cryptographically dead everywhere at once.</div></div>
       <div class="card card-accent-green"><div class="card-title">Cross-jurisdiction</div><div class="card-body">No central store in one jurisdiction holding another's data. Data residency is a property of where you run nodes, not a vendor's promise.</div></div>
@@ -449,7 +481,7 @@
         <div class="card-body" style="line-height:1.8;">• a coordination problem that is genuinely multi-party<br>• a data-sovereignty or resilience constraint that hurts today<br>• an engineering team willing to work at the substrate level<br>• patience for an early-stage, high-conviction technology</div>
       </div>
     </div>
-    <div class="callout callout-green">We win when the architecture is necessary, not merely nicer. If your problem is the one this was built for, there is nothing else shaped like it.</div>
+    <div class="callout callout-green">Choose a pilot where decentralised coordination addresses a concrete constraint. Agree success criteria and alternatives before testing.</div>
   </div>
 </div>
 
@@ -463,9 +495,9 @@
         <strong>Tathata Systems</strong> builds <strong>Mycelium</strong> — coordinator-free infrastructure for sovereign, edge-native agent fleets.
       </div>
       <div class="badges" style="margin-top:30px;">
-        <span class="badge"><span class="dot dot-g"></span>tathatasystems@proton.me</span>
-        <span class="badge"><span class="dot dot-b"></span>github.com/RichardTathata/mycelium</span>
-        <span class="badge"><span class="dot dot-p"></span>The Coordinator Trap · DOI 10.5281/zenodo.20665238</span>
+        <span class="badge"><span class="dot dot-g"></span><a href="mailto:tathatasystems@proton.me">tathatasystems@proton.me</a></span>
+        <span class="badge"><span class="dot dot-b"></span><a href="https://github.com/RichardTathata/mycelium">github.com/RichardTathata/mycelium</a></span>
+        <span class="badge"><span class="dot dot-p"></span><a href="https://doi.org/10.5281/zenodo.20665238">The Coordinator Trap · DOI 10.5281/zenodo.20665238</a></span>
       </div>
       <div class="hero-sub" style="margin-top:16px;font-size:11.5px;color:var(--muted);">Dr. Richard Nicholson · © 2026 Tathata Systems Ltd · Licensed CC BY 4.0</div>
     </div>
@@ -474,10 +506,11 @@
 
 </div><!-- /deck -->
 
-<div class="nav-bar">
-  <button class="nav-btn" id="btn-prev" disabled>←</button>
-  <div class="slide-counter" id="counter">1 / 1</div>
-  <button class="nav-btn" id="btn-next">→</button>
+<div class="nav-bar" role="navigation" aria-label="Presentation controls">
+  <button class="nav-btn mode-btn" id="btn-mode" aria-pressed="false">Read all slides</button>
+  <button class="nav-btn" aria-label="Previous slide" id="btn-prev" disabled>←</button>
+  <div class="slide-counter" id="counter" role="status" aria-live="polite">1 / 1</div>
+  <button class="nav-btn" aria-label="Next slide" id="btn-next">→</button>
 </div>
 <div class="progress-bar">
   <div class="progress-fill" id="progress-fill" style="width:7%"></div>
@@ -486,42 +519,62 @@
 <script>
   const slides = Array.from(document.querySelectorAll('.slide'));
   const total = slides.length;
+  const prev = document.getElementById('btn-prev');
+  const next = document.getElementById('btn-next');
+  const mode = document.getElementById('btn-mode');
   let cur = 0;
-
-  // Auto-number every slide's corner label from its position.
-  slides.forEach((s, i) => {
-    const n = s.querySelector('.slide-num');
-    if (n) n.textContent = `${String(i + 1).padStart(2, '0')} / ${total}`;
+  let reading = matchMedia('(max-width:760px)').matches;
+  slides.forEach((slide, i) => {
+    const heading = slide.querySelector('.slide-title, .hero-title, .big-quote');
+    if (heading) {
+      heading.setAttribute('role', 'heading');
+      heading.setAttribute('aria-level', i === 0 ? '1' : '2');
+      heading.id = heading.id || `heading-${i}`;
+      slide.setAttribute('aria-labelledby', heading.id);
+    }
+    slide.setAttribute('role', 'region');
+    slide.setAttribute('tabindex', '-1');
+    const label = slide.querySelector('.slide-num');
+    if (label) label.textContent = `${i + 1} / ${total}`;
   });
-
-  function go(n) {
-    if (n < 0 || n >= total) return;
-    slides[cur].classList.remove('active');
-    slides[cur].classList.add('was-prev');
-    setTimeout(() => { slides.forEach(s => { if (s !== slides[n]) s.classList.remove('was-prev'); }); }, 420);
-    cur = n;
-    slides[cur].classList.add('active');
-    slides[cur].classList.remove('was-prev');
-    document.getElementById('counter').textContent = `${cur + 1} / ${total}`;
+  function render() {
+    document.body.classList.toggle('reading', reading);
+    slides.forEach((slide, i) => {
+      slide.classList.toggle('active', i === cur);
+      slide.inert = !reading && i !== cur;
+      slide.setAttribute('aria-hidden', String(!reading && i !== cur));
+    });
+    mode.setAttribute('aria-pressed', String(reading));
+    mode.textContent = reading ? 'Slide view' : 'Read all slides';
+    document.getElementById('counter').textContent = reading ? `${total} slides` : `${cur + 1} / ${total}`;
     document.getElementById('progress-fill').style.width = `${((cur + 1) / total) * 100}%`;
-    document.getElementById('btn-prev').disabled = cur === 0;
-    document.getElementById('btn-next').disabled = cur === total - 1;
+    prev.disabled = reading || cur === 0;
+    next.disabled = reading || cur === total - 1;
   }
-
-  document.getElementById('btn-prev').addEventListener('click', () => go(cur - 1));
-  document.getElementById('btn-next').addEventListener('click', () => go(cur + 1));
+  function go(n) {
+    if (reading || n < 0 || n >= total) return;
+    cur = n;
+    render();
+    slides[cur].focus({preventScroll:true});
+  }
+  prev.addEventListener('click', () => go(cur - 1));
+  next.addEventListener('click', () => go(cur + 1));
+  mode.addEventListener('click', () => {
+    if (reading) {
+      const nearest = slides.reduce((best, slide, i) => Math.abs(slide.getBoundingClientRect().top) < Math.abs(slides[best].getBoundingClientRect().top) ? i : best, 0);
+      cur = nearest;
+    }
+    reading = !reading;
+    render();
+    if (reading) slides[cur].scrollIntoView();
+    else window.scrollTo(0, 0);
+  });
   document.addEventListener('keydown', e => {
-    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); go(cur + 1); }
-    if (e.key === 'ArrowLeft'  || e.key === 'PageUp')  { e.preventDefault(); go(cur - 1); }
-    if (e.key === 'Home') go(0);
-    if (e.key === 'End')  go(total - 1);
+    if (reading || e.altKey || e.ctrlKey || e.metaKey || e.target.closest('a,button,input,textarea,select,[contenteditable="true"]')) return;
+    const destinations = {ArrowRight:cur+1, ' ':cur+1, PageDown:cur+1, ArrowLeft:cur-1, PageUp:cur-1, Home:0, End:total-1};
+    if (e.key in destinations) { e.preventDefault(); go(destinations[e.key]); }
   });
-  let tx = 0;
-  document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; });
-  document.addEventListener('touchend',   e => {
-    const dx = e.changedTouches[0].clientX - tx;
-    if (Math.abs(dx) > 50) go(dx < 0 ? cur + 1 : cur - 1);
-  });
+  render();
 </script>
 </body>
 </html>

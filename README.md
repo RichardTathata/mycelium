@@ -2,7 +2,7 @@
 
 **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 
-Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.
+Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.
 
 It is built in three layers — a gossip KV store, a signal mesh, and epidemic
 consensus — with capability discovery across them: no broker, no registry, no daemon, no control
@@ -44,6 +44,10 @@ RPC, **no registry and no configured addresses**.
 
 ## Where next?
 
+Start with the [audience routes](docs/README.md) or [capability map](docs/capabilities.md).
+Prospects: [buyer deck](docs/publications/customer-pitch.html) → [pilot](docs/operations/customer-pilot.md).
+Users and operators: [operations](docs/operations/README.md). Researchers: [research guide](docs/publications/research-guide.md).
+
 | You are… | Go to |
 |---|---|
 | **New here** — is this for me? which primitive? which demo? why-not-X? | the **[FAQ](docs/guide/faq.md)** — your map, and the intended first read |
@@ -68,7 +72,7 @@ resolution; each agent chooses its own payload serialisation.
 
 ### Which crate? — `mycelium` vs `mycelium-core`
 
-The project is a Cargo workspace of two published crates. **Most users want `mycelium`** —
+The workspace offers two substrate crates, obtained from a pinned git tag. See [installation and integration modes](docs/guide/installation.md). **Most users want `mycelium`** —
 the full runtime. Reach for `mycelium-core` only for a minimal embed.
 
 | | `mycelium` | `mycelium-core` |
@@ -79,10 +83,10 @@ the full runtime. Reach for `mycelium-core` only for a minimal embed.
 
 ```toml
 # Full runtime (default):
-mycelium = { version = "…", features = ["tls"] }
+mycelium = { git = "https://github.com/RichardTathata/mycelium", tag = "<release tag>", features = ["tls"] }   # current tag: docs/guide/building-on-mycelium.md §1
 
 # Minimal substrate embed (Layers I + II, no gateway):
-mycelium-core = "…"
+mycelium-core = { git = "https://github.com/RichardTathata/mycelium", tag = "<release tag>" }
 ```
 
 `mycelium` re-exports everything in `mycelium-core`, and a `mycelium-core` node still *forwards*
@@ -147,7 +151,7 @@ reference (API surface, observability, design notes) — one home per fact.
 | **Skills & prompt skills** | LLM agents as mesh nodes (TOML manifests, composition) + LLM-backed capabilities in KV | [ch. 05](docs/guide/05-skills.md) |
 | **Contracts & receipts** | What an acknowledgement *proves*, by rung: applied here · on this node's disk · persisted by named peers · committed at a destination. A timeout is `DeliveryUnknown`, never a failure; a required-sync write **refuses** rather than applying an undurable one | [ch. 18](docs/guide/18-contracts-and-receipts.md) |
 | **Deterministic replay** | A recorded run as a file you can re-run — because a seed is only reproducible while the code is unchanged, which is when nobody needs it. A replay tells you *where* a changed build first departed | [ch. 19](docs/guide/19-replay-and-simulation.md) · [`mycelium-sim`](mycelium-sim/) |
-| **Authorisation at the gateway** | A preflight before dispatch with your own policy engine: permit / deny / **indeterminate**, an evidence journal, and coverage stated as a field rather than implied by silence | [ch. 20](docs/guide/20-authorising-actions.md) |
+| **Authorisation at gateway and provider** | A preflight before dispatch with your own policy engine: permit / deny / **indeterminate**, an evidence journal, and coverage stated as a field rather than implied by silence | [ch. 20](docs/guide/20-authorising-actions.md) |
 | **Scoped mandates** | Is the caller still the one who was appointed? An installed epoch is terminal for work authorised under an earlier one, checked inside the resource's own atomic boundary | [ch. 21](docs/guide/21-mandates.md) |
 | **Adaptive stability** | Deciding when *not* to act on an uncertain view, and budgets backed by durably accounted rights rather than soft state that evaporates | [ch. 22](docs/guide/22-stability-and-control.md) |
 | **Knowledge** | Keeping disagreement instead of resolving it: claims, observations and *judgements with authors* — where a self-assessment does not count as evidence | [ch. 23](docs/guide/23-knowledge.md) |

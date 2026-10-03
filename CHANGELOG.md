@@ -28,6 +28,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.18.0 holds; no API change. **Check before upgrading:** a node that sets a token table, an `[oidc]` table, `[tls]` or `[gateway_tls]` in a build without the feature that enforces it now fails at start — it was running without that protection; build with `--features compliance` / `--features tls` or remove the table, and confirm an unauthenticated `GET /gateway/kv/keys` answers 401.
 
+### Note, added after the tag
+- **v2.18.1 also carries 36 files that its release notes do not mention.** PR #474 was committed with
+  `git add -A` from a checkout another session was editing, and swept in that session's uncommitted work:
+  the six-tutorial learning path (`docs/guide/tutorials/`), the `first_stem_fleet` example and
+  `compare_stem_observations` consumer, `scripts/check-stem-observations.py` and a `wasm-host` CI step that
+  runs them, an interim positioning sentence on every door, and smaller guide edits. All of it passed CI
+  and none of it changes the library's code or wire. Reviewed after the fact in the PR that adds this note,
+  which also replaces the interim sentence.
+
 ### Security
 - **A token table the build cannot enforce now refuses to start, instead of running an open
   gateway.** `gateway_named_tokens` and `gateway_scoped_tokens` (and `GOSSIP_GATEWAY_NAMED_TOKENS`)

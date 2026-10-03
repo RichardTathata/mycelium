@@ -2,7 +2,7 @@
 //!
 //! **A fleet that grows the capabilities it lacks, under rules it can show it kept.**
 //!
-//! Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.
+//! Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.
 //!
 //! An embedded, broker-less library in three layers, with capability discovery across them:
 //!

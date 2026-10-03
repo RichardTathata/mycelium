@@ -189,7 +189,7 @@ Understanding the boundaries matters as much as understanding the model.
 
 **Not a message broker.** No central broker, no topic registry, no persistent queue. Signals are ephemeral. A node that misses a signal misses it — intentionally. Durable delivery is higher-order, built on KV or consensus.
 
-**Not a service mesh.** No sidecar, no control plane, no external certificate authority. mTLS is peer-to-peer; the Ed25519 keypair is the node's identity. The mesh is the library.
+**Not a service mesh.** No obligatory central control plane. Rust embeds the library; language SDKs can use a gateway sidecar. Mesh mTLS admission is CA-anchored; the Ed25519 keypair is the node's identity. Public AgentFacts self-certification is a separate discovery mechanism.
 
 **Not an actor framework.** Actors have explicit addresses and explicit lifecycle management. Mycelium nodes have capabilities and boundaries. Topology emerges from capability matching rather than being managed explicitly.
 

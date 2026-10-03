@@ -186,6 +186,38 @@
   @keyframes flow-move{to{stroke-dashoffset:-24}}
   @keyframes worker-shift{0%,60%{transform:translateX(0)}80%{transform:translateX(52px)}100%{transform:translateX(52px)}}
   @keyframes fade-in-up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+  /* Accessible reading mode retains the deck palette and typography. */
+  a { color:var(--accent); text-underline-offset:3px; }
+  a:focus-visible, button:focus-visible { outline:3px solid var(--accent4); outline-offset:4px; }
+  .slide-body { overflow:auto; min-height:0; padding-bottom:100px; justify-content:safe center; }
+  .mode-btn { width:auto; font-size:13px; white-space:nowrap; }
+  .resource-links { display:flex; flex-wrap:wrap; gap:10px 20px; margin-top:18px; font-size:14px; }
+  body.reading { height:auto; overflow:auto; }
+  body.reading .deck { height:auto; overflow:visible; }
+  body.reading .slide { position:relative; inset:auto; height:auto; min-height:100vh; opacity:1; transform:none; pointer-events:auto; overflow:visible; border-bottom:1px solid var(--border); }
+  body.reading .slide-body { overflow:visible; flex:none; padding-top:32px; }
+  body.reading .card-body, body.reading .sp-body { font-size:16px; }
+  body.reading .nav-bar { bottom:12px; }
+  body.reading .progress-bar { display:none; }
+  @media (max-width:760px) {
+    .slide-top { padding:24px 20px 0; }
+    .slide-body { padding-left:20px; padding-right:20px; }
+    .cols2,.cols3,.cols4 { grid-template-columns:1fr !important; }
+    .nav-bar { max-width:calc(100vw - 16px); gap:6px; }
+    .code-block, .table-wrap { overflow:auto; max-width:100%; }
+    .hero-title { overflow-wrap:anywhere; }
+    .resource-links { flex-direction:column; }
+  }
+  @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }
+  @media print {
+    html,body { height:auto !important; overflow:visible !important; }
+    .deck { height:auto !important; overflow:visible !important; }
+    .slide { position:relative !important; inset:auto !important; opacity:1 !important; transform:none !important; height:auto !important; min-height:0 !important; overflow:visible !important; break-after:page; }
+    .slide-body { overflow:visible !important; padding:24px; }
+    .nav-bar,.progress-bar { display:none !important; }
+  }
+
 </style>
 </head>
 <body>
@@ -200,10 +232,10 @@
   <div class="slide-top"><span class="eyebrow">Mycelium</span><span class="slide-num">01 / 25</span></div>
   <div class="slide-body">
     <div class="hero-center">
-      <div class="hero-title">Mycelium</div>
+      <div class="hero-title">Mycelium</div><nav class="resource-links" aria-label="Supporting resources"><a href="../capabilities.md">Capability map</a><a href="../../examples/README.md">Runnable examples</a><a href="../operations/what-is-proven.md">Evidence and limits</a><a href="../operations/customer-pilot.md">Pilot</a><a href="research-guide.md">Research guide</a></nav><p style="font-size:12px;margin-top:8px">Local links use the accompanying repository. <a href="https://github.com/RichardTathata/mycelium/blob/main/docs/README.md">Online documentation</a></p>
       <div class="hero-tagline">
         A fleet that grows the capabilities it lacks, under rules it can show it kept.<br>
-        <span style="font-weight:400">Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Configured enforcement points check authority and can record their decisions; supported replay seams make captured executions reproducible.</span><br>
+        <span style="font-weight:400">Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.</span><br>
         <strong style="color:var(--text)">The engineer's deck — one coordinator-free fabric, every interaction pattern, not just RPC.</strong>
       </div>
       <div class="badges">
@@ -269,7 +301,7 @@
   <div class="slide-top"><span class="eyebrow">The Status Quo</span><span class="slide-num">03 / 25</span></div>
   <div class="slide-body">
     <div class="slide-title">Four systems.<br><em>One job.</em></div>
-    <div class="slide-sub">Every serious agent deployment today requires stitching these together. You write the glue. You own the glue.</div>
+    <div class="slide-sub">Many agent deployments combine these services. Integration code and their operating dependencies become part of the system.</div>
     <div class="old-stack">
       <div class="old-box">
         <div class="old-box-title">Service Registry</div>
@@ -344,7 +376,7 @@
   <div class="slide-top"><span class="eyebrow">The Key Insight</span><span class="slide-num">04 / 25</span></div>
   <div class="slide-body">
     <div class="slide-title">Availability first.<br><em>Consistency on demand.</em></div>
-    <div class="slide-sub">Every coordination system before Mycelium starts with a coordinator and bolts availability on top. We inverted it.</div>
+    <div class="slide-sub">Mycelium starts with peer propagation and local decisions. Coordination patterns build on that substrate, with their assumptions stated explicitly.</div>
 
     <div class="cols2" style="gap:24px;align-items:start;">
       <div>
@@ -477,7 +509,7 @@
         <div style="display:flex;flex-direction:column;gap:8px;">
           <div class="card card-accent-green" style="padding:13px 16px;">
             <div class="card-title">Layer II — Signal Mesh</div>
-            <div class="card-body">Scoped ephemeral events with admission boundaries. Only nodes that advertise the matching capability receive group-scoped signals. Holland's signals, made concrete.</div>
+            <div class="card-body">Scoped ephemeral events with admission boundaries. Transport forwards signals; group scope and receiver boundaries determine which nodes admit them for action. Holland's signals, made concrete.</div>
           </div>
           <div class="card card-accent-green" style="padding:13px 16px;">
             <div class="card-title">Capability Groups &amp; Opacity</div>
@@ -516,7 +548,7 @@
       <div class="sp-card sp-card-1">
         <div class="sp-icon">🌱</div>
         <div class="sp-title">Self-Organizing Discovery</div>
-        <div class="sp-body">Advertise capabilities and groups emerge automatically. Dead nodes disappear via TTL — no deregister call, no stale entries, no operator involvement.</div>
+        <div class="sp-body">Advertise capabilities and groups emerge automatically. Expired advertisements leave the discovery view after their TTL; stale views remain possible during detection and propagation.</div>
       </div>
       <div class="sp-card sp-card-2">
         <div class="sp-icon">⚡</div>
@@ -536,7 +568,7 @@
       <div class="sp-card sp-card-5">
         <div class="sp-icon">🔌</div>
         <div class="sp-title">Protocol-Native</div>
-        <div class="sp-body">A2A and MCP surfaces built-in. LangChain and AutoGen auto-discover skills from the live capability ring. No adapter code, no manual registration.</div>
+        <div class="sp-body">A2A and MCP surfaces built-in. LangChain and AutoGen auto-discover skills from the live capability ring. Protocol adapters expose declared tools and skills; applications still configure their integration.</div>
       </div>
       <div class="sp-card sp-card-6">
         <div class="sp-icon">🪶</div>
@@ -638,14 +670,14 @@
         </div>
         <div class="card card-accent-orange">
           <div class="card-title">Dead nodes vanish automatically</div>
-          <div class="card-body">When a node stops refreshing its TTL entries, they expire. The cluster heals in under one health interval. No deregister call. No stale entries. No operator alert.</div>
+          <div class="card-body">When a node stops refreshing its TTL entries, they expire. Discovery removes expired advertisements. Recovery time depends on leases, health settings, propagation and available capacity; operators still monitor failures.</div>
         </div>
         <div class="card card-accent-purple">
           <div class="card-title">Late joiners catch up fully</div>
-          <div class="card-body">Anti-entropy sync on reconnect means a restarted node recovers the entire cluster state from its peers within seconds. No replay log. No snapshot restore.</div>
+          <div class="card-body">Anti-entropy lets a restarted node recover replicated state available from its peers. Recovery depends on retained data, reachability and configured persistence.</div>
         </div>
         <div class="callout callout-green">
-          <strong>The cluster knows what it can do</strong> — and it always has an up-to-date view, on every node, without asking a coordinator.
+          <strong>The cluster knows what it can do</strong> — each node resolves from its own eventually convergent view, which can be incomplete or stale.
         </div>
       </div>
     </div>
@@ -742,7 +774,7 @@
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card card-accent-orange" style="padding:14px 16px;">
           <div class="card-title">Opacity Backpressure — automatic</div>
-          <div class="card-body">Busy workers mark themselves opaque. The capability resolver skips them. Overloaded stages draw in idle workers from elsewhere — zero config.</div>
+          <div class="card-body">Busy workers mark themselves opaque. The capability resolver skips them. Overloaded stages draw in idle workers from elsewhere — within configured discovery and capacity limits.</div>
         </div>
         <div class="card card-accent-blue" style="padding:14px 16px;">
           <div class="card-title">KV ring IS the pipeline buffer</div>
@@ -867,7 +899,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
 <span class="cm">// Restart ≡ provisioning. Failure ≡ a fresh resolve.</span>
         </div>
         <div class="callout callout-orange" style="margin-top:10px;font-size:12px;">
-          <strong>Federation, shipped.</strong> Across domains a node publishes self-certified <strong>AgentFacts</strong> — a NANDA-shaped, Ed25519-signed quilt-patch — plus a CRDT-assembled domain view: sovereign discovery with no issuer authority. The internet-scale tier is no longer a future box on the stack. <strong>Declared, shipped (v2.17.0–v2.18.0).</strong> A unit file per deployable says what it offers, needs, hosts and may do; <code>mycelium wire-check</code> runs the mesh's matching rule over the whole declared fleet offline (JSON against a pinned schema); the stem node <code>mycelium-stem</code> runs the file as written — placement, <code>[[activation]]</code> after placement, <code>[[serve]]</code> while the install is live. Agent-published entries run under a per-publisher fuel budget and load only into a shadow lane until a listed reviewer accepts them. Every artifact-shaped co-op demo runs as stems in CI, three against a real model in Ollama. <em>Not claimed:</em> an activation command runs with the stem's privileges, not in a sandbox; models from S3/GCS are not shown (S3 emulator only, no real bucket, and a stem cannot yet read an object store).
+          <strong>Federation, shipped.</strong> Across domains a node publishes self-certified <strong>AgentFacts</strong> — a NANDA-shaped, Ed25519-signed quilt-patch — plus a CRDT-assembled domain view: sovereign discovery with no issuer authority. The internet-scale tier is no longer a future box on the stack. <strong>Declared, shipped (v2.17.0–v2.18.0).</strong> A unit file per deployable says what it offers, needs, hosts and may do; <code>mycelium wire-check</code> runs the mesh's matching rule over the whole declared fleet offline (JSON against a pinned schema); the stem node <code>mycelium-stem</code> implements the supported runtime sections — placement, <code>[[activation]]</code> after placement, <code>[[serve]]</code> while the install is live. Agent-published entries run under a per-publisher fuel budget and load only into a shadow lane until a listed reviewer accepts them. Every artifact-shaped co-op demo runs as stems in CI, three against a real model in Ollama. <em>Not claimed:</em> an activation command runs with the stem's privileges, not in a sandbox; models from S3/GCS are not shown (S3 emulator only, no real bucket, and a stem cannot yet read an object store).
         </div>
       </div>
     </div>
@@ -908,7 +940,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
 <div class="slide" id="s8">
   <div class="slide-top"><span class="eyebrow">The Stack</span><span class="slide-num">09 / 25</span></div>
   <div class="slide-body">
-    <div class="slide-title">Two layers.<br><em>Nothing else.</em></div>
+    <div class="slide-title">Two deployment tiers.<br><em>One three-layer substrate.</em></div>
     <div class="cols2" style="gap:28px;align-items:center;margin-top:8px;">
       <!-- Stack diagram -->
       <svg viewBox="0 0 300 310" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-height:290px;">
@@ -1003,7 +1035,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span c
           <tr><td>Prompt Skills (LLM)</td><td class="td-yes td-my">Built-in (llm feature)</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">You build it</td></tr>
           <tr><td>Fleet inference routing</td><td class="td-yes td-my">Built-in — load + local reservations · failover · OpenAI-compatible façade</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">No</td><td class="td-no">You build it</td></tr>
           <tr><td>Air-gapped / edge</td><td class="td-yes td-my">Yes — zero external deps</td><td>Complex</td><td>Complex</td><td>Possible</td><td>Possible</td></tr>
-          <tr><td>Ops burden</td><td class="td-yes td-my">Zero — no processes</td><td>Broker + config</td><td>Registry + agents</td><td>Cluster manager</td><td class="td-no">Everything</td></tr>
+          <tr><td>Ops burden</td><td class="td-yes td-my">Embedded nodes or gateway/stem processes</td><td>Broker + config</td><td>Registry + agents</td><td>Cluster manager</td><td class="td-no">Everything</td></tr>
         </tbody>
       </table>
     </div>
@@ -1120,7 +1152,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
 
 <!-- 11 Production Ready -->
 <div class="slide" id="s11">
-  <div class="slide-top"><span class="eyebrow">Production Ready</span><span class="slide-num">12 / 25</span></div>
+  <div class="slide-top"><span class="eyebrow">Release discipline</span><span class="slide-num">12 / 25</span></div>
   <div class="slide-body">
     <div class="slide-title">Execution-gated.<br><em>Every fix leaves a regression gate.</em></div>
     <div class="cols2" style="gap:20px;margin-top:8px;">
@@ -1978,10 +2010,11 @@ wiki.<span class="cs">propose</span>(<span class="cv">"decisions/elm-street"</sp
 
 </div><!-- /deck -->
 
-<div class="nav-bar">
-  <button class="nav-btn" id="btn-prev" disabled>←</button>
-  <div class="slide-counter" id="counter">1 / 25</div>
-  <button class="nav-btn" id="btn-next">→</button>
+<div class="nav-bar" role="navigation" aria-label="Presentation controls">
+  <button class="nav-btn mode-btn" id="btn-mode" aria-pressed="false">Read all slides</button>
+  <button class="nav-btn" aria-label="Previous slide" id="btn-prev" disabled>←</button>
+  <div class="slide-counter" id="counter" role="status" aria-live="polite">1 / 25</div>
+  <button class="nav-btn" aria-label="Next slide" id="btn-next">→</button>
 </div>
 <div class="progress-bar">
   <div class="progress-fill" id="progress-fill" style="width:4%"></div>
@@ -1990,43 +2023,62 @@ wiki.<span class="cs">propose</span>(<span class="cv">"decisions/elm-street"</sp
 <script>
   const slides = Array.from(document.querySelectorAll('.slide'));
   const total = slides.length;
+  const prev = document.getElementById('btn-prev');
+  const next = document.getElementById('btn-next');
+  const mode = document.getElementById('btn-mode');
   let cur = 0;
-
-  // Auto-number every slide's corner label from its position, so inserting or
-  // reordering slides can never desync the hardcoded "NN / NN" labels again.
-  slides.forEach((s, i) => {
-    const n = s.querySelector('.slide-num');
-    if (n) n.textContent = `${String(i + 1).padStart(2, '0')} / ${total}`;
+  let reading = matchMedia('(max-width:760px)').matches;
+  slides.forEach((slide, i) => {
+    const heading = slide.querySelector('.slide-title, .hero-title, .big-quote');
+    if (heading) {
+      heading.setAttribute('role', 'heading');
+      heading.setAttribute('aria-level', i === 0 ? '1' : '2');
+      heading.id = heading.id || `heading-${i}`;
+      slide.setAttribute('aria-labelledby', heading.id);
+    }
+    slide.setAttribute('role', 'region');
+    slide.setAttribute('tabindex', '-1');
+    const label = slide.querySelector('.slide-num');
+    if (label) label.textContent = `${i + 1} / ${total}`;
   });
-
-  function go(n) {
-    if (n < 0 || n >= total) return;
-    slides[cur].classList.remove('active');
-    slides[cur].classList.add('was-prev');
-    setTimeout(() => { slides.forEach(s => { if (s !== slides[n]) s.classList.remove('was-prev'); }); }, 420);
-    cur = n;
-    slides[cur].classList.add('active');
-    slides[cur].classList.remove('was-prev');
-    document.getElementById('counter').textContent = `${cur + 1} / ${total}`;
+  function render() {
+    document.body.classList.toggle('reading', reading);
+    slides.forEach((slide, i) => {
+      slide.classList.toggle('active', i === cur);
+      slide.inert = !reading && i !== cur;
+      slide.setAttribute('aria-hidden', String(!reading && i !== cur));
+    });
+    mode.setAttribute('aria-pressed', String(reading));
+    mode.textContent = reading ? 'Slide view' : 'Read all slides';
+    document.getElementById('counter').textContent = reading ? `${total} slides` : `${cur + 1} / ${total}`;
     document.getElementById('progress-fill').style.width = `${((cur + 1) / total) * 100}%`;
-    document.getElementById('btn-prev').disabled = cur === 0;
-    document.getElementById('btn-next').disabled = cur === total - 1;
+    prev.disabled = reading || cur === 0;
+    next.disabled = reading || cur === total - 1;
   }
-
-  document.getElementById('btn-prev').addEventListener('click', () => go(cur - 1));
-  document.getElementById('btn-next').addEventListener('click', () => go(cur + 1));
+  function go(n) {
+    if (reading || n < 0 || n >= total) return;
+    cur = n;
+    render();
+    slides[cur].focus({preventScroll:true});
+  }
+  prev.addEventListener('click', () => go(cur - 1));
+  next.addEventListener('click', () => go(cur + 1));
+  mode.addEventListener('click', () => {
+    if (reading) {
+      const nearest = slides.reduce((best, slide, i) => Math.abs(slide.getBoundingClientRect().top) < Math.abs(slides[best].getBoundingClientRect().top) ? i : best, 0);
+      cur = nearest;
+    }
+    reading = !reading;
+    render();
+    if (reading) slides[cur].scrollIntoView();
+    else window.scrollTo(0, 0);
+  });
   document.addEventListener('keydown', e => {
-    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); go(cur + 1); }
-    if (e.key === 'ArrowLeft'  || e.key === 'PageUp')  { e.preventDefault(); go(cur - 1); }
-    if (e.key === 'Home') go(0);
-    if (e.key === 'End')  go(total - 1);
+    if (reading || e.altKey || e.ctrlKey || e.metaKey || e.target.closest('a,button,input,textarea,select,[contenteditable="true"]')) return;
+    const destinations = {ArrowRight:cur+1, ' ':cur+1, PageDown:cur+1, ArrowLeft:cur-1, PageUp:cur-1, Home:0, End:total-1};
+    if (e.key in destinations) { e.preventDefault(); go(destinations[e.key]); }
   });
-  let tx = 0;
-  document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; });
-  document.addEventListener('touchend',   e => {
-    const dx = e.changedTouches[0].clientX - tx;
-    if (Math.abs(dx) > 50) go(dx < 0 ? cur + 1 : cur - 1);
-  });
+  render();
 </script>
 </body>
 </html>
