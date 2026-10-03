@@ -81,7 +81,7 @@ if [ -n "$host_rng" ]; then
 fi
 
 scan_files() {
-  find src mycelium-core/src -name '*.rs' \
+  find src mycelium-core/src mycelium-wasm-host/src -name '*.rs' \
     ! -name '*_tests.rs' \
     ! -name 'lib_tests.rs' \
     ! -name 'test_util.rs' \

@@ -585,6 +585,8 @@ fn external(evidence: &'static str) -> impl Fn(&TaskCtx) -> Resolution + Send + 
 pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
     use GuaranteeKind::{ExternalPrerequisite as Ext, NodeEnforced as Node};
     vec![
+        // A merged router's route outside the gated prefixes is public by construction — a documented
+        // class, not a guarantee (`gw.extra_routes_auth`, plan §8; docs/operations/rbac.md).
         g("gw.not_open", 1, "gateway", Node,
           "the HTTP gateway requires a credential on every non-public route",
           "`gateway_auth_token`, or (`compliance`) a token table or `[oidc]`",

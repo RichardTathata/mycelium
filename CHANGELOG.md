@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **A data-at-rest cipher attached after `start()` is rejected** (plan G13, `at_rest.cipher`): the WAL
+  writer read its cipher at start, so a later attach was accepted and did nothing while the report said
+  `enforced`. It is now not set, not reported, and counted as a late attachment. Test seen failing on the
+  unfixed code. **The wasm host is inside the replay-seam scan** (`scripts/check-sim-seams.sh`): its 41
+  file-system and timing sites are admitted in the baseline and named in the nondeterminism inventory
+  (a stem's artifact fetch, placement and activation timing are outside the seams, and a recording says
+  so); a new site fails the gate. **Documented:** a router merged with `with_http_routes` that mounts a
+  route outside the gated prefixes is public by construction (`docs/operations/rbac.md`). **Decided** on
+  the plan: the guarantee report is not gossiped (Q2); the private companions register through the one
+  registry before `start()` (Q3).
+
 ---
 
 ## [2.20.0] — 2026-10-03
