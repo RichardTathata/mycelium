@@ -62,6 +62,15 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
+> **Zero gaps (adopted 2026-10-03):** [`zero-gaps.md`](zero-gaps.md) — the nine code-shaped gaps the repository
+> recorded after the guarantees plan closed (five on `what-is-proven.md`, two `~` cells on the doc-coverage matrix,
+> two from the publication lint of the same day), each with its seam named by `file:line`, a decision, and an
+> increment with a test seen failing first: an object-store stem source (D1), `[[serve]].api_key_env` resolved at
+> start and refused by name (D2), a ranged fetch over the mesh for blobs past the frame cap (D3), `llm_agent`'s
+> tools as components with a self-described schema (D4), an arbiter for ticks due at one paused instant so a live
+> node replays decision for decision (D5), an effects refusal counter, the SDKs' `set()` receipt, a port, a gauge.
+> Exit: the proof page lists no gap a commit can close.
+>
 > **Guarantees and the rule catalogue (I1–I7 delivered — I2/I3 in v2.19.0, I1's rule half and I4–I7 in v2.20.0, 2026-10-03):**
 > [`guarantees-and-rule-catalogue.md`](guarantees-and-rule-catalogue.md) — one inventory, two readers. A
 > **supported secure profile**: every guarantee the substrate can claim, resolved at start to *enforced · not
