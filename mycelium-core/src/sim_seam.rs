@@ -382,6 +382,24 @@ mod installed {
         })
     }
 
+    /// [`timer_replay`], unless the next recorded choice is a different request: `None` — not yet.
+    pub fn timer_replay_if_next(op: &'static str, stream: &str, requested_ms: u64) -> Option<u64> {
+        CTX.with(|c| {
+            let mut guard = c.borrow_mut();
+            let Some(ctx) = guard.as_mut() else { return Some(requested_ms) };
+            let mut seams = Seams::new(&mut ctx.kernel, &mut ctx.sources, &ctx.node);
+            match seams.timer_if_next(op, stream, requested_ms) {
+                Ok(v) => v,
+                Err(d) => panic!("{d}"),
+            }
+        })
+    }
+
+    /// How many decisions the installed kernel has made — the arbiter's progress gauge.
+    pub fn position() -> usize {
+        CTX.with(|c| c.borrow().as_ref().map(|ctx| ctx.kernel.position()).unwrap_or(0))
+    }
+
     /// Write down what a bounded send actually did.
     pub fn chan_record(stream: &str, verdict: &str) {
         CTX.with(|c| {
@@ -563,11 +581,49 @@ pub async fn sleep_ms(stream: &str, ms: u64) {
 /// itself. In an exact replay the code requests what it requested when recording, so the ordering
 /// is reproduced; a kernel that *rewrote* a duration is authoring a different schedule, and that is
 /// scenario replay rather than exact replay.
+/// The second arm (zero-gaps Z5): a wait that completed is not necessarily the *next* recorded
+/// choice — two ticks due at the same paused instant complete in whatever order tokio polls them,
+/// and the recording fixed one. So a wait that is not next **waits its turn**: it yields while
+/// other tasks make progress (the kernel's position moves), and asks again. When nothing moves for
+/// [`ARBITER_STALL_ROUNDS`] rounds the recorded next choice is one this run will never make, and the
+/// ordinary check runs to panic with both sides named. Every few rounds the wait is a 1 ms paused
+/// sleep rather than a yield, so a runtime whose only other tasks are asleep can auto-advance.
+#[cfg(feature = "sim")]
+const ARBITER_STALL_ROUNDS: u32 = 4_096;
+
+#[cfg(feature = "sim")]
+async fn wait_turn(op: &'static str, stream: &str, nominal_ms: u64) {
+    let mut last = installed::position();
+    let mut stalled = 0u32;
+    loop {
+        if installed::timer_replay_if_next(op, stream, nominal_ms).is_some() {
+            return;
+        }
+        let now = installed::position();
+        if now != last {
+            last = now;
+            stalled = 0;
+        } else {
+            stalled += 1;
+        }
+        if stalled > ARBITER_STALL_ROUNDS {
+            // Not next, and nothing else is moving: the recorded choice is not coming. Diverge.
+            let _ = installed::timer_replay(op, stream, nominal_ms);
+            return;
+        }
+        if stalled % 64 == 63 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 #[cfg(feature = "sim")]
 async fn replay_timer(op: &'static str, stream: &str, nominal_ms: u64) {
     if installed::clock_paused() {
         tokio::time::sleep(std::time::Duration::from_millis(nominal_ms)).await;
-        let _effective_ms = installed::timer_replay(op, stream, nominal_ms);
+        wait_turn(op, stream, nominal_ms).await;
     } else {
         let _effective_ms = installed::timer_replay(op, stream, nominal_ms);
         tokio::task::yield_now().await;
@@ -628,6 +684,10 @@ pub struct Ticker {
     first: bool,
     /// A deferral requested by `reset_after_ms`: the next tick's nominal wait, once.
     deferred_ms: Option<u64>,
+    /// Replay under a paused clock keeps the recording's **absolute grid** (zero-gaps Z5): the next
+    /// deadline, advanced by one period per tick, rather than a relative wait from whenever `tick`
+    /// was called — which drifted by every yield between ticks.
+    next_due: Option<tokio::time::Instant>,
 }
 
 /// A periodic tick, through the kernel. `stream` must be distinct per loop — two loops on one
@@ -640,7 +700,7 @@ pub fn interval_ms(
 ) -> Ticker {
     let mut inner = tokio::time::interval(std::time::Duration::from_millis(period_ms.max(1)));
     inner.set_missed_tick_behavior(missed);
-    Ticker { inner, stream: stream.into(), period_ms, first: true, deferred_ms: None }
+    Ticker { inner, stream: stream.into(), period_ms, first: true, deferred_ms: None, next_due: None }
 }
 
 #[cfg(feature = "sim")]
@@ -652,6 +712,7 @@ impl Ticker {
         self.inner.reset_after(std::time::Duration::from_millis(ms));
         self.deferred_ms = Some(ms);
         self.first = false;
+        self.next_due = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(ms));
     }
 
     /// Wait for the next tick.
@@ -660,13 +721,16 @@ impl Ticker {
     /// period after, or the deferral a `reset_after_ms` asked for). `Replay` does not wait: the
     /// recorded duration advances the simulated clocks and the task yields once. A tick whose
     /// period differs from the recording is a divergence.
+    ///
+    /// The ticker's own state (`first`, the deferral, the next deadline) moves only **after** the
+    /// wait completes and checks in, so a tick cancelled by a `select!` sibling is asked again, not
+    /// skipped (zero-gaps Z5).
     pub async fn tick(&mut self) {
-        let nominal = match self.deferred_ms.take() {
+        let nominal = match self.deferred_ms {
             Some(ms) => ms,
             None if self.first => 0,
             None => self.period_ms,
         };
-        self.first = false;
         match installed::mode() {
             None => {
                 self.inner.tick().await;
@@ -675,8 +739,19 @@ impl Ticker {
                 self.inner.tick().await;
                 installed::timer_record("tick", &self.stream, nominal);
             }
-            Some(mycelium_sim::Mode::Replay) => replay_timer("tick", &self.stream, nominal).await,
+            Some(mycelium_sim::Mode::Replay) => {
+                if installed::clock_paused() {
+                    let due = self.next_due.unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_millis(nominal));
+                    tokio::time::sleep_until(due).await;
+                    wait_turn("tick", &self.stream, nominal).await;
+                    self.next_due = Some(due + std::time::Duration::from_millis(self.period_ms.max(1)));
+                } else {
+                    replay_timer("tick", &self.stream, nominal).await;
+                }
+            }
         }
+        self.deferred_ms = None;
+        self.first = false;
     }
 }
 
@@ -1230,6 +1305,50 @@ mod tests {
                 std::panic::resume_unwind(e.into_panic());
             }
         }
+    }
+
+    /// Two tickers of one period whose first ticks fall due at the same paused instant — the
+    /// membership and health loops at `health_check_interval_secs = 1`. `names` is the spawn order;
+    /// the returned vector is the completion order the ticks checked in.
+    async fn two_tickers(names: [&'static str; 2]) -> Vec<&'static str> {
+        let order: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>> = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for name in names {
+            let o = std::sync::Arc::clone(&order);
+            handles.push(tokio::spawn(async move {
+                let mut t = interval_ms(name, 100, tokio::time::MissedTickBehavior::Skip);
+                for _ in 0..3 {
+                    t.tick().await;
+                    o.lock().unwrap().push(name);
+                }
+            }));
+        }
+        for h in handles {
+            if let Err(e) = h.await {
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
+        order.lock().unwrap().clone()
+    }
+
+    /// **The scheduler seam's second arm** (zero-gaps Z5, D5): two tasks due at the same paused
+    /// instant wake in the *recorded* order, whichever tokio would have run first. The recording
+    /// spawned `a` then `b`; the replay spawns `b` then `a`, and every tick still checks in as
+    /// recorded, because a tick that is not the next recorded choice waits its turn instead of
+    /// diverging. Written before the arbiter existed and seen diverging at the first tick.
+    #[tokio::test]
+    async fn two_equal_period_tickers_replay_in_the_recorded_order_whichever_wakes_first() {
+        install_recording();
+        let recorded = two_tickers(["tick/a", "tick/b"]).await;
+        let trace = installed::take().expect("installed").kernel.trace().clone();
+        assert_eq!(trace.len(), 6, "six ticks recorded: {}", trace.len());
+
+        install_replaying_trace(trace);
+        pause_clock_for_replay();
+        let replayed = two_tickers(["tick/b", "tick/a"]).await;
+        let ctx = installed::take().expect("installed");
+        assert!(ctx.kernel.is_exhausted(), "every recorded tick was consumed");
+        assert_eq!(replayed, recorded, "the replay checks in in the recorded order, not the spawn order");
     }
 
     fn install_replaying_trace(trace: mycelium_sim::trace::Trace) {

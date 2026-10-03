@@ -20,8 +20,13 @@ use mycelium::{GossipAgent, GossipConfig, NodeId};
 use mycelium_sim::bundle::{Bundle, COVERAGE_MANIFEST, DECISION_ATTACHMENT};
 use mycelium_sim::{Kernel, Sources, Trace};
 
-async fn one_node(kernel: Kernel, port: u16) -> (Trace, Vec<DecisionRecord>) {
+async fn one_node(kernel: Kernel, port: u16, replaying: bool) -> (Trace, Vec<DecisionRecord>, bool) {
     install(SimContext { kernel, sources: Sources::seeded(11, 1_700_000_000_000), node: "n1".into(), offsets: Default::default() });
+    if replaying {
+        // The scheduler seam: a replayed wait is taken on tokio's paused clock, and a tick due at
+        // the same instant as another waits its recorded turn (zero-gaps Z5).
+        mycelium::sim_seam::pause_clock_for_replay();
+    }
     let sink = Arc::new(DecisionSink::default());
     let mut cfg = GossipConfig::auto();
     cfg.bind_port = port;
@@ -45,13 +50,14 @@ async fn one_node(kernel: Kernel, port: u16) -> (Trace, Vec<DecisionRecord>) {
     }
     a.shutdown().await;
     let ctx = take().expect("the kernel this thread ran under");
-    (ctx.kernel.trace().clone(), sink.drain())
+    let exhausted = ctx.kernel.is_exhausted();
+    (ctx.kernel.trace().clone(), sink.drain(), exhausted)
 }
 
 #[tokio::test]
 async fn a_recorded_node_carries_its_decisions_into_the_bundle_and_the_trace_explains() {
     let port = mycelium::test_util::alloc_port();
-    let (trace, recorded) = one_node(Kernel::recording(), port).await;
+    let (trace, recorded, _) = one_node(Kernel::recording(), port, false).await;
     assert!(recorded.iter().any(|r| r.rule == "membership.governed" && r.reason == "join"), "the recording holds a join: {recorded:?}");
 
     // The bundle carries the trace, as the node binary writes it.
@@ -83,4 +89,25 @@ async fn a_recorded_node_carries_its_decisions_into_the_bundle_and_the_trace_exp
     assert_eq!(cmp.divergences.len(), 1);
     assert!(!cmp.divergences[0].attributable && cmp.reproduces(), "a gossiped-input decision's divergence is stated, not counted: {:?}", cmp.divergences);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Zero-gaps Z5 (D5): **a live node's recording replays decision for decision.** The same node,
+/// the recorded trace, the clock paused and the tick arbiter in place; the replay consumes the whole
+/// trace and the decision sink produces the same records in the same order. Before the arbiter this
+/// diverged at the kernel's 20th choice — `membership/tick` and `health/tick`, one period, one
+/// instant, tokio's wake order — which is the finding `what-is-proven.md` carried; seen failing
+/// there first.
+#[tokio::test]
+async fn a_recorded_node_replays_decision_for_decision() {
+    let port = mycelium::test_util::alloc_port();
+    let (trace, recorded, _) = one_node(Kernel::recording(), port, false).await;
+    assert!(recorded.iter().any(|r| r.reason == "join"), "the recording holds a join");
+    let choices = trace.len();
+
+    let (_, replayed, exhausted) = one_node(Kernel::replaying(trace), port, true).await;
+    assert!(exhausted, "the replay consumed all {choices} recorded choices");
+    let cmp = compare(&recorded, &replayed);
+    assert!(cmp.reproduces() && cmp.divergences.is_empty(), "decision for decision: {:?}", cmp.divergences);
+    assert_eq!(recorded.len(), replayed.len(), "the same number of decisions");
+    assert!(replayed.iter().any(|r| r.reason == "join"));
 }
