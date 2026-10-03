@@ -62,7 +62,7 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Guarantees and the rule catalogue (I1–I3 delivered — I2/I3 in v2.19.0, I1's rule half on `main` 2026-10-03; I4–I7 proposed):**
+> **Guarantees and the rule catalogue (I1–I7 delivered — I2/I3 in v2.19.0, I1's rule half and I4–I7 in v2.20.0, 2026-10-03):**
 > [`guarantees-and-rule-catalogue.md`](guarantees-and-rule-catalogue.md) — one inventory, two readers. A
 > **supported secure profile**: every guarantee the substrate can claim, resolved at start to *enforced · not
 > configured · not in this build · not verifiable here*, and a node under a named profile refusing to start when one
@@ -73,7 +73,7 @@ record, not duplicates of those.
 > found three more settings a build could not enforce (v2.18.1), and I3's own acceptance test found that today's TLS
 > init needs the fleet CA's private key on every node (§8). Shipped: the registry and the startup report
 > (`guarantee_report()`, `GET /gateway/guarantees`, the log block at `start()`), and the profiles `dev` and
-> `secure-single-domain`. Next: the trace core (I4) and the stem-provisioning pilot (I5).
+> `secure-single-domain`. Then: the rule catalogue (26 entries, generated and gated), the decision trace core, the stem-provisioning pilot, replay attachments and `mycelium explain`, and the governor and admission on the trace (I4–I7, v2.20.0). The plan's §8 found three more defects on the way — a failing activation probe recorded as a live install, a self-election draw outside the replay seam, and persisted state a node could not read being compacted over — and the TLS init that put the CA key on every node is fixed (`mycelium tls issue`). Next: `secure-single-domain` rev 2 (announced: `id.ca_key_off_node`, `persist.unreadable_refused`), the egress report's overclaim, and a fatal gateway-TLS failure.
 >
 > **v3.0 (proposed, 2026-07-05/06):** a pattern-landscape scan found the substrate covers the
 > *coordination* pattern space natively or by composition ([`ROADMAP.md`](../../ROADMAP.md) → v3.0).
