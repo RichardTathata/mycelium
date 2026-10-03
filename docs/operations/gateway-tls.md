@@ -43,8 +43,15 @@ cfg.gateway_tls = Some(GatewayTlsConfig {
 | Both fields `None` (default) | The node identity cert (from `tls`), served with no client-cert demand | Carries an **IP SAN** only — fits **CA-pinning SDK clients** and proxied setups, **not** hostname/browser trust. Requires `GossipConfig::tls` (else startup errors). Rotates automatically with the node identity (hot cert rotation). |
 | `cert_pem_path` + `key_pem_path` | Your PEM cert chain + PKCS8 key | Use a cert with a real **DNS SAN** for browser/hostname clients. Both fields must be set together. You own its rotation. |
 
-**Feature gate.** Native gateway TLS needs the `tls` feature (which `compliance` implies). Without
-`tls`, `gateway_tls` is inert and the gateway stays plaintext.
+**Feature gate.** Native gateway TLS needs the `tls` feature (which `compliance` implies). A
+`[gateway_tls]` table in a build without `tls` **refuses to start** by name (since 2.18.1) — it is never
+silently plaintext.
+
+**Start-time binding (since 2.20.0).** `start()` binds the gateway port and loads its certificate before
+the node reports ready. A port already in use, or an unreadable `cert_pem_path` / `key_pem_path`, fails
+`start()` with `InvalidField { field: "gateway", .. }` naming the address and the cause, rather than
+leaving a dead listener behind a node that answers `/ready`. Free the port or fix the paths and start
+again.
 
 **Behaviour.** The listener terminates rustls (ring provider) per connection and serves the axum app
 over the TLS stream. On shutdown it stops accepting; in-flight connections drain. A handshake from a

@@ -1,4 +1,7 @@
-# 5 · Explain and replay a decision
+# 5 · Replay a bundle
+
+> Formerly titled *Explain and replay a decision*; the decision trace and `mycelium explain` are in
+> [guide 19 § reading what a node decided](../19-replay-and-simulation.md).
 
 ↑ [Tutorials](README.md) · Next: [Declared versus observed](06-declared-versus-observed.md)
 

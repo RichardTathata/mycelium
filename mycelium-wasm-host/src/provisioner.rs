@@ -2367,8 +2367,8 @@ mod tests {
     /// I5's gate, half one — **the trace changes no decision**: the same scenario, one provisioner
     /// with a sink and one without, decides and hosts identically; and the traced one says what it
     /// decided, in order, with typed reasons: eligible → elected → `unmet_demand_live` → `completed`,
-    /// then next round `all_healthy` and `already_hosted`. (Draw-count equivalence under `sim` waits
-    /// for a `sim` build of this crate — stated on the plan, not claimed here.)
+    /// then next round `all_healthy` and `already_hosted`. (Draw-count equivalence under `sim` is
+    /// `the_trace_makes_no_extra_draw_under_the_replay_seams` below, feature `sim`.)
     #[tokio::test]
     async fn the_trace_changes_no_decision_and_says_what_the_round_decided() {
         use mycelium::decision::{DecisionSink, OutcomeKind};

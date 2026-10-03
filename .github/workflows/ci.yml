@@ -187,6 +187,11 @@ jobs:
       # The node binary's recorded-run path (`GOSSIP_RECORD_BUNDLE_DIR`) exists only under `sim`;
       # nothing else builds the bin with it, so this is the line that keeps it compiling.
       - run: cargo check --bin mycelium --features cli,sim
+      # The claims `what-is-proven.md` rests on these two for: a recording carries its decisions into the
+      # bundle and explains (the comparison's recording half), and the traced provisioner makes no extra
+      # draw under the replay seams (draw-count equivalence) — hand-run only until doc-coverage run 19.
+      - run: cargo test --features sim,test-util --test decision_trace_replay
+      - run: cargo test -p mycelium-wasm-host --features stem,sim --lib the_trace_makes_no_extra_draw_under_the_replay_seams
       # The offline wire-check over the checked-in fixtures (design-time-tooling.md W2): the co-op
       # deployment is green with its library; the unwired one must exit 1 naming its ghost.
       - run: cargo run --features cli --bin mycelium -- wire-check tests/fixtures/units/coop --library tests/fixtures/units/artifacts

@@ -1,7 +1,9 @@
 # Guarantees and the rule catalogue — a supported secure profile, and decisions you can trace
 
-**Status:** proposed, rev 0.2, 2026-10-02 (rev 0.1 the same day; rev 0.2 after a read-only review that resolved
-five points — §3 G4–G6, G10–G12, §4 I2–I3 and §5 carry them). Nothing here is built. Source baseline: `main` after v2.18.0
+**Status:** delivered, rev 1.0, 2026-10-03 — I1–I7 shipped in v2.18.1 → v2.21.0 (§4 marks each), §7's
+questions decided, §8's rows fixed or deferred with a reason, I2's golden `docs/reference/guarantee-catalogue.md`;
+what stays unshown is on `docs/operations/what-is-proven.md` (rev 0.1 and 0.2 both 2026-10-02; rev 0.2 after a
+read-only review that resolved five points — §3 G4–G6, G10–G12, §4 I2–I3 and §5 carry them). Source baseline: `main` after v2.18.0
 plus #468–#471 (the fail-closed token table, the activation stderr drain, two test timing fixes, the
 positioning revision).
 

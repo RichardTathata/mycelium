@@ -51,15 +51,20 @@ this page is the index + the gate.
   read — rev 2 (v2.21.0; rev 1 was v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` · `gw.not_open` · `gw.tls` ·
   `gw.caller_profile` · `ae.authorised_at_seam` · `ae.recorded_before_dispatch` · `prov.enforcement` ·
   `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
-  `egress.allow_list` · `persist.configured` · `persist.sync_mode`. It needs a `compliance` + `tls` build
-  (anything less reads `not_in_build` and refuses). **What it does not cover, by construction:** the
-  external prerequisites — network confinement, clock sync, the consensus profile — which the report
-  lists as `not_verifiable_here` and this checklist owns; the at-rest cipher and the audit sink, which
-  the report shows and this revision does not require; and **`id.ca_key_off_node`, which it cannot
-  require yet**: today's TLS init loads the fleet CA's private key from the node's directory and mints
-  a new CA without it, so every TLS node holds the key at start — the report shows it as not enforced,
-  and the "you can remove a member" item below stays yours until the init can start from a CA cert and
-  a pre-issued node cert alone. Without a profile the node runs as `dev`:
+  `egress.allow_list` · `persist.configured` · `persist.sync_mode` · `persist.unreadable_refused` ·
+  `id.ca_key_off_node`. It needs a `compliance` + `tls` build (anything less reads `not_in_build` and
+  refuses). **Rev 2's two additions are settings, not attachments:** `persist.unreadable_refused` is the
+  default (`[persistence] on_unreadable = "refuse"`), and `id.ca_key_off_node` holds only for a node
+  started from a certificate **issued where the CA key lives** — `mycelium tls issue --ca-dir <ca>
+  --node <ip:port> --out <dir>` on the issuer's host, then `[tls] cert_pem` + `key_pem` on the node with
+  `ca-cert.pem` (never `ca-key.pem`) in its `auto_cert_dir` → [cert-rotation.md § Issuing node
+  certificates off-node](cert-rotation.md). A node that re-signs its own certificate with the CA key at
+  start refuses to start under the profile, naming `id.ca_key_off_node`. **What it does not cover, by
+  construction:** the external prerequisites — network confinement, clock sync, the consensus profile —
+  which the report lists as `not_verifiable_here` and this checklist owns; and the at-rest cipher and
+  the audit sink, which the report shows and this revision does not require. The whole set, with each
+  guarantee's resolution under four reference configurations, is the generated
+  [guarantee catalogue](../reference/guarantee-catalogue.md). Without a profile the node runs as `dev`:
   nothing required, and the log says it is not a production profile.
 - ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**. Bind it to loopback, or set
   `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. **Token tables and `[oidc]` need a
@@ -78,7 +83,7 @@ this page is the index + the gate.
   [crown-jewel.md](crown-jewel.md)
 - ☐ **Data-at-rest** cipher hook wired if the KV/WAL holds sensitive state. → [crown-jewel.md](crown-jewel.md)
 - ☐ **Audit trail** enabled if you need a tamper-evident record (`--features compliance`, hash-chained).
-  → [audit.md](audit.md) · `persist.unreadable_refused` (the default `on_unreadable = "refuse"`) · `id.ca_key_off_node` (a node certificate issued off-node — `mycelium tls issue`, `[tls] cert_pem` + `key_pem` — so the fleet CA's key is on no node).
+  → [audit.md](audit.md). Rev 2's two additions are on the profile item above.
 
 - ☐ **`/a2a` is not an open surface** — unlike `/mcp` (which requires `mcp:invoke`), the A2A route
   has **no scope floor**: a federation credential names a partner, a bearer resolves to a principal

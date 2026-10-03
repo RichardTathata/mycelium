@@ -309,8 +309,16 @@ bundle/
   initial/          # disk images per node, or the fixture ids they came from
   inputs/           # every external input, in arrival order, REDACTED
   choices.trace     # the ordered choice log — the reproduction itself
+  decisions.jsonl   # the decision trace (2.20.0): one record per decision the node took, by rule id
+  coverage.json     # which rules were traced, and `trace_unavailable` where the sink was absent
+  decisions.stats.json  # the sink's bounds and what it dropped (newest first, counted)
   witness.json      # the assertion that failed, and the toggle that makes it fail again
 ```
+
+A bundle **without** `decisions.jsonl` + `coverage.json` means *trace unavailable*, never *no decisions*
+(the recording predates 2.20.0, or no sink was attached). Read one with
+`mycelium explain <bundle>/decisions.jsonl --catalogue docs/reference/rule-catalogue.json`; the rule ids
+are the generated [rule catalogue](../reference/rule-catalogue.md).
 
 **Two operational rules, and neither is optional.**
 
@@ -333,11 +341,31 @@ binary built with `--features cli,sim` and started with **`GOSSIP_RECORD_BUNDLE_
 a current-thread runtime under the seams and writes the bundle there at shutdown (`SIGTERM`/`^C`;
 `GOSSIP_RECORD_SEED` fixes the seed). The bundle carries **no witness** — it reproduces the run's
 timing; whoever debugs it adds the assertion that failed — and its `config.json` is **empty**: the
-node writes `build.json` and `choices.trace`, and the redacted config (secrets replaced, as above) is
+node writes `build.json`, `choices.trace` and the three trace files, and the redacted config (secrets replaced, as above) is
 attached by hand before the bundle travels. An *embedded* agent (your own binary)
 records the way guide [19 § Recording a node](../guide/19-replay-and-simulation.md) shows; nothing
 starts a recording on a node built without `sim`, and no route starts one at runtime. (Until
 2026-09-26 this paragraph implied a capture path the tree did not have — doc-coverage run 17.)
+
+### Reading what a node decided — the trace, the catalogue, `mycelium explain`
+
+Beside the three verbs, a node can keep a bounded **decision trace**: for each catalogued decision point
+what it read, how it ended and the typed reason. The decision points are the generated
+[rule catalogue](../reference/rule-catalogue.md) — an `instrumented` entry records, a `catalogue only`
+entry does not, and `coverage.json` beside a trace says which. The trace is off unless attached, changes
+no decision and never waits (a saturated sink drops the newest record and counts it). A stem writes it
+with `mycelium-stem … --trace-dir <dir>` ([capability-lifecycle.md](capability-lifecycle.md)); the node
+binary built `--features cli,sim` and started with `GOSSIP_RECORD_BUNDLE_DIR=<dir>` writes
+`decisions.jsonl`, `coverage.json` and `decisions.stats.json` into the bundle beside `build.json` and
+`choices.trace`. Read either with:
+
+```bash
+mycelium explain <dir>/decisions.jsonl --catalogue docs/reference/rule-catalogue.json [--target <capability-or-group>]
+mycelium rules [--format md|json]     # the decision points *this binary* registers; the stem host's are in the reference
+```
+
+A bundle **without** `decisions.jsonl` means the trace was unavailable, never that nothing was decided.
+Records the sink dropped are counted in `decisions.stats.json`, not shown.
 
 ## See it: the induce-and-diagnose demo
 

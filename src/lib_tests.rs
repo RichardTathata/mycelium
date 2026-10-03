@@ -10522,9 +10522,9 @@ async fn a2a_is_anonymous_dispatch_whatever_bearer_is_configured() {
 }
 
 /// Plan I3's acceptance: a node that provides every guarantee `secure-single-domain` requires starts
-/// under it, its report says so, and its gateway refuses an unauthenticated request. The same report
-/// shows `id.ca_key_off_node` not enforced and not required — the recorded gap: today's TLS init
-/// needs the fleet CA's private key on every node at start (plan §8).
+/// under it, its report says so, and its gateway refuses an unauthenticated request. Under rev 2 the
+/// node's certificate is issued off-node first, so the same report shows `id.ca_key_off_node`
+/// enforced and required (the rev-1 gap, closed in v2.21.0: plan §8).
 #[cfg(all(feature = "compliance", feature = "a2a"))]
 #[tokio::test]
 async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {

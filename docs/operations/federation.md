@@ -87,6 +87,10 @@ let client = FederationClient::new(
 let agent = agent.with_federation_clients([Arc::new(client)]);   // before start(), like the edge
 ```
 
+`with_federation_clients` applies the node's `egress.allow_hosts` to each client: a partner `base_url`
+outside the list fails before any byte with `ClientError::Egress` (the enum is `#[non_exhaustive]` —
+match with `_` and fail closed). A client built elsewhere opts in with `with_egress` (since 2.20.0).
+
 Then, from any local client holding a bearer:
 
 ```bash

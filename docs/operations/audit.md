@@ -7,7 +7,11 @@ feature). Concept and API: [`docs/guide/09-security.md`](../guide/09-security.md
 Like RBAC, audit signing requires the TLS identity — `compliance = ["gateway",
 "tls"]`. A node with no `GossipConfig::tls` cannot seal signed records; under
 `compliance` `agent.audit()` returns `InvalidField` and the event is logged, not
-written. Configure TLS on every node that must produce evidence.
+written. Configure TLS on every node that must produce evidence. **A node that
+attaches an audit sink without `[tls]` refuses to start** (since 2.20.0,
+`an_audit_sink_without_tls_refuses_the_start`): records are sealed with the node
+identity, so the sink would receive nothing — `start()` returns `InvalidField`
+naming `with_audit_sink` and `[tls]`. Configure `[tls]` or remove the sink.
 
 ---
 
@@ -103,7 +107,7 @@ impl AuditSink for SiemSink {
     }
 }
 
-agent.with_audit_sink(std::sync::Arc::new(SiemSink { /* … */ })); // before start()
+agent.with_audit_sink(std::sync::Arc::new(SiemSink { /* … */ })); // before start(); needs [tls] or start() refuses
 ```
 
 Semantics: the drain channel is bounded; if your sink can't keep up, the **mirror** copy is
@@ -145,7 +149,7 @@ by design (the chain is meant to notice).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| no `sys/audit/` entries under `compliance` | `GossipConfig::tls` unset → `audit()` errors | enable TLS; check logs for "set GossipConfig::tls" |
+| no `sys/audit/` entries under `compliance` | `GossipConfig::tls` unset → `audit()` errors (and with a sink attached the node does not start at all) | enable TLS; check logs for "set GossipConfig::tls" |
 | `/gateway/audit` → 403 | token lacks `audit:read` | grant the scope (or `*`) on the token |
 | `verified: false`, `UnknownSigner` | owner's identity key not learned | confirm peering + shared CA; the key arrives via `sys/identity/` gossip |
 | `verified: false`, `BrokenLink`/`BadSignature` | records tampered or store hand-edited | treat as an incident; cite the offending `seq` + `content_hash` |

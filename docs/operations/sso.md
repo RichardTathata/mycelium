@@ -68,8 +68,11 @@ cfg.oidc = Some(mycelium::OidcConfig {
 | **Google** | `https://accounts.google.com` | (no groups) | Groups require Cloud Identity / Directory; map a custom claim instead. |
 
 In all cases `audience` is your registered client/application id, and the IdP must
-be reachable from the node for discovery + JWKS fetch (mind the WS3 egress posture
-— the IdP host must be allowed if you restrict egress at the network layer).
+be reachable from the node for discovery + JWKS fetch. If `egress.allow_hosts` is
+non-empty it must permit the `issuer` and `jwks_uri` hosts, or **the node refuses to
+start** naming them (since 2.20.0, `an_oidc_issuer_the_egress_policy_denies_refuses_the_start`);
+the runtime key refresh is gated the same way. Network-layer egress control must allow
+the same hosts.
 
 ---
 

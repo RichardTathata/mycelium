@@ -172,7 +172,14 @@ refuses to start, naming the file and the byte, and a snapshot that meets one ab
 truncating past it. `on_unreadable = "quarantine"` is the operator's explicit fail-open: the files are
 moved aside as `*.unreadable-N` (never deleted) and the node starts from what was readable; the fleet
 re-fills the rest by anti-entropy. The startup report resolves `persist.unreadable_refused` from this
-setting.
+setting. It lives in the `[persistence]` table — a bare top-level `on_unreadable` is silently ignored
+(the config does not deny unknown fields):
+
+```toml
+[persistence]
+base_path = "/var/lib/mynode"
+on_unreadable = "quarantine"   # default "refuse"
+```
 
 ### Choosing a sync mode with the receipt contract in hand
 

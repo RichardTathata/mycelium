@@ -104,7 +104,7 @@ security groups, an egress proxy with its own allowlist).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| node loses data after restart | cipher key changed/unavailable → records fail to decrypt, skipped | restore the exact key; key must be stable across restarts |
+| node refuses to start naming `snapshot.bin` or a WAL byte | cipher key changed/unavailable → the state is unreadable and `on_unreadable = "refuse"` (the default) fails closed | restore the exact key; `on_unreadable = "quarantine"` moves the files aside and starts from what was readable |
 | plaintext visible in `wal.bin` | no cipher attached, or attached after `start()` | attach `with_data_at_rest_cipher` **before** `start()` |
 | `connect_mcp_server` → "egress denied by policy" | target host not in `allow_hosts` | add the host (exact or `.suffix`) |
-| data exfiltrated via LLM/probe/A2A | those paths are not code-gated | add network-layer egress control (see §2) |
+| data exfiltrated via an outbound path the list does not cover | `allow_hosts` gates the MCP bridge, LLM backends, capability probes, the federation client and OIDC discovery/JWKS (the table above); a path your own code opens is yours | add network-layer egress control (see §2) |
