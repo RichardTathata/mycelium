@@ -192,8 +192,12 @@ mod tests {
         // and the report says so before it happens (the guarantee registry, 2026-10-03).
         assert_eq!(agent(cfg.clone()).confinement_report().ca_key_off_node, Setting::Unset, "a CA will be minted here");
         std::fs::write(dir.join("ca-cert.pem"), b"-----BEGIN CERTIFICATE-----").unwrap();
+        assert_eq!(agent(cfg.clone()).confinement_report().ca_key_off_node, Setting::Unset,
+            "a CA cert alone is not enough: without a pre-issued node cert, start() needs the CA key to sign one");
+        cfg.tls.as_mut().unwrap().cert_pem = Some(dir.join("node.cert.pem"));
+        cfg.tls.as_mut().unwrap().key_pem = Some(dir.join("node.key.pem"));
         let r = agent(cfg.clone()).confinement_report();
-        assert_eq!(r.ca_key_off_node, Setting::Set, "a provisioned CA cert and no key here");
+        assert_eq!(r.ca_key_off_node, Setting::Set, "a provisioned CA cert, a pre-issued node cert, and no key here");
         std::fs::write(dir.join("ca-key.pem"), b"-----BEGIN PRIVATE KEY-----").unwrap();
         let r = agent(cfg).confinement_report();
         assert_eq!(r.ca_key_off_node, Setting::Unset);

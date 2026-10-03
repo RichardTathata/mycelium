@@ -253,6 +253,11 @@ pub mod membership;
 // log keys) and need `hlc::physical_ms` to read them without copying the bit layout — it is
 // already `pub mod hlc` in `mycelium-core`, so this commits to nothing that crate does not.
 pub use mycelium_core::{config, error, hlc, signal};
+/// Issue a node certificate **off-node** — on the host that holds the fleet CA's key, never on the node
+/// (`id.ca_key_off_node`; `mycelium tls issue`). The node then starts from `[tls] cert_pem` / `key_pem`
+/// and the CA certificate alone.
+#[cfg(feature = "tls")]
+pub use mycelium_core::tls::issue_node_cert;
 /// The replay seams' install point, re-exported under `sim` so a **companion** on the public API
 /// can record and replay its own runs under the kernel (item 6; first used by CN2).
 /// Re-exported in every build, not only under `sim`: a companion routes its draws and clocks through

@@ -20,6 +20,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
+        // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
+        // holds it (`id.ca_key_off_node`). Runs on the issuer's host, starts no node.
+        Some("tls") => std::process::exit(tls_cli(std::env::args().skip(2).collect())),
         _ => {}
     }
 
@@ -353,9 +356,48 @@ fn explain_cli(args: Vec<String>) -> i32 {
     0
 }
 
+/// `mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>` — issue a node certificate off-node:
+/// the CA (`ca-cert.pem` + `ca-key.pem`) stays in `--ca-dir` on this host; `<out>/<node>.cert.pem` and
+/// `<out>/<node>.key.pem` go to the node, with `ca-cert.pem` (the certificate only), as `[tls]
+/// cert_pem` / `key_pem`. Exits 2 on usage or a file that does not load.
+fn tls_cli(args: Vec<String>) -> i32 {
+    const USAGE: &str = "Usage: mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>";
+    let mut it = args.into_iter();
+    if it.next().as_deref() != Some("issue") { eprintln!("{USAGE}"); return 2; }
+    let (mut ca_dir, mut node, mut out): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--ca-dir" => ca_dir = it.next(),
+            "--node" => node = it.next(),
+            "--out" => out = it.next(),
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    let (Some(ca_dir), Some(node), Some(out)) = (ca_dir, node, out) else { eprintln!("{USAGE}"); return 2; };
+    #[cfg(feature = "tls")]
+    {
+        let node_id: mycelium::NodeId = match node.parse() { Ok(n) => n, Err(e) => { eprintln!("--node: {e}"); return 2; } };
+        match mycelium::issue_node_cert(std::path::Path::new(&ca_dir), &node_id, std::path::Path::new(&out)) {
+            Ok((cert, key)) => {
+                println!("issued {} and {}", cert.display(), key.display());
+                println!("copy both to the node with {ca_dir}/ca-cert.pem (the certificate only — never ca-key.pem), and set [tls] cert_pem / key_pem");
+                0
+            }
+            Err(e) => { eprintln!("{e}"); 2 }
+        }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (ca_dir, node, out);
+        eprintln!("mycelium tls issue needs a binary built with the `tls` feature");
+        2
+    }
+}
+
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

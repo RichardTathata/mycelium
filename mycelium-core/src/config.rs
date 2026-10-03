@@ -95,7 +95,10 @@ impl OidcConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TlsConfig {
-    /// Path to a PEM-encoded node certificate. `None` = auto-generate on startup.
+    /// Path to a PEM-encoded node certificate, **pre-issued off-node** (`mycelium tls issue`). With
+    /// it the node starts from the CA certificate alone and never needs or mints the CA key
+    /// (`id.ca_key_off_node`); `key_pem` must name its key. `None` = re-sign a node cert at every
+    /// start with the CA key, which must then be on this node (minted here when absent).
     pub cert_pem: Option<PathBuf>,
     /// Path to a PEM-encoded (PKCS8) node private key. `None` = auto-generate.
     pub key_pem: Option<PathBuf>,
