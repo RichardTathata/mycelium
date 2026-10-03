@@ -191,9 +191,10 @@ A recording says what happened; the **decision trace** says what each decision p
 the typed reason, what it caused. It is off unless a decision point is handed a sink, it changes no
 decision (it reuses the values the code already produced, reads no clock, draws nothing, never waits),
 and it is bounded: at its bound the newest record is dropped and counted, so a trace is a prefix plus
-its drop counts. Today the instrumented decision points are the stem provisioner's, the membership
-governor's (`GossipAgent::with_decision_trace`, before `start()`), and signal admission's refusals and
-sheds; the [rule catalogue](../reference/rule-catalogue.md) says which, per rule:
+its drop counts. Today the instrumented decision points are the stem provisioner's (including a placed blob's
+activation and probe, under the install's token), the membership governor's
+(`GossipAgent::with_decision_trace`, before `start()`), and signal admission's refusals and sheds; a
+recording made with `GOSSIP_RECORD_BUNDLE_DIR` carries the trace into its bundle; the [rule catalogue](../reference/rule-catalogue.md) says which, per rule:
 
 ```bash
 mycelium-stem --units ./units --library ./artifacts --trace-dir ./trace

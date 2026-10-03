@@ -3,9 +3,10 @@
 //! Metadata only; the mechanism is in `provisioner.rs`, `runtime.rs` and `activation.rs`.
 //!
 //! Relationships here are hypotheses from reading the code (plan §6); the trace is what will show them.
-//! Nine are `Instrumented` by the pilot (I5, `Provisioner::with_decision_trace`); provenance, loadable,
-//! activation, probe, advertise and withdraw stay catalogue-only — the first two have no typed reason at
-//! the decision point today, the rest decide inside a runtime hook or under the hosted lock.
+//! Eleven are `Instrumented` by the pilot (I5, `Provisioner::with_decision_trace`) — activation and probe
+//! since the install token and the trace travel into the runtime hook (`ActivationCtx`, 2026-10-03);
+//! provenance and loadable (no typed reason at the decision point today), advertise and withdraw (under the
+//! hosted lock) stay catalogue-only.
 
 use mycelium::rule::{Guard, Input, Outcome, OutcomeKind::*, Responsibility::*, RuleDescriptor, TracePolicy::*};
 
@@ -156,19 +157,19 @@ pub static RULES: &[RuleDescriptor] = &[
         guards: &[Guard::Other], may_trigger: &["prov.probe"], may_inhibit: &[], depends_on: &["prov.install"],
         symbol: "activation::hook", docs: "docs/reference/unit-file.md",
         tests: &["a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability", "an_activation_resolves_artifact_references_to_placed_paths", "a_verbose_command_that_succeeds_is_not_reported_as_a_timeout"],
-        trace: CatalogueOnly,
+        trace: Instrumented,
         summary: "After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round.",
     },
     RuleDescriptor {
-        id: "prov.probe", revision: 1, subsystem: "mycelium-wasm-host::activation", responsibilities: &[Response],
+        id: "prov.probe", revision: 2, subsystem: "mycelium-wasm-host::activation", responsibilities: &[Response],
         trigger: "after activation, and on every re-probe tick",
         inputs: &[UNIT, Input { source: "the declared probe argv's exit status", scope: "this node", freshness: "sampled" }],
-        outcomes: &[Outcome { kind: Action, reasons: &["healthy"] }, Outcome { kind: Refusal, reasons: &["initial_probe_failed"] }, Outcome { kind: NoAction, reasons: &["no_probe_declared"] }],
+        outcomes: &[Outcome { kind: Action, reasons: &["healthy"] }, Outcome { kind: Refusal, reasons: &["initial_probe_failed", "probe_failed"] }, Outcome { kind: NoAction, reasons: &["no_probe_declared"] }],
         effects: &["the install's health flag, which `prov.health_pass` reads"],
         guards: &[Guard::Health], may_trigger: &["prov.health_pass"], may_inhibit: &["prov.advertise"], depends_on: &["prov.activation"],
         symbol: "activation::hook / activation::spawn_reprobe", docs: "docs/reference/unit-file.md",
-        tests: &["a_failing_initial_probe_is_an_activation_error", "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability"], trace: CatalogueOnly,
-        summary: "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on.",
+        tests: &["a_failing_initial_probe_is_an_activation_error", "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability"], trace: Instrumented,
+        summary: "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. Recorded under the install's token; a re-probe records only a change of verdict.",
     },
     RuleDescriptor {
         id: "prov.advertise", revision: 1, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Propagation],

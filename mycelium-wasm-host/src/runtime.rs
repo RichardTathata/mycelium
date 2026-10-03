@@ -97,6 +97,59 @@ pub type ProgressFn = Arc<dyn Fn(u64, u64) + Send + Sync>;
 #[derive(Clone)]
 pub struct RuntimeCtx {
     pub agent: Arc<GossipAgent>,
+    /// The decision trace this install records into, when the provisioner has one (plan I5/I6):
+    /// the install's token names every record the install, its activation and its probe produce,
+    /// so `mycelium explain` reads them as one chain.
+    pub trace: Option<Arc<TraceCtx>>,
+    /// The provisioner's install token for this install (`HostedState::Installing { token }`).
+    pub install_token: u64,
+}
+
+/// The decision trace's sink and the stamps every record carries, taken once from the startup
+/// report when the trace is attached (`Provisioner::with_decision_trace`). Shared by the
+/// provisioner's round, the install task and the activation hook.
+pub struct TraceCtx {
+    pub sink:          Arc<mycelium::decision::DecisionSink>,
+    pub node:          String,
+    pub build:         String,
+    pub config_digest: String,
+    pub profile:       Option<(String, u32)>,
+}
+
+impl TraceCtx {
+    /// One record, from values the caller already has. `trigger` names the round or the install
+    /// token; a dropped record is the sink's counter to report, never the caller's problem.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record(&self, rule: &str, trigger: String, outcome: mycelium::decision::OutcomeKind, reason: &str, target: String,
+                  inputs: Vec<mycelium::decision::InputSnapshot>, effect: Option<String>) {
+        use mycelium::decision::{DecisionRecord, ViewStatus};
+        let mut r = DecisionRecord::new(rule, 1, trigger, outcome, reason)
+            .node(self.node.as_str(), 0)
+            .build(self.build.as_str())
+            .config_digest(self.config_digest.as_str())
+            .target(target)
+            .no_parent()
+            .view(ViewStatus::Unknown);
+        if let Some((name, revision)) = &self.profile {
+            r = r.profile(name.as_str(), *revision);
+        }
+        for i in inputs {
+            r = r.input(i);
+        }
+        r = match effect {
+            Some(e) => r.effect(e),
+            None => r.no_effect(),
+        };
+        let _ = self.sink.record(r);
+    }
+}
+
+/// What an entry activation is handed beside the entry and its placed path: the install's token
+/// and the trace, so `[[activation]]` and its probe can record what they decided under the same
+/// token as the install (plan I5's open link, closed 2026-10-03).
+pub struct ActivationCtx {
+    pub install_token: u64,
+    pub trace:         Option<Arc<TraceCtx>>,
 }
 
 /// Why an install failed — **typed by stage** so callers can match on cause (retry a
@@ -455,7 +508,7 @@ pub struct BlobRuntime {
 /// [`BlobRuntime::with_entry_activation`]. It may return a health flag: the install's probe then
 /// also requires the flag, and whoever holds the other end (a stem's re-probe task) keeps it
 /// current. The probe only *reads* the flag, so nothing slow runs under the provisioner's lock.
-pub type EntryActivateFn = dyn Fn(&InstallableEntry, &std::path::Path) -> Result<Option<Arc<std::sync::atomic::AtomicBool>>, String>
+pub type EntryActivateFn = dyn Fn(&InstallableEntry, &std::path::Path, &ActivationCtx) -> Result<Option<Arc<std::sync::atomic::AtomicBool>>, String>
     + Send
     + Sync;
 
@@ -485,7 +538,7 @@ impl BlobRuntime {
     /// placed file stays; the next round retries). An `Ok(Some(flag))` gates the probe on the flag.
     pub fn with_entry_activation(
         mut self,
-        activate: impl Fn(&InstallableEntry, &std::path::Path) -> Result<Option<Arc<std::sync::atomic::AtomicBool>>, String>
+        activate: impl Fn(&InstallableEntry, &std::path::Path, &ActivationCtx) -> Result<Option<Arc<std::sync::atomic::AtomicBool>>, String>
             + Send
             + Sync
             + 'static,
@@ -596,7 +649,7 @@ impl ArtifactRuntime for BlobRuntime {
         &self,
         entry: InstallableEntry,
         source: Arc<dyn ArtifactSource + Send + Sync>,
-        _ctx: RuntimeCtx,
+        ctx: RuntimeCtx,
         progress: ProgressFn,
     ) -> Result<Box<dyn Installed>, InstallError> {
         std::fs::create_dir_all(&self.place_dir)
@@ -657,7 +710,8 @@ impl ArtifactRuntime for BlobRuntime {
         let health = match &self.entry_activate {
             Some(activate) => {
                 let (activate, entry, dest) = (Arc::clone(activate), entry.clone(), dest.clone());
-                tokio::task::spawn_blocking(move || activate(&entry, &dest))
+                let actx = ActivationCtx { install_token: ctx.install_token, trace: ctx.trace.clone() };
+                tokio::task::spawn_blocking(move || activate(&entry, &dest, &actx))
                     .await
                     .map_err(|e| InstallError::Host(format!("activation task: {e}")))?
                     .map_err(InstallError::Activation)?
@@ -714,7 +768,7 @@ mod tests {
             id,
             mycelium::GossipConfig { bind_port: port, ..Default::default() },
         ));
-        RuntimeCtx { agent }
+        RuntimeCtx { agent, trace: None, install_token: 0 }
     }
 
     type ProgressLog = Arc<Mutex<Vec<(u64, u64)>>>;

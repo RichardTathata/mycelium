@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use mycelium::ActivationDecl;
 
 use crate::catalog::InstallableEntry;
+use crate::runtime::{ActivationCtx, TraceCtx};
+use mycelium::decision::OutcomeKind;
 
 /// One live activation the re-probe task keeps current. Lock-order table row 51: the list is a
 /// leaf, taken by the activation (install task) to push and by the re-probe task to snapshot and
@@ -27,6 +29,9 @@ pub struct Watched {
     entry:  InstallableEntry,
     path:   PathBuf,
     health: Arc<AtomicBool>,
+    /// The install's token and trace, so a re-probe's verdict records under the same token.
+    token:  u64,
+    trace:  Option<Arc<TraceCtx>>,
 }
 
 /// The re-probe list, shared by the activation hook and the re-probe task.
@@ -146,31 +151,59 @@ pub fn render(path: &Path) -> Result<PathBuf, String> {
 pub fn hook(
     decls: Vec<ActivationDecl>,
     watch: WatchList,
-) -> impl Fn(&InstallableEntry, &Path) -> Result<Option<Arc<AtomicBool>>, String> + Send + Sync + 'static {
-    move |entry, path| {
+) -> impl Fn(&InstallableEntry, &Path, &ActivationCtx) -> Result<Option<Arc<AtomicBool>>, String> + Send + Sync + 'static {
+    move |entry, path, actx| {
+        let target = format!("{}/{}", entry.provides.namespace, entry.provides.name);
+        let trigger = format!("install token {}", actx.install_token);
+        // `prov.activation` / `prov.probe` records, from the outcome each step already produced,
+        // under the install's token (the link the plan's I5 left open).
+        let rec = |rule: &str, outcome: OutcomeKind, reason: &str, effect: Option<String>| {
+            if let Some(t) = &actx.trace {
+                t.record(rule, trigger.clone(), outcome, reason, target.clone(), Vec::new(), effect);
+            }
+        };
         let Some(decl) = decls
             .iter()
             .find(|d| d.ns == entry.provides.namespace.as_ref() && d.name == entry.provides.name.as_ref())
         else {
+            rec("prov.activation", OutcomeKind::NoAction, "no_declaration", None);
             return Ok(None);
         };
-        let rendered = if decl.resolve_artifact_refs { Some(render(path)?) } else { None };
+        let rendered = if decl.resolve_artifact_refs {
+            match render(path) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    rec("prov.activation", OutcomeKind::Refusal, if e.contains("not placed") { "reference_not_placed_yet" } else { "render_failed" }, None);
+                    return Err(e);
+                }
+            }
+        } else { None };
         let timeout = decl.timeout_secs.map(Duration::from_secs).unwrap_or(DEFAULT_TIMEOUT);
-        run(&expand(&decl.command, entry, path, rendered.as_deref()), timeout)?;
+        if let Err(e) = run(&expand(&decl.command, entry, path, rendered.as_deref()), timeout) {
+            rec("prov.activation", OutcomeKind::Refusal, if e.contains("timed out") { "command_timed_out" } else { "command_failed" }, None);
+            return Err(e);
+        }
+        rec("prov.activation", OutcomeKind::Action, "activated", Some(decl.command.join(" ")));
         if decl.probe.is_empty() {
+            rec("prov.probe", OutcomeKind::NoAction, "no_probe_declared", None);
             return Ok(None);
         }
         // The probe gates the capability (D21): a failing initial probe is an activation error, so the
         // install fails at stage `activation`, nothing is advertised, and the next round retries —
         // never a live install that the health pass withdraws a round later.
-        run(&expand(&decl.probe, entry, path, rendered.as_deref()), PROBE_TIMEOUT)
-            .map_err(|e| format!("initial probe failed after activation: {e}"))?;
+        if let Err(e) = run(&expand(&decl.probe, entry, path, rendered.as_deref()), PROBE_TIMEOUT) {
+            rec("prov.probe", OutcomeKind::Refusal, "initial_probe_failed", None);
+            return Err(format!("initial probe failed after activation: {e}"));
+        }
+        rec("prov.probe", OutcomeKind::Action, "healthy", Some("health flag set; re-probed on the stem's tick".into()));
         let health = Arc::new(AtomicBool::new(true));
         watch.lock().unwrap_or_else(|e| e.into_inner()).push(Watched {
             decl: decl.clone(),
             entry: entry.clone(),
             path: path.to_path_buf(),
             health: Arc::clone(&health),
+            token: actx.install_token,
+            trace: actx.trace.clone(),
         });
         Ok(Some(health))
     }
@@ -190,8 +223,17 @@ pub fn spawn_reprobe(watch: WatchList, every: Duration) -> tokio::task::JoinHand
             for w in live {
                 let ok = tokio::task::spawn_blocking(move || {
                     let rendered = w.decl.resolve_artifact_refs.then(|| PathBuf::from(format!("{}.rendered", w.path.display())));
+                    let was = w.health.load(Ordering::Relaxed);
                     let ok = run(&expand(&w.decl.probe, &w.entry, &w.path, rendered.as_deref()), PROBE_TIMEOUT).is_ok();
                     w.health.store(ok, Ordering::Relaxed);
+                    // A re-probe records only a **change** of verdict (the steady state is the
+                    // install's record), under the install's token.
+                    if ok != was && let Some(t) = &w.trace {
+                        let target = format!("{}/{}", w.entry.provides.namespace, w.entry.provides.name);
+                        let (outcome, reason) = if ok { (OutcomeKind::Action, "healthy") } else { (OutcomeKind::Refusal, "probe_failed") };
+                        t.record("prov.probe", format!("install token {}", w.token), outcome, reason, target, Vec::new(),
+                            Some(if ok { "health flag set".into() } else { "health flag cleared; the next health pass withdraws".into() }));
+                    }
                     ok
                 })
                 .await
@@ -256,7 +298,13 @@ mod tests {
         };
         let entry = crate::InstallableEntry::new(mycelium::Capability::new("data", "pack"), crate::ArtifactId::from_bytes([7u8; 32]));
         let watch: WatchList = Default::default();
-        let got = hook(vec![decl], Arc::clone(&watch))(&entry, &path);
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        let actx = ActivationCtx { install_token: 7, trace: Some(Arc::new(TraceCtx { sink: Arc::clone(&sink), node: "n".into(), build: "t".into(), config_digest: "d".into(), profile: None })) };
+        let got = hook(vec![decl], Arc::clone(&watch))(&entry, &path, &actx);
+        // The link the plan's I5 left open: activation and probe record under the install's token.
+        let recs: Vec<(String, String, String)> = sink.snapshot().into_iter().map(|r| (r.rule, r.reason, r.trigger)).collect();
+        assert_eq!(recs, [("prov.activation".to_string(), "activated".to_string(), "install token 7".to_string()),
+                          ("prov.probe".to_string(), "initial_probe_failed".to_string(), "install token 7".to_string())], "{recs:?}");
         match got {
             Err(e) => assert!(e.contains("probe"), "names the probe: {e}"),
             Ok(h) => panic!("a failing initial probe must be an activation error, got Ok({:?})", h.map(|h| h.load(std::sync::atomic::Ordering::Relaxed))),

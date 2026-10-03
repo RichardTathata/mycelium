@@ -13,7 +13,7 @@ Schema `mycelium.rules/1` · 26 rules.
 | [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
 | [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
 | [`membership.governed`](#membershipgoverned) | Response | instrumented | This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view. |
-| [`prov.activation`](#provactivation) | Response | catalogue only | After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round. |
+| [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
 | [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
 | [`prov.eligible`](#proveligible) | Response | instrumented | This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
@@ -21,7 +21,7 @@ Schema `mycelium.rules/1` · 26 rules.
 | [`prov.install`](#provinstall) | Response | instrumented | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
 | [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry. |
-| [`prov.probe`](#provprobe) | Response | catalogue only | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. |
+| [`prov.probe`](#provprobe) | Response | instrumented | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. Recorded under the install's token; a re-probe records only a change of verdict. |
 | [`prov.promotion`](#provpromotion) | Response | instrumented | A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20). |
 | [`prov.provenance`](#provprovenance) | Authority | catalogue only | An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says. |
 | [`prov.rights_admission`](#provrights_admission) | Authority | instrumented | An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did. |
@@ -158,7 +158,7 @@ This node rolls to join or leave a governed group against the intent's band — 
 
 ## `prov.activation`
 
-rev 1 · `mycelium-wasm-host::activation` · Response · trace: catalogue only
+rev 1 · `mycelium-wasm-host::activation` · Response · trace: instrumented
 
 After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round.
 
@@ -318,9 +318,9 @@ Fewer live providers than the declared floor, as this node sees it, makes this n
 
 ## `prov.probe`
 
-rev 1 · `mycelium-wasm-host::activation` · Response · trace: catalogue only
+rev 2 · `mycelium-wasm-host::activation` · Response · trace: instrumented
 
-The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on.
+The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. Recorded under the install's token; a re-probe records only a change of verdict.
 
 - **Trigger:** after activation, and on every re-probe tick
 - **Reads:**
@@ -328,7 +328,7 @@ The probe gates the capability: a failing initial probe is an activation error (
   - `the declared probe argv's exit status` — scope: this node; freshness: sampled
 - **Outcomes:**
   - Action: `healthy`
-  - Refusal: `initial_probe_failed`
+  - Refusal: `initial_probe_failed`, `probe_failed`
   - NoAction: `no_probe_declared`
 - **Effects:** the install's health flag, which `prov.health_pass` reads
 - **Guards:** Health

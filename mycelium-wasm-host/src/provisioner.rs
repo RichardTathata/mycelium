@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use mycelium::control::ledger::{PublishedRightsHead, RightsLedger};
 use mycelium::mandate::PrincipalId;
-use mycelium::decision::{DecisionRecord, DecisionSink, InputSnapshot, OutcomeKind, Provenance, ViewStatus};
+use mycelium::decision::{DecisionSink, InputSnapshot, OutcomeKind, Provenance};
 use mycelium::{CapFilter, CapValue, Capability, CapabilityReg, GossipAgent};
 
 use crate::artifact::{ArtifactId, ArtifactKind, ArtifactSource};
@@ -191,17 +191,7 @@ pub struct Provisioner {
     invocations:  InvocationLog,
 }
 
-/// Every `prov.*` rule the pilot records is at semantic revision 1 (`rules::RULES`).
-const PILOT_RULE_REV: u32 = 1;
-
-/// The trace's stamps, taken once at attach time from the startup report, and its sink.
-struct Trace {
-    sink:          Arc<DecisionSink>,
-    node:          String,
-    build:         String,
-    config_digest: String,
-    profile:       Option<(String, u32)>,
-}
+use crate::runtime::TraceCtx as Trace;
 
 /// One round's recorder: every decision point in `provision_round` hands it the values it already
 /// produced. G7: no clock (the record's `at_ms` is absent — the round reads none), no draw of its own,
@@ -213,26 +203,7 @@ struct RoundTrace<'a> {
 
 impl RoundTrace<'_> {
     fn record(&self, rule: &str, outcome: OutcomeKind, reason: &str, target: String, inputs: Vec<InputSnapshot>, effect: Option<String>) {
-        let t = self.trace;
-        let mut r = DecisionRecord::new(rule, PILOT_RULE_REV, format!("round {}", self.round), outcome, reason)
-            .node(t.node.as_str(), 0)
-            .build(t.build.as_str())
-            .config_digest(t.config_digest.as_str())
-            .target(target)
-            .no_parent()
-            .view(ViewStatus::Unknown);
-        if let Some((name, revision)) = &t.profile {
-            r = r.profile(name.as_str(), *revision);
-        }
-        for i in inputs {
-            r = r.input(i);
-        }
-        r = match effect {
-            Some(e) => r.effect(e),
-            None => r.no_effect(),
-        };
-        // A dropped record is the sink's counter to report, never this round's problem.
-        let _ = t.sink.record(r);
+        self.trace.record(rule, format!("round {}", self.round), outcome, reason, target, inputs, effect);
     }
 }
 
@@ -705,7 +676,7 @@ impl Provisioner {
             // `prov.install`'s record, after `hosted` is released (G7), from the outcome the task has.
             let record = |outcome: OutcomeKind, reason: &str, effect: Option<String>| {
                 if let Some(t) = &trace {
-                    RoundTrace { trace: t, round }.record("prov.install", outcome, reason, target.clone(), Vec::new(), effect);
+                    t.record("prov.install", format!("round {round} · install token {token}"), outcome, reason, target.clone(), Vec::new(), effect);
                 }
             };
 
@@ -737,7 +708,7 @@ impl Provisioner {
                         Some(agent.capabilities().advertise_capability(cap, ADVERTISE_INTERVAL));
                 })
             };
-            let ctx = RuntimeCtx { agent: Arc::clone(&agent) };
+            let ctx = RuntimeCtx { agent: Arc::clone(&agent), trace: trace.clone(), install_token: token };
 
             let result = runtime.install(entry, source, ctx, progress).await;
             loading.lock().unwrap().1.take(); // install resolved — the loading tier ends
@@ -2477,5 +2448,36 @@ mod tests {
         assert!(st.dropped_full >= 2, "{st:?}");
         assert_eq!(sink.snapshot()[0].rule, "prov.eligible", "the prefix, not the tail");
         agent.shutdown().await;
+    }
+
+    /// I5's last gate, under the replay seams: the self-election draw is the round's one draw, and
+    /// with a sink it is made exactly as often as without — the kernel's choice trace holds the same
+    /// `select` draws. The provisioner is built on an unstarted agent (the draw touches no mesh), on
+    /// tokio's current-thread runtime so every seam read is this thread's.
+    #[cfg(feature = "sim")]
+    #[tokio::test]
+    async fn the_trace_makes_no_extra_draw_under_the_replay_seams() {
+        use mycelium::decision::DecisionSink;
+        use mycelium::sim_seam::{install, take, SimContext};
+        use mycelium_sim::{ChoiceKind, Kernel, Sources};
+        fn draws(sink: Option<Arc<DecisionSink>>) -> (Vec<bool>, Vec<String>) {
+            install(SimContext { kernel: Kernel::recording(), sources: Sources::seeded(7, 1_700_000_000_000), node: "pilot".into(), offsets: Default::default() });
+            let port = alloc_port();
+            let agent = Arc::new(GossipAgent::new(mycelium::NodeId::new("127.0.0.1", port).unwrap(), mycelium::GossipConfig { bind_port: port, ..Default::default() }));
+            let host = Arc::new(WasmHost::new().expect("engine"));
+            let mut prov = Provisioner::new(agent, host, InstallableCatalog::new(), Arc::new(InMemorySource::new()), 0.5);
+            if let Some(s) = &sink { prov.with_decision_trace(Arc::clone(s)); }
+            let outcomes: Vec<bool> = (0..16).map(|_| prov.self_elects_traced("text/echo")).collect();
+            let ctx = take().expect("this thread's kernel");
+            let streams = ctx.kernel.trace().entries().iter().filter(|c| c.kind == ChoiceKind::Rng).map(|c| c.stream.clone()).collect();
+            (outcomes, streams)
+        }
+        let (off, off_streams) = draws(None);
+        let sink = Arc::new(DecisionSink::default());
+        let (on, on_streams) = draws(Some(Arc::clone(&sink)));
+        assert_eq!(off, on, "the same seed draws the same elections with a sink as without");
+        assert_eq!(off_streams, on_streams, "and the kernel saw the same draws: {off_streams:?} vs {on_streams:?}");
+        assert_eq!(off_streams.iter().filter(|s| s.as_str() == "select").count(), 16);
+        assert_eq!(sink.stats().recorded, 16, "every draw recorded, none drawn by the record");
     }
 }
