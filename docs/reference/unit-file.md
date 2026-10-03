@@ -232,7 +232,7 @@ reinstalls. Activations need `"blob"` in `[hosts].kinds`.
 | `ns` | string | required | Namespace of the capability the blob provides. |
 | `name` | string | required | Name of the capability the blob provides. |
 | `command` | array of strings | required | The argv to run. No shell unless you name one. An empty list is refused. |
-| `probe` | array of strings | empty | The argv whose exit 0 means healthy. Empty means *the placed file exists*. The probe has a 30 s timeout. |
+| `probe` | array of strings | empty | The argv whose exit 0 means healthy. Empty means *the placed file exists*. The probe has a 30 s timeout. A failing *initial* probe fails the install at stage `activation` — nothing is advertised, the next round retries (2026-10-03). |
 | `timeout_secs` | integer | `300` | How long `command` may run. `0` is refused. |
 | `resolve_artifact_refs` | boolean | `false` | Write `{rendered}`: a copy of the placed file with every `artifact:<64 hex>` reference replaced by that artifact's placed path. A reference not placed yet fails the activation, and the next round retries. |
 

@@ -160,8 +160,12 @@ pub fn hook(
         if decl.probe.is_empty() {
             return Ok(None);
         }
-        let healthy = run(&expand(&decl.probe, entry, path, rendered.as_deref()), PROBE_TIMEOUT).is_ok();
-        let health = Arc::new(AtomicBool::new(healthy));
+        // The probe gates the capability (D21): a failing initial probe is an activation error, so the
+        // install fails at stage `activation`, nothing is advertised, and the next round retries —
+        // never a live install that the health pass withdraws a round later.
+        run(&expand(&decl.probe, entry, path, rendered.as_deref()), PROBE_TIMEOUT)
+            .map_err(|e| format!("initial probe failed after activation: {e}"))?;
+        let health = Arc::new(AtomicBool::new(true));
         watch.lock().unwrap_or_else(|e| e.into_inner()).push(Watched {
             decl: decl.clone(),
             entry: entry.clone(),
@@ -229,6 +233,36 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("the last words"), "the tail survives: {}", &err[err.len().saturating_sub(80)..]);
         assert!(err.len() <= STDERR_TAIL_BYTES + 200, "bounded: {} bytes", err.len());
+    }
+
+    /// A failing *initial* probe is an activation error, not a live install: `[[activation]]` says the
+    /// probe gates the capability (D21), and until 2026-10-03 the hook returned `Ok(Some(false))` —
+    /// the install completed, the capability was advertised and counted, and only the next round's
+    /// health pass withdrew it (plan I4 reconnaissance; the I5 exit gate "an activation failure is
+    /// never recorded as success").
+    #[test]
+    fn a_failing_initial_probe_is_an_activation_error() {
+        let dir = std::env::temp_dir().join(format!("act-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pack");
+        std::fs::write(&path, b"bytes").unwrap();
+        let decl = ActivationDecl {
+            ns: "data".into(),
+            name: "pack".into(),
+            command: vec!["true".into()],
+            probe: vec!["false".into()],
+            timeout_secs: Some(5),
+            resolve_artifact_refs: false,
+        };
+        let entry = crate::InstallableEntry::new(mycelium::Capability::new("data", "pack"), crate::ArtifactId::from_bytes([7u8; 32]));
+        let watch: WatchList = Default::default();
+        let got = hook(vec![decl], Arc::clone(&watch))(&entry, &path);
+        match got {
+            Err(e) => assert!(e.contains("probe"), "names the probe: {e}"),
+            Ok(h) => panic!("a failing initial probe must be an activation error, got Ok({:?})", h.map(|h| h.load(std::sync::atomic::Ordering::Relaxed))),
+        }
+        assert!(watch.lock().unwrap().is_empty(), "nothing is watched for a capability that never went live");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A command that genuinely hangs still times out, and is killed and reaped.

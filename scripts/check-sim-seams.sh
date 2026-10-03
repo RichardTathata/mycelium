@@ -69,6 +69,17 @@ PATTERN='SystemTime::now|Instant::now|fastrand::|tokio::time::(sleep|interval|ti
 
 # Production sources only. `mycelium-sim` is the seam; `loom-spike` is a different mechanism
 # (coverage map: Loom owns CAS interleavings, not the kernel).
+# The wasm host is outside the main scan (its artifact/fs code is a baseline decision of its own), but a
+# **random draw** there is replay-critical: the provisioner's self-election was raw `fastrand`, so under
+# `sim` the draw was not a kernel choice and a recording could not reproduce who installed (2026-10-03).
+# Zero baseline, no exceptions.
+host_rng=$(grep -rnE 'fastrand::|rand::(thread_rng|random)' mycelium-wasm-host/src --include='*.rs' | grep -vE '^\S+:[0-9]+:\s*//' || true)
+if [ -n "$host_rng" ]; then
+  echo "check-sim-seams: a random draw outside the seam in mycelium-wasm-host (route it through mycelium::sim_seam::rng_*):" >&2
+  echo "$host_rng" >&2
+  exit 1
+fi
+
 scan_files() {
   find src mycelium-core/src -name '*.rs' \
     ! -name '*_tests.rs' \
