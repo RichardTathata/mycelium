@@ -292,12 +292,11 @@ where
                     Some(c) => c.decrypt(&raw),
                     None    => Some(raw.to_vec()),
                 };
-                let bytes = match decrypted {
-                    Some(b) => b,
-                    None => {
-                        warn!("persistence: snapshot.bin failed to decrypt, skipping");
-                        Vec::new()
-                    }
+                // An unreadable snapshot is an **error**, never a skip (`persist.replay`, plan §8):
+                // skipping it started the node from the WAL alone and let the next snapshot
+                // overwrite state nobody had read. The caller decides (refuse, or quarantine).
+                let Some(bytes) = decrypted else {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("persistence: {} does not decrypt with the configured cipher", snapshot_path.display())));
                 };
                 match codec::from_slice::<KvSnapshot>(&bytes) {
                     Ok(snap) => {
@@ -309,15 +308,11 @@ where
                         hlc
                     }
                     Err(e) => {
-                        warn!("persistence: corrupt snapshot.bin, skipping: {e}");
-                        0
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("persistence: {} is corrupt: {e}", snapshot_path.display())));
                     }
                 }
             }
-            Err(e) => {
-                warn!("persistence: failed to read snapshot.bin: {e}");
-                0
-            }
+            Err(e) => return Err(io::Error::new(e.kind(), format!("persistence: failed to read {}: {e}", snapshot_path.display()))),
         }
     } else {
         0
@@ -331,12 +326,22 @@ where
     // the latter (durability invariant 2, module doc). `snapshot_hlc` stays
     // informational only.
     if wal_path.exists() {
-        match crate::sim_seam::fs_read(&wal_path, WAL_FILE).await {
-            Ok(bytes) => decode_wal_records(&bytes, cipher, |entry| {
-                if entry.timestamp > max_ts { max_ts = entry.timestamp; }
-                apply_fn(entry);
-            }),
-            Err(e) => warn!("persistence: failed to read wal.bin: {e}"),
+        let bytes = crate::sim_seam::fs_read(&wal_path, WAL_FILE).await
+            .map_err(|e| io::Error::new(e.kind(), format!("persistence: failed to read {}: {e}", wal_path.display())))?;
+        match decode_wal_records(&bytes, cipher, |entry| {
+            if entry.timestamp > max_ts { max_ts = entry.timestamp; }
+            apply_fn(entry);
+        }) {
+            WalEnd::Clean => {}
+            WalEnd::Torn { offset } => {
+                // A crash's signature: the records before it were applied; the writer appends after it.
+                warn!("persistence: wal.bin ends inside a record at byte {offset} (a torn tail from a crash); replayed what precedes it");
+            }
+            WalEnd::Corrupt { offset } => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+                    "persistence: {} holds a corrupt record at byte {offset} with data after it; the records before it were replayed, nothing after it can be trusted",
+                    wal_path.display())));
+            }
         }
     }
 
@@ -348,29 +353,69 @@ where
 /// the first zero/oversized length, truncated tail, decrypt failure or decode error
 /// (a corrupt tail — the same stop rule for replay and for the snapshot merge, so
 /// the two never disagree about what the WAL holds).
-fn decode_wal_records<F: FnMut(SyncEntry)>(bytes: &[u8], cipher: Cipher<'_>, mut f: F) {
+fn decode_wal_records<F: FnMut(SyncEntry)>(bytes: &[u8], cipher: Cipher<'_>, mut f: F) -> WalEnd {
     let mut pos = 0usize;
     while pos + 4 <= bytes.len() {
         let len = u32::from_le_bytes([
             bytes[pos], bytes[pos+1], bytes[pos+2], bytes[pos+3],
         ]) as usize;
+        let record_at = pos;
         pos += 4;
-        if len == 0 || len > MAX_RECORD_BYTES { break; }
-        if pos + len > bytes.len()            { break; } // truncated tail
+        // A zero or oversized length prefix: a crash can leave a half-written prefix (zeros from
+        // preallocation), so this is a torn tail when nothing but that prefix follows, and
+        // corruption when data does.
+        if len == 0 || len > MAX_RECORD_BYTES {
+            return if bytes.len() > pos && bytes[pos..].iter().any(|b| *b != 0) { WalEnd::Corrupt { offset: record_at } } else { WalEnd::Torn { offset: record_at } };
+        }
+        if pos + len > bytes.len() { return WalEnd::Torn { offset: record_at }; } // the file ends inside the record
         let record_bytes = &bytes[pos..pos + len];
         pos += len;
         let decrypted = match cipher {
             Some(c) => match c.decrypt(record_bytes) {
                 Some(b) => b,
-                None    => break,
+                None    => return WalEnd::Corrupt { offset: record_at },
             },
             None => record_bytes.to_vec(),
         };
         match codec::from_slice::<SyncEntry>(&decrypted) {
             Ok(entry) => f(entry),
-            Err(_)    => break, // corrupt tail — stop
+            Err(_)    => return WalEnd::Corrupt { offset: record_at }, // a whole record that does not decode
         }
     }
+    WalEnd::Clean
+}
+
+/// Where a walk of the WAL stopped, and why — the difference between a crash and corruption
+/// (`persist.replay`, plan §8). A torn tail is a crash's normal signature: the file ends inside the
+/// last record, and everything before it is good. A corrupt record — one that is all there and does
+/// not decrypt or decode, or a bad length prefix with data after it — is not a crash, and nothing
+/// after it can be trusted or compacted over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalEnd {
+    /// Every record decoded.
+    Clean,
+    /// The file ends inside a record at `offset`; the records before it are complete.
+    Torn { offset: usize },
+    /// A record at `offset` is present and unreadable, with data after it.
+    Corrupt { offset: usize },
+}
+
+/// Move `snapshot.bin` and `wal.bin` aside as `<name>.unreadable-N` (the first free `N`), never
+/// deleting either: the files stay for a human, and the node that chose `quarantine` starts empty.
+/// Returns the paths moved. Startup-only filesystem setup.
+pub fn quarantine_unreadable(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut moved = Vec::new();
+    for name in ["snapshot.bin", "wal.bin"] {
+        let src = dir.join(name);
+        if !src.exists() { continue; }
+        for n in 1u32..10_000 {
+            let dst = dir.join(format!("{name}.unreadable-{n}"));
+            if dst.exists() { continue; }
+            if std::fs::rename(&src, &dst).is_ok() { moved.push(dst); }
+            break;
+        }
+    }
+    moved
 }
 
 // ── WalWriter task ───────────────────────────────────────────────────────────
@@ -716,12 +761,19 @@ async fn do_snapshot(
     // `wal_merge_removed()` is the item 6 PR 4 witness and is `false` in every shipped build.
     if !wal_bytes.is_empty() && !wal_merge_removed() {
         let mut tail: AHashMap<Arc<str>, SyncEntry> = AHashMap::new();
-        decode_wal_records(&wal_bytes, cipher, |rec| {
+        let end = decode_wal_records(&wal_bytes, cipher, |rec| {
             match tail.get(&rec.key) {
                 Some(cur) if !sync_entry_wins(&rec, cur) => {}
                 _ => { tail.insert(Arc::clone(&rec.key), rec); }
             }
         });
+        // A corrupt record must ABORT the snapshot: merging what precedes it and truncating the
+        // rest would compact over bytes nobody read (plan §8, `persist.replay`). A torn tail is a
+        // crash's signature and is carried as before.
+        if let WalEnd::Corrupt { offset } = end {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+                "persistence: wal.bin holds a corrupt record at byte {offset}; the snapshot is aborted and the WAL left as it is")));
+        }
         for e in entries.iter_mut() {
             if let Some(rec) = tail.remove(&e.key)
                 && sync_entry_wins(&rec, e) {
@@ -1151,7 +1203,8 @@ mod durability_tests {
     async fn probe_replay_stops_at_corrupt_tail_and_keeps_prior_records() {
         // Run-61 falsification probe (Robustness): three good records then a torn fourth
         // (length prefix promises more bytes than exist) and, separately, an absurd length
-        // prefix. Replay must keep the three, stop cleanly, never panic.
+        // prefix with data after it. Replay keeps the three and stops cleanly at the torn tail;
+        // the absurd prefix is corruption and an error, never a panic.
         let dir = unique_dir("torn");
         let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
         for i in 0..3u64 { wal_append(&mut file, &entry(&format!("t/{i}"), b"ok", 10 + i, false), true, None).await.unwrap(); }
@@ -1161,16 +1214,19 @@ mod durability_tests {
         let restored = replay_into_fresh_store(&dir).await;
         for i in 0..3 { assert_eq!(live_value(&restored, &format!("t/{i}")).as_deref(), Some(&b"ok"[..])); }
         assert_eq!(restored.store.pin().len(), 3, "the torn record must not produce an entry");
-        // absurd length prefix (> MAX_RECORD_BYTES) after valid records → stop, no panic
+        // absurd length prefix (> MAX_RECORD_BYTES) with data after it: since 2026-10-03 that is
+        // **corruption**, not a torn tail — the record before it is handed over, then an error naming
+        // the byte (never a panic, never a silent stop a snapshot could compact over).
         let dir2 = unique_dir("absurd");
         let mut f2 = open_wal(&dir2.join("wal.bin")).await.unwrap();
         wal_append(&mut f2, &entry("a/0", b"ok", 1, false), true, None).await.unwrap();
         f2.write_all(&u32::MAX.to_le_bytes()).await.unwrap();
         f2.write_all(b"garbage").await.unwrap();
         f2.sync_data().await.unwrap();
-        let r2 = replay_into_fresh_store(&dir2).await;
-        assert_eq!(live_value(&r2, "a/0").as_deref(), Some(&b"ok"[..]));
-        assert_eq!(r2.store.pin().len(), 1);
+        let mut seen = Vec::new();
+        let r2 = replay(&dir2, None, |e| seen.push(e.key.to_string())).await;
+        assert!(r2.is_err(), "an absurd length with data after it is corruption: {r2:?}");
+        assert_eq!(seen, ["a/0"], "the record before it was handed over");
         std::fs::remove_dir_all(&dir).ok(); std::fs::remove_dir_all(&dir2).ok();
     }
 
@@ -1631,6 +1687,95 @@ mod durability_tests {
         assert!(!dir.join("snapshot.bin").exists(), "no snapshot may be installed on a failed read-back");
         assert_eq!(std::fs::metadata(dir.join("scratch.log")).unwrap().len(), before,
             "the WAL handle must not be truncated when the snapshot aborted");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `persist.replay` (plan §8): an **unreadable snapshot is an error, never a skip**. Before the
+    /// fix, a corrupt `snapshot.bin` was logged and skipped, the node started from the WAL alone, and
+    /// the next snapshot overwrote the unreadable one — compaction over state nobody had read.
+    #[tokio::test]
+    async fn an_unreadable_snapshot_is_a_replay_error_not_a_skip() {
+        let dir = unique_dir("corrupt-snapshot");
+        std::fs::write(dir.join("snapshot.bin"), b"this is not a snapshot").unwrap();
+        let r = replay(&dir, None, |_| {}).await;
+        assert!(r.is_err(), "a corrupt snapshot must be an error: {r:?}");
+        assert!(r.unwrap_err().to_string().contains("snapshot.bin"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A **corrupt record followed by more data** is corruption and an error; a **torn tail** (the file
+    /// ends inside the last record) is a crash's normal signature and is not. Before the fix both
+    /// stopped the walk silently, so the records after a corrupt one were dropped from replay and —
+    /// the snapshot merge stopping at the same place — truncated for good.
+    #[tokio::test]
+    async fn a_corrupt_record_followed_by_data_is_an_error_but_a_torn_tail_is_not() {
+        let dir = unique_dir("corrupt-mid-wal");
+        {
+            let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+            wal_append(&mut file, &entry("k1", b"v1", 1, false), true, None).await.unwrap();
+        }
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(dir.join("wal.bin")).unwrap();
+            f.write_all(&8u32.to_le_bytes()).unwrap();
+            f.write_all(&[0xFF; 8]).unwrap(); // a full-length record that does not decode
+        }
+        {
+            let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+            wal_append(&mut file, &entry("k3", b"v3", 3, false), true, None).await.unwrap();
+        }
+        let mut seen = Vec::new();
+        let r = replay(&dir, None, |e| seen.push(e.key.to_string())).await;
+        assert!(r.is_err(), "a corrupt record with data after it must be an error: {r:?}");
+        assert!(r.unwrap_err().to_string().contains("wal.bin"));
+        assert_eq!(seen, ["k1"], "the records before the corruption were handed over");
+
+        let torn = unique_dir("torn-tail");
+        {
+            let mut file = open_wal(&torn.join("wal.bin")).await.unwrap();
+            wal_append(&mut file, &entry("k1", b"v1", 1, false), true, None).await.unwrap();
+        }
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(torn.join("wal.bin")).unwrap();
+            f.write_all(&50u32.to_le_bytes()).unwrap();
+            f.write_all(&[1, 2, 3]).unwrap(); // the file ends inside the record
+        }
+        let mut seen = Vec::new();
+        let r = replay(&torn, None, |e| seen.push(e.key.to_string())).await;
+        assert!(r.is_ok(), "a torn tail is a crash, not corruption: {r:?}");
+        assert_eq!(seen, ["k1"]);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&torn).ok();
+    }
+
+    /// The snapshot must **abort** on a corrupt WAL record — it would otherwise merge the records
+    /// before it and truncate everything after it, including the data a human might still read.
+    #[tokio::test]
+    async fn a_snapshot_aborts_on_a_corrupt_wal_record_instead_of_truncating_past_it() {
+        let dir  = unique_dir("corrupt-snapshot-abort");
+        let node = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc  = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        {
+            let mut file = open_wal(&dir.join("wal.bin")).await.unwrap();
+            wal_append(&mut file, &entry("k1", b"v1", 1, false), true, None).await.unwrap();
+        }
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(dir.join("wal.bin")).unwrap();
+            f.write_all(&8u32.to_le_bytes()).unwrap();
+            f.write_all(&[0xFF; 8]).unwrap();
+            f.write_all(&8u32.to_le_bytes()).unwrap();
+            f.write_all(&[0xEE; 8]).unwrap(); // data after the corruption
+        }
+        let before = std::fs::metadata(dir.join("wal.bin")).unwrap().len();
+        let mut scratch = open_wal(&dir.join("scratch.log")).await.unwrap();
+        wal_append(&mut scratch, &entry("k", b"v", 1, false), true, None).await.unwrap();
+        let r = do_snapshot(&dir, &state, &node, &hlc, 1, &mut scratch, None).await;
+        assert!(r.is_err(), "a corrupt WAL record must abort the snapshot");
+        assert!(!dir.join("snapshot.bin").exists(), "nothing installed over a WAL nobody could read");
+        assert_eq!(std::fs::metadata(dir.join("wal.bin")).unwrap().len(), before, "the WAL is left for a human");
         std::fs::remove_dir_all(&dir).ok();
     }
 

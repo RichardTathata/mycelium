@@ -4666,7 +4666,7 @@ async fn test_ws3_data_at_rest_cipher_encrypts_wal_and_round_trips() {
             base_path: base.clone(),
             sync_mode: SyncMode::Flush,
             snapshot_wal_threshold: 1_000_000, // keep data in wal.bin, no auto-snapshot
-            snapshot_interval_secs: 3_600,
+            snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
         });
         GossipAgent::new(id.clone(), cfg)
     };
@@ -4773,6 +4773,45 @@ async fn a_gateway_that_cannot_come_up_fails_the_start() {
 /// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`
 /// beside it; this pin is what that PR changes, in the open.
 #[cfg(feature = "consensus")]
+/// `persist.replay` (plan §8): a node with persisted state it cannot read **refuses to start** by
+/// default, naming the file — it used to start from the WAL alone and overwrite the unreadable
+/// snapshot at its next snapshot. Under `on_unreadable = "quarantine"` it moves the file aside (never
+/// deleted) and starts.
+#[tokio::test]
+async fn a_node_refuses_to_start_over_an_unreadable_snapshot_unless_told_to_quarantine() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-unreadable-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("snapshot.bin"), b"this is not a snapshot").unwrap();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(PersistenceConfig { base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 10, snapshot_interval_secs: 300, on_unreadable: OnUnreadable::Refuse });
+
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    let e = a.start().await.expect_err("an unreadable snapshot must refuse the start");
+    assert!(e.to_string().contains("snapshot.bin") && e.to_string().contains("quarantine"), "{e}");
+    assert!(dir.join("snapshot.bin").exists(), "nothing was moved or overwritten");
+    a.shutdown().await;
+
+    cfg.persistence.as_mut().unwrap().on_unreadable = OnUnreadable::Quarantine;
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.expect("quarantine moves the file aside and starts");
+    assert!(dir.join("snapshot.bin.unreadable-1").exists(), "moved aside, never deleted: {:?}", std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>());
+    assert_eq!(std::fs::read(dir.join("snapshot.bin.unreadable-1")).unwrap(), b"this is not a snapshot", "the unreadable bytes are kept as they were");
+    if let Ok(now) = std::fs::read(dir.join("snapshot.bin")) {
+        assert_ne!(now, b"this is not a snapshot", "a snapshot written since is a fresh one, not the unreadable file");
+    }
+    let report = b.guarantee_report();
+    let st = report.entries.iter().find(|e| e.id == "persist.unreadable_refused").map(|e| format!("{:?}", e.resolution)).unwrap_or_default();
+    assert!(st.contains("NotConfigured"), "quarantine is not the refusing setting: {st}");
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test]
 async fn floor_committed_persisted_is_true_when_persistence_unconfigured() {
     use crate::{ConsensusConfig, ConsensusResult};
@@ -4811,7 +4850,7 @@ async fn consensus_commit_reports_persisted_and_survives_restart() {
             base_path: base.clone(),
             sync_mode: SyncMode::Async, // append_sync must force the fsync here
             snapshot_wal_threshold: 1_000_000,
-            snapshot_interval_secs: 3_600,
+            snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
         });
         GossipAgent::new(id.clone(), cfg)
     };
@@ -6333,7 +6372,7 @@ async fn gateway_consistent_set_reports_local_durability_beside_persisted() {
             base_path: base.clone(),
             sync_mode: SyncMode::Flush,
             snapshot_wal_threshold: 1_000_000,
-            snapshot_interval_secs: 3_600,
+            snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
         });
         let agent = GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg);
         agent.start().await.expect("start");
@@ -6430,7 +6469,7 @@ mod receipt_tests {
                 base_path: base.clone(),
                 sync_mode,
                 snapshot_wal_threshold: 1_000_000,
-                snapshot_interval_secs: 3_600,
+                snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
             },
             base,
         )
@@ -10452,7 +10491,7 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
         base_path: root.join("data"),
         sync_mode: SyncMode::Flush,
         snapshot_wal_threshold: 1_000_000,
-        snapshot_interval_secs: 3_600,
+        snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
     });
     cfg.profile = Some("secure-single-domain".into());
 

@@ -817,6 +817,16 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               Some(_) => Resolution::Enforced,
               None => Resolution::NotConfigured { missing: "[persistence]" },
           }),
+        g("persist.unreadable_refused", 1, "persistence", Node,
+          "a node does not start over persisted state it could not read — nothing is compacted over an unreadable snapshot or WAL",
+          "`[persistence]` with `on_unreadable = \"refuse\"` (the default)",
+          &["lifecycle (replay; `persistence::quarantine_unreadable`)", "persistence::do_snapshot (aborts on a corrupt record)"], "docs/operations/deployment.md",
+          |c| if c.config.persistence.is_some() { None } else { Some("no `[persistence]` configured") },
+          |c| match c.config.persistence.as_ref().map(|p| p.on_unreadable) {
+              Some(crate::config::OnUnreadable::Refuse) => Resolution::Enforced,
+              Some(crate::config::OnUnreadable::Quarantine) => Resolution::NotConfigured { missing: "on_unreadable = \"refuse\" (quarantine moves unreadable files aside and starts from what was readable)" },
+              None => Resolution::NotConfigured { missing: "[persistence]" },
+          }),
         g("at_rest.cipher", 1, "persistence", Node,
           "the WAL and snapshot are encrypted at rest",
           "`[persistence]`; `with_data_at_rest_cipher`, before `start()`",
@@ -942,7 +952,7 @@ mod tests {
         assert_eq!(state(&r, "persist.sync_mode"), "not_applicable");
         assert_eq!(state(&r, "at_rest.cipher"), "not_applicable");
         let mut cfg = GossipConfig::default();
-        cfg.persistence = Some(crate::config::PersistenceConfig { base_path: std::env::temp_dir().join(format!("g-{}", crate::test_util::alloc_port())), sync_mode: crate::config::SyncMode::Async, snapshot_wal_threshold: 1_000_000, snapshot_interval_secs: 3_600 });
+        cfg.persistence = Some(crate::config::PersistenceConfig { on_unreadable: Default::default(), base_path: std::env::temp_dir().join(format!("g-{}", crate::test_util::alloc_port())), sync_mode: crate::config::SyncMode::Async, snapshot_wal_threshold: 1_000_000, snapshot_interval_secs: 3_600 });
         let r = agent(cfg).guarantee_report();
         assert_eq!(state(&r, "persist.configured"), "enforced");
         assert_eq!(state(&r, "persist.sync_mode"), "not_configured", "the default sync mode is async");

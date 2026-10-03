@@ -165,6 +165,15 @@ every sync in the WAL, not only this one — development only. Tune `snapshot_in
 bounded; the snapshot pass raises the node's opacity for its duration. Since v2.4.2
 (`CHANGELOG § [2.4.2]`); the invariants are canon in `mycelium-core/src/persistence.rs`.
 
+**Unreadable state fails closed** (`on_unreadable`, default `"refuse"`). A corrupt or undecryptable
+`snapshot.bin`, or a WAL record that is all there and does not decode, is **not** a crash's torn tail
+(the file ending inside its last record, which replay tolerates and the writer appends after): the node
+refuses to start, naming the file and the byte, and a snapshot that meets one aborts rather than
+truncating past it. `on_unreadable = "quarantine"` is the operator's explicit fail-open: the files are
+moved aside as `*.unreadable-N` (never deleted) and the node starts from what was readable; the fleet
+re-fills the rest by anti-entropy. The startup report resolves `persist.unreadable_refused` from this
+setting.
+
 ### Choosing a sync mode with the receipt contract in hand
 
 Since v2.5.0 the sync mode is no longer the *only* lever, because a caller can ask per write what it
