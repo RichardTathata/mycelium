@@ -21,6 +21,7 @@ pub mod framing;
 pub mod hlc;
 /// The replay seams (item 6 PR 3) — production's route to the deterministic kernel.
 pub mod sim_seam;
+pub mod rule;
 pub mod kv_handle;
 pub mod kv_persist;
 pub mod locality;

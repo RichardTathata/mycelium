@@ -260,6 +260,11 @@ pub use mycelium_core::{config, error, hlc, signal};
 /// site that can only be seamed in a `sim` build is a call site nobody seams (the wasm host's
 /// self-election draw, 2026-10-03).
 pub use mycelium_core::sim_seam;
+/// The rule catalogue's descriptor types (plan I1): each crate registers its decision points as
+/// `&'static [RuleDescriptor]`; this crate's are `rules::RULES`.
+pub use mycelium_core::rule;
+/// This crate's decision points, described — the catalogue's core entries (plan I1).
+pub mod rules;
 pub(crate) use mycelium_core::{
     connection, framing, locality, node_id, persistence, seen, store, stream, tls, writer,
 };
