@@ -31,6 +31,7 @@ fn usage() -> ! {
              --host <ip>                bind address\n\
          -r, --peers <ip:port,…>        bootstrap peers\n\
              --library <dir>            read artifact bytes from this directory (default: mesh pull)\n\
+             --stage-dir <dir>          where a mesh pull stages what it fetches (default: <placement_root>/stage)\n\
              --librarian <manifest>     also take the librarian role over --library and this manifest\n\
              --publisher ed25519:<hex>  the manifest's publisher key (with --librarian)\n\
              --tick-ms <n>              provisioner tick (default 500)\n\
@@ -55,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tick_ms: u64 = 500;
     let mut self_elect: f64 = 0.5;
     let mut trace_dir: Option<String> = None;
+    let mut stage_dir: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -71,6 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--tick-ms" => tick_ms = val().parse().unwrap_or_else(|_| usage()),
             "--self-elect" => self_elect = val().parse().unwrap_or_else(|_| usage()),
             "--trace-dir" => trace_dir = Some(val()),
+
+            "--stage-dir" => stage_dir = Some(val()),
             _ => usage(),
         }
     }
@@ -108,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tick: Duration::from_millis(tick_ms.max(50)),
         self_elect_p: self_elect.clamp(0.0, 1.0),
         trace: sink.clone(),
+        stage_dir: stage_dir.as_ref().map(std::path::PathBuf::from),
         ..StemOptions::default()
     };
 

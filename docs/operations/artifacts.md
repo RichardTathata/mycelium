@@ -290,9 +290,11 @@ manifest from the local file at `LibrarianConfig::manifest_path`. That is what t
 does: `mycelium-stem --librarian <manifest>` sets `manifest_source: None`, so a stem librarian
 in front of a remote store needs the manifest file synced down to its node (a CI artifact, a
 cron `curl`, or a mounted volume) while the bytes stay remote — the librarian mirrors what its
-manifest names (`PrefetchingSource::prefetch_all`). A stem itself cannot read an `s3://` or
-`gs://` library: its byte sources are a library directory (`--library`) or a mesh pull from a
-librarian (`StemSource::Library`, `StemSource::Mesh`).
+manifest names (`PrefetchingSource::prefetch_all`). A stem's byte sources are a library directory
+(`--library`) or a mesh pull from a librarian (`StemSource::Library`, `StemSource::Mesh`); the mesh
+pull **stages to disk** through the same `DiskStagedSource` — a component in one `artifact.fetch`, a
+blob past the frame cap in `artifact.fetch_range` pieces of 4 MiB (`MeshRangedFetcher`, zero-gaps Z3)
+— under `<placement_root>/stage` (`--stage-dir`), and re-serves what it staged in ranges too.
 
 **The tool against a store.** `mycelium-artifact` opens a store URL only when built with the
 `object_store` feature, beside the `stem` feature the binary needs:
