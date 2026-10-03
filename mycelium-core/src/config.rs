@@ -209,6 +209,10 @@ pub enum DomainProfile {
     Enforced,
 }
 
+/// The guarantee profiles a node can start under (`GossipConfig::profile`); the sets they require are
+/// defined beside the registry, `mycelium::guarantee`.
+pub const PROFILE_NAMES: &[&str] = &["dev", "secure-single-domain"];
+
 impl std::str::FromStr for DomainProfile {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -1031,6 +1035,14 @@ pub struct GossipConfig {
     /// TLS and refuses SWIM — see [`DomainProfile`]; `validate()` enforces it.
     pub domain_profile: DomainProfile,
 
+    /// The **guarantee profile** this node starts under (`docs/plans/guarantees-and-rule-catalogue.md`
+    /// I3). `None` is `dev`: nothing required, said loudly in the startup report. `secure-single-domain`
+    /// makes `GossipAgent::start()` refuse unless every node-enforced guarantee it requires resolves
+    /// `enforced` on this node — see `mycelium::guarantee::SECURE_SINGLE_DOMAIN` for the set. Env
+    /// `GOSSIP_PROFILE`. An unknown name is refused by `validate()` ([`PROFILE_NAMES`]).
+    #[serde(default)]
+    pub profile: Option<String>,
+
     /// Outbound egress allow-policy (WS3). Default: empty = allow all. Set
     /// `allow_hosts` to constrain which external hosts the substrate may reach
     /// (enforced at the MCP client bridge). A node-local posture, not a coordinator.
@@ -1173,6 +1185,7 @@ impl Default for GossipConfig {
             control_max_staleness_ms:      30_000,
             control_min_peers_heard:       1,
             domain_profile:                DomainProfile::Open,
+            profile:                       None,
             egress:                        EgressPolicy::default(),
             oidc:                          None,
             tls:                           None,
@@ -1325,6 +1338,14 @@ impl GossipConfig {
         // The enforced domain profile (item 2 PR 1). Checked first and refused outright: a node
         // that claims the profile and does not meet it should not reach the point of opening a
         // socket, because by then a partner has something to talk to.
+        if let Some(p) = &self.profile
+            && !PROFILE_NAMES.contains(&p.as_str())
+        {
+            return Err(GossipError::InvalidField {
+                field: "profile",
+                reason: format!("unknown guarantee profile '{p}' (known: {})", PROFILE_NAMES.join(", ")),
+            });
+        }
         if self.domain_profile == DomainProfile::Enforced {
             if self.swim_failure_detector {
                 return Err(GossipError::InvalidField {
@@ -1769,6 +1790,9 @@ impl GossipConfig {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect();
+        }
+        if let Ok(v) = env::var("GOSSIP_PROFILE") {
+            self.profile = Some(v);
         }
         if let Ok(v) = env::var("GOSSIP_DOMAIN_PROFILE") {
             self.domain_profile = v.parse().map_err(|reason| GossipError::InvalidField {

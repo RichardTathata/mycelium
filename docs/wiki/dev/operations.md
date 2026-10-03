@@ -37,6 +37,11 @@ the *diagnosis* agrees across nodes, while each keeps its own `view_confidence`)
   one block at `start()`, after validation and before traffic (the G13 boundary); an attachment made
   after that is counted (`late_attachments`) and warned about. The strongest sentence it says is *node
   requirements satisfied*, never *deployment verified*. `ConfinementReport` is now a view over it.
+  **Profiles (I3):** `GossipConfig::profile` / `GOSSIP_PROFILE` selects `dev` (nothing required, said
+  loudly) or `secure-single-domain` (rev 1, sixteen ids pinned by `the_secure_profiles_required_set_is_pinned`);
+  under a profile `start()` refuses by name when a required guarantee is not `enforced` or
+  `not_applicable` (`guarantee::check`), an unknown required id refuses, and an unknown name fails
+  `validate()`. The report carries the profile, its revision and its required set.
 
 All three are also programmatic (**diagnostics as data**): `agent.fleet_snapshot()` /
 `fleet_diagnosis()`. Operator runbook (one entry per pathology + Prometheus alert recipes):

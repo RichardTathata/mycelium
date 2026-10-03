@@ -296,7 +296,9 @@ pub use agent::ae_contract;
 pub use agent::confinement::{ClockSync, ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
 pub use agent::guarantee::{
     GuaranteeDescriptor, GuaranteeEntry, GuaranteeId, GuaranteeKind, GuaranteeReport, ProfileRef,
-    NodeView as GuaranteeNodeView, Resolution as GuaranteeResolution, REPORT_SCHEMA as GUARANTEE_REPORT_SCHEMA,
+    NodeView as GuaranteeNodeView, Profile as GuaranteeProfile, ProfileRefusal, Resolution as GuaranteeResolution,
+    REPORT_SCHEMA as GUARANTEE_REPORT_SCHEMA, DEV as DEV_PROFILE, SECURE_SINGLE_DOMAIN as SECURE_SINGLE_DOMAIN_PROFILE,
+    check as check_profile, profile_named,
 };
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::gateway_authority::{
@@ -363,7 +365,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{DomainProfile, EgressPolicy, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]

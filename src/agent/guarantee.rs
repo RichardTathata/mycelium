@@ -218,17 +218,140 @@ pub struct GuaranteeReport {
     pub started: bool,
     /// Attachments made after the boundary — a non-zero count means the logged report is stale.
     pub late_attachments: u32,
-    /// The profile this node was started under, and its revision — `None` until I3.
+    /// The profile this node runs under (`dev` by default, said so), its revision and required set.
     pub profile: Option<ProfileRef>,
     pub entries: Vec<GuaranteeEntry>,
 }
 
-/// A named, versioned profile (plan G3, G12) — carried in the report once I3 lands.
+/// The profile a node was started under, as the report carries it (plan G12): its name and revision,
+/// whether the configuration selected it (or `dev` applied by default), and the ids it requires.
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize)]
 pub struct ProfileRef {
-    pub name: String,
+    pub name: &'static str,
     pub revision: u32,
+    /// `false` when no profile was configured and `dev` applies by default.
+    pub selected: bool,
+    pub required: Vec<GuaranteeId>,
+}
+
+/// A named, versioned set of required guarantee ids (plan G3, G12). A node started under it refuses
+/// to start unless every id resolves `Enforced` or `NotApplicable` on that node (G5); an id the registry
+/// does not hold refuses too — a requirement must not vanish with its registrar (G11).
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct Profile {
+    pub name: &'static str,
+    /// Bumped when the required set changes; adding a requirement is a release note (G12).
+    pub revision: u32,
+    pub required: &'static [GuaranteeId],
+    pub about: &'static str,
+}
+
+/// Nothing required. Said loudly in the report and the log: this is not a production profile.
+pub const DEV: Profile = Profile {
+    name: "dev",
+    revision: 1,
+    required: &[],
+    about: "nothing required — a local demo or a development node; the report still says what is and is not enforced",
+};
+
+/// The readiness checklist's production set for one trust domain (plan G3): what a node fronting
+/// agents must enforce before it is exposed. External prerequisites (network confinement, clock
+/// sync, the consensus profile) are not in it — they cannot be; the report lists them unresolved.
+pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
+    name: "secure-single-domain",
+    revision: 1,
+    // Not `id.ca_key_off_node`, though the checklist asks for it: `tls::load_or_create_ca` loads
+    // the CA *key* from the node's directory and regenerates a whole new CA without it, so today
+    // every TLS node must hold the fleet CA's private key at start. The guarantee is reported — it
+    // reads the disk truthfully — and cannot be required until the TLS init can start a node from
+    // a CA cert and a pre-issued node cert alone (plan §8, found by this profile's own acceptance
+    // test, 2026-10-03).
+    required: &[
+        "mesh.tls",
+        "id.proofs_required",
+        "gw.not_open",
+        "gw.tls",
+        "gw.caller_profile",
+        "ae.authorised_at_seam",
+        "ae.recorded_before_dispatch",
+        "prov.enforcement",
+        "a2a.admission",
+        "authz.execution_authority",
+        "authz.durable_epochs",
+        "audit.chain",
+        "egress.allow_list",
+        "persist.configured",
+        "persist.sync_mode",
+    ],
+    about: "a node fronting agents in one trust domain: authenticated transport and identity, a closed \
+            HTTPS gateway, authority checked and recorded at the gateway and the provider, revocation \
+            that survives a restart, a sealed audit chain, an egress allow-list, durable persistence",
+};
+
+/// The profile named `name`, if it is one of [`crate::config::PROFILE_NAMES`].
+pub fn profile_named(name: &str) -> Option<&'static Profile> {
+    match name {
+        "dev" => Some(&DEV),
+        "secure-single-domain" => Some(&SECURE_SINGLE_DOMAIN),
+        _ => None,
+    }
+}
+
+/// The profile a configuration selects — `dev` when none is set (`validate()` refused unknown names).
+pub(crate) fn selected_profile(cfg: &crate::config::GossipConfig) -> (&'static Profile, bool) {
+    match cfg.profile.as_deref().and_then(profile_named) {
+        Some(p) => (p, true),
+        None => (&DEV, false),
+    }
+}
+
+/// Why a profile refused to start a node: every required id that is not registered, and every one
+/// that applies and did not resolve `Enforced`, with what is missing and where to read.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileRefusal {
+    pub profile: &'static str,
+    pub revision: u32,
+    pub unknown: Vec<GuaranteeId>,
+    /// `(id, state, what is missing or not in the build, docs)`.
+    pub unmet: Vec<(GuaranteeId, &'static str, &'static str, &'static str)>,
+}
+
+impl std::fmt::Display for ProfileRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "profile `{}` rev {}: ", self.profile, self.revision)?;
+        if !self.unknown.is_empty() {
+            write!(f, "{} required guarantee(s) not registered on this node ({}) — a requirement does not vanish with its registrar; ", self.unknown.len(), self.unknown.join(", "))?;
+        }
+        if !self.unmet.is_empty() {
+            write!(f, "{} requirement(s) unmet:", self.unmet.len())?;
+            for (id, state, detail, docs) in &self.unmet {
+                write!(f, " [{id}: {state} — {detail} → {docs}]")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Check a report against a profile (plan G5, G11). `Ok` means every required id is registered and
+/// resolves `Enforced` or `NotApplicable`; an external prerequisite in a profile's set is a profile
+/// bug and reads as unmet, because it can never be met from inside the node.
+pub fn check(report: &GuaranteeReport, profile: &Profile) -> Result<(), ProfileRefusal> {
+    let mut refusal = ProfileRefusal { profile: profile.name, revision: profile.revision, unknown: Vec::new(), unmet: Vec::new() };
+    for id in profile.required {
+        match report.entry(id) {
+            None => refusal.unknown.push(id),
+            Some(e) => match &e.resolution {
+                Resolution::Enforced | Resolution::NotApplicable { .. } => {}
+                Resolution::NotConfigured { missing } => refusal.unmet.push((e.id, "not_configured", missing, e.docs)),
+                Resolution::NotInBuild { feature } => refusal.unmet.push((e.id, "not_in_build", feature, e.docs)),
+                Resolution::NotVerifiableHere { evidence } => refusal.unmet.push((e.id, "not_verifiable_here", evidence, e.docs)),
+            },
+        }
+    }
+    if refusal.unknown.is_empty() && refusal.unmet.is_empty() { Ok(()) } else { Err(refusal) }
 }
 
 impl GuaranteeReport {
@@ -255,10 +378,18 @@ impl GuaranteeReport {
             })
             .collect()
     }
-    /// **The strongest thing this report says**: every node-enforced guarantee that applies is
-    /// enforced. It is not "deployment verified" — [`Self::unresolved`] is what the node cannot see.
+    /// Of the profile's required guarantees, those that apply and are not `Enforced` — what a
+    /// profile refuses on. Empty when no profile is carried.
+    pub fn required_unmet(&self) -> Vec<GuaranteeId> {
+        let Some(p) = &self.profile else { return Vec::new() };
+        self.unmet().into_iter().filter(|id| p.required.contains(id)).collect()
+    }
+    /// **The strongest thing this report says**: every guarantee the carried profile requires is
+    /// enforced on this node, or does not apply to it. Under `dev` that is vacuously true, and the
+    /// log says so. It is not "deployment verified" — [`Self::unresolved`] is what the node cannot
+    /// see, and [`Self::unmet`] is everything else the node could enforce and does not.
     pub fn node_requirements_satisfied(&self) -> bool {
-        self.unmet().is_empty()
+        self.required_unmet().is_empty()
     }
     /// The entry for `id`, if registered.
     pub fn entry(&self, id: &str) -> Option<&GuaranteeEntry> {
@@ -340,7 +471,10 @@ pub(crate) fn report(ctx: &TaskCtx) -> GuaranteeReport {
         config_digest: config_digest(&ctx.config),
         started: ctx.started.load(Ordering::Acquire),
         late_attachments: ctx.late_attachments.load(Ordering::Relaxed),
-        profile: None,
+        profile: {
+            let (p, selected) = selected_profile(&ctx.config);
+            Some(ProfileRef { name: p.name, revision: p.revision, selected, required: p.required.to_vec() })
+        },
         entries,
     }
 }
@@ -375,21 +509,31 @@ pub(crate) fn log_report(r: &GuaranteeReport) {
             detail = ?detail(&e.resolution), "guarantee"
         );
     }
+    if let Some(p) = &r.profile {
+        if p.name == "dev" {
+            tracing::warn!(profile = p.name, revision = p.revision, selected = p.selected, "guarantees: profile `dev` — nothing required; this is not a production profile (set `profile = \"secure-single-domain\"` or GOSSIP_PROFILE)");
+        } else {
+            tracing::info!(profile = p.name, revision = p.revision, required = ?p.required, "guarantees: profile");
+        }
+    }
     let unmet = r.unmet();
+    let required_unmet = r.required_unmet();
     let unresolved = r.unresolved();
-    if unmet.is_empty() {
+    let profile = r.profile.as_ref().map(|p| p.name).unwrap_or("dev");
+    if required_unmet.is_empty() {
         tracing::info!(
-            unresolved = ?unresolved, config_digest = %r.config_digest,
-            "guarantees: node requirements satisfied — {} enforced, {} not applicable; {} external prerequisites are not verifiable here (this is not 'deployment verified')",
+            profile, not_enforced = ?unmet, unresolved = ?unresolved, config_digest = %r.config_digest,
+            "guarantees: node requirements satisfied under profile `{profile}` — {} enforced, {} not applicable, {} not enforced and not required by this profile; {} external prerequisites are not verifiable here (this is not 'deployment verified')",
             r.entries.iter().filter(|e| e.resolution.is_enforced()).count(),
             r.not_applicable().len(),
+            unmet.len(),
             unresolved.len()
         );
     } else {
         tracing::warn!(
-            unmet = ?unmet, unresolved = ?unresolved, config_digest = %r.config_digest,
-            "guarantees: {} node-enforced guarantee(s) NOT met on this node; a profile (plan I3) would refuse to start on these",
-            unmet.len()
+            profile, required_unmet = ?required_unmet, not_enforced = ?unmet, unresolved = ?unresolved, config_digest = %r.config_digest,
+            "guarantees: {} guarantee(s) required by profile `{profile}` NOT met on this node",
+            required_unmet.len()
         );
     }
 }
@@ -538,6 +682,9 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
                   match &c.config.tls {
                       None => Resolution::NotConfigured { missing: "[tls]" },
                       Some(t) if t.auto_cert_dir.join("ca-key.pem").exists() => Resolution::NotConfigured { missing: "the CA private key is in this node's certificate directory (the `auto_cert_dir` development default)" },
+                      // No CA here at all: start() mints one into this directory, key included — the
+                      // report is computed before that, so say what is about to be true.
+                      Some(t) if !t.auto_cert_dir.join("ca-cert.pem").exists() && t.ca_cert_pem.is_none() => Resolution::NotConfigured { missing: "no CA in `auto_cert_dir` yet: start() generates one here, private key included; provision the CA cert and keep its key off the node" },
                       Some(_) => Resolution::Enforced,
                   }
               }
@@ -750,7 +897,8 @@ mod tests {
         let r = agent(cfg).guarantee_report();
         assert_eq!(state(&r, "gw.not_open"), "not_configured");
         assert!(r.unmet().contains(&"gw.not_open"));
-        assert!(!r.node_requirements_satisfied());
+        assert!(r.node_requirements_satisfied(), "under `dev` nothing is required, and the report says what is not enforced anyway");
+        assert!(r.required_unmet().is_empty());
         let mut cfg = GossipConfig::default();
         cfg.http_port = Some(crate::test_util::alloc_port());
         cfg.gateway_auth_token = Some("s3cret".into());
@@ -815,6 +963,83 @@ mod tests {
         let r = a.guarantee_report();
         assert_eq!(state(&r, "companion.thing"), "not_configured", "the companion's check read the config through the view");
         assert_eq!(state(&r, "egress.allow_list"), "not_configured", "the core result stood");
+    }
+
+    /// `dev` is the default, requires nothing, and the report says it was not selected.
+    #[test]
+    fn the_dev_profile_requires_nothing_and_the_report_says_so() {
+        let r = agent(GossipConfig::default()).guarantee_report();
+        let p = r.profile.as_ref().expect("a profile is always reported");
+        assert_eq!((p.name, p.revision, p.selected), ("dev", 1, false));
+        assert!(p.required.is_empty());
+        assert!(check(&r, &DEV).is_ok());
+        let mut cfg = GossipConfig::default();
+        cfg.profile = Some("dev".into());
+        assert!(agent(cfg).guarantee_report().profile.unwrap().selected);
+    }
+
+    /// An unknown profile name is refused by `validate()`, naming the known ones.
+    #[test]
+    fn an_unknown_profile_name_is_refused_by_validate() {
+        let mut cfg = GossipConfig::default();
+        cfg.profile = Some("prod".into());
+        let e = cfg.validate().unwrap_err();
+        assert!(matches!(e, GossipError::InvalidField { field: "profile", .. }), "{e}");
+        assert!(e.to_string().contains("secure-single-domain"), "{e}");
+        let mut ok = GossipConfig::default();
+        ok.profile = Some("secure-single-domain".into());
+        assert!(ok.validate().is_ok());
+    }
+
+    /// Plan G10 and G11 at the profile: a required guarantee that does not apply passes; a required
+    /// id the registry does not hold refuses — a requirement does not vanish with its registrar.
+    #[test]
+    fn a_requirement_that_does_not_apply_passes_and_an_unknown_one_refuses() {
+        let r = agent(GossipConfig::default()).guarantee_report(); // no gateway
+        let gw_only = Profile { name: "t", revision: 1, required: &["gw.not_open"], about: "" };
+        assert!(check(&r, &gw_only).is_ok(), "not applicable is not unmet");
+        let ghost = Profile { name: "t", revision: 1, required: &["wiki.nothing"], about: "" };
+        let e = check(&r, &ghost).unwrap_err();
+        assert_eq!(e.unknown, vec!["wiki.nothing"]);
+        assert!(e.to_string().contains("does not vanish"), "{e}");
+    }
+
+    /// The secure profile's set is pinned (the readiness checklist copies it; a change is a revision
+    /// bump and a release note), every id is a core guarantee, and none is an external prerequisite.
+    #[test]
+    fn the_secure_profiles_required_set_is_pinned() {
+        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 1);
+        assert_eq!(SECURE_SINGLE_DOMAIN.required, &[
+            "mesh.tls", "id.proofs_required", "gw.not_open", "gw.tls", "gw.caller_profile",
+            "ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "a2a.admission",
+            "authz.execution_authority", "authz.durable_epochs", "audit.chain", "egress.allow_list",
+            "persist.configured", "persist.sync_mode",
+        ]);
+        let r = agent(GossipConfig::default()).guarantee_report();
+        for id in SECURE_SINGLE_DOMAIN.required {
+            assert!(core_ids().contains(id), "{id} is a core guarantee");
+            assert_eq!(r.entry(id).unwrap().kind, GuaranteeKind::NodeEnforced, "{id}: an external prerequisite can never be met from inside the node");
+        }
+    }
+
+    /// Plan G5: under `secure-single-domain` an open node refuses to start, naming each unmet
+    /// guarantee with what is missing and where to read, and never passes the boundary.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn the_secure_profile_refuses_an_open_node_by_name() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(crate::test_util::alloc_port());
+        cfg.profile = Some("secure-single-domain".into());
+        let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        let e = a.start().await.unwrap_err().to_string();
+        assert!(e.contains("profile `secure-single-domain` rev 1"), "{e}");
+        for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"] {
+            assert!(e.contains(id), "{id} is named: {e}");
+        }
+        assert!(e.contains("not_configured") && e.contains("docs/operations/rbac.md"), "what is missing and where to read: {e}");
+        assert!(!a.guarantee_report().started, "the boundary was not passed");
     }
 
     /// Plan G13: an attachment after `start()` is counted and the report says so, because the block
