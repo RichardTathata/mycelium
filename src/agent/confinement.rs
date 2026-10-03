@@ -188,8 +188,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = GossipConfig::default();
         cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        // An empty directory is not "the key is off the node": start() mints a CA here, key included,
+        // and the report says so before it happens (the guarantee registry, 2026-10-03).
+        assert_eq!(agent(cfg.clone()).confinement_report().ca_key_off_node, Setting::Unset, "a CA will be minted here");
+        std::fs::write(dir.join("ca-cert.pem"), b"-----BEGIN CERTIFICATE-----").unwrap();
         let r = agent(cfg.clone()).confinement_report();
-        assert_eq!(r.ca_key_off_node, Setting::Set, "no CA key here");
+        assert_eq!(r.ca_key_off_node, Setting::Set, "a provisioned CA cert and no key here");
         std::fs::write(dir.join("ca-key.pem"), b"-----BEGIN PRIVATE KEY-----").unwrap();
         let r = agent(cfg).confinement_report();
         assert_eq!(r.ca_key_off_node, Setting::Unset);

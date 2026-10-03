@@ -17,6 +17,7 @@ operator's working set.
 | `health_check_interval_secs` | `10` | `GOSSIP_HEALTH_CHECK_INTERVAL_SECS` | s |
 | `reconnect_backoff_secs` | `5` | `GOSSIP_RECONNECT_BACKOFF_SECS` | s |
 | `peer_eviction_intervals` | `3` | `GOSSIP_PEER_EVICTION_INTERVALS` | × interval |
+| `profile` | *(none → `dev`)* | `GOSSIP_PROFILE` | `dev` \| `secure-single-domain` — the **guarantee profile** (plan `guarantees-and-rule-catalogue.md` I3). `secure-single-domain` makes `start()` **refuse** unless every guarantee it requires resolves `enforced` on this node, naming each unmet one; `dev` requires nothing and the startup log says so. An unknown name is refused by `validate()`. The required set: [production-readiness.md §2](production-readiness.md) |
 | `domain_profile` | `open` | `GOSSIP_DOMAIN_PROFILE` | `open` \| `enforced` — a federated domain runs `enforced` on every node (TLS required at `validate()`) |
 | `control_max_staleness_ms` | `30000` | `GOSSIP_CONTROL_MAX_STALENESS_MS` | ms — the governors' confidence bound: the stalest heard peer may be at most this old; loosen **on evidence** ([control-profiles.md](control-profiles.md) step 2); `validate()` refuses 0 |
 | `control_min_peers_heard` | `1` | `GOSSIP_CONTROL_MIN_PEERS_HEARD` | peers — the other half of the bound; `validate()` refuses 0 |

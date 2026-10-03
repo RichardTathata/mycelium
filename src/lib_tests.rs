@@ -10321,3 +10321,111 @@ async fn a2a_is_anonymous_dispatch_whatever_bearer_is_configured() {
         assert!(!mounted.a2a_dispatch_is_anonymous(), "an evaluator attached after with_a2a counts");
     }
 }
+
+/// Plan I3's acceptance: a node that provides every guarantee `secure-single-domain` requires starts
+/// under it, its report says so, and its gateway refuses an unauthenticated request. The same report
+/// shows `id.ca_key_off_node` not enforced and not required — the recorded gap: today's TLS init
+/// needs the fleet CA's private key on every node at start (plan §8).
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
+    use crate::agent::gateway_authority::ExecutionAuthority;
+    use crate::agent::guarantee::{check, Resolution, SECURE_SINGLE_DOMAIN};
+    use crate::knowledge::issuer::TrustedExternalIssuers;
+    use crate::knowledge::IssuerId;
+    use crate::mandate::authority::{ClockModel, DurableEpochs, ExecutionGate, FreshnessPolicy, ResourceTier};
+    use crate::mandate::grant::{EntitlementTable, GrantVerifier};
+    use crate::mandate::{PrincipalId, ResourceAuthority};
+    use crate::{EvidenceJournal, EvidenceProfile, ReferenceEvaluator, Rule};
+    use ed25519_dalek::SigningKey;
+
+    let port = alloc_port();
+    let http_port = alloc_port();
+    let root = std::env::temp_dir().join(format!("secure-profile-{port}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let cert_dir = root.join("tls");
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(http_port);
+    cfg.http_addr = "127.0.0.1".to_string();
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    cfg.gateway_tls = Some(crate::GatewayTlsConfig::default()); // the node cert serves the gateway too
+    cfg.gateway_auth_token = Some("s3cret".into());
+    cfg.require_identity_proofs = true;
+    cfg.egress.allow_hosts = vec!["idp.coop.example".into()];
+    cfg.persistence = Some(PersistenceConfig {
+        base_path: root.join("data"),
+        sync_mode: SyncMode::Flush,
+        snapshot_wal_threshold: 1_000_000,
+        snapshot_interval_secs: 3_600,
+    });
+    cfg.profile = Some("secure-single-domain".into());
+
+    let a = GossipAgent::new(id, cfg).with_a2a();
+    let me = a.node_id().clone();
+    let resource = format!("skill:depot/dispatch@{me}");
+    a.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-i3")
+            .with_catalogue("cat-i3", "1")
+            .map_action("skill.invoke", resource.clone())
+            .allow(Rule::new("*", "skill.invoke", resource).requiring_mandate("depot")),
+    ));
+    a.with_evidence_journal(EvidenceJournal::open(root.join("evidence"), EvidenceProfile::Strict).unwrap());
+    a.with_provider_enforcement();
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+    let mut external = TrustedExternalIssuers::new();
+    external
+        .trust(IssuerId::new("operator:acme").unwrap(), SigningKey::from_bytes(&[51u8; 32]).verifying_key().to_bytes())
+        .unwrap();
+    let gate = ExecutionGate::strict(
+        ResourceAuthority::new("depot", 1),
+        ResourceTier::Serialised,
+        ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+    )
+    .unwrap();
+    let authority = ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), external);
+    authority.with_durable_epochs(DurableEpochs::open(root.join("epochs")).unwrap());
+    a.with_execution_authority(Arc::new(authority));
+
+    // Before the boundary the check already passes: every required guarantee resolves on config and
+    // attachments, none of which start() changes.
+    check(&a.guarantee_report(), &SECURE_SINGLE_DOMAIN).expect("every requirement is enforced before start");
+    a.start().await.expect("and so the profile admits the node");
+    let r = a.guarantee_report();
+    assert!(r.started && r.node_requirements_satisfied(), "required unmet: {:?}", r.required_unmet());
+    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 1, true)));
+    assert_eq!(r.unresolved(), ["cons.safety_profile", "net.confinement", "clock.sync"], "what the node cannot see is still listed");
+    // The recorded gap, visible and not waived: the dev TLS init left the CA key here.
+    assert!(matches!(r.entry("id.ca_key_off_node").unwrap().resolution, Resolution::NotConfigured { .. }));
+    assert!(r.unmet().contains(&"id.ca_key_off_node") && !r.required_unmet().contains(&"id.ca_key_off_node"));
+    // Talk to the gateway the way a partner would: TLS pinned on the node's SPKI (the project's own
+    // client path; a stock verifier does not negotiate with the Ed25519 node identity).
+    let pin = crate::federation::pinning::ed25519_spki_sha256(&a.task_ctx.tls.get().expect("TLS is on").verifying_key_bytes());
+    let client = reqwest::Client::builder()
+        .use_preconfigured_tls(crate::federation::pinning::pinned_client_config(vec![pin]))
+        .build()
+        .unwrap();
+    // The gateway task binds after start() returns; wait for it structurally, never a fixed sleep.
+    let url = format!("https://127.0.0.1:{http_port}/gateway/kv/keys");
+    let mut last = None;
+    let mut resp = None;
+    for _ in 0..100 {
+        match client.get(&url).send().await {
+            Ok(r) => { resp = Some(r); break; }
+            Err(e) => {
+                let mut chain = e.to_string();
+                let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&e);
+                while let Some(s) = src { chain.push_str(" <- "); chain.push_str(&s.to_string()); src = s.source(); }
+                last = Some(chain);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let resp = resp.unwrap_or_else(|| panic!("the HTTPS gateway came up — last error: {last:?}"));
+    assert_eq!(resp.status(), 401, "no bearer, no entry");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}

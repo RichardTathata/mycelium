@@ -45,6 +45,22 @@ this page is the index + the gate.
   consensus profile) is listed as `not_verifiable_here` and is yours to evidence. A report whose
   `late_attachments` is non-zero was logged before something was attached; the route recomputes live.
   → [`src/agent/guarantee.rs`](../../src/agent/guarantee.rs), plan [`guarantees-and-rule-catalogue.md`](../plans/guarantees-and-rule-catalogue.md)
+- ☐ **Start under the `secure-single-domain` profile** (`profile = "secure-single-domain"` or
+  `GOSSIP_PROFILE`). The node then **refuses to start** unless each of these resolves `enforced` (or
+  `not_applicable` to its role), and names every one that does not, with what is missing and where to
+  read — rev 1: `mesh.tls` · `id.proofs_required` · `gw.not_open` · `gw.tls` ·
+  `gw.caller_profile` · `ae.authorised_at_seam` · `ae.recorded_before_dispatch` · `prov.enforcement` ·
+  `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
+  `egress.allow_list` · `persist.configured` · `persist.sync_mode`. It needs a `compliance` + `tls` build
+  (anything less reads `not_in_build` and refuses). **What it does not cover, by construction:** the
+  external prerequisites — network confinement, clock sync, the consensus profile — which the report
+  lists as `not_verifiable_here` and this checklist owns; the at-rest cipher and the audit sink, which
+  the report shows and this revision does not require; and **`id.ca_key_off_node`, which it cannot
+  require yet**: today's TLS init loads the fleet CA's private key from the node's directory and mints
+  a new CA without it, so every TLS node holds the key at start — the report shows it as not enforced,
+  and the "you can remove a member" item below stays yours until the init can start from a CA cert and
+  a pre-issued node cert alone. Without a profile the node runs as `dev`:
+  nothing required, and the log says it is not a production profile.
 - ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**. Bind it to loopback, or set
   `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. **Token tables and `[oidc]` need a
   `compliance` build, and `[gateway_tls]` a `tls` build** — a build without the feature refuses to

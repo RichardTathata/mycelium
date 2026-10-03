@@ -22,8 +22,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after `start()` is counted (`late_attachments`) and warned about — the at-rest cipher among them, which
   silently left the WAL plaintext before. `ConfinementReport` is a view over the registry now, which
   sharpened one reading: `require_identity_proofs` without `[tls]` is `Unset`, since the flag is inert
-  without the identity. The strongest sentence the report says is *node requirements satisfied*; a
-  profile that refuses on an unmet one is I3.
+  without the identity. The strongest sentence the report says is *node requirements satisfied*.
+- **Guarantee profiles (plan I3).** `GossipConfig::profile` / `GOSSIP_PROFILE` selects `dev` (nothing
+  required; the startup log says it is not a production profile) or **`secure-single-domain`** (rev 1,
+  fifteen node-enforced guarantees: authenticated transport and identity, a closed HTTPS gateway with the
+  caller attested, authority checked and recorded at gateway and provider, revocation that survives a
+  restart, a sealed audit chain, an egress allow-list, durable persistence). Under it `start()` **refuses**
+  unless every required guarantee resolves `enforced` or `not_applicable` on this node, naming each unmet
+  one with what is missing and where to read; a required id the registry does not hold refuses too, and
+  an unknown profile name is refused by `validate()`. The report carries the profile, its revision and
+  its required set. External prerequisites are never in a profile. **Found by the profile's own
+  acceptance test:** `id.ca_key_off_node` cannot be required — `tls::load_or_create_ca` loads the fleet
+  CA's private key from the node's directory and regenerates a whole CA without it, so every TLS node
+  holds the key at start; the report shows it as not enforced, and the readiness checklist says so.
+  **Upgrade note:** `GossipConfig`
+  gained `profile` (an exhaustive literal breaks; `..Default::default()` is unaffected); no node changes
+  behaviour unless it sets a profile.
 
 ---
 

@@ -98,7 +98,15 @@ impl GossipAgent {
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
         // is. Resolve every registered guarantee against this node and say so, once, before traffic.
         self.task_ctx.started.store(true, std::sync::atomic::Ordering::Release);
-        super::guarantee::log_report(&super::guarantee::report(&self.task_ctx));
+        let report = super::guarantee::report(&self.task_ctx);
+        super::guarantee::log_report(&report);
+        // Plan G5: under a profile, a required guarantee that is not enforced on this node refuses the
+        // start, by name, with what is missing and where to read. `dev` requires nothing.
+        let (profile, _) = super::guarantee::selected_profile(&self.config);
+        if let Err(refusal) = super::guarantee::check(&report, profile) {
+            self.task_ctx.started.store(false, std::sync::atomic::Ordering::Release);
+            return Err(GossipError::InvalidField { field: "profile", reason: refusal.to_string() });
+        }
         let bind_ip: IpAddr = self.config.bind_address.parse().map_err(|e| {
             GossipError::InvalidField {
                 field:  "bind_address",
