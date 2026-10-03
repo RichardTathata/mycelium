@@ -279,7 +279,8 @@ has a `[[serve]]` section.
 | `endpoint` | string | required | The OpenAI-compatible base URL, e.g. `http://localhost:11434/v1`. Refused when empty. |
 | `model` | string | required | The model name at that endpoint. Refused when empty. |
 | `while_live` | table | absent (always) | `ns` and `name` of the install this skill waits for; the skill is served while this node provides that capability. Refused when it names the skill itself: the two share a capability key. Name the install differently, e.g. `storyteller-deploy`. |
-| `api_key` | string | `"none"` | The bearer sent to the endpoint, as a literal. |
+| `api_key` | string | `"none"` | The bearer sent to the endpoint, as a literal. One of `api_key` / `api_key_env`, never both. |
+| `api_key_env` | string | absent | The **name** of an environment variable holding the bearer, read once at stem start. An unset variable refuses the start, naming it; an empty name is refused by the loader. |
 | `max_tokens` | integer | `256` | The template's token limit. |
 | `temperature` | float | `0.7` | The template's temperature. |
 
@@ -295,10 +296,11 @@ ns   = "llm"
 name = "storyteller-deploy"
 ```
 
-**Limit: `api_key` is a literal.** There is no environment indirection. A keyed endpoint therefore
-puts a secret in the unit file, which [capability-lifecycle.md](../operations/capability-lifecycle.md)
-§1 otherwise calls safe to commit. The workaround is a local proxy on the host that adds the key, with
-`endpoint` pointing at the proxy. A local Ollama needs no key.
+**Keys.** A keyed endpoint names its variable — `api_key_env = "OPENAI_API_KEY"` — and the stem reads it
+once at start, so the unit file carries no secret and stays safe to commit
+([capability-lifecycle.md](../operations/capability-lifecycle.md) §1). A host where the variable is unset
+refuses to start naming it, rather than serving a skill with no key. `api_key` remains the literal form
+for a file that is not committed (a local Ollama needs neither). The key is never logged, traced or reported.
 
 ## Checking a file
 

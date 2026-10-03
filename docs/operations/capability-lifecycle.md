@@ -30,7 +30,7 @@ install budget, headroom, trusted publisher keys, placement root, fuel and revie
 `[[presence]]` floors it keeps, the `[[activation]]` that hands a placed blob to its local runtime, and
 the `[[serve]]` that makes a live install a routable model skill. The unit directory is the thing the rest of this page checks, deploys and compares.
 Keep credentials out of committed units.
-`[[serve]].api_key` is a literal secret: a directory containing one is not safe to commit; see the reference's limit note.
+`[[serve]].api_key` is a literal secret: a directory containing one is not safe to commit — name the variable with `api_key_env` instead, read once at stem start (unset refuses the start by name).
 
 ```
 deploy/

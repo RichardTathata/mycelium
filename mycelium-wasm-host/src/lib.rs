@@ -63,7 +63,7 @@ pub use librarian::{
 };
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND};
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
-pub use stem::{Stem, StemError, StemOptions, StemSource};
+pub use stem::{resolve_serve_key, Stem, StemError, StemOptions, StemSource};
 pub mod activation;
 /// The provisioning rules, described — the catalogue entries the stem pilot instruments (plan I1).
 pub mod rules;
