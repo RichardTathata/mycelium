@@ -62,6 +62,16 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
+> **Realignment repairs (adopted 2026-10-04, nothing delivered yet):** [`realignment-repairs.md`](realignment-repairs.md) —
+> an external review's twelve findings, each verified by `file:line` and six re-run as probes (eleven hold; F01 is
+> narrower, F02 and F03 are wider than reported), and the four pieces that repair them without blocking one another:
+> the security/durability patch `v2.22.1` (the journal truncates its torn tail and owns its file; the WAL's startup
+> repair pinned and its failure a refusal; one egress-gated client builder with no redirects; the gate parsing the
+> URL the way the client does), the SDK release (TypeScript lossless on 64-bit values with the wire **unchanged**,
+> the shapes matched to the gateway, `sseStream` with a lifetime, the live suite in CI, an incomplete LangGraph
+> checkpoint raising), the private exporter plan, and architecture decided small ("no control plane" kept and
+> defined, the config split deferred, strict eligibility from source-established coverage). Twelve decisions in §4.
+>
 > **Zero gaps (delivered 2026-10-03, v2.22.0 — #507–#512):** [`zero-gaps.md`](zero-gaps.md) — the nine code-shaped gaps the repository
 > recorded after the guarantees plan closed (five on `what-is-proven.md`, two `~` cells on the doc-coverage matrix,
 > two from the publication lint of the same day), each with its seam named by `file:line`, a decision, and an
