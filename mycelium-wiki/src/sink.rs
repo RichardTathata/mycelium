@@ -116,6 +116,12 @@ mod git {
                 return Ok(None);
             }
             let authority = rest.split('/').next().unwrap_or("");
+            // A backslash, whitespace or a control character in the authority is where a hand split
+            // and the parser git hands the URL to (curl, ssh) can read two different hosts — the
+            // egress gate's R4 finding. Refused by name rather than guessed at (realignment repairs R4).
+            if authority.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control()) {
+                return Err(bad("a remote authority with a backslash, whitespace or a control character is refused"));
+            }
             let host = authority.rsplit('@').next().unwrap_or("");
             let host = host.split(':').next().unwrap_or("");
             return if host.is_empty() { Err(bad("unparseable remote host")) } else { Ok(Some(host.to_string())) };
@@ -124,6 +130,9 @@ mod git {
             // scp-like user@host:path — but a Windows drive or a plain local path is not
             if user_host.contains('/') {
                 return Ok(None); // a relative path containing ':' later — treat as local
+            }
+            if user_host.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control()) {
+                return Err(bad("a remote host with a backslash, whitespace or a control character is refused"));
             }
             let host = user_host.rsplit('@').next().unwrap_or("");
             return if host.is_empty() { Err(bad("unparseable remote host")) } else { Ok(Some(host.to_string())) };

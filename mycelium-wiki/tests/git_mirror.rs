@@ -150,6 +150,36 @@ fn egress_fail_closed_and_local_remote_roundtrip() {
     assert_eq!(mirror.push_divergences(), 0, "tripwire quiet on an honest remote");
 }
 
+/// **Realignment repairs R4.** The mirror split the remote's authority by hand and took what
+/// followed the last `@`, while git hands an https remote to curl, which parses it with its own
+/// rules. `https://evil.example\@git.internal/…` was gated as `git.internal`. A backslash,
+/// whitespace or a control character in the authority is now refused by name, whatever the policy.
+#[test]
+fn a_remote_whose_authority_two_parsers_could_read_differently_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsStore::open(tmp.path().join("store"), "g").unwrap());
+    for (i, remote) in [
+        "https://evil.example\\@git.internal/acme/corpus.git",
+        "https://evil.example\\.git.internal/acme/corpus.git",
+        "https://git.internal\t/acme/corpus.git",
+        "git@evil.example\\@git.internal:acme/corpus.git",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = GitMirror::open(
+            Arc::clone(&store),
+            GitMirrorConfig {
+                dir: tmp.path().join(format!("m-{i}")),
+                remote: Some(remote.into()),
+                egress: Some(EgressPolicy { allow_hosts: vec!["git.internal".into(), ".git.internal".into()] }),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(&r, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput), "{remote:?} must be refused: {:?}", r.as_ref().err());
+    }
+}
+
 /// A sink failure is the sink's problem: destroying the mirror after open must not panic the
 /// notification path (the apply already landed in the store; `rebuild()` into a fresh dir heals).
 #[test]
