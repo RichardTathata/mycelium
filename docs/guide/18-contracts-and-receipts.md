@@ -277,6 +277,26 @@ said no. `cargo run --example composed_commit --features tls,compliance` is the 
 permitted at the gateway, refused at the resource once it installs a newer epoch, both decisions in the
 journal. Design: [`composed-effect.md`](../design/composed-effect.md) §9.
 
+**Counting what the destination refused.** A refusal is an `Err` to the caller and, until v2.22.0,
+nothing else. `Counting<D>` wraps any destination and counts every outcome — commits, and refusals by
+kind and by composition leg — delegating `apply_composed` to the inner destination so a composed
+refusal counts once:
+
+```rust
+use mycelium_effects::Counting;
+
+let dest = Counting::new(SqliteDestination::open(path, "billing-writer", handler)?);
+// … apply as before; then, or from another task holding `dest.shared()`:
+let c = dest.counts();   // RefusalSnapshot { commits, conflict, failed, delivery_unknown,
+                         //                   unauthorised_attribution, unauthorised_authority }
+if c.unauthorised_attribution > 0 { /* someone presented effects under another's mandate */ }
+```
+
+With the crate's `metrics` feature the same wrapper increments `mycelium_effects_refusals_total{kind,
+leg}`. `cargo run -p mycelium-effects --example counting_destination` walks it. The counter is a
+*value* the destination's owner reads; the durable trace of a refusal is still the provider's
+evidence record (above).
+
 `EffectDestination` is the one trait to implement for your own destination (`apply(&Effect) ->
 Result<DestinationCommit, EffectRefusal>`). With the `tuple-space` feature, `TupleConsumer::new(space,
 destination, namespace)` consumes work items in the order *effect first, ack second* — an ack before

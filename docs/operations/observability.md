@@ -49,7 +49,9 @@ curl -s http://node:8080/stats | jq
 ### Prometheus
 
 With `--features metrics`, `/metrics` exposes the gossip hot-path gauges/counters
-(`gossip_store_entries`, `gossip_anti_entropy_rounds_total`,
+(`gossip_store_entries`, `gossip_peers_connected` — live outbound writers, the sockets, beside the
+emergent `peers_known` / `peers_heard`, the *view*; `0` while `peers_known > 0` is a node that can see
+peers it cannot reach — `gossip_anti_entropy_rounds_total`,
 `gossip_messages_received_total`, `gossip_signals_delivered_total` /
 `_rejected_total`, `gossip_rpc_latency_ms`, …) plus the emergent-diagnosis, governor,
 artifact-library, guardrails, and reason-routing families. Scrape it like any service.

@@ -83,7 +83,7 @@ leased.heartbeat()   # every ~30 s from your main loop (async: aheartbeat())
 # ── KV store ──────────────────────────────────────────────────────────────────
 # Note: no TTL parameter — the store never time-evicts live keys. Liveness
 # semantics come from capability evaporation, not from KV expiry.
-agent.set("pipeline/job/42", b'{"status": "pending"}')
+rcpt  = agent.set("pipeline/job/42", b'{"status": "pending"}')   # KvReceipt: rung 1 always, rung 2 as .local_durability
 val   = agent.get("pipeline/job/42")        # bytes | None
 items = agent.scan_prefix("pipeline/job/")  # dict[str, bytes]
 agent.delete("pipeline/job/42")
@@ -170,7 +170,7 @@ await leased.heartbeat();   // a missed window retracts the advert node-side
 
 // ── KV store ──────────────────────────────────────────────────────────────────
 // No TTL option — the store never time-evicts live keys.
-await agent.set("pipeline/job/42", Buffer.from('{"status":"pending"}'));
+const rcpt  = await agent.set("pipeline/job/42", Buffer.from('{"status":"pending"}')); // KvReceipt: rung 1, rung 2 as .localDurability
 const val   = await agent.get("pipeline/job/42");      // Buffer | null
 const items = await agent.scanPrefix("pipeline/job/"); // Record<string, Buffer>
 await agent.delete("pipeline/job/42");

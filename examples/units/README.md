@@ -39,3 +39,6 @@ unit format has no row for it; `federation_node` and `invoke_skill` take their n
 environment or the command line; `identity_one_record` advertises roles, not capabilities. The
 companion crates' examples advertise through their libraries (`blackboard/*`, `tuple/*`, `llm/*`)
 and are a second pass.
+
+`catalog/README.md` is the one directory with two deployments — the library on a volume (`catalog`) and in an
+object store (`catalog_store`) — because the byte source is a stem flag, not a declaration.

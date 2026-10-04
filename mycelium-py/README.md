@@ -300,8 +300,8 @@ of confidence on one scale**. Nothing infers a higher rung from a lower one:
 
 | Rung | Question | What reports it from Python |
 |---|---|---|
-| 1 | did *this node* apply it? | `set` returning without raising |
-| 2 | did *this exact write* cross that node's persistence barrier? | `CommitResult.local_durability` |
+| 1 | did *this node* apply it? | `set` returning a `KvReceipt` (its `operation_id`) |
+| 2 | did *this exact write* cross that node's persistence barrier? | `KvReceipt.local_durability` for `set`; `CommitResult.local_durability` for the consensus verbs |
 | 3 | do named, distinct **peers** hold it on disk? | `set_with_min_acks` |
 | 4 | did a **destination** commit the business change? | not a KV verb — an effect adapter's receipt |
 
@@ -310,6 +310,11 @@ destination commit. The full argument is [guide 18](../docs/guide/18-contracts-a
 what matters at the SDK boundary is that the fields below are already this vocabulary.
 
 ```python
+rcpt = agent.set("config/endpoint", b"https://api.v2/")   # since 0.2.5: the receipt, not None
+rcpt.operation_id        # rung 1: the write's stable identity on the gateway node
+rcpt.local_durability    # rung 2: "on_disk" | "buffered" | "not_configured" | "failed" (None on a pre-v2.16.0 gateway)
+rcpt.on_disk             # True ONLY for "on_disk"
+
 res = agent.consistent_set("config/endpoint", b"https://api.v2/")
 
 res.persisted            # rung 2, the v2.4.2 bool — folds "on disk" and "nothing was promised"
@@ -342,6 +347,11 @@ writes to the same key are totally ordered by ballot number. `consistent_get` is
 and may lag by up to one anti-entropy round.
 
 ```python
+rcpt = agent.set("config/endpoint", b"https://api.v2/")   # since 0.2.5: the receipt, not None
+rcpt.operation_id        # rung 1: the write's stable identity on the gateway node
+rcpt.local_durability    # rung 2: "on_disk" | "buffered" | "not_configured" | "failed" (None on a pre-v2.16.0 gateway)
+rcpt.on_disk             # True ONLY for "on_disk"
+
 res = agent.consistent_set("config/endpoint", b"https://api.v2/")
 val = agent.consistent_get("config/endpoint")  # → b"https://api.v2/"
 res.persisted   # True: on the gateway node's disk · False: committed but that node's WAL
