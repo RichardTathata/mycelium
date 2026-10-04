@@ -68,6 +68,7 @@
 //! `repair_tests`. *Strength:* `SelfImposedPrevention` over this node's own records; it prevents
 //! nothing at a resource.
 
+use mycelium_core::persistence::OwnershipLock;
 use mycelium_core::receipt::LocalDurability;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -137,7 +138,7 @@ pub struct Journal {
     path:   PathBuf,
     /// The exclusive OS lock on `<path>.lock`, held for this handle's lifetime and released when
     /// the last `Arc` drops. `None` only for the test-only handles that own no file.
-    _lock:  Option<std::fs::File>,
+    _lock:  Option<OwnershipLock>,
 }
 
 /// What `recover` found: how many complete frames the file holds, where the last one ends, and
@@ -338,23 +339,11 @@ fn write_frame(
     file.sync_data()
 }
 
-/// Take the exclusive OS lock on `<path>.lock`. Held by the handle for its lifetime; released by the
-/// OS when the file closes, including when the process dies.
-fn acquire_ownership(path: &Path) -> std::io::Result<std::fs::File> {
-    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
-    let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path)?;
-    match f.try_lock() {
-        Ok(()) => Ok(f),
-        Err(std::fs::TryLockError::WouldBlock) => Err(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            format!(
-                "the journal {} is owned by another handle or process (lock file {})",
-                path.display(),
-                lock_path.display()
-            ),
-        )),
-        Err(std::fs::TryLockError::Error(e)) => Err(e),
-    }
+/// Take the exclusive OS lock on `<path>.lock` — the same [`OwnershipLock`] the KV WAL holds, so a
+/// second owner of either file is refused the same way. Held by the handle for its lifetime;
+/// released by the OS when it closes, including when the process dies.
+fn acquire_ownership(path: &Path) -> std::io::Result<OwnershipLock> {
+    OwnershipLock::acquire(path)
 }
 
 /// Fsync the directory holding `path`, so a truncation survives a crash the way the file does.

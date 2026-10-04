@@ -115,7 +115,11 @@ pub enum WalMsg {
     Sync {
         ack: oneshot::Sender<io::Result<()>>,
     },
-    #[allow(dead_code)]
+    /// Hand the WAL's [`OwnershipLock`] to the writer task, which holds it until it exits — so the
+    /// lock is released exactly when the writer stops, on shutdown or on the handle's drop, and not
+    /// while a cloned handle somewhere still points at a writer that is gone (realignment repairs
+    /// R2). Sent once by [`WalHandle::hold_ownership`].
+    HoldOwnership(OwnershipLock),
     Shutdown,
 }
 
@@ -133,6 +137,19 @@ pub struct WalHandle {
     /// never restore. Counting the drops is what lets that peer decline the claim instead.
     /// Found by the Phase-C adversarial audit (items 1+2+7).
     dropped_appends: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl WalHandle {
+    /// Hand the WAL's [`OwnershipLock`] to the writer task, which holds it until it exits. Call it
+    /// once, right after [`spawn_wal_writer`], before the first append: the message is queued ahead
+    /// of every append, so the writer owns the file for all of them. If the writer is already gone
+    /// the lock is released and an error logged — nothing can be persisted anyway.
+    pub fn hold_ownership(&self, lock: OwnershipLock) {
+        match crate::sim_seam::chan_try_send(WAL_OWNERSHIP, &self.tx, WalMsg::HoldOwnership(lock)) {
+            crate::sim_seam::ChanVerdict::Sent => {}
+            _ => error!("persistence: the WAL writer is gone before it could take ownership of wal.bin; the lock is released"),
+        }
+    }
 }
 
 /// The writer task has exited (channel closed) — nothing awaited on it can be a
@@ -255,9 +272,12 @@ impl WalHandle {
         Self { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) }
     }
 
-    #[allow(dead_code)]
+    /// Stop the writer: it takes its final snapshot, releases the WAL's ownership lock and exits.
+    /// Returns once the writer task has dropped its receiver, so a caller that restarts an agent
+    /// over the same directory afterwards finds the lock free (realignment repairs R2).
     pub async fn shutdown(&self) {
         let _ = self.tx.send(WalMsg::Shutdown).await;
+        self.tx.closed().await;
     }
 }
 
@@ -268,6 +288,15 @@ impl WalHandle {
 ///
 /// `apply_fn` is responsible for `intern_key` (if configured) and
 /// `apply_and_notify` — keeping `persistence.rs` free of agent-layer imports.
+///
+/// **What this does not do** (realignment repairs R2). A torn tail — a crash mid-append — is
+/// applied up to its last complete record and **left on disk**; `replay` never writes. What removes
+/// it is the first snapshot (`do_snapshot` step 4 truncates the WAL), which `GossipAgent::start`
+/// triggers before its first append and treats as a refusal when it fails. A direct embedder that
+/// composes `replay` with [`spawn_wal_writer`] must do the same: take
+/// [`OwnershipLock::acquire`] on `wal.bin` first, then call [`WalHandle::trigger_snapshot`] and
+/// check its result before the first append, or an append lands behind the torn frame and the
+/// frame's claimed length swallows it.
 pub async fn replay<F>(
     dir: &std::path::Path,
     cipher: Cipher<'_>,
@@ -382,6 +411,12 @@ fn decode_wal_records<F: FnMut(SyncEntry)>(bytes: &[u8], cipher: Cipher<'_>, mut
             Err(_)    => return WalEnd::Corrupt { offset: record_at }, // a whole record that does not decode
         }
     }
+    if pos < bytes.len() {
+        // 1–3 bytes of a length prefix: a crash inside the prefix itself. Torn, so the startup
+        // snapshot removes them; reporting `Clean` left them for the writer to append behind
+        // (realignment repairs R2).
+        return WalEnd::Torn { offset: pos };
+    }
     WalEnd::Clean
 }
 
@@ -418,6 +453,43 @@ pub fn quarantine_unreadable(dir: &std::path::Path) -> Vec<PathBuf> {
     moved
 }
 
+/// Exclusive ownership of a persistence file: an OS lock on `<file>.lock`, held for this value's
+/// lifetime and released when it drops — including when the process dies. A second owner, in this
+/// process or another, gets [`WouldBlock`](io::ErrorKind::WouldBlock) naming the file.
+///
+/// Taken by `GossipAgent::start` on `wal.bin` before replay and held on the [`WalHandle`], and by
+/// the node-local journal on its own file (realignment repairs R1/R2). Two agents on one
+/// `base_path`/node id used to replay, snapshot and append to one WAL.
+pub struct OwnershipLock {
+    _file:     std::fs::File,
+    lock_path: PathBuf,
+}
+
+impl OwnershipLock {
+    /// Take the lock for `file` (the lock file is `<file>.lock` beside it). Startup-only.
+    pub fn acquire(file: &std::path::Path) -> io::Result<Self> {
+        let lock_path = PathBuf::from(format!("{}.lock", file.display()));
+        let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path)?;
+        match f.try_lock() {
+            Ok(()) => Ok(Self { _file: f, lock_path }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "{} is owned by another handle or process (lock file {})",
+                    file.display(),
+                    lock_path.display()
+                ),
+            )),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    /// Where the lock file is.
+    pub fn lock_path(&self) -> &std::path::Path {
+        &self.lock_path
+    }
+}
+
 // ── WalWriter task ───────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -428,6 +500,13 @@ pub fn quarantine_unreadable(dir: &std::path::Path) -> Vec<PathBuf> {
 /// upper layer, so core stays unaware of `sys/load/` semantics (Layer II).
 pub type SnapshotDeferHook = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// Spawn the WAL writer for `dir` and return its handle.
+///
+/// This opens `wal.bin` for append and **repairs nothing**. The node binary's `start()` takes
+/// [`OwnershipLock::acquire`] on `wal.bin` before [`replay`], hands it to
+/// [`WalHandle::hold_ownership`], and awaits [`WalHandle::trigger_snapshot`] — refusing the start
+/// if it fails — before the first append; that snapshot is what truncates a torn tail. A direct
+/// embedder must do the same three things in that order (realignment repairs R2).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_wal_writer(
     dir:                    PathBuf,
@@ -492,6 +571,10 @@ async fn wal_writer_task(
     );
     snap_timer.tick().await; // consume immediate first tick
 
+    // The WAL's ownership lock, once the handle hands it over: held until this task returns, so it
+    // is released exactly when the writer stops (realignment repairs R2).
+    let mut _ownership: Option<OwnershipLock> = None;
+
     loop {
         tokio::select! {
             biased;
@@ -503,6 +586,9 @@ async fn wal_writer_task(
                     None | Some(WalMsg::Shutdown) => {
                         let _ = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
                         break;
+                    }
+                    Some(WalMsg::HoldOwnership(lock)) => {
+                        _ownership = Some(lock);
                     }
                     Some(WalMsg::Append { entry, ack, force_sync }) => {
                         let sync = force_sync || sync_mode == SyncMode::Flush;
@@ -563,6 +649,9 @@ const WAL_TAIL: &str = "wal.bin#tail";
 /// The WAL's post-truncation sync — a distinct stream from an ordinary append's sync, so the
 /// *ordering* against the directory sync is legible in a trace rather than buried among appends.
 const WAL_TRUNCATE: &str = "wal.bin#truncate";
+/// The one-time hand-over of the WAL's ownership lock to the writer — its own stream, so a replay
+/// of the writer channel's saturation never answers for it.
+const WAL_OWNERSHIP: &str = "wal.bin#ownership";
 
 
 async fn open_wal(path: &std::path::Path) -> io::Result<tfs::File> {
@@ -1747,6 +1836,25 @@ mod durability_tests {
         assert_eq!(seen, ["k1"]);
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&torn).ok();
+    }
+
+    /// A crash can land inside the 4-byte length prefix. Those 1–3 bytes are a torn tail, not a
+    /// clean end: the walk used to loop `while pos + 4 <= len` and report `Clean` with bytes left
+    /// over, so the startup snapshot saw nothing to repair and the writer appended behind them
+    /// (realignment repairs R2; the review's F01).
+    #[test]
+    fn a_partial_length_prefix_is_a_torn_tail_not_a_clean_end() {
+        let payload = codec::to_vec(&entry("k1", b"v1", 1, false)).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        let good_end = bytes.len();
+        bytes.extend_from_slice(&[7, 0]); // two bytes of a length prefix
+        let mut seen = Vec::new();
+        let end = decode_wal_records(&bytes, None, |e| seen.push(e.key.to_string()));
+        assert_eq!(end, WalEnd::Torn { offset: good_end }, "two stray bytes are a torn tail");
+        assert_eq!(seen, ["k1"], "the complete record before them is handed over");
+        assert_eq!(decode_wal_records(&bytes[..good_end], None, |_| {}), WalEnd::Clean, "and without them the end is clean");
     }
 
     /// The snapshot must **abort** on a corrupt WAL record — it would otherwise merge the records

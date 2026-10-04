@@ -204,6 +204,19 @@ impl GossipAgent {
 
                 let cipher = self.data_at_rest_cipher.get().cloned();
 
+                // Ownership first (realignment repairs R2): one agent per persistence directory.
+                // A second would replay, snapshot and append to the same `wal.bin`; it used to get
+                // as far as the bind and fail for the port, with the shared WAL never named.
+                let ownership = match crate::persistence::OwnershipLock::acquire(&dir.join("wal.bin")) {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        return Err(GossipError::InvalidField {
+                            field: "persistence",
+                            reason: format!("{e}; one agent per persistence directory"),
+                        });
+                    }
+                };
+
                 match crate::persistence::replay(&dir, cipher.as_ref(), apply_fn).await {
                     Ok(max_ts) => {
                         if max_ts > 0 { hlc.observe(max_ts); }
@@ -245,8 +258,26 @@ impl GossipAgent {
                     defer_snapshot,
                 );
                 let handle = Arc::new(handle);
-                // Compact immediately so next restart has a bounded replay window.
-                let _ = handle.trigger_snapshot().await;
+                handle.hold_ownership(ownership);
+                // The snapshot that repairs a torn WAL tail (`do_snapshot` step 4 truncates the
+                // file) and bounds the next restart's replay window. Its result used to be
+                // discarded, which started the node behind the torn frame it could not remove and
+                // let the next appends be acknowledged there (realignment repairs R2; the review's
+                // F01). A refusal by default — a node used to start degraded — or, under
+                // `quarantine`, a warning: the files are readable, so nothing is moved aside.
+                if let Err(e) = handle.trigger_snapshot().await {
+                    match pcfg.on_unreadable {
+                        crate::config::OnUnreadable::Refuse => {
+                            return Err(GossipError::InvalidField {
+                                field: "persistence",
+                                reason: format!("the startup snapshot that repairs the WAL failed: {e}; the node would otherwise append behind a tail it cannot remove — fix the directory, or set `persistence.on_unreadable = \"quarantine\"` to start without the repair"),
+                            });
+                        }
+                        crate::config::OnUnreadable::Quarantine => {
+                            warn!("persistence: the startup snapshot that repairs the WAL failed: {e}; starting without the repair under `on_unreadable = \"quarantine\"` — appends before the next successful snapshot may not survive a restart");
+                        }
+                    }
+                }
                 let _ = self.task_ctx.wal.set(handle);
             }
         }
@@ -899,6 +930,15 @@ impl GossipAgent {
         if time::timeout(timeout, drain).await.is_err() {
             warn!("shutdown: {} task(s) did not exit within {:?}; aborting", owned.len(), timeout);
             owned.abort_all();
+        }
+        // The WAL writer last, after every task that could append has exited: it takes its final
+        // snapshot and releases the WAL's ownership lock, so an agent restarted over the same
+        // directory in this process finds it free (realignment repairs R2). Before this nothing
+        // stopped the writer at shutdown; it ran until the agent was dropped.
+        if let Some(wal) = self.task_ctx.wal.get()
+            && time::timeout(timeout, wal.shutdown()).await.is_err()
+        {
+            warn!("shutdown: the WAL writer did not exit within {:?}", timeout);
         }
     }
 

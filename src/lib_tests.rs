@@ -4917,6 +4917,125 @@ async fn a_node_refuses_to_start_over_an_unreadable_snapshot_unless_told_to_quar
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A persistence config pointing at `base`, Flush mode, with the realignment-repairs R2 witnesses'
+/// small thresholds.
+#[cfg(unix)]
+fn r2_persistence(base: &std::path::Path) -> crate::config::PersistenceConfig {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    PersistenceConfig { base_path: base.to_path_buf(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse }
+}
+
+/// **Realignment repairs R2 (the review's F01), the pin.** A torn WAL tail is repaired by the
+/// startup snapshot *before* the first acknowledged append, so the append is reachable by replay
+/// if the node crashes right after it. This held before R2 — `start()` has triggered a snapshot
+/// since the WAL existed — but nothing pinned it.
+///
+/// **The crash is modelled by copying the files while the node runs**, right after the synced
+/// append, and replaying the copy. A graceful restart cannot pin this: `shutdown()` takes a final
+/// snapshot from the *store*, which holds the value whatever the WAL says, so the first version of
+/// this test passed with the startup snapshot removed. Seen failing with that line toggled off.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_append() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-r2-torn-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A length prefix claiming 50 bytes, three present: the file a crash mid-append leaves.
+    std::fs::write(dir.join("wal.bin"), [50u8, 0, 0, 0, 1, 2, 3]).unwrap();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.expect("a torn tail is a crash, not a refusal");
+    a.kv().set_requiring_sync(&mycelium_core::receipt::OperationId::new("r2-after-torn"), "r2/after-torn", b"v".to_vec()).await.expect("the append is synced before the crash");
+
+    // The crash: what is on disk now, with the node still running, is all a restart would have.
+    let crash = base.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+    }
+    let mut replayed = Vec::new();
+    mycelium_core::persistence::replay(&crash, None, |e| replayed.push(e.key.to_string()))
+        .await
+        .expect("the crashed files replay");
+    assert!(replayed.iter().any(|k| k == "r2/after-torn"), "the acknowledged append is reachable after a crash: {replayed:?}");
+    let wal = std::fs::read(crash.join("wal.bin")).unwrap();
+    assert!(!wal.starts_with(&[50, 0, 0, 0]), "the torn frame was removed before the append landed");
+    a.shutdown().await;
+
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    assert_eq!(b.kv().get("r2/after-torn"), Some(Bytes::from_static(b"v")), "the acknowledged append survives the restart");
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **R2, the refusal.** If the startup snapshot that repairs the WAL fails, the node must not start
+/// and append behind the torn tail it could not remove — `start()` used to discard the snapshot's
+/// result with `let _ =`. The failure here is a directory the node cannot write `snapshot.tmp` into.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failing_startup_snapshot_refuses_the_start_instead_of_appending_behind_a_torn_tail() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-r2-snapfail-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("wal.bin"), [50u8, 0, 0, 0, 1, 2, 3]).unwrap();
+    // The ownership lock file exists already, so the read-only directory stops only the snapshot.
+    std::fs::write(dir.join("wal.bin.lock"), b"").unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+
+    let a = GossipAgent::new(id, cfg);
+    let r = a.start().await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let e = match r {
+        Err(e) => e,
+        Ok(()) => { a.shutdown().await; panic!("a node whose repairing snapshot failed must refuse to start"); }
+    };
+    assert!(e.to_string().contains("startup snapshot"), "the refusal names the snapshot: {e}");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **R2, ownership (the review's F12 for the WAL).** Two agents on one persistence path — the same
+/// node id, the same `base_path` — would each replay, each snapshot and each append to one
+/// `wal.bin`. The second now refuses to start naming the owner, before it binds anything; before R2
+/// it got as far as the bind and failed for the port.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_agent_on_one_persistence_path_refuses_to_start_naming_the_owner() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-r2-owner-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let b = GossipAgent::new(id, cfg);
+    let e = match b.start().await {
+        Err(e) => e,
+        Ok(()) => { b.shutdown().await; panic!("a second owner must be refused"); }
+    };
+    assert!(e.to_string().contains("owned by another"), "the refusal names the ownership, not the port: {e}");
+    b.shutdown().await;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Regression floor (contracts axis item 1 PR 1, `docs/design/contracts-receipts.md` §8): with
 /// **no persistence configured**, `Committed { persisted }` reads `true` — "nothing was promised" is
 /// collapsed into the same bool as "fsynced" (D24). PR 2 adds `local_durability: NotConfigured`
