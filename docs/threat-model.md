@@ -86,17 +86,40 @@ the audit trail (WS2) records what it did.
 A compromised node with unrestricted outbound reach can exfiltrate twin state to
 an attacker-controlled endpoint, or pull malicious tool definitions.
 
-*Mitigations:* `EgressPolicy.allow_hosts` (WS3) gates **every outbound HTTP path
-the substrate chooses to make**: the MCP client bridge, capability probes, and
-LLM-backend calls (core prompt skills + SkillRunner). Empty = allow all (default);
-set it to fail-closed against unlisted hosts.
+*Mitigations:* `EgressPolicy.allow_hosts` (WS3) is a **hostname allow-list** on the
+outbound HTTP paths the substrate chooses to make: the MCP client bridge, capability
+probes, LLM-backend calls (core prompt skills, SkillRunner, a stem's `[[serve]]`),
+OIDC discovery and JWKS (a denied issuer refuses `start()`), the federation client,
+the wasm host's artifact sources, the Ollama probe, and the wiki's git mirror. Empty =
+allow all (default); set it to fail-closed against unlisted hosts. Since 2.22.1
+(realignment repairs R3–R4, after an external review's F03):
 
-*Residual & coverage (be honest):* not gated in code — and intentionally so:
-intra-cluster **bulk** peer fetches (cluster-internal, not external egress) and
-operator-configured **OIDC JWKS** (auth infra the node must reach). The A2A
-**client** lives in the SDKs (Python/TS), not the substrate; gate it at the SDK
-or network layer. For anything ungated, restrict egress at the network layer
-(firewall / security group / proxy allowlist) — see the crown-jewel runbook.
+- **A redirect is a destination.** A client that knows the node's policy re-checks
+  every hop (at most five, never `https` → `http`); a client without one, or one
+  carrying a credential header reqwest does not strip cross-host (the federation
+  client, the bulk peer fetch, a library source with a static header), follows none.
+  Before, every client followed ten redirects unchecked, so an allowed endpoint could
+  send the node's request — a handshake, a prompt, a JWKS fetch, a federation
+  credential — to any host.
+- **The gate reads the host the client dials.** It parses with the same WHATWG parser
+  reqwest uses. Before, a hand-rolled parser read `http://evil\@allowed/` as `allowed`
+  while the client dialled `evil`, with no redirect needed.
+- **An object store is gated on its endpoint**, not its bucket name; an endpoint the
+  adapter cannot derive (Azure, S3 Express) is refused under a non-empty list.
+
+*Residual & coverage (be honest):*
+
+- **Names, not addresses.** Nothing resolves. An allowed name that resolves to an
+  address the operator meant to deny — DNS rebinding, the cloud metadata address — is
+  outside the gate.
+- **Not gated:** intra-cluster **bulk** peer fetches (cluster-internal by design; they
+  follow no redirect); a cloud identity's credential traffic (instance metadata, STS)
+  behind an object store; redirects inside `object_store`'s own client.
+- The A2A **client** lives in the SDKs (Python/TS), not the substrate; gate it at the
+  SDK or network layer.
+
+For anything ungated, restrict egress at the network layer (firewall / security group /
+proxy allowlist) — see the crown-jewel runbook.
 
 ---
 

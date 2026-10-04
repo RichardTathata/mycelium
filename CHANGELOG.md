@@ -79,6 +79,18 @@ egress refusal — that request was leaving the allow-list before.
   object-store fetcher's endpoint is R3b and the host parser R4, both above. **API note:** `OpenAiBackend::new`
   follows no redirect; call `.with_egress(policy)` to follow allowed ones.
 
+### Documentation
+- **What the egress allow-list covers, restated** (`docs/plans/realignment-repairs.md` R5). The
+  threat model said the list gated "every outbound HTTP path" and, in the same section, that OIDC
+  JWKS was not gated — false since 2026-10-03; neither said a redirect was followed unchecked. The
+  threat model's Boundary C, the `egress.allow_list` row of the guarantee catalogue (regenerated),
+  the crown-jewel coverage table and the confined-fleet runbook now say what 2.22.1 gates — the
+  first URL and every redirect hop, with the host read by the client's own parser, and an object
+  store on its endpoint — and what it does not: name resolution, a cloud identity's credential
+  traffic, and redirects inside `object_store`'s client. The crown-jewel table gains the object
+  store, the Ollama probe and the git mirror. `examples/receipt_ladder.rs` gains step 8b: a torn WAL
+  tail, a restart over it, an `OnDisk` write, and a replay of the files copied mid-run.
+
 ### Fixed
 - **The KV WAL's startup repair is pinned, its failure refuses the start, a partial length prefix
   is a torn tail, and the WAL has one owner** (`docs/plans/realignment-repairs.md` R2; the review's
