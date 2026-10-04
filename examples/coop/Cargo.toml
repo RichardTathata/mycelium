@@ -2,7 +2,7 @@
 name = "mycelium-coop-examples"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 publish = false
 description = "Food-Rescue Co-op example suite — runnable demos of the mailbox, governance, autonomic provisioning, federation, and tuple-space capabilities, composed in one constructive world. See docs/plans/example-suite.md."
 

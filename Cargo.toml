@@ -2,7 +2,7 @@
 name = "mycelium"
 version = "2.22.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "A fleet that grows the capabilities it lacks, under rules it can show it kept. An embedded library for agent fleets with no coordinator: gossip KV, signal mesh, consensus, capability discovery, demand-driven provisioning."
 license = "AGPL-3.0-only"

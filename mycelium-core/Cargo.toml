@@ -2,7 +2,7 @@
 name = "mycelium-core"
 version = "2.22.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "Mycelium substrate, Layers I+II of the coordinator-free library for AI agent fleets: gossip transport, LWW KV store, signal/boundary mesh"
 license = "AGPL-3.0-only"

@@ -2,7 +2,7 @@
 name = "mycelium-sim"
 version = "2.22.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "Deterministic replay harness for Mycelium — the event kernel, the seams, and the choices trace (v3 contracts axis, item 6)"
 license = "AGPL-3.0-only"
