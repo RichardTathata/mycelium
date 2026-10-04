@@ -278,8 +278,8 @@ confidence on one scale**. Nothing infers a higher rung from a lower one:
 
 | Rung | Question | What reports it from TypeScript |
 |---|---|---|
-| 1 | did *this node* apply it? | `set` resolving |
-| 2 | did *this exact write* cross that node's persistence barrier? | `CommitResult.localDurability` |
+| 1 | did *this node* apply it? | `set` resolving to a `KvReceipt` (its `operationId`) |
+| 2 | did *this exact write* cross that node's persistence barrier? | `KvReceipt.localDurability` for `set`; `CommitResult.localDurability` for the consensus verbs |
 | 3 | do named, distinct **peers** hold it on disk? | `setWithMinAcks` |
 | 4 | did a **destination** commit the business change? | not a KV verb — an effect adapter's receipt |
 
@@ -288,6 +288,10 @@ destination commit. The full argument is [guide 18](../docs/guide/18-contracts-a
 what matters at the SDK boundary is that the fields below are already this vocabulary.
 
 ```ts
+const rcpt = await agent.set("config/endpoint", Buffer.from("https://api.v2/")); // since 0.1.2: the receipt, not void
+rcpt.operationId;        // rung 1: the write's stable identity on the gateway node
+rcpt.localDurability;    // rung 2: "on_disk" | "buffered" | "not_configured" | "failed" (null on a pre-v2.16.0 gateway)
+
 const res = await agent.consistentSet("config/endpoint", Buffer.from("https://api.v2/"));
 
 res.persisted;            // rung 2, the v2.4.2 bool — folds "on disk" and "nothing was promised"

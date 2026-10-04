@@ -275,8 +275,13 @@ an absent section.
   `src/agent/action_evaluator.rs`, written by `examples/composed_commit.rs`). So watch the journal
   exporter ([audit.md §9](audit.md#9-evidence-export--what-a-gap-looks-like-to-the-consumer)) for
   destination-point refusals. A provider that does not write that record leaves no trace at all.
-- **Observe.** `committed_count()`. No metrics, and no refusal counter — a known gap in the code.
-- **See it:** `cargo run -p mycelium-effects --example destination_commit`.
+- **Observe.** `committed_count()`, and since v2.22.0 `Counting<D>` — wrap the destination and read
+  `counts()`: commits, and refusals by kind and by composition leg (`RefusalSnapshot`); with the
+  crate's `metrics` feature the same wrapper emits `mycelium_effects_refusals_total{kind, leg}`. A
+  rising `unauthorised_attribution` is effects presented under someone else's mandate; a rising
+  `conflict` is a retry that changed its content.
+- **See it:** `cargo run -p mycelium-effects --example destination_commit`, and
+  `--example counting_destination` for the counter.
 
 ### mycelium-guardrails — the structural gate
 

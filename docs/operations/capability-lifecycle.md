@@ -95,21 +95,23 @@ a seed, the CA identity). A **host** unit is a direct deployment too — the ima
 binary, the wasm host and a provisioner, the runtimes for the kinds in its `[hosts]` table (the WASM
 sandbox is built in; a `blob` runtime needs its native consumer, an Ollama or ONNX process, already on
 the node), the publisher keys it trusts, a way to read artifact bytes, and its egress policy. A stem
-reads bytes from a **library directory** on the node (`--library`, a local disk or a mounted volume) or
-**over the mesh** from a librarian. The mesh path rides the gossip frame and is bounded by
-`MAX_FRAME_BYTES` (10 MiB), so a large model needs `--library` on a mounted volume. A stem cannot
-read an S3 or GCS library itself: its sources are `StemSource::Library` and `StemSource::Mesh`, and
-the stem binary's librarian reads its manifest from a local file (`manifest_source: None`). Sync or
-mount a store-backed library onto the node ([artifacts.md](artifacts.md) § Remote blob stores). A fleet
+reads bytes from a **library directory** on the node (`--library <dir>`, a local disk or a mounted
+volume), **over the mesh** from a librarian (no `--library`), or from an **object store** by URL
+(`--library s3://bucket/prefix`, feature `object_store`; credentials from the environment, the URL
+gated by the node's egress policy). Every path stages what it pulls to disk under
+`<placement_root>/stage` and verifies it; a blob past the 10 MiB frame cap crosses the mesh in 4 MiB
+ranges (v2.22.0), so a model host no longer needs a mounted library, and a host re-serves what it
+staged. A librarian over a store reads its manifest from there (`--manifest-source <url>`) and mirrors
+what it names ([artifacts.md](artifacts.md) § Remote blob stores). A fleet
 of identical hosts is the **stem fleet** (`docs/plans/design-time-tooling.md` §13): it holds nothing
 application-specific at deploy time and loads what the declarations call for.
 
 A **stem node** declares from the file at startup: `mycelium-stem --units <unit.toml>` (a binary of
 `mycelium-wasm-host`, feature `stem`) advertises every `[[capability]]`, declares every
 `[[requirement]]`, defines every `[[group]]`, and, with `[hosts]`, runs a provisioner from it with
-every `[[presence]]` as a standing want — `--library <dir>` to read bytes from a directory, none to
-pull them over the mesh from a librarian, `--librarian <manifest> --publisher ed25519:<hex>` to take
-the librarian role too. The file and the runtime vocabulary are then one thing; every declaration
+every `[[presence]]` as a standing want — `--library <dir>` to read bytes from a directory,
+`--library <url>` from an object store, none to pull them over the mesh from a librarian,
+`--librarian <manifest> --publisher ed25519:<hex>` to take the librarian role too. The file and the runtime vocabulary are then one thing; every declaration
 still travels as its own evaporating entry and no other node reads the file. A unit that declares in
 code keeps working; the `mycelium` node binary itself does not read the file, because the provisioner
 lives in the wasm-host crate and the dependency runs the other way. An **SDK agent's** unit file
@@ -136,8 +138,10 @@ when the unit file has a `[[serve]]` section.
 | `-p, --port <port>` | from the config | bind port |
 | `--host <ip>` | from the config | bind address |
 | `-r, --peers <ip:port,…>` | from the config | bootstrap peers |
-| `--library <dir>` | none: pull over the mesh (5 s per fetch) | read artifact bytes from this directory |
+| `--library <dir \| url>` | none: pull over the mesh (5 s per fetch; a blob past the frame cap in 4 MiB ranges) | read artifact bytes from this directory, or from an object store by URL (`s3://`, `gs://`, `file://`; feature `object_store`, credentials from the environment) |
+| `--stage-dir <dir>` | `<placement_root>/stage` | where a mesh or store pull stages what it fetches, verified, before the runtime reads it |
 | `--librarian <manifest>` | off | also take the librarian role over `--library` and this manifest file; needs `--library` and `--publisher` |
+| `--manifest-source <url>` | off | with `--librarian`: read the manifest from the store at this URL instead of the file; with a URL `--library`, the librarian also mirrors what the manifest names to its stage |
 | `--publisher ed25519:<hex>` | none | the manifest's publisher key (with `--librarian`) |
 | `--tick-ms <n>` | `500` (minimum `50`) | the provisioner's tick |
 | `--self-elect <p>` | `0.5` (clamped to `0..1`) | self-election probability per round |

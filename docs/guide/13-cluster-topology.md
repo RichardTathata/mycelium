@@ -162,6 +162,36 @@ presence floor below its count, or a `req/` entry with no provider, self-elects,
 from the catalogue, verifies and runs it. Kill a host and a standby does the same. Seeds are chosen as
 in shapes 1–3; the stem shape is about *what the nodes hold*, not how they find each other.
 
+**Where the bytes come from** is one flag, and since v2.22.0 it has three answers:
+
+```sh
+mycelium-stem --units host.toml                                   # the mesh: pull from whoever advertises the librarian
+mycelium-stem --units host.toml --library /lib                    # a directory on the node (a mounted volume)
+mycelium-stem --units host.toml --library s3://bucket/prefix      # an object store, by URL (feature object_store)
+```
+
+All three stage what they pull to disk under `<placement_root>/stage` (`--stage-dir` overrides) and
+verify it before the runtime reads it: a component arrives in one `artifact.fetch`, a blob past the
+10 MiB frame cap arrives in `artifact.fetch_range` pieces of 4 MiB, so a model host no longer needs a
+mounted library. A host that staged something re-serves it to peers — in ranges too — so one node
+with store credentials can feed a fleet that has none. The store form takes its credentials from the
+environment (`AWS_*`, `GOOGLE_*`), is gated by the node's egress policy, and gives the librarian its
+manifest from the store (`--librarian <unused> --manifest-source s3://bucket/prefix`), where it mirrors
+what the manifest names. The `catalog_store` profile of the stem-examples suite is the whole shape
+against S3Mock (`examples/units/catalog/README.md`).
+
+A keyed `[[serve]]` endpoint names its **variable**, never its secret:
+
+```toml
+[[serve]]
+name        = "inference"
+endpoint    = "https://api.example/v1"
+model       = "coop-storyteller"
+api_key_env = "COOP_INFERENCE_KEY"      # read once at stem start; unset → the stem refuses to start, naming it
+```
+
+so the unit directory stays safe to commit (`reference/unit-file.md` § `[[serve]]`).
+
 **Its limits, on the tin** (`docs/plans/design-time-tooling.md` §13): only WASM components and
 blobs load dynamically (a `blob` runtime needs its native consumer on the node); the catalogue is the
 supply chain, so the publisher keys in `[hosts].trusted_publishers` are the posture to review; and

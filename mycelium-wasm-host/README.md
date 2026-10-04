@@ -64,7 +64,11 @@ mycelium-stem --units examples/units/model_deploy/model-host.toml --library /lib
   decision trace under the install's token — `ActivationCtx`, the activation hook's third argument
   since 2.21.0) and `[[serve]]`: [`docs/reference/unit-file.md`](../docs/reference/unit-file.md).
 - **Running a stem**, its flags and what it needs on the node:
-  [`docs/operations/capability-lifecycle.md`](../docs/operations/capability-lifecycle.md) §3.
+  [`docs/operations/capability-lifecycle.md`](../docs/operations/capability-lifecycle.md) §3. The byte
+  source is one flag with three answers — the mesh (none), a directory (`--library /lib`), an object
+  store (`--library s3://bucket/prefix`, feature `object_store`) — every one staged to disk and verified,
+  a blob past the frame cap in ranges; a librarian over a store takes `--manifest-source <url>`. A keyed
+  `[[serve]]` names its variable (`api_key_env`), read once at start.
 - **Publishing, verifying and accepting entries; object stores and their limits:**
   [`docs/operations/artifacts.md`](../docs/operations/artifacts.md).
 

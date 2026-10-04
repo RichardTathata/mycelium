@@ -180,3 +180,6 @@ has `examples/units/<example>/` — its units in the `capability_config` format,
 forces each example's caller to be written down as a requirer. The matrix's *Declared* column links
 each row to its directory; `examples/units/README.md` names the examples that have none and why.
 
+- `mycelium-effects/examples/counting_destination.rs` (v2.22.0) — `Counting<D>`, the refusal counter by kind and leg,
+  the fifth rung's ledger of outcomes; `examples/units/catalog/README.md` names the two deployments of one
+  declaration directory (a volume, an object store).

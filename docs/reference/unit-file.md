@@ -291,6 +291,7 @@ name       = "storyteller"
 endpoint   = "http://172.40.0.56:11434/v1"
 model      = "coop-storyteller"
 max_tokens = 48
+# api_key_env = "COOP_INFERENCE_KEY"   # a keyed endpoint names its variable; a local Ollama needs none
 [serve.while_live]
 ns   = "llm"
 name = "storyteller-deploy"
