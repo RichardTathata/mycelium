@@ -81,19 +81,25 @@ cfg.egress = mycelium::EgressPolicy {
 
 ### Coverage
 
-The gate is enforced at every outbound HTTP path the substrate *chooses* to make:
+The gate is a **hostname** allow-list on the outbound HTTP paths the substrate *chooses*
+to make. Since 2.22.1 it covers the first URL **and every redirect hop**, and reads a URL's
+host with the same parser the client dials with (realignment repairs R3–R4). It does not
+resolve names: an allowed name that resolves to an address you meant to deny is outside it.
 
 | Outbound path | Gated in code? | Notes |
 |---|:-:|---|
-| MCP client bridge (`connect_mcp_server`) | ✓ `EgressPolicy` | denied → `Transport("egress denied")` |
-| LLM backend calls (prompt skills) | ✓ `EgressPolicy` | `handle_llm_invoke` → `egress_denied` if the backend endpoint host isn't allowed |
-| LLM backend calls (SkillRunner) | ✓ `EgressPolicy` | gated against the node's `egress_policy()` before the call |
-| Capability HTTP probes | ✓ `EgressPolicy` | a blocked probe URL fails the probe (capability not advertised) |
+| MCP client bridge (`connect_mcp_server`) | ✓ `EgressPolicy`, every hop | denied → `Transport("egress denied")`; a redirect to an unlisted host fails the connect |
+| LLM backend calls (prompt skills) | ✓ `EgressPolicy` | `handle_llm_invoke` → `egress_denied` if the backend endpoint host isn't allowed; `OpenAiBackend::new` follows no redirect, `.with_egress(policy)` re-checks each hop (a stem's `[[serve]]` uses it) |
+| LLM backend calls (SkillRunner) | ✓ `EgressPolicy`, every hop | gated against the node's `egress_policy()` before the call |
+| Capability HTTP probes | ✓ `EgressPolicy`, every hop | a blocked probe URL fails the probe (capability not advertised) |
 | A2A **client** | — | client lives in the SDKs (Python/TS), not the substrate; restrict at the SDK / network layer |
-| Federation client (`FederationClient`) | ✓ `EgressPolicy` (since 2026-10-03) | the node's policy applies to the clients it is handed (`with_federation_clients`); a client used outside an agent is built `.with_egress(policy)`. A denied endpoint is `ClientError::Egress`, refused before any byte is sent |
-| OIDC JWKS / discovery | ✓ `EgressPolicy` (since 2026-10-03) | an `[oidc]` issuer or `jwks_uri` the allow-list does not permit **refuses `start()`** by name; at runtime a denied host is never dialled (no keys, every token refused). Add the IdP's host to `allow_hosts` |
-| Artifact HTTP library source (`HttpLibrarySource`) | ✓ when built `.with_egress(policy)` | a companion type constructed by the operator; `new()` alone allows all — documented on the type |
-| Bulk transport peer fetch | n/a | intra-cluster (peer URLs), not external egress — deliberately not gated |
+| Federation client (`FederationClient`) | ✓ `EgressPolicy` (since 2026-10-03) | the node's policy applies to the clients it is handed (`with_federation_clients`); a client used outside an agent is built `.with_egress(policy)`. A denied endpoint is `ClientError::Egress`, refused before any byte is sent. **Follows no redirect**: its credential header is not stripped cross-host |
+| OIDC JWKS / discovery | ✓ `EgressPolicy` (since 2026-10-03) | an `[oidc]` issuer or `jwks_uri` the allow-list does not permit **refuses `start()`** by name; at runtime a denied host is never dialled (no keys, every token refused), including through a redirect. Add the IdP's host to `allow_hosts` |
+| Artifact HTTP library source (`HttpLibrarySource`) | ✓ when built `.with_egress(policy)` | a companion type constructed by the operator; `new()` alone allows all and follows no redirect; with a static header it never follows one |
+| Object-store library (`ObjectStoreFetcher`, `--library s3://…`) | ✓ on the **endpoint** it dials | `AWS_ENDPOINT_URL_S3` / `AWS_ENDPOINT`, else `s3.<region>.amazonaws.com`; `storage.googleapis.com` or `GOOGLE_BASE_URL`. **List the endpoint host, not the bucket.** Azure and S3 Express are refused under a non-empty list. Not gated: the cloud identity's credential traffic, and redirects inside `object_store`'s own client |
+| Ollama probe (`mycelium-reason`) | ✓ when built `.with_egress(policy)` | `new()` alone is ungated and follows no redirect |
+| Wiki git mirror push (`GitMirror`) | ✓ `EgressPolicy` on the remote host | git runs with `http.followRedirects=false`; a remote whose authority holds a backslash, whitespace or a control character is refused |
+| Bulk transport peer fetch | n/a | intra-cluster (peer URLs), not external egress — deliberately not gated; follows no redirect |
 
 For the non-gated rows, enforce egress at the **network layer** (firewall rules,
 security groups, an egress proxy with its own allowlist).

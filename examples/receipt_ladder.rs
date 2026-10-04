@@ -29,7 +29,9 @@
 //!
 //! Step 7 shuts a peer down and writes again: the peer that cannot answer is reported **unknown**,
 //! never *failed*. Step 8 reopens the persisted node's own data directory and reads back what
-//! replayed. Those are the two places the vocabulary earns its keep.
+//! replayed. Step 8b writes the bytes a crash mid-append leaves, restarts over them, takes an
+//! `OnDisk` receipt, and replays a copy of the files taken mid-run — a crash, as far as one process
+//! can stage one. Those are the places the vocabulary earns its keep.
 //!
 //! # What it does not demonstrate, stated because the gap matters
 //!
@@ -251,6 +253,53 @@ async fn main() {
     note("surviving power loss — are exactly the ones this process cannot stage, which is why the");
     note("receipt says `Buffered` and not something warmer.");
     reborn.shutdown().await;
+
+    // ── 8b. A crash mid-append, then an acknowledged write after it ───────────────────────────
+    //
+    // The one recovery this process *can* stage honestly: the bytes a crash mid-append leaves
+    // behind. A length prefix claiming 50 bytes with three present is written to the WAL, the node
+    // restarts over it, and one write is acknowledged `OnDisk`. Then the files are copied **while
+    // the node is still running** — a crash, not a clean shutdown, whose final snapshot would
+    // rescue the write from memory whatever the log said — and the copy is replayed.
+    step(8, "(b) a torn WAL tail, a restart over it, and a write after it");
+    let kv_dir = keeper_dir.join(format!("127.0.0.1:{keeper_port}")).join("kv");
+    {
+        use std::io::Write as _;
+        let mut wal = std::fs::OpenOptions::new().append(true).open(kv_dir.join("wal.bin"))
+            .expect("the keeper's WAL exists");
+        wal.write_all(&[50, 0, 0, 0, 1, 2, 3]).expect("write a torn frame");
+    }
+    note("wrote a torn frame to wal.bin: a length prefix claiming 50 bytes, three present.");
+    let survivor = GossipAgent::new(
+        NodeId::new("127.0.0.1", keeper_port).unwrap(),
+        persisted_config(keeper_port, &keeper_dir, SyncMode::Async),
+    );
+    survivor.start().await.expect("a torn tail is a crash, not a refusal: the node starts");
+    let after = survivor.kv()
+        .set_requiring_sync(&OperationId::new("op-after-torn"), "ladder/after-torn", b"v".to_vec())
+        .await
+        .expect("an acknowledged write after the repair");
+    show(&after);
+    let crash = tmp.join("crash-copy");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if kv_dir.join(f).exists() {
+            std::fs::copy(kv_dir.join(f), crash.join(f)).unwrap();
+        }
+    }
+    let mut replayed = Vec::new();
+    mycelium_core::persistence::replay(&crash, None, |e| replayed.push(e.key.to_string()))
+        .await
+        .expect("the crashed files replay");
+    let found = replayed.iter().any(|k| k == "ladder/after-torn");
+    note(format!("ladder/after-torn in a replay of the files copied mid-run: {}",
+                 if found { "present" } else { "ABSENT" }));
+    assert!(found, "an OnDisk receipt after a torn tail must survive a crash");
+    note("The startup snapshot removed the torn frame before the first append, so the write the");
+    note("receipt called `OnDisk` is where replay finds it. Before 2.22.1 that held only while the");
+    note("snapshot succeeded; a failing one now refuses the start instead of appending behind the");
+    note("tail (realignment repairs R2).");
+    survivor.shutdown().await;
 
     // ── 9. The retry that must not win ────────────────────────────────────────────────────────
     //
