@@ -11,8 +11,15 @@
 //! `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or an instance/task role, `GOOGLE_SERVICE_ACCOUNT`
 //! or the metadata server, `AWS_ENDPOINT` + `AWS_ALLOW_HTTP=true` for an S3-compatible store
 //! such as MinIO — never a unit file, a description or a manifest. Every request is gated by the
-//! node's [`EgressPolicy`] on the store's URL **before** a client is built (a bucket host outside
-//! `allow_hosts` never gets a connection).
+//! node's [`EgressPolicy`] on **the endpoint the store dials** — derived from the URL and the same
+//! option keys `object_store` reads ([`dial_hosts`]) — **before** a client is built. It used to
+//! be gated on the store URL, whose host for `s3://bucket/…` is the bucket name, not a host anyone
+//! dials (realignment repairs R3b). An endpoint this adapter does not model (Azure, S3 Express) is
+//! refused under a non-empty allow-list rather than guessed at.
+//!
+//! **Not covered:** the credential traffic of the node's cloud identity (the instance-metadata
+//! address, STS), and redirects inside `object_store`'s own HTTP client, which this adapter does not
+//! build.
 //!
 //! **The manifest lives in the store too** (D14): `<prefix>/manifest`, the same line-hex text a
 //! library directory carries, so a librarian fronting a remote store reads it from the store
@@ -38,7 +45,71 @@ pub struct ObjectStoreFetcher {
     prefix:    StorePath,
     url:       String,
     egress:    EgressPolicy,
+    /// The hosts the store dials ([`dial_hosts`]), each checked against `egress` on every request.
+    endpoints: Vec<String>,
     max_bytes: u64,
+}
+
+/// The hosts an `object_store` store opened from `url` with `options` will dial — the egress gate's
+/// subject (realignment repairs R3b). The options are the same key/value pairs `parse_url_opts`
+/// receives, lower-cased the way it matches them.
+///
+/// - `file://`, `memory://`: none.
+/// - `s3://`, `s3a://`: `aws_endpoint_url_s3`, else `aws_endpoint_url` / `aws_endpoint` /
+///   `endpoint_url` / `endpoint`, else `s3.<region>.amazonaws.com` (`<bucket>.s3.<region>…` with
+///   virtual-hosted addressing), the region from `aws_region` / `region` / `aws_default_region` /
+///   `default_region`, default `us-east-1`. S3 Express is refused: its endpoint is not modelled.
+/// - `gs://`: `google_base_url` / `base_url`, else `storage.googleapis.com`.
+/// - `http(s)://`: the URL's host, **and** any endpoint option present, since the builder applies
+///   the options after the URL.
+/// - Azure and anything else: refused, naming the scheme.
+pub fn dial_hosts(url: &reqwest::Url, options: impl IntoIterator<Item = (String, String)>) -> Result<Vec<String>, String> {
+    let o: std::collections::HashMap<String, String> =
+        options.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+    let get = |keys: &[&str]| keys.iter().find_map(|k| o.get(*k).cloned());
+    let host_of = |v: &str| -> Result<String, String> {
+        mycelium::config::host_of_url(v).ok_or_else(|| format!("the endpoint {v:?} names no host"))
+    };
+    const S3_ENDPOINT: &[&str] = &["aws_endpoint_url", "aws_endpoint", "endpoint_url", "endpoint"];
+    match url.scheme() {
+        "file" | "memory" => Ok(Vec::new()),
+        "s3" | "s3a" => {
+            if let Some(e) = get(&["aws_endpoint_url_s3"]).or_else(|| get(S3_ENDPOINT)) {
+                return Ok(vec![host_of(&e)?]);
+            }
+            if get(&["aws_s3_express", "s3_express"]).is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+                return Err("an S3 Express endpoint is not modelled by this adapter".into());
+            }
+            let region = get(&["aws_region", "region", "aws_default_region", "default_region"])
+                .unwrap_or_else(|| "us-east-1".into());
+            let virtual_hosted = get(&["aws_virtual_hosted_style_request", "virtual_hosted_style_request"])
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            let bucket = url.host_str().unwrap_or_default();
+            Ok(vec![if virtual_hosted {
+                format!("{bucket}.s3.{region}.amazonaws.com")
+            } else {
+                format!("s3.{region}.amazonaws.com")
+            }])
+        }
+        "gs" => Ok(vec![match get(&["google_base_url", "base_url"]) {
+            Some(b) => host_of(&b)?,
+            None => "storage.googleapis.com".into(),
+        }]),
+        "http" | "https" => {
+            let mut hosts = vec![url.host_str().ok_or("the store URL names no host")?.to_string()];
+            for e in [get(&["aws_endpoint_url_s3"]), get(S3_ENDPOINT), get(&["google_base_url", "base_url"]), get(&["azure_storage_endpoint", "azure_endpoint"])]
+                .into_iter()
+                .flatten()
+            {
+                let h = host_of(&e)?;
+                if !hosts.contains(&h) {
+                    hosts.push(h);
+                }
+            }
+            Ok(hosts)
+        }
+        other => Err(format!("the endpoint of a {other}:// store is not modelled by this adapter")),
+    }
 }
 
 impl std::fmt::Debug for ObjectStoreFetcher {
@@ -55,12 +126,19 @@ impl ObjectStoreFetcher {
     /// Open the store `url` names, with the builder options taken from the process environment.
     /// Refused **before** a client is built when `egress` does not permit the URL.
     pub fn from_url(url: &str, egress: EgressPolicy) -> Result<Self, String> {
-        if !egress.permits_url(url) {
-            return Err(format!("egress policy denies {url}"));
-        }
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+        // Gate on the endpoint the store dials, not the URL (R3b). With an empty allow-list nothing
+        // is gated, as before; with one, an endpoint that cannot be derived is refused.
+        let endpoints = if egress.allow_hosts.is_empty() {
+            Vec::new()
+        } else {
+            dial_hosts(&parsed, std::env::vars()).map_err(|why| format!("egress policy cannot gate {url}: {why}"))?
+        };
+        if let Some(denied) = endpoints.iter().find(|h| !egress.permits_host(h)) {
+            return Err(format!("egress policy denies {url}: the store dials {denied}"));
+        }
         let (store, prefix) = parse_url_opts(&parsed, std::env::vars()).map_err(|e| format!("{url}: {e}"))?;
-        Ok(Self { store: Arc::from(store), prefix, url: url.to_string(), egress, max_bytes: DEFAULT_MAX_IN_MEMORY_BYTES })
+        Ok(Self { store: Arc::from(store), prefix, url: url.to_string(), egress, endpoints, max_bytes: DEFAULT_MAX_IN_MEMORY_BYTES })
     }
 
     /// The most bytes [`fetch_remote`](BlobFetcher::fetch_remote) will hold for one artifact.
@@ -75,7 +153,10 @@ impl ObjectStoreFetcher {
     }
 
     fn gate(&self) -> Result<(), String> {
-        if self.egress.permits_url(&self.url) { Ok(()) } else { Err(format!("egress policy denies {}", self.url)) }
+        match self.endpoints.iter().find(|h| !self.egress.permits_host(h)) {
+            None => Ok(()),
+            Some(h) => Err(format!("egress policy denies {}: the store dials {h}", self.url)),
+        }
     }
 
     fn location(&self, id: &ArtifactId) -> StorePath {
@@ -461,6 +542,45 @@ mod tests {
             eprintln!("the store adapter exercised against {url}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Realignment repairs R3b (the review's F03, object-store row).** The gate checked the store
+    /// URL, and for `s3://bucket/…` the URL's host is the *bucket name* — not a host anyone dials.
+    /// A bucket named like an allowed host passed, and the client then connected to
+    /// `s3.<region>.amazonaws.com` (or `AWS_ENDPOINT`), which the list never named. Now the gate is
+    /// on the endpoint the store dials.
+    #[test]
+    fn a_bucket_named_like_an_allowed_host_does_not_open_a_store_on_another_endpoint() {
+        let gated = EgressPolicy { allow_hosts: vec!["library.allowed.example".into()] };
+        let r = ObjectStoreFetcher::from_url("s3://library.allowed.example/prefix", gated);
+        let err = r.expect_err("the bucket name is not the endpoint, so the store must be refused");
+        assert!(err.contains("egress"), "{err}");
+    }
+
+    /// The endpoint each store dials, as the adapter derives it — the same option keys
+    /// `object_store` reads, lower-cased the way `parse_url_opts` lower-cases them.
+    #[test]
+    fn the_dialled_endpoint_is_derived_per_store() {
+        let u = |s: &str| reqwest::Url::parse(s).unwrap();
+        let o = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        assert_eq!(dial_hosts(&u("s3://b/p"), o(&[])).unwrap(), vec!["s3.us-east-1.amazonaws.com"]);
+        assert_eq!(dial_hosts(&u("s3://b/p"), o(&[("AWS_REGION", "eu-west-2")])).unwrap(), vec!["s3.eu-west-2.amazonaws.com"]);
+        assert_eq!(
+            dial_hosts(&u("s3://b/p"), o(&[("AWS_REGION", "eu-west-2"), ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", "true")])).unwrap(),
+            vec!["b.s3.eu-west-2.amazonaws.com"]
+        );
+        assert_eq!(dial_hosts(&u("s3://b/p"), o(&[("AWS_ENDPOINT", "http://minio.internal:9000")])).unwrap(), vec!["minio.internal"]);
+        assert_eq!(
+            dial_hosts(&u("s3://b/p"), o(&[("AWS_ENDPOINT", "http://a.internal"), ("AWS_ENDPOINT_URL_S3", "http://s3.internal")])).unwrap(),
+            vec!["s3.internal"],
+            "the S3-specific endpoint wins, as it does in the builder"
+        );
+        assert!(dial_hosts(&u("s3://b/p"), o(&[("AWS_S3_EXPRESS", "true")])).is_err(), "an endpoint this adapter does not model is refused");
+        assert_eq!(dial_hosts(&u("gs://b/p"), o(&[])).unwrap(), vec!["storage.googleapis.com"]);
+        assert_eq!(dial_hosts(&u("gs://b/p"), o(&[("GOOGLE_BASE_URL", "https://gcs.internal")])).unwrap(), vec!["gcs.internal"]);
+        assert_eq!(dial_hosts(&u("https://store.example/p"), o(&[])).unwrap(), vec!["store.example"]);
+        assert!(dial_hosts(&u("az://acct/c"), o(&[])).is_err(), "Azure is not modelled, so it is refused under a list");
+        assert!(dial_hosts(&u("file:///tmp/lib"), o(&[])).unwrap().is_empty(), "a local store dials nothing");
     }
 
     #[test]

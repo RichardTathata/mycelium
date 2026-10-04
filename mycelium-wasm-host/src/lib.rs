@@ -79,7 +79,7 @@ pub use tools::{
     signing_key_from_hex, verify as verify_library, AcceptOutcome, PublishOutcome, VerifyReport,
 };
 #[cfg(feature = "object_store")]
-pub use object_store_source::{accept_in_store, list_store, publish_to_store, verify_store, ObjectStoreFetcher};
+pub use object_store_source::{accept_in_store, dial_hosts, list_store, publish_to_store, verify_store, ObjectStoreFetcher};
 pub use resources::{ResourceProbe, SystemResourceProbe};
 pub use runtime::{
     cap_invoke_kind, ArtifactRuntime, BlobRuntime, EntryActivateFn, FuelPolicy, InstallError, Installed, InvocationLog,

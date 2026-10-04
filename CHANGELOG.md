@@ -18,6 +18,22 @@ deployment whose MCP, LLM or OIDC endpoint redirects to a host off its allow-lis
 egress refusal — that request was leaving the allow-list before.
 
 ### Security
+- **The object-store fetcher gates on the endpoint it dials, not the bucket name**
+  (`docs/plans/realignment-repairs.md` R3b; the review's F03, object-store row). The gate checked
+  the store URL, and for `s3://bucket/…` that URL's host is the bucket name, which nothing dials: a
+  bucket named like an allowed host passed, and `object_store` then connected to
+  `s3.<region>.amazonaws.com` or `AWS_ENDPOINT`. `mycelium_wasm_host::dial_hosts` now derives the
+  endpoint from the URL and the same option keys `object_store` reads: an explicit S3 endpoint
+  (`AWS_ENDPOINT_URL_S3` first), else the regional host with path-style or virtual-hosted
+  addressing; `storage.googleapis.com` or `GOOGLE_BASE_URL` for GCS; the URL's host plus any
+  endpoint option for `http(s)://`; nothing for a local store. An endpoint the adapter does not model
+  — Azure, S3 Express — is refused under a non-empty allow-list rather than guessed at. Fail-first on
+  `d9415708`: `a_bucket_named_like_an_allowed_host_does_not_open_a_store_on_another_endpoint`
+  opened the store. **Check before upgrading:** a stem or `mycelium-artifact` reading an
+  `s3://`/`gs://` library under a non-empty allow-list must list the endpoint host
+  (`.amazonaws.com`, `storage.googleapis.com`, or the MinIO host) — listing the bucket name never
+  gated anything. **Not covered:** the cloud identity's credential traffic (instance metadata, STS)
+  and redirects inside `object_store`'s own client, which this adapter does not build.
 - **The egress gate reads a URL's host the way the HTTP client does** (`docs/plans/realignment-
   repairs.md` R4; found while verifying the review's F03, and stronger than it — no redirect is
   needed). `host_of_url` split the authority on `/?#` and took what followed the last `@`; reqwest
@@ -60,8 +76,7 @@ egress refusal — that request was leaving the allow-list before.
   `a_jwks_redirect_to_a_denied_host_is_not_followed` and
   `the_federation_client_follows_no_redirect` each failed — the denied listener's own accept
   counter moved — and each plants an allowed redirect first. **Not in this entry:** the
-  object-store fetcher still gates on the bucket rather than its endpoint (R3b); the host parser
-  is R4, above. **API note:** `OpenAiBackend::new`
+  object-store fetcher's endpoint is R3b and the host parser R4, both above. **API note:** `OpenAiBackend::new`
   follows no redirect; call `.with_egress(policy)` to follow allowed ones.
 
 ### Fixed
