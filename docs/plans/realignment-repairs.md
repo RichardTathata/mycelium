@@ -319,7 +319,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | Increment | PR | Status |
 |---|---|---|
 | R1 journal: truncate, one-buffer frame, lock, poisoned writer | #518 | in review |
-| R2 WAL: pinned startup repair, refusal on failure, partial header, ownership | (this PR) | in review |
+| R2 WAL: pinned startup repair, refusal on failure, partial header, ownership | #519 | in review |
 | R3 egress client builder, every client, no redirects | — | open |
 | R4 the gate parses with `url` | — | open |
 | R5 patch documentation | — | open |
