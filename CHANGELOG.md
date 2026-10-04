@@ -15,6 +15,32 @@ in a process, now get `WouldBlock` naming the path on the second open — a conf
 silently corrupting its journal.
 
 ### Fixed
+- **The KV WAL's startup repair is pinned, its failure refuses the start, a partial length prefix
+  is a torn tail, and the WAL has one owner** (`docs/plans/realignment-repairs.md` R2; the review's
+  F01, narrower than reported). `GossipAgent::start` has always run a snapshot before the first
+  append, and the snapshot truncates `wal.bin`, so the node binary already repaired a torn tail — but
+  nothing pinned that, the snapshot's result was discarded with `let _ =` (a failed startup snapshot
+  started the node behind the torn frame, where the next appends were acknowledged and then swallowed
+  by its claimed length), `decode_wal_records` reported a trailing 1–3-byte prefix as `Clean`, and two
+  agents on one `base_path`/node id shared one `wal.bin`. Now: a failing startup snapshot **refuses
+  the start by name** (`InvalidField { field: "persistence" }`, "startup snapshot"), the same class as
+  v2.20.0's refusals; under `on_unreadable = "quarantine"` it warns and starts without the repair
+  rather than moving readable files aside. A partial prefix is `WalEnd::Torn`. `start()` takes an
+  exclusive OS lock on `wal.bin.lock` (`mycelium_core::persistence::OwnershipLock`, the journal's
+  lock moved to core so both share it) before replay and hands it to the writer task
+  (`WalHandle::hold_ownership`), which holds it until it exits; a second agent on the path refuses
+  to start naming the owner. **`shutdown()` now stops the WAL writer** — final snapshot, lock
+  released — after every other task has exited; before, the writer ran until the agent was dropped,
+  so an agent restarted over the same directory in one process would now find the lock held. A
+  direct embedder of `replay` + `spawn_wal_writer` is told, on both rustdocs, to take the lock,
+  hand it over and trigger a snapshot first. **API note:** `WalMsg` gained `HoldOwnership` (an
+  exhaustive match outside core breaks; none exists in the workspace), and `WalHandle::shutdown`
+  now waits for the writer to exit.
+  Witnesses: `a_partial_length_prefix_is_a_torn_tail_not_a_clean_end`,
+  `a_failing_startup_snapshot_refuses_the_start_instead_of_appending_behind_a_torn_tail`,
+  `a_second_agent_on_one_persistence_path_refuses_to_start_naming_the_owner`, each seen failing on
+  the unfixed code; `a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_append` pins
+  the existing repair by replaying a copy of the files taken mid-run (a crash; a graceful restart is rescued by the shutdown snapshot and cannot show it), and was seen failing with the trigger toggled off — the replay recovered nothing.
 - **The node-local journal truncates a torn tail before the first append, owns its file, and stops
   after a failed append** (`docs/plans/realignment-repairs.md` R1; the external review's F02 and F12).
   `Journal::open` counted complete records but never removed a partial final frame, so an append

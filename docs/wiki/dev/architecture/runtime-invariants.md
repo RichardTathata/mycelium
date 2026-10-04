@@ -287,6 +287,24 @@ would repair it from peers eventually; a single node or a cold cluster restart l
 record is now replayed through `apply_fn` = `apply_and_notify`, whose LWW lets the snapshot's newer
 entry win on its own. `KvSnapshot::snapshot_hlc` stays on disk, informational only.
 
+**4. The startup snapshot repairs the WAL's torn tail before the first acknowledged append, and the
+WAL has one owner** (realignment repairs R2, 2026-10-04; the external review's F01). `replay` applies
+the good prefix of a torn `wal.bin` and *leaves the tail on disk*; what removes it is the snapshot
+`GossipAgent::start` triggers before the handle is installed (`lifecycle.rs`), whose step 4 truncates
+the WAL. So the node binary never appends behind a torn frame — **unless that snapshot fails**, which
+used to be discarded (`let _ =`) and is now a refusal at `start()` by name (or a warning under
+`on_unreadable = "quarantine"`). A trailing 1–3-byte length prefix is `WalEnd::Torn`, not `Clean`.
+`start()` also takes `OwnershipLock` on `wal.bin.lock` before replay and hands it to the **writer
+task** (`WalHandle::hold_ownership`), which holds it until it exits — at `shutdown()`, which now stops
+the writer last, or when the handle drops — so two agents on one `base_path`/node id cannot share a
+WAL, and a handle clone that outlives the writer cannot keep the lock. **A direct embedder of the public `replay`
++ `spawn_wal_writer` gets none of this unless it takes the lock and calls `trigger_snapshot()` before
+its first append** — both rustdocs say so. The pin is
+`a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_append` (seen failing with the
+trigger toggled off); the refusal and the ownership each have their own witness. The node-local
+`Journal` (`src/agent/journal.rs`) is a different file with the same two invariants since R1, enforced
+in its `open` rather than by a snapshot.
+
 **The contract above the invariants (contracts axis item 1, ADR 2026-09-13).** What each public
 acknowledgement proves — and does not — is inventoried site by site in
 [`docs/design/contracts-receipts.md`](../../../design/contracts-receipts.md) §1, with the four receipts
