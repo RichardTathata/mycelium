@@ -320,7 +320,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 |---|---|---|
 | R1 journal: truncate, one-buffer frame, lock, poisoned writer | #518 | in review |
 | R2 WAL: pinned startup repair, refusal on failure, partial header, ownership | #519 | in review |
-| R3 egress client builder, every client, every hop re-checked | (this PR) | in review |
+| R3 egress client builder, every client, every hop re-checked | #520 | in review |
 | R3b the object-store fetcher gates on its endpoint, not its bucket | — | open — `object_store` builds its own client, so the endpoint must be derived from the store's configuration (`AWS_ENDPOINT`, the regional S3 host, `storage.googleapis.com`) and its redirect policy is not reachable from here |
 | R4 the gate parses with `url` | — | open |
 | R5 patch documentation | — | open |
