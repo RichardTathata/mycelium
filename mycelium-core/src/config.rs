@@ -344,25 +344,32 @@ impl EgressPolicy {
     }
 }
 
-/// Extract the host from a URL without pulling in a URL crate: drop the scheme,
-/// any `userinfo@`, then take up to the first `/?#` and strip a `:port`. IPv6
-/// literals in brackets are returned without the brackets.
+/// The host a URL names, read **the way the HTTP client reads it** — the WHATWG parser (`url`) that
+/// reqwest uses — so the host the egress gate allows is the host the client dials.
+///
+/// The hand-rolled parser this replaces split the authority on `/?#` and took what followed the
+/// last `@`. The WHATWG parser treats a backslash as `/` in an http(s) authority, strips tabs and
+/// newlines, and maps IDNA forms, so the two disagreed: `http://evil.example\@allowed.example/`
+/// was gated as `allowed.example` and dialled as `evil.example`, with no redirect needed
+/// (realignment repairs R4). A string with no `://` is read as `http://…`, so a bare `host:port`
+/// still yields its host. An IPv6 literal is returned without brackets. `None` when the parser
+/// rejects the URL or it names no host — denied under a non-empty allow-list.
+///
+/// **What this is not:** resolution. The gate compares names; an allowed name that resolves to an
+/// address the operator meant to deny is not caught here.
 pub fn host_of_url(url: &str) -> Option<String> {
-    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    if authority.is_empty() {
-        return None;
+    let parsed = if url.contains("://") {
+        url::Url::parse(url)
+    } else {
+        url::Url::parse(&format!("http://{url}"))
     }
-    // IPv6 literal: [::1]:port
-    if let Some(rest) = authority.strip_prefix('[') {
-        return rest.split(']').next().filter(|s| !s.is_empty()).map(|s| s.to_string());
+    .ok()?;
+    match parsed.host()? {
+        url::Host::Domain(d) if !d.is_empty() => Some(d.to_string()),
+        url::Host::Domain(_) => None,
+        url::Host::Ipv4(a) => Some(a.to_string()),
+        url::Host::Ipv6(a) => Some(a.to_string()),
     }
-    let host = authority.split(':').next().unwrap_or(authority);
-    if host.is_empty() { None } else { Some(host.to_string()) }
 }
 
 /// Controls if and how a node persists its KV store to local disk.
@@ -2016,13 +2023,58 @@ mod tests {
         assert!(!p.permits_url("http:///nohost"));
     }
 
+    /// **Realignment repairs R4 (the review's strongest egress finding).** The gate must read the
+    /// same host from a URL that the HTTP client dials. reqwest parses with the WHATWG `url` crate,
+    /// which treats a backslash as `/` in an http(s) authority, strips tabs and newlines, and maps IDNA
+    /// forms; the hand-rolled parser did none of that, so `http://evil.example\@allowed.example/`
+    /// was gated as `allowed.example` and dialled as `evil.example`. Every vector here must agree
+    /// with the client's parser exactly — the client's host is the reference, not an expectation
+    /// written by hand.
+    #[test]
+    fn the_gate_reads_the_host_the_client_dials() {
+        let vectors = [
+            "http://evil.example\\@allowed.example/mcp",
+            "http://evil.example\\.allowed.example/",
+            "https://evil.example\\@allowed.example:8443/x",
+            "http://allowed.example@evil.example/",
+            "http://u:p@evil.example:9000/p?x#y",
+            "http://evil.example#@allowed.example/",
+            "http://evil.example?@allowed.example/",
+            "http://evil\t.example/",
+            "http://evil.exa\nmple/",
+            "http://ALLOWED.Example/",
+            "http://allowed\u{3002}example/",
+            "http://ex\u{0430}mple.com/",
+            "http://[::1]:8080/p",
+            "http://127.0.0.1:9/",
+            "http:///nohost",
+            "s3://bucket/prefix",
+        ];
+        for v in vectors {
+            let client = url::Url::parse(v).ok().and_then(|u| match u.host() {
+                Some(url::Host::Domain(d)) => Some(d.to_string()),
+                Some(url::Host::Ipv4(a)) => Some(a.to_string()),
+                Some(url::Host::Ipv6(a)) => Some(a.to_string()),
+                None => None,
+            });
+            assert_eq!(host_of_url(v), client, "the gate and the client disagree on {v:?}");
+        }
+        let p = EgressPolicy { allow_hosts: vec!["allowed.example".into(), ".allowed.example".into()] };
+        assert!(!p.permits_url("http://evil.example\\@allowed.example/mcp"), "the userinfo trick is refused");
+        assert!(!p.permits_url("http://evil.example\\.allowed.example/"), "the suffix trick is refused");
+        assert!(p.permits_url("http://allowed.example/"));
+    }
+
     #[test]
     fn egress_host_of_url_parses_forms() {
         assert_eq!(host_of_url("http://h.example/p").as_deref(), Some("h.example"));
         assert_eq!(host_of_url("https://u:p@h.example:9000/p?x#y").as_deref(), Some("h.example"));
         assert_eq!(host_of_url("h.example:8080/p").as_deref(), Some("h.example"));
         assert_eq!(host_of_url("http://[::1]:8080/p").as_deref(), Some("::1"));
-        assert_eq!(host_of_url("http:///nohost"), None);
+        // The WHATWG parser reads `http:///nohost` as host `nohost` — and so does the client, which
+        // is the point (R4). Under a non-empty allow-list it is still refused unless listed.
+        assert_eq!(host_of_url("http:///nohost").as_deref(), Some("nohost"));
+        assert_eq!(host_of_url("http://"), None);
     }
 
     #[test]

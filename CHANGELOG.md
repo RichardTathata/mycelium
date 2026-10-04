@@ -18,6 +18,25 @@ deployment whose MCP, LLM or OIDC endpoint redirects to a host off its allow-lis
 egress refusal — that request was leaving the allow-list before.
 
 ### Security
+- **The egress gate reads a URL's host the way the HTTP client does** (`docs/plans/realignment-
+  repairs.md` R4; found while verifying the review's F03, and stronger than it — no redirect is
+  needed). `host_of_url` split the authority on `/?#` and took what followed the last `@`; reqwest
+  parses with the WHATWG `url` crate, which reads a backslash as `/` in an http(s) authority,
+  strips tabs and newlines, and maps IDNA forms. So `http://evil.example\@allowed.example/` was
+  allowed as `allowed.example` and dialled as `evil.example`, and `http://evil.example\.allowed.example/`
+  passed a `.allowed.example` suffix entry the same way — for every caller of `permits_url` that hands
+  the same string to a client. `host_of_url` now parses with `url` (already in the lockfile through
+  reqwest); a string with no `://` is read as `http://…`, and an IPv6 literal still comes back
+  without brackets. One visible change: `http:///nohost` now yields `nohost`, the host the client
+  would dial. The wiki's `GitMirror`, which splits a git remote by hand and hands it to git (and so to
+  curl or ssh), now refuses by name a remote whose authority holds a backslash, whitespace or a
+  control character. Fail-first on `55eb4edd`: `the_gate_reads_the_host_the_client_dials` (every
+  vector compared with the client's own parse) and
+  `a_backslash_in_the_authority_does_not_smuggle_a_denied_host_past_the_gate` (the MCP bridge connected
+  to a denied listener through `http://127.0.0.1:{port}\@localhost/` with only `localhost` allowed)
+  each failed; `a_remote_whose_authority_two_parsers_could_read_differently_is_refused` likewise
+  against the unfixed mirror. **Still not claimed:** resolution — the gate compares names, so an
+  allowed name that resolves to an address the operator meant to deny is not caught.
 - **A redirect is now checked against the egress allow-list like the first URL**
   (`docs/plans/realignment-repairs.md` R3; the external review's F03, P1). The allow-list gated the
   first URL of each outbound call, and every client then followed reqwest's default ten redirects
@@ -41,8 +60,8 @@ egress refusal — that request was leaving the allow-list before.
   `a_jwks_redirect_to_a_denied_host_is_not_followed` and
   `the_federation_client_follows_no_redirect` each failed — the denied listener's own accept
   counter moved — and each plants an allowed redirect first. **Not in this entry:** the
-  object-store fetcher still gates on the bucket rather than its endpoint (R3b), and the gate's
-  host parser still disagrees with reqwest on `\` (R4). **API note:** `OpenAiBackend::new`
+  object-store fetcher still gates on the bucket rather than its endpoint (R3b); the host parser
+  is R4, above. **API note:** `OpenAiBackend::new`
   follows no redirect; call `.with_egress(policy)` to follow allowed ones.
 
 ### Fixed

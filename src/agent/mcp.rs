@@ -662,6 +662,36 @@ mod tests {
         closed.shutdown().await;
     }
 
+    /// **Realignment repairs R4, end to end.** The gate parsed `http://127.0.0.1:{port}\@localhost/`
+    /// as host `localhost` (it took what follows the last `@`), while reqwest — which treats a backslash
+    /// as `/` — dialled `127.0.0.1`. With only `localhost` allowed, the denied listener must see zero
+    /// connections. The plant: the same listener reached by an allowed name does count.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn a_backslash_in_the_authority_does_not_smuggle_a_denied_host_past_the_gate() {
+        use crate::test_util::spawn_counting_listener;
+        use std::sync::atomic::Ordering;
+        const MCP_OK: &str = r#"{"jsonrpc":"2.0","id":0,"result":{"tools":[]}}"#;
+        let (denied, hits) = spawn_counting_listener(MCP_OK).await;
+
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.egress = crate::EgressPolicy { allow_hosts: vec!["localhost".into()] };
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        a.start().await.unwrap();
+
+        assert!(a.mcp().connect_mcp_server(format!("http://localhost:{denied}/")).await.is_ok(), "the plant: an allowed name reaches the listener");
+        let planted = hits.load(Ordering::SeqCst);
+        assert!(planted > 0);
+
+        let smuggled = format!("http://127.0.0.1:{denied}\\@localhost/");
+        let r = a.mcp().connect_mcp_server(smuggled.clone()).await;
+        assert!(r.is_err(), "{smuggled} is gated as the host it dials");
+        assert_eq!(hits.load(Ordering::SeqCst), planted, "the denied host saw no new connection");
+        a.shutdown().await;
+    }
+
     #[cfg(feature = "gateway")]
     #[tokio::test]
     async fn test_mcp_client_proxies_call() {

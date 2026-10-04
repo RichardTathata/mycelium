@@ -52,6 +52,9 @@ async-trait = "0.1"
 thiserror = "1.0"
 tracing = "0.1"
 base64 = "0.22"
+# The egress gate parses a URL with the parser reqwest uses (WHATWG), so the host it allows is the
+# host the client dials (realignment repairs R4). Already in the lockfile through reqwest.
+url = "2"
 
 # TLS (optional — "tls" feature)
 tokio-rustls   = { version = "0.26", optional = true }
