@@ -2,7 +2,7 @@
 name = "mycelium-tuple-space"
 version = "2.22.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "Linda-style tuple space companion crate for Mycelium: single-copy pipeline buffer with blocking take, WAL persistence, and emergent primary/secondary failover — built entirely on Mycelium's public API"
 license = "AGPL-3.0-only"

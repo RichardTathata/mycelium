@@ -36,16 +36,37 @@
 //! its own stream, so a replay of one cannot hand the other its verdict. The stream is therefore a
 //! parameter of [`open`](Journal::open), not a constant.
 //!
+//! # Ownership and repair (realignment repairs R1)
+//!
+//! An acknowledged record is only as durable as the file in front of it. Two things used to break
+//! that. A crash mid-append leaves a **torn tail** — a partial length prefix, or a prefix whose body
+//! never fully landed — and `open` used to count past it and append *behind* it, so the torn frame's
+//! claimed length swallowed the next acknowledged record: no reader returned it, and once enough had
+//! been appended every consumer that folds its journal on open refused to start. And nothing stopped
+//! **two owners** — two handles, or two processes — opening one path and each issuing the same
+//! sequence numbers. Now `open` takes an exclusive OS lock on `<path>.lock` first, scans to the last
+//! complete frame and truncates there (synced, directory too), and only then spawns the writer; each
+//! frame is one write; and a failed append **poisons** the writer, which refuses every later append
+//! by name until a reopen repairs the file. The torn-tail witnesses are in `journal_repair_tests.rs`.
+//!
+//! What the scan cannot see is corruption *inside* a complete frame: there is no checksum on disk,
+//! so a frame of the right length and the wrong bytes reaches the consumer, which refuses it by name
+//! when it decodes. A journal written by a version before this repair, with an acknowledged record
+//! already behind a torn frame, is in that class.
+//!
 //! # Five-part statement
 //!
 //! *Guarantee:* a record this journal acknowledges with `OnDisk` is on this node's disk, fsynced,
-//! before the acknowledgement returns; and nothing written here is gossiped. *Assumptions:* the
-//! journal directory is on durable local storage the node owns, and `fsync` means what the
-//! filesystem says it means. *Enforcing component:* [`Journal::append`] and its writer task.
-//! *Failure behaviour:* the three named errors; a full queue is refused rather than dropped, and a
-//! lost acknowledgement is reported as unknown rather than as failure. *Detecting tests:* this
-//! module's `tests`, one per failure plus the round-trip, restart and reader cases. *Strength:*
-//! `SelfImposedPrevention` over this node's own records; it prevents nothing at a resource.
+//! before the acknowledgement returns, **and readable after a restart**; one owner at a time; and
+//! nothing written here is gossiped. *Assumptions:* the journal directory is on durable local storage
+//! the node owns, `fsync` means what the filesystem says it means, and the OS honours its file locks.
+//! *Enforcing component:* [`Journal::open`] (ownership, repair) and [`Journal::append`] with its
+//! writer task. *Failure behaviour:* the three named errors; a full queue is refused rather than
+//! dropped, a lost acknowledgement is reported as unknown rather than as failure, a second owner is
+//! refused with `WouldBlock`, and a failed append poisons the writer. *Detecting tests:* this
+//! module's `tests`, one per failure plus the round-trip, restart and reader cases, and
+//! `repair_tests`. *Strength:* `SelfImposedPrevention` over this node's own records; it prevents
+//! nothing at a resource.
 
 use mycelium_core::receipt::LocalDurability;
 use sha2::{Digest, Sha256};
@@ -114,6 +135,18 @@ pub struct Journal {
     /// The replay-seam stream this journal's queue records under — per destination.
     stream: &'static str,
     path:   PathBuf,
+    /// The exclusive OS lock on `<path>.lock`, held for this handle's lifetime and released when
+    /// the last `Arc` drops. `None` only for the test-only handles that own no file.
+    _lock:  Option<std::fs::File>,
+}
+
+/// What `recover` found: how many complete frames the file holds, where the last one ends, and
+/// how long the file is. `valid_end < file_len` means a torn tail — a partial length prefix or a
+/// frame whose body the file does not contain — that `open` removes before anything is appended.
+struct Recovered {
+    records:   u64,
+    valid_end: u64,
+    file_len:  u64,
 }
 
 impl Journal {
@@ -122,35 +155,84 @@ impl Journal {
     ///
     /// Append-only. The file is opened once and kept open; each record is length-prefixed so a
     /// reader can walk it without parsing the payload to find boundaries.
+    ///
+    /// **Ownership first, repair second, writes last** (`docs/plans/realignment-repairs.md` R1).
+    /// An exclusive OS lock on `<path>.lock` is taken before anything is read, and a second owner —
+    /// another handle in this process or another process — is refused with
+    /// [`WouldBlock`](std::io::ErrorKind::WouldBlock) naming the path. Then the file is scanned to
+    /// its last complete frame and **truncated there**, synced along with its directory, so a
+    /// crash mid-append (a partial length prefix, or a body shorter than its prefix claims) can
+    /// never sit in front of a later acknowledged record. Only then is the writer spawned.
     pub fn open(path: impl AsRef<Path>, stream: &'static str) -> Result<Arc<Self>, std::io::Error> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_inner(path.as_ref(), stream, None)
+    }
+
+    fn open_inner(
+        path: &Path,
+        stream: &'static str,
+        fault: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Arc<Self>, std::io::Error> {
+        let path = path.to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let lock = acquire_ownership(&path)?;
+        let recovered = recover(&path)?;
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        if recovered.valid_end < recovered.file_len {
+            // A torn tail. Nothing in it was ever acknowledged: an append is acknowledged only after
+            // its whole frame is fsynced, and the scan stops at the first frame the file does not
+            // complete. Removing it is what makes the next append land where every reader will find
+            // it; leaving it was F02 (an acknowledged record behind a torn frame that no reader
+            // returned, then every folding consumer refusing to open).
+            file.set_len(recovered.valid_end)?;
+            file.sync_all()?;
+            fsync_parent(&path)?;
+            tracing::warn!(
+                journal = %path.display(),
+                dropped_bytes = recovered.file_len - recovered.valid_end,
+                records = recovered.records,
+                "journal: truncated a torn tail left by a crash mid-append before the first append"
+            );
+        }
         // Where the existing journal ends is where this node's sequence resumes; counting records
         // rather than assuming an empty file means a restart does not renumber history.
-        let mut seq = count_records(&path)?;
+        let mut seq = recovered.records;
 
         let (tx, mut rx) = mpsc::channel::<Msg>(QUEUE_DEPTH);
         tokio::spawn(async move {
-            use std::io::Write as _;
+            // After a failed append the file's end is unknown — part of a frame may be on disk —
+            // and the writer must not put an acknowledged record behind it. It refuses every later
+            // append by name until a reopen scans and repairs the file (F02's second half).
+            let mut poisoned: Option<String> = None;
             while let Some(Msg::Append { bytes, ack }) = rx.recv().await {
-                let result = (|| -> std::io::Result<u64> {
-                    let len = u32::try_from(bytes.len()).map_err(|_| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidInput, "record too large")
-                    })?;
-                    file.write_all(&len.to_le_bytes())?;
-                    file.write_all(&bytes)?;
-                    // `OnDisk` is a claim, and this is what makes it true. Without it the receipt
-                    // would say durable and mean "in the page cache".
-                    file.sync_data()?;
-                    seq += 1;
-                    Ok(seq - 1)
-                })();
-                let reply = match result {
-                    Ok(at) => Ok((at, LocalDurability::OnDisk)),
-                    Err(e) => Err(e.to_string()),
+                if let Some(why) = &poisoned {
+                    let _ = ack.send(Err(format!(
+                        "the journal is poisoned by an earlier failed append and refuses until it is reopened and repaired: {why}"
+                    )));
+                    continue;
+                }
+                let reply = match u32::try_from(bytes.len()) {
+                    // Nothing was written, so nothing is poisoned.
+                    Err(_) => Err("record too large".to_string()),
+                    Ok(len) => {
+                        // One frame, one write: a length and a body written separately could be
+                        // interleaved by a second writer, which the lock now prevents, and left a
+                        // prefix without its body on a failure between the two.
+                        let mut frame = Vec::with_capacity(4 + bytes.len());
+                        frame.extend_from_slice(&len.to_le_bytes());
+                        frame.extend_from_slice(&bytes);
+                        match write_frame(&mut file, &frame, fault.as_deref()) {
+                            Ok(()) => {
+                                seq += 1;
+                                Ok((seq - 1, LocalDurability::OnDisk))
+                            }
+                            Err(e) => {
+                                poisoned = Some(format!("seq {seq}: {e}"));
+                                Err(e.to_string())
+                            }
+                        }
+                    }
                 };
                 // The caller may have timed out and gone; that is their `DeliveryUnknown`, and from
                 // here the record is on disk regardless.
@@ -158,7 +240,7 @@ impl Journal {
             }
         });
 
-        Ok(Arc::new(Self { tx, stream, path }))
+        Ok(Arc::new(Self { tx, stream, path, _lock: Some(lock) }))
     }
 
     /// Where the journal lives.
@@ -217,7 +299,18 @@ impl Journal {
                 drop(ack);
             }
         });
-        Arc::new(Self { tx, stream, path: PathBuf::from("<stalled>") })
+        Arc::new(Self { tx, stream, path: PathBuf::from("<stalled>"), _lock: None })
+    }
+
+    /// A real journal whose writer fails the next append **after writing part of its frame**
+    /// whenever `fault` is set (and clears it). How a test arranges the one failure the production
+    /// path cannot otherwise be made to produce on demand: a short write followed by an error.
+    pub(crate) fn open_with_fault(
+        path: impl AsRef<Path>,
+        stream: &'static str,
+        fault: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Arc<Self>, std::io::Error> {
+        Self::open_inner(path.as_ref(), stream, Some(fault))
     }
 
     /// The replay-seam stream this journal records under. Production never asks a journal its
@@ -227,35 +320,96 @@ impl Journal {
     }
 }
 
-/// How many length-prefixed records the file already holds.
-fn count_records(path: &Path) -> std::io::Result<u64> {
+/// Write one frame and fsync it. `fault`, set only by a test, turns this call into a short write
+/// followed by an error — the failure shape a full disk or a pulled cable produces.
+fn write_frame(
+    file: &mut std::fs::File,
+    frame: &[u8],
+    fault: Option<&std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if fault.is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::SeqCst)) {
+        file.write_all(&frame[..4])?;
+        return Err(std::io::Error::other("injected write failure after a partial frame"));
+    }
+    file.write_all(frame)?;
+    // `OnDisk` is a claim, and this is what makes it true. Without it the receipt would say
+    // durable and mean "in the page cache".
+    file.sync_data()
+}
+
+/// Take the exclusive OS lock on `<path>.lock`. Held by the handle for its lifetime; released by the
+/// OS when the file closes, including when the process dies.
+fn acquire_ownership(path: &Path) -> std::io::Result<std::fs::File> {
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path)?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(std::fs::TryLockError::WouldBlock) => Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "the journal {} is owned by another handle or process (lock file {})",
+                path.display(),
+                lock_path.display()
+            ),
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// Fsync the directory holding `path`, so a truncation survives a crash the way the file does.
+fn fsync_parent(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Walk the file frame by frame to its last complete record. A missing file is an empty journal.
+///
+/// Both ends of a crash mid-append are a torn tail: a length prefix the file holds only part of
+/// (1–3 bytes), and a body shorter than its prefix claims. The scan stops at the first of either and
+/// reports where the complete frames end, which is where `open` truncates to. The landing position
+/// is computed from the lengths, never from a seek's `Ok` — **seeking past the end of a file is
+/// legal and succeeds**, which is how an earlier version counted a torn tail as a record.
+///
+/// **What this cannot see:** a frame whose body is the right length and the wrong bytes. The journal
+/// stores no checksum, so corruption *inside* a complete frame is for the consumer that decodes the
+/// record to refuse by name — which every folding consumer does on open.
+fn recover(path: &Path) -> std::io::Result<Recovered> {
     use std::io::{Read as _, Seek as _};
-    let mut f = std::fs::File::open(path)?;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Recovered { records: 0, valid_end: 0, file_len: 0 });
+        }
+        Err(e) => return Err(e),
+    };
     let file_len = f.metadata()?.len();
-    let mut n = 0u64;
+    let mut records = 0u64;
+    let mut pos = 0u64;
     let mut len = [0u8; 4];
     loop {
-        match f.read_exact(&mut len) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e),
+        if pos + 4 > file_len {
+            break; // a clean end, or a partial prefix: either way the complete frames end at `pos`
         }
-        let want = u32::from_le_bytes(len) as i64;
-        // A truncated tail is where a crash landed: stop counting there rather than failing to
-        // open, so a node with a half-written record still starts and still appends after it.
-        //
-        // The landing position is checked, not merely the seek's `Ok`: **seeking past the end of a
-        // file is legal and succeeds**, so a torn tail whose length prefix outruns the file was
-        // counted as a complete record. `count_records` drives the next append's sequence number
-        // while `read_journal_from` stops *at* the torn record, so the two disagreed about how many
-        // records exist and the next append took a seq number that no reader would ever hand out.
-        let Ok(landed) = f.seek(std::io::SeekFrom::Current(want)) else { break };
-        if landed > file_len {
-            break;
+        f.read_exact(&mut len)?;
+        let want = u64::from(u32::from_le_bytes(len));
+        if pos + 4 + want > file_len {
+            break; // the body the prefix promises is not all there
         }
-        n += 1;
+        f.seek(std::io::SeekFrom::Current(want as i64))?;
+        pos += 4 + want;
+        records += 1;
     }
-    Ok(n)
+    Ok(Recovered { records, valid_end: pos, file_len })
+}
+
+/// How many length-prefixed records the file already holds — the complete ones.
+#[cfg(test)]
+fn count_records(path: &Path) -> std::io::Result<u64> {
+    Ok(recover(path)?.records)
 }
 
 /// Where a reader has got to. Opaque-ish on purpose: an exporter stores it and hands it back.
@@ -305,8 +459,10 @@ pub struct JournalPage {
 /// than `max_bytes` is still returned **alone** rather than skipped: silently dropping a record
 /// because it is inconveniently large is the failure mode this mechanism exists to avoid.
 ///
-/// A truncated tail — where a crash landed mid-record — ends the page cleanly and leaves the cursor
-/// before it, so a later read picks the record up once the writer completes it.
+/// A truncated tail ends the page cleanly and leaves the cursor before it. Live, that is a record
+/// the writer is still completing, and a later read picks it up. After a crash nothing completes
+/// it: the next [`Journal::open`] truncates it before the next append, and the cursor is still
+/// right, because the next record lands exactly where the torn one began.
 pub fn read_journal_from(
     path: &Path,
     cursor: JournalCursor,
@@ -446,7 +602,7 @@ mod tests {
         let path = temp("saturation");
         // A writer that never drains, so the queue fills and stays full.
         let (tx, _held) = mpsc::channel::<Msg>(1);
-        let j = Journal { tx, stream: "test/journal", path: path.clone() };
+        let j = Journal { tx, stream: "test/journal", path: path.clone(), _lock: None };
 
         // Fill the one slot, then the next append has nowhere to go.
         let first = j.append(b"a".to_vec());
@@ -606,18 +762,27 @@ mod tests {
         assert!(!page.more);
     }
 
+    /// Where a crash landed mid-record. The node must still open, still append — refusing to start
+    /// would turn a partial write into an outage — **and the append must be readable afterwards**.
+    /// The first version of this test asserted only that the append returned `Ok`, which pinned
+    /// the F02 defect: the record was acknowledged behind the torn frame and no reader ever
+    /// returned it (`docs/plans/realignment-repairs.md` R1).
     #[tokio::test]
     async fn a_truncated_tail_does_not_stop_the_node_from_starting() {
-        // Where a crash landed mid-record. The node must still open, still append, and simply not
-        // count the fragment — refusing to start would turn a partial write into an outage.
         let path = temp("truncated");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, [9u8, 0, 0, 0, b'h', b'i']).unwrap();
 
         let j = Journal::open(&path, "test/journal").unwrap();
-        assert!(j.append(b"after".to_vec()).await.is_ok());
+        let a = j.append(b"after".to_vec()).await.expect("the node appends after a torn tail");
+        assert_eq!(a.seq, 0, "the fragment was never a record");
+        assert_eq!(read_journal(&path).unwrap(), vec![b"after".to_vec()], "and the append is readable");
     }
 }
+
+#[cfg(test)]
+#[path = "journal_repair_tests.rs"]
+mod repair_tests;
 
 
 #[cfg(test)]

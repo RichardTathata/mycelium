@@ -37,7 +37,7 @@
 1 src/agent/helpers.rs
 15 src/agent/http.rs
 1 src/agent/intent.rs
-5 src/agent/journal.rs
+12 src/agent/journal.rs
 1 src/agent/kv_quorum_ext.rs
 7 src/agent/lifecycle.rs
 3 src/agent/lock_service.rs

@@ -9,6 +9,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Wire **v12** unchanged (`PREV = 11`); no API change. **Check before upgrading:** `rust-version` is now
+**1.89** (`std::fs::File::try_lock`); two agents sharing one journal path, or one journal opened twice
+in a process, now get `WouldBlock` naming the path on the second open — a configuration that was
+silently corrupting its journal.
+
+### Fixed
+- **The node-local journal truncates a torn tail before the first append, owns its file, and stops
+  after a failed append** (`docs/plans/realignment-repairs.md` R1; the external review's F02 and F12).
+  `Journal::open` counted complete records but never removed a partial final frame, so an append
+  after a crash landed *behind* it and the torn frame's claimed length then swallowed the new bytes:
+  the append was acknowledged `OnDisk`, no reader ever returned it, and once enough had been
+  appended every consumer that folds its journal on open — the evidence journal, the rights ledger,
+  the knowledge durable stores and `DurableEpochs`, which carries v2.15.0's *a restart does not
+  restore revoked authority* — refused to start. The v2.10.0 fix had covered counting only, and the
+  test `a_truncated_tail_does_not_stop_the_node_from_starting` pinned the defect by asserting only
+  that the append returned `Ok`. Now: `open` finds the last complete frame (a 1–3-byte partial
+  length prefix counts as torn), truncates the file there, syncs it and its directory, and only then
+  spawns the writer; each frame is written in one call; an exclusive OS lock on `<journal>.lock` is
+  held for the handle's lifetime, so a second owner in this or another process is refused by name;
+  and a failed append poisons the writer — every later append answers `Failed` naming the first
+  failure — until a reopen repairs the file. Regression tests in `journal_repair_tests.rs` (the
+  review's probes inverted: append after a torn tail, partial prefix, same-process and cross-process
+  second owner, a failed append, an epoch floor recorded after a torn tail surviving a restart), each
+  seen failing on the unfixed code; the pinning test inverted to read its record back.
+
 ---
 
 ## [2.22.0] — 2026-10-03

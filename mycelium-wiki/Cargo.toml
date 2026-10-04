@@ -2,7 +2,7 @@
 name = "mycelium-wiki"
 version = "2.22.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Dr. Richard Nicholson <tathatasystems@proton.me>"]
 description = "Group-scoped, LLM-curated wiki for Mycelium — the maintained-meaning / authoritative-specific knowledge canon that composes with an external metrics store and RAG. Control-plane on Mycelium (curator election + failover, access-brokering, MCP tool); data-plane in a pluggable node-independent store."
 license = "AGPL-3.0-only"
