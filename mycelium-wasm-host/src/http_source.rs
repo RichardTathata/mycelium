@@ -142,8 +142,27 @@ pub struct HttpLibrarySource {
     base_url:  String,
     headers:   Vec<(String, String)>,
     egress:    EgressPolicy,
+    /// Whether the node's policy was supplied ([`with_egress`](Self::with_egress)); only then are
+    /// redirects followed, each hop re-checked.
+    egress_set: bool,
     client:    reqwest::Client,
     max_bytes: u64,
+}
+
+/// The redirect policy for a client that knows the node's egress policy: every hop goes through
+/// [`EgressPolicy::redirect_verdict`] (realignment repairs R3). This crate builds its own clients —
+/// it depends on `mycelium` without `gateway` — against the same verdict `mycelium::egress_client`
+/// uses.
+pub(crate) fn redirect_policy(egress: EgressPolicy) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        let hop = attempt.previous().len();
+        let from = attempt.previous().last().map(|u| u.scheme().to_string()).unwrap_or_default();
+        let to = attempt.url();
+        match egress.redirect_verdict(hop, &from, to.scheme(), to.host_str()) {
+            Ok(()) => attempt.follow(),
+            Err(why) => attempt.error(why),
+        }
+    })
 }
 
 impl HttpLibrarySource {
@@ -155,9 +174,29 @@ impl HttpLibrarySource {
             base_url: base_url.into(),
             headers:  Vec::new(),
             egress:   EgressPolicy::default(),
-            client:   reqwest::Client::new(),
+            egress_set: false,
+            client:   Self::client_for(None),
             max_bytes: DEFAULT_MAX_IN_MEMORY_BYTES,
         }
+    }
+
+    /// A client that follows **no** redirect unless the node's policy is known and no static header
+    /// is attached; then every hop is re-checked. A static header may be a credential reqwest does
+    /// not strip on a cross-host hop, so a source carrying one never follows (realignment repairs
+    /// R3).
+    fn client_for(policy: Option<&EgressPolicy>) -> reqwest::Client {
+        let redirect = match policy {
+            Some(p) => redirect_policy(p.clone()),
+            None => reqwest::redirect::Policy::none(),
+        };
+        reqwest::Client::builder().redirect(redirect).build().unwrap_or_else(|_| {
+            reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("a plain client builds")
+        })
+    }
+
+    fn rebuild_client(&mut self) {
+        let policy = (self.egress_set && self.headers.is_empty()).then_some(&self.egress);
+        self.client = Self::client_for(policy);
     }
 
     /// The most bytes [`fetch_remote`](BlobFetcher::fetch_remote) will read for one artifact
@@ -205,6 +244,7 @@ impl HttpLibrarySource {
     /// Attach a static request header (credentials: `("Authorization", "Bearer …")`).
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
+        self.rebuild_client();
         self
     }
 
@@ -213,6 +253,8 @@ impl HttpLibrarySource {
     /// connection is attempted.
     pub fn with_egress(mut self, egress: EgressPolicy) -> Self {
         self.egress = egress;
+        self.egress_set = true;
+        self.rebuild_client();
         self
     }
 }
@@ -751,5 +793,33 @@ mod tests {
         let open = HttpLibrarySource::new(&base);
         assert_eq!(open.fetch_remote(&id).await.unwrap(), None, "404 is a miss");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// **Realignment repairs R3.** A source without the node's policy follows no redirect; one
+    /// with it re-checks every hop; and one carrying a static header never follows, because the
+    /// header may be a credential reqwest does not strip cross-host.
+    #[tokio::test]
+    async fn the_http_source_follows_a_redirect_only_with_a_policy_and_no_header() {
+        use mycelium::test_util::{spawn_counting_listener, spawn_redirector};
+        let fetch = |src: HttpLibrarySource| async move { src.fetch_remote(&ArtifactId::of(b"blob")).await };
+
+        let (denied, hits) = spawn_counting_listener("blob").await;
+        let hop = spawn_redirector(302, format!("http://127.0.0.1:{denied}")).await;
+        let _ = fetch(HttpLibrarySource::new(format!("http://localhost:{hop}"))).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no policy, no redirect");
+
+        let one = EgressPolicy { allow_hosts: vec!["localhost".into()] };
+        let _ = fetch(HttpLibrarySource::new(format!("http://localhost:{hop}")).with_egress(one)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "a denied hop is refused");
+
+        let both = EgressPolicy { allow_hosts: vec!["localhost".into(), "127.0.0.1".into()] };
+        let _ = fetch(HttpLibrarySource::new(format!("http://localhost:{hop}")).with_egress(both.clone())).await;
+        assert!(hits.load(Ordering::SeqCst) > 0, "the plant: an allowed hop is followed");
+
+        let (elsewhere, cred_hits) = spawn_counting_listener("blob").await;
+        let hop = spawn_redirector(302, format!("http://127.0.0.1:{elsewhere}")).await;
+        let src = HttpLibrarySource::new(format!("http://localhost:{hop}")).with_egress(both).with_header("Authorization", "Bearer secret");
+        let _ = fetch(src).await;
+        assert_eq!(cred_hits.load(Ordering::SeqCst), 0, "a source carrying a header never follows");
     }
 }

@@ -126,6 +126,10 @@ pub(crate) mod transparency;
 pub(crate) mod capauthz;
 #[cfg(feature = "compliance")]
 pub(crate) mod oidc;
+/// The one place an outbound HTTP client is built — redirects re-checked against the egress
+/// policy on every hop, or not followed at all (realignment repairs R3).
+#[cfg(feature = "gateway")]
+pub mod egress_client;
 
 #[allow(unused_imports)]
 pub(crate) use bulk::BulkTransport;

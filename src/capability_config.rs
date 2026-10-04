@@ -904,7 +904,11 @@ pub async fn run_capability_probes<F>(
 ) where
     F: Fn(ProbeEvent) + Send + 'static,
 {
-    let client = reqwest::Client::new();
+    // Probe URLs are gated one by one; redirects are re-checked against the same policy
+    // (realignment repairs R3).
+    let client = crate::agent::egress_client::build_or_none(
+        crate::agent::egress_client::with_policy(agent.egress_policy()),
+    );
     let n = config.capabilities.len();
     let mut handles: Vec<Option<CapabilityReg>> = (0..n).map(|_| None).collect();
 

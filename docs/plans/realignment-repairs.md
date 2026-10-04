@@ -306,7 +306,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | D3 | A `CoreConfig` split | **deferred** to a planned breaking release; A2's table now | a core type cannot alias a type in `mycelium`, so the split is two types and an adapter until a removal; no defect depends on it | splitting now |
 | D4 | Strict eligibility | **additive**, coverage established by the history source, sufficiency decided per rule by the evaluator, `Unknown` is not `Eligible` | a caller flag relocates the assumption; a range alone does not establish scope, start, continuity or availability | a governed-fleet profile label; a signed handover manifest format |
 | D5 | An incomplete LangGraph checkpoint | **raises** a named retriable error | `None` means *no checkpoint* to LangGraph and restarts the thread | returning a shorter tuple; returning `None` |
-| D6 | Egress redirects | **refused by default**; a client that declares it needs them gets per-hop re-checking with a hop cap and no downgrade | the allow-list gates a destination, and a redirect is a destination | following with a post-hoc check |
+| D6 | Egress redirects | **every hop re-checked** by a client that knows the node's policy (target host on the list, ≤ 5 hops, never https → http); **none followed** by a client built without one, or carrying a credential header reqwest does not strip (federation, bulk peer fetch, an HTTP library source with a static header). *Amended at R3, 2026-10-04:* the adopted wording, "refused by default", would have broken every deployment with an empty allow-list, which permits all hosts; the amended rule changes nothing for those beyond the hop cap and the downgrade | the allow-list gates a destination, and a redirect is a destination | following with a post-hoc check; refusing every redirect regardless of the list |
 | D7 | Egress host parsing | **the `url` crate**, in core | the gate must read the host the client dials | fixing the hand-rolled parser's `\` case alone |
 | D8 | Lossless JSON in TypeScript | **an internal scanner** that quotes bare integers before `JSON.parse` | zero dependencies, Node 20 | `JSON.parse` reviver with `context.source` (Node 21+); `json-bigint` |
 | D9 | Journal and WAL file lock | **`std::fs::File::try_lock`** on a sidecar `lock` file; `rust-version` 1.88 → 1.89 | no new dependency; the private outbox already does exactly this; one decision for WAL and journal | `fd-lock`; an in-process registry (does not cover two processes) |
@@ -320,7 +320,8 @@ Guide 21 and the handover design record say who establishes coverage (the source
 |---|---|---|
 | R1 journal: truncate, one-buffer frame, lock, poisoned writer | #518 | in review |
 | R2 WAL: pinned startup repair, refusal on failure, partial header, ownership | #519 | in review |
-| R3 egress client builder, every client, no redirects | — | open |
+| R3 egress client builder, every client, every hop re-checked | #520 | in review |
+| R3b the object-store fetcher gates on its endpoint, not its bucket | — | open — `object_store` builds its own client, so the endpoint must be derived from the store's configuration (`AWS_ENDPOINT`, the regional S3 host, `storage.googleapis.com`) and its redirect policy is not reachable from here |
 | R4 the gate parses with `url` | — | open |
 | R5 patch documentation | — | open |
 | R6 release `v2.22.1` | — | open |

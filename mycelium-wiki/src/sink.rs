@@ -170,6 +170,10 @@ mod git {
         /// Run one git command in the mirror dir; non-zero exit → `Err` carrying stderr.
         fn git(&self, args: &[&str]) -> Result<String, io::Error> {
             let out = Command::new("git")
+                // The remote host is gated by the egress policy; git's default
+                // `http.followRedirects=initial` would let the first request go elsewhere unchecked
+                // (realignment repairs R3).
+                .arg("-c").arg("http.followRedirects=false")
                 .arg("-c").arg(format!("user.name={}", self.cfg.author_name))
                 .arg("-c").arg(format!("user.email={}", self.cfg.author_email))
                 .args(args)

@@ -244,7 +244,10 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn http_client(connect: Duration, request: Duration, tls_pins: &[[u8; 32]]) -> reqwest::Client {
-    let builder = reqwest::Client::builder().connect_timeout(connect).timeout(request);
+    // No redirect, ever (realignment repairs R3): the credential travels in
+    // `x-mycelium-federation-call`, which reqwest does not strip on a cross-host hop, so following
+    // one would hand it to whatever host the partner's gateway named.
+    let builder = crate::agent::egress_client::without_redirects().connect_timeout(connect).timeout(request);
     let builder = if tls_pins.is_empty() {
         builder
     } else {
@@ -261,7 +264,7 @@ fn http_client(connect: Duration, request: Duration, tls_pins: &[[u8; 32]]) -> r
         // must not be a client that quietly does not.
         .unwrap_or_else(|e| {
             assert!(tls_pins.is_empty(), "a pinned TLS client could not be built, and falling back would drop the pinning: {e}");
-            reqwest::Client::new()
+            crate::agent::egress_client::build_or_none(crate::agent::egress_client::without_redirects())
         })
 }
 
@@ -692,5 +695,26 @@ impl FederationClient {
     fn silent(&self, repeatability: Repeatability, attempted: &mut Vec<String>, reason: &str) -> Result<String, ClientError> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         on_gateway_silent(&mut s.pool, &self.partner, repeatability, attempted, reason).map_err(ClientError::Outcome)
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+
+    /// **Realignment repairs R3 (F03's federation row).** The federation client carries its
+    /// credential in `x-mycelium-federation-call`, a header reqwest does not strip on a cross-host
+    /// redirect, so following one would hand the credential to whatever host the partner named. The
+    /// client follows **no** redirects.
+    #[tokio::test]
+    async fn the_federation_client_follows_no_redirect() {
+        use crate::test_util::{spawn_counting_listener, spawn_redirector};
+        use std::sync::atomic::Ordering;
+        let (elsewhere, hits) = spawn_counting_listener("{}").await;
+        let hop = spawn_redirector(307, format!("http://127.0.0.1:{elsewhere}/")).await;
+        let c = http_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, &[]);
+        let r = c.post(format!("http://localhost:{hop}/")).header("x-mycelium-federation-call", "credential").send().await;
+        assert!(r.map(|r| r.status().is_redirection()).unwrap_or(true), "the redirect is returned, not followed");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the credential never reaches the redirect target");
     }
 }
