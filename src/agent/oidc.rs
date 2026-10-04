@@ -145,7 +145,10 @@ pub(crate) struct OidcVerifier {
 
 impl OidcVerifier {
     pub(crate) fn new(cfg: OidcConfig, egress: crate::config::EgressPolicy) -> Self {
-        Self { cfg, http: reqwest::Client::new(), egress, cache: tokio::sync::RwLock::new(None) }
+        // Discovery and JWKS are gated by URL below; every redirect is re-checked as well, or keys
+        // served by a denied host would be trusted (realignment repairs R3).
+        let http = crate::agent::egress_client::build_or_none(crate::agent::egress_client::with_policy(&egress));
+        Self { cfg, http, egress, cache: tokio::sync::RwLock::new(None) }
     }
 
     /// The IdP issuer every accepted JWT was validated against — the authority that qualifies an
@@ -392,5 +395,21 @@ mod tests {
         // admins → "*"; duplicate groups don't duplicate scopes.
         let s = c.scopes_for_groups(&["admins".into(), "admins".into()]);
         assert_eq!(s, vec!["*".to_string()]);
+    }
+    /// **Realignment repairs R3 (F03's OIDC row).** The JWKS URL was gated, and then fetched with a
+    /// client that followed redirects — so keys served by a host the egress list denies would be
+    /// trusted. The fetch now re-checks every hop: a redirect to a denied host reaches it zero times
+    /// and the verifier holds no keys.
+    #[tokio::test]
+    async fn a_jwks_redirect_to_a_denied_host_is_not_followed() {
+        use crate::test_util::{spawn_counting_listener, spawn_redirector};
+        use std::sync::atomic::Ordering;
+        let (denied, hits) = spawn_counting_listener(r#"{"keys":[]}"#).await;
+        let hop = spawn_redirector(302, format!("http://127.0.0.1:{denied}/jwks")).await;
+        let mut c = cfg();
+        c.jwks_uri = Some(format!("http://localhost:{hop}/jwks"));
+        let v = OidcVerifier::new(c, crate::config::EgressPolicy { allow_hosts: vec!["localhost".into()] });
+        assert!(v.fetch_keys().await.is_empty());
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the denied host is never contacted");
     }
 }

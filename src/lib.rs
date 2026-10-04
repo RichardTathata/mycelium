@@ -309,6 +309,9 @@ pub use agent::{
 /// adopter cannot see cannot hold their replacement evaluator to anything.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::ae_contract;
+/// Outbound HTTP clients that re-check every redirect against the egress policy (realignment repairs R3).
+#[cfg(feature = "gateway")]
+pub use agent::egress_client;
 pub use agent::confinement::{ClockSync, ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
 pub use agent::guarantee::{
     GuaranteeDescriptor, GuaranteeEntry, GuaranteeId, GuaranteeKind, GuaranteeReport, ProfileRef,

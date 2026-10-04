@@ -299,6 +299,38 @@ impl EgressPolicy {
         })
     }
 
+    /// May a client following a redirect take hop number `hop` (1 for the first redirect) from a
+    /// URL with scheme `from_scheme` to one with scheme `to_scheme` and host `to_host`?
+    ///
+    /// **A redirect is a destination** (realignment repairs R3; the review's F03). The allow-list
+    /// gated the first URL and every outbound client then followed reqwest's default ten redirects
+    /// wherever they led, so an allowed endpoint could send the node's request — an MCP handshake,
+    /// a prompt, a JWKS fetch — to a host the list denies. Each crate's HTTP client asks this on
+    /// every hop and refuses with the returned reason:
+    ///
+    /// - the target host must be permitted, exactly as a first URL is (an empty list permits it);
+    /// - at most [`MAX_REDIRECT_HOPS`](Self::MAX_REDIRECT_HOPS) hops;
+    /// - never from `https` down to `http` — a downgrade drops the transport's confidentiality
+    ///   mid-request, which no allow-list entry says was intended.
+    ///
+    /// A URL with no host is refused. Pure; no I/O.
+    pub fn redirect_verdict(&self, hop: usize, from_scheme: &str, to_scheme: &str, to_host: Option<&str>) -> Result<(), String> {
+        if hop > Self::MAX_REDIRECT_HOPS {
+            return Err(format!("egress: more than {} redirects", Self::MAX_REDIRECT_HOPS));
+        }
+        if from_scheme.eq_ignore_ascii_case("https") && to_scheme.eq_ignore_ascii_case("http") {
+            return Err("egress: a redirect from https to http is refused".into());
+        }
+        match to_host {
+            None => Err("egress: a redirect to a URL with no host is refused".into()),
+            Some(h) if !self.permits_host(h) => Err(format!("egress: the redirect target {h} is not on the allow-list")),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The most redirects a policy-aware client follows ([`redirect_verdict`](Self::redirect_verdict)).
+    pub const MAX_REDIRECT_HOPS: usize = 5;
+
     /// True if outbound to `url`'s host is permitted. A URL whose host cannot be
     /// parsed is **denied** when a non-empty allowlist is in force (fail closed).
     pub fn permits_url(&self, url: &str) -> bool {
@@ -1932,6 +1964,24 @@ mod tests {
     }
 
     // ── WS3 egress policy gate ────────────────────────────────────────────
+
+    /// A redirect is a destination (realignment repairs R3): the target host is checked like a
+    /// first URL, the hop count is capped, and an https → http downgrade is refused even when the
+    /// list permits everything.
+    #[test]
+    fn a_redirect_is_checked_like_a_destination() {
+        let open = EgressPolicy::default();
+        let closed = EgressPolicy { allow_hosts: vec!["api.example.com".into()] };
+        assert!(open.redirect_verdict(1, "http", "http", Some("anywhere.example")).is_ok());
+        assert!(closed.redirect_verdict(1, "https", "https", Some("api.example.com")).is_ok());
+        assert!(closed.redirect_verdict(1, "https", "https", Some("evil.example")).unwrap_err().contains("evil.example"));
+        assert!(open.redirect_verdict(1, "https", "http", Some("anywhere.example")).is_err(), "a downgrade is refused even on an open list");
+        assert!(open.redirect_verdict(1, "HTTPS", "Http", Some("a")).is_err(), "case-insensitively");
+        assert!(open.redirect_verdict(1, "http", "https", Some("a")).is_ok(), "an upgrade is fine");
+        assert!(open.redirect_verdict(EgressPolicy::MAX_REDIRECT_HOPS, "http", "http", Some("a")).is_ok());
+        assert!(open.redirect_verdict(EgressPolicy::MAX_REDIRECT_HOPS + 1, "http", "http", Some("a")).is_err());
+        assert!(open.redirect_verdict(1, "http", "http", None).is_err(), "no host, no redirect");
+    }
 
     #[test]
     fn egress_empty_allowlist_permits_all() {

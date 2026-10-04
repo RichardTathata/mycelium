@@ -610,6 +610,58 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// **Realignment repairs R3 (the review's F03).** The egress gate checked the first URL only,
+    /// and the client followed reqwest's default ten redirects, so an allowed MCP endpoint could
+    /// send the node's `initialize` and `tools/list` to a denied host. Now every hop is re-checked.
+    ///
+    /// The plant first: with both hosts allowed, the redirect is followed and the destination's own
+    /// accept counter moves, so the refusal below is the gate and not an unreachable listener. Then
+    /// with only `localhost` allowed, each redirect status and a two-hop chain must reach the denied
+    /// listener **zero** times, and the connect must fail.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn an_mcp_redirect_to_a_denied_host_reaches_no_connection() {
+        use crate::test_util::{spawn_counting_listener, spawn_redirector};
+        use std::sync::atomic::Ordering;
+        const MCP_OK: &str = r#"{"jsonrpc":"2.0","id":0,"result":{"tools":[]}}"#;
+
+        async fn agent_allowing(hosts: &[&str]) -> Arc<GossipAgent> {
+            let port = alloc_port();
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
+            cfg.egress = crate::EgressPolicy { allow_hosts: hosts.iter().map(|h| h.to_string()).collect() };
+            let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+            a.start().await.unwrap();
+            a
+        }
+
+        // The plant: both hosts allowed, the redirect is followed and reaches the listener.
+        let (target, reached) = spawn_counting_listener(MCP_OK).await;
+        let hop = spawn_redirector(307, format!("http://127.0.0.1:{target}/")).await;
+        let open = agent_allowing(&["localhost", "127.0.0.1"]).await;
+        let ok = open.mcp().connect_mcp_server(format!("http://localhost:{hop}/")).await;
+        assert!(ok.is_ok(), "an allowed redirect is still followed");
+        assert!(reached.load(Ordering::SeqCst) > 0, "the plant reached the destination");
+        open.shutdown().await;
+
+        let closed = agent_allowing(&["localhost"]).await;
+        for status in [301u16, 302, 303, 307, 308] {
+            let (denied, hits) = spawn_counting_listener(MCP_OK).await;
+            let hop = spawn_redirector(status, format!("http://127.0.0.1:{denied}/")).await;
+            let r = closed.mcp().connect_mcp_server(format!("http://localhost:{hop}/")).await;
+            assert!(r.is_err(), "a {status} to a denied host must fail the connect");
+            assert_eq!(hits.load(Ordering::SeqCst), 0, "a {status} must reach the denied host zero times");
+        }
+        // Two hops: allowed → allowed → denied.
+        let (denied, hits) = spawn_counting_listener(MCP_OK).await;
+        let second = spawn_redirector(302, format!("http://127.0.0.1:{denied}/")).await;
+        let first = spawn_redirector(307, format!("http://localhost:{second}/")).await;
+        let r = closed.mcp().connect_mcp_server(format!("http://localhost:{first}/")).await;
+        assert!(r.is_err(), "a chain ending at a denied host must fail");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the chain's last hop is refused before it connects");
+        closed.shutdown().await;
+    }
+
     #[cfg(feature = "gateway")]
     #[tokio::test]
     async fn test_mcp_client_proxies_call() {

@@ -43,3 +43,56 @@ pub fn alloc_port() -> u16 {
     }
     panic!("no free loopback port found");
 }
+
+/// A listener that answers every request with an HTTP redirect to `location`, using `status`
+/// (301, 302, 303, 307 or 308). Bound on `127.0.0.1`; reach it as `http://localhost:{port}` so the
+/// egress gate sees the host `localhost` while the redirect names `127.0.0.1` — two hosts an
+/// allow-list can tell apart (realignment repairs R3).
+pub async fn spawn_redirector(status: u16, location: String) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind redirector");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let location = location.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let reply = format!(
+                    "HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+/// A listener that counts every connection it accepts and answers each with `200` and `body`
+/// (JSON). The count is the witness: a denied destination's listener must see **zero** connections,
+/// and a plant through an allowed redirect must see at least one — which is what shows the denied
+/// case reached the redirect rather than failing for some other reason.
+pub async fn spawn_counting_listener(body: &'static str) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind counting listener");
+    let port = listener.local_addr().expect("addr").port();
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = std::sync::Arc::clone(&accepted);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            count.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    (port, accepted)
+}

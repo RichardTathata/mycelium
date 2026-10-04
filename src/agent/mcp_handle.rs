@@ -164,7 +164,11 @@ impl McpHandle {
                 "egress denied by policy: {server_url}"
             )));
         }
-        let http_client = reqwest::Client::new();
+        // Every redirect re-checked against the same policy (realignment repairs R3): the gate
+        // above covers the first URL, and a redirect is a destination too.
+        let http_client = crate::agent::egress_client::build_or_none(
+            crate::agent::egress_client::with_policy(&self.ctx.config.egress),
+        );
 
         // ── Handshake ─────────────────────────────────────────────────────────
         let init_req = json!({

@@ -12,7 +12,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Wire **v12** unchanged (`PREV = 11`); no API change. **Check before upgrading:** `rust-version` is now
 **1.89** (`std::fs::File::try_lock`); two agents sharing one journal path, or one journal opened twice
 in a process, now get `WouldBlock` naming the path on the second open — a configuration that was
-silently corrupting its journal.
+silently corrupting its journal. **And:** an outbound client now re-checks every redirect
+against the egress allow-list, follows at most five, and never downgrades `https` to `http`; a
+deployment whose MCP, LLM or OIDC endpoint redirects to a host off its allow-list now gets a named
+egress refusal — that request was leaving the allow-list before.
+
+### Security
+- **A redirect is now checked against the egress allow-list like the first URL**
+  (`docs/plans/realignment-repairs.md` R3; the external review's F03, P1). The allow-list gated the
+  first URL of each outbound call, and every client then followed reqwest's default ten redirects
+  wherever they led — so an allowed MCP server received the node's `initialize` and `tools/list`
+  and then forwarded them to a denied host, a 307 from an LLM endpoint re-sent the prompt, a
+  redirected JWKS fetch made the gateway trust keys served by a denied host, and the federation
+  client's `x-mycelium-federation-call` credential (a header reqwest does not strip cross-host)
+  travelled to whatever host a partner named. Now one builder, `mycelium::egress_client`, gives
+  every client in the crate one of two rules: with the node's policy, every hop goes through
+  `EgressPolicy::redirect_verdict` (target host on the list, at most five hops, never `https` →
+  `http`); without one, or carrying a credential header, no redirect is followed. The MCP bridge,
+  OIDC discovery and JWKS, capability probes and the skillrunner use the first; the federation
+  client, the bulk peer fetch and `OpenAiBackend::new` the second, with `OpenAiBackend::with_egress`
+  for the first (the stem's `[[serve]]` uses it). The companions use the same verdict:
+  `HttpLibrarySource` follows only with a policy and no static header, and `OllamaProbe` gains
+  `with_egress` — it was the one outbound client no allow-list reached. The wiki's `GitMirror`
+  runs git with `http.followRedirects=false`. An empty allow-list still permits every host, so a
+  deployment that never configured egress sees only the hop cap and the downgrade refusal. Fail-
+  first on `36ae00b2`: `an_mcp_redirect_to_a_denied_host_reaches_no_connection`,
+  `an_llm_backend_without_a_policy_follows_no_redirect`,
+  `a_jwks_redirect_to_a_denied_host_is_not_followed` and
+  `the_federation_client_follows_no_redirect` each failed — the denied listener's own accept
+  counter moved — and each plants an allowed redirect first. **Not in this entry:** the
+  object-store fetcher still gates on the bucket rather than its endpoint (R3b), and the gate's
+  host parser still disagrees with reqwest on `\` (R4). **API note:** `OpenAiBackend::new`
+  follows no redirect; call `.with_egress(policy)` to follow allowed ones.
 
 ### Fixed
 - **The KV WAL's startup repair is pinned, its failure refuses the start, a partial length prefix

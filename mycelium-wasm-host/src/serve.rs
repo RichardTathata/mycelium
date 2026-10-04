@@ -29,11 +29,13 @@ pub fn spawn(agent: Arc<GossipAgent>, decls: Vec<(ServeDecl, Option<String>)>, t
             for (i, (d, key)) in decls.iter().enumerate() {
                 let live = is_live_here(&agent, d);
                 if live && !held.contains_key(&i) {
+                    // The node's own egress policy, so a redirect from the endpoint is re-checked
+                    // on every hop (realignment repairs R3).
                     let backend: Arc<dyn LlmBackend> = Arc::new(OpenAiBackend::new(
                         d.endpoint.clone(),
                         key.clone().unwrap_or_else(|| "none".into()),
                         d.model.clone(),
-                    ));
+                    ).with_egress(agent.egress_policy()));
                     let template = PromptTemplate {
                         system: String::new(),
                         user_template: "{{input}}".into(),

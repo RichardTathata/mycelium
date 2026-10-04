@@ -129,7 +129,9 @@ async fn run(sf: Arc<SkillFile>) -> Result<(), Box<dyn std::error::Error>> {
 
     // Build HTTP client for LLM calls
     let http_client = Arc::new(
-        reqwest::Client::builder()
+        // Redirects re-checked against the node's egress policy on every hop (realignment repairs
+        // R3); the runner gates the endpoint itself before each call.
+        mycelium::egress_client::with_policy(agent.egress_policy())
             .timeout(Duration::from_secs(120))
             .build()?,
     );

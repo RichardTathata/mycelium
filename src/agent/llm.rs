@@ -84,8 +84,18 @@ impl OpenAiBackend {
             base_url: base_url.into(),
             api_key:  api_key.into(),
             model:    model.into(),
-            client:   reqwest::Client::new(),
+            // No policy known here, so no redirect is followed (realignment repairs R3): the call's
+            // gate checks `base_url`, and a 307 would re-send the prompt wherever it pointed.
+            // `with_egress` re-checks each hop against the node's policy instead.
+            client:   crate::agent::egress_client::build_or_none(crate::agent::egress_client::without_redirects()),
         }
+    }
+
+    /// Follow redirects, re-checking every hop against `egress` (realignment repairs R3). What a
+    /// node registering a backend should call with its own policy.
+    pub fn with_egress(mut self, egress: &crate::config::EgressPolicy) -> Self {
+        self.client = crate::agent::egress_client::build_or_none(crate::agent::egress_client::with_policy(egress));
+        self
     }
 }
 
@@ -402,5 +412,42 @@ mod tests {
         // An allowed endpoint passes.
         let ok = OpenAiBackend::new("https://api.allowed.example/v1", "k", "m");
         assert!(policy.permits_url(ok.endpoint().unwrap()));
+    }
+    /// **Realignment repairs R3 (F03's LLM row).** A backend built without the node's egress
+    /// policy follows **no** redirects: the call's gate checks `base_url`, and a 307 would re-send
+    /// the prompt to wherever the endpoint pointed. Before R3 the default client followed ten.
+    #[tokio::test]
+    async fn an_llm_backend_without_a_policy_follows_no_redirect() {
+        use crate::test_util::{spawn_counting_listener, spawn_redirector};
+        use std::sync::atomic::Ordering;
+        const CHAT_OK: &str = r#"{"choices":[{"message":{"content":"x"}}],"usage":{"total_tokens":1},"model":"m"}"#;
+        let (denied, hits) = spawn_counting_listener(CHAT_OK).await;
+        let hop = spawn_redirector(307, format!("http://127.0.0.1:{denied}/chat/completions")).await;
+        let b = OpenAiBackend::new(format!("http://localhost:{hop}"), "k", "m");
+        let r = b.complete("sys", "the prompt", 8, 0.0).await;
+        assert!(r.is_err(), "a redirect is not followed: {r:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the prompt never reaches the redirect target");
+    }
+
+    /// With the node's policy (`with_egress`) an allowed redirect is followed — the plant — and a
+    /// denied one reaches its target zero times.
+    #[tokio::test]
+    async fn an_llm_backend_with_a_policy_rechecks_every_redirect_hop() {
+        use crate::test_util::{spawn_counting_listener, spawn_redirector};
+        use std::sync::atomic::Ordering;
+        const CHAT_OK: &str = r#"{"choices":[{"message":{"content":"x"}}],"usage":{"total_tokens":1},"model":"m"}"#;
+        let (target, reached) = spawn_counting_listener(CHAT_OK).await;
+        let hop = spawn_redirector(307, format!("http://127.0.0.1:{target}/chat/completions")).await;
+        let both = crate::config::EgressPolicy { allow_hosts: vec!["localhost".into(), "127.0.0.1".into()] };
+        let b = OpenAiBackend::new(format!("http://localhost:{hop}"), "k", "m").with_egress(&both);
+        assert!(b.complete("sys", "p", 8, 0.0).await.is_ok(), "an allowed redirect is followed");
+        assert!(reached.load(Ordering::SeqCst) > 0);
+
+        let (denied, hits) = spawn_counting_listener(CHAT_OK).await;
+        let hop = spawn_redirector(307, format!("http://127.0.0.1:{denied}/chat/completions")).await;
+        let one = crate::config::EgressPolicy { allow_hosts: vec!["localhost".into()] };
+        let b = OpenAiBackend::new(format!("http://localhost:{hop}"), "k", "m").with_egress(&one);
+        assert!(b.complete("sys", "p", 8, 0.0).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "a denied hop is refused before it connects");
     }
 }

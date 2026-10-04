@@ -27,6 +27,9 @@ use crate::route::{ModelProfile, ModelReg, llm_meta};
 pub struct OllamaProbe {
     base_url: String,
     client: reqwest::Client,
+    /// The node's egress policy, once supplied ([`with_egress`](Self::with_egress)): the daemon's
+    /// host is gated before each probe, and redirects are re-checked on every hop.
+    egress: Option<mycelium::EgressPolicy>,
 }
 
 /// What the daemon reported for one model.
@@ -69,11 +72,42 @@ impl OllamaProbe {
     /// `base_url` is the daemon root, e.g. `http://127.0.0.1:11434`.
     pub fn new(base_url: impl Into<String>) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
-        Self { base_url, client: reqwest::Client::new() }
+        // No policy known here, so no redirect is followed (realignment repairs R3).
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("a client with no options and no redirects builds");
+        Self { base_url, client, egress: None }
+    }
+
+    /// Gate the daemon's host with the node's egress policy before each probe, and re-check every
+    /// redirect hop against it (realignment repairs R3). Without this the probe was the one
+    /// outbound client in the workspace no allow-list reached.
+    pub fn with_egress(mut self, egress: mycelium::EgressPolicy) -> Self {
+        let check = egress.clone();
+        let redirect = reqwest::redirect::Policy::custom(move |attempt| {
+            let hop = attempt.previous().len();
+            let from = attempt.previous().last().map(|u| u.scheme().to_string()).unwrap_or_default();
+            let to = attempt.url();
+            match check.redirect_verdict(hop, &from, to.scheme(), to.host_str()) {
+                Ok(()) => attempt.follow(),
+                Err(why) => attempt.error(why),
+            }
+        });
+        if let Ok(client) = reqwest::Client::builder().redirect(redirect).build() {
+            self.client = client;
+        }
+        self.egress = Some(egress);
+        self
     }
 
     /// One probe: process list + show. A model absent from both is [`OllamaError::UnknownModel`].
     pub async fn probe(&self, model: &str) -> Result<OllamaModelState, OllamaError> {
+        if let Some(egress) = &self.egress
+            && !egress.permits_url(&self.base_url)
+        {
+            return Err(OllamaError::Http(format!("egress policy denies {}", self.base_url)));
+        }
         let ps: serde_json::Value = self
             .client
             .get(format!("{}/api/ps", self.base_url))
@@ -242,5 +276,27 @@ mod tests {
         assert_eq!(get(&p, llm_meta::WARM), Some(CapValue::Bool(false)));
         assert_eq!(get(&p, llm_meta::VRAM_USED_MB), None);
         assert_eq!(get(&p, llm_meta::PARAM_SIZE), Some(CapValue::Text(Arc::from("8B"))));
+    }
+
+    /// **Realignment repairs R3.** The probe was the one outbound client no allow-list reached.
+    /// With the node's policy its host is gated before any request and a redirect is re-checked;
+    /// without one it follows no redirect.
+    #[tokio::test]
+    async fn the_probe_is_gated_and_follows_no_unchecked_redirect() {
+        use mycelium::test_util::{spawn_counting_listener, spawn_redirector};
+        use std::sync::atomic::Ordering;
+        let (denied, hits) = spawn_counting_listener(r#"{"models":[]}"#).await;
+        let hop = spawn_redirector(307, format!("http://127.0.0.1:{denied}/api/ps")).await;
+
+        let _ = OllamaProbe::new(format!("http://localhost:{hop}")).probe("m").await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no policy, no redirect");
+
+        let one = mycelium::EgressPolicy { allow_hosts: vec!["localhost".into()] };
+        let _ = OllamaProbe::new(format!("http://localhost:{hop}")).with_egress(one.clone()).probe("m").await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "a denied hop is refused");
+
+        let gated = OllamaProbe::new(format!("http://127.0.0.1:{denied}")).with_egress(one).probe("m").await;
+        assert!(matches!(gated, Err(OllamaError::Http(m)) if m.contains("egress")), "the daemon's own host is gated");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 }

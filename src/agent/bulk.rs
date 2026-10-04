@@ -79,7 +79,9 @@ impl BulkTransport {
             http_port:        AtomicU16::new(http_port),
             active_handlers:  Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "gateway")]
-            client: reqwest::Client::builder()
+            // A peer's redirect is not a peer (realignment repairs R3): the URL is built from the
+            // sender's address, and a 3xx could point the fetch anywhere the node can reach.
+            client: crate::agent::egress_client::without_redirects()
                 .timeout(_fetch_timeout)
                 .build()
                 .expect("reqwest::Client build should never fail with valid config"),
