@@ -60,10 +60,22 @@ impl GossipAgent {
     /// cycle and retunes its cadence on the next tick — no task restart. `0` ⇒ revert to the static
     /// config value. A node-local set is **sovereign**: it pins timing so a cluster `TimingIntent`
     /// no longer overrides this node (local-wins).
-    pub fn set_health_check_interval_secs(&self, secs: u64) {
+    ///
+    /// # Errors
+    /// [`GossipError::InvalidField`] for a value above 3600 — `validate()`'s bound, which the cluster
+    /// timing governor also applies (realignment repairs R9). A refused value changes nothing: neither
+    /// the live value nor the local pin.
+    pub fn set_health_check_interval_secs(&self, secs: u64) -> Result<(), crate::GossipError> {
+        if secs > 3600 {
+            return Err(crate::GossipError::InvalidField {
+                field:  "health_check_interval_secs",
+                reason: format!("{secs} is above 3600, the bound validate() applies; 0 reverts to the static value"),
+            });
+        }
         self.task_ctx.hot.health_check_interval_secs
             .store(secs, std::sync::atomic::Ordering::Relaxed);
         self.task_ctx.hot.health_locally_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
     /// Live-set the **reconnect backoff** (secs, WS-C / M10). `0` ⇒ revert to the static config value.
     /// Pins the reconnect-backoff param locally (local-wins over fleet governance); does NOT pin the
@@ -71,10 +83,21 @@ impl GossipAgent {
     /// — an existing per-peer writer loops with the backoff captured at its spawn (audit 2026-07-15
     /// pass 5: this was previously advertised as a live retune but read only by diagnostics; the
     /// writer/RPC spawn sites now read this hot value, so new connections honor it).
-    pub fn set_reconnect_backoff_secs(&self, secs: u64) {
+    ///
+    /// # Errors
+    /// [`GossipError::InvalidField`] for a value above 300 — `validate()`'s bound, which the cluster
+    /// timing governor also applies (realignment repairs R9). A refused value changes nothing.
+    pub fn set_reconnect_backoff_secs(&self, secs: u64) -> Result<(), crate::GossipError> {
+        if secs > 300 {
+            return Err(crate::GossipError::InvalidField {
+                field:  "reconnect_backoff_secs",
+                reason: format!("{secs} is above 300, the bound validate() applies; 0 reverts to the static value"),
+            });
+        }
         self.task_ctx.hot.reconnect_backoff_secs
             .store(secs, std::sync::atomic::Ordering::Relaxed);
         self.task_ctx.hot.reconnect_locally_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
     /// Current live timing values (WS-C / M10), as `(health_check_interval_secs, reconnect_backoff_secs)`.
     /// `0` for a field means "using the static config value".

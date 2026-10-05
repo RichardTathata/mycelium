@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The live timing setters keep `validate()`'s bounds** (`docs/plans/realignment-repairs.md` R9,
+  found by A2's configuration audit). `set_health_check_interval_secs` and `set_reconnect_backoff_secs`
+  stored any value — a health interval of a day, a reconnect backoff past five minutes — and pinned
+  the node against the fleet's `TimingIntent`, while `validate()` and the timing governor both refused
+  them. A value above 3600 or 300 is now `InvalidField` naming the field, and changes nothing: neither
+  the live value nor the local pin. `0` still reverts to the static value. Fail-first on `7ae0ea69`:
+  `hot_timing_setters_refuse_what_validate_refuses` — the setters stored 3601 and 301.
+  **Upgrade note:** both setters now return `Result<(), GossipError>`; a call that ignores it compiles
+  with an `unused_must_use` warning, which `-D warnings` turns into an error.
+
 ---
 
 ## [2.24.0] — 2026-10-05

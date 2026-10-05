@@ -31,13 +31,13 @@ Conventions:
 | cluster_name | gateway | — (surfaced only via gateway /stats, metrics label) | not refused (any string; env blank → None, config.rs:1683) | yes | `None` (GOSSIP_CLUSTER_NAME) | label only; http.rs:195 (metrics), :946 (/stats), introspect.rs:32 getter |
 | bootstrap_peers | core transport/state | — | parse (NodeId Deserialize; env `InvalidField GOSSIP_BOOTSTRAP_PEERS`, config.rs:1731-1740) | yes | `[]` (GOSSIP_BOOTSTRAP_PEERS, comma `ip:port`) | self filtered out in new() (mod.rs:897); also N estimate for derive_unset; validate() only *warns* if >20 with uncapped forwarding |
 | propagation_window_secs | core transport/state | — | validate() (0, :1489) — see Z: derived on agent path | yes | `60`; `auto()`=0→`max(60, health×eviction×2)` (GOSSIP_PROPAGATION_WINDOW_SECS) | GC task lifecycle.rs:681; audit_invariants warns if < eviction window |
-| health_check_interval_secs | core transport/state | — | validate() (0, >3600, :1474-1480) | **no** — `set_health_check_interval_secs` (introspect.rs:63) + `TimingIntent` (timing_governor.rs:73); health monitor re-reads hot value per cycle | `10` (GOSSIP_HEALTH_CHECK_INTERVAL_SECS) | runtime setter does NOT apply validate()'s 1..3600 bound (0 = revert to static). Static value still read by consensus_handle.rs:213, membership cooldown default |
+| health_check_interval_secs | core transport/state | — | validate() (0, >3600, :1474-1480) | **no** — `set_health_check_interval_secs` (introspect.rs:63) + `TimingIntent` (timing_governor.rs:73); health monitor re-reads hot value per cycle | `10` (GOSSIP_HEALTH_CHECK_INTERVAL_SECS) | the runtime setter refuses a value above 3600 (`InvalidField`, nothing applied or pinned; 0 = revert to static), the bound `TimingIntent` also applies (R9). Static value still read by consensus_handle.rs:213, membership cooldown default |
 | membership_cooldown_secs | control | — | not refused — **clamped** to ≥1 s (`membership_cooldown()` config.rs:1667) | yes (doc says so, read at governor start membership_governor.rs:350) | `None` = 3 × health_check_interval_secs (GOSSIP_MEMBERSHIP_COOLDOWN_SECS) | |
 | default_ttl | core transport/state | — | validate() (0, :1485) — see Z | yes | `5`; `auto()`=0→`max(5,⌈log2(N+1)⌉)` (GOSSIP_DEFAULT_TTL) | copied into CoreCtx.default_ttl at new() (mod.rs:911) |
 | max_connections | core transport/state | — | validate() (0, >65535, :1463-1467) | yes | `1024` (GOSSIP_MAX_CONNECTIONS) | Semaphore at listener start lifecycle.rs:544 |
 | writer_channel_depth | core transport/state | — | validate() (0, :1495; <64 warn only) — see Z | **no** (new writers only) — `set_writer_channel_depth` (introspect.rs:50, clamps ≥1) + ClusterTuner | `1024`; `auto()`=0→`max(1024, N×4)` (GOSSIP_WRITER_CHANNEL_DEPTH) | hot read tasks.rs:254/613; existing writers keep their channel |
 | max_forwarding_peers | core transport/state | — | not refused (validate() warn only, :1557) | yes | `i64::MAX as usize` (GOSSIP_MAX_FORWARDING_PEERS) | shard ctx lifecycle.rs:571 |
-| reconnect_backoff_secs | core transport/state | — | validate() (0, >300, :1528-1534) | **no** (new connections only) — `set_reconnect_backoff_secs` (introspect.rs:74) + TimingIntent (timing_governor.rs:78) | `5` (GOSSIP_RECONNECT_BACKOFF_SECS) | setter bypasses the 1..300 bound; existing writer keeps backoff captured at spawn (doc introspect.rs:70) |
+| reconnect_backoff_secs | core transport/state | — | validate() (0, >300, :1528-1534) | **no** (new connections only) — `set_reconnect_backoff_secs` (introspect.rs:74) + TimingIntent (timing_governor.rs:78) | `5` (GOSSIP_RECONNECT_BACKOFF_SECS) | the setter refuses a value above 300 (R9); existing writer keeps backoff captured at spawn (doc introspect.rs:70) |
 | gossip_channel_capacity | core transport/state | — | validate() (0, :1507) | yes | `1024` (GOSSIP_GOSSIP_CHANNEL_CAPACITY) | mpsc capacity in new() mod.rs:882 |
 | max_seen_entries | core transport/state | — | validate() (0, :1513) — see Z | yes | `100_000`; `auto()`=0→`max(100k, N×1000)` (GOSSIP_MAX_SEEN_ENTRIES) | GC lifecycle.rs:682 |
 | peer_eviction_intervals | core transport/state | — | validate() (0, :1519) | yes | `3` (GOSSIP_PEER_EVICTION_INTERVALS) | health monitor lifecycle.rs:657 |
@@ -102,7 +102,8 @@ Writing this table down found one defect and two open items, recorded in the pla
   `enforced`, and `secure-single-domain` admitted the node.
 - **R8 (open):** `http_port` and `gateway_tls` are silently ignored in a build without `gateway`, and
   the `gw.*` guarantees resolve from config there. No test runs in a gateway-free build today.
-- **R9 (open):** the runtime `HotConfig` setters bypass `validate()`'s bounds.
+- **R9 (fixed):** the runtime timing setters bypassed `validate()`'s bounds; they now refuse a value
+  above them, changing nothing — the bounds the cluster timing governor already applied.
 
 Also worth knowing, not defects in themselves: a `0` in five fields is *derived* on the agent path but
 *refused* through `load_from_file` (the zero-sentinel caveat above); boolean environment variables
