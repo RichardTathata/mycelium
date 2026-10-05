@@ -331,7 +331,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | R9 the runtime `HotConfig` setters apply `validate()`'s bounds (`health_check_interval_secs` 1–3600, `reconnect_backoff_secs` 1–300 can be bypassed at runtime) — found by A2's audit | — | open |
 | S1 lossless integers (TS) | #526 | merged |
 | S2 the shapes (TS); the additive gateway `kind` field waits for `v2.24.0` — the SDK reads the event name, so it does not need it | #526 | merged |
-| S2's gateway half: the signal SSE data carries `kind` on both routes | (this PR) | in review |
+| S2's gateway half: the signal SSE data carries `kind` on both routes | #532 | in review |
 | S3 `sseStream` lifetime | #526 | merged |
 | S4 the live suites in CI — the TypeScript half here; `mycelium-py`'s `test_gateway.py` with S5 | #526 | merged |
 | S5 incomplete checkpoint raises (py); `mycelium-py`'s live gateway suite in CI (S4's Python half) | #527 | merged |
