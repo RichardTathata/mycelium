@@ -10,6 +10,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A signal SSE event's data names its kind** (`docs/plans/realignment-repairs.md` §3.2, the S2
+  row's deferred gateway half). `GET /gateway/signal/sse/{kind}` and `GET /signals/{kind}` now put
+  `"kind"` in each event's JSON data as well as the SSE event name, so a client that reads the body
+  alone is not wrong. Additive: the event name and every other field are unchanged, and wire **v12**
+  is unaffected.
 - **Strict eligibility: unknown history is never eligible** (`docs/plans/realignment-repairs.md` A3,
   decision D4). `mandate::eligibility::eligible_strict` answers each configured incumbency rule as
   `Eligible`, `Ineligible` or `Unknown` (naming what is missing), from a `TermHistory` whose coverage
