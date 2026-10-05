@@ -502,12 +502,35 @@ jobs:
       # mid-run. Proves a LangGraph graph's model dependency follows it across node death.
       - run: cargo build -p mycelium-reason --features llm,gateway --example reheal_node
       - run: python examples/langgraph/06_deploy_reheal.py
+      # mycelium-py's live gateway suite (realignment repairs S4, the Python half). It was never in
+      # the pytest list above, so it never ran in CI; against a `mycelium` node it passes (the
+      # Python SDK reads every route the TypeScript one got wrong correctly). Its own node, because
+      # the reason nodes above are built without the binary's default features.
+      - run: cargo build --bin mycelium
+      - name: mycelium-py live gateway suite
+        run: |
+          GOSSIP_HTTP_PORT=9312 ./target/debug/mycelium --port 9302 > "$RUNNER_TEMP/py-node.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/py-node.pid"
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9312/health > /dev/null && break
+            if [ "$i" -eq 60 ]; then echo "node never became healthy"; cat "$RUNNER_TEMP/py-node.log"; exit 1; fi
+            sleep 1
+          done
+          for i in $(seq 1 60); do
+            seen=$(curl -sf "http://127.0.0.1:9312/gateway/kv/keys?prefix=sys/caller-context/" \
+                   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["keys"]))' 2>/dev/null || echo 0)
+            [ "$seen" -ge 1 ] && break
+            if [ "$i" -eq 60 ]; then echo "the node never published its caller-context marker"; cat "$RUNNER_TEMP/py-node.log"; exit 1; fi
+            sleep 1
+          done
+          MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest mycelium-py/tests/test_gateway.py -v
       - name: Stop reason nodes
         if: always()
         run: |
           for n in a b; do
             [ -f "$RUNNER_TEMP/node-$n.pid" ] && kill "$(cat "$RUNNER_TEMP/node-$n.pid")" 2>/dev/null || true
           done
+          [ -f "$RUNNER_TEMP/py-node.pid" ] && kill "$(cat "$RUNNER_TEMP/py-node.pid")" 2>/dev/null || true
 
   conway-gpu:
     # Standalone GPU demo (examples/conway-gpu): excluded from the workspace so its

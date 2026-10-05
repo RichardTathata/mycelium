@@ -34,7 +34,7 @@ from typing import Annotated
 from typing_extensions import TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph_checkpoint_mycelium import MyceliumCheckpointSaver
+from langgraph_checkpoint_mycelium import IncompleteCheckpoint, MyceliumCheckpointSaver
 
 HOST = os.getenv("MYCELIUM_TEST_HOST", "127.0.0.1")
 PORT_A = os.getenv("MYCELIUM_TEST_PORT")
@@ -88,7 +88,13 @@ def main() -> int:
     with MyceliumCheckpointSaver(HOST, int(PORT_B)) as saver_b:
         deadline = time.monotonic() + CONVERGE_TIMEOUT
         while True:
-            head_b = saver_b.get_tuple(config)
+            # The row can gossip in before its blobs are fetchable: that read raises
+            # IncompleteCheckpoint (0.2.0) — not yet, retry — rather than reading as no checkpoint
+            # or as one with fewer pending writes. The pending-writes count stays as a check.
+            try:
+                head_b = saver_b.get_tuple(config)
+            except IncompleteCheckpoint:
+                head_b = None
             if (
                 head_b is not None
                 and head_b.checkpoint["id"] == expected_id

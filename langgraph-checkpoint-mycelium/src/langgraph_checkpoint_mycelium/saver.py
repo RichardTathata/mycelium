@@ -27,6 +27,11 @@ hex with the timestamp in the most significant bits, so **lexicographic order is
 chronological order** (verified against ``langgraph.checkpoint.base.id.uuid6``);
 ``get_tuple`` with no ``checkpoint_id`` picks the lexicographic max key.
 
+Incomplete checkpoints: a checkpoint whose row is visible but one of whose referenced blobs
+(skeleton, a channel value, a pending write) cannot be fetched yet raises
+:class:`IncompleteCheckpoint` from ``get_tuple`` / ``aget_tuple`` / ``list`` / ``alist`` —
+retriable, naming the missing blob ids. ``None`` means only that no checkpoint row exists.
+
 Consistency, stated honestly: KV rows are gossip-replicated (eventual);
 read-your-writes holds only against the *same* node's gateway. Cross-node
 readers poll for convergence. Payload blobs are fetched through the gateway's
@@ -55,6 +60,31 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
     get_checkpoint_metadata,
 )
+
+class IncompleteCheckpoint(Exception):
+    """A checkpoint exists, but a payload it references cannot be fetched yet.
+
+    The index row gossips ahead of the blobs, so a reader on another node can see a checkpoint
+    whose skeleton, channel values or pending writes are not yet reachable. That is **neither** a
+    missing checkpoint **nor** a smaller one: returning ``None`` made LangGraph start the thread
+    over, and dropping a pending write made it re-run a task that had already completed (and could
+    lose an ``__error__``/``__interrupt__``/``__resume__`` write). Retry once the blobs propagate.
+
+    ``missing`` lists the content ids that could not be fetched.
+    """
+
+    retriable = True
+
+    def __init__(self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, missing: list[str]):
+        self.thread_id = thread_id
+        self.checkpoint_ns = checkpoint_ns
+        self.checkpoint_id = checkpoint_id
+        self.missing = missing
+        super().__init__(
+            f"checkpoint {checkpoint_id} of thread {thread_id!r} (ns {checkpoint_ns!r}) is incomplete: "
+            f"{len(missing)} referenced blob(s) not fetchable yet ({', '.join(m[:12] for m in missing)}); retry"
+        )
+
 
 CKPT_PREFIX  = "ckpt"
 WRITE_PREFIX = "ckptw"
@@ -304,27 +334,35 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             if raw is None:
                 return None
             row = json.loads(raw)
+        # The row exists, so this checkpoint exists: a payload that cannot be fetched makes it
+        # *incomplete*, never absent or smaller (realignment repairs S5).
+        missing: list[str] = []
         skeleton = self._blob_get(row["blob"])
         if skeleton is None:
-            return None  # payload not (yet) fetchable from any provider
+            missing.append(row["blob"])
         channel_bytes: dict[str, bytes] = {}
         for ch, (blob_id, _type) in row.get("channels", {}).items():
             data = self._blob_get(blob_id)
             if data is None:
-                return None
-            channel_bytes[ch] = data
+                missing.append(blob_id)
+            else:
+                channel_bytes[ch] = data
         writes: list[tuple[str, int, dict[str, Any], bytes]] = []
         wprefix = f"{WRITE_PREFIX}/{_seg(thread_id)}/{_seg(checkpoint_ns)}/{_seg(checkpoint_id)}/"
         for key in self._kv_keys(wprefix):
             parsed = self._parse_write_key(key)
             raw = self._kv_get(key)
             if parsed is None or raw is None:
-                continue
+                continue  # a malformed key, or a row deleted since the listing: not part of it
             wrow = json.loads(raw)
             data = self._blob_get(wrow["blob"])
             if data is None:
+                missing.append(wrow["blob"])
                 continue
             writes.append((parsed[0], parsed[1], wrow, data))
+        if missing:
+            raise IncompleteCheckpoint(thread_id, checkpoint_ns, checkpoint_id, missing)
+        assert skeleton is not None
         return self._assemble(
             thread_id, checkpoint_ns, checkpoint_id, row, skeleton, channel_bytes, writes, config
         )
@@ -563,15 +601,18 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             if raw is None:
                 return None
             row = json.loads(raw)
+        # The same rule as the sync loader: present but unfetchable is *incomplete* (S5).
+        missing: list[str] = []
         skeleton = await self._ablob_get(row["blob"])
         if skeleton is None:
-            return None
+            missing.append(row["blob"])
         channel_bytes: dict[str, bytes] = {}
         for ch, (blob_id, _type) in row.get("channels", {}).items():
             data = await self._ablob_get(blob_id)
             if data is None:
-                return None
-            channel_bytes[ch] = data
+                missing.append(blob_id)
+            else:
+                channel_bytes[ch] = data
         writes: list[tuple[str, int, dict[str, Any], bytes]] = []
         wprefix = f"{WRITE_PREFIX}/{_seg(thread_id)}/{_seg(checkpoint_ns)}/{_seg(checkpoint_id)}/"
         for key in await self._akv_keys(wprefix):
@@ -582,8 +623,12 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             wrow = json.loads(raw)
             data = await self._ablob_get(wrow["blob"])
             if data is None:
+                missing.append(wrow["blob"])
                 continue
             writes.append((parsed[0], parsed[1], wrow, data))
+        if missing:
+            raise IncompleteCheckpoint(thread_id, checkpoint_ns, checkpoint_id, missing)
+        assert skeleton is not None
         return self._assemble(
             thread_id, checkpoint_ns, checkpoint_id, row, skeleton, channel_bytes, writes, config
         )

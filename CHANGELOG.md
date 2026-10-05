@@ -121,6 +121,24 @@ egress refusal — that request was leaving the allow-list before.
   tail, a restart over it, an `OnDisk` write, and a replay of the files copied mid-run.
 
 ### Fixed
+- **`langgraph-checkpoint-mycelium` 0.2.0 — an incomplete checkpoint raises instead of reading as
+  absent or smaller** (`docs/plans/realignment-repairs.md` S5; the review's F10). A checkpoint's index
+  row gossips in before every blob it references is fetchable, and the loaders answered that gap two
+  wrong ways: a missing pending-write blob was dropped, so the tuple came back with fewer
+  `pending_writes` and LangGraph re-ran a task that had already completed (losing an
+  `__error__`/`__interrupt__`/`__resume__` write the same way); a missing skeleton or channel blob
+  returned `None`, which LangGraph reads as *no checkpoint* and restarts the thread. `get_tuple`,
+  `aget_tuple`, `list` and `alist` now raise `IncompleteCheckpoint` — retriable, naming the missing
+  blob ids — and `None` means only that no checkpoint row exists. Fail-first on `989cf4bd`:
+  `tests/test_incomplete.py` (node-free, an in-memory gateway behind `httpx.MockTransport`) — a
+  missing pending-write blob, a missing channel blob by id and as the latest, and the async loader —
+  each did not raise. **Callers that poll across nodes must catch it:** the LangGraph ladder's
+  cross-node rungs (03 and the 06 flagship) now treat `IncompleteCheckpoint` as *not converged yet*
+  and retry — the first CI run of this change failed the flagship exactly there, with three blobs of
+  the gossiped-in checkpoint not yet fetchable on node B, which the old reader would have answered
+  with `None` or a shorter tuple. **Also:** `mycelium-py`'s live gateway suite (`test_gateway.py`) now runs in CI
+  against a `mycelium` node (S4's Python half); it had never been in the job's list, and passes (19,
+  1 expected failure) — the Python SDK reads every route the TypeScript SDK got wrong correctly.
 - **The wiki git store's push tripwire no longer fires on a healthy concurrent publish.** Its doc
   called it an *ancestry* tripwire; the code compared the remote head with ours for *equality* right
   after the push. With several clones publishing to one origin, another publisher can push between

@@ -59,7 +59,7 @@ import httpx
 from typing_extensions import TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph_checkpoint_mycelium import MyceliumCheckpointSaver
+from langgraph_checkpoint_mycelium import IncompleteCheckpoint, MyceliumCheckpointSaver
 
 HOST = "127.0.0.1"
 MODEL = "reheal-demo"
@@ -260,7 +260,12 @@ def main() -> int:
     saver_b = MyceliumCheckpointSaver(HOST, B_HTTP)
     deadline = time.monotonic() + CONVERGE_TIMEOUT
     while True:
-        head_b = saver_b.get_tuple(config)
+        # The row can arrive before its blobs are fetchable on B: that raises IncompleteCheckpoint
+        # (0.2.0), which here means *not converged yet* — retry, never "no checkpoint".
+        try:
+            head_b = saver_b.get_tuple(config)
+        except IncompleteCheckpoint:
+            head_b = None
         if head_b is not None and head_b.checkpoint["id"] == expected_id:
             break
         assert time.monotonic() < deadline, "checkpoint never gossiped to B"
