@@ -529,6 +529,12 @@ pub fn resolved_fanout(gossip_fanout: usize, max_active_connections: usize, know
 pub const DEFAULT_MEMBERSHIP_COOLDOWN_TICKS: u64 = 3;
 
 /// Unified configuration for all protocol components.
+///
+/// **Who owns each field** — the component that consumes it, the feature it needs to have any
+/// effect, where an unsupported value is refused by name (or that it is not), whether a change needs
+/// a restart, and its default and environment variable — is one table per field in
+/// `docs/reference/configuration.md` (realignment repairs A2). Only five fields change at runtime,
+/// through `HotConfig`; every other field is read once, when the agent is built.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GossipConfig {

@@ -1,0 +1,32 @@
+# Cross-layer hooks — what each may do
+
+↑ [architecture](architecture.md) · realignment repairs A2 (`docs/plans/realignment-repairs.md` §3.4)
+
+**Traced at `main` `f67b3f37` (2026-10-05).** The places where a lower layer calls code a higher layer
+installed. Each is a contract: what triggers it, what it is handed, what it may do, whether it runs on a
+hot path or under a lock, how long it stays registered, and what happens when nothing is installed.
+
+**The rule every hook keeps: no synchronous network I/O, and nothing that blocks.** Most run inside
+`apply_and_notify` or a connection's read loop; a slow hook stalls the path that called it, and a
+blocking one stalls the node. The detection-not-prevention invariant
+([runtime-invariants](runtime-invariants.md)) applies: a hook observes and counts, it does not teach
+Layer I a higher-layer law.
+
+| hook | defined | trigger | data | may | lock/hot path | lifetime | when absent |
+|---|---|---|---|---|---|---|---|
+| `ReplyInterceptor` (`Arc<dyn Fn(&Signal) -> bool>`) | mycelium-core/src/context.rs:92; field `CoreCtx::reply_interceptor` :133; installed mycelium/src/agent/mod.rs:952 | every signal about to be delivered locally: inbound (connection.rs:562, after boundary admit + reorder) and local emits (ops.rs:95, :132) | `&Signal` (kind, scope, payload, sender, nonce) | claim an `rpc.result`/`bulk.result` by nonce → fire the waiting oneshot and return `true`, which **skips** the `signal_handlers` fan-out; must not block (sync fn) | hot path (per delivered signal, inside the per-connection read loop); the installed closure takes the `rpc_pending` std `Mutex` (mod.rs:965) — short critical section; reorder-buffer guard is already dropped at the call (connection.rs:547-553 scope) | fixed at `GossipAgent::new` for the agent's life (plain `Option`, not settable later) | `None` (pure core embeds, lib_tests.rs:142): every signal goes to `signal_handlers`; RPC/bulk replies would never resolve |
+| `QuorumObserver` (trait) | mycelium-core/src/store.rs:20 (`observe`, `observe_update` :36); list type `QuorumTrackerList` :45; map `KvStore::quorum_trackers` :119; impl `QuorumAckTracker` src/agent/kv_quorum.rs:118 | `apply_and_notify` when an update **changed** the store for a tracked key (store.rs:763-771) | origin `sender` id_hash, HLC `timestamp`, `nonce`, `content_hash(key,value,tombstone)` | count an ack (insert into `acked_by`, bump a `watch`); documented as notification-only — the ack law lives above | runs inside `apply_and_notify` (inbound + local write hot path) under a papaya pin guard, after the per-key index stripe `Mutex` is released (stripe block store.rs:661-~702); content hash computed only if a tracker exists | per `set_with_min_acks` call: `install_tracker`/`remove_tracker` (kv_quorum.rs:31/52), copy-on-write list | no entry for the key → nothing called, no hash computed |
+| `SnapshotDeferHook` (`Arc<dyn Fn() -> bool>`) | mycelium-core/src/persistence.rs:501; consulted :621; installed src/agent/lifecycle.rs:243 (`is_self_opaque`, opacity.rs:215) | WAL writer task's **interval** snapshot tick only (not the WAL-threshold snapshot at :596, not TriggerSnapshot, not shutdown) | none (closure captures KvState + node id) | return `true` to defer: timer reset 30 s (`reset_after_ms(30_000)`), recorded as a deferral; read-only KV scan of `sys/load/{self}/` | WAL writer task (off the write path); closure takes papaya pins only; no lock held by caller | set once per WAL writer spawn at `start()`; lives until the writer task ends | `None` (pure-core embeds): never defers |
+| `DecisionSink` | mycelium-core/src/decision.rs:274 (`record` :316, `drain` :~355); slot `CoreCtx::decision_sink` `OnceLock` context.rs:125, getter :223; attach `GossipAgent::with_decision_trace` src/agent/mod.rs:1131 | membership governor decisions (membership_governor.rs:233-243); signal admission refusals/sheds on **locally emitted** signals only (`deliver_locally` ops.rs:37-63) — the inbound admission path (connection.rs:528) records nothing; wasm-host provisioner via its own `with_decision_trace` | `DecisionRecord` (rule id+rev, trigger, outcome+reason, target, bounded inputs with provenance, view) | append to a bounded ring; must change no decision (G7): no clock/RNG/network; inputs truncated to `max_input_bytes` (256) | `try_lock` only — contended ⇒ dropped and counted, never waits; bounded by `max_records` 4096 / `max_bytes` 1 MiB, newest dropped; callers record after releasing subsystem locks (boundary read guard is a temporary dropped before the record, ops.rs:37) | set once before `start()` (OnceLock; 2nd call warns, ignored; post-start attach counted by `note_attachment`); lives with the agent | not attached ⇒ nothing recorded; bundles say *trace unavailable*, not *no decisions* |
+| KV change notifications (`subscribe`, `subscribe_prefix`, `subscribe_prefix_with_predicate`) | maps `KvState::subscriptions` store.rs:148 (per-key `watch<Option<Bytes>>`), `KvStore::prefix_watchers` :101 (`watch<u64>`), `prefix_predicate_watchers` :107; API mycelium-core/src/kv_handle.rs:397/425/450, ops.rs:203/226/249 | `apply_and_notify` when an update changed the store (store.rs:711-760) | per-key: new value or `None` for tombstone; prefix: a bumped generation counter (`u64`) only — reader re-reads | `watch::send`/`send_modify` (non-blocking); predicate watchers run a **caller-supplied predicate synchronously** (`(w.predicate)(&key)`, :749) | in the apply hot path under papaya pins (not the stripe lock); a slow predicate stalls the inbound connection loop / writer that applied the update | until the receiver is dropped; closed senders evicted lazily on next matching update | no subscriber ⇒ no work beyond the map lookups/iteration (prefix + predicate maps are iterated on every changed update) |
+
+## Notes the trace surfaced
+
+- **The decision trace records signal admission only for locally emitted signals**; the inbound
+  admission path (`mycelium-core/src/connection.rs`) records nothing. A trace that shows no refusals
+  for inbound traffic is *unrecorded*, not *none* — the same rule as a bundle without
+  `decisions.jsonl`.
+- **`SnapshotDeferHook` is consulted only on the interval snapshot**, not the WAL-threshold one, so a
+  node that is opaque for load still snapshots when its WAL fills.
+- **Predicate watchers run the caller's predicate synchronously inside `apply_and_notify`.** Keep the
+  predicate a pure, bounded check; anything heavier belongs after the notification.
