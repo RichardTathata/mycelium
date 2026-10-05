@@ -118,6 +118,7 @@ describe_("MyceliumAgent — live node tests", () => {
   // ── Signal mesh ────────────────────────────────────────────────────────────
 
   it_("emit returns a boolean", async () => {
+    // Since the SDK reads the gateway's `ok` (it read `queued`, which is never sent).
     const queued = await a.emit("ts-test-signal", Buffer.from("hello"), {
       scope: "system",
     });
@@ -126,10 +127,13 @@ describe_("MyceliumAgent — live node tests", () => {
 
   // ── RPC ────────────────────────────────────────────────────────────────────
 
-  it_("rpcCall times out with non-existent target", async () => {
+  // A target the gateway cannot see a caller-context marker for is refused before dispatch (HTTP 412
+  // `provider_without_caller_context`, the secure default since the gateway caller-identity work) —
+  // it never reaches the point of timing out. This test used to expect a `TimeoutError`.
+  it_("rpcCall to an unknown target is refused before dispatch", async () => {
     await expect(
       a.rpcCall("127.0.0.1:1", "echo", Buffer.from("hi"), { timeoutSecs: 0.2 }),
-    ).rejects.toMatchObject({ name: "TimeoutError" });
+    ).rejects.toThrow(/provider_without_caller_context/);
   });
 
   // ── Mailbox ────────────────────────────────────────────────────────────────
@@ -150,11 +154,12 @@ describe_("MyceliumAgent — live node tests", () => {
     expect(got?.toString()).toBe("consistent-val");
   });
 
-  it_("electLeader returns a string node ID", async () => {
+  // An election over a group nobody joined has no electorate and is refused by name (409
+  // `electorate_unavailable`, since v2.14.0): absence is not authority. This test used to expect
+  // a leader for a fresh, empty group.
+  it_("electLeader over an empty group is refused by name", async () => {
     const group = `ts-test-elect-${Date.now()}`;
-    const leader = await a.electLeader(group);
-    expect(typeof leader).toBe("string");
-    expect(leader.length).toBeGreaterThan(0);
+    await expect(a.electLeader(group)).rejects.toThrow(/electorate_unavailable/);
   });
 
   it_("append and scanLog round-trip", async () => {
@@ -176,10 +181,21 @@ describe_("MyceliumAgent — live node tests", () => {
     await expect(a.compactLog(stream, hlc + 1n)).resolves.not.toThrow();
   });
 
-  it_("emitReliable to non-existent target returns timeout", async () => {
-    const result = await a.emitReliable("127.0.0.1:1", "ts-test.reliable", Buffer.alloc(0), {
+  // A real timeout needs a target the gateway will dispatch to: this node itself, on a kind nobody
+  // serves. `0.3` s is sent as 1 s (whole seconds, rounded up), which the gateway accepts; it used to
+  // refuse the fraction with 422, and the SDK read `status` where the gateway sends `ack`.
+  it_("emitReliable to a kind nobody serves returns timeout", async () => {
+    const self = await a.nodeId;
+    const result = await a.emitReliable(self, `ts-test.reliable.${Date.now()}`, Buffer.alloc(0), {
       timeoutSecs: 0.3,
     });
     expect(result).toBe("timeout");
+  });
+
+  // An unknown target is a refusal, thrown — never reported as a timeout.
+  it_("emitReliable to an unknown target is refused, not reported as a timeout", async () => {
+    await expect(
+      a.emitReliable("127.0.0.1:1", "ts-test.reliable", Buffer.alloc(0), { timeoutSecs: 1 }),
+    ).rejects.toThrow(/provider_without_caller_context/);
   });
 });

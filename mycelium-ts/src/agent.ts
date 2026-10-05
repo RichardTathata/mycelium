@@ -1,4 +1,5 @@
 import { sseStream } from "./sse";
+import { parseLossless, stringifyLossless, toBigInt } from "./json";
 import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
 import { authHeaders, resolveToken, type AuthOptions } from "./auth";
@@ -21,6 +22,14 @@ function b64(buf: Buffer | Uint8Array): string {
 
 function fromb64(s: string): Buffer {
   return Buffer.from(s, "base64");
+}
+
+/**
+ * A timeout the gateway reads as `u64` seconds: a fraction rounds up, never below 1. Sending `0.3`
+ * was refused with 422 before the request was looked at.
+ */
+function wholeSeconds(secs: number): number {
+  return Math.max(1, Math.ceil(secs));
 }
 
 /**
@@ -94,14 +103,16 @@ export class MyceliumAgent {
       signal: AbortSignal.timeout(this.timeout),
     });
     if (!resp.ok) throw new Error(`GET ${path} failed: ${resp.status}`);
-    return resp.json();
+    // Lossless: a 64-bit integer above 2^53 arrives as a decimal string, not a rounded double (S1).
+    return parseLossless(await resp.text());
   }
 
   private async _post(path: string, body: unknown): Promise<unknown> {
     const resp = await fetch(`${this.base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", ...this.auth },
-      body: JSON.stringify(body),
+      // A `bigint` in the body is written as a bare JSON integer, exactly (S1).
+      body: stringifyLossless(body),
       signal: AbortSignal.timeout(this.timeout),
     });
     if (!resp.ok) {
@@ -115,7 +126,7 @@ export class MyceliumAgent {
       }
       throw new Error(`POST ${path} failed: ${resp.status} ${text}`);
     }
-    return resp.json();
+    return parseLossless(await resp.text());
   }
 
   private async _delete(path: string): Promise<void> {
@@ -272,7 +283,11 @@ export class MyceliumAgent {
   ): Promise<Array<Record<string, unknown>>> {
     const params: Record<string, string> = { ns, name };
     if (options.callerId) params.caller_id = options.callerId;
-    return this._get("/gateway/capability/resolve", params) as Promise<Array<Record<string, unknown>>>;
+    // The gateway answers `{"providers": [...]}`; this returned the envelope as if it were the array.
+    const data = await this._get("/gateway/capability/resolve", params) as {
+      providers?: Array<Record<string, unknown>>;
+    };
+    return data.providers ?? [];
   }
 
   /**
@@ -296,7 +311,9 @@ export class MyceliumAgent {
   /**
    * Fires a signal into the mesh.
    * @param scope `"cluster"` (every node; default), `"group:NAME"`, or `"node:IP:PORT"`. `"system"` is a deprecated alias.
-   * @returns `true` if queued for gossip; `false` if the shard was full (local delivery still occurred).
+   * @returns the gateway's `ok`: `true` when the signal was handed to local delivery and queued for
+   *   gossip fan-out; `false` when the gossip queue was full (local delivery still occurred). It does
+   *   not say any subscriber ran.
    */
   async emit(
     kind: string,
@@ -307,8 +324,8 @@ export class MyceliumAgent {
       kind,
       payload_b64: b64(payload),
       scope: options.scope ?? "cluster",
-    }) as { queued: boolean };
-    return data.queued;
+    }) as { ok: boolean };
+    return data.ok === true;
   }
 
   /**
@@ -316,15 +333,16 @@ export class MyceliumAgent {
    */
   async *onSignal(kind: string): AsyncGenerator<Signal> {
     const url = this._sseUrl(`/gateway/signal/sse/${encodeURIComponent(kind)}`);
-    yield* sseStream<Signal>({ url, headers: this.auth }, (data) => {
-      const raw = JSON.parse(data) as {
-        kind: string; sender: string; payload_b64: string; nonce: string;
+    yield* sseStream<Signal>({ url, headers: this.auth }, (data, event) => {
+      const raw = parseLossless(data) as {
+        kind?: string; sender: string; payload_b64: string; nonce: number | string;
       };
       return {
-        kind: raw.kind,
+        // The kind is the SSE event name; the data object carries it only on newer gateways.
+        kind: raw.kind ?? event ?? kind,
         sender: raw.sender,
         payload: fromb64(raw.payload_b64),
-        nonce: BigInt(raw.nonce),
+        nonce: toBigInt(raw.nonce),
       };
     });
   }
@@ -333,8 +351,9 @@ export class MyceliumAgent {
 
   /** Reads a key, returns `null` if absent or tombstoned. */
   async get(key: string): Promise<Buffer | null> {
-    const data = await this._get("/gateway/kv", { key }) as { value_b64: string | null };
-    return data.value_b64 !== null ? fromb64(data.value_b64) : null;
+    // `{"found": false}` carries no `value_b64` at all; checking it against `null` threw on absence.
+    const data = await this._get("/gateway/kv", { key }) as { found?: boolean; value_b64?: string | null };
+    return data.found && typeof data.value_b64 === "string" ? fromb64(data.value_b64) : null;
   }
 
   /**
@@ -415,7 +434,8 @@ export class MyceliumAgent {
   // ── RPC ───────────────────────────────────────────────────────────────────
 
   /**
-   * Blocking point-to-point RPC call. Throws `TimeoutError` if no reply arrives.
+   * Blocking point-to-point RPC call. Throws `TimeoutError` if no reply arrives. `timeoutSecs` is
+   * whole seconds, a fraction rounded up (the gateway clamps to 1–300).
    *
    * Protected kinds (`mcp.invoke`, `skill.invoke`, `llm.invoke`, and any the operator lists) are
    * refused with `ProtectedKindError`: call tools through `/mcp` and skills through `A2aClient`,
@@ -432,7 +452,8 @@ export class MyceliumAgent {
       target,
       method,
       payload_b64: b64(payload),
-      timeout_secs: options.timeoutSecs ?? 5,
+      // Whole seconds: the gateway reads `as_u64()`, and a fraction became its 30 s default silently.
+      timeout_secs: wholeSeconds(options.timeoutSecs ?? 5),
     }) as { ok: boolean; result_b64?: string; error?: string };
     if (!data.ok) throw Object.assign(new Error("rpc_call timeout"), { name: "TimeoutError" });
     return fromb64(data.result_b64!);
@@ -487,7 +508,8 @@ export class MyceliumAgent {
       kind: method,
       payload_b64: b64(payload),
       min_ok: options.minOk ?? targets.length,
-      timeout_secs: options.timeoutSecs ?? 5,
+      // Whole seconds: the gateway reads `as_u64()`, and a fraction became its 10 s default silently.
+      timeout_secs: wholeSeconds(options.timeoutSecs ?? 5),
     }) as { ok: boolean; replies?: Array<{ sender: string; result_b64: string }>; error?: string };
     if (!data.ok) throw Object.assign(new Error("scatter_gather timeout"), { name: "TimeoutError" });
     return (data.replies ?? []).map((r) => ({
@@ -549,9 +571,9 @@ export class MyceliumAgent {
   /** Read latest ballot-committed value visible to this node (local, eventually consistent). */
   async consistentGet(key: string): Promise<Buffer | null> {
     const data = await this._get("/gateway/overlay/consistent/get", { key }) as {
-      value_b64: string | null;
+      value_b64?: string | null;
     };
-    return data.value_b64 !== null ? fromb64(data.value_b64) : null;
+    return typeof data.value_b64 === "string" ? fromb64(data.value_b64) : null;
   }
 
   /**
@@ -567,7 +589,7 @@ export class MyceliumAgent {
       ttl_secs: options.ttlSecs ?? 30,
     }) as { guard_id: string; token: string };
     const guardId = data.guard_id;
-    return new LockGuard(guardId, BigInt(data.token), async () => {
+    return new LockGuard(guardId, toBigInt(data.token), async () => {
       await this._delete(`/gateway/overlay/lock/${guardId}`);
     });
   }
@@ -625,8 +647,8 @@ export class MyceliumAgent {
     const data = await this._post("/gateway/overlay/log/append", {
       stream,
       value_b64: b64(value),
-    }) as { hlc: string };
-    return BigInt(data.hlc);
+    }) as { hlc: number | string };
+    return toBigInt(data.hlc);
   }
 
   /**
@@ -636,23 +658,26 @@ export class MyceliumAgent {
     stream: string,
     options: { fromHlc?: bigint; toHlc?: bigint } = {},
   ): Promise<LogEntry[]> {
+    // The gateway reads `from` / `to` (inclusive / exclusive) and answers a bare array. This sent
+    // `from_hlc` / `to_hlc`, which the gateway ignored, and mapped `data.entries` over the array.
     const params: Record<string, string> = { stream };
-    if (options.fromHlc !== undefined) params.from_hlc = options.fromHlc.toString();
-    if (options.toHlc !== undefined) params.to_hlc = options.toHlc.toString();
-    const data = await this._get("/gateway/overlay/log/scan", params) as {
-      entries: Array<{ hlc: string; value_b64: string }>;
-    };
-    return data.entries.map((e) => ({
-      hlc: BigInt(e.hlc),
+    if (options.fromHlc !== undefined) params.from = options.fromHlc.toString();
+    if (options.toHlc !== undefined) params.to = options.toHlc.toString();
+    const data = await this._get("/gateway/overlay/log/scan", params) as Array<{
+      hlc: number | string; value_b64: string;
+    }>;
+    return data.map((e) => ({
+      hlc: toBigInt(e.hlc),
       value: fromb64(e.value_b64),
     }));
   }
 
   /** Tombstones all entries with `hlc < beforeHlc`. Gossips tombstones to peers. */
   async compactLog(stream: string, beforeHlc: bigint): Promise<void> {
+    // A JSON integer, as the gateway's `u64` requires; a string was refused with 422.
     await this._post("/gateway/overlay/log/compact", {
       stream,
-      before_hlc: beforeHlc.toString(),
+      before_hlc: beforeHlc,
     });
   }
 
@@ -661,11 +686,12 @@ export class MyceliumAgent {
    */
   async *subscribeLog(stream: string, options: { sinceHlc?: bigint } = {}): AsyncGenerator<LogEntry> {
     const params: Record<string, string> = { stream };
-    if (options.sinceHlc !== undefined) params.since_hlc = options.sinceHlc.toString();
+    // `since`, as the gateway reads it; `since_hlc` was ignored and every resume replayed from 0.
+    if (options.sinceHlc !== undefined) params.since = options.sinceHlc.toString();
     const url = this._sseUrl("/gateway/overlay/log/subscribe", params);
     yield* sseStream<LogEntry>({ url, headers: this.auth }, (data) => {
-      const raw = JSON.parse(data) as { hlc: string; value_b64: string };
-      return { hlc: BigInt(raw.hlc), value: fromb64(raw.value_b64) };
+      const raw = parseLossless(data) as { hlc: number | string; value_b64: string };
+      return { hlc: toBigInt(raw.hlc), value: fromb64(raw.value_b64) };
     });
   }
 
@@ -676,14 +702,17 @@ export class MyceliumAgent {
   async *subscribeLogGroup(stream: string, group: string): AsyncGenerator<LogEntry> {
     const url = this._sseUrl("/gateway/overlay/log/group/subscribe", { stream, group });
     yield* sseStream<LogEntry>({ url, headers: this.auth }, (data) => {
-      const raw = JSON.parse(data) as { hlc: string; value_b64: string };
-      return { hlc: BigInt(raw.hlc), value: fromb64(raw.value_b64) };
+      const raw = parseLossless(data) as { hlc: number | string; value_b64: string };
+      return { hlc: toBigInt(raw.hlc), value: fromb64(raw.value_b64) };
     });
   }
 
   /**
    * Sends `payload` to `target` and waits for an explicit application-level ACK.
-   * Returns `"acknowledged"` or `"timeout"`.
+   * Returns `"acknowledged"` or `"timeout"`; a refusal (an unknown target, a protected kind, a
+   * malformed request) is thrown, never reported as a timeout.
+   *
+   * `timeoutSecs` is whole seconds: a fraction is rounded **up**, and the gateway clamps to 1–300.
    */
   async emitReliable(
     target: string,
@@ -695,9 +724,13 @@ export class MyceliumAgent {
       target,
       kind,
       payload_b64: b64(payload),
-      timeout_secs: options.timeoutSecs ?? 5,
-    }) as { status: "acknowledged" | "timeout" };
-    return data.status;
+      timeout_secs: wholeSeconds(options.timeoutSecs ?? 5),
+    }) as { ack?: "acknowledged" | "timeout" };
+    // The gateway answers `{"ack": …}`; this read `status`, which is never sent.
+    if (data.ack !== "acknowledged" && data.ack !== "timeout") {
+      throw new Error(`emit_reliable: unexpected reply ${JSON.stringify(data)}`);
+    }
+    return data.ack;
   }
 
   // ── Cluster sharding ────────────────────────────────────────────────────

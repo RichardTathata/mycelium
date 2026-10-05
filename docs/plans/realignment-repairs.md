@@ -326,10 +326,10 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | R5 patch documentation | #523 | merged |
 | R6a the git store's push tripwire checks ancestry, not equality — found by R6's step 2b: `main` red on a false alarm in the ten-council contention run | #524 | merged |
 | R6 release `v2.23.0` | (this PR) | in review |
-| S1 lossless integers (TS) | — | open |
-| S2 the shapes (TS, one additive gateway field) | — | open |
-| S3 `sseStream` lifetime | — | open |
-| S4 the live suites in CI | — | open |
+| S1 lossless integers (TS) | #526 | in review |
+| S2 the shapes (TS); the additive gateway `kind` field waits for `v2.24.0` — the SDK reads the event name, so it does not need it | #526 | in review |
+| S3 `sseStream` lifetime | #526 | in review |
+| S4 the live suites in CI — the TypeScript half here; `mycelium-py`'s `test_gateway.py` with S5 | #526 | in review |
 | S5 incomplete checkpoint raises (py) | — | open |
 | A1 "no control plane" defined; "profile" disambiguated | — | open |
 | A2 configuration field table; hook contracts page | — | open |

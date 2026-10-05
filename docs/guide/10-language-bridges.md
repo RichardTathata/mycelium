@@ -198,8 +198,10 @@ const guard   = await agent.distributedLock("migration-lock", { ttlSecs: 30 });
 // ... critical section (guard.token is the fencing token) ...
 await guard.release();
 const leader  = await agent.electLeader("workers");
-const hlc     = await agent.append("events", Buffer.from("entry")); // bigint HLC
-const entries = await agent.scanLog("events", { fromHlc: 0n });
+const hlc     = await agent.append("events", Buffer.from("entry")); // bigint HLC, exact
+const entries = await agent.scanLog("events", { fromHlc: 0n });   // [fromHlc, toHlc)
+// 64-bit values are exact from mycelium-ts 0.2.0: an HLC is above 2^53, and earlier versions
+// rounded it (two HLCs one tick apart compared equal). Timeouts are whole seconds, rounded up.
 
 // ── A2A / Prompt Skills ───────────────────────────────────────────────────────
 import { A2aClient, PromptSkillClient } from "mycelium-ts";
