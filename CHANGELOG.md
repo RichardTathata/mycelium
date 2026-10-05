@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [2.25.0] — 2026-10-05
+
+The realignment repairs' last two rows (`docs/plans/realignment-repairs.md` R8, R9 — #534, #535), both
+found by A2's configuration audit; with them every row of the plan is closed. Wire **v12** unchanged.
+A MINOR rather than a PATCH: R9 changes two public signatures and R8 adds a start-time refusal.
+
 ### Fixed
 - **The live timing setters keep `validate()`'s bounds** (`docs/plans/realignment-repairs.md` R9,
   found by A2's configuration audit). `set_health_check_interval_secs` and `set_reconnect_backoff_secs`
