@@ -4975,6 +4975,36 @@ async fn a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_appe
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// **Realignment repairs R7** (found by A2's configuration audit, 2026-10-05). A persistence
+/// directory that cannot be created used to be a warning: `start()` logged it and ran **in memory**,
+/// so every write was lost on the next restart — while the guarantee report, resolved from the
+/// configuration alone, still said `persist.configured: enforced` and `secure-single-domain` let the
+/// node start. Now it refuses the start by name. The directory here sits under a regular file.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_persistence_directory_that_cannot_be_created_refuses_the_start() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let root = std::env::temp_dir().join(format!("mycelium-r7-{port}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let not_a_dir = root.join("a-file");
+    std::fs::write(&not_a_dir, b"not a directory").unwrap();
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&not_a_dir));
+
+    let a = GossipAgent::new(id, cfg);
+    let r = a.start().await;
+    let e = match r {
+        Err(e) => e,
+        Ok(()) => { a.shutdown().await; panic!("a node that cannot persist must not start as if it could"); }
+    };
+    assert!(e.to_string().contains("persistence") && e.to_string().contains("directory"), "the refusal names it: {e}");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// **R2, the refusal.** If the startup snapshot that repairs the WAL fails, the node must not start
 /// and append behind the torn tail it could not remove — `start()` used to discard the snapshot's
 /// result with `let _ =`. The failure here is a directory the node cannot write `snapshot.tmp` into.

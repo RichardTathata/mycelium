@@ -169,7 +169,14 @@ impl GossipAgent {
         if let Some(ref pcfg) = self.config.persistence {
             let dir = pcfg.base_path.join(self.node_id.to_string()).join("kv");
             if let Err(e) = tfs::create_dir_all(&dir).await {
-                warn!("persistence: failed to create data dir {:?}: {e}", dir);
+                // A refusal, not a warning (realignment repairs R7). This used to log and start the
+                // node **in memory**, so every write was lost on the next restart while the
+                // guarantee report — resolved from the configuration alone — still said
+                // `persist.configured: enforced`, and `secure-single-domain` let it start.
+                return Err(GossipError::InvalidField {
+                    field: "persistence",
+                    reason: format!("the persistence directory {} cannot be created: {e}; a node configured to persist does not start without it", dir.display()),
+                });
             } else {
                 let kv_state     = Arc::clone(&self.kv_state);
                 let intern_keys  = self.config.intern_keys;
