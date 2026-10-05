@@ -1,5 +1,9 @@
 # Mycelium and the enterprise agentic control plane
 
+> **"Control plane" in this guide's title is the enterprise industry's term for the whole slot, not a
+> Mycelium component.** Mycelium has no control-plane service: *Control decisions live in participating nodes: enabled governors and provisioners act locally, subject to configured consensus and resource-side authority checks. No separate Mycelium control-plane service is required.* The definition
+> and its reasoning are in [positioning](../positioning.md#the-three-expansions).
+
 *Which slot Mycelium fills in the emerging "control plane for enterprise AI agents" architecture —
 what it provides out of the box, what deliberately stays on your side of the line, and how it
 composes with a deterministic workflow engine. Written 2026-08-18 against a representative

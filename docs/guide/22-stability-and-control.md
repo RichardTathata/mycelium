@@ -86,6 +86,11 @@ never consulted under `Legacy`.
 
 ## The profile ladder
 
+*This is the **control** profile. It is not the startup profile (`secure-single-domain`, which decides
+what a node refuses to start without) and not a consensus policy (which decides how one operation is
+agreed); none implies another. The three side by side:
+[`operations/control-profiles.md`](../operations/control-profiles.md).*
+
 ```rust
 pub enum Profile { Legacy, Observe, EnforceLocal, EnforceAllocated }
 ```

@@ -179,7 +179,7 @@ Postgres metrics + RAG background by a shared id namespace). It answers a
 different question — *"where does a group keep what it learns?"* Not in gossiped
 KV: the corpus lives in a node-independent store, a single elected **curator**
 serialises writes (so concurrent edits need no CRDT) while agents **read directly,
-in parallel**, and Mycelium is only the control plane (curator election +
+in parallel**, and Mycelium supplies only the control functions (curator election +
 ring-failover, an evaporating proposal queue, MCP + gateway, a membership-gated
 access broker). One line: *transient work → tuple space / blackboard; durable
 curated knowledge → wiki.*
@@ -366,6 +366,8 @@ the question to answer is not "what went wrong" but "what should the caller do d
 | Award | native | the contract net's accepted offer — a receipt-bearing operation, one per requirement, a second is refused | `redistribution_cn` |
 | `Indeterminate` | native | authority could not be **established** — never a permit, and never the same as a deny | `design/action-envelope-ae0.md` |
 | Bundle | native | a recorded run: what production asked for and received, plus the build and the witness that failed | `replay_a_bundle` |
+| "No control plane" | definition | *Control decisions live in participating nodes: enabled governors and provisioners act locally, subject to configured consensus and resource-side authority checks. No separate Mycelium control-plane service is required.* — no *separate* service to run, not the absence of control | `positioning.md` |
+| Three things called "profile" | disambiguation | a **startup profile** (`profile = "secure-single-domain"`: the guarantees a node refuses to start without) · a **control profile** (`Legacy` → `Observe` → `EnforceLocal` → `EnforceAllocated`: how the node's governors act, set at runtime) · a **consensus policy** (per operation: quorum, lease, ballot). None implies another | `operations/control-profiles.md` |
 | Guarantee report · profile | native | what this node enforces and why not the rest — every core guarantee resolved at `start()` to `enforced` · `not_configured` · `not_in_build` · `not_applicable` · `not_verifiable_here` (`guarantee_report()`, `GET /gateway/guarantees`); a **profile** (`dev`, `secure-single-domain`) names the set a node refuses to start without | `reference/guarantee-catalogue.md`, guide 20 |
 | Rule catalogue | native | every decision point the substrate has, described by stable id — trigger, inputs, typed outcomes and reasons, guards, relations as hypotheses, code and tests, trace policy; generated and gated, `mycelium rules` | `reference/rule-catalogue.md`, guide 19 |
 | Decision trace | native | a bounded record of what each instrumented decision point read, how it ended and why — off unless attached, changes no decision, never waits; `decisions.jsonl` + `coverage.json` in a bundle, read with `mycelium explain` | guide 19 § reading what a node decided |

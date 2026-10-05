@@ -68,6 +68,12 @@ Each is one paragraph and opens with the hero and the sentence.
 > agents must coordinate and nobody should be in charge: fleets that partition and heal, edge and
 > on-prem meshes, systems where *who is in charge* must be emergent and recallable.
 
+**What "no control plane" means** (realignment repairs A1, decision D2). Not that nothing controls
+the fleet — the node runs governors, a provisioner and consensus. It means there is no *separate*
+control-plane service to deploy or operate. The definition, used everywhere the phrase appears:
+*Control decisions live in participating nodes: enabled governors and provisioners act locally, subject to configured consensus and resource-side authority checks. No separate Mycelium control-plane service is required.* "Enabled" is load-bearing: a minimal embed runs none of them, and a governor
+enforces only under the control profile its node is set to.
+
 **The buyer's** — both decks, the engagement kit, the pilot page — the hero and the sentence, then the order in
 the plan's §3: what an agent **may** do, checked where the work happens · what it **did**, as records
 a third party can audit · a fleet that **fills itself** · how: no coordinator · what is proven and what
