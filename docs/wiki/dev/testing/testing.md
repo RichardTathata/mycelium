@@ -74,6 +74,17 @@ feature-matrix gates pass. **The fast catcher is `cargo clippy --lib --no-defaul
 `make check`) — it lints the same gateway/metrics-off mycelium lib the slow wasm-host job compiles,
 so you rarely need the wasmtime build to catch the trap.
 
+**`cargo test --no-default-features` is not a gateway-free test build** (found 2026-10-05, realignment
+repairs R8). `mycelium`'s dev-dependencies include `mycelium-tuple-space` with its `gateway` feature,
+which depends on `mycelium/gateway`, and Cargo unifies features across a test build — so every test
+build of `mycelium`, whatever its flags, has `gateway`, and a `#[cfg(not(feature = "gateway"))]` test
+inside the crate is never compiled. (`clippy --lib --no-default-features`, with no `--tests`, *is*
+gateway-free: no dev-dependencies are built.) The tests that need the build without it live in
+**`mycelium-gateway-free-tests`**, a test-only workspace crate depending on `mycelium` with
+`default-features = false`; `cargo test -p mycelium-gateway-free-tests` run alone builds it truly
+without the gateway, and its first test, `this_build_has_no_gateway`, reads the guarantee report's
+compiled features and fails if a shared invocation unified the gateway back in.
+
 **mycelium-core's suite runs in CI as of 2026-07-11.** Before that it was clippy-*compiled*
 (`clippy -p mycelium-core --lib --tests`) but never *run*: `cargo test --lib` tests only the root
 `mycelium` package (core is a compiled dependency there, its `#[cfg(test)]` invisible), and there was

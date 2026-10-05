@@ -101,6 +101,21 @@ impl GossipAgent {
                     .into(),
             });
         }
+        // A build without `gateway` runs no HTTP server, so a gateway setting would be accepted and
+        // ignored — and `http_port` is still advertised as the bulk-transfer port, which nothing
+        // serves (realignment repairs R8, found by A2's configuration audit). Refused by name.
+        #[cfg(not(feature = "gateway"))]
+        for (field, set) in [("http_port", self.config.http_port.is_some()), ("gateway_tls", self.config.gateway_tls.is_some())] {
+            if set {
+                return Err(GossipError::InvalidField {
+                    field,
+                    reason: "the HTTP gateway is provided only by a build with the `gateway` feature; \
+                             this build would run no gateway and ignore the setting. Build with \
+                             `--features gateway`, or remove it"
+                        .into(),
+                });
+            }
+        }
         #[cfg(not(feature = "tls"))]
         for (field, set) in [("tls", self.config.tls.is_some()), ("gateway_tls", self.config.gateway_tls.is_some())] {
             if set {

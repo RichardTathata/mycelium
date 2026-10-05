@@ -184,6 +184,12 @@ jobs:
       # Every target compiles without default features: an example that uses an optional feature must declare it as
       # `required-features`, or this fails. A compile check, not clippy: examples have never been linted in CI.
       - run: cargo check --all-targets --no-default-features
+      # The only tests that run against `mycelium` without `gateway` (realignment repairs R8). They live in
+      # their own crate because `mycelium`'s dev-dependencies enable `gateway`, so its own test build never
+      # lacks it; run alone, this crate builds `mycelium` with no default features. Its first test fails if
+      # the gateway was unified back in.
+      - run: cargo clippy -p mycelium-gateway-free-tests --all-targets -- -D warnings
+      - run: cargo test -p mycelium-gateway-free-tests
       # The node binary's recorded-run path (`GOSSIP_RECORD_BUNDLE_DIR`) exists only under `sim`;
       # nothing else builds the bin with it, so this is the line that keeps it compiling.
       - run: cargo check --bin mycelium --features cli,sim

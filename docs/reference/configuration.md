@@ -100,8 +100,10 @@ Writing this table down found one defect and two open items, recorded in the pla
 - **R7 (fixed, #529):** a persistence directory that could not be created let the node start **in
   memory**, while `persist.configured` — resolved from the configuration alone — still said
   `enforced`, and `secure-single-domain` admitted the node.
-- **R8 (open):** `http_port` and `gateway_tls` are silently ignored in a build without `gateway`, and
-  the `gw.*` guarantees resolve from config there. No test runs in a gateway-free build today.
+- **R8 (fixed):** `http_port` and `gateway_tls` were silently ignored in a build without `gateway`, and
+  the `gw.*` guarantees resolved from config there. `start()` now refuses each by name, the `gw.*`
+  guarantees read `not_in_build`, and `mycelium-gateway-free-tests` is the first test build of
+  `mycelium` without the gateway.
 - **R9 (fixed):** the runtime timing setters bypassed `validate()`'s bounds; they now refuse a value
   above them, changing nothing — the bounds the cluster timing governor already applied.
 
