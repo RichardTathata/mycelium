@@ -1,6 +1,6 @@
 # Realignment repairs — twelve findings, four pieces
 
-**Status:** adopted 2026-10-04, rev 1.1 — piece 1 delivered in **v2.23.0** (2026-10-05; R1–R6a, #518–#524), released as a MINOR rather than the `v2.22.1` this plan named because the repairs add public API (`RELEASING.md` §1), so pieces 2 and 4's MINOR is `v2.24.0`; pieces 2–4 open; §5 tracks delivery. Source baseline: `main` at
+**Status:** adopted 2026-10-04, rev 1.1 — piece 1 delivered in **v2.23.0** (2026-10-05; R1–R6a, #518–#524), released as a MINOR rather than the `v2.22.1` this plan named because the repairs add public API (`RELEASING.md` §1); pieces 2 and 4, with R7, in **v2.24.0** (2026-10-05; #526–#532); piece 3 in the private repository (X1–X6); R8 and R9 open; §5 tracks delivery. Source baseline: `main` at
 `5e4dd12b` (v2.22.0 plus #515, #516) and the private companion at `abf406c` (pinned to v2.22.0). The private half
 of this plan is `docs/plans/realignment-exporter.md` in the private repository; §3.3 here says only what it covers
 and what the public side owes it.
@@ -325,20 +325,21 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | R4 the gate parses with `url`; the git mirror refuses an ambiguous authority | #521 | merged |
 | R5 patch documentation | #523 | merged |
 | R6a the git store's push tripwire checks ancestry, not equality — found by R6's step 2b: `main` red on a false alarm in the ten-council contention run | #524 | merged |
-| R6 release `v2.23.0` | (this PR) | in review |
+| R6 release `v2.23.0` | #525 | merged |
 | R7 a persistence directory that cannot be created refuses the start — found by A2's configuration audit: the node ran in memory while `persist.configured` said enforced | #529 | merged |
 | R8 `http_port` / `gateway_tls` in a build without `gateway` refused at start, and the `gw.*` guarantees resolve `not_in_build` there — found by A2's audit; needs a test step in the gateway-free CI job first, since no test runs in that build today | — | open |
 | R9 the runtime `HotConfig` setters apply `validate()`'s bounds (`health_check_interval_secs` 1–3600, `reconnect_backoff_secs` 1–300 can be bypassed at runtime) — found by A2's audit | — | open |
+| release `v2.24.0` (pieces 2 and 4, R7) | (this PR) | in review |
 | S1 lossless integers (TS) | #526 | merged |
 | S2 the shapes (TS); the additive gateway `kind` field waits for `v2.24.0` — the SDK reads the event name, so it does not need it | #526 | merged |
-| S2's gateway half: the signal SSE data carries `kind` on both routes | #532 | in review |
+| S2's gateway half: the signal SSE data carries `kind` on both routes | #532 | merged |
 | S3 `sseStream` lifetime | #526 | merged |
 | S4 the live suites in CI — the TypeScript half here; `mycelium-py`'s `test_gateway.py` with S5 | #526 | merged |
 | S5 incomplete checkpoint raises (py); `mycelium-py`'s live gateway suite in CI (S4's Python half) | #527 | merged |
 | A1 "no control plane" defined; "profile" disambiguated | #528 | merged |
 | A2 configuration field table (`docs/reference/configuration.md`); hook contracts page (`dev/architecture/hooks.md`) — the trace found R7 | #530 | merged |
-| A3 strict eligibility (`mandate::eligibility`); the example is `examples/strict_eligibility.rs` — beside the API it uses, since the curator example builds without `mycelium` | #531 | in review |
-| Piece 3 | private plan | open |
+| A3 strict eligibility (`mandate::eligibility`); the example is `examples/strict_eligibility.rs` — beside the API it uses, since the curator example builds without `mycelium` | #531 | merged |
+| Piece 3 — the private exporter (X1–X6; mycelium-private #15–#20, pinned at v2.23.0) | private plan | delivered |
 
 ## 6 · Not claimed
 

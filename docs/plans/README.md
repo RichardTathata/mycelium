@@ -62,7 +62,7 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Realignment repairs (adopted 2026-10-04; piece 1 delivered in v2.23.0, #518–#524 — the SDK release, the private exporter and the architecture piece are next):** [`realignment-repairs.md`](realignment-repairs.md) —
+> **Realignment repairs (adopted 2026-10-04; delivered — piece 1 in v2.23.0, #518–#524; pieces 2 and 4 with R7 in v2.24.0, #526–#532; the private exporter, piece 3, on the same pin — R8 and R9 stay open, recorded with their evidence):** [`realignment-repairs.md`](realignment-repairs.md) —
 > an external review's twelve findings, each verified by `file:line` and six re-run as probes (eleven hold; F01 is
 > narrower, F02 and F03 are wider than reported), and the four pieces that repair them without blocking one another:
 > the security/durability patch `v2.23.0` (the journal truncates its torn tail and owns its file; the WAL's startup
