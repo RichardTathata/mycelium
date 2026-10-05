@@ -92,6 +92,17 @@ egress refusal — that request was leaving the allow-list before.
   tail, a restart over it, an `OnDisk` write, and a replay of the files copied mid-run.
 
 ### Fixed
+- **The wiki git store's push tripwire no longer fires on a healthy concurrent publish.** Its doc
+  called it an *ancestry* tripwire; the code compared the remote head with ours for *equality* right
+  after the push. With several clones publishing to one origin, another publisher can push between
+  our push and our `ls-remote`, leaving the remote at a descendant of our head — and that counted as
+  a divergence and warned. It made `main` red on 2026-10-04 (`ten_councils_contend_without_spurious_
+  failures_measured`: `tripwire quiet for c4`, left 1) while every PR was green; found by the
+  release runbook's step 2b. The check now fetches the remote head and counts a divergence only when
+  it does not contain ours. Fail-first on `386f8d3e`, made deterministic:
+  `a_later_publisher_on_top_of_ours_is_not_a_divergence_but_a_rewound_remote_is` — A publishes, B
+  publishes on top, then A asks — failed with the equality rule; its second half keeps a remote
+  rewound past our head a divergence.
 - **The KV WAL's startup repair is pinned, its failure refuses the start, a partial length prefix
   is a torn tail, and the WAL has one owner** (`docs/plans/realignment-repairs.md` R2; the review's
   F01, narrower than reported). `GossipAgent::start` has always run a snapshot before the first

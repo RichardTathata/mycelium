@@ -1138,8 +1138,9 @@ impl WikiStore for GitStore {
     /// "their tree with my subtree's current files spliced in" IS the merge. Caveat (documented):
     /// a clone hosting several groups' stores publishes the whole local branch's *history* even
     /// though each store splices only its own scope's tree — clone-per-group is the deployed shape.
-    /// After a successful push the **divergence tripwire** checks `ls-remote` against the pushed
-    /// head — counted and warned, never fixed.
+    /// After a successful push the **divergence tripwire** asks whether the remote head still
+    /// contains the pushed one (an ancestry check, not equality — a later publisher on top of us is
+    /// healthy) — counted and warned, never fixed.
     fn publish(&self) -> Result<(), WikiError> {
         if self.cfg.remote.is_none() {
             return Ok(());
@@ -1162,10 +1163,7 @@ impl WikiStore for GitStore {
             let push_argv: Vec<&str> = push.iter().map(String::as_str).collect();
             let (_, pushed) = self.git_raw(&push_argv, None)?;
             if pushed {
-                let ls = self.git_ok(&["ls-remote", "origin", &refname], None)?;
-                let remote_sha =
-                    String::from_utf8_lossy(&ls).split_whitespace().next().unwrap_or("").to_string();
-                if remote_sha != local {
+                if let Some(remote_sha) = self.diverged_after_push(&local, &refname)? {
                     self.push_divergences.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(local, remote = remote_sha,
                         "wiki git-store: remote head diverged after push (tripwire)");
@@ -1233,3 +1231,91 @@ impl WikiStore for GitStore {
         Err(WikiError::Io(io::Error::other("publish: persistent contention pushing to the remote")))
     }
 }
+
+impl GitStore {
+    /// The post-push tripwire's question: after a successful push of `local`, does the remote's
+    /// head say something went wrong? `Some(remote head)` when it does.
+    ///
+    /// **Ancestry, not equality.** With several clones publishing to one origin, another publisher
+    /// can push between our push and this `ls-remote`; the remote then sits at a *descendant* of our
+    /// head, which is the healthy outcome. Comparing for equality counted that as a divergence — a
+    /// false alarm the ten-council contention run hit on `main` (2026-10-04). A divergence is a
+    /// remote head that does not contain ours: a force-push or a rewind past what we published.
+    fn diverged_after_push(&self, local: &str, refname: &str) -> Result<Option<String>, WikiError> {
+        let ls = self.git_ok(&["ls-remote", "origin", refname], None)?;
+        let remote_sha = String::from_utf8_lossy(&ls).split_whitespace().next().unwrap_or("").to_string();
+        if remote_sha == local {
+            return Ok(None);
+        }
+        if remote_sha.is_empty() {
+            return Ok(Some(remote_sha)); // the ref we just pushed is gone
+        }
+        // Someone may have published on top of us. Fetch what the remote holds and ask git whether
+        // our head is in its history; a fetch or ancestry check that fails counts as a divergence,
+        // so the tripwire stays fail-loud.
+        let fetched = self.git_raw(&["fetch", "-q", "origin", &self.cfg.branch], None)?.1;
+        let contains_ours = fetched && self.git_raw(&["merge-base", "--is-ancestor", local, "FETCH_HEAD"], None)?.1;
+        Ok((!contains_ours).then_some(remote_sha))
+    }
+}
+
+#[cfg(test)]
+mod tripwire_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn page(group: &str) -> Vec<PageWrite> {
+        vec![PageWrite {
+            path: format!("{group}-page"),
+            attributes: BTreeMap::new(),
+            sections: vec![Section { id: Arc::from("s"), heading: "H".into(), body: group.into(), attributes: BTreeMap::new() }],
+        }]
+    }
+
+    /// **The push tripwire counted a later publisher as a divergence.** Its doc calls it an
+    /// *ancestry* tripwire, and the check compared the remote head with ours for *equality*. With
+    /// several clones publishing to one origin, another council pushing between our push and our
+    /// `ls-remote` leaves the remote at a descendant of our head — the healthy outcome — and the
+    /// tripwire fired on it. That is the `main` failure of 2026-10-04 in
+    /// `ten_councils_contend_without_spurious_failures_measured` (`tripwire quiet for c4: left 1`),
+    /// made deterministic: A publishes, B publishes on top, then A asks the question.
+    ///
+    /// The negative half keeps the tripwire meaningful: a remote rewound to a history that does not
+    /// contain A's head is still a divergence.
+    #[test]
+    fn a_later_publisher_on_top_of_ours_is_not_a_divergence_but_a_rewound_remote_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+        let remote = origin.to_string_lossy().into_owned();
+        let a = GitStore::open(GitStoreConfig::for_group(tmp.path().join("a"), "a").with_remote(&remote)).unwrap();
+        let b = GitStore::open(GitStoreConfig::for_group(tmp.path().join("b"), "b").with_remote(&remote)).unwrap();
+
+        a.write_pages(&page("a"), "a-1").unwrap();
+        a.publish().unwrap();
+        let a_head = a.head().unwrap().expect("a committed");
+        b.write_pages(&page("b"), "b-1").unwrap();
+        b.publish().unwrap();
+        assert_ne!(git(&origin, &["rev-parse", "main"]).trim(), a_head, "B's publish moved the remote past A");
+
+        assert_eq!(a.diverged_after_push(&a_head, &a.refname()).unwrap(), None,
+            "a remote that moved on from our head has not diverged from it");
+
+        // A history that does not contain A's head, forced onto the origin.
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        git(&other, &["init", "-q", "-b", "main"]);
+        git(&other, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "unrelated"]);
+        git(&other, &["push", "-q", "--force", &remote, "main:main"]);
+        assert!(a.diverged_after_push(&a_head, &a.refname()).unwrap().is_some(),
+            "a remote rewound away from our head has diverged");
+    }
+}
+
