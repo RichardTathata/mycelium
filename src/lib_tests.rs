@@ -5659,8 +5659,8 @@ async fn test_wsc_m10_hot_reload_timing_no_task_restart() {
     let tasks_before = agent.system_stats().task_count;
 
     // Live-retune the health-check interval and the reconnect backoff.
-    agent.set_health_check_interval_secs(1);
-    agent.set_reconnect_backoff_secs(2);
+    agent.set_health_check_interval_secs(1).unwrap();
+    agent.set_reconnect_backoff_secs(2).unwrap();
     assert_eq!(agent.timing_tunables(), (1, 2), "the live timing override is recorded");
 
     // The health monitor adopts the new cadence on its next cycle — no task respawned.
@@ -5669,10 +5669,36 @@ async fn test_wsc_m10_hot_reload_timing_no_task_restart() {
         "G-M10.1: hot-reload retunes the loop in place — no task restart");
 
     // `0` reverts to the static config value.
-    agent.set_health_check_interval_secs(0);
+    agent.set_health_check_interval_secs(0).unwrap();
     assert_eq!(agent.timing_tunables().0, 0, "0 = revert to static config");
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Realignment repairs R9: the live timing setters keep `validate()`'s bounds — health interval in
+/// 1..=3600, reconnect backoff in 1..=300, with `0` still meaning *revert to the static value* — the
+/// bounds the cluster timing governor already applies to a `TimingIntent`. A refused value changes
+/// nothing: neither the live value nor the local pin that would make the node ignore the fleet.
+#[test]
+fn hot_timing_setters_refuse_what_validate_refuses() {
+    use std::sync::atomic::Ordering;
+    let port = alloc_port();
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), GossipConfig::default());
+    let pinned = |a: &GossipAgent| (a.task_ctx.hot.health_locally_pinned.load(Ordering::Relaxed),
+                                    a.task_ctx.hot.reconnect_locally_pinned.load(Ordering::Relaxed));
+
+    let before = agent.timing_tunables();
+    assert!(agent.set_health_check_interval_secs(3601).is_err(), "refused by name");
+    assert!(agent.set_reconnect_backoff_secs(301).is_err(), "refused by name");
+    assert_eq!(agent.timing_tunables(), before, "an out-of-range value is not applied");
+    assert_eq!(pinned(&agent), (false, false), "nor does it pin the node against the fleet");
+
+    agent.set_health_check_interval_secs(3600).unwrap();
+    agent.set_reconnect_backoff_secs(300).unwrap();
+    assert_eq!(agent.timing_tunables(), (3600, 300), "the bounds themselves are allowed");
+    agent.set_health_check_interval_secs(0).unwrap();
+    agent.set_reconnect_backoff_secs(0).unwrap();
+    assert_eq!(agent.timing_tunables(), (0, 0), "0 still reverts to the static value");
 }
 
 /// WS-C / M10.2 gate (G-M10.2): live timing reconfiguration cluster-wide, intent-governed and
@@ -5698,7 +5724,7 @@ async fn test_wsc_m10_timing_intent_governs_fleet_with_local_wins() {
     poll_until(|| !a.peers().is_empty() && !b.peers().is_empty(), 5_000).await;
 
     // B pins its own timing locally → it must ignore the fleet intent (local-wins).
-    b.set_health_check_interval_secs(9);
+    b.set_health_check_interval_secs(9).unwrap();
 
     // A publishes a fleet TimingIntent (whole fleet).
     assert!(a.govern_timing(2, 3, None), "intent published");
