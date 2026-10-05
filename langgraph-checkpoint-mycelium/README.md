@@ -69,6 +69,15 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
 - **Gossip-eventual metadata** — read-your-writes holds only against the *same*
   node's gateway. A cross-node reader polls until the thread head has gossiped in
   (the test suite shows the structural convergence loop).
+- **An incomplete checkpoint raises `IncompleteCheckpoint`** (0.2.0). The index row can
+  gossip in before every blob it references is fetchable. Before 0.2.0 the reader
+  answered that two wrong ways: a missing pending-write blob was **dropped** (the tuple
+  came back with fewer `pending_writes`, so LangGraph re-ran a task that had already
+  completed), and a missing skeleton or channel blob returned **`None`**, which LangGraph
+  reads as *no checkpoint* and starts the thread over. Now `get_tuple`, `aget_tuple`,
+  `list` and `alist` raise `IncompleteCheckpoint` — retriable, naming the missing blob
+  ids — and `None` means only that no checkpoint row exists. Catch it and retry after a
+  short wait; do not treat it as "start fresh".
 - **`put()` returns a rung-1 receipt** — the index row was *applied* to the store of
   the node you are talking to (`_kv_set` → `POST /gateway/kv`). It does **not** say
   the row crossed that node's persistence barrier, and it says nothing about any
