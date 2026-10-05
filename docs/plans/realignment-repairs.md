@@ -324,7 +324,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | R3b the object-store fetcher gates on its endpoint, not its bucket | #522 | in review |
 | R4 the gate parses with `url`; the git mirror refuses an ambiguous authority | #521 | in review |
 | R5 patch documentation | #523 | in review |
-| R6a the git store's push tripwire checks ancestry, not equality — found by R6's step 2b: `main` red on a false alarm in the ten-council contention run | (this PR) | in review |
+| R6a the git store's push tripwire checks ancestry, not equality — found by R6's step 2b: `main` red on a false alarm in the ten-council contention run | #524 | in review |
 | R6 release `v2.22.1` | — | open |
 | S1 lossless integers (TS) | — | open |
 | S2 the shapes (TS, one additive gateway field) | — | open |
