@@ -327,7 +327,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | R6a the git store's push tripwire checks ancestry, not equality — found by R6's step 2b: `main` red on a false alarm in the ten-council contention run | #524 | merged |
 | R6 release `v2.23.0` | #525 | merged |
 | R7 a persistence directory that cannot be created refuses the start — found by A2's configuration audit: the node ran in memory while `persist.configured` said enforced | #529 | merged |
-| R8 `http_port` / `gateway_tls` in a build without `gateway` refused at start, and the `gw.*` guarantees resolve `not_in_build` there — found by A2's audit; needs a test step in the gateway-free CI job first, since no test runs in that build today | (this PR) | in review |
+| R8 `http_port` / `gateway_tls` in a build without `gateway` refused at start, and the `gw.*` guarantees resolve `not_in_build` there — found by A2's audit; needs a test step in the gateway-free CI job first, since no test runs in that build today | #535 | in review |
 | R9 the runtime `HotConfig` setters apply `validate()`'s bounds (`health_check_interval_secs` 1–3600, `reconnect_backoff_secs` 1–300 can be bypassed at runtime) — found by A2's audit | #534 | merged |
 | release `v2.24.0` (pieces 2 and 4, R7) | #533 | merged |
 | S1 lossless integers (TS) | #526 | merged |
