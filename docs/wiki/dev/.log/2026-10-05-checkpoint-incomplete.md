@@ -15,6 +15,11 @@ realignment plan's S5 row, and this log.
   found that the "strict" handling of a missing channel blob — returning `None` — restarts a thread
   when the latest checkpoint is incomplete. Matching the dropped-write path to the `None` path would
   have spread the second bug, which is why the fix is a raise on both.
+- **The flagship proved the state is real, not theoretical.** The first CI run of the change failed
+  `examples/langgraph/06_deploy_reheal.py` at its convergence poll: node B saw the checkpoint row with
+  three blobs not yet fetchable. Rung 03 had already worked around the old shorter tuple by waiting
+  for `pending_writes` to reach a count. Both polls now catch `IncompleteCheckpoint` and retry; any
+  cross-node reader must.
 - **A node-free witness for a gateway client:** `httpx.MockTransport` in front of the saver's two
   clients, serving the five routes it uses with the gateway's own shapes. It runs in the existing
   pytest step with no node, and reaches the same code the live suite does.

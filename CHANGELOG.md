@@ -132,7 +132,11 @@ egress refusal — that request was leaving the allow-list before.
   blob ids — and `None` means only that no checkpoint row exists. Fail-first on `989cf4bd`:
   `tests/test_incomplete.py` (node-free, an in-memory gateway behind `httpx.MockTransport`) — a
   missing pending-write blob, a missing channel blob by id and as the latest, and the async loader —
-  each did not raise. **Also:** `mycelium-py`'s live gateway suite (`test_gateway.py`) now runs in CI
+  each did not raise. **Callers that poll across nodes must catch it:** the LangGraph ladder's
+  cross-node rungs (03 and the 06 flagship) now treat `IncompleteCheckpoint` as *not converged yet*
+  and retry — the first CI run of this change failed the flagship exactly there, with three blobs of
+  the gossiped-in checkpoint not yet fetchable on node B, which the old reader would have answered
+  with `None` or a shorter tuple. **Also:** `mycelium-py`'s live gateway suite (`test_gateway.py`) now runs in CI
   against a `mycelium` node (S4's Python half); it had never been in the job's list, and passes (19,
   1 expected failure) — the Python SDK reads every route the TypeScript SDK got wrong correctly.
 - **The wiki git store's push tripwire no longer fires on a healthy concurrent publish.** Its doc
