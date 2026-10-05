@@ -11,6 +11,9 @@ inversion a compile-time guarantee. Pages:
   the rule that nothing infers a higher one from a lower, `LocalDurability`'s four states, why a
   timeout is `DeliveryUnknown` rather than a failure, and the regression floor — *a PR changes an
   ack's meaning by changing a pin, in the open*.
+- **[hooks.md](hooks.md)** — the cross-layer hooks (`ReplyInterceptor`, `QuorumObserver`,
+  `SnapshotDeferHook`, the decision sink, KV change notifications): what each is handed, what it may
+  do, and the rule they all keep — no synchronous network I/O, nothing that blocks.
 - **[runtime-invariants.md](runtime-invariants.md)** — the invariants that keep recurring
   in review: Layer III's detection-not-prevention posture, individual-scope routing,
   event-driven fan-out. Read before "optimizing" anything in the gossip loop.
