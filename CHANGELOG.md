@@ -9,6 +9,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`mycelium-ts` 0.2.0 — the TypeScript SDK matches the gateway it talks to**
+  (`docs/plans/realignment-repairs.md` S1–S4; the review's F06–F09). Run against a real node, the
+  SDK's own live suite failed 9 of its 19 assertions, and it had never run in CI. Every defect was
+  on the SDK side — the Python SDK reads the same routes correctly — so the wire is unchanged:
+  **64-bit values are exact** (responses are parsed losslessly, so an HLC above 2⁵³ is no longer
+  rounded — two HLCs one tick apart used to compare equal — and a signal nonce or lock token is
+  exact; a `bigint` in a request body is written as an exact integer, so `compactLog` stops being
+  refused with 422); **the shapes match** (`get` returns `null` for an absent key instead of
+  throwing; `resolveCapability` returns the providers array, not the envelope; `emit` returns the
+  gateway's `ok` instead of `undefined`; `emitReliable` reads `ack` and throws a refusal instead of
+  returning `undefined`; a signal's `kind` comes from the SSE event name); **the log verbs use the
+  gateway's names** (`scanLog` sends `from`/`to` — the bounds were ignored — and reads the bare array;
+  `subscribeLog` sends `since` — every resume replayed from zero); **timeouts are whole seconds**
+  (`emitReliable` refused a fraction with 422; `rpcCall` and `scatterGather` silently replaced one
+  with a 30 s / 10 s default); and **an SSE stream has a lifetime** (`sseStream` reads on demand and
+  cancels the reader and aborts the request when the loop ends; a consumer more than `maxPending`
+  events behind gets `SseOverflowError` instead of an unbounded buffer). Fail-first on `989cf4bd`:
+  `tests/contract.test.ts` (node-free, a mocked `fetch` answering each handler's exact shape) failed
+  13 of 14; the live suite failed 9 of 19. Both pass now (20 live, including a real `emitReliable`
+  timeout), and **the live suite runs in CI** against a `mycelium` node in the `sdk-ts` job. Three
+  live expectations were stale and are corrected in the same PR: an unknown target is refused before
+  dispatch (412 `provider_without_caller_context`) rather than timing out, and an election over an
+  empty group is refused by name (409 `electorate_unavailable`).
+
 ---
 
 ## [2.23.0] — 2026-10-05

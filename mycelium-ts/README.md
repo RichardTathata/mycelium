@@ -152,8 +152,10 @@ See [guide 10 — Declaring a unit file](../docs/guide/10-language-bridges.md#de
 
 Fires a signal into the mesh.
 
-- `options.scope`: `"system"` (default), `"group:NAME"`, or `"node:IP:PORT"`
-- Returns `true` if queued for gossip; `false` if the gossip shard was full.
+- `options.scope`: `"cluster"` (default), `"group:NAME"`, or `"node:IP:PORT"` (`"system"` is a deprecated alias)
+- Returns the gateway's `ok`: `true` when the signal was handed to local delivery and queued for gossip
+  fan-out, `false` when the gossip queue was full (local delivery still occurred). It does not say any
+  subscriber ran. Before 0.2.0 this always returned `undefined` (it read a field the gateway never sends).
 
 #### `onSignal(kind) → AsyncGenerator<Signal>`
 
@@ -166,7 +168,8 @@ for await (const sig of agent.onSignal("render-job")) {
 }
 ```
 
-`Signal` fields: `kind: string`, `sender: string`, `payload: Buffer`, `nonce: bigint`.
+`Signal` fields: `kind: string` (from the SSE event name), `sender: string`, `payload: Buffer`,
+`nonce: bigint` (exact — see *64-bit values* below).
 
 ---
 
@@ -349,25 +352,29 @@ await using lock = await agent.distributedLock("job-42");
 
 #### `electLeader(group) → Promise<string>`
 
-One-shot election for `group`. Returns the elected node's `"ip:port"` string.
+One-shot election for `group`. Returns the elected node's `"ip:port"` string. A group with no members
+is refused (`electorate_unavailable`, thrown): absence is not authority.
 
 #### `append(stream, value?) → Promise<bigint>`
 
-Appends `value` to the named log stream. Returns the HLC timestamp.
+Appends `value` to the named log stream. Returns the HLC timestamp, exactly.
 
 #### `scanLog(stream, options?) → Promise<LogEntry[]>`
 
-Range scan over a log stream. Returns `LogEntry[]` sorted by HLC.
+Range scan over a log stream, `[fromHlc, toHlc)`. Returns `LogEntry[]` sorted by HLC. Before 0.2.0 the
+bounds were sent under names the gateway ignores, so every scan covered the whole stream, and the
+reply could not be read.
 
 `LogEntry` fields: `hlc: bigint`, `value: Buffer`.
 
 #### `compactLog(stream, beforeHlc) → Promise<void>`
 
-Tombstones all entries with `hlc < beforeHlc`.
+Tombstones all entries with `hlc < beforeHlc`. `beforeHlc` is sent as an exact JSON integer.
 
 #### `subscribeLog(stream, options?) → AsyncGenerator<LogEntry>`
 
-Live SSE subscription.
+Live SSE subscription from `options.sinceHlc`. Before 0.2.0 the cursor was sent under a name the
+gateway ignores, so every resume replayed the stream from the beginning.
 
 #### `subscribeLogGroup(stream, group) → AsyncGenerator<LogEntry>`
 
@@ -375,7 +382,23 @@ Consumer-group subscription: at most one consumer per group per entry.
 
 #### `emitReliable(target, kind, payload?, options?) → Promise<"acknowledged" | "timeout">`
 
-Sends `payload` and waits for an explicit application-level ACK.
+Sends `payload` and waits for an explicit application-level ACK. A refusal — an unknown target, a
+protected kind — is thrown, never reported as `"timeout"`.
+
+### 64-bit values, timeouts and streams (0.2.0)
+
+- **64-bit values are exact.** The gateway sends HLCs, signal nonces and lock tokens as JSON numbers;
+  an HLC is about 1.2 × 10¹⁷, above 2⁵³, so a plain `JSON.parse` rounded it and two HLCs one tick
+  apart came back equal. The SDK now parses every response losslessly and returns these as `bigint`;
+  it writes a `bigint` in a request body as an exact JSON integer. The wire is unchanged.
+- **Timeouts are whole seconds** for `rpcCall`, `scatterGather` and `emitReliable`: a fraction is
+  rounded up (minimum 1). The gateway reads these as integers — it refused a fraction with 422 on
+  `emitReliable` and silently replaced it with a 10–30 s default on the other two.
+- **A stream ends when you stop reading it.** `onSignal`, `subscribeLog`, `mailbox`, `rpcServe` and
+  the rest read on demand and close the connection when the loop ends (`break`, `return()`, an error).
+  A consumer that falls more than `maxPending` (default 1024) events behind gets `SseOverflowError`
+  rather than a silently truncated stream. Before 0.2.0 the connection and a background reader kept
+  running after the loop ended, buffering every later event.
 
 ### Federated domains
 
@@ -427,16 +450,17 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 ## Running the tests
 
-Tests require a live Mycelium node:
+`npm test` runs the node-free suites, including `tests/contract.test.ts`, which pins every request and
+response shape against the gateway's handlers with a mocked `fetch`. The live suite needs a node, and
+runs in CI against one:
 
 ```sh
-# Start a node on port 8300
-cargo run --example three_node_demo
+# Start a node: gossip on 9301, gateway on 9311
+GOSSIP_HTTP_PORT=9311 cargo run --bin mycelium -- --port 9301
 
-# Install dependencies and run tests
 cd mycelium-ts
-npm install
-MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
+npm ci
+MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9311 npx jest tests/gateway.test.ts
 ```
 
 ## Gateway endpoint reference

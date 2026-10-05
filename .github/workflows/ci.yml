@@ -583,7 +583,7 @@ jobs:
       - run: ./examples/coop/ci_smoke.sh
 
   sdk-ts:
-    name: TypeScript SDK type check
+    name: TypeScript SDK type check + live suite
     runs-on: ubuntu-latest
     # The TS SDK shipped 8 tsc errors — including a runtime-breaking
     # `this._base` typo in shardFor() — because nothing in CI ever ran the
@@ -603,6 +603,41 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx jest
+      # The live suite against a real node (realignment repairs S4). It skips itself without
+      # MYCELIUM_TEST_HOST, which nothing here set until 2026-10-05 — so it never ran in CI, and
+      # run by hand it failed 9 of its 19 assertions against the gateway it was written for.
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --bin mycelium
+        working-directory: .
+      - name: Start a node for the live suite
+        working-directory: .
+        run: |
+          GOSSIP_HTTP_PORT=9311 ./target/debug/mycelium --port 9301 > "$RUNNER_TEMP/ts-node.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/ts-node.pid"
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9311/health > /dev/null && break
+            if [ "$i" -eq 60 ]; then echo "node never became healthy"; cat "$RUNNER_TEMP/ts-node.log"; exit 1; fi
+            sleep 1
+          done
+          # Gate on the capability the tests use, not on /health: dispatch to this node needs its own
+          # caller-context marker to be visible (the python-sdk job's 2026-09-15 lesson).
+          for i in $(seq 1 60); do
+            seen=$(curl -sf "http://127.0.0.1:9311/gateway/kv/keys?prefix=sys/caller-context/" \
+                   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["keys"]))' 2>/dev/null || echo 0)
+            [ "$seen" -ge 1 ] && break
+            if [ "$i" -eq 60 ]; then echo "the node never published its caller-context marker"; cat "$RUNNER_TEMP/ts-node.log"; exit 1; fi
+            sleep 1
+          done
+      - name: Live suite
+        run: npx jest tests/gateway.test.ts
+        env:
+          MYCELIUM_TEST_HOST: 127.0.0.1
+          MYCELIUM_TEST_PORT: 9311
+      - name: Stop the node
+        if: always()
+        working-directory: .
+        run: '[ -f "$RUNNER_TEMP/ts-node.pid" ] && kill "$(cat "$RUNNER_TEMP/ts-node.pid")" 2>/dev/null || true'
 
   fuzz:
     name: Fuzz (wire + capability decoders, time-boxed)
