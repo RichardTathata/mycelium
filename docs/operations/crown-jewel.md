@@ -82,7 +82,7 @@ cfg.egress = mycelium::EgressPolicy {
 ### Coverage
 
 The gate is a **hostname** allow-list on the outbound HTTP paths the substrate *chooses*
-to make. Since 2.22.1 it covers the first URL **and every redirect hop**, and reads a URL's
+to make. Since 2.23.0 it covers the first URL **and every redirect hop**, and reads a URL's
 host with the same parser the client dials with (realignment repairs R3–R4). It does not
 resolve names: an allowed name that resolves to an address you meant to deny is outside it.
 

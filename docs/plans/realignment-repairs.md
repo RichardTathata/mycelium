@@ -1,6 +1,6 @@
 # Realignment repairs — twelve findings, four pieces
 
-**Status:** adopted 2026-10-04, rev 1.0 — nothing delivered yet; §5 tracks delivery. Source baseline: `main` at
+**Status:** adopted 2026-10-04, rev 1.1 — piece 1 delivered in **v2.23.0** (2026-10-05; R1–R6a, #518–#524), released as a MINOR rather than the `v2.22.1` this plan named because the repairs add public API (`RELEASING.md` §1), so pieces 2 and 4's MINOR is `v2.24.0`; pieces 2–4 open; §5 tracks delivery. Source baseline: `main` at
 `5e4dd12b` (v2.22.0 plus #515, #516) and the private companion at `abf406c` (pinned to v2.22.0). The private half
 of this plan is `docs/plans/realignment-exporter.md` in the private repository; §3.3 here says only what it covers
 and what the public side owes it.
@@ -19,10 +19,10 @@ that do not block each other**, in the order they should ship:
 
 | Piece | Scope | Ships as |
 |---|---|---|
-| **1 · Security and durability patch** (§3.1) | F01, F02, F03 and its two siblings, F12; witnesses, runbook corrections | `v2.22.1` |
-| **2 · SDK and integration release** (§3.2) | F06, F07, F08, F09, F10; the live suite in CI | `mycelium-ts 0.2.0`, `langgraph-checkpoint-mycelium 0.2.0`, one additive gateway field in `v2.23.0` |
+| **1 · Security and durability patch** (§3.1) | F01, F02, F03 and its two siblings, F12; witnesses, runbook corrections | `v2.23.0` |
+| **2 · SDK and integration release** (§3.2) | F06, F07, F08, F09, F10; the live suite in CI | `mycelium-ts 0.2.0`, `langgraph-checkpoint-mycelium 0.2.0`, one additive gateway field in `v2.24.0` |
 | **3 · Private export durability** (§3.3) | F04, F05, F11 | the private plan, on its own line |
-| **4 · Architecture, decided small** (§3.4) | the three decisions in §4, strict eligibility, the field table | `v2.23.0` plus documentation |
+| **4 · Architecture, decided small** (§3.4) | the three decisions in §4, strict eligibility, the field table | `v2.24.0` plus documentation |
 
 Piece 1 has no dependency on anything. Piece 2 depends on nothing in piece 1. Piece 3 depends on the journal
 repair in piece 1 only through the substrate pin. Piece 4 lands after the others and blocks none of them.
@@ -139,7 +139,7 @@ WAL has the same gap for two agents sharing a `base_path`/node id.
 
 ## 3 · The four pieces
 
-### 3.1 · Piece 1 — the security and durability patch (`v2.22.1`)
+### 3.1 · Piece 1 — the security and durability patch (`v2.23.0`)
 
 Six increments, each a PR with its fail-first witness, a changelog line and the documentation it touches. Wire
 **v12** unchanged; no public API change beyond one new error variant.
@@ -199,7 +199,7 @@ the exact log lines an operator sees; `docs/wiki/dev/.log/2026-09-16-ae-journal-
 ("a later read picks it up") is corrected on the page it fed. `examples/receipt_ladder.rs` gains a
 *recover → append → recover* branch that prints the receipt's rung and the re-read.
 
-**R6 · Release `v2.22.1`.** Changelog in the v2.18.1 form: what was accepted and ignored, what now refuses by
+**R6 · Release `v2.23.0`.** Changelog in the v2.18.1 form: what was accepted and ignored, what now refuses by
 name, and the **check before upgrading** — a node whose startup snapshot was failing silently now refuses to
 start; a deployment relying on a redirecting MCP, LLM or OIDC endpoint now gets a named egress refusal and must
 either allow the target or declare redirects for that client. Follows `RELEASING.md` including step 2b.
@@ -222,7 +222,7 @@ result and a non-2xx to a thrown `GatewayError`, and `timeoutSecs` is documented
 matching `Option<u64>` on the Rust side (the live test's `0.3` is corrected as test setup, separately);
 `scanLog`/`subscribeLog` send `from`/`to`/`since`; `scanLog` maps the bare array; the signal subscription reads
 the kind from the SSE event name. The additive gateway change: the SSE data object also carries `"kind"` so an
-SDK that reads the body alone is not wrong (`v2.23.0`, wire unchanged). Each shape has a live assertion.
+SDK that reads the body alone is not wrong (`v2.24.0`, wire unchanged). Each shape has a live assertion.
 
 **S3 · `sseStream` has a lifetime (F09).** An `AbortController` shared by `fetch` and the reader; `try/finally`
 on the generator that cancels the reader, aborts the fetch and releases the lock on `break`, `return()` and
@@ -251,7 +251,7 @@ ladder's recovery step shows the pause.
 
 Releases: `mycelium-ts 0.2.0` (the return types of `get`, `emit`, `emitReliable`, `resolveCapability` and the
 log verbs change in practice, so a minor), `langgraph-checkpoint-mycelium 0.2.0` (callers now see an exception),
-each with a README migration note; the gateway's `kind` field and the CI change in `v2.23.0`.
+each with a README migration note; the gateway's `kind` field and the CI change in `v2.24.0`.
 
 ### 3.3 · Piece 3 — private export durability (the private plan)
 
@@ -260,9 +260,9 @@ Covered in the private repository's `docs/plans/realignment-exporter.md`: the ex
 progress), byte-identical retry from the persisted envelope, the export chain restored on open, a typed
 `ExportCheckpoint` replacing `journal_cursor()` as the thing an operator persists, the migration that **never
 fabricates a cursor**, and the RA watermark made monotonic (F11). What the public side owes it: R1's journal
-repair (the exporter's own journal is a `Journal`), and a released tag to pin, which is `v2.22.1`.
+repair (the exporter's own journal is a `Journal`), and a released tag to pin, which is `v2.23.0`.
 
-### 3.4 · Piece 4 — architecture, decided small (`v2.23.0` and documentation)
+### 3.4 · Piece 4 — architecture, decided small (`v2.24.0` and documentation)
 
 **A1 · "No control plane", defined (D2).** The positioning sentence stays. The visitor's expansion in
 `docs/positioning.md`, guide 00 and the top of `docs/guide/agentic-control-plane.md` gain one definition, in these
@@ -318,14 +318,14 @@ Guide 21 and the handover design record say who establishes coverage (the source
 
 | Increment | PR | Status |
 |---|---|---|
-| R1 journal: truncate, one-buffer frame, lock, poisoned writer | #518 | in review |
-| R2 WAL: pinned startup repair, refusal on failure, partial header, ownership | #519 | in review |
-| R3 egress client builder, every client, every hop re-checked | #520 | in review |
-| R3b the object-store fetcher gates on its endpoint, not its bucket | #522 | in review |
-| R4 the gate parses with `url`; the git mirror refuses an ambiguous authority | #521 | in review |
-| R5 patch documentation | #523 | in review |
-| R6a the git store's push tripwire checks ancestry, not equality — found by R6's step 2b: `main` red on a false alarm in the ten-council contention run | #524 | in review |
-| R6 release `v2.22.1` | — | open |
+| R1 journal: truncate, one-buffer frame, lock, poisoned writer | #518 | merged |
+| R2 WAL: pinned startup repair, refusal on failure, partial header, ownership | #519 | merged |
+| R3 egress client builder, every client, every hop re-checked | #520 | merged |
+| R3b the object-store fetcher gates on its endpoint, not its bucket | #522 | merged |
+| R4 the gate parses with `url`; the git mirror refuses an ambiguous authority | #521 | merged |
+| R5 patch documentation | #523 | merged |
+| R6a the git store's push tripwire checks ancestry, not equality — found by R6's step 2b: `main` red on a false alarm in the ten-council contention run | #524 | merged |
+| R6 release `v2.23.0` | (this PR) | in review |
 | S1 lossless integers (TS) | — | open |
 | S2 the shapes (TS, one additive gateway field) | — | open |
 | S3 `sseStream` lifetime | — | open |

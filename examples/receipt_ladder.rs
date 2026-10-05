@@ -296,7 +296,7 @@ async fn main() {
                  if found { "present" } else { "ABSENT" }));
     assert!(found, "an OnDisk receipt after a torn tail must survive a crash");
     note("The startup snapshot removed the torn frame before the first append, so the write the");
-    note("receipt called `OnDisk` is where replay finds it. Before 2.22.1 that held only while the");
+    note("receipt called `OnDisk` is where replay finds it. Before 2.23.0 that held only while the");
     note("snapshot succeeded; a failing one now refuses the start instead of appending behind the");
     note("tail (realignment repairs R2).");
     survivor.shutdown().await;

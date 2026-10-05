@@ -62,10 +62,10 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Realignment repairs (adopted 2026-10-04, nothing delivered yet):** [`realignment-repairs.md`](realignment-repairs.md) —
+> **Realignment repairs (adopted 2026-10-04; piece 1 delivered in v2.23.0, #518–#524 — the SDK release, the private exporter and the architecture piece are next):** [`realignment-repairs.md`](realignment-repairs.md) —
 > an external review's twelve findings, each verified by `file:line` and six re-run as probes (eleven hold; F01 is
 > narrower, F02 and F03 are wider than reported), and the four pieces that repair them without blocking one another:
-> the security/durability patch `v2.22.1` (the journal truncates its torn tail and owns its file; the WAL's startup
+> the security/durability patch `v2.23.0` (the journal truncates its torn tail and owns its file; the WAL's startup
 > repair pinned and its failure a refusal; one egress-gated client builder with no redirects; the gate parsing the
 > URL the way the client does), the SDK release (TypeScript lossless on 64-bit values with the wire **unchanged**,
 > the shapes matched to the gateway, `sseStream` with a lifetime, the live suite in CI, an incomplete LangGraph
