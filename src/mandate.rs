@@ -49,6 +49,9 @@ pub mod grant;
 #[cfg(feature = "tls")]
 pub mod protected;
 pub mod handover;
+/// Strict eligibility: a verdict per configured incumbency rule, from history whose coverage its
+/// source established; unknown history is never eligible (realignment repairs A3).
+pub mod eligibility;
 pub mod lock_audit;
 pub mod partition;
 pub mod restart;
