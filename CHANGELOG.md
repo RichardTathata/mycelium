@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Strict eligibility: unknown history is never eligible** (`docs/plans/realignment-repairs.md` A3,
+  decision D4). `mandate::eligibility::eligible_strict` answers each configured incumbency rule as
+  `Eligible`, `Ineligible` or `Unknown` (naming what is missing), from a `TermHistory` whose coverage
+  its **source** established — chained terms verified at construction, an `Origin` (the role's first
+  term or a trusted baseline), the current head — never from a caller's assurance. Consecutive terms,
+  cumulative tenure and cooling-off each need their own coverage. `eligibility::ready` gates a
+  successor on both the handover journal read and every rule decided in favour. Additive:
+  `handover::eligible` keeps its stated contract. `examples/strict_eligibility.rs` shows a candidate
+  the lenient check admits on a history one term short, held at `Unknown` by the strict one, then
+  refused once the term is back.
+
 ### Fixed
 - **A persistence directory that cannot be created refuses the start instead of running in memory**
   (`docs/plans/realignment-repairs.md` R7; found by the configuration audit behind A2). `start()`

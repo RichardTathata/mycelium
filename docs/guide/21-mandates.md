@@ -150,6 +150,33 @@ pub enum Inherited {
 predecessor's judgement as their own, because the type does not let them. `render()` prints the
 attribution where attribution is owed, and `is_conclusion()` lets a reviewer filter.
 
+### Eligibility: unknown history is never eligible (2.24.0)
+
+`handover::eligible` checks the incumbency rules against whatever history it is handed, and says so:
+an incomplete history passes. For a deployment whose limits must mean something there is a strict
+form beside it, `mandate::eligibility::eligible_strict`, which answers **per configured rule** —
+`Eligible`, `Ineligible`, or `Unknown` naming what is missing — and never `Eligible` on history that
+does not suffice.
+
+**The source establishes coverage; the evaluator decides sufficiency.** A `TermHistory` is built from
+*chained* terms (each names the term it followed), the source's `Origin` (the role's first term, or a
+trusted baseline at a checkpoint) and the head the source says is current. `from_chain` verifies the
+chain: a break narrows what is vouched for to the suffix after it; a last term that is not the head
+reaches nothing up to now. There is no `complete: true` for a caller to pass — that would only move
+the assumption. Each rule then needs its own kind of coverage:
+
+| Rule | Decided when |
+|---|---|
+| consecutive terms | the run is broken inside the verified suffix, or the suffix starts at the role's first term — or the run already meets the limit |
+| cumulative tenure | the suffix starts at the first term or a trusted baseline — or the visible total already meets the limit |
+| cooling-off | a term of the candidate is in the suffix, or the suffix reaches back across the whole cooling window |
+
+`eligibility::ready(successor, journal, &strict)` is the readiness gate: the handover journal read
+**and** every configured rule decided in favour. Two conditions — reading says nothing about
+eligibility, and eligibility says nothing about having read. `cargo run --example strict_eligibility`
+walks one candidate whom the lenient check admits on a history a week short, and the strict check
+holds at `Unknown` until the missing term is back, then refuses.
+
 ---
 
 ## Run the demonstration
