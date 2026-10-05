@@ -330,7 +330,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | R8 `http_port` / `gateway_tls` in a build without `gateway` refused at start, and the `gw.*` guarantees resolve `not_in_build` there — found by A2's audit; needs a test step in the gateway-free CI job first, since no test runs in that build today | #535 | merged |
 | R9 the runtime `HotConfig` setters apply `validate()`'s bounds (`health_check_interval_secs` 1–3600, `reconnect_backoff_secs` 1–300 can be bypassed at runtime) — found by A2's audit | #534 | merged |
 | release `v2.24.0` (pieces 2 and 4, R7) | #533 | merged |
-| release `v2.25.0` (R8, R9) | (this PR) | in review |
+| release `v2.25.0` (R8, R9) | #537 | merged |
 | S1 lossless integers (TS) | #526 | merged |
 | S2 the shapes (TS); the additive gateway `kind` field waits for `v2.24.0` — the SDK reads the event name, so it does not need it | #526 | merged |
 | S2's gateway half: the signal SSE data carries `kind` on both routes | #532 | merged |
