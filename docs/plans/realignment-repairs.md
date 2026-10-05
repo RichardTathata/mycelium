@@ -331,7 +331,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | S3 `sseStream` lifetime | #526 | merged |
 | S4 the live suites in CI — the TypeScript half here; `mycelium-py`'s `test_gateway.py` with S5 | #526 | merged |
 | S5 incomplete checkpoint raises (py); `mycelium-py`'s live gateway suite in CI (S4's Python half) | #527 | merged |
-| A1 "no control plane" defined; "profile" disambiguated | (this PR) | in review |
+| A1 "no control plane" defined; "profile" disambiguated | #528 | in review |
 | A2 configuration field table; hook contracts page | — | open |
 | A3 strict eligibility; curator example | — | open |
 | Piece 3 | private plan | open |
