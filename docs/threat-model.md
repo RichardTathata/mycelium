@@ -91,7 +91,7 @@ outbound HTTP paths the substrate chooses to make: the MCP client bridge, capabi
 probes, LLM-backend calls (core prompt skills, SkillRunner, a stem's `[[serve]]`),
 OIDC discovery and JWKS (a denied issuer refuses `start()`), the federation client,
 the wasm host's artifact sources, the Ollama probe, and the wiki's git mirror. Empty =
-allow all (default); set it to fail-closed against unlisted hosts. Since 2.22.1
+allow all (default); set it to fail-closed against unlisted hosts. Since 2.23.0
 (realignment repairs R3–R4, after an external review's F03):
 
 - **A redirect is a destination.** A client that knows the node's policy re-checks

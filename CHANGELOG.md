@@ -9,7 +9,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Wire **v12** unchanged (`PREV = 11`); no API change. **Check before upgrading:** `rust-version` is now
+---
+
+## [2.23.0] — 2026-10-05
+
+Wire **v12** unchanged (`PREV = 11`); rolling upgrade from 2.22.0 holds. A **MINOR**, not the PATCH `realignment-repairs.md` named: the repairs add public API — `mycelium::egress_client`, `EgressPolicy::redirect_verdict`, `OpenAiBackend::with_egress`, `OllamaProbe::with_egress`, `persistence::OwnershipLock`, `WalHandle::hold_ownership`, `mycelium_wasm_host::dial_hosts` — and a `WalMsg` variant (`RELEASING.md` §1). **Check before upgrading:** `rust-version` is now
 **1.89** (`std::fs::File::try_lock`); two agents sharing one journal path, or one journal opened twice
 in a process, now get `WouldBlock` naming the path on the second open — a configuration that was
 silently corrupting its journal. **And:** an outbound client now re-checks every redirect
@@ -84,7 +88,7 @@ egress refusal — that request was leaving the allow-list before.
   threat model said the list gated "every outbound HTTP path" and, in the same section, that OIDC
   JWKS was not gated — false since 2026-10-03; neither said a redirect was followed unchecked. The
   threat model's Boundary C, the `egress.allow_list` row of the guarantee catalogue (regenerated),
-  the crown-jewel coverage table and the confined-fleet runbook now say what 2.22.1 gates — the
+  the crown-jewel coverage table and the confined-fleet runbook now say what 2.23.0 gates — the
   first URL and every redirect hop, with the host read by the client's own parser, and an object
   store on its endpoint — and what it does not: name resolution, a cloud identity's credential
   traffic, and redirects inside `object_store`'s client. The crown-jewel table gains the object

@@ -17,7 +17,7 @@ For a reproducible example checkout:
 
 ```sh
 # Set this to the tag selected from building-on-mycelium.md §1:
-MYCELIUM_RELEASE_TAG="v2.22.0"   # a release anchor: moved by the release script with building-on-mycelium.md §1
+MYCELIUM_RELEASE_TAG="v2.23.0"   # a release anchor: moved by the release script with building-on-mycelium.md §1
 git clone --branch "$MYCELIUM_RELEASE_TAG" https://github.com/RichardTathata/mycelium.git
 cd mycelium
 cargo run --example hello_mesh
