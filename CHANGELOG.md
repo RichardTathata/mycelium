@@ -10,6 +10,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A persistence directory that cannot be created refuses the start instead of running in memory**
+  (`docs/plans/realignment-repairs.md` R7; found by the configuration audit behind A2). `start()`
+  logged the failure and carried on with no persistence, so every write was lost on the next restart,
+  while the guarantee report — resolved from the configuration alone — still said
+  `persist.configured: enforced`, and `secure-single-domain` let the node start. Now it is
+  `InvalidField { field: "persistence" }` naming the directory, the class of the v2.20.0 refusals.
+  Fail-first on `f67b3f37`: `a_persistence_directory_that_cannot_be_created_refuses_the_start` (the
+  directory under a regular file) — the node started. **Check before upgrading:** a node whose
+  persistence directory could not be created now fails at start; it was running without persistence.
 - **`mycelium-ts` 0.2.0 — the TypeScript SDK matches the gateway it talks to**
   (`docs/plans/realignment-repairs.md` S1–S4; the review's F06–F09). Run against a real node, the
   SDK's own live suite failed 9 of its 19 assertions, and it had never run in CI. Every defect was
