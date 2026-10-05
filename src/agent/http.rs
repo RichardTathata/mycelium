@@ -1509,7 +1509,8 @@ async fn gw_govern_membership(
 ///
 /// Each event carries:
 /// - `event` field: the signal kind
-/// - `data` field: JSON `{"sender":"<node_id>","payload":"<base64>"}`
+/// - `data` field: JSON `{"kind":"<kind>","sender":"<node_id>","payload":"<base64>"}` — `kind`
+///   repeats the event name (since 2.24.0) so a client reading the body alone is not wrong
 ///
 /// The subscription is torn down automatically when the client disconnects.
 async fn signal_sse_handler(
@@ -1525,6 +1526,7 @@ async fn signal_sse_handler(
         use base64::Engine as _;
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&sig.payload);
         let data = json!({
+            "kind":    sig.kind.as_ref(),
             "sender":  sig.sender.to_string(),
             "payload": payload_b64,
         });
@@ -2086,7 +2088,8 @@ async fn gw_signal_emit(
 
 /// `GET /gateway/signal/sse/{kind}` — SSE stream of admitted signals for a kind.
 ///
-/// Each event has `event: <kind>` and `data: {"sender":"…","payload_b64":"…","nonce":…}`.
+/// Each event has `event: <kind>` and `data: {"kind":"…","sender":"…","payload_b64":"…","nonce":…}`;
+/// `kind` repeats the event name (since 2.24.0) so a client reading the body alone is not wrong.
 async fn gw_signal_sse(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
@@ -2100,6 +2103,7 @@ async fn gw_signal_sse(
         use base64::Engine as _;
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&sig.payload);
         let data = json!({
+            "kind":        sig.kind.as_ref(),
             "sender":      sig.sender.to_string(),
             "payload_b64": payload_b64,
             "nonce":       sig.nonce,
@@ -4425,6 +4429,59 @@ mod tests {
         assert_eq!(failed["local_durability"], "failed");
         assert_eq!(failed["local_durability_error"], "no ack");
         assert_eq!(failed["ok"], true, "a failed *durability* is still a committed value");
+    }
+
+    /// Both signal SSE routes carry the kind in the data object as well as the SSE event name, so a
+    /// client that reads the body alone is not wrong (realignment repairs §3.2: `mycelium-ts`'s old
+    /// `raw.kind` was always undefined). Additive: the event name is unchanged.
+    #[tokio::test]
+    async fn signal_sse_data_carries_the_kind() {
+        use futures_util::StreamExt as _;
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.http_addr = "127.0.0.1".to_string();
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+
+        for path in ["/gateway/signal/sse/repair.request", "/signals/repair.request"] {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let resp = loop {
+                match reqwest::get(format!("http://127.0.0.1:{http_port}{path}")).await {
+                    Ok(r) => break r,
+                    Err(e) => {
+                        assert!(tokio::time::Instant::now() < deadline, "{path} never opened: {e}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            };
+            assert_eq!(resp.status(), 200, "{path}");
+            let mut body = resp.bytes_stream();
+            let signal = crate::signal::Signal {
+                kind:    Arc::from("repair.request"),
+                scope:   crate::signal::SignalScope::Cluster,
+                payload: bytes::Bytes::from_static(b"kettle"),
+                sender:  id.clone(),
+                nonce:   7,
+            };
+            // The subscription registers when the stream is polled; deliver until an event arrives.
+            let mut seen = String::new();
+            while !seen.contains("data:") {
+                assert!(tokio::time::Instant::now() < deadline, "{path} delivered nothing");
+                agent.task_ctx.signal_handlers.deliver(&signal);
+                if let Ok(Some(Ok(chunk))) = tokio::time::timeout(Duration::from_millis(100), body.next()).await {
+                    seen.push_str(&String::from_utf8_lossy(&chunk));
+                }
+            }
+            assert!(seen.contains("event: repair.request"), "{path}: the event name is unchanged: {seen}");
+            let data = seen.lines().find_map(|l| l.strip_prefix("data:")).expect("a data line").trim();
+            let v: serde_json::Value = serde_json::from_str(data).unwrap();
+            assert_eq!(v["kind"], "repair.request", "{path}: the data object names its kind: {data}");
+        }
+        agent.shutdown().await;
     }
 
     #[tokio::test]
