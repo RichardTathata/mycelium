@@ -4,6 +4,18 @@
 rule), §8 (detection, not prevention — except the ledger). The Phase E exit item "shadow-mode rollout
 documented".*
 
+> **Three things are called "profile" in Mycelium, and none implies another** (realignment repairs A1):
+>
+> | Name | What it decides | Set by | Read |
+> |---|---|---|---|
+> | **startup profile** — `dev`, `secure-single-domain` | the guarantees a node **refuses to start without** | `GossipConfig::profile` / `GOSSIP_PROFILE`, at start | `guarantee_report()`, `GET /gateway/guarantees` |
+> | **control profile** — `Legacy` · `Observe` · `EnforceLocal` · `EnforceAllocated` | how the node's **governors act** on what they observe | `set_control_profile` / `POST /gateway/govern/profile`, at runtime | `GET /gateway/govern` |
+> | **consensus policy** — quorum, lease, ballot | how **one operation** is agreed | the caller, per proposal (`ConsensusConfig`) | the operation's result |
+>
+> A node can run `secure-single-domain` with its governors at `Legacy`; a control profile at
+> `EnforceAllocated` says nothing about whether a given proposal used a majority quorum. A deployment
+> that needs all three states all three.
+
 A node runs its governors under **one control profile**, set at runtime and taking effect on each
 governor's next pass — no restart, no config-struct change:
 

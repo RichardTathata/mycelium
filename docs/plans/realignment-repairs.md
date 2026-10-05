@@ -330,8 +330,8 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | S2 the shapes (TS); the additive gateway `kind` field waits for `v2.24.0` — the SDK reads the event name, so it does not need it | #526 | merged |
 | S3 `sseStream` lifetime | #526 | merged |
 | S4 the live suites in CI — the TypeScript half here; `mycelium-py`'s `test_gateway.py` with S5 | #526 | merged |
-| S5 incomplete checkpoint raises (py); `mycelium-py`'s live gateway suite in CI (S4's Python half) | #527 | in review |
-| A1 "no control plane" defined; "profile" disambiguated | — | open |
+| S5 incomplete checkpoint raises (py); `mycelium-py`'s live gateway suite in CI (S4's Python half) | #527 | merged |
+| A1 "no control plane" defined; "profile" disambiguated | #528 | in review |
 | A2 configuration field table; hook contracts page | — | open |
 | A3 strict eligibility; curator example | — | open |
 | Piece 3 | private plan | open |
