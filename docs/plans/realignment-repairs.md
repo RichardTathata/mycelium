@@ -336,7 +336,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 | S5 incomplete checkpoint raises (py); `mycelium-py`'s live gateway suite in CI (S4's Python half) | #527 | merged |
 | A1 "no control plane" defined; "profile" disambiguated | #528 | merged |
 | A2 configuration field table (`docs/reference/configuration.md`); hook contracts page (`dev/architecture/hooks.md`) — the trace found R7 | #530 | merged |
-| A3 strict eligibility (`mandate::eligibility`); the example is `examples/strict_eligibility.rs` — beside the API it uses, since the curator example builds without `mycelium` | (this PR) | in review |
+| A3 strict eligibility (`mandate::eligibility`); the example is `examples/strict_eligibility.rs` — beside the API it uses, since the curator example builds without `mycelium` | #531 | in review |
 | Piece 3 | private plan | open |
 
 ## 6 · Not claimed
