@@ -197,6 +197,7 @@ check-full: check
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
 
 	cargo test  --lib --no-default-features --features gateway
+	cargo test  -p mycelium-gateway-free-tests   # the one test build of `mycelium` without `gateway` (R8)
 	cargo test  -p mycelium-sim           # the kernel + the same-length/different-content gate
 	cargo test  -p mycelium-core --features sim   # the seams actually route through the kernel
 	cargo test  -p mycelium-core          # the substrate suite (codec/framing/hlc/store/swim) + the wire back-compat gate

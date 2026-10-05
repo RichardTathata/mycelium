@@ -19,6 +19,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `hot_timing_setters_refuse_what_validate_refuses` — the setters stored 3601 and 301.
   **Upgrade note:** both setters now return `Result<(), GossipError>`; a call that ignores it compiles
   with an `unused_must_use` warning, which `-D warnings` turns into an error.
+- **A gateway setting in a build without `gateway` refuses the start, and the gateway guarantees say
+  why** (`docs/plans/realignment-repairs.md` R8, found by A2's configuration audit). Such a build runs
+  no HTTP server, yet it accepted an `http_port` and a `[gateway_tls]` table and ignored them — and
+  still advertised `http_port` as its bulk-transfer port, which nothing served — while the guarantee
+  report resolved `gw.not_open`, `gw.tls` and `gw.caller_profile` from the configuration, so a node
+  with a token reported `gw.not_open: enforced` for a gateway that did not exist. `start()` now refuses
+  `http_port` and `gateway_tls` by name, the class of the v2.18.1 refusals, and those guarantees read
+  `not_in_build` (feature `gateway`). **No test had ever run against a gateway-free build:**
+  `mycelium`'s dev-dependencies enable `gateway`, so its own test build always has it. The new
+  test-only crate `mycelium-gateway-free-tests` is that build, run in the CI job named for it and in
+  `make check-full`. Fail-first on `7ae0ea69`: the node started with an `http_port` and `gw.not_open`
+  read `enforced`. **Check before upgrading:** a gateway-free build given an `http_port` — including
+  `skillrunner` built without default features — now fails at start; it was serving nothing on it.
 
 ---
 

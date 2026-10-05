@@ -2554,6 +2554,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mycelium-gateway-free-tests"
+version = "0.0.0"
+dependencies = [
+ "mycelium",
+ "tokio",
+]
+
+[[package]]
 name = "mycelium-guardrails"
 version = "1.0.0"
 dependencies = [

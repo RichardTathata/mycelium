@@ -578,6 +578,15 @@ fn g(
 fn gateway_role(ctx: &TaskCtx) -> Option<&'static str> {
     if ctx.config.http_port.is_some() { None } else { Some("no `http_port`: this node runs no gateway") }
 }
+
+/// A gateway guarantee in a build without `gateway` is `not_in_build`, whatever the configuration
+/// says: no gateway runs to enforce it (realignment repairs R8). `cfg!`, not `#[cfg]`, so the
+/// resolver stays compiled and linted in every build.
+fn in_gateway_build(
+    resolve: impl Fn(&TaskCtx) -> Resolution + Send + Sync + 'static,
+) -> impl Fn(&TaskCtx) -> Resolution + Send + Sync + 'static {
+    move |c| if cfg!(feature = "gateway") { resolve(c) } else { Resolution::NotInBuild { feature: "gateway" } }
+}
 fn always(_: &TaskCtx) -> Option<&'static str> { None }
 fn external(evidence: &'static str) -> impl Fn(&TaskCtx) -> Resolution + Send + Sync + 'static {
     move |_| Resolution::NotVerifiableHere { evidence }
@@ -593,14 +602,14 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           "`gateway_auth_token`, or (`compliance`) a token table or `[oidc]`",
           &["gateway_auth"], "docs/operations/rbac.md",
           gateway_role,
-          |c| {
+          in_gateway_build(|c| {
               let cfg = &c.config;
               #[allow(unused_mut)]
               let mut closed = cfg.gateway_auth_token.is_some();
               #[cfg(feature = "compliance")]
               { closed |= !cfg.gateway_scoped_tokens.is_empty() || !cfg.gateway_named_tokens.is_empty() || cfg.oidc.is_some(); }
               if closed { Resolution::Enforced } else { Resolution::NotConfigured { missing: "gateway_auth_token (or, with `compliance`, a token table or [oidc])" } }
-          }),
+          })),
         g("gw.token_tables", 1, "gateway", Node,
           "scoped or named tokens close the gateway with a per-route scope floor",
           "`compliance`; `gateway_scoped_tokens` / `gateway_named_tokens`",
@@ -628,18 +637,18 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           "`tls`; `[gateway_tls]` (or TLS terminated by a proxy in front — not visible here)",
           &["http::serve_https"], "docs/operations/gateway-tls.md",
           gateway_role,
-          |c| {
+          in_gateway_build(|c| {
               #[cfg(feature = "tls")]
               { if c.config.gateway_tls.is_some() { Resolution::Enforced } else { Resolution::NotConfigured { missing: "[gateway_tls] (or a TLS-terminating proxy, which this node cannot see)" } } }
               #[cfg(not(feature = "tls"))]
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
-          }),
+          })),
         g("gw.caller_profile", 1, "gateway", Node,
           "a provider sees the gateway's client as the caller, attested by the gateway's identity",
           "`tls`; `[tls]`; `gateway_caller_profile = secure` (the default)",
           &["gateway_caller::attest", "gateway_caller::verify"], "docs/guide/20-authorising-actions.md",
           gateway_role,
-          |c| {
+          in_gateway_build(|c| {
               #[cfg(feature = "tls")]
               {
                   use crate::config::GatewayCallerProfile;
@@ -648,7 +657,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               }
               #[cfg(not(feature = "tls"))]
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
-          }),
+          })),
         g("mesh.tls", 1, "transport", Node,
           "gossip is mTLS: every peer presents a certificate signed by the fleet CA",
           "`tls`; `[tls]`",
