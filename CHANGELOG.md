@@ -27,12 +27,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   distinguishable in the error"*; doc-coverage run 20, code gap 2). **`mycelium-reason` 0.7.0:** the blob tier's
   `MeshBlobStore::fetch` returns a `BlobMiss` — `NotFound`, `Unavailable` (a provider unreachable), `Corrupt` —
   and `GET /gateway/reason/blob/{id}` answers 404 / 503 / 502 with the reason in its body; it answered 404 for
-  all three. **Corrupt** only when every copy anyone could still serve fails its content address — local or a
-  provider's reply — with no provider unreachable and none merely lacking it, so one faulty or hostile provider
+  all three. **Corrupt** only when every copy currently on offer fails its content address — the local copy and
+  every **advertised** provider's reply — with no advertised provider unreachable and none merely lacking it (a
+  holder offline past its 30 s capability lease is not counted, so it cannot hold the answer at retriable), so one faulty or hostile provider
   cannot turn a blob that is still spreading into a permanent failure. **Damage at rest** is corruption, not
-  absence: `FsBlobStore::read` returns `LocalRead::Damaged`, and the stock blob server serves a damaged copy for
-  the requester to verify instead of answering *miss* (it read as `NotFound`, retriable forever).
-  **`langgraph-checkpoint-mycelium` 0.2.1:** `IncompleteCheckpoint.reasons` names each missing blob's reason,
+  absence: `FsBlobStore::read` returns `LocalRead::Damaged`, and the stock blob server answers a damaged copy —
+  even one truncated to nothing — with a marker that fails every content address, instead of the empty *miss* (it
+  read as `NotFound`, retriable forever); and `FsBlobStore::put` of the right bytes **repairs** a damaged copy,
+  where it returned early because a file existed.
+  **`langgraph-checkpoint-mycelium` 0.3.0** (a MINOR: a 401/403 on a blob now raises `IncompleteCheckpoint`, where it raised `httpx.HTTPStatusError`)**:** `IncompleteCheckpoint.reasons` names each missing blob's reason,
   read from the route's **body** as well as its status — a proxy's 502 page is `unavailable`, not `corrupt`;
   a bare 404 (no reason companion on that node) is `unsupported`; 408/429 are `unavailable`; a 401/403 is
   `unauthorized` (it escaped as a raw HTTP error) — a blob fetched twice keeps its most serious reason, and
@@ -41,8 +44,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not_found`; a blob damaged on its only holder's disk answered `404`; one bad provider beside an honest one
   answered `502 corrupt` (the PR's own adversarial review found the last two); twelve checkpointer tests failed
   against 0.2.0; a live two-node test makes the row arrive before its blob and asserts the raise.
-  **Upgrade order:** upgrade `langgraph-checkpoint-mycelium` to 0.2.1 **before** the reason nodes to 0.7.0 — a 0.2.0
-  checkpointer reads only 404 as a missing blob, so a 503 from a 0.7.0 node escapes its retry loop as an
+  **Upgrade order:** upgrade `langgraph-checkpoint-mycelium` to 0.3.0 **before** the reason nodes to 0.7.0 — a 0.2.x
+  checkpointer reads only 404 as a missing blob, so a 503 or a 502 from a 0.7.0 node escapes its retry loop as an
   `httpx.HTTPStatusError`. `mycelium-py`'s `ReasonClient.blob_get` returns `None` only for 404 and raises for
   502/503, whose body names the reason.
 

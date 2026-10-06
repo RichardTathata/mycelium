@@ -65,7 +65,7 @@ mod route;
 mod trace;
 
 pub use blob::{
-    BLOB_FETCH_KIND, BlobId, BlobMiss, BlobServerHandle, FsBlobStore, LocalRead, MAX_BLOB_BYTES, MeshBlobStore,
+    BLOB_FETCH_KIND, BlobId, BlobMiss, BlobServerHandle, DAMAGED_REPLY, FsBlobStore, LocalRead, MAX_BLOB_BYTES, MeshBlobStore,
     spawn_blob_server,
 };
 #[cfg(feature = "gateway")]

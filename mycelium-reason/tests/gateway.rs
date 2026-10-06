@@ -505,6 +505,7 @@ async fn a_blob_only_corrupt_providers_hold_is_reported_corrupt_not_missing() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(a.capabilities().resolve(&filter).iter().any(|(n, _)| n == b.node_id()), "B must be visible to A");
 
     let id = mycelium_reason::BlobId::of(b"the real payload");
     let got = reqwest::get(format!("http://127.0.0.1:{http_port}/gateway/reason/blob/{id}")).await.unwrap();
@@ -554,6 +555,8 @@ async fn one_bad_provider_beside_an_honest_one_that_lacks_the_blob_is_not_found(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // Without both providers the case is not exercised: no provider at all is also `not_found`.
+    assert!(a.capabilities().resolve(&filter).len() >= 2, "both providers must be visible to A");
     let id = mycelium_reason::BlobId::of(b"still spreading");
     let got = reqwest::get(format!("http://127.0.0.1:{http_port}/gateway/reason/blob/{id}")).await.unwrap();
     let status = got.status().as_u16();
@@ -578,5 +581,40 @@ async fn a_blob_damaged_on_the_only_holders_disk_is_corrupt() {
     let status = got.status().as_u16();
     let body: serde_json::Value = got.json().await.unwrap_or_default();
     assert_eq!((status, body["error"].as_str()), (502, Some("corrupt")), "{body}");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+
+/// The second review of #542, finding 1: a copy damaged on a *remote* holder's disk — here truncated to
+/// nothing, a realistic crash outcome — is corruption, through the **stock** blob server. It served the
+/// damaged bytes, and empty bytes are the protocol's "miss", so the requester read it as not found.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_truncated_on_the_only_remote_holder_is_corrupt_through_the_stock_server() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let (a, a_port, http_port) = start_gateway_node(Arc::new(FsBlobStore::open(dir_a.path()).unwrap()), None).await;
+    let c_port = mycelium::test_util::alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = c_port;
+    cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", a_port).unwrap()];
+    let c = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", c_port).unwrap(), cfg));
+    c.start().await.unwrap();
+    let dir_c = tempfile::tempdir().unwrap();
+    let store_c = Arc::new(FsBlobStore::open(dir_c.path()).unwrap());
+    let id = store_c.put(b"the only good copy, about to be truncated").unwrap();
+    std::fs::write(dir_c.path().join(id.to_hex()), b"").unwrap();
+    let _server = mycelium_reason::spawn_blob_server(&c, store_c);
+    let filter = mycelium::CapFilter::new("reason", "blob-cache");
+    for _ in 0..200 {
+        if a.capabilities().resolve(&filter).iter().any(|(n, _)| n == c.node_id()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(a.capabilities().resolve(&filter).iter().any(|(n, _)| n == c.node_id()), "C must be visible to A");
+    let got = reqwest::get(format!("http://127.0.0.1:{http_port}/gateway/reason/blob/{id}")).await.unwrap();
+    let status = got.status().as_u16();
+    let body: serde_json::Value = got.json().await.unwrap_or_default();
+    assert_eq!((status, body["error"].as_str()), (502, Some("corrupt")), "{body}");
+    c.shutdown_with_timeout(Duration::from_secs(5)).await;
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

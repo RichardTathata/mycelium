@@ -71,7 +71,7 @@ class IncompleteCheckpoint(Exception):
     lose an ``__error__``/``__interrupt__``/``__resume__`` write). Retry once the blobs propagate.
 
     ``missing`` lists the content ids that could not be fetched, and ``reasons`` says why for each
-    (0.2.1 — the plan's "absence, temporary unavailability, authorization refusal and corrupt content
+    (0.3.0 — the plan's "absence, temporary unavailability, authorization refusal and corrupt content
     stay distinguishable"): ``"not_found"`` (no reachable holder has it yet), ``"unavailable"`` (a
     holder could not be reached, the node or a proxy in front of it failed, or the read was throttled),
     ``"unauthorized"`` (the gateway refused the read — a token or scope problem), ``"corrupt"`` (every

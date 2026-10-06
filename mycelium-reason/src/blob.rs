@@ -89,7 +89,8 @@ pub enum LocalRead {
 ///
 /// No locks: writes are **complete-or-absent** (uniquely-named temp file + rename — the
 /// `FsLibrarySource` discipline), so a concurrent reader never observes a partial blob,
-/// and reads verify the hash so a corrupted-on-disk blob is a miss, never bad data.
+/// and reads verify the hash: [`get`](FsBlobStore::get) never returns bad data, and [`read`](FsBlobStore::read)
+/// says when a copy on disk is damaged rather than absent.
 pub struct FsBlobStore {
     dir: PathBuf,
 }
@@ -118,7 +119,9 @@ impl FsBlobStore {
         }
         let id = BlobId::of(bytes);
         let path = self.path_of(&id);
-        if path.exists() {
+        // A valid copy is a no-op. A damaged one is replaced: returning early because a file existed left
+        // damage unrepairable — the mesh write-back and a client's re-upload both did nothing (S5).
+        if matches!(self.read(&id), LocalRead::Valid(_)) {
             return Ok(id);
         }
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -178,8 +181,13 @@ impl Drop for BlobServerHandle {
     }
 }
 
+/// What the stock blob server answers for a copy that is damaged on its disk: non-empty, and the content
+/// address of nothing a blob id could name, so a requester reads it as corrupt evidence (S5).
+pub const DAMAGED_REPLY: &[u8] = b"mycelium-reason: the holder's copy of this blob is damaged at rest";
+
 /// Advertise this node as a blob provider and serve [`BLOB_FETCH_KIND`] RPCs against
-/// `store`. Reply is the blob bytes, or **empty bytes** for a miss / malformed id —
+/// `store`. Reply is the blob bytes, [`DAMAGED_REPLY`] for a copy damaged on disk, or **empty bytes**
+/// for a miss / malformed id —
 /// unambiguous because the one blob whose bytes ARE empty (id = SHA-256 of `""`) is
 /// never fetched over the mesh: [`MeshBlobStore::get`] answers it from the content
 /// address alone (the LangGraph checkpointer stores `None` channel values as exactly
@@ -193,12 +201,14 @@ pub fn spawn_blob_server(agent: &Arc<GossipAgent>, store: Arc<FsBlobStore>) -> B
     let task = tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
             let payload = req.payload();
-            // A damaged copy is served as it is: the requester verifies every reply, so it reads as
-            // corrupt there rather than as a miss — damage at rest stays visible (S5). An absent one is
-            // the empty reply, as before.
+            // A damaged copy is answered with `DAMAGED_REPLY`, which no content address matches, so the
+            // requester counts it as corrupt rather than as a miss — whatever the damage left behind (a file
+            // truncated to nothing would otherwise be the empty "miss"; one grown past the frame cap would
+            // never arrive). An absent copy is the empty reply, as before (S5).
             let reply = match <[u8; 32]>::try_from(payload.as_ref()) {
                 Ok(id) => match store.read(&BlobId(id)) {
-                    LocalRead::Valid(bytes) | LocalRead::Damaged(bytes) => bytes,
+                    LocalRead::Valid(bytes) => bytes,
+                    LocalRead::Damaged(_) => Bytes::from_static(DAMAGED_REPLY),
                     LocalRead::Absent => Bytes::new(),
                 },
                 Err(_) => Bytes::new(),
@@ -285,7 +295,8 @@ impl MeshBlobStore {
     /// [`get`](Self::get), saying **why** a blob is not returned (realignment repairs S5: *"absence,
     /// temporary unavailability, authorization refusal and corrupt content stay distinguishable"*).
     ///
-    /// **Corrupt** only when every copy anyone could still serve is bad: some copy (local, or a provider's
+    /// **Corrupt** only when every copy currently on offer is bad — this node's and every **advertised**
+    /// provider's (a holder offline past its capability lease is not counted): some copy (local, or a provider's
     /// reply) failed the content address, no provider was unreachable, and none merely lacked it. One bad
     /// provider beside an honest one that has not received the blob yet is **not found** — retriable — so
     /// a single faulty or hostile node cannot turn a blob that is still spreading into a permanent failure.
@@ -371,7 +382,7 @@ mod tests {
         assert!(s.put(&vec![0u8; MAX_BLOB_BYTES]).is_ok());
     }
 
-    /// S5: why a blob is missing. Corrupt only when no copy anyone could still serve is good — not when one
+    /// S5: why a blob is missing. Corrupt only when no copy currently on offer could still serve is good — not when one
     /// bad provider sits beside one that simply has not received it (the review of #542, finding 1).
     #[test]
     fn a_miss_is_classified_by_its_worst_evidence() {
@@ -385,6 +396,19 @@ mod tests {
             [BlobMiss::NotFound, BlobMiss::Unavailable, BlobMiss::Corrupt].map(BlobMiss::as_str),
             ["not_found", "unavailable", "corrupt"]
         );
+    }
+
+    /// The second review of #542, finding 2: damage must be repairable. `put` returned early when a file
+    /// existed, so writing the correct bytes over a damaged copy — the mesh write-back, or a client's
+    /// re-upload — left the damage in place.
+    #[test]
+    fn putting_the_right_bytes_repairs_a_damaged_copy() {
+        let (_d, s) = store();
+        let id = s.put(b"honest bytes").unwrap();
+        std::fs::write(s.path_of(&id), b"rot").unwrap();
+        assert!(matches!(s.read(&id), LocalRead::Damaged(_)));
+        assert_eq!(s.put(b"honest bytes").unwrap(), id);
+        assert_eq!(s.read(&id), LocalRead::Valid(Bytes::from_static(b"honest bytes")));
     }
 
     #[test]

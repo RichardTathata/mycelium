@@ -96,10 +96,10 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
       raise RuntimeError("checkpoint still incomplete — see below")
   ```
 
-  **Why each blob is missing** is `e.reasons[blob_id]` (0.2.1, with `mycelium-reason` 0.7.0):
+  **Why each blob is missing** is `e.reasons[blob_id]` (0.3.0, with `mycelium-reason` 0.7.0):
   `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached, the
   node or a proxy in front of it failed, or the read was throttled; `"unauthorized"` — the gateway refused
-  the read (a token or scope problem); `"corrupt"` — every copy anyone could still serve fails the content
+  the read (a token or scope problem); `"corrupt"` — every copy currently on offer fails the content
   address (one bad provider beside an honest one that lacks it is `not_found`); `"unsupported"` — the node
   does not serve the blob route (no reason companion there). `e.retriable`
   is true only when every reason is `not_found` or `unavailable`, so the loop above should re-raise
