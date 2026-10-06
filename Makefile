@@ -176,7 +176,8 @@ check:
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	cargo build --examples --features tls,metrics,a2a,llm       # CI builds these; `--lib --tests` does not
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
-	python3 scripts/check-test-inventory.py                     # every test target runs in some CI step, with its features (verification policy rule 3)
+	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)
+	./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py  # …and the check catches every bypass a review found
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 	./scripts/check-positioning.sh                              # shared proposition, audience routes, resources and capability coverage
@@ -191,15 +192,18 @@ check:
 gate-knowledge:
 	cargo test --lib --features tls,metrics,a2a,llm knowledge::gate -- --nocapture
 
-## check-full — check + the test suites + the (slow, wasmtime-heavy) wasm-host clippy. Mirrors the
-## CI gate set; run before a release or when you have touched wasm-host / a feature-conditional path.
+## check-full — check + the main test suites + the (slow, wasmtime-heavy) wasm-host clippy; run before a
+## release or when you have touched wasm-host / a feature-conditional path. A local subset of CI, not a
+## mirror: the companions' suites, loom, the fuzz job and the TypeScript SDK run in CI only, and CI's
+## coverage is what scripts/check-test-inventory.py proves. The Python line needs pytest and the two
+## Python packages installed (pip install -e mycelium-py -e langgraph-checkpoint-mycelium pytest pytest-asyncio).
 check-full: check
 	cargo test  --lib --features tls,metrics,a2a,llm
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
 	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)
 	cargo test  --features tls,a2a --bins                # the skillrunner binary's unit tests
 	cargo test  --features tls,a2a --doc                 # the crate's doctests (cargo will not mix --doc with other targets)
-	cargo test  -p mycelium-wasm-host --features stem,gateway --test '*'   # rule_catalogue + signed-entry gateway tests
+	cargo test  -p mycelium-wasm-host --features stem,gateway,llm   # rule_catalogue, signed-entry gateway, provisioner gateway, [[serve]]
 	cargo test  -p mycelium-effects --features tuple-space,envelope --test '*'
 	python3 -m pytest -q langgraph-checkpoint-mycelium/tests mycelium-py/tests   # the live suites skip without a node
 
@@ -207,6 +211,7 @@ check-full: check
 	cargo test  -p mycelium-gateway-free-tests   # the one test build of `mycelium` without `gateway` (R8)
 	cargo test  -p mycelium-sim           # the kernel + the same-length/different-content gate
 	cargo test  -p mycelium-core --features sim   # the seams actually route through the kernel
+	cargo test  -p mycelium-core --features tls   # erasure (crypto-shred), key extraction, framing's TLS cases
 	cargo test  -p mycelium-core          # the substrate suite (codec/framing/hlc/store/swim) + the wire back-compat gate
 	cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 

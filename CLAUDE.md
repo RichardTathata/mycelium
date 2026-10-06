@@ -73,7 +73,8 @@ the evidence).
    test that delivers it; an undelivered promise is written *not built*. Someone who did not write the PR
    checks it.
 3. **CI collects tests by discovery, not a list.** Point runners at directories; live suites skip themselves
-   when no node is configured, so a new test file cannot silently go unrun.
+   when no node is configured, except in the step that starts the node, which sets their `*_LIVE_REQUIRED`
+   guard. `scripts/check-test-inventory.py` (with its mutation suite) proves every test runs somewhere.
 4. **Independent adversarial review after each PR.** Before merge, an agent other than the author enumerates
    the surfaces the change touches and tries to break them (`/adversarial-review`); its findings are fixed or
    answered in the PR.

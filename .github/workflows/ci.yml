@@ -66,6 +66,9 @@ jobs:
       # And the seams under `sim`: without this the routed path is never built in CI, and
       # `sim_seam` would be a module that compiles only on the author's machine.
       - run: ./scripts/ci-retest.sh -p mycelium-core --features sim
+      # Core's `tls`-gated unit tests (erasure's crypto-shred, tls's key extraction, framing's TLS cases)
+      # ran in no step until 2026-10-06 — found by the test inventory once it counted library unit tests.
+      - run: ./scripts/ci-retest.sh -p mycelium-core --features tls
       # In-suite decoder mini-fuzz (gated behind fuzz-internals). The fuzz/
       # targets existed for the whole project's life but were never executed
       # in CI, and an unbounded-allocation decode DoS sat uncaught (M2 Run-20).
@@ -164,10 +167,13 @@ jobs:
       # The static forbidden-call check (item 6 PR 3, D12). Runs in the same job as clippy
       # because it is the same kind of claim: the seams cannot erode while PR 4-7 are built.
       - run: ./scripts/check-sim-seams.sh
-      # Verification policy rule 3, checked positively: every test target in the repository — each crate's
-      # integration tests with the features they need, bin unit tests, doctests, Python and TypeScript files,
-      # fuzz targets — maps to a CI step that runs it (CLAUDE.md § Verification policy).
-      - run: python3 scripts/check-test-inventory.py
+      # Verification policy rule 3, checked positively: every test requirement in the repository — each
+      # crate's library, integration, binary and doc tests under every cfg gate on test code, Python and
+      # TypeScript files (live ones only with their *_LIVE_REQUIRED guard set), fuzz targets — maps to a CI
+      # step that would run it (CLAUDE.md § Verification policy). The second line is the check's own
+      # mutation suite: each bypass an adversarial review found must fail it.
+      - run: ./scripts/with-pyyaml.sh scripts/check-test-inventory.py
+      - run: ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py
       # Closure plan C11: no new unclassified read of Hlc::current(), which stands still on a quiet
       # node and fails a deadline check open.
       - run: ./scripts/check-hlc-current.sh
@@ -268,10 +274,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-retest.sh -p mycelium-wasm-host
-      # The integration tests gated on `stem` and `gateway` — `rule_catalogue` (the rule catalogue's gate,
-      # claimed "gated in CI" since v2.20.0) and `gateway` (signed entries across two nodes) — ran in no step
-      # until 2026-10-06: no wasm-host step enabled either feature without a name filter.
-      - run: ./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway --test '*'
+      # Every wasm-host test gated on `stem`, `gateway` or `llm` — `rule_catalogue` (the rule catalogue's gate,
+      # claimed "gated in CI" since v2.20.0), `gateway` (signed entries across two nodes), the provisioner's
+      # gateway tests and the stem's `[[serve]]` tests — ran in no step until 2026-10-06: no wasm-host step
+      # enabled those features without a name filter.
+      - run: ./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway,llm
       # The S3-compatible fixture: MinIO in a container, one bucket made with the runner's AWS CLI.
       - name: Start an S3-compatible store with the test bucket
         run: |
@@ -519,6 +526,9 @@ jobs:
         env:
           MYCELIUM_TEST_PORT: 8101
           MYCELIUM_TEST_PORT_B: 8102
+          # The reason-node suites (test_reason, test_typed, the checkpointer's) fail rather than skip if
+          # the ports above go missing.
+          MYCELIUM_REASON_LIVE_REQUIRED: "1"
       # The LangGraph example ladder, rungs 0–5 (echo variant): each runs against the
       # shared A/B mesh above and prints `RUNG N OK`. Rung 03 needs the second node
       # (MYCELIUM_TEST_PORT_B); the rest ignore it. Rung 06 has its own step below.

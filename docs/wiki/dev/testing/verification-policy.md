@@ -31,9 +31,11 @@ an auditor enumerated surfaces from the code instead of the description:
 2. **Plan rows close on evidence.** A delivery-table row is marked merged only beside a quotation of each of
    its promises and the code or test that delivers it. A promise not delivered is written as *not built* in
    the row, never left implied. The check is made by an agent or person who did not write the PR.
-3. **CI collects tests by discovery, not by list.** A test runner is pointed at a directory, never at named
-   files; a test that needs a live node lives in a `live/` directory and skips when no node is configured. A new
-   test file runs the day it lands — and `check-test-inventory.py` proves every existing one does.
+3. **CI collects tests by discovery, not by list.** A test runner is pointed at a directory (`--test '*'`, a
+   pytest directory, bare `jest`), and a test that needs a live node skips when no node is configured — except in
+   the step that brings the node up, which sets the suite's `*_LIVE_REQUIRED` guard so a missing node fails. A
+   name is used only to select what a feature or cfg gate confines to a few tests (`--test decision_trace_replay`
+   under `sim`, each fuzz target), and `check-test-inventory.py` proves every test requirement has a step.
 4. **Independent adversarial review after each PR.** Before merge, an agent other than the author — with no
    access to the author's reasoning, given only the diff and the repository — enumerates the surfaces the
    change touches and tries to break them: siblings, other doors, the plan row's promises, literal execution of
@@ -45,20 +47,35 @@ an auditor enumerated surfaces from the code instead of the description:
 - `CLAUDE.md` § Verification policy — every session reads it.
 - `.github/pull_request_template.md` — the enumeration, the plan-row evidence and the review link are fields.
 - `RELEASING.md` § 5b — no release while a delivery row marked merged lacks its evidence.
-- `scripts/check-test-inventory.py` (in `make check` and CI) — rule 3 checked **positively**: it inventories every
-  test target (each crate's integration tests with the features each needs, bin unit tests, doctests, Python and
-  TypeScript test files, fuzz targets) and fails unless each maps to a CI step that runs it with those features,
-  or `scripts/test-inventory-exceptions.txt` gives a reason. It replaced a gate that refused *named* test files:
-  this PR's own adversarial review bypassed that one fourteen ways and showed it could not see the failure that
-  had actually happened — a feature-gated test no step enabled. Its first run found five uncovered targets:
-  `mycelium-wasm-host`'s `gateway` and `rule_catalogue`, the skillrunner binary's unit tests, and the root and
-  co-op crates' doctests.
-- **Live suites live in a directory** (`mycelium-py/tests/live`, `mycelium-ts/tests/live`): the directory run collects
-  them and they skip without a node; the live step runs the directory with `MYCELIUM_LIVE_REQUIRED=1`, which fails
-  rather than skips when the node variable is missing — so a new live file runs the day it lands.
+- `scripts/check-test-inventory.py` (in `make check` and CI, through `scripts/with-pyyaml.sh`) — rule 3 checked
+  **positively**. It inventories every test *requirement*: per crate, the library's, each integration test's,
+  each binary's and the doctests' test code under every distinct `cfg` gate (a file's `#![cfg]`, the gate on the
+  `mod` that declares it, `#[cfg(all(test, feature = …))]` on a module, `#[cfg]` on a test function,
+  `required-features`) — resolved to features to enable, features to leave off, and bare cfgs `RUSTFLAGS` must
+  set; a cfg it cannot evaluate is uncovered, never "needs nothing". Then Python and TypeScript files (a live one
+  only by a step that sets its `*_LIVE_REQUIRED` guard) and fuzz targets. A step counts only if it would run
+  tests: its workflow triggers on push or pull request, it is not `if: false` or `continue-on-error`, and its
+  command is not `--no-run`, `-- --list`, `-- --ignored`, or filtered past the gate (a name filter counts only if
+  it provably selects the whole gate — the module's path or the one gated function's name). Exceptions go in
+  `scripts/test-inventory-exceptions.txt` with a reason; there are none.
+- `scripts/test-check-test-inventory.py` — the check's own **mutation suite** (also in `make check` and CI): 28
+  edits that each leave a test unrun, every one of which the check must fail on. They are the bypasses two
+  adversarial reviews of #541 found: the first version refused *named* test files and was bypassed fourteen
+  ways; the second inventoried targets but not library unit tests, read non-feature cfgs as "needs nothing",
+  and counted steps that never run tests — 20 of the reviewer's 38 mutations passed it.
+- **What the inventory found** (each now runs in CI, all passing): `mycelium-wasm-host`'s `rule_catalogue` and
+  `gateway` integration tests, its provisioner's `gateway` tests and the stem's `llm` (`[[serve]]`) tests; the
+  skillrunner binary's unit tests; the root and co-op doctests (one, `lock_service`'s `with_lock`, had stopped
+  compiling); `mycelium-core`'s `tls`-gated unit tests (crypto-shred erasure, key extraction).
+- **Live suites declare a guard.** `mycelium-py/tests/live` and `mycelium-ts/tests/live` read
+  `MYCELIUM_LIVE_REQUIRED`; the reason-node suites (`test_reason.py`, `test_typed.py`, the checkpointer's
+  `test_checkpointer.py`) read `MYCELIUM_REASON_LIVE_REQUIRED`. Without the variable they skip; with it and
+  without the node they fail — so the step that brings up the node sets it, and the inventory checks that it
+  does.
 - `.github/workflows/ci.yml` — Python runs `pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests`; root
   integration tests run as `--test '*'`. The switch ran eight tests no CI job had ever run (five Python files,
   three Rust integration tests) — all passed. Replacing the named lines removed seven from `ci.yml`.
+- `make check-full` is a local subset of CI, not a mirror; CI's coverage is what the inventory proves.
 - `.claude/commands/adversarial-review.md` — rule 4's procedure.
 
 ## What it does not promise

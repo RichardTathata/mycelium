@@ -511,9 +511,10 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 ## Running the tests
 
-Every test outside `tests/live/` needs no node — they mock the transport, and `pytest tests/ -v` runs them
-(the live suites skip themselves without `MYCELIUM_TEST_HOST`). The live suites in `tests/live/` need a real
-node; the recipe CI uses (`MYCELIUM_LIVE_REQUIRED=1` turns a missing node into an error rather than a run
+`pytest tests/ -v` with no node configured runs the node-free tests (they mock the transport) and skips the
+live ones: the suites in `tests/live/` skip without `MYCELIUM_TEST_HOST`, and `test_reason.py` and
+`test_typed.py` without `MYCELIUM_TEST_PORT` (a reason node — CI sets `MYCELIUM_REASON_LIVE_REQUIRED` there so
+a lost port fails instead). The suites in `tests/live/` need a plain node; the recipe CI uses (`MYCELIUM_LIVE_REQUIRED=1` turns a missing node into an error rather than a run
 that skips everything):
 
 ```sh
