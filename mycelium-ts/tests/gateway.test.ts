@@ -138,6 +138,74 @@ describe_("MyceliumAgent — live node tests", () => {
 
   // ── Mailbox ────────────────────────────────────────────────────────────────
 
+  // ── Round-trips the contract mocks cannot prove (sweep 2026-10-06) ──────────────────────
+  // A mocked `fetch` answers whatever it is sent, so a wrong field name passes it. These run the verb
+  // against the node, which refuses a field it does not read.
+
+  it_("rpcServe yields the request's kind, and scatterGather to self collects the reply", async () => {
+    const self = await a.nodeId;
+    const kind = `ts-test.scatter-echo.${Date.now()}`;
+    const server = agent();
+    const serve = server.rpcServe(kind);
+    const seenKind: string[] = [];
+    const served = (async () => {
+      for await (const req of serve) {
+        seenKind.push(req.kind);
+        await server.rpcRespond(req, Buffer.concat([Buffer.from("echo:"), req.payload]));
+        break;
+      }
+    })();
+    await new Promise((r) => setTimeout(r, 300)); // the serve stream registers on connect
+    let replies: Array<{ sender: string; result: Buffer }>;
+    try {
+      replies = await a.scatterGather([self], kind, Buffer.from("ping"), { minOk: 1, timeoutSecs: 5 });
+    } catch (e) {
+      // Release the serve loop so a failure fails the test rather than hanging the run.
+      await a.rpcCall(self, kind, Buffer.alloc(0), { timeoutSecs: 2 }).catch(() => undefined);
+      await served;
+      throw e;
+    }
+    await served;
+    expect(seenKind).toEqual([kind]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0].sender).toBe(self);
+    expect(replies[0].result.toString()).toBe("echo:ping");
+  });
+
+  it_("onSignal receives a signal emitted after it subscribed, with its kind", async () => {
+    const kind = `ts-test.signal.${Date.now()}`;
+    const sub = a.onSignal(kind);
+    const first = sub.next();                         // opens the stream
+    await new Promise((r) => setTimeout(r, 300));     // and lets the node register it
+    expect(await agent().emit(kind, Buffer.from("hello"))).toBe(true);
+    const { value } = await first;
+    await sub.return(undefined);
+    expect(value?.kind).toBe(kind);
+    expect(value?.payload.toString()).toBe("hello");
+    expect(typeof value?.nonce).toBe("bigint");
+  });
+
+  it_("subscribeLog starts at the HLC it is given (inclusive)", async () => {
+    const stream = `ts-test-sub-${Date.now()}`;
+    const first = await a.append(stream, Buffer.from("one"));
+    const second = await a.append(stream, Buffer.from("two"));
+    // The gateway keeps `hlc >= since`. Before 0.2.0 the SDK sent `since_hlc`, which the gateway
+    // ignored, so this began at zero and yielded "one".
+    const sub = a.subscribeLog(stream, { sinceHlc: second });
+    const { value } = await sub.next();
+    await sub.return(undefined);
+    expect(value?.hlc).toBe(second);
+    expect(value?.value.toString()).toBe("two");
+    expect(first < second).toBe(true);
+  });
+
+  it_("an RPC to a kind nobody serves is a TimeoutError", async () => {
+    const self = await a.nodeId;
+    await expect(
+      a.rpcCall(self, `ts-test.unserved.${Date.now()}`, Buffer.alloc(0), { timeoutSecs: 1 }),
+    ).rejects.toMatchObject({ name: "TimeoutError" });
+  });
+
   it_("deliverEvent does not throw", async () => {
     const id = await a.nodeId;
     await expect(

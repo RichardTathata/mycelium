@@ -48,3 +48,4 @@ export {
 } from "./federation";
 export { Artifacts, ArtifactError, PublishReceipt } from "./artifacts";
 export { TOKEN_ENV, resolveToken, authHeaders, type AuthOptions } from "./auth";
+export { sseStream, SseOverflowError, type SseOptions } from "./sse";

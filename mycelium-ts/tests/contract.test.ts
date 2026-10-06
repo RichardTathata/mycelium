@@ -132,6 +132,40 @@ describe("timeouts the gateway reads as whole seconds", () => {
   });
 });
 
+describe("verbs the review did not reach (the 2026-10-06 sweep of every verb against its handler)", () => {
+  it("scatterGather sends method, the field gw_scatter reads", async () => {
+    // `gw_scatter` reads `body["method"]` and answers 400 `missing method` without it; this sent
+    // `kind`, so every scatterGather against a real node failed (since the client was written).
+    const seen = mockFetch(`{"ok":true,"replies":[]}`);
+    await agent().scatterGather(["127.0.0.1:1"], "echo");
+    const body = JSON.parse(seen[0].body!);
+    expect(body.method).toBe("echo");
+    expect(body.kind).toBeUndefined();
+  });
+
+  it("an RpcRequest's kind comes from the serve stream's event name", async () => {
+    // `gw_rpc_serve`'s data is {nonce_hex, sender, payload_b64, caller?}; the kind is the event name.
+    mockSse([`event: the-kind\ndata: {"nonce_hex":"00000000000000ff","sender":"127.0.0.1:1","payload_b64":""}\n\n`]);
+    const gen = agent().rpcServe("the-kind");
+    const first = await gen.next();
+    await gen.return(undefined);
+    expect(first.value?.kind).toBe("the-kind");
+  });
+
+  it("a gateway 504 from rpcCall or scatterGather is a TimeoutError, as documented", async () => {
+    // Both handlers answer an expired deadline with 504; the README and Python say TimeoutError.
+    mockFetch(`{"error":"timeout"}`, 504);
+    await expect(agent().rpcCall("127.0.0.1:1", "echo")).rejects.toMatchObject({ name: "TimeoutError" });
+    mockFetch(`{"error":"timeout"}`, 504);
+    await expect(agent().scatterGather(["127.0.0.1:1"], "echo")).rejects.toMatchObject({ name: "TimeoutError" });
+  });
+
+  it("the package root exports the stream error a caller is told to catch", async () => {
+    const root = await import("../src/index");
+    expect((root as Record<string, unknown>).SseOverflowError).toBeDefined();
+  });
+});
+
 describe("ordered-log requests use the gateway's names (F08)", () => {
   it("scanLog sends from and to", async () => {
     const seen = mockFetch(`[]`);

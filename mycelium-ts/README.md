@@ -34,14 +34,15 @@ const handle = await agent.advertiseCapability("compute", "gpu", {
 const providers = await agent.resolveCapability("compute", "gpu");
 console.log(providers); // [{ node_id: "...", ns: "compute", name: "gpu", ... }]
 
-// Emit a signal
-await agent.emit("render-job", Buffer.from("payload"), { scope: "system" });
-
-// Subscribe to signals
-for await (const sig of agent.onSignal("render-job")) {
-  console.log(sig.sender, sig.payload);
-  break;
-}
+// Subscribe first: the node registers the subscription when the stream opens, and a signal emitted
+// before that is not delivered to it.
+const sub = agent.onSignal("render-job");
+const first = sub.next();                      // opens the stream
+await new Promise((r) => setTimeout(r, 100));  // let the node register it
+await agent.emit("render-job", Buffer.from("payload"), { scope: "cluster" });
+const { value: sig } = await first;
+console.log(sig!.kind, sig!.sender, sig!.payload);
+await sub.return(undefined);
 
 await handle.drop();
 ```
@@ -168,7 +169,7 @@ for await (const sig of agent.onSignal("render-job")) {
 }
 ```
 
-`Signal` fields: `kind: string` (from the SSE event name), `sender: string`, `payload: Buffer`,
+`Signal` fields: `kind: string` (from the event's data on a 2.24.0+ gateway, else the SSE event name), `sender: string`, `payload: Buffer`,
 `nonce: bigint` (exact — see *64-bit values* below).
 
 ---
@@ -177,7 +178,8 @@ for await (const sig of agent.onSignal("render-job")) {
 
 #### `rpcCall(target, method, payload?, options?) → Promise<Buffer>`
 
-Blocking point-to-point RPC call. Throws `TimeoutError` if no reply arrives.
+Blocking point-to-point RPC call. Throws an error named `TimeoutError` if no reply arrives — the
+gateway answers an expired deadline with 504 (0.2.1; before it, a plain `Error` naming the 504).
 
 ```typescript
 const result = await agent.rpcCall("127.0.0.1:57001", "echo", Buffer.from("hello"), {
@@ -203,7 +205,9 @@ Sends a reply to an in-flight RPC request.
 
 #### `scatterGather(targets, method, payload?, options?) → Promise<Array<{sender, result}>>`
 
-Fan-out RPC to multiple targets; waits for at least `minOk` replies.
+Fan-out RPC to multiple targets; waits for at least `minOk` replies, and throws `TimeoutError` when
+fewer arrive. **Fixed in 0.2.1:** every call before it was refused with 400 `missing method` — the
+SDK sent the method under `kind`, which the gateway does not read.
 
 ```typescript
 const replies = await agent.scatterGather(
@@ -373,7 +377,8 @@ Tombstones all entries with `hlc < beforeHlc`. `beforeHlc` is sent as an exact J
 
 #### `subscribeLog(stream, options?) → AsyncGenerator<LogEntry>`
 
-Live SSE subscription from `options.sinceHlc`. Before 0.2.0 the cursor was sent under a name the
+Live SSE subscription from `options.sinceHlc`, **inclusive** — the gateway yields entries with
+`hlc >= sinceHlc`, so to resume after an entry you handled pass `entry.hlc + 1n`. Before 0.2.0 the cursor was sent under a name the
 gateway ignores, so every resume replayed the stream from the beginning.
 
 #### `subscribeLogGroup(stream, group) → AsyncGenerator<LogEntry>`
@@ -396,9 +401,28 @@ protected kind — is thrown, never reported as `"timeout"`.
   `emitReliable` and silently replaced it with a 10–30 s default on the other two.
 - **A stream ends when you stop reading it.** `onSignal`, `subscribeLog`, `mailbox`, `rpcServe` and
   the rest read on demand and close the connection when the loop ends (`break`, `return()`, an error).
-  A consumer that falls more than `maxPending` (default 1024) events behind gets `SseOverflowError`
-  rather than a silently truncated stream. Before 0.2.0 the connection and a background reader kept
-  running after the loop ended, buffering every later event.
+  Before 0.2.0 the connection and a background reader kept running after the loop ended, buffering
+  every later event. Reading on demand means a slow consumer applies backpressure to the connection;
+  **upstream, the node holds at most 256 undelivered signals per subscription, and past that it drops
+  the signal** and logs `Signal handler channel full; signal dropped` — the client is not told, so use
+  `subscribeLog` or a mailbox for anything that must not be lost. `SseOverflowError` (exported, with
+  `sseStream`) bounds only the events parsed from a single network read (`maxPending`, default 1024,
+  when you call `sseStream` yourself).
+
+### Migrating from 0.1.x
+
+| Verb | 0.1.x | 0.2.x |
+|---|---|---|
+| `get(key)` | threw for an absent key | `null` for an absent key |
+| `resolveCapability` | the `{ providers }` envelope | the providers array |
+| `emit` | `undefined` | the gateway's `ok` (`boolean`) |
+| `emitReliable` | `undefined` | `"acknowledged"` / `"timeout"`; a refusal throws |
+| `scanLog` / `subscribeLog` | bounds and resume cursor ignored | `fromHlc`/`toHlc`, `sinceHlc` honoured |
+| HLCs, nonces, lock tokens | `number` (rounded above 2⁵³) | `bigint`, exact |
+| timeouts | fractions refused or replaced by a default | whole seconds, rounded up |
+| `scatterGather` | refused 400 by every gateway | works (0.2.1) |
+| `RpcRequest.kind` from `rpcServe` | `undefined` | the kind (0.2.1) |
+| an RPC or scatter timeout | a plain `Error` naming 504 | an error named `TimeoutError` (0.2.1) |
 
 ### Federated domains
 
