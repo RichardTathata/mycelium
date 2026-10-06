@@ -163,7 +163,10 @@ class ReasonClient:
         """
         Fetch a blob by its content address (local-then-mesh on the Rust side).
 
-        Returns the bytes, or ``None`` if no node holds the blob (404).
+        Returns the bytes, or ``None`` if no node holds the blob (404 ``not_found``). Any other miss
+        raises ``httpx.HTTPStatusError``, whose JSON body's ``error`` says why (``mycelium-reason`` 0.6.3):
+        503 ``unavailable`` — a holder could not be reached, retry; 502 ``corrupt`` — every holder that
+        answered served bytes failing the content address, which retrying will not fix.
         """
         async with self._pool.asy() as c:
             resp = await c.get(f"/gateway/reason/blob/{blob_id}")

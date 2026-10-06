@@ -88,17 +88,22 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
       try:
           result = graph.invoke(None, config)    # or graph.get_state(config)
           break
-      except IncompleteCheckpoint as e:          # e.missing: the blob ids not fetchable yet
+      except IncompleteCheckpoint as e:          # e.missing: the blob ids; e.reasons: why each
+          if not e.retriable:                    # refused or corrupt: waiting will not fix it
+              raise
           time.sleep(0.25)
   else:
       raise RuntimeError("checkpoint still incomplete — see below")
   ```
 
-  A checkpoint that stays incomplete past your bound means no reachable `reason`/`blob-cache`
-  provider can serve the blobs in `e.missing` — escalate; do not start the thread fresh. Today a
-  blob that is lost everywhere, or that fails verification at every provider, raises the same
-  retriable error as one that has not arrived yet (operations: `docs/operations/companions.md`
-  § mycelium-reason).
+  **Why each blob is missing** is `e.reasons[blob_id]` (0.2.1, with `mycelium-reason` 0.6.3):
+  `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached, or
+  the gateway failed; `"unauthorized"` — the gateway refused the read (a token or scope problem);
+  `"corrupt"` — every holder that answered served bytes that fail the content address. `e.retriable`
+  is true only when every reason is `not_found` or `unavailable`, so the loop above should re-raise
+  on `not e.retriable` rather than wait. A checkpoint that stays incomplete past your bound with
+  only transient reasons means no reachable `reason`/`blob-cache` provider holds it — escalate; do
+  not start the thread fresh (operations: `docs/operations/companions.md` § mycelium-reason).
 - **`put()` returns a rung-1 receipt** — the index row was *applied* to the store of
   the node you are talking to (`_kv_set` → `POST /gateway/kv`). It does **not** say
   the row crossed that node's persistence barrier, and it says nothing about any

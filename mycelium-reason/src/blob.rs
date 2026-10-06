@@ -180,6 +180,40 @@ pub fn spawn_blob_server(agent: &Arc<GossipAgent>, store: Arc<FsBlobStore>) -> B
 
 // ── Mesh fetching ────────────────────────────────────────────────────────────
 
+/// Why [`MeshBlobStore::fetch`] did not return a blob.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobMiss {
+    /// No provider holds it — every one answered *miss*, or there is none. Transient while blobs propagate.
+    NotFound,
+    /// At least one provider could not be reached (timeout or transport error) and none served it. Transient.
+    Unavailable,
+    /// At least one provider served bytes that fail the content address, and none served the real ones.
+    /// Not transient: damage or forgery, which waiting does not undo.
+    Corrupt,
+}
+
+impl BlobMiss {
+    fn classify(corrupt: usize, unreachable: usize) -> Self {
+        if corrupt > 0 {
+            Self::Corrupt
+        } else if unreachable > 0 {
+            Self::Unavailable
+        } else {
+            Self::NotFound
+        }
+    }
+
+    /// The wire name the gateway route answers with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Unavailable => "unavailable",
+            Self::Corrupt => "corrupt",
+        }
+    }
+}
+
 /// Local-first, mesh-fallback blob store: `get` serves a local hit, else asks each
 /// `reason/blob-cache` provider in turn, verifies the reply against the content
 /// address, and write-back caches it locally.
@@ -213,14 +247,26 @@ impl MeshBlobStore {
     /// whose empty reply means "miss". Serializers do mint it (a typed `None` payload
     /// serializes to zero bytes), so this is a load-bearing case.
     pub async fn get(&self, id: &BlobId) -> Option<Bytes> {
+        self.fetch(id).await.ok()
+    }
+
+    /// [`get`](Self::get), saying **why** a blob is not returned (realignment repairs S5: *"absence,
+    /// temporary unavailability, authorization refusal and corrupt content stay distinguishable"*).
+    ///
+    /// Corrupt outranks unavailable outranks not-found: a provider serving bytes that fail the content
+    /// address is evidence of damage or forgery, which retrying elsewhere later will not undo; an
+    /// unreachable provider may hold it; only when every provider answered *miss* (or there is none) is
+    /// the blob simply not here yet.
+    pub async fn fetch(&self, id: &BlobId) -> Result<Bytes, BlobMiss> {
         if *id == BlobId::of(&[]) {
-            return Some(Bytes::new());
+            return Ok(Bytes::new());
         }
         if let Some(bytes) = self.local.get(id) {
-            return Some(bytes);
+            return Ok(bytes);
         }
         let providers = self.agent.capabilities().resolve(&CapFilter::new(BLOB_CAP_NS, BLOB_CAP_NAME));
         let me = self.agent.node_id().clone();
+        let (mut corrupt, mut unreachable) = (0usize, 0usize);
         for (node, _) in providers {
             if node == me {
                 continue; // self is the local tier, already missed
@@ -235,15 +281,17 @@ impl MeshBlobStore {
                     if let Err(e) = self.local.put(&bytes) {
                         warn!(id = %id, error = %e, "write-back cache of mesh blob failed");
                     }
-                    return Some(bytes);
+                    return Ok(bytes);
                 }
                 Ok(bytes) if !bytes.is_empty() => {
+                    corrupt += 1;
                     warn!(id = %id, provider = %node, "mesh blob failed content verification — trying next provider");
                 }
-                _ => {} // miss or RPC error → next provider
+                Ok(_) => {}                // the provider answered: it does not hold it
+                Err(_) => unreachable += 1, // timeout or transport error: it may
             }
         }
-        None
+        Err(BlobMiss::classify(corrupt, unreachable))
     }
 }
 
@@ -285,6 +333,20 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         // The exact ceiling is accepted.
         assert!(s.put(&vec![0u8; MAX_BLOB_BYTES]).is_ok());
+    }
+
+    /// S5: why a blob is missing, and which reason wins when providers disagree — corrupt outranks
+    /// unreachable outranks a plain miss.
+    #[test]
+    fn a_miss_is_classified_by_its_worst_evidence() {
+        assert_eq!(BlobMiss::classify(0, 0), BlobMiss::NotFound, "every provider answered miss, or there is none");
+        assert_eq!(BlobMiss::classify(0, 2), BlobMiss::Unavailable, "a provider that could not be reached may hold it");
+        assert_eq!(BlobMiss::classify(1, 0), BlobMiss::Corrupt);
+        assert_eq!(BlobMiss::classify(1, 3), BlobMiss::Corrupt, "bytes failing the address outrank an unreachable peer");
+        assert_eq!(
+            [BlobMiss::NotFound, BlobMiss::Unavailable, BlobMiss::Corrupt].map(BlobMiss::as_str),
+            ["not_found", "unavailable", "corrupt"]
+        );
     }
 
     #[test]

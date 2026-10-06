@@ -468,3 +468,51 @@ async fn probe_facade_hostile_inputs_never_5xx_and_node_stays_serviceable() {
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// S5's unbuilt half (`docs/plans/realignment-repairs.md`: "absence, temporary unavailability,
+/// authorization refusal and corrupt content stay distinguishable"): a provider that serves bytes
+/// failing content verification is **corrupt**, not absent. The blob tier folded every miss into
+/// one 404, so the checkpointer read a forged or damaged blob as "not arrived yet" and retried
+/// forever. Node B advertises the cache and answers every fetch with the wrong bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blob_only_corrupt_providers_hold_is_reported_corrupt_not_missing() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let store_a = Arc::new(FsBlobStore::open(dir_a.path()).unwrap());
+    let (a, a_port, http_port) = start_gateway_node(store_a, None).await;
+
+    let b_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = b_port;
+    cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", a_port).unwrap()];
+    let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", b_port).unwrap(), cfg));
+    b.start().await.unwrap();
+    let _cap = b.capabilities().advertise_capability(
+        mycelium::Capability::new("reason", "blob-cache"),
+        Duration::from_secs(30),
+    );
+    let mut rx = b.service().rpc_rx(mycelium_reason::BLOB_FETCH_KIND);
+    let server = Arc::clone(&b);
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            server.service().rpc_respond(&req, b"these are not the bytes you asked for".to_vec());
+        }
+    });
+    // Structural wait: A sees B as a blob-cache provider.
+    let filter = mycelium::CapFilter::new("reason", "blob-cache");
+    for _ in 0..200 {
+        if a.capabilities().resolve(&filter).iter().any(|(n, _)| n == b.node_id()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let id = mycelium_reason::BlobId::of(b"the real payload");
+    let got = reqwest::get(format!("http://127.0.0.1:{http_port}/gateway/reason/blob/{id}")).await.unwrap();
+    let status = got.status().as_u16();
+    let body: serde_json::Value = got.json().await.unwrap_or_default();
+    assert_eq!(status, 502, "corrupt content is not absence: {body}");
+    assert_eq!(body["error"], "corrupt");
+
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

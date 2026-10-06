@@ -38,6 +38,8 @@ class FakeGateway:
     def __init__(self) -> None:
         self.kv: dict[str, bytes] = {}
         self.blobs: dict[str, bytes] = {}
+        # A status the blob route answers for an id instead of serving it (S5's four reasons).
+        self.blob_status: dict[str, int] = {}
 
     def handle(self, req: httpx.Request) -> httpx.Response:
         path, q = req.url.path, req.url.params
@@ -60,7 +62,11 @@ class FakeGateway:
             self.blobs[blob_id] = req.content
             return httpx.Response(200, json={"id": blob_id})
         if path.startswith("/gateway/reason/blob/"):
-            blob = self.blobs.get(path.rsplit("/", 1)[1])
+            wanted = path.rsplit("/", 1)[1]
+            if wanted in self.blob_status:
+                code = self.blob_status[wanted]
+                return httpx.Response(code, json={"error": {404: "not_found", 503: "unavailable", 502: "corrupt"}.get(code, "denied")})
+            blob = self.blobs.get(wanted)
             return httpx.Response(404) if blob is None else httpx.Response(200, content=blob)
         return httpx.Response(404)
 
@@ -151,3 +157,38 @@ def gw_restore_and_reread(gw, saver, cfg, missing, value):
     gw.blobs[missing] = data
     tup = saver.get_tuple(cfg)
     assert [w[2] for w in tup.pending_writes] == [value]
+
+
+# ── S5's unbuilt half: why a blob is missing stays distinguishable (doc-coverage run 20) ──────────
+# The plan promised "absence, temporary unavailability, authorization refusal and corrupt content stay
+# distinguishable in the error". The saver read 404 as missing and raised a bare HTTP error for any
+# other status, so a corrupt or refused blob was either indistinguishable from a slow one or escaped as
+# an unrelated exception.
+
+@pytest.mark.parametrize("status,reason,retriable", [
+    (404, "not_found", True),
+    (503, "unavailable", True),
+    (502, "corrupt", False),
+    (401, "unauthorized", False),
+    (403, "unauthorized", False),
+])
+def test_why_a_blob_is_missing_is_named_and_decides_retriable(world, status, reason, retriable):
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, f"t-why-{status}")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = status
+    with pytest.raises(IncompleteCheckpoint) as e:
+        saver.get_tuple(cfg)
+    assert e.value.reasons[blob] == reason
+    assert e.value.retriable is retriable
+
+
+async def test_the_async_loader_names_the_reason_too(world):
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, "t-why-async")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = 502
+    with pytest.raises(IncompleteCheckpoint) as e:
+        await saver.aget_tuple(cfg)
+    assert e.value.reasons[blob] == "corrupt"
+    assert e.value.retriable is False

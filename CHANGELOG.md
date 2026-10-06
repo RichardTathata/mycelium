@@ -21,6 +21,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files ran in no step; they run now. The PR template, `RELEASING.md` § 5b and `/adversarial-review` carry
   the rules.
 
+### Fixed
+- **Why a checkpoint blob is missing stays distinguishable** (`docs/plans/realignment-repairs.md` S5 — the half
+  2.24.0 did not build: *"absence, temporary unavailability, authorization refusal and corrupt content stay
+  distinguishable in the error"*; doc-coverage run 20, code gap 2). `mycelium-reason` 0.6.3: the blob tier's new
+  `MeshBlobStore::fetch` returns a `BlobMiss` — `NotFound`, `Unavailable` (a provider unreachable), `Corrupt`
+  (every provider that answered served bytes failing the content address) — and `GET /gateway/reason/blob/{id}`
+  answers 404 / 503 / 502 for them; it answered 404 for all three. `langgraph-checkpoint-mycelium` 0.2.1:
+  `IncompleteCheckpoint.reasons` names each missing blob's reason (adding `unauthorized` for a 401/403, which
+  escaped as a raw HTTP error), and `retriable` is false for `corrupt` and `unauthorized` — before, a forged or
+  damaged blob raised the same retriable error forever. The example rungs' convergence polls re-raise a
+  non-retriable error. Fail-first: a two-node test where a provider serves the wrong bytes answered `404
+  not_found`; six checkpointer tests (one per status, and the async loader) failed against 0.2.0.
+
 ### Documentation
 - **Doc-coverage run 20** (`docs/analysis/doc-coverage.md`): the realignment repairs' operator and developer
   landings — persistence start refusals with their messages and actions, every `start()` refusal by field, the

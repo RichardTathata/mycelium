@@ -264,7 +264,9 @@ def main() -> int:
         # (0.2.0), which here means *not converged yet* — retry, never "no checkpoint".
         try:
             head_b = saver_b.get_tuple(config)
-        except IncompleteCheckpoint:
+        except IncompleteCheckpoint as e:
+            if not e.retriable:   # a refused read or a corrupt blob: waiting will not fix it (0.2.1)
+                raise
             head_b = None
         if head_b is not None and head_b.checkpoint["id"] == expected_id:
             break

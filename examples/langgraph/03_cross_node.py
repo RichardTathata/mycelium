@@ -93,7 +93,9 @@ def main() -> int:
             # or as one with fewer pending writes. The pending-writes count stays as a check.
             try:
                 head_b = saver_b.get_tuple(config)
-            except IncompleteCheckpoint:
+            except IncompleteCheckpoint as e:
+                if not e.retriable:   # a refused read or a corrupt blob: waiting will not fix it (0.2.1)
+                    raise
                 head_b = None
             if (
                 head_b is not None

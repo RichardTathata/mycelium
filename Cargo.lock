@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "mycelium-reason"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
