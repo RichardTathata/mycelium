@@ -14,9 +14,12 @@
 //! let locks = agent.consensus().locks();
 //!
 //! // Scoped critical section — acquire, run, release (the recommended form):
-//! locks.with_lock("shard-7", Duration::from_secs(30), Duration::from_secs(10), |guard| async move {
-//!     let _fence = guard.token; // stamp resource writes with this (see the fencing-token note)
-//!     // … exclusive work; the lock is released when this returns (or on panic/error) …
+//! locks.with_lock("shard-7", Duration::from_secs(30), Duration::from_secs(10), |guard| {
+//!     let fence = guard.token; // stamp resource writes with this (see the fencing-token note)
+//!     async move {
+//!         let _ = fence;
+//!         // … exclusive work; the lock is released when this returns (or on panic/error) …
+//!     }
 //! }).await?;
 //! # Ok(()) }
 //! ```

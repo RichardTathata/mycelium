@@ -32,8 +32,8 @@ an auditor enumerated surfaces from the code instead of the description:
    its promises and the code or test that delivers it. A promise not delivered is written as *not built* in
    the row, never left implied. The check is made by an agent or person who did not write the PR.
 3. **CI collects tests by discovery, not by list.** A test runner is pointed at a directory, never at named
-   files; a test that needs a live node marks itself to skip when no node is configured. A new test file runs
-   the day it lands.
+   files; a test that needs a live node lives in a `live/` directory and skips when no node is configured. A new
+   test file runs the day it lands — and `check-test-inventory.py` proves every existing one does.
 4. **Independent adversarial review after each PR.** Before merge, an agent other than the author — with no
    access to the author's reasoning, given only the diff and the repository — enumerates the surfaces the
    change touches and tries to break them: siblings, other doors, the plan row's promises, literal execution of
@@ -45,12 +45,20 @@ an auditor enumerated surfaces from the code instead of the description:
 - `CLAUDE.md` § Verification policy — every session reads it.
 - `.github/pull_request_template.md` — the enumeration, the plan-row evidence and the review link are fields.
 - `RELEASING.md` § 5b — no release while a delivery row marked merged lacks its evidence.
-- `scripts/check-test-discovery.sh` (in `make check` and CI) — fails if a workflow names a test file or test
-  binary without a `# discovery-exception: <reason>` on the line above (rule 3 made mechanical). Its first run
-  flagged four; one was replaced by discovery, three carry their reason.
-- `.github/workflows/ci.yml` — Python runs `pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests`; the live
-  gateway suite skips itself without `MYCELIUM_TEST_HOST`; root integration tests run as `--test '*'`. The switch
-  ran eight tests no CI job had ever run (five Python files, three Rust integration tests) — all passed.
+- `scripts/check-test-inventory.py` (in `make check` and CI) — rule 3 checked **positively**: it inventories every
+  test target (each crate's integration tests with the features each needs, bin unit tests, doctests, Python and
+  TypeScript test files, fuzz targets) and fails unless each maps to a CI step that runs it with those features,
+  or `scripts/test-inventory-exceptions.txt` gives a reason. It replaced a gate that refused *named* test files:
+  this PR's own adversarial review bypassed that one fourteen ways and showed it could not see the failure that
+  had actually happened — a feature-gated test no step enabled. Its first run found five uncovered targets:
+  `mycelium-wasm-host`'s `gateway` and `rule_catalogue`, the skillrunner binary's unit tests, and the root and
+  co-op crates' doctests.
+- **Live suites live in a directory** (`mycelium-py/tests/live`, `mycelium-ts/tests/live`): the directory run collects
+  them and they skip without a node; the live step runs the directory with `MYCELIUM_LIVE_REQUIRED=1`, which fails
+  rather than skips when the node variable is missing — so a new live file runs the day it lands.
+- `.github/workflows/ci.yml` — Python runs `pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests`; root
+  integration tests run as `--test '*'`. The switch ran eight tests no CI job had ever run (five Python files,
+  three Rust integration tests) — all passed. Replacing the named lines removed seven from `ci.yml`.
 - `.claude/commands/adversarial-review.md` — rule 4's procedure.
 
 ## What it does not promise

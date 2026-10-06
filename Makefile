@@ -176,7 +176,7 @@ check:
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	cargo build --examples --features tls,metrics,a2a,llm       # CI builds these; `--lib --tests` does not
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
-	./scripts/check-test-discovery.sh                           # CI discovers tests; it never names a test file (verification policy rule 3)
+	python3 scripts/check-test-inventory.py                     # every test target runs in some CI step, with its features (verification policy rule 3)
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 	./scripts/check-positioning.sh                              # shared proposition, audience routes, resources and capability coverage
@@ -196,6 +196,12 @@ gate-knowledge:
 check-full: check
 	cargo test  --lib --features tls,metrics,a2a,llm
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
+	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)
+	cargo test  --features tls,a2a --bins                # the skillrunner binary's unit tests
+	cargo test  --features tls,a2a --doc                 # the crate's doctests (cargo will not mix --doc with other targets)
+	cargo test  -p mycelium-wasm-host --features stem,gateway --test '*'   # rule_catalogue + signed-entry gateway tests
+	cargo test  -p mycelium-effects --features tuple-space,envelope --test '*'
+	python3 -m pytest -q langgraph-checkpoint-mycelium/tests mycelium-py/tests   # the live suites skip without a node
 
 	cargo test  --lib --no-default-features --features gateway
 	cargo test  -p mycelium-gateway-free-tests   # the one test build of `mycelium` without `gateway` (R8)

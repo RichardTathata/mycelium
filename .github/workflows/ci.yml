@@ -80,6 +80,11 @@ jobs:
       # every root integration test, by discovery (verification policy rule 3). A file gated on a
       # feature this line lacks (`decision_trace_replay`, `sim`) compiles empty here and runs below.
       - run: cargo test --features tls,a2a --test '*'
+      # The skillrunner binary's unit tests and the crate's doctests ran in no step until 2026-10-06 — one
+      # doctest (`lock_service`'s `with_lock`) had stopped compiling. `check-test-inventory.py` found both.
+      - run: cargo test --features tls,a2a --bins
+      - run: cargo test --features tls,a2a --doc
+      - run: cargo test -p mycelium-coop-examples --doc
       # `tls` as well as `fuzz-internals`: two of the trust-edge parsers (the presented
       # credential, the catalogue reply) live behind it, so without it they are not
       # compiled and the mini-fuzz would silently cover two of four.
@@ -159,8 +164,10 @@ jobs:
       # The static forbidden-call check (item 6 PR 3, D12). Runs in the same job as clippy
       # because it is the same kind of claim: the seams cannot erode while PR 4-7 are built.
       - run: ./scripts/check-sim-seams.sh
-      # Verification policy rule 3: CI discovers tests rather than naming files (CLAUDE.md § Verification policy).
-      - run: ./scripts/check-test-discovery.sh
+      # Verification policy rule 3, checked positively: every test target in the repository — each crate's
+      # integration tests with the features they need, bin unit tests, doctests, Python and TypeScript files,
+      # fuzz targets — maps to a CI step that runs it (CLAUDE.md § Verification policy).
+      - run: python3 scripts/check-test-inventory.py
       # Closure plan C11: no new unclassified read of Hlc::current(), which stands still on a quiet
       # node and fails a deadline check open.
       - run: ./scripts/check-hlc-current.sh
@@ -206,7 +213,7 @@ jobs:
       # The claims `what-is-proven.md` rests on these two for: a recording carries its decisions into the
       # bundle and explains (the comparison's recording half), and the traced provisioner makes no extra
       # draw under the replay seams (draw-count equivalence) — hand-run only until doc-coverage run 19.
-      # discovery-exception: `sim` turns the replay seams on, and no other test runs under it; this file is the only one gated on it
+      # Its own step: `sim` turns the replay seams on, and no other root integration test runs under it.
       - run: cargo test --features sim,test-util --test decision_trace_replay
       - run: cargo test -p mycelium-wasm-host --features stem,sim --lib the_trace_makes_no_extra_draw_under_the_replay_seams
       # The offline wire-check over the checked-in fixtures (design-time-tooling.md W2): the co-op
@@ -261,6 +268,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-retest.sh -p mycelium-wasm-host
+      # The integration tests gated on `stem` and `gateway` — `rule_catalogue` (the rule catalogue's gate,
+      # claimed "gated in CI" since v2.20.0) and `gateway` (signed entries across two nodes) — ran in no step
+      # until 2026-10-06: no wasm-host step enabled either feature without a name filter.
+      - run: ./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway --test '*'
       # The S3-compatible fixture: MinIO in a container, one bucket made with the runner's AWS CLI.
       - name: Start an S3-compatible store with the test bucket
         run: |
@@ -543,8 +554,9 @@ jobs:
             if [ "$i" -eq 60 ]; then echo "the node never published its caller-context marker"; cat "$RUNNER_TEMP/py-node.log"; exit 1; fi
             sleep 1
           done
-          # discovery-exception: the live gateway suite needs its own plain node; the directory run above collects it and it skips there
-          MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest mycelium-py/tests/test_gateway.py -v
+          # The live directory, not a file: a new live suite runs the day it lands. MYCELIUM_LIVE_REQUIRED
+          # makes a missing node a failure rather than an all-skipped green run.
+          MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest mycelium-py/tests/live -v
       - name: Stop reason nodes
         if: always()
         run: |
@@ -674,9 +686,11 @@ jobs:
             sleep 1
           done
       - name: Live suite
-        # discovery-exception: the live suite needs a node; `npx jest` above collects every file and this one skips there
-        run: npx jest tests/gateway.test.ts
+        # The live directory, not a file (verification policy rule 3); MYCELIUM_LIVE_REQUIRED fails the
+        # step if the node variable is missing rather than letting every live test skip green.
+        run: npx jest tests/live
         env:
+          MYCELIUM_LIVE_REQUIRED: "1"
           MYCELIUM_TEST_HOST: 127.0.0.1
           MYCELIUM_TEST_PORT: 9311
       - name: Stop the node
