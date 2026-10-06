@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+- **Doc-coverage run 20** (`docs/analysis/doc-coverage.md`): the realignment repairs' operator and developer
+  landings — persistence start refusals with their messages and actions, every `start()` refusal by field, the
+  live timing tunables and their route, the object-store endpoint rule, the discovered-JWKS case in SSO, the
+  SDK quick starts that subscribed after emitting, a configuration-ownership row; six code gaps recorded.
+- **Correction to 2.24.0's Documentation entry:** it said the guarantee, domain and control profiles were told
+  apart. What shipped named the guarantee (startup), control and consensus profiles; the **domain profile**
+  joins the table in run 20, which now names four things called *profile*.
 ### Fixed
 - **`mycelium-ts` 0.2.1 — two verbs that did not match their gateway handlers, found by sweeping every
   SDK verb's request and response against its handler.** `scatterGather` sent the method under `kind`;

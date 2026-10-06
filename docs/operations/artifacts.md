@@ -277,12 +277,23 @@ node-local staging directory, and served to the blob runtime from disk; peak mem
 whatever the size, and a store that ignores `Range` gets its `200` dropped unread. Implement
 `BlobFetcher` (and `RangedBlobFetcher` for large artifacts) for a vendor SDK, or use the shipped
 **object-store adapter** (`ObjectStoreFetcher`, feature `object_store`): one URL selects the store —
-`s3://bucket/prefix`, `gs://bucket/prefix`, `az://…`, `https://host/prefix`, `file:///dir` — and the
+`s3://bucket/prefix`, `gs://bucket/prefix`, `az://…` (only with an empty allow-list — below),
+`https://host/prefix`, `file:///dir` — and the
 credentials are the node's cloud identity from the environment (an instance or task role, or
 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`; `AWS_ENDPOINT` + `AWS_ALLOW_HTTP=true` for an
 S3-compatible store), never a file this project defines. It is ranged, so a model
-stages to disk in pieces; every request is gated by the node's egress policy on the store URL
-before a client is built. **The manifest lives in the store too**, at `<prefix>/manifest`: a
+stages to disk in pieces; under a non-empty `egress.allow_hosts` the store is gated on the **endpoint
+host it dials** — not the bucket name — before a client is built (2.23.0, `dial_hosts`):
+
+| Store URL | The host to allow |
+|---|---|
+| `s3://bucket/…` | `AWS_ENDPOINT_URL_S3`'s host, else `AWS_ENDPOINT`'s; otherwise `s3.<region>.amazonaws.com`, the region from `AWS_REGION` / `AWS_DEFAULT_REGION`, default **`us-east-1`** — or `<bucket>.s3.<region>.amazonaws.com` under `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=true`. `.amazonaws.com` (leading dot) covers both. S3 Express is refused |
+| `gs://bucket/…` | `storage.googleapis.com`, or `GOOGLE_BASE_URL`'s host |
+| `https://host/…` | the URL's host, **and** any endpoint variable above that is set |
+| `az://…` | refused under any non-empty allow-list — its endpoint is not modelled |
+
+A store that does not pass is refused with `egress policy denies <url>: the store dials <host>`; an
+endpoint that cannot be derived, with `egress policy cannot gate <url>: …`. **The manifest lives in the store too**, at `<prefix>/manifest`: a
 librarian fronting the store reads it from there (`LibrarianConfig::manifest_source`), and
 `mycelium-artifact publish --library s3://bucket/prefix` writes blob and manifest through the same
 adapter, so nothing has to be synced down. Without a `manifest_source` the librarian reads the
@@ -292,7 +303,7 @@ in front of a remote store needs the manifest file synced down to its node (a CI
 cron `curl`, or a mounted volume) while the bytes stay remote — the librarian mirrors what its
 manifest names (`PrefetchingSource::prefetch_all`). A stem's byte sources are a library directory
 (`--library <dir>`), **an object store by URL** (`--library s3://bucket/prefix`, `StemSource::Store` —
-zero-gaps Z1: credentials from the environment, the URL gated by the node's egress policy, every blob
+zero-gaps Z1: credentials from the environment, the endpoint gated by the node's egress policy (table above), every blob
 staged by ranged pull; a librarian over a store takes `--manifest-source <url>` and mirrors what the
 manifest names to its stage, so peers without credentials pull from it) or a mesh pull from a
 librarian (`StemSource::Library`, `StemSource::Mesh`); the mesh
@@ -311,7 +322,8 @@ The stem Docker image (`docker/Dockerfile.stem`) builds the tool with `stem,gate
 **without** `object_store`, so its `mycelium-artifact` refuses an `s3://` library with *a store URL
 needs a build with the object_store feature*. The tool's store requests pass the egress policy read
 from `MYCELIUM_EGRESS_ALLOW_HOSTS` — a comma-separated host allowlist, where an entry starting with
-`.` matches that domain and its subdomains. Unset (or empty) allows every host, as `EgressPolicy`'s
+`.` matches that domain and its subdomains. List the store's **endpoint** host, as in the table above —
+a bucket name on the list admits nothing. Unset (or empty) allows every host, as `EgressPolicy`'s
 default does.
 
 ### 3 · How another node installs it

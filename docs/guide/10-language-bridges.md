@@ -97,12 +97,15 @@ async for req in agent.rpc_serve("process"):
     agent.rpc_respond(req, json.dumps(response).encode())
 
 # ── Signals ───────────────────────────────────────────────────────────────────
+# Subscribe before emitting: a signal emitted before the stream opens is not delivered to it.
+signals = agent.on_signal("task.ready")
+first = asyncio.create_task(anext(signals))   # opens the stream
+await asyncio.sleep(0.1)                      # let the node register it
 agent.emit("task.ready", b"payload", scope="cluster")
 agent.emit("task.ready", b"payload", scope="group:workers")   # scope is a string
 agent.emit("task.ready", b"payload", scope="node:127.0.0.1:7000")
-
-async for sig in agent.on_signal("task.ready"):
-    print(sig.sender, sig.payload)
+sig = await first
+print(sig.sender, sig.payload)
 
 # ── Mailbox (reliable delivery) ───────────────────────────────────────────────
 agent.deliver_event(target_node_id, "task.result", b"done")
@@ -126,10 +129,10 @@ from mycelium import A2aClient, PromptSkillClient
 
 a2a    = A2aClient("http://localhost:9050")
 skills = a2a.fetch_card()   # list discovered skills
-result = a2a.send("llm/orchestrator", {"topic": "gossip protocols"}, timeout_secs=120)
+result = a2a.send("llm/orchestrator", "gossip protocols", timeout_secs=120)   # message is a string
 
-ps = PromptSkillClient("http://localhost:8300")
-reply = ps.call("demo/summarizer", {"text": "..."})
+ps = PromptSkillClient("127.0.0.1", 8300)                # host, then port
+reply = await ps.call("demo", "summarizer", "...")      # async: (ns, name, input)
 ```
 
 See [`mycelium-py/README.md`](../../mycelium-py/README.md) for the full API
@@ -184,12 +187,15 @@ for await (const req of agent.rpcServe("process")) {
 }
 
 // ── Signals ───────────────────────────────────────────────────────────────────
+// Subscribe before emitting: a signal emitted before the stream opens is not delivered to it.
+const sub = agent.onSignal("task.ready");
+const next = sub.next();                         // opens the stream
+await new Promise((r) => setTimeout(r, 100));    // let the node register it
 await agent.emit("task.ready", Buffer.from("payload"), { scope: "cluster" });
 await agent.emit("task.ready", Buffer.from("payload"), { scope: "group:workers" });
-for await (const sig of agent.onSignal("task.ready")) {
-    console.log(sig.sender, sig.payload.toString());
-    break;
-}
+const { value: sig } = await next;
+console.log(sig!.sender, sig!.payload.toString());
+await sub.return(undefined);
 
 // ── Consensus overlay ─────────────────────────────────────────────────────────
 await agent.consistentSet("config/flag", Buffer.from("true")); // quorum = peer majority
@@ -206,12 +212,12 @@ const entries = await agent.scanLog("events", { fromHlc: 0n });   // [fromHlc, t
 // ── A2A / Prompt Skills ───────────────────────────────────────────────────────
 import { A2aClient, PromptSkillClient } from "mycelium-ts";
 
-const a2a    = new A2aClient("http://localhost:9050");
+const a2a    = new A2aClient("http://localhost:9050", { timeoutMs: 120_000 });
 const skills = await a2a.fetchCard();
-const result = await a2a.send("llm/orchestrator", { topic: "gossip protocols" }, { timeoutSecs: 120 });
+const result = await a2a.send("llm/orchestrator", "gossip protocols");   // message is a string
 
-const ps    = new PromptSkillClient("http://localhost:8300");
-const reply = await ps.call("demo/summarizer", { text: "..." });
+const ps      = new PromptSkillClient("127.0.0.1", 8300);                // host, then port
+const summary = await ps.call("demo", "summarizer", "...");               // (ns, name, input)
 
 // ── Clean up ──────────────────────────────────────────────────────────────────
 await handle.drop();
@@ -331,8 +337,11 @@ shapes; the SDK READMEs carry the receipt narrative, this table carries the wire
 | `POST /gateway/kv` | `{"key", "value_b64"}` → `{"ok": true, "operation_id", "local_durability", "local_durability_error"?}` | the write's **receipt**: rung 1, and rung 2 as `local_durability` (`on_disk` · `buffered` · `not_configured` · `failed`, the SDKs' vocabulary) — added 2026-09-26; before it the route answered a bare `{"ok": true}`; a missing `value_b64` is **400 and no mutation** since 2.14.0; `""` writes an empty value |
 | `POST /gateway/kv/quorum` | `{"key", "value_b64", "min_acks", "timeout_secs"}` → `{"ok", "acks_received"}` or `{"ok": false, "error": "timeout", "acks_received", "unknown_peers"}` | rung 3: `unknown_peers` is *silence*, not refusal — `DeliveryUnknown` in the receipt vocabulary |
 | consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why |
+| `GET /gateway/signal/sse/{kind}` | SSE; event name = the kind; data `{"kind", "sender", "payload_b64", "nonce"}` (`kind` in the data since 2.24.0; `nonce` is a u64 — parse it losslessly) | delivered to **this** subscriber. The node holds at most 256 undelivered signals per subscription and drops past that, logging `Signal handler channel full; signal dropped` — signals are best-effort |
+| `GET /signals/{kind}` | the same event; data `{"kind", "sender", "payload"}` — base64 under `payload`, no `nonce` | as above |
 
-Scopes: `kv:read` for the GET, `kv:write` for both POSTs ([rbac.md §2](../operations/rbac.md)).
+Scopes: `kv:read` for the GET, `kv:write` for both POSTs; `mesh:read` for the two signal streams
+([rbac.md §2](../operations/rbac.md)).
 
 ## Authenticating to a token-protected gateway
 

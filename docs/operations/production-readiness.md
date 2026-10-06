@@ -132,6 +132,13 @@ this page is the index + the gate.
 
 ## 3 · Persistence & restart
 
+- ☐ **One agent per persistence directory, one owner per journal** — each node writes under its own
+  `{base_path}/{node_id}`, and each node-local journal (`DurableEpochs`, the evidence journal, the rights
+  ledger) has its own path. A second owner is refused at start or open by name (2.23.0); a node that
+  cannot create its directory refuses to start (2.24.0). On Kubernetes: a per-pod PVC, never a shared
+  read-write-many volume. The messages and what to do: [deployment.md § Persistence start
+  refusals](deployment.md#persistence-modes).
+
 - ☐ **Persistence enabled** with a `sync_mode` matched to your durability need; consensus committed
   slots are always fsynced regardless — check `ConsensusResult::Committed { persisted }` (gateway
   `"persisted"`): `false` means committed cluster-wide but not on this node's disk. The strict
@@ -162,7 +169,7 @@ this page is the index + the gate.
 
 ## 4 · Sizing & back-pressure (the scale sweep)
 
-- ☐ **Cluster-size knobs set** — pick the profile for your node count (`max_forwarding_peers`,
+- ☐ **Cluster-size knobs set** — pick the sizing row for your node count (`max_forwarding_peers`,
   `epidemic_extra_peers`, `gossip_shards`, `writer_channel_depth`, intervals). The full sizing tables
   by cluster size (≤20 / 20–100 / 100–1 000 / >1 000) live in
   [tuning.md §Scaling guidelines](tuning.md). Most defaults auto-derive from cluster size (WS-C).
@@ -196,6 +203,11 @@ this page is the index + the gate.
   `cargo run --example coordination_viz --features metrics`
 
 ## 5a · Coordination integrity
+
+- ☐ **Control profile chosen** — the governors default to `Legacy` (they act as before the contracts
+  axis); step up `Observe` → `EnforceLocal` → `EnforceAllocated` on evidence, per
+  [control-profiles.md](control-profiles.md). This is not the guarantee profile of § 2 — that table
+  names the four things called *profile*.
 
 - ☐ **Groups are joined before they are elected in** — an election over a roster this node cannot see
   is **refused** (`electorate_unavailable`), not decided alone. Join via `mesh().join_group(..)` or

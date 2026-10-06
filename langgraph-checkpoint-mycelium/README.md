@@ -77,7 +77,28 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   reads as *no checkpoint* and starts the thread over. Now `get_tuple`, `aget_tuple`,
   `list` and `alist` raise `IncompleteCheckpoint` — retriable, naming the missing blob
   ids — and `None` means only that no checkpoint row exists. Catch it and retry after a
-  short wait; do not treat it as "start fresh".
+  short wait, with a bound; do not treat it as "start fresh". An application meets it from
+  `graph.invoke(…)` / `graph.get_state(…)` on a node that has not converged yet:
+
+  ```python
+  import time
+  from langgraph_checkpoint_mycelium import IncompleteCheckpoint
+
+  for attempt in range(40):                      # ~10 s; size the bound to your gossip interval
+      try:
+          result = graph.invoke(None, config)    # or graph.get_state(config)
+          break
+      except IncompleteCheckpoint as e:          # e.missing: the blob ids not fetchable yet
+          time.sleep(0.25)
+  else:
+      raise RuntimeError("checkpoint still incomplete — see below")
+  ```
+
+  A checkpoint that stays incomplete past your bound means no reachable `reason`/`blob-cache`
+  provider can serve the blobs in `e.missing` — escalate; do not start the thread fresh. Today a
+  blob that is lost everywhere, or that fails verification at every provider, raises the same
+  retriable error as one that has not arrived yet (operations: `docs/operations/companions.md`
+  § mycelium-reason).
 - **`put()` returns a rung-1 receipt** — the index row was *applied* to the store of
   the node you are talking to (`_kv_set` → `POST /gateway/kv`). It does **not** say
   the row crossed that node's persistence barrier, and it says nothing about any

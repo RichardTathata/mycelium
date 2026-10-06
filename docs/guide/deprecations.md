@@ -255,3 +255,42 @@ so `prov.activation` and `prov.probe` record under the install that placed the b
 **Will the compiler tell me?** Yes — the closure's arity is in the trait bound.
 
 **Migration.** Ignore the context: `|entry, path, _ctx| …`. Use it to record: `_ctx.trace.as_ref()`.
+
+## 15. `WalMsg` gained `HoldOwnership`; a second owner and a failed startup snapshot refuse the start (2.23.0)
+
+**What changes.** `mycelium_core::persistence::WalMsg` has a new variant, so an exhaustive `match` on it no
+longer compiles. Behaviour changes with it: `start()` takes a lock on `wal.bin.lock` and refuses a second
+agent on the same `{base_path}/{node_id}`, refuses if the startup snapshot that repairs a torn WAL tail
+fails, and `WalHandle::shutdown` now waits for the writer to exit.
+
+**Will the compiler tell me?** For the `match`, yes. For the refusals, no — they are `InvalidField {
+field: "persistence" }` at `start()`; `docs/operations/deployment.md` § *Persistence start refusals*.
+
+**Migration.** Add a `_` arm. A direct embedder of `replay` + `spawn_wal_writer` takes
+`OwnershipLock::acquire` before replay, hands it to `WalHandle::hold_ownership`, and awaits
+`trigger_snapshot()` before its first append — the two functions' rustdocs say so.
+
+## 16. Outbound clients follow no unchecked redirect (2.23.0)
+
+**What changes.** Every outbound client the substrate builds re-checks each redirect hop against
+`egress.allow_hosts` (at most five, never https → http). `OpenAiBackend::new` follows **no** redirect;
+attach the node's policy to follow allowed ones. An `s3://` / `gs://` library under a non-empty allow-list
+is gated on the **endpoint host it dials**, not the bucket.
+
+**Will the compiler tell me?** No — a redirect that used to be followed now fails at request time.
+
+**Migration.** `OpenAiBackend::new(…).with_egress(agent.egress_policy())` (this one takes a reference);
+`OllamaProbe`, `HttpLibrarySource` and `FederationClient` take the policy by value —
+`.with_egress(agent.egress_policy().clone())`. For object stores list the endpoint
+(`docs/operations/artifacts.md` § *Remote blob stores*).
+
+## 17. The live timing setters return `Result` (2.25.0)
+
+**What changes.** `set_health_check_interval_secs` and `set_reconnect_backoff_secs` return
+`Result<(), GossipError>` and refuse a value above 3600 / 300, changing nothing.
+
+**Will the compiler tell me?** It warns (`unused_must_use`) where a call ignores the result — an error under
+`-D warnings`.
+
+**Migration.** `agent.set_health_check_interval_secs(30)?;` — or `.expect(…)` where the value is a constant
+you know is in range.

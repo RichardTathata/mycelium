@@ -32,13 +32,15 @@ async def main():
         providers = agent.resolve_capability("compute", "gpu")
         print(providers)  # [{"node_id": "...", "ns": "compute", "name": "gpu", "attributes": {...}}]
 
-        # Emit a signal
-        agent.emit("render-job", b"payload", scope="system")
-
-        # Subscribe to signals
-        async for sig in agent.on_signal("render-job"):
-            print(sig.sender, sig.payload)
-            break
+        # Subscribe first: the node registers the subscription when the stream opens, and a
+        # signal emitted before that is not delivered to it.
+        signals = agent.on_signal("render-job")
+        first = asyncio.create_task(anext(signals))   # opens the stream
+        await asyncio.sleep(0.1)                      # let the node register it
+        agent.emit("render-job", b"payload", scope="cluster")
+        sig = await first
+        print(sig.kind, sig.sender, sig.payload)
+        await signals.aclose()
 
 asyncio.run(main())
 ```
@@ -147,7 +149,7 @@ See [guide 10 — Declaring a unit file](../docs/guide/10-language-bridges.md#de
 
 Fires a signal into the mesh.
 
-- `scope`: `"system"` (default), `"group:NAME"`, or `"node:IP:PORT"`
+- `scope`: `"cluster"` (default), `"group:NAME"`, or `"node:IP:PORT"` (`"system"` is a deprecated alias for `"cluster"`)
 - Returns `True` if queued for gossip; `False` if the gossip shard was full (local delivery still occurred).
 
 #### `on_signal(kind) → AsyncIterator[Signal]`
@@ -289,9 +291,9 @@ agent.stats()   # → {"node_id": "...", "store_entries": N, "dropped_frames": N
 
 ### Consistency & Ordering Overlay
 
-Opt-in strong guarantees layered on top of the epidemic substrate. Requires the Mycelium
-node to be started with `MYCELIUM_ROLE=overlay` (or any role that calls
-`start_consensus_listener`).
+Opt-in strong guarantees layered on top of the epidemic substrate. Requires a node built with the
+`consensus` feature — on by default, so the plain `mycelium` binary qualifies (`MYCELIUM_ROLE` is only a
+`three_node_demo` role switch).
 
 #### Receipts — what an acknowledgement proves (and what it does not)
 
@@ -385,7 +387,7 @@ All nodes calling concurrently converge on the same winner.
 
 ```python
 leader = agent.elect_leader("shard-0")
-if leader == agent.node_id:   # node_id property returns this node's id string
+if leader == agent.health()["node_id"]:   # this node's id string
     start_serving()
 ```
 
@@ -509,16 +511,19 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 ## Running the tests
 
-Tests require a live Mycelium node. Start one with the demo binary or a custom config:
+Every test file except `tests/test_gateway.py` needs no node — they mock the transport:
+`pytest tests/ --ignore=tests/test_gateway.py -v`. The live suite, `tests/test_gateway.py`, needs a real
+node and fails without one; the recipe CI uses:
 
 ```sh
-# Start a node on port 8300
-cargo run --example three_node_demo  # or any node with http_port=8300
+cargo build --bin mycelium
+GOSSIP_HTTP_PORT=9312 ./target/debug/mycelium --port 9302 &
+# wait until the node has published its caller-context marker (the gateway is then dispatching)
+until curl -sf "http://127.0.0.1:9312/gateway/kv/keys?prefix=sys/caller-context/" | grep -q caller-context; do sleep 1; done
 
-# Run the gateway tests
 cd mycelium-py
 pip install -e ".[dev]"
-MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 pytest tests/ -v
+MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest tests/test_gateway.py -v
 ```
 
 ## Gateway endpoint reference

@@ -69,10 +69,14 @@ cfg.oidc = Some(mycelium::OidcConfig {
 
 In all cases `audience` is your registered client/application id, and the IdP must
 be reachable from the node for discovery + JWKS fetch. If `egress.allow_hosts` is
-non-empty it must permit the `issuer` and `jwks_uri` hosts, or **the node refuses to
-start** naming them (since 2.20.0, `an_oidc_issuer_the_egress_policy_denies_refuses_the_start`);
-the runtime key refresh is gated the same way. Network-layer egress control must allow
-the same hosts.
+non-empty it must permit the `issuer` and `jwks_uri` hosts. The start-time check covers the
+`issuer` and a `jwks_uri` **you configured** — either off the list and **the node refuses to start**
+naming it (since 2.20.0, `an_oidc_issuer_the_egress_policy_denies_refuses_the_start`). A `jwks_uri`
+taken from discovery is checked only when keys are fetched: off the list, the node starts, logs
+`oidc: the egress policy does not permit the JWKS host; no keys, every token refused`, and answers every
+JWT 401. Google is the common case — issuer `accounts.google.com`, keys at `www.googleapis.com` — so allow
+both, or set `jwks_uri` explicitly. Since 2.23.0 a redirect from either URL is checked against the list
+too. Network-layer egress control must allow the same hosts.
 
 ---
 
@@ -112,6 +116,8 @@ see `src/agent/http.rs::test_gateway_oidc_jwt_maps_groups_to_scopes`.
 | Symptom | Cause | Fix |
 |---|---|---|
 | every JWT → 401 | `issuer`/`audience` mismatch, or JWKS unreachable | match `iss`/`aud` exactly; confirm the node can reach the IdP (egress) |
+| every JWT → 401; log `oidc: the egress policy does not permit the JWKS host` | the discovered `jwks_uri` is on a host the allow-list does not permit | allow that host, or set `jwks_uri` so `start()` checks it |
+| every JWT → 401 after upgrading to 2.23.0; log `egress: the redirect target … is not on the allow-list` | the issuer or JWKS URL redirects to an unlisted host | allow the redirect target, or configure the final URL |
 | valid user → 403 | their groups map to no/insufficient scopes | extend `group_scopes`, or check `group_claim` is the right claim |
 | works then breaks after IdP key rotation | stale JWKS cache | automatic — the verifier refetches on unknown `kid`; if persistent, check JWKS reachability |
 | `groups` claim empty (Entra) | tenant emits group object-IDs or omits groups | switch to app `roles`, or configure group-name emission |

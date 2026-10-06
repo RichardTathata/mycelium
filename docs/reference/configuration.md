@@ -18,7 +18,7 @@ build, will a bad value stop the node or be quietly ignored, can I change it liv
 Conventions:
 - "validate()" = refused by name in `GossipConfig::validate` (called by `start()` at lifecycle.rs:34 AND by `load_from_file`).
 - **Zero-sentinel caveat (Z):** `GossipAgent::new` runs `derive_unset` *before* `start()`'s `validate()` (mod.rs:880), so a `0` in `default_ttl`, `writer_channel_depth`, `max_seen_entries`, `ping_peer_sample_size`, `propagation_window_secs` is **derived, not refused** on the agent path; validate's zero refusal for these fires only via `load_from_file` (which validates before any derive — so a TOML/env `0` meant as "auto" is refused there). `gossip_shards` is rounded with `next_power_of_two()` in new() (mod.rs:883), so `0` becomes `1` and is never refused on the agent path.
-- "profile" = refused at `start()` only under `profile = "secure-single-domain"` via `guarantee::check` (lifecycle.rs:138), naming the unmet guarantee id.
+- "profile" = refused at `start()` only under `profile = "secure-single-domain"` via `guarantee::check` (lifecycle.rs:138), naming the unmet guarantee id. That is the **guarantee profile**; the control profile is set at runtime (`set_control_profile`, `POST /gateway/govern/profile`) and is not a field here, and `domain_profile` is a field of its own — the table of things called *profile* is in [`operations/control-profiles.md`](../operations/control-profiles.md).
 - restart: `GossipConfig` lives in an immutable `Arc` (mod.rs:914); re-reading `ctx.config` does not make a field changeable. The only runtime-changeable fields are the 5 in `HotConfig` (setters `src/agent/introspect.rs:44-78`, also moved by `ClusterTuner` cluster_tuner.rs:78-82 and the `TimingIntent` reconciler timing_governor.rs:73-90).
 - "parse" = serde/TOML (`GossipError::Toml`) or `apply_env_overrides` (`GossipError::Parse` / `InvalidField`).
 
@@ -68,9 +68,9 @@ Conventions:
 | max_clock_drift_ms | core transport/state | — | not refused (0 = bound disabled, documented) | yes | `300_000` = `DEFAULT_MAX_CLOCK_DRIFT_MS` (GOSSIP_MAX_CLOCK_DRIFT_MS) | `Hlc::with_max_drift` at new() mod.rs:926 |
 | locality_path | core transport/state | — | validate() (empty segment, :1590) | yes | `[]` (GOSSIP_LOCALITY_PATH) | advertised once at start lifecycle.rs:729 |
 | topology_policies | control (consensus) | consensus | validate() (Hard needs spread_depth and spread_min_distinct ≥2, :1599-1605) | yes | `{}` (no env) | only reader consensus_handle.rs:259 (module `#[cfg(feature="consensus")]` mod.rs:32); in a no-consensus build accepted, validated, ignored |
-| http_port | gateway | gateway | validate() (0; == bind_port; :1568-1572); start() refuses a bind failure by name `gateway` (lifecycle.rs:384) | yes (bulk advertise port alone: `set_bulk_serving_port` service_handle.rs:135) | `None` (GOSSIP_HTTP_PORT) | **in a build without `gateway` it is silently ignored** — the server block is `#[cfg(feature="gateway")]` (lifecycle.rs:369) and nothing refuses it; it is still copied into BulkTransport (mod.rs:983) and advertised in bulk tickets |
+| http_port | gateway | gateway | validate() (0; == bind_port; :1568-1572); start() refuses a bind failure by name `gateway` (lifecycle.rs:384) | yes (bulk advertise port alone: `set_bulk_serving_port` service_handle.rs:135) | `None` (GOSSIP_HTTP_PORT) | in a build without `gateway`, `start()` refuses it by name (2.25.0, R8; `lifecycle.rs`) — it used to be ignored while still copied into BulkTransport (mod.rs) and advertised in bulk tickets |
 | http_addr | gateway | gateway | validate() (empty / not IP, only when http_port set, :1578-1582); start() re-parse (lifecycle.rs:372) | yes | `"127.0.0.1"` (GOSSIP_HTTP_ADDR) | |
-| gateway_tls | gateway | tls (+gateway) | start(): refused by name without `tls` (lifecycle.rs:104-115); bad cert/key refused at start via `prepare_gateway` → field `gateway` (http.rs:175, lifecycle.rs:384); profile (`gw.tls`) | yes | `None` (no env) | **with `tls` but no `http_port` it is silently ignored** (not refused) |
+| gateway_tls | gateway | tls (+gateway) | start(): refused by name without `tls`, and without `gateway` (2.25.0) (lifecycle.rs); bad cert/key refused at start via `prepare_gateway` → field `gateway` (http.rs:175, lifecycle.rs:384); profile (`gw.tls`) | yes | `None` (no env) | **with `tls` but no `http_port` it is silently ignored** (not refused) |
 | persistence | core transport/state | — | validate() (snapshot_wal_threshold/interval 0, :1614-1620; unwritable base_path **warn only**); start(): ownership lock, unreadable replay (`on_unreadable=refuse`), failed startup snapshot all refused as field `persistence` (lifecycle.rs:206-279); profile (persist.*) | yes | `None` (no env) | **since R7 (#529) an uncreatable data directory refuses `start()` by name**; before it, start() warned and ran in memory while `persist.configured` still read `enforced` |
 | bulk_fetch_timeout_secs | gateway | gateway | not refused (0 accepted → zero reqwest timeout; effect not tested → ?) | yes | `30` (no env) | used only for the reqwest client `#[cfg(feature="gateway")]` (bulk.rs:85, mod.rs:984) |
 | max_concurrent_bulk_handlers | gateway | gateway (bulk_serve) | not refused (0 = unlimited) | **no** — `set_max_concurrent_bulk_handlers` (introspect.rs:55) + ClusterTuner | `64` (GOSSIP_MAX_CONCURRENT_BULK_HANDLERS) | sampled per admission bulk.rs:274 |
@@ -95,7 +95,7 @@ Conventions:
 
 ## What tracing it found
 
-Writing this table down found one defect and two open items, recorded in the plan:
+Writing this table down found three defects, recorded in the plan and all fixed:
 
 - **R7 (fixed, #529):** a persistence directory that could not be created let the node start **in
   memory**, while `persist.configured` — resolved from the configuration alone — still said

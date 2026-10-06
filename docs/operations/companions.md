@@ -197,6 +197,13 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   `openai_serve` (Mycelium **over** any OpenAI-compatible engine — PAIR, vLLM, LM Studio — the
   `llm-meta` ad declared by env, `--features llm,gateway`). Common env: `BIND_PORT`, `HTTP_PORT`,
   optional `BOOTSTRAP`, optional `GOSSIP_GATEWAY_AUTH_TOKEN`.
+- **Checkpointer reads (`langgraph-checkpoint-mycelium` ≥ 0.2.0).** A client raising
+  `IncompleteCheckpoint` means an index row arrived before its blobs were fetchable — transient while
+  blobs propagate. If it persists: `GET /gateway/capability/resolve?ns=reason&name=blob-cache` must list a
+  live holder, and `GET /gateway/reason/blob/{id}` (scope `llm:read`) for an id the error names answers
+  404 while none can serve it. A log line `mesh blob failed content verification — trying next provider`
+  means a provider is serving corrupt bytes; the node logs nothing for a plain miss. Today the client
+  cannot tell a lost or corrupt blob from a slow one — all three raise the same retriable error.
 - **What is exposed** (all under `/gateway/reason/`, all behind the gateway bearer since 2026-09-04):
   `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
   (scope `llm:invoke` / `llm:read`) — point any OpenAI client at `http://node:HTTP_PORT/gateway/reason/v1`;

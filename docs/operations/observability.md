@@ -255,3 +255,10 @@ invocation. Failure paths log with actionable context — the tripwire warnings
 above, `SignedData from unknown signer`, `Individual-scoped frame dropped`, etc.,
 each name the cause (and several are [patterns-chapter](../guide/14-patterns-and-pitfalls.md)
 entries).
+
+**`Signal handler channel full; signal dropped`** (with the `kind`) means a subscriber is not draining —
+most often an SDK or HTTP client on `/gateway/signal/sse/{kind}` or `/signals/{kind}`, whose subscription
+buffers 256 signals. The signal is dropped for that subscriber and **the client is not told**. Signals
+are best-effort by design: consume faster, or move work that must not be lost to an ordered log
+(`subscribe_log`) or a mailbox. An in-process handler can take a larger buffer
+(`signal_rx_with_capacity`).

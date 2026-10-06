@@ -179,6 +179,22 @@ per-governor care will fix.
 
 ---
 
+## Setting a node's timing yourself
+
+Two of the five live tunables are timing, and a node can set them for itself:
+
+```rust
+agent.set_health_check_interval_secs(30)?;   // 1–3600; 0 reverts to the configured value
+agent.set_reconnect_backoff_secs(10)?;       // 1–300; applies to connections made after this
+let (health, reconnect) = agent.timing_tunables();
+```
+
+Both return `Result<(), GossipError>` since 2.25.0: a value past `validate()`'s bound is refused and
+changes nothing. A successful set **pins** the node — the fleet's `TimingIntent` (published through
+`POST /gateway/govern/timing`) no longer moves it, which is the local-wins rule the governors share.
+The three capacity tunables and the routes are in [operations/tuning.md](../operations/tuning.md)
+§ *Live retuning*.
+
 ## Run the demonstration
 
 ```bash

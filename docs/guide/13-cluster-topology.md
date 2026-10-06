@@ -175,7 +175,9 @@ verify it before the runtime reads it: a component arrives in one `artifact.fetc
 10 MiB frame cap arrives in `artifact.fetch_range` pieces of 4 MiB, so a model host no longer needs a
 mounted library. A host that staged something re-serves it to peers — in ranges too — so one node
 with store credentials can feed a fleet that has none. The store form takes its credentials from the
-environment (`AWS_*`, `GOOGLE_*`), is gated by the node's egress policy, and gives the librarian its
+environment (`AWS_*`, `GOOGLE_*`), is gated by the node's egress policy on the **endpoint host it
+dials** — list `s3.<region>.amazonaws.com` (or `.amazonaws.com`), not the bucket
+([artifacts.md § Remote blob stores](../operations/artifacts.md)) — and gives the librarian its
 manifest from the store (`--librarian <unused> --manifest-source s3://bucket/prefix`), where it mirrors
 what the manifest names. The `catalog_store` profile of the stem-examples suite is the whole shape
 against S3Mock (`examples/units/catalog/README.md`).

@@ -528,7 +528,9 @@ logged at the boundary did not see it. Attach before `start()` in production. Th
 are `src/agent/guarantee.rs`; the plan is `docs/plans/guarantees-and-rule-catalogue.md` (I2); a profile
 that *refuses* to start on an unmet guarantee is its I3.
 
-**Making the report binding — a profile.** Set it before `start()`:
+**Making the report binding — a profile.** This is the **guarantee profile** — not the control
+profile (guide 22) or the domain profile (guide 17); [operations/control-profiles.md](../operations/control-profiles.md)
+has the table of the four. Set it before `start()`:
 
 ```rust
 cfg.profile = Some("secure-single-domain".into());   // or GOSSIP_PROFILE=secure-single-domain

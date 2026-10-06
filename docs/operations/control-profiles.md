@@ -4,17 +4,20 @@
 rule), §8 (detection, not prevention — except the ledger). The Phase E exit item "shadow-mode rollout
 documented".*
 
-> **Three things are called "profile" in Mycelium, and none implies another** (realignment repairs A1):
+> **Four things are called "profile" in Mycelium, and none implies another** (realignment repairs A1):
 >
 > | Name | What it decides | Set by | Read |
 > |---|---|---|---|
-> | **startup profile** — `dev`, `secure-single-domain` | the guarantees a node **refuses to start without** | `GossipConfig::profile` / `GOSSIP_PROFILE`, at start | `guarantee_report()`, `GET /gateway/guarantees` |
+> | **guarantee profile** (also called the startup profile) — `dev`, `secure-single-domain` | the guarantees a node **refuses to start without** | `GossipConfig::profile` / `GOSSIP_PROFILE`, at start | `guarantee_report()`, `GET /gateway/guarantees` |
+> | **domain profile** — `Open` · `Enforced` | whether this mesh runs as a federated **domain**: `Enforced` requires TLS and refuses SWIM at `validate()` | `GossipConfig::domain_profile` / `GOSSIP_DOMAIN_PROFILE`, at start | [federation.md](federation.md) Step 0 |
 > | **control profile** — `Legacy` · `Observe` · `EnforceLocal` · `EnforceAllocated` | how the node's **governors act** on what they observe | `set_control_profile` / `POST /gateway/govern/profile`, at runtime | `GET /gateway/govern` |
 > | **consensus policy** — quorum, lease, ballot | how **one operation** is agreed | the caller, per proposal (`ConsensusConfig`) | the operation's result |
 >
 > A node can run `secure-single-domain` with its governors at `Legacy`; a control profile at
-> `EnforceAllocated` says nothing about whether a given proposal used a majority quorum. A deployment
-> that needs all three states all three.
+> `EnforceAllocated` says nothing about whether a given proposal used a majority quorum, nor about
+> whether the mesh is a federated domain. A deployment that needs each states each. Two per-component
+> modes are unrelated despite the word: `gateway_caller_profile` (`Secure` / `Legacy`, how the gateway
+> presents its caller to a provider) and the action evaluator's evidence profile (guide 20).
 
 A node runs its governors under **one control profile**, set at runtime and taking effect on each
 governor's next pass — no restart, no config-struct change:
