@@ -71,11 +71,12 @@ with neither — same theoretical exposure, so far unexpressed.)
 **Feature-gated dead code is a real trap** (bit the diagnostics work, 2026-07-03): an item used
 only under `gateway`/`metrics` is *dead* in a `--no-default-features` build, and `-D warnings` fails
 there even though the default and feature-matrix gates pass. **The catcher is `cargo clippy --lib
---no-default-features`, and today only `make check` runs it.** CI's "Gateway-free build" job lints with
-`--lib --bins --tests` and checks with `--all-targets`, and the moment a test target is in the invocation
-the dev-dependencies unify `gateway` and `tls` back on (below; `cargo tree -e features,normal,dev
---no-default-features -i mycelium` shows it), so that job never lints a gateway-free library; the "WASM host"
-job builds `mycelium` without default features but lints only its own crate (lint 2026-10-06).
+--no-default-features` — no `--tests`** — run by `make check` and, since 2026-10-06, by CI's "Gateway-free
+build" job. Until then that job's only clippy was `--lib --bins --tests` (and its check `--all-targets`), and
+the moment a test target is in the invocation the dev-dependencies unify `gateway` and `tls` back on (below;
+`cargo tree -e features,normal,dev --no-default-features -i mycelium` shows it), so CI never linted a
+gateway-free library; the "WASM host" job builds `mycelium` without default features but lints only its own
+crate (lint 2026-10-06). Keep the two lines separate: adding `--tests` to the gateway-free one undoes it.
 
 **`cargo test --no-default-features` is not a gateway-free test build** (found 2026-10-05, realignment
 repairs R8). `mycelium`'s dev-dependencies include `mycelium-tuple-space` with its `gateway` feature,

@@ -181,6 +181,12 @@ jobs:
       # --bins --tests too: the `mycelium` binary once failed to compile without `cli` (its tracing-subscriber) and
       # this line, being --lib only, never saw it.
       - run: cargo clippy --lib --bins --tests --no-default-features -- -D warnings
+      # The line above is NOT a gateway-free lint: `--tests` builds the dev-dependencies, and
+      # `mycelium-tuple-space` (`gateway`) and `mycelium-effects` (`envelope` -> `gateway` + `tls`) switch
+      # both features back on for the whole invocation. With no test target, this one lints the library
+      # with the gateway really off -- the catcher for code used only under `gateway`/`tls`, which is dead
+      # here (lint 2026-10-06; `make check` has run it locally since 2026-07-03).
+      - run: cargo clippy --lib --no-default-features -- -D warnings
       # Every target compiles without default features: an example that uses an optional feature must declare it as
       # `required-features`, or this fails. A compile check, not clippy: examples have never been linted in CI.
       - run: cargo check --all-targets --no-default-features
