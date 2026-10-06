@@ -480,7 +480,7 @@ async fn a_blob_only_corrupt_providers_hold_is_reported_corrupt_not_missing() {
     let store_a = Arc::new(FsBlobStore::open(dir_a.path()).unwrap());
     let (a, a_port, http_port) = start_gateway_node(store_a, None).await;
 
-    let b_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let b_port = mycelium::test_util::alloc_port();
     let mut cfg = GossipConfig::default();
     cfg.bind_port = b_port;
     cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", a_port).unwrap()];
@@ -514,5 +514,69 @@ async fn a_blob_only_corrupt_providers_hold_is_reported_corrupt_not_missing() {
     assert_eq!(body["error"], "corrupt");
 
     b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+
+/// The review of #542, finding 1: one provider serving the wrong bytes must not make a blob that an
+/// honest holder may still receive read as corrupt — a non-retriable answer would stop every reader for a
+/// blob that was merely still spreading. B serves garbage; C runs the stock blob server and simply does not
+/// hold the blob yet. The answer is `not_found`, retriable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_bad_provider_beside_an_honest_one_that_lacks_the_blob_is_not_found() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let (a, a_port, http_port) = start_gateway_node(Arc::new(FsBlobStore::open(dir_a.path()).unwrap()), None).await;
+    let peer = |bootstrap: u16| {
+        let port = mycelium::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", bootstrap).unwrap()];
+        Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg))
+    };
+    let b = peer(a_port);
+    b.start().await.unwrap();
+    let _b_cap = b.capabilities().advertise_capability(mycelium::Capability::new("reason", "blob-cache"), Duration::from_secs(30));
+    let mut rx = b.service().rpc_rx(mycelium_reason::BLOB_FETCH_KIND);
+    let server = Arc::clone(&b);
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            server.service().rpc_respond(&req, b"garbage".to_vec());
+        }
+    });
+    let c = peer(a_port);
+    c.start().await.unwrap();
+    let dir_c = tempfile::tempdir().unwrap();
+    let _c_server = mycelium_reason::spawn_blob_server(&c, Arc::new(FsBlobStore::open(dir_c.path()).unwrap()));
+    let filter = mycelium::CapFilter::new("reason", "blob-cache");
+    for _ in 0..200 {
+        if a.capabilities().resolve(&filter).len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let id = mycelium_reason::BlobId::of(b"still spreading");
+    let got = reqwest::get(format!("http://127.0.0.1:{http_port}/gateway/reason/blob/{id}")).await.unwrap();
+    let status = got.status().as_u16();
+    let body: serde_json::Value = got.json().await.unwrap_or_default();
+    assert_eq!((status, body["error"].as_str()), (404, Some("not_found")), "{body}");
+    c.shutdown_with_timeout(Duration::from_secs(5)).await;
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// The review of #542, finding 2: damage at rest is corruption, not absence. The only copy of a blob, on
+/// this node's disk, no longer matches its address — the stock tier read that as a miss, which is retriable
+/// forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blob_damaged_on_the_only_holders_disk_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let id = store.put(b"the original bytes").unwrap();
+    std::fs::write(dir.path().join(id.to_hex()), b"bit rot").unwrap();
+    let (a, _port, http_port) = start_gateway_node(store, None).await;
+    let got = reqwest::get(format!("http://127.0.0.1:{http_port}/gateway/reason/blob/{id}")).await.unwrap();
+    let status = got.status().as_u16();
+    let body: serde_json::Value = got.json().await.unwrap_or_default();
+    assert_eq!((status, body["error"].as_str()), (502, Some("corrupt")), "{body}");
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

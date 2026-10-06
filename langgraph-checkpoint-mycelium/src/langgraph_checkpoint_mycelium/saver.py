@@ -73,12 +73,14 @@ class IncompleteCheckpoint(Exception):
     ``missing`` lists the content ids that could not be fetched, and ``reasons`` says why for each
     (0.2.1 — the plan's "absence, temporary unavailability, authorization refusal and corrupt content
     stay distinguishable"): ``"not_found"`` (no reachable holder has it yet), ``"unavailable"`` (a
-    holder could not be reached, or the gateway failed), ``"unauthorized"`` (the gateway refused the
-    read — a token or scope problem, not propagation), ``"corrupt"`` (every holder that answered served
-    bytes that fail the content address). ``retriable`` is true only when every reason is transient
-    (``not_found`` or ``unavailable``): retrying cannot fix a refused read or a corrupt blob.
+    holder could not be reached, the node or a proxy in front of it failed, or the read was throttled),
+    ``"unauthorized"`` (the gateway refused the read — a token or scope problem), ``"corrupt"`` (every
+    holder that answered served bytes failing the content address, and none could still serve it),
+    ``"unsupported"`` (the node does not serve the blob route — no reason companion). ``retriable`` is
+    true only when every reason is transient (``not_found`` or ``unavailable``).
     """
 
+    retriable = True  # the class default; an instance says whether *its* reasons are all transient
     TRANSIENT = frozenset({"not_found", "unavailable"})
 
     def __init__(
@@ -103,19 +105,45 @@ class IncompleteCheckpoint(Exception):
         )
 
 
-def _blob_reason(status: int) -> str | None:
-    """Why the blob route did not serve a blob, from its status (``None`` = it did)."""
+def _route_error(resp: httpx.Response) -> str | None:
+    """The blob route's own ``{"error": …}`` word, or ``None`` if the body is not the route's."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    return body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), str) else None
+
+
+def _blob_reason(resp: httpx.Response) -> str | None:
+    """Why the blob route did not serve a blob (``None`` = it did, or the status is not a miss).
+
+    The status alone is not enough: a reverse proxy answers 502 with its own page when the node is down,
+    and a node without the reason companion answers a bare 404 — so ``corrupt`` and ``not_found`` are
+    read only from the route's own body (``mycelium-reason`` 0.7.0+).
+    """
+    status = resp.status_code
     if status == 200:
         return None
     if status == 404:
-        return "not_found"
+        return "not_found" if _route_error(resp) == "not_found" else "unsupported"
     if status in (401, 403):
         return "unauthorized"
-    if status == 502:
+    if status == 502 and _route_error(resp) == "corrupt":
         return "corrupt"
-    if status >= 500:
+    if status >= 500 or status in (408, 429):
         return "unavailable"
-    return None  # anything else is not a missing blob: let raise_for_status report it
+    return None  # a client error: let raise_for_status report it
+
+
+# How serious a reason is: a blob fetched more than once in one read keeps its most serious reason, so
+# ``retriable`` does not depend on which fetch came last.
+_SEVERITY = {"not_found": 1, "unavailable": 2, "corrupt": 3, "unauthorized": 3, "unsupported": 3}
+
+
+def _merge_reason(reasons: dict[str, str], blob_id: str, reason: str) -> None:
+    held = reasons.get(blob_id)
+    if held is None or _SEVERITY.get(reason, 3) > _SEVERITY.get(held, 3):
+        reasons[blob_id] = reason
 
 
 CKPT_PREFIX  = "ckpt"
@@ -217,8 +245,7 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         return resp.json()["id"]
 
     def _blob_get(self, blob_id: str) -> bytes | None:
-        data, _reason = self._blob_try(blob_id)
-        return data
+        return self._blob_try(blob_id)
 
     def _blob_try(self, blob_id: str, reasons: dict[str, str] | None = None) -> bytes | None:
         """The blob, or ``None`` with why recorded in ``reasons`` (``IncompleteCheckpoint.reasons``)."""
@@ -226,12 +253,12 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             resp = self._client.get(f"/gateway/reason/blob/{blob_id}")
         except httpx.TransportError:
             if reasons is not None:
-                reasons[blob_id] = "unavailable"
+                _merge_reason(reasons, blob_id, "unavailable")
             return None
-        reason = _blob_reason(resp.status_code)
+        reason = _blob_reason(resp)
         if reason is not None:
             if reasons is not None:
-                reasons[blob_id] = reason
+                _merge_reason(reasons, blob_id, reason)
             return None
         resp.raise_for_status()
         return resp.content
@@ -274,12 +301,12 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             resp = await self._aclient.get(f"/gateway/reason/blob/{blob_id}")
         except httpx.TransportError:
             if reasons is not None:
-                reasons[blob_id] = "unavailable"
+                _merge_reason(reasons, blob_id, "unavailable")
             return None
-        reason = _blob_reason(resp.status_code)
+        reason = _blob_reason(resp)
         if reason is not None:
             if reasons is not None:
-                reasons[blob_id] = reason
+                _merge_reason(reasons, blob_id, reason)
             return None
         resp.raise_for_status()
         return resp.content

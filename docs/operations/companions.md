@@ -201,12 +201,17 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   `IncompleteCheckpoint` means an index row arrived before its blobs were fetchable — transient while
   blobs propagate. If it persists: `GET /gateway/capability/resolve?ns=reason&name=blob-cache` must list a
   live holder, and `GET /gateway/reason/blob/{id}` (scope `llm:read`) for an id the error names says why
-  (`mycelium-reason` 0.6.3): **404 `not_found`** — no holder has it yet; **503 `unavailable`** — a holder
-  could not be reached; **502 `corrupt`** — every holder that answered served bytes failing the content
-  address, which the node also logs (`mesh blob failed content verification — trying next provider`).
-  The client's `IncompleteCheckpoint.reasons` carries the same word per blob, plus `unauthorized` for a
-  401/403, and `retriable` is false for `corrupt` and `unauthorized` — those need a person: a provider
-  serving damaged or forged bytes, or a token without `llm:read`.
+  (`mycelium-reason` 0.7.0): **404 `not_found`** — no holder has it yet; **503 `unavailable`** — a holder
+  could not be reached; **502 `corrupt`** — every copy anyone could still serve fails its content address
+  (a copy damaged on a holder's disk, or bytes a provider forged) and no provider merely lacks it or is
+  unreachable; the node logs each bad copy (`mesh blob failed content verification — trying next provider`,
+  `blob failed content verification on read — damaged at rest`). The client's `IncompleteCheckpoint.reasons`
+  carries the same word per blob — read from the route's body, so a proxy's own 502 page is `unavailable` —
+  plus `unauthorized` for a 401/403 and `unsupported` for a bare 404 (that node serves no blob route), and
+  `retriable` is false for `corrupt`, `unauthorized` and `unsupported`: a damaged or forged blob, a token
+  without `llm:read`, or a node without the reason companion — each needs a person, not a retry.
+  **Upgrade order:** the checkpointer to 0.2.1 before the reason nodes to 0.7.0 (a 0.2.0 checkpointer reads a
+  503 as an unrelated HTTP error).
 - **What is exposed** (all under `/gateway/reason/`, all behind the gateway bearer since 2026-09-04):
   `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
   (scope `llm:invoke` / `llm:read`) — point any OpenAI client at `http://node:HTTP_PORT/gateway/reason/v1`;
