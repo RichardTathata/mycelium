@@ -124,6 +124,11 @@ export class MyceliumAgent {
           throw new ProtectedKindError(body.kind ?? "", body.message ?? "protected kind");
         }
       }
+      // 504 is the gateway's answer to an expired deadline (`rpc/call`, `scatter`): a
+      // `TimeoutError`, as the README promises and the Python SDK raises — not a generic failure.
+      if (resp.status === 504) {
+        throw Object.assign(new Error(`POST ${path} timed out: ${text}`), { name: "TimeoutError" });
+      }
       throw new Error(`POST ${path} failed: ${resp.status} ${text}`);
     }
     return parseLossless(await resp.text());
@@ -468,13 +473,14 @@ export class MyceliumAgent {
    */
   async *rpcServe(kind: string): AsyncGenerator<RpcRequest> {
     const url = this._sseUrl(`/gateway/rpc/serve/${encodeURIComponent(kind)}`);
-    yield* sseStream<RpcRequest>({ url, headers: this.auth }, (data) => {
+    yield* sseStream<RpcRequest>({ url, headers: this.auth }, (data, event) => {
       const raw = JSON.parse(data) as {
-        kind: string; nonce_hex: string; sender: string; payload_b64: string;
+        kind?: string; nonce_hex: string; sender: string; payload_b64: string;
         caller?: { principal: string; via: string; scopes: string[]; attested: boolean };
       };
       const req: RpcRequest = {
-        kind: raw.kind,
+        // The serve stream's data has no `kind`: it is the SSE event name (sweep 2026-10-06).
+        kind: raw.kind ?? event ?? kind,
         nonceHex: raw.nonce_hex,
         sender: raw.sender,
         payload: fromb64(raw.payload_b64),
@@ -505,7 +511,8 @@ export class MyceliumAgent {
   ): Promise<Array<{ sender: string; result: Buffer }>> {
     const data = await this._post("/gateway/scatter", {
       targets,
-      kind: method,
+      // `gw_scatter` reads `method`; this sent `kind`, and every call was refused 400 (sweep 2026-10-06).
+      method,
       payload_b64: b64(payload),
       min_ok: options.minOk ?? targets.length,
       // Whole seconds: the gateway reads `as_u64()`, and a fraction became its 10 s default silently.
@@ -682,7 +689,8 @@ export class MyceliumAgent {
   }
 
   /**
-   * Live SSE subscription. Yields new entries as they arrive, starting from `sinceHlc`.
+   * Live SSE subscription. Yields entries with `hlc >= sinceHlc` (inclusive), then new ones as they
+   * arrive. To resume after an entry you have handled, pass `entry.hlc + 1n`.
    */
   async *subscribeLog(stream: string, options: { sinceHlc?: bigint } = {}): AsyncGenerator<LogEntry> {
     const params: Record<string, string> = { stream };

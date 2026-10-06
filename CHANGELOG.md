@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`mycelium-ts` 0.2.1 — two verbs that did not match their gateway handlers, found by sweeping every
+  SDK verb's request and response against its handler.** `scatterGather` sent the method under `kind`;
+  `gw_scatter` reads `method` and answered **every call 400 `missing method`** — since the client was
+  written (2026-05-25). The same mistake in `rpcCall` was fixed in 2.15.0 (#409) and this one, the next
+  function down, was not; nor was it caught in 0.2.0 (#526), which changed this function's timeout line
+  and tested it with a mocked `fetch` that answers any body. `rpcServe`'s `RpcRequest.kind` read a `kind`
+  the serve stream's data does not carry, so it was always `undefined`; it now comes from the event name,
+  as `onSignal`'s does. And a gateway **504** (`rpcCall`, `scatterGather`'s expired deadline) is now an
+  error named `TimeoutError`, as the README promised and the Python SDK raises, where it was a plain
+  `Error`; `sseStream`, `SseOverflowError` and `SseOptions` are exported from the package root. Fail-first:
+  four contract tests failed against 0.2.0 (`tests/contract.test.ts` § *verbs the review did not reach*);
+  the live suite gains the round-trips a mock cannot prove (`scatterGather` to a served kind, `rpcServe`'s
+  kind, `onSignal` after subscribing, `subscribeLog` resuming after an HLC, an unserved RPC as
+  `TimeoutError`). The Python SDK's requests and responses matched every handler.
+- **The 2.24.0 entry overstated what `mycelium-ts` 0.2.0 verified.** *"The TypeScript SDK matches the
+  gateway it talks to"* held for the verbs the review named and the live suite exercised, not for every
+  verb; the two above were outside both. The README's claim that a slow consumer "gets
+  `SseOverflowError` rather than a silently truncated stream" was also wrong: the node drops past 256
+  undelivered signals per subscription and the client is not told — corrected in the README, with a
+  migration table from 0.1.x.
+
 ---
 
 ## [2.25.0] — 2026-10-05
