@@ -303,7 +303,10 @@ its first append** — both rustdocs say so. The pin is
 `a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_append` (seen failing with the
 trigger toggled off); the refusal and the ownership each have their own witness. The node-local
 `Journal` (`src/agent/journal.rs`) is a different file with the same two invariants since R1, enforced
-in its `open` rather than by a snapshot.
+in its `open` rather than by a snapshot. And a persistence directory that cannot be created **refuses
+`start()`** (`InvalidField { field: "persistence" }`, R7, 2.24.0): it used to log and run **in memory**,
+losing every write at the next restart, while `persist.configured` — resolved from the configuration
+alone — still said `enforced` and `secure-single-domain` admitted the node.
 
 **The contract above the invariants (contracts axis item 1, ADR 2026-09-13).** What each public
 acknowledgement proves — and does not — is inventoried site by site in

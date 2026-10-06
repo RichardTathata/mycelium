@@ -108,6 +108,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`receipt_ladder`](../docs/guide/18-contracts-and-receipts.md#run-the-ladder) · [src](receipt_ladder.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`replay_a_bundle`](../docs/guide/19-replay-and-simulation.md#run-it) · [src](../mycelium-sim/examples/replay_a_bundle.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`curator_handover`](../docs/guide/21-mandates.md#run-the-demonstration) · [src](../mycelium-wiki/examples/curator_handover.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ | · |
+| [`strict_eligibility`](../docs/guide/21-mandates.md#eligibility-unknown-history-is-never-eligible-2240) · [src](strict_eligibility.rs) | · | · | · | · | Adv | CLI | · | · | · | · | · |
 | [`control_envelope_viz`](../docs/guide/22-stability-and-control.md#run-the-demonstration) · [src](control_envelope_viz.rs) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · | · |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md#7-what-lands-next) · [src](knowledge_layer.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`federated_domains`](../docs/guide/17-federation.md#encrypting-the-link-the-pin-is-the-anchor) · [src](federated_domains.rs) | ○ | · | · | ● | Adv | CLI | · | · | · | ✓ | · |
@@ -115,6 +116,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`mcp_tool_authority`](../docs/guide/20-authorising-actions.md#which-tools-an-agent-may-actually-call) · [src](mcp_tool_authority.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | · |
 | [`a2a_skill_authority`](../docs/guide/20-authorising-actions.md#the-other-door-and-why-it-is-the-one-that-matters) · [src](a2a_skill_authority.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | [✓](units/a2a_skill_authority/) |
 | [`destination_commit`](../docs/operations/companions.md#mycelium-effects--the-transactional-destination) · [src](../mycelium-effects/examples/destination_commit.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ | · |
+| [`counting_destination`](../docs/operations/companions.md#mycelium-effects--the-transactional-destination) · [src](../mycelium-effects/examples/counting_destination.rs) | ● | · | · | · | Adv | CLI | · | · | · | · | · |
 | [`redistribution_cn`](../docs/guide/24-commitments.md#run-it) · [src](../mycelium-commitment/examples/redistribution_cn.rs) | · | ● | · | ● | Adv | CLI | · | · | · | ✓ | · |
 | [`authority_drain`](../docs/design/authority-at-execution.md#4-what-this-does-not-claim) · [src](authority_drain.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | · |
 | [`composed_commit`](../docs/design/composed-effect.md#9-enforced-at-the-destination-2026-09-29) · [src](composed_commit.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | · |

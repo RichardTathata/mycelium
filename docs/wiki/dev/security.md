@@ -175,6 +175,18 @@ artefacts may carry: verified claims and scoped attestations, never credentials;
 recording seam with a named protected-artefact class. Items 2, 3 and 5 cite it from their PR 1 ADRs (plan §6.5, done).
 Log: [`.log/2026-09-13-threat-model-rev2.md`](.log/2026-09-13-threat-model-rev2.md).
 
+**Handover eligibility: unknown history is never eligible (2.24.0, realignment repairs A3).** An appointment's
+incumbency limits (consecutive terms, cumulative tenure, cooling-off) are only as good as the history they are
+evaluated over. `mandate::handover::eligible` evaluates whatever it is handed and says so; the strict form beside
+it, `mandate::eligibility::eligible_strict` (`src/mandate/eligibility.rs`), takes a `TermHistory` whose
+coverage its **source** established — chained terms verified at construction (a break narrows what is vouched for
+to the suffix after it), an `Origin` (the role's first term or a trusted baseline), the current head — and answers
+each configured rule `Eligible`, `Ineligible` or `Unknown`, never `Eligible` on history that does not suffice;
+`eligibility::ready` requires the handover journal read **and** every rule decided in favour. The rule is the
+same as *authority is recomputed, never inherited*, applied to a role's past: a caller's `complete: true` would
+only move the assumption. Guide 21 § Eligibility; `examples/strict_eligibility.rs`;
+[`.log/2026-10-05-a3-strict-eligibility.md`](.log/2026-10-05-a3-strict-eligibility.md).
+
 ## Threat model revision 3 draft — Boundary H (2026-09-23)
 
 `docs/threat-model.md` §5 adds **H**, a colluding population of admitted members: the plural of §4's "trusted member
@@ -209,9 +221,17 @@ their broker IS the crown jewel). Two opt-in controls:
 - **`DataAtRestCipher`** hook (`src/persistence.rs`) at the four on-disk boundaries (WAL
   append/replay, snapshot write/read). Key custody is the operator's (wrap a KMS); scope is
   disk only.
-- **`EgressPolicy { allow_hosts }`** — enforced at every outbound HTTP path the substrate
-  chooses (MCP bridge, capability probes, LLM backends, SkillRunner). Fail-closed on
-  unparseable hosts.
+- **`EgressPolicy { allow_hosts }`** — a **hostname** allow-list, enforced at every outbound HTTP
+  path the substrate chooses (MCP bridge, capability probes, LLM backends, SkillRunner, the wasm host,
+  the wiki sink, the federation client, OIDC — the `egress.allow_list` row of
+  [`reference/guarantee-catalogue.md`](../../reference/guarantee-catalogue.md)). Fail-closed on
+  unparseable hosts. **Since 2.23.0** (realignment repairs R3, R3b, R4): every client is built by
+  `mycelium::egress_client`, which re-checks **each redirect hop** (`EgressPolicy::redirect_verdict` — at
+  most five, never https → http, every target on the list) where the clients used to follow ten unchecked;
+  the gate reads a URL's host with the **client's own parser** (the WHATWG `url` crate — the hand-rolled one
+  let `http://evil\@allowed/` through as `allowed`); and an object store is gated on the **endpoint it
+  dials**, not the bucket name (`dial_hosts`). Not covered: name resolution (an allowed name resolving to a
+  denied address), a cloud identity's credential traffic, redirects inside `object_store`'s own client.
 - **Crypto-shred erasure (WS-F, `tls`)** — `SubjectKeyRegistry` (`mycelium-core/src/erasure.rs`):
   per-subject DEK envelope encryption; GDPR erase = destroy the DEK → all ciphertext dead. The
   per-subject layer *above* the KV value, composing with `DataAtRestCipher`. Physical deletion isn't

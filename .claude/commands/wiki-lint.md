@@ -78,13 +78,22 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   *actual* `run:` steps in `.github/workflows/*.yml`. A page that lists the *clippy* of a crate's
   tests can imply coverage CI doesn't provide — `mycelium-core`'s whole suite was clippy-compiled but
   never *run* (no `-p mycelium-core` test job), and `testing.md` read as if it were covered (ledger
-  2026-07-11). Confirm every gate the page names has a live `run:` line.
+  2026-07-11). Confirm every gate the page names has a live `run:` line. **And for any step a page says
+  runs a *reduced* feature set** (gateway-free, no default features, a minimal embed), confirm the
+  feature set it actually builds: a step with `--tests`/`--all-targets` builds dev-dependencies, and
+  `mycelium`'s dev-dependencies unify `gateway` and `tls` back on —
+  `cargo tree -e features,normal,dev --no-default-features -i mycelium` shows it. The CI "Gateway-free
+  build" job's clippy was described as the dead-code catcher for months while linting a gateway build
+  (ledger 2026-10-06).
 - **External front-door docs that *restate* code facts** — `docs/guide/building-on-mycelium.md`
   (and lightly `docs/guide/faq.md`). These live outside `docs/wiki/` but duplicate code by
   design, so they drift like a wiki page and are higher-stakes (downstream integrators act on
   them). Verify: the reserved-KV-prefix list matches the `src/lib.rs` namespace-ownership
   table (top-level prefixes — grep `\| \`` rows, diff the sets); `WIRE_VERSION`; the eight
-  sub-handle names; the `Cargo.toml` feature flags; **the install snippet's `tag = "…"` pins are the newest tag
+  sub-handle names; the `Cargo.toml` feature flags — **as a set**: derive the `[features]` names from the
+  manifest and confirm each is named on the page or deliberately omitted (`default`, `fuzz-internals`'s
+  warning); checking only that the *named* flags exist let `compliance` go unmentioned from 2.3.0 to
+  2.25.0 (ledger 2026-10-06); **the install snippet's `tag = "…"` pins are the newest tag
   on each line** (`git tag -l 'v*' | sort -V | tail -1`; `git tag -l 'mycelium-<crate>-*'`). A mismatch = a finding (fix the doc) —
   and since 2026-09-26 the pin is also a **release-runbook anchor** (`RELEASING.md` §6), so a pin found stale here means
   a release skipped that step, which is a second finding to record. The
