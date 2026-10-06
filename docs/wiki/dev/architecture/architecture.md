@@ -14,6 +14,11 @@ inversion a compile-time guarantee. Pages:
 - **[hooks.md](hooks.md)** — the cross-layer hooks (`ReplyInterceptor`, `QuorumObserver`,
   `SnapshotDeferHook`, the decision sink, KV change notifications): what each is handed, what it may
   do, and the rule they all keep — no synchronous network I/O, nothing that blocks.
+- **Configuration ownership** (code-canon reference, not a wiki page) —
+  [`docs/reference/configuration.md`](../../../reference/configuration.md): every `GossipConfig` field's
+  component, the feature that enforces it, where a bad value is refused, and whether it needs a restart
+  (only five fields change at runtime, `HotConfig`). The configuration split is deferred behind it
+  (realignment repairs A2, decision D3).
 - **[runtime-invariants.md](runtime-invariants.md)** — the invariants that keep recurring
   in review: Layer III's detection-not-prevention posture, individual-scope routing,
   event-driven fan-out. Read before "optimizing" anything in the gossip loop.

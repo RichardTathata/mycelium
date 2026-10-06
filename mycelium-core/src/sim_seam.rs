@@ -2025,9 +2025,10 @@ mod tests {
         let _ = fs_write_all(&mut f2, "wal.bin", b"record-two").await;
     }
 
-    /// Replay supplies the recorded outcome and **does not perform the write** — checked by
-    /// replaying against a file that was never created: a real write would fail, a replayed one
-    /// cannot.
+    /// Replay **re-performs** a recorded successful write — the effect happens in both modes; only a
+    /// recorded *failure* skips it. (This test was once `a_replayed_write_does_not_touch_the_disk`
+    /// and checked the opposite against a read-only file, where a swallowed `EBADF` made it pass
+    /// while measuring nothing — `docs/wiki/dev/history.md`.)
     #[tokio::test]
     async fn a_replayed_write_reperforms_the_effect_it_recorded() {
         install_recording();

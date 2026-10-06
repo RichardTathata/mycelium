@@ -46,6 +46,11 @@ Feature choice on the full crate:
 - **`default-features = false`** drops the gateway (bare-metal / WASM / no-std host).
 - add **`tls`** for mTLS + signed consensus, **`metrics`** for a Prometheus endpoint,
   **`a2a`** for Agent-to-Agent discovery.
+- add **`compliance`** (implies `gateway` + `tls`) for scoped and named gateway tokens, OIDC, the
+  tamper-evident audit trail and identity roles — a build without it refuses those settings at start
+  rather than ignoring them; **`llm`** for prompt skills over a node-local LLM backend; **`otel`** for
+  SkillRunner's OpenTelemetry span export. **`sim`** (the replay seams) and **`test-util`** are for
+  recording and tests, never a shipped build.
 - Depend on **`mycelium-core`** directly only for a minimal embed that needs LWW-KV +
   the scoped event mesh but *not* RPC, consensus, capabilities, or the gateway.
 

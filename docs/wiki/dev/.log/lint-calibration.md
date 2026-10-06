@@ -305,3 +305,26 @@ Entry format:
   non-enumeration page. Found by reading the paragraph while checking the stem suite's coverage.
   Sharpening (folded into §4): a prose list of a manifest's set is an enumeration; derive it from the
   manifest and diff the names.
+
+- 2026-10-06 (full pass): **§1 CI-gate list — a step's spelling checked, its feature set not.** `testing.md`
+  said the CI "Gateway-free build" and "WASM host" jobs run the `--no-default-features` build that catches
+  feature-gated dead code. The gateway-free job lints with `--lib --bins --tests` and checks with
+  `--all-targets`; a test target builds dev-dependencies, and `mycelium-tuple-space` (`gateway`) and
+  `mycelium-effects` (`envelope` → `gateway` + `tls`) unify both features back on — `cargo tree -e
+  features,normal,dev --no-default-features -i mycelium` shows `gateway` and `tls` enabled. The WASM host job
+  lints only its own crate. So no CI step lints a gateway-free `mycelium` library; only local `make check`
+  does. Every pass since 2026-07-11 diffed the page's gate lines against `run:` lines by text and declared
+  them covered. Found by R8 (2026-10-05), whose in-crate gateway-free witnesses "passed" 824 tests without
+  compiling. Sharpening (folded into §1): for a step described as a reduced feature set, verify the set it
+  builds, not the flags it is spelled with.
+- 2026-10-06 (same pass): **§1 front door — a feature list checked for existence, not completeness.**
+  `building-on-mycelium.md`'s *Feature choice* named `default`, `tls`, `metrics`, `a2a` and never
+  `compliance` — the build that enforces token tables, OIDC and the audit trail, which a build without it
+  refuses at start since 2.18.1 — nor `llm`, `otel`, `sim`. The check read "the `Cargo.toml` feature
+  flags" and confirmed the named ones existed. Sharpening (folded into §1): derive the manifest's feature
+  set and account for every name.
+- 2026-10-06 (same pass): **§4 manifest prose list — the 2026-10-02 fix reintroduced an imprecision.** The
+  repaired sentence said "`provisioning`, `catalog`, `mcp_toolgrowth` and their `*_viz` variants";
+  `mcp_toolgrowth` has none, so it implied a bin the manifest lacks (eight gated, not nine). No new
+  sharpening — the 10-02 rule (derive the names, diff them) catches it when the diff is by name rather
+  than by reading the sentence; this pass did that.
