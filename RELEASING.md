@@ -113,6 +113,15 @@ grep -rn "\"$OLD\"" --include=Cargo.toml . | grep -v '^./target'   # expect no o
 Cut `## [Unreleased]` → `## [NEW] — YYYY-MM-DD` (note wire version + whether it changed), consolidate
 duplicate `### Added` blocks, and open a fresh empty `## [Unreleased]` at the top.
 
+## 5b. Plan rows close on evidence
+
+Every delivery-table row this release marks **merged** (in the plan it delivers) quotes each of its
+promises beside the code or test that delivers it, and says *not built* for any it does not. Read each
+row against the merged diff — not against the PR description — and have someone who did not write the PR
+check it ([verification policy](docs/wiki/dev/testing/verification-policy.md), rule 2). A row that cannot
+pass this is corrected before the tag, not after: A3 was released in 2.24.0 marked merged with its history
+source unbuilt, and S5 with half its promise, and both were found only by an audit two releases later.
+
 ## 6. Update the version-state anchors
 
 `ROADMAP.md` (Status line) · `docs/wiki/wiki.md` (Version state) · `docs/wiki/dev/history.md`

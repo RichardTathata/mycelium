@@ -1,7 +1,11 @@
 # dev/testing — conventions
 
 ↑ [dev/](../dev.md) · child pages: [scale-tests.md](scale-tests.md) ·
-[cluster-suites.md](cluster-suites.md)
+[cluster-suites.md](cluster-suites.md) · [verification-policy.md](verification-policy.md)
+
+**Read first: [verification-policy.md](verification-policy.md)** — a change is verified against the surface
+it touches, not its own description: enumerate every entry point before fixing, close plan rows on quoted
+evidence, CI discovers tests, an independent adversarial review before merge (adopted 2026-10-06).
 
 ## Run the full feature matrix before pushing
 

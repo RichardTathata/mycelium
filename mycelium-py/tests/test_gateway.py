@@ -19,6 +19,14 @@ import pytest
 
 from mycelium import MyceliumAgent, DemandStatus, RpcRequest, MailboxEvent
 
+# A live suite: it runs only when MYCELIUM_TEST_HOST names a node, and skips itself otherwise, so a
+# directory-wide `pytest mycelium-py/tests` collects it without a node (verification policy rule 3).
+# MYCELIUM_TEST_PORT alone is not enough — the reason suites use it for a different node.
+pytestmark = pytest.mark.skipif(
+    not os.getenv("MYCELIUM_TEST_HOST"),
+    reason="MYCELIUM_TEST_HOST not set — the live gateway suite needs a running node",
+)
+
 # Default to n-0's HTTP port; override with MYCELIUM_TEST_PORT env var.
 TEST_HOST = os.getenv("MYCELIUM_TEST_HOST", "127.0.0.1")
 TEST_PORT  = int(os.getenv("MYCELIUM_TEST_PORT", "8100"))

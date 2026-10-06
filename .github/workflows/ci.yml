@@ -72,12 +72,14 @@ jobs:
       # The AE seam's replaceable-evaluator premise: an evaluator written in *another crate* must
       # compile and be able to permit, deny and be undecided. `--lib` would never catch a
       # `#[non_exhaustive]` constructor hole, which is how one shipped into review (2026-09-15).
-      - run: cargo test --test ae_external_adapter --features tls,a2a
-      # Same premise for the operator-built execution authority (`with_execution_authority`). Added
-      # in #399, broken the same day by #417's sweeper spawn, and unnoticed through the v2.15.0 tag
-      # because only the line above was ever *run* here — a `tests/` binary that CI compiles and
-      # does not execute is not a gate (external review F9, 2026-09-26).
-      - run: cargo test --test gateway_mandate_external --features tls,a2a
+      # Same premise for the operator-built execution authority (`gateway_mandate_external`), added in
+      # #399, broken the same day by #417, and unnoticed through the v2.15.0 tag because only the
+      # first test was *run* here — a `tests/` binary CI compiles and does not execute is not a gate
+      # (external review F9, 2026-09-26). The answer then was to name it too, and naming is what left
+      # `declaration_schema`, `wire_check_examples` and `wire_check_fixtures` unrun until 2026-10-06. So:
+      # every root integration test, by discovery (verification policy rule 3). A file gated on a
+      # feature this line lacks (`decision_trace_replay`, `sim`) compiles empty here and runs below.
+      - run: cargo test --features tls,a2a --test '*'
       # `tls` as well as `fuzz-internals`: two of the trust-edge parsers (the presented
       # credential, the catalogue reply) live behind it, so without it they are not
       # compiled and the mini-fuzz would silently cover two of four.
@@ -157,6 +159,8 @@ jobs:
       # The static forbidden-call check (item 6 PR 3, D12). Runs in the same job as clippy
       # because it is the same kind of claim: the seams cannot erode while PR 4-7 are built.
       - run: ./scripts/check-sim-seams.sh
+      # Verification policy rule 3: CI discovers tests rather than naming files (CLAUDE.md § Verification policy).
+      - run: ./scripts/check-test-discovery.sh
       # Closure plan C11: no new unclassified read of Hlc::current(), which stands still on a quiet
       # node and fails a deadline check open.
       - run: ./scripts/check-hlc-current.sh
@@ -202,6 +206,7 @@ jobs:
       # The claims `what-is-proven.md` rests on these two for: a recording carries its decisions into the
       # bundle and explains (the comparison's recording half), and the traced provisioner makes no extra
       # draw under the replay seams (draw-count equivalence) — hand-run only until doc-coverage run 19.
+      # discovery-exception: `sim` turns the replay seams on, and no other test runs under it; this file is the only one gated on it
       - run: cargo test --features sim,test-util --test decision_trace_replay
       - run: cargo test -p mycelium-wasm-host --features stem,sim --lib the_trace_makes_no_extra_draw_under_the_replay_seams
       # The offline wire-check over the checked-in fixtures (design-time-tooling.md W2): the co-op
@@ -328,7 +333,7 @@ jobs:
       - run: cargo clippy -p mycelium-effects --all-targets -- -D warnings
       - run: cargo clippy -p mycelium-effects --features tuple-space --all-targets -- -D warnings
       # The gateway-side composition constructor (composed-effect.md §9) needs the attesting build.
-      - run: cargo test -p mycelium-effects --features tuple-space,envelope --test composed
+      - run: cargo test -p mycelium-effects --features tuple-space,envelope --test '*'
       - run: cargo clippy -p mycelium-effects --features tuple-space,envelope --all-targets -- -D warnings
       # The example is the crate's decisive demonstration (guide 18 § Rung 4); the catalogue said it
       # ran in CI and it did not (2026-09-27).
@@ -496,7 +501,10 @@ jobs:
             sleep 1
           done
       - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
-      - run: pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests/test_typed.py mycelium-py/tests/test_reason.py mycelium-py/tests/test_connection_reuse.py mycelium-py/tests/test_commit_result.py mycelium-py/tests/test_federation.py mycelium-py/tests/test_mandate.py mycelium-py/tests/test_protected_kind.py -v
+      # By directory, never by file (verification policy rule 3): a named list left five node-free test files
+      # out of CI until 2026-10-06. The live gateway suite skips itself here (no MYCELIUM_TEST_HOST) and runs in
+      # its own step below against a plain node.
+      - run: pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v
         env:
           MYCELIUM_TEST_PORT: 8101
           MYCELIUM_TEST_PORT_B: 8102
@@ -535,6 +543,7 @@ jobs:
             if [ "$i" -eq 60 ]; then echo "the node never published its caller-context marker"; cat "$RUNNER_TEMP/py-node.log"; exit 1; fi
             sleep 1
           done
+          # discovery-exception: the live gateway suite needs its own plain node; the directory run above collects it and it skips there
           MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest mycelium-py/tests/test_gateway.py -v
       - name: Stop reason nodes
         if: always()
@@ -665,6 +674,7 @@ jobs:
             sleep 1
           done
       - name: Live suite
+        # discovery-exception: the live suite needs a node; `npx jest` above collects every file and this one skips there
         run: npx jest tests/gateway.test.ts
         env:
           MYCELIUM_TEST_HOST: 127.0.0.1

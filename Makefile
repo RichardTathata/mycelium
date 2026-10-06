@@ -176,6 +176,7 @@ check:
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	cargo build --examples --features tls,metrics,a2a,llm       # CI builds these; `--lib --tests` does not
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
+	./scripts/check-test-discovery.sh                           # CI discovers tests; it never names a test file (verification policy rule 3)
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 	./scripts/check-positioning.sh                              # shared proposition, audience routes, resources and capability coverage
