@@ -31,14 +31,14 @@ Re-exported from `mycelium-core` (`mycelium::GossipError`). All ten variants:
 
 ```rust
 pub enum GossipError {
-    InvalidField { field: &'static str, reason: String },   // a GossipConfig field is out of range
+    InvalidField { field: &'static str, reason: String },   // a setting out of range, or refused at start() (below)
     FieldConflict { field_a: &'static str, field_b: &'static str, reason: String }, // e.g. http_port == bind_port
     NodeIdMismatch { node_id: String, bind_addr: String },  // node_id doesn't encode the bind address
     FrameTooLarge { size: usize, limit: usize },            // a frame exceeds MAX_FRAME_BYTES
     UnsupportedWireVersion { received: u8, current: u8, prev: u8, hint: &'static str }, // peer wire skew
     AlreadyRunning,                                          // start() called twice
     Shutdown,                                                // start() after shutdown (create a new agent)
-    Io(std::io::Error),                                      // listener bind, WAL replay, TLS cert setup
+    Io(std::io::Error),                                      // listener bind, TLS cert setup
     Toml(toml::de::Error),                                  // config file parse failure
     Parse(std::num::ParseIntError),                         // env-var parse failure
 }
@@ -48,6 +48,21 @@ pub enum GossipError {
 config loading (`GossipConfig::load_from_file`). Two are not startup-only:
 `FrameTooLarge` guards the wire path and `UnsupportedWireVersion` is raised when a peer
 speaks an out-of-range wire version.
+
+**Start refusals.** `start()` refuses rather than run degraded, each as `InvalidField` naming the
+setting — the full list, by `field`:
+
+| `field` | Refused when | Since |
+|---|---|---|
+| `gateway_named_tokens` / `gateway_scoped_tokens` / `oidc` | set in a build without `compliance` (it would ignore them and run an open gateway) | 2.18.1 |
+| `tls` / `gateway_tls` | set in a build without `tls` (it would run plaintext) | 2.18.1 |
+| `http_port` / `gateway_tls` | set in a build without `gateway` (it would run no gateway) | 2.25.0 |
+| `oidc` | the issuer, or a configured `jwks_uri`, is not on a non-empty `egress.allow_hosts` | 2.20.0 |
+| `audit_sink` | an audit sink is attached (`compliance`) without `[tls]` — nothing would be sealed | 2.20.0 |
+| `gateway` | the gateway cannot bind its port or load its certificate | 2.20.0 |
+| `persistence` | unreadable state (2.20.0); a second owner of the directory, or a failed startup snapshot (2.23.0); a directory that cannot be created (2.24.0) — `docs/operations/deployment.md` § *Persistence start refusals* | — |
+| `profile` | a guarantee the configured profile requires is unmet; the message names each | 2.19.0 |
+| `http_addr` / `bind_address` | not a valid IP address | — |
 
 **Recoverability:**
 - `InvalidField` / `FieldConflict` / `NodeIdMismatch` / `Toml` / `Parse` — fix the

@@ -8,14 +8,15 @@ hold between them, and how to scale them safely as cluster size grows.
 ## Quick-reference table
 
 Precedence (lowest → highest): TOML config file (`-c <path>`) → CLI flags → environment
-variables (`GOSSIP_<FIELD_NAME>` exists for every field). The authoritative field list with
+variables (`GOSSIP_<FIELD_NAME>` exists for most fields; [`reference/configuration.md`](../reference/configuration.md)
+names each field's variable, which have none, which build it needs, and where a bad value is refused). The authoritative field list with
 full doc comments is the rustdoc on `mycelium-core/src/config.rs`; this table is the
 operator's working set.
 
 | Parameter | Default | Env var | Unit |
 |---|---:|---|---|
-| `health_check_interval_secs` | `10` | `GOSSIP_HEALTH_CHECK_INTERVAL_SECS` | s |
-| `reconnect_backoff_secs` | `5` | `GOSSIP_RECONNECT_BACKOFF_SECS` | s |
+| `health_check_interval_secs` | `10` | `GOSSIP_HEALTH_CHECK_INTERVAL_SECS` | s, 1–3600 |
+| `reconnect_backoff_secs` | `5` | `GOSSIP_RECONNECT_BACKOFF_SECS` | s, 1–300 |
 | `peer_eviction_intervals` | `3` | `GOSSIP_PEER_EVICTION_INTERVALS` | × interval |
 | `profile` | *(none → `dev`)* | `GOSSIP_PROFILE` | `dev` \| `secure-single-domain` — the **guarantee profile** (plan `guarantees-and-rule-catalogue.md` I3). `secure-single-domain` makes `start()` **refuse** unless every guarantee it requires resolves `enforced` on this node, naming each unmet one; `dev` requires nothing and the startup log says so. An unknown name is refused by `validate()`. The required set: [production-readiness.md §2](production-readiness.md) |
 | `domain_profile` | `open` | `GOSSIP_DOMAIN_PROFILE` | `open` \| `enforced` — a federated domain runs `enforced` on every node (TLS required at `validate()`) |
@@ -86,11 +87,16 @@ keeps the static default in the table above (auto is opt-in via `auto()` or a `0
 
 ### Live retuning — hot-reload (WS-C M9)
 
-Three params are **hot-reloadable** on a running node, no restart: `max_inbound_frames_per_sec`
-(sampled per inbound frame), `max_concurrent_bulk_handlers` (sampled per bulk admission), and
-`writer_channel_depth` (sampled at each *new* writer spawn — existing peers keep their channel).
-Set them live with `GossipAgent::{set_max_inbound_frames_per_sec, set_max_concurrent_bulk_handlers,
-set_writer_channel_depth}`; read the current live values with `hot_tunables()`.
+Five params are **hot-reloadable** on a running node, no restart. Three are capacity:
+`max_inbound_frames_per_sec` (sampled per inbound frame), `max_concurrent_bulk_handlers` (sampled per
+bulk admission), and `writer_channel_depth` (sampled at each *new* writer spawn — existing peers keep
+their channel); set them with `GossipAgent::{set_max_inbound_frames_per_sec,
+set_max_concurrent_bulk_handlers, set_writer_channel_depth}` and read them with `hot_tunables()`. Two are
+timing: `set_health_check_interval_secs` and `set_reconnect_backoff_secs` return
+`Result<(), GossipError>` and **refuse a value above 3600 / 300** (`validate()`'s bounds, since 2.25.0 —
+a refused value changes nothing); `0` reverts to the static value; a set **pins** the node, so a fleet
+`TimingIntent` no longer moves it; read them with `timing_tunables()`. The reconnect backoff applies to
+connections established after the change.
 
 For self-tuning, call `GossipAgent::start_cluster_tuner(interval, policy)` — a decentralized,
 coordinator-free advisor: each node observes the live peer count, recomputes the M8 formula, and
@@ -130,6 +136,7 @@ accepts the POST and it gossips to converge — no elected/active endpoint, no f
 | Route | Scope | Body / effect |
 |---|---|---|
 | `POST /gateway/govern/tuning` | `govern:write` | `{"enabled":bool?, "params":[{"param","floor"?,"ceiling"?,"ratchet":"up\|down\|off"}], "target":NodeId?}` → publishes a `GovernIntent` to `sys/govern/fleet` |
+| `POST /gateway/govern/timing` | `govern:write` | `{"health_check_interval_secs"?, "reconnect_backoff_secs"?, "target":NodeId?}` (`0`/absent = leave ungoverned) → publishes a `TimingIntent`; a node that pinned its timing locally ignores it. **Each node applies only values in 1–3600 / 1–300**; the route does not refuse an out-of-range value today, it publishes one every node then ignores |
 | `POST /gateway/govern/membership` | `govern:write` | `{"group", "min", "max"?, "drain":[NodeId]?, "target":NodeId?}` → publishes a `MembershipIntent` to `sys/govern/membership/{group}` |
 | `GET /gateway/govern` | `govern:read` | this node's **effective** tuning-governor snapshot (reconciled local pins + fleet intent) |
 

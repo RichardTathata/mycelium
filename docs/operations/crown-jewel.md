@@ -73,6 +73,16 @@ cfg.egress = mycelium::EgressPolicy {
 };
 ```
 
+In a config file (`GossipConfig::load_from_file`, the `mycelium` binary's `-c`, a stem's `--config`):
+
+```toml
+[egress]
+allow_hosts = ["tools.internal", ".corp.example"]
+```
+
+Since 2.23.0 the list is checked against the **first URL and every redirect hop** (at most five, never
+https → http), with the host read by the HTTP client's own parser.
+
 - **Empty `allow_hosts` = allow all** (the default). A non-empty list is
   **fail-closed**: a host not matched — including a URL whose host can't be parsed
   — is denied.
@@ -94,9 +104,9 @@ resolve names: an allowed name that resolves to an address you meant to deny is 
 | Capability HTTP probes | ✓ `EgressPolicy`, every hop | a blocked probe URL fails the probe (capability not advertised) |
 | A2A **client** | — | client lives in the SDKs (Python/TS), not the substrate; restrict at the SDK / network layer |
 | Federation client (`FederationClient`) | ✓ `EgressPolicy` (since 2026-10-03) | the node's policy applies to the clients it is handed (`with_federation_clients`); a client used outside an agent is built `.with_egress(policy)`. A denied endpoint is `ClientError::Egress`, refused before any byte is sent. **Follows no redirect**: its credential header is not stripped cross-host |
-| OIDC JWKS / discovery | ✓ `EgressPolicy` (since 2026-10-03) | an `[oidc]` issuer or `jwks_uri` the allow-list does not permit **refuses `start()`** by name; at runtime a denied host is never dialled (no keys, every token refused), including through a redirect. Add the IdP's host to `allow_hosts` |
+| OIDC JWKS / discovery | ✓ `EgressPolicy` (since 2026-10-03) | an `[oidc]` issuer, or a `jwks_uri` **you configured**, that the allow-list does not permit **refuses `start()`** by name; a `jwks_uri` taken from discovery is checked when keys are fetched — off the list, the node starts, logs `oidc: the egress policy does not permit the JWKS host; no keys, every token refused`, and answers every JWT 401 (Google: issuer `accounts.google.com`, keys at `www.googleapis.com` — allow both, or set `jwks_uri`); at runtime a denied host is never dialled (no keys, every token refused), including through a redirect. Add the IdP's host to `allow_hosts` |
 | Artifact HTTP library source (`HttpLibrarySource`) | ✓ when built `.with_egress(policy)` | a companion type constructed by the operator; `new()` alone allows all and follows no redirect; with a static header it never follows one |
-| Object-store library (`ObjectStoreFetcher`, `--library s3://…`) | ✓ on the **endpoint** it dials | `AWS_ENDPOINT_URL_S3` / `AWS_ENDPOINT`, else `s3.<region>.amazonaws.com`; `storage.googleapis.com` or `GOOGLE_BASE_URL`. **List the endpoint host, not the bucket.** Azure and S3 Express are refused under a non-empty list. Not gated: the cloud identity's credential traffic, and redirects inside `object_store`'s own client |
+| Object-store library (`ObjectStoreFetcher`, `--library s3://…`) | ✓ on the **endpoint** it dials | `AWS_ENDPOINT_URL_S3` / `AWS_ENDPOINT`, else `s3.<region>.amazonaws.com` (region from `AWS_REGION` / `AWS_DEFAULT_REGION`, default `us-east-1`; `<bucket>.s3.<region>.amazonaws.com` under `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=true` — `.amazonaws.com` covers both); `storage.googleapis.com` or `GOOGLE_BASE_URL`. **List the endpoint host, not the bucket.** Azure and S3 Express are refused under a non-empty list. Not gated: the cloud identity's credential traffic, and redirects inside `object_store`'s own client |
 | Ollama probe (`mycelium-reason`) | ✓ when built `.with_egress(policy)` | `new()` alone is ungated and follows no redirect |
 | Wiki git mirror push (`GitMirror`) | ✓ `EgressPolicy` on the remote host | git runs with `http.followRedirects=false`; a remote whose authority holds a backslash, whitespace or a control character is refused |
 | Bulk transport peer fetch | n/a | intra-cluster (peer URLs), not external egress — deliberately not gated; follows no redirect |
@@ -113,4 +123,7 @@ security groups, an egress proxy with its own allowlist).
 | node refuses to start naming `snapshot.bin` or a WAL byte | cipher key changed/unavailable → the state is unreadable and `on_unreadable = "refuse"` (the default) fails closed | restore the exact key; `on_unreadable = "quarantine"` moves the files aside and starts from what was readable |
 | plaintext visible in `wal.bin` | no cipher attached, or attached after `start()` | attach `with_data_at_rest_cipher` **before** `start()` |
 | `connect_mcp_server` → "egress denied by policy" | target host not in `allow_hosts` | add the host (exact or `.suffix`) |
-| data exfiltrated via an outbound path the list does not cover | `allow_hosts` gates the MCP bridge, LLM backends, capability probes, the federation client and OIDC discovery/JWKS (the table above); a path your own code opens is yours | add network-layer egress control (see §2) |
+| `egress: the redirect target … is not on the allow-list` / `egress: a redirect from https to http is refused` / `egress: more than 5 redirects` (2.23.0) | an allowed URL redirects off the list, downgrades, or loops | allow the target host, or point the setting at the final URL |
+| `egress policy denies <url>: the store dials <host>` (2.23.0) | an object store's **endpoint** is not on the list (a bucket name admits nothing) | allow the endpoint host — [artifacts.md § Remote blob stores](artifacts.md) has the table |
+| every JWT answers 401; log `oidc: the egress policy does not permit the JWKS host` | a discovered `jwks_uri` on a host not on the list | allow the JWKS host or set `jwks_uri` explicitly (then `start()` checks it) |
+| data exfiltrated via an outbound path the list does not cover | `allow_hosts` gates the MCP bridge, LLM backends, capability probes, the federation client, OIDC discovery/JWKS, object stores, the wiki git mirror, and — when built `.with_egress` — the Ollama probe and HTTP library source (the table above); a path your own code opens is yours | add network-layer egress control (see §2) |

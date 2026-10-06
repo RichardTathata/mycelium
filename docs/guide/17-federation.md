@@ -243,7 +243,9 @@ let agent = GossipAgent::new(id, cfg)
 ```
 
 The node's `egress.allow_hosts` now covers the client: a partner `base_url` the list denies returns
-`ClientError::Egress` before any byte (2.20.0; `#[non_exhaustive]`, so a `_` arm must fail closed).
+`ClientError::Egress` before any byte (2.20.0; `#[non_exhaustive]`, so a `_` arm must fail closed). Since
+2.23.0 the client also follows **no** redirect off the list — a partner `base_url` that answers 301 to
+an unlisted host fails rather than being followed; configure the final URL.
 
 | Route | Scope | What it does |
 |---|---|---|

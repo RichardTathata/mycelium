@@ -63,8 +63,9 @@ pub enum GossipError {
     #[error("Agent has been shut down and cannot be restarted")]
     Shutdown,
 
-    /// An I/O error during startup: TCP listener bind, WAL read/replay, or TLS
-    /// certificate setup.
+    /// An I/O error during startup: TCP listener bind or TLS certificate setup. (A persistence
+    /// failure at `start()` — unreadable state, a second owner, a failed startup snapshot, an
+    /// uncreatable directory — is [`InvalidField`](Self::InvalidField) with `field: "persistence"`.)
     ///
     /// Runtime TCP connection errors (peer unreachable, write timeout) are absorbed
     /// internally and surfaced via `system_stats().dropped_frames` and

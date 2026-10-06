@@ -193,7 +193,8 @@ Understanding the boundaries matters as much as understanding the model.
 
 **Not an actor framework.** Actors have explicit addresses and explicit lifecycle management. Mycelium nodes have capabilities and boundaries. Topology emerges from capability matching rather than being managed explicitly.
 
-**Not a platform.** No daemon, no orchestrator, no installer, no control plane. A Rust crate embedded in the process that needs it. The operator's existing infrastructure is irrelevant — Mycelium does not touch it.
+**Not a platform.** No daemon, no orchestrator, no installer, no control plane — in the sense
+[positioning.md § The three expansions](positioning.md#the-three-expansions) defines: control decisions live in the participating nodes, and no separate control-plane service is required. A Rust crate embedded in the process that needs it. The operator's existing infrastructure is irrelevant — Mycelium does not touch it.
 
 **Not Byzantine-tolerant.** The consensus layer is crash-fault tolerant. Signed frames (`tls`) and signed `sys/identity` proofs make a forged or altered write *detectable and refused*; a compromised node still signs falsehoods under its own key, and nothing here outvotes it. Authority is checked where an enforcement point is configured — gateway, provider, store — before work runs (v2.15.0), membership removal is an operator's signed act (v2.15.0), and a named profile makes `start()` refuse on an unmet guarantee (v2.19.0): each named and reported, none of it a policy engine inside Layer I, which prevents nothing and detects (litmus 4).
 

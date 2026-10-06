@@ -33,7 +33,7 @@ mesh (a seed needs none). Everything else is optional.
 | Config | Purpose | Default |
 |---|---|---|
 | `bind_port` | gossip transport (TCP, and SWIM UDP if enabled) — node-to-node | required |
-| `http_port` | the embedded gateway (diagnostics, AgentFacts, `/gateway/*`) | `None` (off) |
+| `http_port` | the embedded gateway (diagnostics, AgentFacts, `/gateway/*`) — needs a build with the `gateway` feature; without it `start()` refuses the setting by name (2.25.0) | `None` (off) |
 | `http_addr` | interface the gateway binds | `127.0.0.1` |
 
 `http_port` must differ from `bind_port`. Leave `http_port = None` for a
@@ -102,7 +102,9 @@ own) like any **stateful** service, minding two requirements that follow from th
    balancer — peers must reach *specific* nodes.
 2. **Persistent identity + WAL.** Mount a durable volume for `auto_cert_dir` (so
    the Ed25519 identity survives restarts) and, if persistence is on, the WAL path
-   (so state replays). On k8s that's a `volumeClaimTemplates` PVC per pod.
+   (so state replays). On k8s that's a `volumeClaimTemplates` PVC per pod — **never one shared
+   read-write-many volume**: a replacement pod that starts while the old one still holds
+   `wal.bin.lock` is refused until the old process exits (above, *Persistence start refusals*).
 
 **Kubernetes:** a **StatefulSet** (stable pod identity + per-pod PVC) behind a
 **headless Service** (stable per-pod DNS for bootstrap) is the natural fit; set
@@ -167,7 +169,8 @@ bounded; the snapshot pass raises the node's opacity for its duration. Since v2.
 
 **Unreadable state fails closed** (`on_unreadable`, default `"refuse"`). A corrupt or undecryptable
 `snapshot.bin`, or a WAL record that is all there and does not decode, is **not** a crash's torn tail
-(the file ending inside its last record, which replay tolerates and the writer appends after): the node
+(the file ending inside its last record, which replay tolerates and the startup snapshot truncates before
+the first acknowledged append — since 2.23.0; the writer used to append after it): the node
 refuses to start, naming the file and the byte, and a snapshot that meets one aborts rather than
 truncating past it. `on_unreadable = "quarantine"` is the operator's explicit fail-open: the files are
 moved aside as `*.unreadable-N` (never deleted) and the node starts from what was readable; the fleet
@@ -180,6 +183,22 @@ setting. It lives in the `[persistence]` table — a bare top-level `on_unreadab
 base_path = "/var/lib/mynode"
 on_unreadable = "quarantine"   # default "refuse"
 ```
+
+**Persistence start refusals.** Each is `InvalidField { field: "persistence" }` at `start()`, naming
+the path; the node does not start in a degraded mode for any of them.
+
+| The message says | Cause | Do |
+|---|---|---|
+| `the persistence directory … cannot be created` (2.24.0) | `base_path` not creatable by the node's user — a read-only mount, a missing parent, a file where the directory should be | fix the path or its permissions; before 2.24.0 the node ran **in memory** and lost every write at restart |
+| `… is owned by another handle or process (lock file …/wal.bin.lock); one agent per persistence directory` (2.23.0) | a second agent on the same `{base_path}/{node_id}`, or the previous process still running | stop the other owner; **do not delete the lock file** — the lock is the OS's and is released when its holder exits |
+| `the startup snapshot that repairs the WAL failed …` (2.23.0) | the snapshot that truncates a torn WAL tail could not be written | fix the directory (space, permissions); `on_unreadable = "quarantine"` starts without the repair, and appends before the next good snapshot may not survive a restart |
+| an unreadable snapshot or WAL record (2.20.0) | corruption, or the wrong at-rest key | the paragraph above |
+
+The node-local journals (`DurableEpochs`, the evidence journal, the rights ledger) follow the same two
+rules in their own `open`: one owner per file — a second opener gets `WouldBlock` naming the path, so give
+each its own path — and **a failed append poisons the writer**, which refuses every later append
+(`the journal is poisoned by an earlier failed append …`) until the journal is reopened, i.e. until the
+node restarts after the disk is fixed.
 
 ### Choosing a sync mode with the receipt contract in hand
 
@@ -239,6 +258,20 @@ window fails CI, not your rollout.
 `POST /gateway/kv` without `value_b64` answers **400 and writes nothing** (it used to store an empty
 value); an HTTP client or an old SDK that relied on the silent default breaks at upgrade, not at the
 wire. The list is [deprecations.md](../guide/deprecations.md) (§12 for this one).
+
+**Behaviour changes that refuse a start.** These upgrades make `start()` refuse a node that used to start
+degraded — each was running without the protection it was configured for, so check before upgrading:
+
+| From | A node now refuses to start when | It used to |
+|---|---|---|
+| 2.18.1 | a token table or `[oidc]` is set without `compliance`; `[tls]` / `[gateway_tls]` without `tls` | run an open gateway, or plaintext |
+| 2.20.0 | persisted state is unreadable (or the at-rest key is wrong); the gateway cannot bind or load its certificate; the OIDC issuer is not on the egress list; an audit sink has no `[tls]` | start empty, or with a dead gateway behind a ready node |
+| 2.23.0 | a second agent owns the persistence directory; the startup snapshot that repairs a torn WAL fails | share a WAL, or append behind a torn frame |
+| 2.24.0 | the persistence directory cannot be created | run in memory and lose every write at restart |
+| 2.25.0 | `http_port` or `[gateway_tls]` is set in a build without `gateway` | run no gateway while advertising its port |
+
+Each refusal names the setting; the Dev view is [error-handling.md](../guide/error-handling.md) §
+*Start refusals*, the persistence ones are [above](#persistence-modes).
 
 ## Backup & restore
 

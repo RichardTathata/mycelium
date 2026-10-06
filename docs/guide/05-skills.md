@@ -378,7 +378,10 @@ let backend = OpenAiBackend::new(
     "http://localhost:11434/v1",   // any OpenAI-compatible endpoint
     "",                             // API key (empty for Ollama)
     "llama3.2",                    // model baked in at construction
-);
+)
+// Since 2.23.0 `new` follows no redirect. Attach the node's allow-list to follow allowed ones and
+// to gate the endpoint itself: every hop is re-checked (crown-jewel.md § 2).
+.with_egress(agent.egress_policy());
 
 let template = PromptTemplate {
     system: "You are a helpful assistant. Reply concisely.".into(),

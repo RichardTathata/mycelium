@@ -272,8 +272,10 @@ pub struct GatewayNamedToken {
 /// Enforced at every outbound path the substrate opens: the MCP client bridge
 /// (`connect_mcp_server`), LLM backends, capability probes, and — since 2.20.0 —
 /// the federation client and the gateway's OIDC discovery/JWKS fetch (a denied
-/// issuer refuses `start()`). A path your own code opens is yours; see the egress
-/// runbook and threat model for the full posture.
+/// issuer refuses `start()`); an object store on the endpoint it dials and the wiki's
+/// git mirror. Since 2.23.0 every redirect hop is checked too ([`Self::redirect_verdict`]:
+/// at most five, never https → http). A path your own code opens is yours; see the egress
+/// runbook (`docs/operations/crown-jewel.md` § 2) and threat model for the full posture.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EgressPolicy {
     /// Permitted outbound hosts. Empty = allow all. An entry matches a host if it
@@ -877,7 +879,9 @@ pub struct GossipConfig {
     /// provides `/health`, `/stats`, and `/signals/{kind}` (SSE) endpoints, and will
     /// serve the MCP bridge and language gateway in Layer 4.
     ///
-    /// Must be non-zero and must differ from `bind_port`.
+    /// Must be non-zero and must differ from `bind_port`. Requires the `gateway` crate feature: a
+    /// build without it refuses to start with this set (2.25.0), rather than run no gateway and still
+    /// advertise the port.
     pub http_port: Option<u16>,
 
     /// Bind address for the embedded HTTP server.
@@ -887,8 +891,9 @@ pub struct GossipConfig {
     pub http_addr: String,
 
     /// Native server-side TLS for the HTTP gateway. `None` (default) = plaintext HTTP.
-    /// See [`GatewayTlsConfig`]. Only meaningful when `http_port` is `Some`. Requires the `tls`
-    /// crate feature: a build without it refuses to start with this set, rather than serve plaintext.
+    /// See [`GatewayTlsConfig`]. Only meaningful when `http_port` is `Some`. Requires the `tls` and
+    /// `gateway` crate features: a build without either refuses to start with this set, rather than
+    /// serve plaintext or nothing.
     pub gateway_tls: Option<GatewayTlsConfig>,
 
     /// Local KV persistence configuration.
@@ -898,8 +903,8 @@ pub struct GossipConfig {
     /// { base_path, .. })` to enable an append-only WAL and periodic snapshots.
     ///
     /// Each node writes under `{base_path}/{node_id}/kv/`, so multiple nodes on
-    /// the same machine never collide. If `base_path` is not writable at startup,
-    /// a warning is logged and the node falls back to in-memory-only mode.
+    /// the same machine never collide. If the directory cannot be created at startup, `start()`
+    /// refuses with `InvalidField { field: "persistence" }` (2.24.0; it used to run in memory).
     pub persistence: Option<PersistenceConfig>,
 
     /// Timeout (seconds) for the HTTP fetch issued by `bulk_serve` when a target
@@ -1115,8 +1120,9 @@ pub struct GossipConfig {
 
     /// Outbound egress allow-policy (WS3). Default: empty = allow all. Set
     /// `allow_hosts` to constrain which external hosts the substrate may reach
-    /// (the MCP bridge, LLM backends, probes, the federation client, OIDC). A
-    /// node-local posture, not a coordinator.
+    /// (the MCP bridge, LLM backends, probes, the federation client, OIDC, object stores,
+    /// the git mirror — the first URL and every redirect hop). A node-local posture, not a
+    /// coordinator. In TOML: `[egress]` / `allow_hosts = ["host", ".suffix"]`.
     #[serde(default)]
     pub egress: EgressPolicy,
 
@@ -1627,15 +1633,15 @@ impl GossipConfig {
                     reason: "cannot be zero".into(),
                 });
             }
-            // Writability check: warn and the caller falls back to None at startup.
-            // We don't hard-fail here because validate() is also called in load_from_file
-            // before the node_id is known, so we can only check the base path itself.
+            // Writability check: warn early. We don't hard-fail here because validate() is also
+            // called in load_from_file before the node_id is known, so we can only check the base
+            // path itself; `start()` refuses if the node's directory cannot be created (R7).
             if !p.base_path.as_os_str().is_empty()
                 && let Err(e) = fs::create_dir_all(&p.base_path) {
                     tracing::warn!(
                         path = %p.base_path.display(),
                         error = %e,
-                        "persistence.base_path is not writable; node will run in-memory-only mode",
+                        "persistence.base_path is not writable; start() will refuse unless it becomes writable",
                     );
                 }
         }
@@ -1663,7 +1669,8 @@ impl GossipConfig {
     /// **Note:** this method does _not_ call [`validate`](Self::validate). Callers
     /// must invoke `validate()` separately after all overrides are applied.
     ///
-    /// All 24 fields can be overridden: `GOSSIP_BIND_ADDRESS`, `GOSSIP_BIND_PORT`,
+    /// Fields that can be overridden include (the full list, with each variable's field, is
+    /// `docs/reference/configuration.md`): `GOSSIP_BIND_ADDRESS`, `GOSSIP_BIND_PORT`,
     /// `GOSSIP_PROPAGATION_WINDOW_SECS`, `GOSSIP_HEALTH_CHECK_INTERVAL_SECS`,
     /// `GOSSIP_DEFAULT_TTL`, `GOSSIP_MAX_CONNECTIONS`, `GOSSIP_WRITER_CHANNEL_DEPTH`,
     /// `GOSSIP_MAX_FORWARDING_PEERS`, `GOSSIP_RECONNECT_BACKOFF_SECS`,

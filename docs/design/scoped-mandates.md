@@ -77,6 +77,18 @@ without its context, which is what §6.1 of the knowledge record separates as as
 Plus **incumbency rules** — consecutive terms, cumulative tenure, cooling-off, eligibility, affiliated
 principals — and a **fail-closed authority restart**.
 
+**Strict eligibility (realignment repairs A3, decision D4; 2.24.0).** An incumbency rule is only as good as
+the history it is evaluated over, and a history that silently lacks a candidate's earlier terms passes
+every limit. So the strict form answers each configured rule `Eligible`, `Ineligible` or **`Unknown`**,
+and **unknown history is never eligible**. Coverage belongs to the *source*: a `TermHistory` is built from
+chained terms (each names its predecessor), an `Origin` (the role's first term, or a trusted baseline at
+a checkpoint) and the current head, and `from_chain` verifies the chain rather than accepting a caller's
+`complete: true` — which would only move the assumption. Sufficiency belongs to the *evaluator*, per rule:
+a run broken inside the verified suffix decides consecutive terms; cumulative tenure needs the origin or a
+baseline; cooling-off needs the window covered. What it does not claim: that the source recorded every
+appointment there was, and — today — that any shipped source builds the history; an embedding
+application does (`src/mandate/eligibility.rs`; guide 21 § Eligibility).
+
 ## 5. D26 — the enforcement lives inside the resource's atomic boundary
 
 **This is the one architectural disagreement of the axis, and the record states both sides.**

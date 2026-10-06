@@ -163,13 +163,18 @@ cfg.persistence = Some(PersistenceConfig {
 
 What an acknowledged write means depends on `sync_mode`: `Flush` — `set_async` awaits the record's
 `fdatasync` before returning, **but its `bool` is the gossip-queue result, not a durability receipt**:
-a dead WAL writer or disk error is logged at `warn` and the call still returns `true` (surfacing
-per-write durability to callers is the v3.0 contracts plan's first deliverable — `ROADMAP.md`
-§ contracts axis); `Async` (the default) — OS-buffered, the last few writes may be lost on power failure;
+a dead WAL writer or disk error is logged at `warn` and the call still returns `true` — for a
+per-write durability receipt use `set_with_receipt` or `set_requiring_sync` (since 2.5.0;
+[guide 18](18-contracts-and-receipts.md)); `Async` (the default) — OS-buffered, the last few writes may be lost on power failure;
 `Os` — no explicit sync, development only. Consensus committed slots and leases are fsynced in
 **every** mode. A snapshot never discards a WAL record (it merges the WAL tail before truncating),
 and replay is last-writer-wins over every record — the same rule the live store applies. Operator
-side: [deployment.md § Persistence modes](../operations/deployment.md#persistence-modes).
+side: [deployment.md § Persistence modes](../operations/deployment.md#persistence-modes), including what
+`start()` refuses (a second agent on one directory, a directory it cannot create, a startup snapshot
+that fails — one agent per `{base_path}/{node_id}`). Embedding the WAL directly rather than through
+`GossipAgent`: take `OwnershipLock::acquire` before `replay`, hand it to the writer with
+`WalHandle::hold_ownership`, and await `trigger_snapshot()` before the first append, or a torn tail
+stays behind your writes (`mycelium_core::persistence`'s `replay` and `spawn_wal_writer` rustdocs).
 
 **The KV ring as pipeline buffer.** The fluid pipeline example
 ([07-pipelines.md](07-pipelines.md)) uses `scan_prefix("pipeline/stage-a/")`

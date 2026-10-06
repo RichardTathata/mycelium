@@ -167,9 +167,14 @@ the assumption. Each rule then needs its own kind of coverage:
 
 | Rule | Decided when |
 |---|---|
-| consecutive terms | the run is broken inside the verified suffix, or the suffix starts at the role's first term — or the run already meets the limit |
-| cumulative tenure | the suffix starts at the first term or a trusted baseline — or the visible total already meets the limit |
-| cooling-off | a term of the candidate is in the suffix, or the suffix reaches back across the whole cooling window |
+| consecutive terms | the history reaches the source's current head, **and** the run is broken inside the verified suffix or the suffix starts at the role's first term — or the visible run already meets the limit (then `Ineligible` however much is missing) |
+| cumulative tenure | the history reaches the head **and** the suffix starts at the first term or a trusted baseline — or the visible total already meets the limit (then `Ineligible` regardless) |
+| cooling-off | the history reaches the head (checked **first** — a stale head is `Unknown` even for a candidate visibly inside the window), **and** a term of the candidate is in the suffix, or the suffix starts at the role's first term or reaches back across the whole cooling window |
+
+**Who the source is.** Whoever builds the `ChainedTerm`s and chooses the `Origin` — `Genesis` is that
+source's claim to hold the role from its first appointment. `from_chain` checks the chain is unbroken
+and reaches the head it is given; it cannot check that no appointment exists outside it. Nothing in the
+substrate builds a `TermHistory` yet — an embedding application does, from the records it holds.
 
 `eligibility::ready(successor, journal, &strict)` is the readiness gate: the handover journal read
 **and** every configured rule decided in favour. Two conditions — reading says nothing about

@@ -11,6 +11,9 @@ choices over the same substrate, not different architecture layers.
 
 ## Pin the source
 
+**Toolchain:** Rust **1.89** or newer for `mycelium` and `mycelium-core` (`rust-version` in `Cargo.toml`);
+**1.94** for `mycelium-wasm-host`. The repository pins its own toolchain in `rust-toolchain.toml`.
+
 The supported Rust dependency path is a git tag; do not substitute a similarly named registry
 package. The copyable dependencies and feature choices live in the [integrator contract](building-on-mycelium.md#1-the-dependency).
 For a reproducible example checkout:

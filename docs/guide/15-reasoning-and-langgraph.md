@@ -92,7 +92,10 @@ Never checkpoint blobs into KV — KV floods every node and is size-gated.
 on node B. The index rows gossip A→B; the payload blobs are fetched from whichever peer holds
 them. The rung waits for convergence with a bounded structural poll (read-your-writes holds
 only against the *same* node's gateway; a cross-node reader polls until the head has gossiped
-in — an honest consequence of eventual consistency, not a bug).
+in — an honest consequence of eventual consistency, not a bug). The poll treats
+`IncompleteCheckpoint` (0.2.0) as *not converged yet*: the index row can arrive before its blobs are
+fetchable. An application calling `graph.invoke` on node B meets the same error and should retry it with
+a bound — the checkpointer README has the loop.
 
 ### What a checkpoint's acknowledgement actually proves
 

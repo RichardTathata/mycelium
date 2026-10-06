@@ -43,7 +43,9 @@ mycelium-reason     = { git = "https://github.com/RichardTathata/mycelium", tag 
 
 Feature choice on the full crate:
 - **`default`** = `cli,gateway,consensus` — most integrators want this.
-- **`default-features = false`** drops the gateway (bare-metal / WASM / no-std host).
+- **`default-features = false`** drops the gateway (bare-metal / WASM / no-std host) — and such a build
+  refuses `http_port` / `[gateway_tls]` at `start()` rather than ignore them (2.25.0). Which feature
+  each configuration field needs: [`reference/configuration.md`](../reference/configuration.md).
 - add **`tls`** for mTLS + signed consensus, **`metrics`** for a Prometheus endpoint,
   **`a2a`** for Agent-to-Agent discovery.
 - add **`compliance`** (implies `gateway` + `tls`) for scoped and named gateway tokens, OIDC, the

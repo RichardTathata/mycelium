@@ -90,7 +90,8 @@ an attacker-controlled endpoint, or pull malicious tool definitions.
 outbound HTTP paths the substrate chooses to make: the MCP client bridge, capability
 probes, LLM-backend calls (core prompt skills, SkillRunner, a stem's `[[serve]]`),
 OIDC discovery and JWKS (a denied issuer refuses `start()`), the federation client,
-the wasm host's artifact sources, the Ollama probe, and the wiki's git mirror. Empty =
+the wasm host's artifact sources (an `HttpLibrarySource` when built `.with_egress`; an object store on
+its endpoint), the Ollama probe (when built `.with_egress`), and the wiki's git mirror. Empty =
 allow all (default); set it to fail-closed against unlisted hosts. Since 2.23.0
 (realignment repairs R3–R4, after an external review's F03):
 

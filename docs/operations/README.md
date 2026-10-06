@@ -53,6 +53,7 @@ declarations, shadow acceptance, authority boundaries, replay, and declared vers
 | [companions.md](companions.md) | **operating the companions** (tuple-space · blackboard · wiki) — durability/WAL, capability-ring failover, the wiki's node-independent store, teardown invariants |
 | [admission-control.md](admission-control.md) | **admission at the companions' queues** (v3 item 4 PR 5) — the tuple space's watermark and `admission()` counts, the blackboard's `high_watermark`, what a rising `rejected` means, what these bounds are not |
 | [control-profiles.md](control-profiles.md) | **the shadow-mode rollout** (v3 item 4 §7) — `Legacy` → `Observe` → `EnforceLocal` → `EnforceAllocated`, what each step changes per governor, the tripwires to watch before stepping up, rollback |
+| [../reference/configuration.md](../reference/configuration.md) | **who owns each configuration field** — every `GossipConfig` field: the component that reads it, the feature that enforces it, where a bad value is refused (and where it is silently accepted), whether a change needs a restart, its default and env var |
 | [tuning.md](tuning.md) | the full config reference + env-var precedence, auto-derivation, hard invariants, per-size scaling profiles, RPC-heavy-pair pinning, performance baselines |
 | [rbac.md](rbac.md) | signed role claims, capability authz, OAuth2 gateway ACLs |
 | [sso.md](sso.md) | generic-OIDC SSO at the gateway |
