@@ -22,6 +22,18 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Unreleased on `main` (2026-10-06/07) — the verification policy and the recorded code gaps
+
+Doc-coverage run 20 found six code gaps behind green CI and repeated analysis; the answer was a policy, not
+six patches. **#541** — the verification policy (enumerate, evidence, discovery, adversarial review) with rule
+3 *observed*: the `test-coverage` job fails on any known test that did not execute in the run
+([testing/verification-policy.md](testing/verification-policy.md)); its first runs found tests no step ran and
+a flake tier that skipped binaries. **#542** — S5's distinguishable blob reasons (`mycelium-reason` 0.7.0,
+checkpointer 0.3.0). **#543** — A3's history source and a consecutive-terms stale-head fix. **#544** — the
+timing door and every door to it (the substrate's KV keys, the governance routes' strictness), cooling-off's
+order, `with_egress`, `mycelium-py` 0.2.6. Each PR went through two to four independent adversarial reviews;
+every review found something. Not released.
+
 ## v2.25.0 release — 2026-10-05 (tag `v2.25.0`) — the realignment repairs' last rows
 
 the **realignment repairs' last rows** (R8, R9 — #534, #535; every row of the plan now closed): the live timing setters keep `validate()`'s bounds — `set_health_check_interval_secs` / `set_reconnect_backoff_secs` refuse a value above 3600 / 300 with `InvalidField`, changing neither the live value nor the local pin (R9); a build without `gateway` refuses `http_port` and `[gateway_tls]` at start instead of ignoring them while advertising a bulk port nothing served, and the `gw.*` guarantees read `not_in_build` there instead of `enforced` (R8) — with **the first test build of `mycelium` without the gateway**, the test-only crate `mycelium-gateway-free-tests`, because `mycelium`'s own dev-dependencies unify `gateway` into every test build of the crate. Wire **v12** unchanged. **Upgrade notes:** both timing setters return `Result<(), GossipError>` (ignoring it is `unused_must_use`); a gateway-free build given an `http_port` — `skillrunner` built without default features included — now fails at start.

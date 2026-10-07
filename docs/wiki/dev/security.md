@@ -187,6 +187,29 @@ same as *authority is recomputed, never inherited*, applied to a role's past: a 
 only move the assumption. Guide 21 § Eligibility; `examples/strict_eligibility.rs`;
 [`.log/2026-10-05-a3-strict-eligibility.md`](.log/2026-10-05-a3-strict-eligibility.md).
 
+**The source, built (unreleased on `main`, #543).** `mandate::history_source::history_from_appointment_stream`
+(`src/mandate/history_source.rs`) builds that `TermHistory` from an appointment stream in the knowledge layer:
+pinned to one `(issuer, stream)`, walked back from **this node's reader's checkpoint** along signed `prev`
+digests — the checkpoint head under a current key, older heads under any key the issuer held (the hash chain
+fixes them) — so a presenter's other heads cannot add coverage. A gap or a repeated term breaks the chain; a
+forked stream (since the reader was opened) vouches for nothing; a baseline binds only at the head digest it
+names. Stated limits: "current" is as of the reader's checkpoint, a restart forgets a fork, and a reader that
+must advance across a revoked head stays put (knowledge K2). It took three independent reviews; the first found
+a version that could report full coverage over a false history. Also from its example: a consecutive-terms run
+at the limit behind a stale head is now `Unknown` — a later term breaks a run.
+[`.log/2026-10-07-a3-history-source.md`](.log/2026-10-07-a3-history-source.md).
+
+**The doors that take a KV key do not write the substrate's (unreleased on `main`, #544).** `POST`/`DELETE
+/gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set` refuse every key under
+`sys/` and `consensus/` **403** `protected_key`, whatever the token's scopes — an allow-list with one
+allowance, the operator's `sys/topology-override/{group}` (`refuse_protected_key`, `src/agent/http.rs`). Under
+`kv:write` they could publish a governance intent without `govern:write`, plant the `sys/caller-context/`
+marker a secure gateway checks before dispatch, delete an acceptor's durable ballot, or forge a committed slot.
+**Recorded, not decided:** `kv:write` stays a data-plane superuser scope for every *other* route-owned
+namespace (`prompts/`, `log/`, `grp/`, `cap/`, `mailbox/`, `installable/`, companions'), and the topology
+override is an unaudited `kv:write` write — `rbac.md` says so.
+[`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md).
+
 ## Threat model revision 3 draft — Boundary H (2026-09-23)
 
 `docs/threat-model.md` §5 adds **H**, a colluding population of admitted members: the plural of §4's "trusted member

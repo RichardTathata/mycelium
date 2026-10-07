@@ -110,6 +110,12 @@ via wasm-host).
   `IncompleteCheckpoint` (retriable) where a checkpoint's rows and blobs have not all converged, instead of
   reading it as absent or smaller (`.log/2026-10-05-ts-sdk-contract.md`,
   `.log/2026-10-05-checkpoint-incomplete.md`).
+  **Why a blob is missing (unreleased on `main`, #542 — `mycelium-reason` 0.7.0, checkpointer 0.3.0):**
+  `MeshBlobStore::fetch` returns a `BlobMiss` — `NotFound` / `Unavailable` / `Corrupt`, corrupt only when every
+  copy currently on offer fails its address — and the route answers 404 / 503 / 502 with the reason in its body;
+  damage at rest (a bad hash, an unreadable file) is corruption, answered by the stock server with a marker, and
+  `put` of the right bytes repairs it; `IncompleteCheckpoint.reasons` reads the route's body, so a proxy's 502 is
+  `unavailable` and a bare 404 `unsupported` (`.log/2026-10-07-s5-blob-reasons.md`).
   **COMPLETE (PRs #130–#136, 2026-07-08):** the crate + Python tier, the LangGraph example ladder
   (`examples/langgraph/` rungs 0–6 incl. the echo-CI **deploy/reheal flagship** + a router-robustness
   fix it surfaced — live-SWIM filter + fast failover, #134), the repo's first Python CI job, and guide
