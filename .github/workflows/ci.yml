@@ -675,13 +675,16 @@ jobs:
           cache-dependency-path: mycelium-ts/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
-      - run: npx jest --verbose   # --verbose: each test's ✓/○ line, which the test-coverage job reads
-      # The TypeScript half of the test universe: every test file jest would collect, listed (the
-      # test-coverage job checks each executed somewhere — a fully skipped suite prints no test lines).
+      # --verbose: each test's ✓/○ line, which the test-coverage job reads; --json: every test's title,
+      # skipped ones included (a fully skipped suite prints no ✓/○ lines), for the universe below.
+      - run: npx jest --verbose --json --outputFile="$RUNNER_TEMP/jest-results.json"
+      # The TypeScript half of the test universe: every test file jest would collect, and every test's title
+      # (skipped ones too), listed — the test-coverage job checks each executed somewhere.
       - name: List the TypeScript test universe
         run: |
           echo "@@test-universe@@ begin"
           npx jest --listTests
+          python3 -c 'import json,sys,os; r=json.load(open(sys.argv[1])); [print("@@ts-test@@ "+os.path.relpath(t["name"], os.getcwd())+"::"+a["title"]) for t in r["testResults"] for a in t["assertionResults"]]' "$RUNNER_TEMP/jest-results.json"
           echo "@@test-universe@@ end"
       # The live suite against a real node (realignment repairs S4). It skips itself without
       # MYCELIUM_TEST_HOST, which nothing here set until 2026-10-05 — so it never ran in CI, and
@@ -807,6 +810,11 @@ jobs:
           cargo test --workspace --all-features --no-fail-fast -- --list
           cargo test -p mycelium --no-default-features --lib -- --list
           cargo test -p mycelium-core --no-default-features --lib -- --list
+          # Every workspace crate's own featureless build, so a test gated `not(feature = …)` in any crate is
+          # known (derived from cargo metadata, so a new crate is covered the day it joins the workspace).
+          for p in $(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]'); do
+            cargo test -p "$p" --no-default-features --no-fail-fast -- --list || exit 1
+          done
           pytest --collect-only -q langgraph-checkpoint-mycelium/tests mycelium-py/tests
           echo "@@test-universe@@ end"
 

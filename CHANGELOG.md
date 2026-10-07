@@ -38,6 +38,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   routing one through `/a2a` would reach a model without `llm:invoke`. Before, a guessed id resolved a provider
   and dispatched `skill.invoke` there, where a co-hosted receiver could run under the guessed name. Test
   `agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
+- **The test-coverage job knows more tests** (verification policy rule 3). Its universe lists every TypeScript test
+  by name — jest's `--json` report, skipped tests included — where it listed only files, and every workspace
+  crate's own featureless build, so a test gated `not(feature = …)` outside the root crate is known. A test known
+  and never executed fails CI as before.
 
 ## [2.26.0] — 2026-10-07
 

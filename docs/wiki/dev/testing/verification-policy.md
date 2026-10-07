@@ -60,12 +60,13 @@ an auditor enumerated surfaces from the code instead of the description:
   tier skipping test binaries behind a flake (`--no-fail-fast`, below). Self-tests: `scripts/test-ci-test-coverage.py`
   (the parser), `scripts/test-ci-retest.sh` (the retry tier).
 - **What the observed job cannot see**, so the static check below still matters: a test compiled under no
-  feature set the universe builds — a `not(feature = …)` gate in a crate other than `mycelium` and
-  `mycelium-core`, `all(a, not(b))`, a root-crate test gated `not(feature = "gateway")` (the root's
-  dev-dependencies unify `gateway` back in), a `--cfg` other than the loom job's; TypeScript test *names*
-  (files are listed, names are known only once printed); script-style suites (`scripts/test-*`, the Docker
-  workflows). And it keys an integration test by file and name, not crate, so two crates' same-named tests
-  would mask each other — the static check refuses that pair.
+  feature set the universe builds — the universe lists `--all-features`, `mycelium` and `mycelium-core` without
+  default features, and every workspace crate's own featureless build (2.27.0), so the remaining gap is a gate
+  needing two or more features off at once in the root crate (whose dev-dependencies unify `gateway` back in),
+  or a `--cfg` other than the loom job's; script-style suites (`scripts/test-*`, the Docker workflows). TypeScript
+  tests are known by name since 2.27.0 (jest's `--json` report lists skipped ones too). It keys an integration
+  test by file and name, not crate, so two crates' same-named tests would mask each other — the static check
+  refuses that pair.
 - `scripts/check-test-inventory.py` (in `make check` and CI, through `scripts/with-pyyaml.sh`) — the fast,
   **approximate** pre-push half: rule 3 checked positively from source and workflow text. It inventories every test *requirement*: per crate, the library's, each integration test's,
   each binary's and the doctests' test code under every distinct `cfg` gate (a file's `#![cfg]`, the gate on the
