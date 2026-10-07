@@ -137,8 +137,15 @@ def fetch(dest: str):
         if status != "completed":
             unfinished.append(name)
             continue
-        log = subprocess.run(["gh", "api", f"repos/{repo}/actions/jobs/{jid}/logs"], capture_output=True, text=True)
-        open(os.path.join(dest, f"{jid}.log"), "w", encoding="utf-8").write(log.stdout)
+        # `gh run view --log` follows the API's redirect to the log blob (`gh api …/logs` does not, and
+        # returned an empty body on the first CI run — which this script then failed on, as it should).
+        log = subprocess.run(["gh", "run", "view", run, "-R", repo, "--job", jid, "--log"],
+                             capture_output=True, text=True)
+        if log.returncode != 0 or not log.stdout.strip():
+            sys.exit(f"ci-test-coverage: could not fetch the log of job {name!r} ({jid}): {log.stderr.strip()[:300]}")
+        # Each line is `job<TAB>step<TAB>timestamp text`; keep the last field.
+        text = "\n".join(l.split("\t", 2)[-1] for l in log.stdout.splitlines())
+        open(os.path.join(dest, f"{jid}.log"), "w", encoding="utf-8").write(text)
     if unfinished:
         sys.exit("ci-test-coverage: these jobs had not finished, so their tests cannot be observed — add them to "
                  "the test-coverage job's `needs`: " + ", ".join(unfinished))

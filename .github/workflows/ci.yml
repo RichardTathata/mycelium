@@ -10,6 +10,11 @@ on:
     # have caught). Monday 06:00 UTC.
     - cron: '0 6 * * 1'
 
+# One pipe for stdout and stderr in every bash step, so a log keeps cargo's "Running <target>" header next
+# to the results it introduces — the test-coverage job reads them in order (scripts/ci-merge-stderr.sh).
+env:
+  BASH_ENV: ${{ github.workspace }}/scripts/ci-merge-stderr.sh
+
 jobs:
   documentation:
     name: Documentation coherence
