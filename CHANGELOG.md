@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.27.0] — 2026-10-07
+
+**The doors say what they own.** 2.26.0 recorded `kv:write` as a data-plane superuser scope over namespaces other
+routes own and left it undecided; it is decided — the raw KV routes write application keys only, every owned
+namespace answers **403** `protected_key` naming its own route, the log routes keep off streams a component owns,
+and the topology override gets its governance route. The same reading of every door found an A2A card offering
+plumbing and prompt skills `/a2a` cannot call, a governance route that neither refused a loose body nor audited,
+and an audit that failed silently without an identity — each closed, with the SDKs naming the new refusals
+(`mycelium-py` **0.2.7**, `mycelium-ts` **0.2.2**). Issue #168: every group's observed size on the fleet snapshot.
+And the alignment sweep after it — doc-coverage run 21 and a wiki lint, which found nine instructions that failed
+when followed. Every PR under the verification policy, each with an independent review answered in the PR. Wire
+**v12** unchanged. A MINOR: behaviour changes with upgrade notes — read *Upgrade notes* in each entry below
+(`deprecations.md` §19), and `FleetSnapshot` gained a field.
+
 ### Changed
 - **The raw KV routes write application keys only** (the `kv:write` decision, 2026-10-07). `POST`/`DELETE
   /gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set` refuse **403**
@@ -24,7 +38,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   test parses the ownership table, so a new namespace must be classified before it ships. **Upgrade note:** a
   client writing an owned namespace through the KV routes uses its route (`deprecations.md` §19).
 - **The topology override has a governance route.** `POST /gateway/govern/topology-override {"group", "override"}`
-  (`govern:write`, audited in a `compliance` build) sets or releases `sys/topology-override/{group}`; it was an unaudited `kv:write`
+  (`govern:write`, audited in a `compliance` build with `[tls]`) sets or releases `sys/topology-override/{group}`; it was an unaudited `kv:write`
   write, the one owned key 2.26.0 still let through.
 - **The test-coverage job knows more tests** (verification policy rule 3). Its universe lists every TypeScript test
   by name — jest's `--json` report, skipped tests included — where it listed only files, and every workspace
@@ -82,6 +96,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The rule catalogue's inputs render.** An input whose source carried its own code spans was wrapped in another,
   breaking 25 inputs across the generated `docs/reference/rule-catalogue.md`; such a source now renders as prose.
   Test `an_input_with_its_own_code_spans_renders_unwrapped`, seen failing first.
+
+### Documentation
+- **Doc-coverage run 21 and a wiki lint over the window (#554).** Nine instructions failed when followed — guide
+  05's prompt-skill and skill-call snippets (`agent.llm()`, `PromptSkillClient`, and `A2aClient` where `rpc_call`
+  has answered 403 `protected_kind` since 2.15.0), guide 08's Python, five runbooks' governance `curl`s without
+  `Content-Type` (415), `rbac.md` advising a scope for a `protected_key` 403, a 12-character blob id the route
+  rejects; the card's "every capability" corrected everywhere; ops landings for presence ceilings and strict
+  eligibility; the coop CI job's demo count (13); `CONTRIBUTING.md`'s gate. The wiki-lint skill gains four
+  sharpenings from its ledger.
 
 ### Added
 - **Every group's size on the fleet snapshot (#168).** `fleet_snapshot().group_sizes` and `group_sizes` on

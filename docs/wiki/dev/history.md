@@ -22,7 +22,7 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Unreleased on `main` (2026-10-07) — application keys only, a card that lists what it calls, a wider test universe
+## v2.27.0 release — 2026-10-07 (tag `v2.27.0`) — the doors say what they own
 
 **#549** — the `kv:write` decision 2.26.0 recorded and left open: the raw KV doors (`POST`/`DELETE /gateway/kv`,
 `/kv/quorum`, `/overlay/consistent/set`) write **application keys only**, refusing every namespace the substrate or a
@@ -30,13 +30,24 @@ companion owns `403 protected_key` and naming its route (`OWNED_KV_PREFIXES`, he
 `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`); `ckpt/`/`ckptw/`, `manifest/`, `schemas/` and an
 application's `agent/{node}/provision/` report stay writable. Its review found the log routes took an unchecked stream —
 `consensus:write` reached `log/cn/`, `log/reason/`, `log/wiki/` — now `403 protected_stream`. The topology escape hatch
-became `POST /gateway/govern/topology-override` (`govern:write`, audited with `compliance`). **#550** — the A2A agent
+became `POST /gateway/govern/topology-override` (`govern:write`, audited with `compliance` and `[tls]`). **#550** — the A2A agent
 card listed the fleet's plumbing and prompt skills, and `tasks/send` dispatched to ids the card left out; one predicate
 (`not_an_a2a_skill`) now serves both. **#551** — the `test-coverage` universe knows every TypeScript test by title and
 every workspace crate's featureless build; its review made the jest join refuse duplicated leaf titles. Each went
 through an independent adversarial review that found something. Pages: [security.md](security.md),
 [operations.md](operations.md), [testing/verification-policy.md](testing/verification-policy.md);
 [`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
+
+**#552** (issue #168) — `FleetSnapshot.group_sizes`: every group with a live member and its size, governed or not, one
+pass over `grp/`; a group nobody belongs to is absent, and a crashed member still counts (nothing reaps its key).
+**#553** — the SDKs raise `ProtectedKeyError` / `ProtectedStreamError` (`mycelium-py` 0.2.7, also the
+`httpx.HTTPStatusError` it raised before; `mycelium-ts` 0.2.2, whose `delete()` now carries the body). **#554** — the
+alignment sweep: doc-coverage run 21 (nine instructions that failed when followed) and a wiki lint whose four
+sharpenings went into the skill. **#555** — what the sweeps found in code: `govern/profile` refused nothing and audited
+nothing; `audit_govern` dropped a failed seal — every governance write at the gateway is now audited or counted
+(`governance_unaudited`), enumerated from the router's own literals, and `identity/revoke` is audited; the rule
+catalogue's inputs render; `mycelium_artifact_presence_sheds_total`. Release record:
+[`.log/2026-10-07-release-v2.27.0.md`](.log/2026-10-07-release-v2.27.0.md).
 
 ## v2.26.0 release — 2026-10-07 (tag `v2.26.0`) — the verification policy and the recorded code gaps
 

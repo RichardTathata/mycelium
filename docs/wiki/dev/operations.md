@@ -51,7 +51,7 @@ Governance surface: `POST /gateway/govern/{timing,tuning,membership,profile,topo
 `GET /gateway/govern` (deny-by-default scopes, `govern:read`/`govern:write`; each write is sealed into the audit
 trail in a `compliance` build with `[tls]`, and one that is not is counted on `/stats` (`governance_unaudited`) —
 `profile` recorded nothing and accepted a `target` until #555; `topology-override` sets or releases `sys/topology-override/{group}`,
-which the raw KV routes refuse — 2.27.0, unreleased on `main`, #549) — see
+which the raw KV routes refuse — 2.27.0, #549) — see
 [management-as-intent](../domain/theory/management-as-intent.md) for the model.
 
 **Identity / key revocation (SOC 2 WS-B, `compliance`):** `POST /gateway/identity/revoke` (scope

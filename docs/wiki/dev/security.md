@@ -202,7 +202,7 @@ position*: the walk's starting head must be under a current key, older heads nee
 [`.log/2026-10-07-a3-history-source.md`](.log/2026-10-07-a3-history-source.md).
 
 **The doors that take a KV key write application keys only (2.26.0 for `sys/`/`consensus/`, #544; every owned
-namespace in 2.27.0, unreleased on `main` — #549).** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and
+namespace in 2.27.0 — #549).** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and
 `POST /gateway/overlay/consistent/set` refuse every key in a namespace the substrate or a companion owns —
 `OWNED_KV_PREFIXES` in `src/agent/http.rs`, kept in step with `src/lib.rs`'s ownership table by
 `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes` — **403** `protected_key`, naming the route that owns it where there is one; the checkpointer's `ckpt/`/`ckptw/`
@@ -216,7 +216,7 @@ commitment's offers. The topology escape hatch moved to
 [`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md) ·
 [`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
 
-**`/a2a` calls only what its agent card lists (2.27.0, unreleased on `main` — #550).** `/.well-known/agent.json`
+**`/a2a` calls only what its agent card lists (2.27.0 — #550).** `/.well-known/agent.json`
 listed every advertised capability as a skill, so an external agent was offered the fleet's plumbing — provisioning
 tiers (`{ns}/loading`, `{ns}/installable`), `prov-shed/*` marks, `llm-meta/*`, `artifact/librarian`,
 `reason/blob-cache`, the companions' election and role marks (`.primary`/`.secondary`/`.candidate`/`.curator`) — none
