@@ -52,6 +52,10 @@ pub mod handover;
 /// Strict eligibility: a verdict per configured incumbency rule, from history whose coverage its
 /// source established; unknown history is never eligible (realignment repairs A3).
 pub mod eligibility;
+/// A history source that establishes its own coverage: an appointment stream in the knowledge layer,
+/// verified by the signed-heads reader (realignment repairs A3's source; `tls`, as the knowledge layer is).
+#[cfg(feature = "tls")]
+pub mod history_source;
 pub mod lock_audit;
 pub mod partition;
 pub mod restart;

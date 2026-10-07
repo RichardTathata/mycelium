@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+<<<<<<< HEAD
 - **The verification policy** (`CLAUDE.md` § Verification policy; `docs/wiki/dev/testing/verification-policy.md`):
   enumerate before fixing, plan rows close on evidence, CI collects tests by discovery, an independent
   adversarial review after each PR — adopted after doc-coverage run 20 found six code gaps behind green CI. Rule
@@ -20,6 +21,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wasm-host and binary targets, the root doctests (one no longer compiled) and the Python live and node-free
   files ran in no step; they run now. The PR template, `RELEASING.md` § 5b and `/adversarial-review` carry
   the rules.
+=======
+- **A3's history source, built** (`docs/plans/realignment-repairs.md` A3 — 2.24.0 shipped the evaluator and
+  marked the row merged with its source unbuilt; doc-coverage run 20, code gap 3). `mandate::history_source::
+  history_from_appointment_stream` (`tls`) builds a `TermHistory` from an appointment stream in the knowledge
+  layer: the heads are offered to the signed-heads reader, which authenticates them and advances only through
+  an unbroken chain from its durable checkpoint; a verified head whose record cannot be fetched is a gap; the
+  stream's first head is genesis, and earlier history counts only through a trusted baseline. Before, nothing in
+  the substrate built a `TermHistory` — the embedding application did, so "the source establishes coverage"
+  rested on the caller. `HandoverJournal` records its scope, start and endpoint (`for_scope`, `start()`,
+  `endpoint()`; a journal saved before loads with them absent). `mycelium-wiki/examples/curator_handover.rs`
+  withholds the re-appointment until the successor has read the journal and the history reaches the current
+  head, and shows the successor's write refused at the resource meanwhile. Fail-first: with the reader bypassed,
+  heads signed by a key the authority does not hold vouched for six terms; the plan's two witnesses (a missing
+  appointment record is `Unknown`, its return decides; terms 20–30 decide consecutive terms, not cumulative
+  tenure) pass on the real source.
+>>>>>>> a15221c5 (A3: the history source — signed appointment heads become a TermHistory; the journal says what it covers)
 
 ### Documentation
 - **Doc-coverage run 20** (`docs/analysis/doc-coverage.md`): the realignment repairs' operator and developer
@@ -31,6 +48,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joins the table in run 20, which now names four things called *profile*.
 
 ### Fixed
+<<<<<<< HEAD
 - **The recorded code gaps of doc-coverage run 20, closed under the verification policy** (enumerated entry points,
   tests seen failing first, an independent review):
   - **R9's third door.** `POST /gateway/govern/timing` and `GossipAgent::govern_timing` published any value, and
@@ -104,6 +122,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   beside a retried flake; and a failing doctest's name was cut at its first space, so its retry ran nothing and
   passed as a flake. Now: `--no-fail-fast`, a crashed binary fails the step, the whole name is retried, and a
   retry passes only if it ran a test (`scripts/test-ci-retest.sh`, each case seen failing first).
+=======
+
+- **Strict eligibility: a consecutive-terms run at the limit behind a stale head is `Unknown`, not `Ineligible`.**
+  `eligible_strict` decided a visible run at the limit before checking that the history reached the head — but
+  a later term by someone else breaks the run, so the candidate may be eligible. Missing *earlier* history only
+  lengthens a run, which is why the shortcut holds at the head (and for cumulative tenure and cooling-off, where
+  later history can only add). Found by the A3 example: the council's history lacked term 2, A's, which broke
+  B's run, and B read as `Ineligible`. Test `a_run_at_the_limit_behind_a_stale_head_is_unknown_not_ineligible`,
+  seen failing first.
+>>>>>>> a15221c5 (A3: the history source — signed appointment heads become a TermHistory; the journal says what it covers)
 - **`mycelium-ts` 0.2.1 — two verbs that did not match their gateway handlers, found by sweeping every
   SDK verb's request and response against its handler.** `scatterGather` sent the method under `kind`;
   `gw_scatter` reads `method` and answered **every call 400 `missing method`** — since the client was
