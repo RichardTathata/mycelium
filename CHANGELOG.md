@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.26.0] — 2026-10-07
+
+The **verification policy** release. Doc-coverage run 20 found six code gaps behind green CI and repeated
+analysis; the answer was four rules (enumerate every entry point before fixing, plan rows close on evidence,
+CI collects tests by discovery, an independent adversarial review after each PR) — with rule 3 *observed* by a
+CI job that fails on any known test that did not execute — and the six gaps closed under them: S5's
+distinguishable blob reasons (`mycelium-reason` **0.7.0**, `langgraph-checkpoint-mycelium` **0.3.0**), A3's
+history source, the timing door and every door to it, cooling-off's order, one `with_egress` shape
+(`mycelium-py` **0.2.6**); and #545, a presence ceiling that shed every host at once. Wire **v12** unchanged. A
+MINOR: new public API (`mandate::history_source`, `election::rank`, `BlobMiss`/`LocalRead`) and behaviour
+changes with upgrade notes — the KV doors refuse `sys/`/`consensus/` keys **403**, the governance routes refuse
+loose bodies **400**, the companions' status codes; read *Upgrade notes* in each entry below.
+
 ### Added
 - **A3's history source, built** (`docs/plans/realignment-repairs.md` A3 — 2.24.0 shipped the evaluator and
   marked the row merged with its source unbuilt; doc-coverage run 20, code gap 3). `mandate::history_source::

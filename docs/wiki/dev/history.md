@@ -22,7 +22,7 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Unreleased on `main` (2026-10-06/07) — the verification policy and the recorded code gaps
+## v2.26.0 release — 2026-10-07 (tag `v2.26.0`) — the verification policy and the recorded code gaps
 
 Doc-coverage run 20 found six code gaps behind green CI and repeated analysis; the answer was a policy, not
 six patches. **#541** — the verification policy (enumerate, evidence, discovery, adversarial review) with rule
@@ -31,8 +31,12 @@ six patches. **#541** — the verification policy (enumerate, evidence, discover
 a flake tier that skipped binaries. **#542** — S5's distinguishable blob reasons (`mycelium-reason` 0.7.0,
 checkpointer 0.3.0). **#543** — A3's history source and a consecutive-terms stale-head fix. **#544** — the
 timing door and every door to it (the substrate's KV keys, the governance routes' strictness), cooling-off's
-order, `with_egress`, `mycelium-py` 0.2.6. Each PR went through two to four independent adversarial reviews;
-every review found something. Not released.
+order, `with_egress`, `mycelium-py` 0.2.6. **#547** — #545's flake was the shed itself: above a presence
+ceiling every host drew to withdraw, and at `self_elect_p = 1.0` all did at once; hosts now withdraw by a shared
+rendezvous rank among the providers that advertise `prov-shed` (six review rounds; two of the intermediate
+designs were worse than the bug). Each PR went through two to six independent adversarial reviews; every
+review but the last found something. Wire v12 unchanged; companions `mycelium-reason` 0.7.0,
+`langgraph-checkpoint-mycelium` 0.3.0, `mycelium-py` 0.2.6 on their own tags.
 
 ## v2.25.0 release — 2026-10-05 (tag `v2.25.0`) — the realignment repairs' last rows
 
