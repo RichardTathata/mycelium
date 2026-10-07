@@ -11,6 +11,8 @@ from .agent import (
     CommitResult,
     KvReceipt,
     ProtectedKindError,
+    ProtectedKeyError,
+    ProtectedStreamError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
 from .artifacts import Artifacts, ArtifactError
@@ -30,6 +32,8 @@ from ._pool import TOKEN_ENV, auth_headers, resolve_token
 __all__ = [
     "MyceliumAgent",
     "ProtectedKindError",
+    "ProtectedKeyError",
+    "ProtectedStreamError",
     "CapabilityHandle",
     "UnitHandle",
     "Signal",

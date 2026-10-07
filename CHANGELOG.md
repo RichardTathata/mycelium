@@ -32,6 +32,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and never executed fails CI as before.
 
 ### Fixed
+- **The SDKs name the KV and log refusals** (`mycelium-py` **0.2.7**, `mycelium-ts` **0.2.2**). Since the raw KV
+  routes write application keys only (above), `set`, `delete`, `set_with_min_acks`/`setWithMinAcks` and
+  `consistent_set`/`consistentSet` raise **`ProtectedKeyError`** (`.key`) for the gateway's `403 protected_key`, and
+  `append` and `compact_log`/`compactLog` raise **`ProtectedStreamError`** (`.stream`) for `403 protected_stream` —
+  each carrying the gateway's `message`, which names the route to use. They raised a bare HTTP error before, whose
+  text did not include it. In Python both are a `PermissionError` (as `ProtectedKindError` is) **and** an
+  `httpx.HTTPStatusError`, what these verbs raised before, so an existing `except` of either kind still catches
+  them. Every door enumerated against `src/agent/http.rs` (`refuse_protected_key`: four handlers;
+  `refuse_owned_stream`: two) and tested by verb, with a plant: an ordinary scope 403 stays the error it was. Two
+  siblings the enumeration found: the TypeScript `delete()` threw `DELETE /gateway/kv failed: 403` and dropped the
+  body — it now goes through the shared error path and carries it; and the Python `emit_reliable` raised a bare
+  HTTP error for `403 protected_kind` where its five sibling routes raised `ProtectedKindError` — it raises it now.
+  Docs: both READMEs gain an Errors section; their caller-identity paragraph named `llm_*` / `llm*` verbs that do
+  not exist (the call is `PromptSkillClient.call`); the Python Introspection section lists `agent.node_id`; and the
+  `langgraph-checkpoint-mycelium` README no longer calls `IncompleteCheckpoint` retriable unconditionally (only
+  `not_found` and `unavailable` are) and states the upgrade order (checkpointer 0.3.0 before `mycelium-reason`
+  0.7.0). Fail-first: seven Python and seven TypeScript tests failed against the unwired SDKs
+  (`mycelium-py/tests/test_protected_key.py`, `mycelium-ts/tests/protected_key.test.ts`), and
+  `test_emit_reliable_raises_it_too` against 0.2.6. **Behaviour changes to check:** in Python the new errors are
+  `OSError`s (through `PermissionError`), so an `except OSError` retry loop now catches — and could retry — a
+  permanent refusal, and `str(e)` is the gateway's message rather than httpx's status-and-URL text (`e.response`
+  still has both); `emit_reliable`'s `ProtectedKindError` is a `PermissionError` only, like its siblings', so an
+  `except httpx.HTTPStatusError` around it no longer catches a `protected_kind` 403. In TypeScript every DELETE
+  (KV delete, capability drop, lock release) now fails through the shared path: the message is
+  `DELETE <path with query> failed: <status> <body>` — the key appears in it — and a 504 is a `TimeoutError`.
 - **The A2A agent card lists what `/a2a` can call, and `tasks/send` refuses the rest.** `/.well-known/agent.json`
   listed every advertised capability as a skill, so an external agent was offered `prov-shed/…` (2.26.0's shed
   marks), `{ns}/loading`, `{ns}/installable`, `llm-meta/…`, `artifact/librarian`, `reason/blob-cache` and the

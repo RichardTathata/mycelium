@@ -68,6 +68,36 @@ export class ProtectedKindError extends Error {
   }
 }
 
+/**
+ * The gateway refused a **protected key** on a raw KV route (HTTP 403 `protected_key`). `set`, `delete`,
+ * `setWithMinAcks` and `consistentSet` write application keys only (`ckpt/`, `manifest/`, `schemas/`,
+ * your own namespaces); a key in a namespace the substrate or a companion owns (`sys/`, `grp/`, `cap/`,
+ * `prompts/`, `log/`, `mailbox/`, …) is written through its own route, which `message` names.
+ */
+export class ProtectedKeyError extends Error {
+  readonly status = 403;
+  constructor(public readonly key: string, message: string) {
+    super(message);
+    this.name = "ProtectedKeyError";
+  }
+}
+
+/**
+ * The gateway refused a **protected log stream** (HTTP 403 `protected_stream`): `append` and
+ * `compactLog` refuse a stream under `cn/`, `wiki/` or `reason/`, which the commitment net, a wiki and
+ * `mycelium-reason` write through themselves. `message` is the gateway's.
+ */
+export class ProtectedStreamError extends Error {
+  readonly status = 403;
+  constructor(public readonly stream: string, message: string) {
+    super(message);
+    this.name = "ProtectedStreamError";
+  }
+}
+
+/** The key or stream a write names, for the refusal that names it back. */
+type Subject = { key?: string; stream?: string };
+
 export class MyceliumAgent {
   private readonly base: string;
   private readonly timeout: number;
@@ -107,7 +137,11 @@ export class MyceliumAgent {
     return parseLossless(await resp.text());
   }
 
-  private async _post(path: string, body: unknown): Promise<unknown> {
+  /**
+   * `subject` names the key or stream a write carries, so a `protected_key` / `protected_stream`
+   * refusal can say which one it was.
+   */
+  private async _post(path: string, body: unknown, subject: Subject = {}): Promise<unknown> {
     const resp = await fetch(`${this.base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", ...this.auth },
@@ -115,32 +149,41 @@ export class MyceliumAgent {
       body: stringifyLossless(body),
       signal: AbortSignal.timeout(this.timeout),
     });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      if (resp.status === 403) {
-        let body: { error?: string; kind?: string; message?: string } = {};
-        try { body = JSON.parse(text); } catch { /* not JSON: fall through */ }
-        if (body.error === "protected_kind") {
-          throw new ProtectedKindError(body.kind ?? "", body.message ?? "protected kind");
-        }
-      }
-      // 504 is the gateway's answer to an expired deadline (`rpc/call`, `scatter`): a
-      // `TimeoutError`, as the README promises and the Python SDK raises — not a generic failure.
-      if (resp.status === 504) {
-        throw Object.assign(new Error(`POST ${path} timed out: ${text}`), { name: "TimeoutError" });
-      }
-      throw new Error(`POST ${path} failed: ${resp.status} ${text}`);
-    }
+    if (!resp.ok) await this._fail("POST", path, resp, subject);
     return parseLossless(await resp.text());
   }
 
-  private async _delete(path: string): Promise<void> {
+  private async _delete(path: string, subject: Subject = {}): Promise<void> {
     const resp = await fetch(`${this.base}${path}`, {
       method: "DELETE",
       headers: this.auth,
       signal: AbortSignal.timeout(this.timeout),
     });
-    if (!resp.ok) throw new Error(`DELETE ${path} failed: ${resp.status}`);
+    if (!resp.ok) await this._fail("DELETE", path, resp, subject);
+  }
+
+  /** Throws for a non-2xx answer: the typed refusals by their `error` code, else the status and body. */
+  private async _fail(method: string, path: string, resp: Response, subject: Subject): Promise<never> {
+    const text = await resp.text().catch(() => "");
+    if (resp.status === 403) {
+      let body: { error?: string; kind?: string; message?: string } = {};
+      try { body = JSON.parse(text) ?? {}; } catch { /* not JSON: fall through */ }
+      if (body.error === "protected_kind") {
+        throw new ProtectedKindError(body.kind ?? "", body.message ?? "protected kind");
+      }
+      if (body.error === "protected_key") {
+        throw new ProtectedKeyError(subject.key ?? "", body.message ?? "protected key");
+      }
+      if (body.error === "protected_stream") {
+        throw new ProtectedStreamError(subject.stream ?? "", body.message ?? "protected stream");
+      }
+    }
+    // 504 is the gateway's answer to an expired deadline (`rpc/call`, `scatter`): a
+    // `TimeoutError`, as the README promises and the Python SDK raises — not a generic failure.
+    if (resp.status === 504) {
+      throw Object.assign(new Error(`${method} ${path} timed out: ${text}`), { name: "TimeoutError" });
+    }
+    throw new Error(`${method} ${path} failed: ${resp.status} ${text}`);
   }
 
   private _sseUrl(path: string, params?: Record<string, string>): string {
@@ -366,7 +409,7 @@ export class MyceliumAgent {
    * as `localDurability` (every field `null` on a pre-v2.16.0 gateway).
    */
   async set(key: string, value: Buffer | Uint8Array): Promise<KvReceipt> {
-    const data = (await this._post("/gateway/kv", { key, value_b64: b64(value) })) as {
+    const data = (await this._post("/gateway/kv", { key, value_b64: b64(value) }, { key })) as {
       operation_id?: string;
       local_durability?: string;
       local_durability_error?: string;
@@ -381,12 +424,8 @@ export class MyceliumAgent {
 
   /** Tombstones a key and queues for gossip. */
   async delete(key: string): Promise<void> {
-    const resp = await fetch(`${this.base}/gateway/kv?key=${encodeURIComponent(key)}`, {
-      method: "DELETE",
-      headers: this.auth,
-      signal: AbortSignal.timeout(this.timeout),
-    });
-    if (!resp.ok) throw new Error(`DELETE /gateway/kv failed: ${resp.status}`);
+    // The refusal's body is surfaced: it dropped it and threw only `failed: 403`.
+    await this._delete(`/gateway/kv?key=${encodeURIComponent(key)}`, { key });
   }
 
   /** Lists live keys with an optional prefix filter. */
@@ -426,7 +465,7 @@ export class MyceliumAgent {
       value_b64: b64(value),
       min_acks: minAcks,
       timeout_secs: options.timeoutSecs ?? 5,
-    }) as { ok: boolean; acks_received: number; error?: string };
+    }, { key }) as { ok: boolean; acks_received: number; error?: string };
     if (!data.ok) {
       throw Object.assign(new Error(`set_with_min_acks timeout (${data.acks_received} acks)`), {
         name: "TimeoutError",
@@ -571,7 +610,7 @@ export class MyceliumAgent {
     const data = await this._post("/gateway/overlay/consistent/set", {
       key,
       value_b64: b64(value),
-    }) as { persisted?: boolean };
+    }, { key }) as { persisted?: boolean };
     return commitResult(data);
   }
 
@@ -654,7 +693,7 @@ export class MyceliumAgent {
     const data = await this._post("/gateway/overlay/log/append", {
       stream,
       value_b64: b64(value),
-    }) as { hlc: number | string };
+    }, { stream }) as { hlc: number | string };
     return toBigInt(data.hlc);
   }
 
@@ -685,7 +724,7 @@ export class MyceliumAgent {
     await this._post("/gateway/overlay/log/compact", {
       stream,
       before_hlc: beforeHlc,
-    });
+    }, { stream });
   }
 
   /**

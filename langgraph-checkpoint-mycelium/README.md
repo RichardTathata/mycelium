@@ -75,9 +75,14 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   came back with fewer `pending_writes`, so LangGraph re-ran a task that had already
   completed), and a missing skeleton or channel blob returned **`None`**, which LangGraph
   reads as *no checkpoint* and starts the thread over. Now `get_tuple`, `aget_tuple`,
-  `list` and `alist` raise `IncompleteCheckpoint` — retriable, naming the missing blob
-  ids — and `None` means only that no checkpoint row exists. Catch it and retry after a
-  short wait, with a bound; do not treat it as "start fresh". An application meets it from
+  `list` and `alist` raise `IncompleteCheckpoint`, naming the missing blob ids and why
+  each is missing — and `None` means only that no checkpoint row exists. It is **retriable
+  only when every reason is transient**: `not_found` (the blob route's 404) or `unavailable`
+  (503, or any other 5xx, 408 or 429 — a proxy's 502 page included). `corrupt` (a 502 whose
+  body is the route's own `corrupt`),
+  `unauthorized` (401/403) and `unsupported` (a bare 404 — no reason companion) are not:
+  `e.retriable` is false and waiting will not fix them. Catch it and retry a retriable one
+  after a short wait, with a bound; do not treat it as "start fresh". An application meets it from
   `graph.invoke(…)` / `graph.get_state(…)` on a node that has not converged yet:
 
   ```python
@@ -98,7 +103,8 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
 
   **Why each blob is missing** is `e.reasons[blob_id]` (0.3.0, with `mycelium-reason` 0.7.0):
   `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached, the
-  node or a proxy in front of it failed, or the read was throttled; `"unauthorized"` — the gateway refused
+  node or a proxy in front of it failed, the read was throttled, or the node itself could not be reached
+  (an `httpx.TransportError`, such as a refused connection); `"unauthorized"` — the gateway refused
   the read (a token or scope problem); `"corrupt"` — every copy currently on offer fails the content
   address (one bad provider beside an honest one that lacks it is `not_found`); `"unsupported"` — the node
   does not serve the blob route (no reason companion there). `e.retriable`
@@ -106,6 +112,11 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   on `not e.retriable` rather than wait. A checkpoint that stays incomplete past your bound with
   only transient reasons means no reachable `reason`/`blob-cache` provider holds it — escalate; do
   not start the thread fresh (operations: `docs/operations/companions.md` § mycelium-reason).
+
+  **Upgrade order:** upgrade this package to **0.3.0 before** upgrading the reason nodes to
+  `mycelium-reason` **0.7.0**. A 0.2.x checkpointer reads only a 404 as a missing blob, so the
+  503 (`unavailable`) or 502 (`corrupt`) a 0.7.0 node answers escapes its retry loop as an
+  `httpx.HTTPStatusError`.
 - **`put()` returns a rung-1 receipt** — the index row was *applied* to the store of
   the node you are talking to (`_kv_set` → `POST /gateway/kv`). It does **not** say
   the row crossed that node's persistence barrier, and it says nothing about any

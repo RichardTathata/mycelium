@@ -325,6 +325,8 @@ are unaffected, as is every key outside the table. The log routes refuse a strea
 `reason/` (403 `protected_stream`).
 
 **Will the compiler tell me?** No — it is an HTTP status. The 403's `message` names the route to use where the namespace has one.
+The SDKs raise it typed: `ProtectedKeyError` (`.key`) and `ProtectedStreamError` (`.stream`), carrying that
+message (`mycelium-py` 0.2.7, where each is also the `httpx.HTTPStatusError` it raised before; `mycelium-ts` 0.2.2).
 
 **Migration.** Use the route that owns the namespace: `POST /gateway/govern/topology-override` (`govern:write`) for
 the topology escape hatch; `/gateway/prompts/{ns}/{name}` for prompt templates; `/gateway/overlay/log/append` for

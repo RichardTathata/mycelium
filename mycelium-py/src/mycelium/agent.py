@@ -70,14 +70,73 @@ class ProtectedKindError(PermissionError):
         self.kind = kind
 
 
-def _raise_if_protected(resp: httpx.Response) -> None:
+class _ProtectedWriteError(PermissionError, httpx.HTTPStatusError):
+    """A raw KV or log route refused a namespace that a component owns (HTTP 403).
+
+    Both a :class:`PermissionError` (as :class:`ProtectedKindError` is) and the
+    :class:`httpx.HTTPStatusError` these verbs raised for the same 403 before 0.2.7, so an existing
+    ``except`` clause of either kind still catches it. ``message`` is the gateway's, naming the route
+    that owns the namespace; ``response`` is the 403.
+    """
+
+    def __init__(self, message: str, response: httpx.Response) -> None:
+        PermissionError.__init__(self, message)
+        self.message = message
+        self.request = response.request
+        self.response = response
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class ProtectedKeyError(_ProtectedWriteError):
+    """The gateway refused a **protected key** on a raw KV route (HTTP 403 ``protected_key``).
+
+    ``set``, ``delete``, ``set_with_min_acks`` and ``consistent_set`` write application keys only
+    (``ckpt/``, ``manifest/``, ``schemas/``, your own namespaces); a key in a namespace the substrate or
+    a companion owns (``sys/``, ``grp/``, ``cap/``, ``prompts/``, ``log/``, ``mailbox/`` …) is written
+    through its own route, which ``message`` names. ``key`` is the refused key.
+    """
+
+    def __init__(self, key: str, message: str, response: httpx.Response) -> None:
+        super().__init__(message, response)
+        self.key = key
+
+
+class ProtectedStreamError(_ProtectedWriteError):
+    """The gateway refused a **protected log stream** (HTTP 403 ``protected_stream``).
+
+    ``append`` and ``compact_log`` refuse a stream under ``cn/``, ``wiki/`` or ``reason/`` — the
+    commitment net's, a wiki's and ``mycelium-reason``'s — which are written through those components.
+    ``stream`` is the refused stream.
+    """
+
+    def __init__(self, stream: str, message: str, response: httpx.Response) -> None:
+        super().__init__(message, response)
+        self.stream = stream
+
+
+def _raise_if_protected(
+    resp: httpx.Response, *, key: Optional[str] = None, stream: Optional[str] = None,
+) -> None:
+    """Raise the typed error for a gateway ``403`` that names a protected kind, key or stream.
+
+    Any other response (an ordinary scope refusal included) is left to ``raise_for_status``.
+    """
     if resp.status_code == 403:
         try:
             data = resp.json()
         except ValueError:
             return
-        if data.get("error") == "protected_kind":
+        if not isinstance(data, dict):
+            return
+        error = data.get("error")
+        if error == "protected_kind":
             raise ProtectedKindError(str(data.get("kind", "")), str(data.get("message", "protected kind")))
+        if error == "protected_key":
+            raise ProtectedKeyError(key or "", str(data.get("message", "protected key")), resp)
+        if error == "protected_stream":
+            raise ProtectedStreamError(stream or "", str(data.get("message", "protected stream")), resp)
 from .artifacts import Artifacts
 from .federation import Federation
 
@@ -667,6 +726,9 @@ class MyceliumAgent:
         when the local HLC timestamp is strictly greater (LWW semantics).
         The receipt names what the gateway node established — rung 1 always, rung 2 as
         ``local_durability`` — and nothing above it (``docs/design/contracts-receipts.md``).
+
+        Raises :class:`ProtectedKeyError` for a key in a namespace the substrate or a companion owns
+        (the gateway's ``403 protected_key``; its message names the route to use).
         """
         body = {
             "key":       key,
@@ -674,6 +736,7 @@ class MyceliumAgent:
         }
         with self._pool.sync() as c:
             resp = c.post("/gateway/kv", json=body)
+            _raise_if_protected(resp, key=key)
             resp.raise_for_status()
             try:
                 data = resp.json()
@@ -690,10 +753,13 @@ class MyceliumAgent:
     def delete(self, key: str) -> None:
         """Tombstone a KV entry.
 
-        The tombstone is gossiped so all live nodes remove the key.
+        The tombstone is gossiped so all live nodes remove the key. Raises
+        :class:`ProtectedKeyError` for a key in an owned namespace, as :meth:`set` does.
         """
         with self._pool.sync() as c:
-            c.delete("/gateway/kv", params={"key": key}).raise_for_status()
+            resp = c.delete("/gateway/kv", params={"key": key})
+            _raise_if_protected(resp, key=key)
+            resp.raise_for_status()
 
     def keys(self, prefix: str | None = None) -> list[str]:
         """Return all live KV keys, optionally filtered by prefix.
@@ -746,6 +812,7 @@ class MyceliumAgent:
 
         Raises:
             TimeoutError: When fewer than ``min_acks`` peers confirmed in time.
+            ProtectedKeyError: When ``key`` is in an owned namespace, as for :meth:`set`.
         """
         import base64
         body = {
@@ -756,6 +823,7 @@ class MyceliumAgent:
         }
         with self._pool.sync(timeout=timeout_secs + 2.0) as c:
             resp = c.post("/gateway/kv/quorum", json=body)
+            _raise_if_protected(resp, key=key)
             resp.raise_for_status()
             data = resp.json()
             if data.get("ok"):
@@ -939,10 +1007,12 @@ class MyceliumAgent:
 
         Returns a :class:`CommitResult` — ``.persisted`` says whether the committed slot also
         reached the gateway node's own disk (since 0.2.4; ``None`` from a pre-v2.4.2 node).
-        Raises ``RuntimeError`` if the commit itself failed."""
+        Raises ``RuntimeError`` if the commit itself failed, and :class:`ProtectedKeyError` for a key
+        in an owned namespace, as :meth:`set` does."""
         body = {"key": key, "value_b64": base64.b64encode(value).decode()}
         with self._pool.sync() as c:
             r = c.post("/gateway/overlay/consistent/set", json=body)
+            _raise_if_protected(r, key=key)
             r.raise_for_status()
             data = r.json()
             if not data.get("ok"):
@@ -1030,10 +1100,14 @@ class MyceliumAgent:
     # ── Overlay: ordered log ────────────────────────────────────────────────
 
     def append(self, stream: str, value: bytes) -> int:
-        """Append ``value`` to ``stream``. Returns the HLC timestamp of the entry."""
+        """Append ``value`` to ``stream``. Returns the HLC timestamp of the entry.
+
+        Raises :class:`ProtectedStreamError` for a stream under ``cn/``, ``wiki/`` or ``reason/``."""
         body = {"stream": stream, "value_b64": base64.b64encode(value).decode()}
         with self._pool.sync() as c:
-            data = c.post("/gateway/overlay/log/append", json=body).raise_for_status().json()
+            resp = c.post("/gateway/overlay/log/append", json=body)
+            _raise_if_protected(resp, stream=stream)
+            data = resp.raise_for_status().json()
         return data["hlc"]
 
     def scan_log(
@@ -1050,10 +1124,14 @@ class MyceliumAgent:
         return [LogEntry(hlc=e["hlc"], value=base64.b64decode(e["value_b64"])) for e in data]
 
     def compact_log(self, stream: str, before_hlc: int) -> None:
-        """Tombstone all entries in ``stream`` with HLC < ``before_hlc``."""
+        """Tombstone all entries in ``stream`` with HLC < ``before_hlc``.
+
+        Raises :class:`ProtectedStreamError` for a stream under ``cn/``, ``wiki/`` or ``reason/``."""
         body = {"stream": stream, "before_hlc": before_hlc}
         with self._pool.sync() as c:
-            c.post("/gateway/overlay/log/compact", json=body).raise_for_status()
+            resp = c.post("/gateway/overlay/log/compact", json=body)
+            _raise_if_protected(resp, stream=stream)
+            resp.raise_for_status()
 
     async def subscribe_log(
         self,
@@ -1120,7 +1198,9 @@ class MyceliumAgent:
             "timeout_secs": timeout_secs,
         }
         with self._pool.sync(timeout=timeout_secs + 5.0) as c:  # the server parks for timeout_secs
-            data = c.post("/gateway/overlay/emit_reliable", json=body).raise_for_status().json()
+            resp = c.post("/gateway/overlay/emit_reliable", json=body)
+            _raise_if_protected(resp)
+            data = resp.raise_for_status().json()
         return data["ack"]
 
     # ── Cluster sharding ───────────────────────────────────────────────────
