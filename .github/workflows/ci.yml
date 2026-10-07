@@ -684,7 +684,7 @@ jobs:
         run: |
           echo "@@test-universe@@ begin"
           npx jest --listTests
-          python3 -c 'import json,sys,os; r=json.load(open(sys.argv[1])); [print("@@ts-test@@ "+os.path.relpath(t["name"], os.getcwd())+"::"+a["title"]) for t in r["testResults"] for a in t["assertionResults"]]' "$RUNNER_TEMP/jest-results.json"
+          python3 ../scripts/ci-jest-universe.py "$RUNNER_TEMP/jest-results.json"
           echo "@@test-universe@@ end"
       # The live suite against a real node (realignment repairs S4). It skips itself without
       # MYCELIUM_TEST_HOST, which nothing here set until 2026-10-05 — so it never ran in CI, and
@@ -808,10 +808,9 @@ jobs:
         run: |
           echo "@@test-universe@@ begin"
           cargo test --workspace --all-features --no-fail-fast -- --list
-          cargo test -p mycelium --no-default-features --lib -- --list
-          cargo test -p mycelium-core --no-default-features --lib -- --list
           # Every workspace crate's own featureless build, so a test gated `not(feature = …)` in any crate is
-          # known (derived from cargo metadata, so a new crate is covered the day it joins the workspace).
+          # known (derived from cargo metadata, so a new crate is covered the day it joins the workspace). A
+          # guard: on 2026-10-07 it added no test the lines above missed, and costs about six minutes.
           for p in $(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]'); do
             cargo test -p "$p" --no-default-features --no-fail-fast -- --list || exit 1
           done
