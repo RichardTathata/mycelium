@@ -6619,6 +6619,7 @@ mod tests {
         ];
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
         agent.start().await.unwrap();
+        agent.mesh().join_group("workers"); // ungoverned: no membership intent anywhere
         tokio::time::sleep(Duration::from_millis(50)).await;
         let client = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{http_port}");
@@ -6638,6 +6639,8 @@ mod tests {
         let body: serde_json::Value = r.json().await.unwrap();
         assert!(body["view_confidence"]["observer"].is_string(), "snapshot carries the RT1 view_confidence header");
         assert!(body["governed_groups"].is_array());
+        // #168: every group's observed size, governed or not — an ungoverned group was invisible here.
+        assert_eq!(body["group_sizes"], serde_json::json!([{"group": "workers", "observed": 1}]), "{body}");
         assert!(body["throttle_graph"].is_array());
         assert!(body["store_hash"].is_number());
         agent.shutdown().await;
