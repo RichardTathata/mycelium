@@ -330,8 +330,9 @@ message (`mycelium-py` 0.2.7, where each is also the `httpx.HTTPStatusError` it 
 
 **Migration.** Use the route that owns the namespace: `POST /gateway/govern/topology-override` (`govern:write`) for
 the topology escape hatch; `/gateway/prompts/{ns}/{name}` for prompt templates; `/gateway/overlay/log/append` for
-logs; `POST /gateway/mesh/group` on the node that joins a group; `/gateway/capability/*` for capabilities and
-requirements (`POST /gateway/units/declare` for requirements); `/gateway/mailbox/deliver`;
+logs; `POST /gateway/mesh/group` on the node that joins a group (`DELETE /gateway/mesh/group?group=G` to leave);
+`POST /gateway/capability/advertise` (and `DELETE /gateway/capability/{handle_id}`) for capabilities;
+`POST /gateway/units/declare` for requirements; `/gateway/mailbox/deliver`;
 `/gateway/artifacts/publish` for catalogue lines; `/gateway/overlay/lock/acquire` for locks. A namespace with no
 gateway route of its own is written by the substrate or the companion that owns it.
 

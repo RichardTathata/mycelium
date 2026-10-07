@@ -1717,7 +1717,7 @@ agent.<span class="cs">shutdown_with_timeout</span>(Duration::from_secs(<span cl
           <div class="card-body"><code>shard_for(key, filter)</code> — FNV-1a consistent hash ring over NodeId. <code>emit_sharded(kind, key, filter, payload)</code> — deterministic routing, no coordinator. Same key always routes to the same node while the ring is stable.</div>
         </div>
         <div class="callout callout-orange">
-          <strong>AgentCard is built live from the KV ring.</strong> Change a capability and both the A2A surface and MCP tool list update automatically — no manual registration step.
+          <strong>AgentCard is built live from the KV ring.</strong> Change a skill and both the A2A surface and MCP tool list update automatically (plumbing and prompt skills are never on the card) — no manual registration step.
         </div>
       </div>
       <div>
@@ -1772,21 +1772,21 @@ agent.<span class="cs">service</span>().<span class="cs">emit_sharded</span>(
       <div>
         <div class="code-block" style="font-size:11px;">
 <span class="cm">// Register — Rust</span>
-<span class="ck">let</span> _h = agent.<span class="cs">register_prompt_skill</span>(
+<span class="ck">let</span> _h = agent.llm().<span class="cs">register_prompt_skill</span>(
   <span class="cv">"llm"</span>, <span class="cv">"summarise"</span>, template,
   Arc::new(OpenAiBackend::new(url, key, <span class="cv">"gpt-4o-mini"</span>))).await?;
 
 <span class="cm">// Call from any node</span>
-<span class="ck">let</span> reply = agent.<span class="cs">call_prompt_skill</span>(
-  <span class="cv">"llm"</span>, <span class="cv">"summarise"</span>, <span class="cv">"Long text…"</span>, {}, timeout).await?;
+<span class="ck">let</span> reply = agent.llm().<span class="cs">call_prompt_skill</span>(
+  <span class="cv">"llm"</span>, <span class="cv">"summarise"</span>, <span class="cv">"Long text…"</span>, HashMap::new(), timeout).await?;
         </div>
         <div class="code-block" style="font-size:11px;margin-top:10px;">
 <span class="cm"># Python SDK</span>
-<span class="ck">from</span> mycelium.llm <span class="ck">import</span> PromptSkillClient
-client = PromptSkillClient(<span class="cv">"http://node:8300"</span>)
-reply = client.call(<span class="cv">"llm"</span>, <span class="cv">"summarise"</span>, <span class="cv">"Long text…"</span>)
+<span class="ck">from</span> mycelium <span class="ck">import</span> PromptSkillClient
+client = PromptSkillClient(<span class="cv">"node"</span>, 8300)
+reply = (<span class="ck">await</span> client.call(<span class="cv">"llm"</span>, <span class="cv">"summarise"</span>, <span class="cv">"Long text…"</span>))[<span class="cv">"output"</span>]
 <span class="cm"># Live template swap — zero downtime</span>
-client.register(<span class="cv">"llm"</span>, <span class="cv">"summarise"</span>, new_template)
+<span class="ck">await</span> client.update_prompt(<span class="cv">"llm"</span>, <span class="cv">"summarise"</span>, new_template)
         </div>
         <div class="callout callout-green" style="margin-top:10px;font-size:12px;">
           <strong>Demo (no API key):</strong> <code>cargo run -p mycelium-coop-examples --bin mailbox_llm</code>

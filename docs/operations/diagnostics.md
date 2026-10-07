@@ -156,6 +156,19 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   quorum is `⌊n/2⌋+1` of the **consensus group**, not the whole cluster; for `all_opaque`, relieve
   load. A **leased** commit self-heals on the next round once quorum returns — no manual repair.
 
+### Consensus refused — `topology_unsatisfied`
+
+- **Means:** a Hard-topology group (`topology_policies`) had quorum by headcount, but its voters did not
+  span `spread_min_distinct` domains at `spread_depth`; nothing was committed (HTTP **409**
+  `{"ok": false, "error": "topology_unsatisfied"}`; `ConsistencyError::TopologyUnsatisfied` in Rust).
+- **Read:** `GET /gateway/mesh/group?group=G` for the roster this node sees; `GET
+  /gateway/kv?key=sys/topology-override/G` for whether an override is in force (engaged only when the value
+  is exactly `true`).
+- **Do:** restore nodes in the missing domains. If the group must commit meanwhile, `POST
+  /gateway/govern/topology-override` with `{"group":"G","override":true}` (`govern:write`, `Content-Type:
+  application/json`). It does **not** lapse — unlike a governance intent it has no lease — so release it with
+  `"override": false` once the domains are back ([tuning.md](tuning.md) § Operator surface).
+
 ### Stuck / contended distributed lock
 
 - **Means:** callers block on `lock(name, …)` or repeatedly get `Superseded` for the same lock.

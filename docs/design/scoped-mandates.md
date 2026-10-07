@@ -84,9 +84,10 @@ and **unknown history is never eligible**. Coverage belongs to the *source*: a `
 chained terms (each names its predecessor), an `Origin` (the role's first term, or a trusted baseline at
 a checkpoint) and the current head, and `from_chain` verifies the chain rather than accepting a caller's
 `complete: true` — which would only move the assumption. Sufficiency belongs to the *evaluator*, per rule:
-a run broken inside the verified suffix decides consecutive terms; cumulative tenure needs the origin or a
-baseline; cooling-off needs the window covered. What it does not claim: that the source recorded every
-appointment there was. The source the plan named is built (unreleased): an appointment stream, pinned by
+consecutive terms needs the history to reach the head, then a run broken inside the verified suffix (or a run
+already at the limit) decides it; cumulative tenure needs the origin or a baseline; cooling-off is `Ineligible`
+on a visible term inside the window, else needs the head and the window covered. What it does not claim: that the source recorded every
+appointment there was. The source the plan named is built (2.26.0): an appointment stream, pinned by
 issuer and stream, walked back along `prev` links from this node's reader's checkpoint
 (`src/mandate/history_source.rs`) — continuity up to the reader's checkpoint and the availability of what the
 heads reference, never earlier history than the walk reaches — and the handover journal records its scope,

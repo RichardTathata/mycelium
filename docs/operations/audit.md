@@ -250,6 +250,22 @@ When a fenced write is refused because the holder was replaced, the error is
 tooling classifies it as a conflict it will advise the holder to re-read and retry, which refuses
 forever. See [guide 21 · Mandates](../guide/21-mandates.md).
 
+**Strict eligibility — what the operator owns** (2.26.0; only where the embedding application decides
+incumbency rules with `mandate::eligibility::ready` over the shipped appointment-stream source,
+`mandate::history_source`, feature `tls`). The substrate decides from the appointment stream the appointing
+authority publishes in the knowledge layer; three facts about that stream are operational:
+
+- **Publishing.** The authority chains each head from its *own* previous head, one appointment per head.
+- **Key revocation.** A reader whose checkpoint is on a head signed under a since-revoked key vouches for
+  nothing until it holds a head under a current key; older heads under a revoked key stay attributable.
+- **Forks.** A stream the reader has seen fork vouches for nothing; forks are held in memory, so a restart
+  forgets them.
+
+A successor held with `eligibility unknown: …` (`NotReadyStrict::HistoryUnknown`) is the source failing
+closed, not a refusal: check that this node's reader holds a current-key checkpoint for the stream, that the
+appointment records the walk names can be fetched, and that the stream has not forked. `not eligible: …` is a
+rule saying no. The rule table and the trust walk are in [guide 21 § Eligibility](../guide/21-mandates.md).
+
 ## 9. Evidence export — what a gap looks like to the consumer
 
 Authorisation evidence does **not** live in this gossiped chain. Every decision and execution goes

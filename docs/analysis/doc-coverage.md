@@ -19,6 +19,62 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-10-07 (run 21)** — diff-gated over **#541–#551** (v2.26.0 and the unreleased 2.27.0 window: the
+  verification policy and the `test-coverage` job, S5's blob reasons, A3's history source, the governance and KV
+  doors, the ranked shed, the raw KV routes writing application keys only, the A2A card excluding plumbing and
+  prompt skills, the coverage universe). #552 (`group_sizes`) was not merged and is not audited. Three parallel
+  auditors (the KV and governance doors · A2A, prompt skills and the shed · blob reasons, the history source and
+  the verification policy), each opening the pages and checking every must-work instruction against
+  `src/agent/http.rs`, `src/agent/a2a.rs`, the mandate modules and both SDKs' sources. **The sweep the brief asked
+  for came back clean:** no doc writes an owned namespace through `/gateway/kv` or an SDK `set()`, and none calls a
+  prompt skill through `/a2a` (`llm/orchestrator` in guide 08 is a SkillRunner skill, which answers
+  `skill.invoke`). **Floor before fixes: 4 ✗ cells (two Ops pairs) and 12 Tier-1 items, nine of them instructions
+  that fail as written** — most predate the window and were exposed by reading the snippets against the code the
+  window touched. **After: 0 ✗, 0 failing instructions in scope; three `~` — two Dev walkthroughs (an appointment-stream source with no example, a ceiling with no example) and the contributor how-to that lives in the wiki and a stale `CONTRIBUTING.md`, outside this run's scope.**
+  Moves:
+  - **Prompt skills · HOW·Dev ✓ → Thin → ✓** (calibration): guide 05's Rust registration and call were on
+    `GossipAgent` (they are on `agent.llm()`, with an `Arc` backend), its Python client used a URL constructor, a
+    `register` that does not exist, sync calls and attribute access on a dict; its generic skill-calling snippets
+    called `agent.resolve` / `agent.rpc_call` (not on `GossipAgent`) and, in Python, sent `skill.invoke` through
+    `rpc_call`, refused **403** `protected_kind` since 2.15.0 — now `A2aClient.send`. The deck copied the prompt
+    client. Guide 05 now says a prompt skill is called at `/gateway/llm/call`, never `/a2a`.
+  - **A2A (new row)**: guide 08's two Python snippets posted a non-JSON-RPC body (`-32601`) and read
+    `input_schema` (the card says `inputSchema`) — now the `A2aClient` form with the wire shape; every "the card
+    lists every capability" sentence in scope corrected (`00-concepts`, cookbook, `skillrunner.html`, the deck);
+    `unit-file.md` § `[[serve]]` says how to call a served model; `production-readiness.md`'s negative probe no
+    longer passes by naming a prompt skill; `confined-fleet.md` routes prompt skills to `llm:invoke`.
+  - **Presence ceiling and ranked shed (new row)**: WHAT/HOW·Ops were ✗ — `capability-lifecycle.md` §5 gains
+    *Presence ceilings*: which host withdraws, `prov-shed`, the `max − k` bound, the rolling-upgrade dip,
+    overlapping bands, and how to see a withdrawal (`mycelium explain` over `--trace-dir`; there is no metric).
+  - **Strict eligibility (folded into the scoped-mandates row)**: WHAT/HOW·Ops were ✗ — `audit.md` §8 gains
+    what the operator owns (publishing, key revocation, forks forgotten on restart) and what
+    `eligibility unknown` asks them to check. Guide 21 said "a head signed under a since-revoked key stops the
+    walk", which the source's round 2 reversed (only the checkpoint head needs a current key); and "unreleased"
+    for code in 2.26.0, with `design/scoped-mandates.md` the same.
+  - **Governance doors · HOW·Ops ✓ → Thin → ✓** (calibration): `dynamic-scaling.md`'s three governance `curl`s
+    sent no `Content-Type` and answer **415** before any parsing (the body run 20 corrected was right; the header
+    was never there); the same in `cert-rotation.md`'s revoke, `federation.md`'s two federation calls, and the
+    negative examples in `rbac.md` and `sso.md`. `tuning.md` said every governance POST is audited — `profile`
+    never is, and none are without `compliance` **and** `[tls]` (the seal's error is discarded); it gains a
+    `profile` row, and "set `target` on any intent" no longer invites a field `profile` silently ignores.
+  - **KV doors (Security row)**: `rbac.md` § failure modes said to grant the scope or `"*"` for any 403, which
+    never fixes `protected_key`; a row now says so. Guide 10's wire table gains the 403 and what each SDK raises
+    (no typed error; TypeScript `delete()` drops the body); `deployment.md`'s client-facing upgrade list names
+    §18–§19; `deprecations.md` §19's migration lists the capability and group routes exactly; the cookbook's
+    "write your own `sys/load/`" is Rust-only now. `companions.md` told an operator to compact `cn/` offers over
+    `POST /gateway/overlay/log/compact`, refused **403** `protected_stream` since #549 — it says there is no HTTP
+    door.
+  - **Hard topology (Layer III)**: guide 04's own #549 example sent a `group` the consistent-set route ignores;
+    `error-handling.md` gains the override as the remedy, the **409**, and `ElectorateUnavailable` (missing from
+    its `ConsistencyError`); `diagnostics.md` gains *Consensus refused — `topology_unsatisfied`* (the override has
+    no lease); guide 02's "see chapter 13" pointed at a chapter with nothing on topology policies.
+  - **Reasoning companion**: `companions.md`'s version line (0.6.2 → 0.7.0), a missing damaged-at-rest log line,
+    and its probe — "for an id the error names" handed the operator the 12-character prefix the route refuses
+    **400** `bad_id`; guide 15 listed four reasons and told the reader to retry unconditionally.
+  - **What is proven**: two `ci.yml` line references had drifted; they name the step now.
+  - **Outside scope, reported** (SDK READMEs, `CONTRIBUTING.md`, `examples/**` other than `examples/README.md`,
+    `docs/wiki/**`): listed under § Run 21 below.
+
 - **2026-10-06 (run 20)** — diff-gated over **#517–#538** (v2.22.0 → v2.25.0: the realignment repairs —
   durability R1/R2/R7, egress R3/R3b/R4, the gateway-free refusals R8, the timing setters R9, the SDKs S1–S5,
   architecture A1–A3). Three parallel auditors (durability · refusals · timing · configuration — egress ·
@@ -496,7 +552,7 @@ closed it.
 | Layer I — Gossip KV | ✓ | ✓ | ✓ ᵀ² | ✓ | ✓ |
 | KV persistence (WAL + snapshot) — split from Layer I, run 16 | ✓ ᴿ¹⁶ | ✓ ᴿ¹⁶ ᴿ²⁰ (`config.rs` rustdoc and `validate()` warning no longer say a node falls back to memory; the `Io` gloss drops WAL replay) | ✓ ᴿ¹⁶ ᴿ¹⁹ (guide 01 + 13 literals carry `on_unreadable` — the struct has no `Default`) ᴿ²⁰ (guide 01: the receipt verbs named; the direct-embedder obligation (`OwnershipLock` → `hold_ownership` → `trigger_snapshot`)) | ✓ ᴿ¹⁶ ᴿ²⁰ (`deployment.md`: a torn tail is truncated before the first append, not appended after) | ✓ ᴿ¹⁶ ᴿ¹⁷ ᴿ¹⁹ (`deployment.md`: the `[persistence]` table — a bare key no-ops) ᴿ²⁰ (`deployment.md` § *Persistence start refusals* — four messages, cause, action; journals' one-owner and poison rules; per-pod PVC; readiness § 3 item) |
 | Layer II — Signal mesh | ✓ | ✓ | ✓ ᴿ²⁰ (both SDK quick starts and guide 10 subscribed after emitting and waited forever; guide 10's table gains both signal streams' data shapes) | ✓ | ✓ ᴿ²⁰ (`observability.md`: `Signal handler channel full; signal dropped` — what it means and what to do) |
-| Layer III — Consensus | ✓ | ✓ | ✓ ᵀ² ᴿ¹⁶ ᴿ¹⁷ | ✓ ᵀ¹ | ✓ ᵀ¹ |
+| Layer III — Consensus | ✓ | ✓ ᴿ²¹ (`error-handling.md`: `ElectorateUnavailable`, the 409 and the override as `TopologyUnsatisfied`'s remedy) | ✓ ᵀ² ᴿ¹⁶ ᴿ¹⁷ ᴿ²¹ (guide 04: the consistent-set body sent a `group` the route ignores; the Rust form of the override, no lease) | ✓ ᵀ¹ | ✓ ᵀ¹ ᴿ²¹ (`diagnostics.md` § Consensus refused — `topology_unsatisfied`) |
 | Capabilities / groups | ✓ | ✓ | ✓ ᴿ¹⁷ | ✓ | ✓ |
 | Distributed locks | ✓ | ✓ | ✓ | ✓ ᵀ¹ | ✓ ᵀ¹ |
 | Services / RPC | — | ✓ | ✓ ᵀ² | ✓ | ✓ |
@@ -505,29 +561,29 @@ closed it.
 | Membership + cluster_name | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Groups (three kinds) | ✓ | ✓ ᵀ³ | ✓ | ✓ | ✓ |
 | Legible Emergence | ✓ ᵀ³ | ✓ | ✓ ᵀ³ | ✓ | ✓ |
-| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ | ✓ ᴿ¹³ ᴿ¹⁷ ᴿ¹⁹ (guide 09: the serve window is closed since 2.18.2; `cert_pem` means an issued certificate) | ✓ ᴿ¹⁹ (`rbac.md`: `fleet:read` + `govern:*` rows; the window dated right) | ✓ ᴿ¹⁷ ᴿ¹⁸ ᴿ¹⁹ (`gateway-tls.md`: refuses, not inert, and the start-time bind; `audit.md`: a sink without `[tls]` refuses the start) ᴿ²⁰ (`sso.md`: the start check covers a *configured* `jwks_uri` only — a discovered one off the list starts and 401s every JWT; two failure rows) |
+| Security (TLS/RBAC/SSO/audit) | ✓ | ✓ ᴿ²¹ (guide 10's wire table: the KV doors' 403 `protected_key`) | ✓ ᴿ¹³ ᴿ¹⁷ ᴿ¹⁹ (guide 09: the serve window is closed since 2.18.2; `cert_pem` means an issued certificate) ᴿ²¹ (guide 10: what each SDK raises on `protected_key`/`protected_stream`; `deprecations.md` §19's routes exact) | ✓ ᴿ¹⁹ (`rbac.md`: `fleet:read` + `govern:*` rows; the window dated right) ᴿ²¹ (`rbac.md`: the consensus row's refusals current) | ✓ ᴿ¹⁷ ᴿ¹⁸ ᴿ¹⁹ (`gateway-tls.md`: refuses, not inert, and the start-time bind; `audit.md`: a sink without `[tls]` refuses the start) ᴿ²⁰ (`sso.md`: the start check covers a *configured* `jwks_uri` only — a discovered one off the list starts and 401s every JWT; two failure rows) ᴿ²¹ (`rbac.md` § failure modes: no scope fixes `protected_key`; `deployment.md`'s client-facing upgrade list; five JSON `curl`s gained `Content-Type`) |
 | Data erasure (crypto-shred) | ✓ | ✓ ᴿ¹³ | ✓ ᴿ¹³ | ✓ | ✓ |
 | Artifacts / library | ✓ | ✓ | ✓ ᵀ² ᴿ⁹ | ✓ | ✓ ᴿ²⁰ (`artifacts.md`: an object store is gated on the endpoint it dials, with the per-scheme table; it said the store URL) |
 | Agent-authored functions (D19 fuel by publisher · D20 proposed → shadow → accept) — added 2026-09-30 (plan F3) | ✓ `design-time-tooling.md` §17 | ✓ guide 16 § Agent-authored functions (U1–U4, the five gates) | ✓ guide 16 § the five gates + the co-op `provisioning` demo's wave 3 (opened: the description's `proposed = true`, `mycelium-artifact accept`, `Provisioner::invocations()` are the shipped names) | ✓ `operations/artifacts.md` § Trust & provenance (the `[hosts]` keys by name) | ✓ same section: `accept`, `verify --reviewer`, the counter (opened; each command exists in the `mycelium-artifact` bin) |
 | Federation / AgentFacts (public discovery) | ✓ | ✓ | ✓ ᵀ¹ | ✓ | ✓ ᴿ¹⁷ |
-| Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² ᴿ²⁰ (checkpointer README: a bounded `IncompleteCheckpoint` retry; guide 15 rung 3) | ✓ | ✓ ᴿ¹⁶ ᴿ²⁰ (`companions.md` § mycelium-reason: a persistent `IncompleteCheckpoint`, the resolve and blob probes) |
+| Reasoning / LLM / MCP / guardrails | ✓ | ✓ | ✓ ᵀ² ᴿ²⁰ (checkpointer README: a bounded `IncompleteCheckpoint` retry; guide 15 rung 3) ᴿ²¹ (calibration: guide 05's prompt-skill Rust and Python and its skill-calling snippets never worked; guide 15's five reasons, the `e.retriable` guard, the upgrade order) | ✓ ᴿ²¹ (`companions.md`: 0.7.0) | ✓ ᴿ¹⁶ ᴿ²⁰ (`companions.md` § mycelium-reason: a persistent `IncompleteCheckpoint`, the resolve and blob probes) ᴿ²¹ (the probe takes a full id from `e.missing` — the message's 12-character prefix is 400 `bad_id`) |
 | Companions | ✓ | ✓ | ✓ ᴿ¹⁸ (guide 21 § authority at execution in the wiki store) | ✓ | ✓ ᵀ² |
 | Rolling upgrade (wire compat) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ² ᴿ¹⁹ (`deprecations.md`: 2.19.0–2.21.0's literal breaks and two `#[non_exhaustive]` enums gaining variants) ᴿ²⁰ (`deployment.md` § Rolling upgrades: the start refusals by release; `deprecations.md` §15–17; `installation.md` the toolchain floor) |
 | Contracts & receipts (item 1) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Effects companion (`mycelium-effects`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (guide 18 compiles: `generate(&NodeId)`) | ✓ ᴿ¹⁷ | ✓ ᶻ⁶ (`Counting<D>` + `RefusalCounts`, by kind and leg; `mycelium_effects_refusals_total` under `metrics` — zero-gaps Z6, 2026-10-03) |
 | Replay & simulation (item 6) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (guide 19: the recording snippet attaches the trace; the stem command takes a unit *file*) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ ᴿ¹⁹ (`diagnostics.md`: the bundle layout carries the three trace files) |
-| Commitments (`mycelium-commitment`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`companions.md`: `compact_log` / `POST /gateway/overlay/log/compact` on the `cn/` streams) |
+| Commitments (`mycelium-commitment`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ ᴿ²¹ (`companions.md`: `compact_log` in process — the HTTP door refuses `cn/` **403** `protected_stream` since #549) |
 | Gateway / SDK receipt parity — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᶻ⁷ (both SDKs' `set()` return `KvReceipt` — zero-gaps Z7, 2026-10-03) ᴿ²⁰ (mycelium-ts 0.2.1 (#539): `scatterGather` refused 400 on every call since 2026-05-25; `rpcServe` kind; 504 → `TimeoutError`; guide 10's A2A/prompt-skill snippets in both languages) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Gateway caller identity (item 7) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Action evaluator + evidence (AE) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
-| Scoped mandates + authority at execution (item 5, Boundary H) — new, run 17 | ✓ ᴿ¹⁷ ᴿ²⁰ (`design/scoped-mandates.md` § strict eligibility (D4)) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ²⁰ (guide 21: every rule needs the head; cooling-off checks it first; who the source is) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
+| Scoped mandates + authority at execution (item 5, Boundary H) — new, run 17 | ✓ ᴿ¹⁷ ᴿ²⁰ (`design/scoped-mandates.md` § strict eligibility (D4)) ᴿ²¹ (its rule sufficiency matches the code; 2.26.0, not unreleased) | ✓ ᴿ¹⁷ ᴿ²¹ (guide 21: the revoked-key rule as the source applies it; forks; `from_reader`/`from_parts`) | ~ ᴿ²¹ (`examples/strict_eligibility` runs; no example or snippet builds an `AppointmentStream` for the shipped source — nothing in the repository calls `history_from_appointment_stream` outside its tests) | ✓ ᴿ¹⁷ ᴿ²¹ (`audit.md` §8 § strict eligibility — was ✗) | ✓ ᴿ¹⁷ ᴿ²¹ (`audit.md` §8: what `eligibility unknown` asks the operator to check — was ✗) |
 | Member removal + identity authentication (C5) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Confined fleet (H7) — new, run 17 | ✓ ᴿ¹⁷ | — | — | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁹ (calibration: ✓ᴿ¹⁷ asserted every outbound path failed closed while the federation client and OIDC fetch were ungated until v2.20.0; the row says so now) ᴿ²⁰ (`crown-jewel.md` § 2: the TOML form, redirects, region and virtual-hosted S3, three failure rows) |
-| Adaptive stability / control (item 4) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ²⁰ (guide 22 § *Setting a node's timing yourself*) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁸ (`control-profiles.md` step 2 + `tuning.md`: the two bound fields and env vars, applied at start) ᴿ²⁰ (`tuning.md`: five hot params, the timing setters' bounds and `Result`, `POST /gateway/govern/timing`; `dynamic-scaling.md`'s curl answered 400 as written) |
+| Adaptive stability / control (item 4) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ²⁰ (guide 22 § *Setting a node's timing yourself*) | ✓ ᴿ¹⁷ ᴿ²¹ (`tuning.md`: the audit conditions — `compliance` **and** `[tls]`, never `profile`; a `profile` row) | ✓ ᴿ¹⁸ (`control-profiles.md` step 2 + `tuning.md`: the two bound fields and env vars, applied at start) ᴿ²⁰ (`tuning.md`: five hot params, the timing setters' bounds and `Result`, `POST /gateway/govern/timing`; `dynamic-scaling.md`'s curl answered 400 as written) ᴿ²¹ (calibration: its three governance `curl`s answered 415 — no `Content-Type`; `target` on `profile` is ignored, now said) |
 | Knowledge layer (item 3 + Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (guide 17: `ClientError::Egress`) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (`federation.md`: the client under `egress.allow_hosts`; `sso.md`: a denied issuer refuses `start()`) |
 | Election / leadership (`mycelium::election`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
-| What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ~ ᴿ²¹ (the contributor's how-to for the verification policy lives in the wiki; `CONTRIBUTING.md` § Testing is stale — outside this run's scope, reported) | ✓ | ✓ ᴿ²¹ (two `ci.yml` line references named by step) |
 | Capability lifecycle — the two arrival paths, the unit file, `wire-check` (`operations/capability-lifecycle.md`, guide 02, `src/capability_config.rs`) — new, 2026-09-28 | ✓ | ✓ ᴿ¹⁸ (`reference/unit-file.md`; the module-doc example now a test) | ✓ | ✓ ᴿ¹⁸ (all 15 findings, six flags, exit codes) | ✓ ᴿ¹⁸ (snippets are TOML; `verify` runs) |
 | Stem node and fleet (`mycelium-stem`, R1/R2) — new, run 18 | ✓ plan §13 | ✓ ᴿ¹⁸ (wasm-host README; `reference/unit-file.md` § who reads what) | ✓ ᴿ¹⁸ (guide 13 §5; `examples/units/`; `make examples-both-ways`) | ✓ ᴿ¹⁸ (`capability-lifecycle.md` § Running a stem: every flag and default) | ✓ ᶻ¹ ᶻ³ (a stem reads an object store by URL and pulls past the frame cap in ranges, both staged to disk — zero-gaps Z1/Z3, 2026-10-03) |
 | Declared activation and serving (`[[activation]]` D21, `[[serve]]` D22) — new, run 18 | ✓ plan D21/D22 | ✓ ᴿ¹⁸ (`reference/unit-file.md`, placeholders, defaults) | ✓ (`examples/units/model_deploy`, `reheal_deploy`, `llm_agent`) | ✓ ᴿ¹⁸ (not a sandbox — `shared-responsibility-matrix.md` CC8) | ✓ ᶻ² (`api_key_env`, read once at start, unset refuses the start by name — zero-gaps Z2, 2026-10-03) |
@@ -542,8 +598,10 @@ closed it.
 | Decision trace (`mycelium_core::decision`, `with_decision_trace`, `--trace-dir`, `decisions.jsonl` + `coverage.json`, `mycelium explain`) — new, run 19 | ✓ plan G7/G8, §6 (diagnostics, not the audit trail) | ✓ `decision.rs` module doc; guide 19 § reading what a node decided; glossary ᴿ¹⁹ | ✓ ᴿ¹⁹ (the sink snippet — `DecisionSink::new(SinkConfig {..})`, `with_decision_trace`, `StemOptions.trace`, the bundle attachment — was Missing; every identifier verified) | ✓ `capability-lifecycle.md` § `--trace-dir` (stem) · `diagnostics.md` ᴿ¹⁹ (node binary) | ✓ `capability-lifecycle.md` (works literally) · `diagnostics.md` ᴿ¹⁹ (`mycelium explain … --catalogue …`, matches `main.rs`); the seven "changes no decision / bounded / never blocks" tests run green |
 | What the trace does not show (the whole-agent replay diverging at the kernel's 20th choice; draw-count equivalence) — new, run 19 | ✓ plan I5/I6 rows | ✓ `tests/decision_trace_replay.rs` module doc · guide 19 ᴿ¹⁹ (cross-link) · the inventory row ᴿ¹⁹ | ✓ ᶻ⁵ (the replay half is a checked-in assertion — `a_recorded_node_replays_decision_for_decision`, in CI; the whole-agent replay is proven, zero-gaps Z5) | ✓ `what-is-proven.md` § not yet shown (what would show it) | — (an operator cannot act beyond not expecting a decision-for-decision replay, which the page says) |
 | Configuration ownership (`docs/reference/configuration.md`, A2) — new, run 20 | ✓ ᴿ²⁰ `configuration.md` § intro (what a type definition cannot answer); D3 in the plan | ✓ ᴿ²⁰ (rows 71/73 corrected for R8; the defect count; linked from `building-on`, the architecture folder note) | ✓ ᴿ²⁰ (`building-on` names it beside the feature list) | ✓ ᴿ²⁰ (`operations/README.md` funnel row; `tuning.md`'s head — whose "an env var exists for every field" was false, eleven have none) | ✓ ᴿ²⁰ (the refusal and restart columns; spot-checked twelve rows against `config.rs`) |
+| A2A interop — the agent card and `tasks/send` (#550) — new, run 21 | ✓ guide 08 § Concept; `00-concepts` | ✓ ᴿ²¹ (guide 08 § How it works; `00-concepts`, cookbook, `skillrunner.html`: the card lists what `/a2a` can call — not plumbing, not prompt skills) | ✓ ᴿ²¹ (guide 08's snippets were not JSON-RPC (`-32601`) and read `input_schema`; now `A2aClient` + the wire shape; guide 10's card is a dict) | ✓ `rbac.md` (public surface), `production-readiness.md` | ✓ ᴿ²¹ (the negative probe names a skill on the card; `confined-fleet.md`: prompt skills under `llm:invoke`) |
+| Presence ceiling and the ranked shed (`max_providers`, `prov-shed`, `election::rank`, `prov.shed` rev 2, #547) — new, run 21 | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings: why the draw was replaced) | ✓ `reference/unit-file.md` § `[[presence]]`; `rule-catalogue.md` rev 2 | ~ ᴿ²¹ (the field row explains it; no example shows a ceiling, and `election::rank` is in no guide) | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings — was ✗) | ✓ ᴿ²¹ (the bound, the rolling-upgrade dip, overlapping bands, and reading a withdrawal from the trace — was ✗) |
 
-ᴿ²⁰ closed in run 20 (2026-10-06) · ᴿ¹⁹ closed in run 19 (2026-10-03) · ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
+ᴿ²¹ closed in run 21 (2026-10-07) · ᴿ²⁰ closed in run 20 (2026-10-06) · ᴿ¹⁹ closed in run 19 (2026-10-03) · ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 
 ## What was found, and how it was closed
 
@@ -632,6 +690,45 @@ verifying-against-code finds real problems:
 6. **Five node-free Python test files run in no CI job** (`test_kv_receipt.py`, `test_gateway_token.py`,
    `test_artifacts.py`, `test_units.py`, `test_action_refusal.py`); and two SDK defects fixed in
    `mycelium-ts` 0.2.1 (#539) — `scatterGather`'s field name and `rpcServe`'s kind.
+
+### Run 21 (2026-10-07) — code gaps and findings outside this run's scope
+
+The run-20 list above is closed in code — each item verified at its site (`TimingIntent::check` and
+`gw_govern_timing`; `BlobMiss` and the 404/502/503 mapping; `mandate::history_source`; `eligibility.rs`'s
+cooling-off order; the four `with_egress` signatures; the Python tests run by directory).
+
+**Code gaps (documented as they behave, not papered):**
+1. **`POST /gateway/govern/profile` neither parses strictly nor audits** — it never calls
+   `refuse_unknown_fields` or `audit_govern`, so a `target` is silently ignored and the step leaves no record
+   (`src/agent/http.rs` `gw_govern_profile`). Its siblings do both. `tuning.md` says so.
+2. **"Audited" needs `[tls]`.** `audit_govern` discards `seal_and_write`'s error, which a node without the TLS
+   identity always returns — a `compliance` build without `[tls]` records no governance action and says nothing.
+3. **No typed SDK error for `protected_key` / `protected_stream`.** Both SDKs type `protected_kind` only; Python
+   raises `httpx.HTTPStatusError`, TypeScript a plain `Error`, and TypeScript's `delete()` drops the body, losing
+   the route-naming `message` (`mycelium-ts/src/agent.ts` `delete`).
+4. **The shipped strict-eligibility source has no caller and no example** — `history_from_appointment_stream`
+   is reached only by its own tests; both examples build `TermHistory` by hand.
+5. **No metric for the ranked shed** — a withdrawal is visible only in the decision trace.
+6. **`rule-catalogue.md`'s `prov.shed` input sources render broken code spans** (sources containing backticks,
+   generated from `mycelium-wasm-host/src/rules.rs`); and the `installable/` refusal names
+   `POST /gateway/artifacts/publish`, present only where `mycelium-wasm-host`'s routes are merged.
+
+**Outside this run's file scope** (reported to their owners, not edited):
+- `mycelium-py/README.md:79`, `mycelium-ts/README.md:81` — "`llm_*` / `llm*`" calls that carry caller context do
+  not exist; the call is `PromptSkillClient.call`. `mycelium-py/README.md` § Health (~l.287): add
+  `agent.node_id` (0.2.6).
+- `langgraph-checkpoint-mycelium/README.md:78` still calls `IncompleteCheckpoint` "retriable" unconditionally;
+  the upgrade order (checkpointer 0.3.0 before `mycelium-reason` 0.7.0) is on no Dev surface but guide 15 now.
+- `examples/a2a_langchain/README.md:80` — "lists every capability currently advertised"; should say what `/a2a`
+  can call (plumbing and prompt skills excluded, prompt skills at `POST /gateway/llm/call`).
+- `examples/fluid_pipeline/flow_networks.html:789,798–808` — the same broken prompt-skill Rust and Python as
+  guide 05 had (`agent.llm()`, `PromptSkillClient("localhost", 8300)`, async `call(…, timeout_ms=…)` → dict).
+- `CONTRIBUTING.md` § Testing (l.69–85) — a memorised test count, no `make check`, no inventory check, no
+  exceptions file or `*_LIVE_REQUIRED`; l.103 and l.126 cite `CLAUDE.md` sections that no longer exist
+  (point at `docs/wiki/dev/testing/testing.md` and `docs/wiki/dev/concurrency/lock-free-and-atomics.md`).
+- `docs/wiki/dev/security.md:190` — "(unreleased on `main`, #543)" → "(2.26.0, #543)".
+- At the 2.27.0 release: `what-is-proven.md`'s universe sentence (jest by test name, every crate's featureless
+  build — #551) and CHANGELOG's "audited in a `compliance` build" (add "with `[tls]`").
 
 ## Artifacts created
 
@@ -842,11 +939,34 @@ skepticism, not a re-asserted ✓.
   never worked against a node. Not a receipt cell's subject, but the cell vouched for the SDK surface; the
   verb was outside every review and test that ran (`.log/2026-10-06-ts-sdk-021-sweep.md`).
 
+- **2026-10-07 (run 21) — Reasoning / LLM · HOW·Dev** read `Clear` in every run while guide 05's prompt-skill
+  snippets could not compile or run: `register_prompt_skill` / `call_prompt_skill` on `GossipAgent` (they are on
+  `agent.llm()`), a Python client with a URL constructor and a `register` that does not exist, and a skill call
+  through `agent.rpc_call` that the gateway has refused **403** `protected_kind` since 2.15.0. Fifth hit of the
+  *instruction present, does not work as written* class. Found by an auditor checking #550's split against the
+  chapter that registers prompt skills. Structural answer, again: SDK snippets in the guides are untested text.
+- **2026-10-07 (run 21) — Adaptive stability · HOW·Ops** (✓ᴿ²⁰, after run 20 corrected the *body* of the same
+  `curl` and "confirmed against a node"): the three governance `curl`s in `dynamic-scaling.md` sent no
+  `Content-Type`, which axum's `Json` extractor answers **415** — so the run-20 check ran a different command from
+  the page's. Same class in `cert-rotation.md`, `federation.md`, `rbac.md`, `sso.md`. Structural answer: a
+  must-work check runs the page's text, pasted, not a reconstruction.
+- **2026-10-07 (run 21) — Federation / AgentFacts · HOW·Dev** (✓ᵀ¹; A2A had no row of its own): guide 08's Python
+  `tasks/send` snippets were never JSON-RPC and read a card field that does not exist. A2A now has a row.
+- **2026-10-07 (run 21) — Security · HOW·Ops** (✓ᴿ²⁰): `rbac.md` § failure modes advised granting the scope or
+  `"*"` for any 403, wrong for `protected_kind` since 2.15.0 and `protected_key` since 2.26.0; `tuning.md` said
+  every governance POST is audited.
+- 2026-10-07 (run 21), not misses but recorded: three Clear cells broken **by the window's own PRs** — guide 04's
+  consistent-set example (#549 wrote a `group` field the route ignores), guide 21's revoked-key sentence (#543's
+  round 2 reversed the rule and the guide kept round 1), and `companions.md`'s `cn/` compaction over HTTP (#549
+  closed the door). The verification policy's rule 2 (*plan rows close on evidence*) applies to a PR's own
+  doc lines too.
+
 ## Re-run guidance
 
 The audit was a one-time systematic sweep; a re-run should be a **diff**. Re-audit a concept only
-when its code/docs changed since the last run (run 19 baseline: tag `v2.21.0` plus #501 —
-`git log v2.21.0..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`). The matrix
+when its code/docs changed since the last run (run 21 baseline: `a68f7e12`, #551 on `main` —
+`git log a68f7e12..HEAD -- docs/ src/ mycelium-*/src/ mycelium-core/src/`; #552's `group_sizes` is the first
+thing a run 22 audits). The matrix
 above is the baseline: any cell dropping below ✓ is a regression. The method (four auditors, the
 Clear/Thin/Missing rubric, the exact prompts) is reproducible from this session's transcript. New
 concepts (a new sub-handle, a new companion, a new external standard) each need a fresh row audited

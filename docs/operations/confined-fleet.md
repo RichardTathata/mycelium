@@ -74,7 +74,7 @@ possession proof they sign over `mandate_request_bytes(...)`.
 
 | Agent role | Scopes |
 |---|---|
-| Calls skills and tools | none on the raw routes: skills go through `/a2a`, tools through `/mcp` (`mcp:invoke`) |
+| Calls skills and tools | none on the raw routes: skills go through `/a2a`, prompt skills through `/gateway/llm/call` (`llm:invoke`), tools through `/mcp` (`mcp:invoke`) |
 | Serves skills through the gateway | `mesh:serve` only (the serve stream and `rpc/respond`) |
 | Emits coordination signals | `mesh:write`, and only if it must |
 

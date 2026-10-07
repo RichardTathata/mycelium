@@ -68,17 +68,19 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   ledger. Being a browser showcase it runs continuously and is built rather than run in CI; the four
   CLI demonstrations are the ones CI runs.
 - **Food-Rescue Co-op suite** (`examples/coop/`, workspace member
-  `mycelium-coop-examples`): **fourteen** demos (twelve CI + two manual real-model) composed in one constructive world (depot
+  `mycelium-coop-examples`): **fifteen** demos (thirteen CI + two manual real-model) composed in one constructive world (depot
   nodes rescuing surplus food, no dispatcher) — mailbox_llm · stigmergy · elastic_intent ·
   provisioning ⭐ (the autonomic loop) · federation_facts · rotation · consensus ·
   llm_pipeline · mcp_toolgrowth (real **code arrival**, bridged over MCP) · llm_council ·
   catalog (the durable **library**: runtime-read origin, librarian, origin-death →
-  peer-cache install) · diagnostics. The five **runtime-loading** demos (`catalog` ·
+  peer-cache install) · diagnostics · procurement_authority (the AE gallery row on the public seam: an action
+  nobody wrote a rule about is *authority not established*, not a denial; a denied action that ran anyway is
+  reported as both). The five **runtime-loading** demos (`catalog` ·
   `mcp_toolgrowth` · `provisioning` · `model_deploy` · `reheal_deploy`) each print a
   **`dynamically loaded artifact` banner** at startup via `coop::common::announce_loads`
   (a `LOADS: &[Loads]` const, mirrored in a `## Loads` doc block) — the CLI analogue of the
   browser [concepts box](ui-example-contract.md), declaring **content · type · loaded-from**.
-  `ci_smoke.sh` runs the twelve CI demos Docker-free (CI
+  `ci_smoke.sh` runs the thirteen CI demos Docker-free (CI
   `coop-smoke`). Plus two **manual** code runs, `model_deploy` and `reheal_deploy`, which also run
   **as stem nodes in CI** against a pinned Ollama (the stem-examples suite —
   [testing](testing/testing.md#the-stem-examples-suite-the-same-demos-as-stem-nodes-x2-2026-09-30--10-01)).

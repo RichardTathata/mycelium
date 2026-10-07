@@ -77,9 +77,11 @@ the Axum route table in
 `agent_card_handler`, `/a2a` → the task handler).
 
 **Discovery.** `A2aClient.fetch_card()` does a single
-`GET /.well-known/agent.json`. The response lists every capability currently
-advertised on the mesh — scanned from the KV store at request time, so it is
-always current:
+`GET /.well-known/agent.json`. The response lists every skill `/a2a` can call —
+scanned from the KV store at request time, so it is always current. The fleet's own
+plumbing (provisioning tiers, shed and role marks, model metadata) and prompt skills,
+which answer `llm.invoke` through `POST /gateway/llm/call`, are left out, and
+`tasks/send` refuses them (2.27.0):
 
 ```
 Connecting to Mycelium at http://localhost:9050 ...

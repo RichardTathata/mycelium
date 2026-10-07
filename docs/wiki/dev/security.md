@@ -187,7 +187,7 @@ same as *authority is recomputed, never inherited*, applied to a role's past: a 
 only move the assumption. Guide 21 § Eligibility; `examples/strict_eligibility.rs`;
 [`.log/2026-10-05-a3-strict-eligibility.md`](.log/2026-10-05-a3-strict-eligibility.md).
 
-**The source, built (unreleased on `main`, #543).** `mandate::history_source::history_from_appointment_stream`
+**The source, built (2.26.0, #543).** `mandate::history_source::history_from_appointment_stream`
 (`src/mandate/history_source.rs`) builds that `TermHistory` from an appointment stream in the knowledge layer:
 pinned to one `(issuer, stream)`, walked back from **this node's reader's checkpoint** along signed `prev`
 digests — the checkpoint head under a current key, older heads under any key the issuer held (the hash chain
@@ -196,20 +196,40 @@ forked stream (since the reader was opened) vouches for nothing; a baseline bind
 names. Stated limits: "current" is as of the reader's checkpoint, a restart forgets a fork, and a reader that
 must advance across a revoked head stays put (knowledge K2). It took three independent reviews; the first found
 a version that could report full coverage over a false history. Also from its example: a consecutive-terms run
-at the limit behind a stale head is now `Unknown` — a later term breaks a run.
+at the limit behind a stale head is now `Unknown` — a later term breaks a run. Records: `docs/design/scoped-mandates.md`
+(the source the plan named, and what it vouches for) and `docs/design/knowledge-validity.md` (*a third resolver
+position*: the walk's starting head must be under a current key, older heads need only be attributable — K2 unchanged).
 [`.log/2026-10-07-a3-history-source.md`](.log/2026-10-07-a3-history-source.md).
 
-**The doors that take a KV key write application keys only (2.26.0 for `sys/`/`consensus/`, #544; 2.27.0 for every
-owned namespace).** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set`
-refuse every key in a namespace the substrate or a companion owns — `OWNED_KV_PREFIXES` in `src/agent/http.rs`,
-kept in step with `src/lib.rs`'s ownership table by `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`
-— **403** `protected_key`, naming the route that owns it where there is one; the checkpointer's `ckpt/`/`ckptw/`
+**The doors that take a KV key write application keys only (2.26.0 for `sys/`/`consensus/`, #544; every owned
+namespace in 2.27.0, unreleased on `main` — #549).** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and
+`POST /gateway/overlay/consistent/set` refuse every key in a namespace the substrate or a companion owns —
+`OWNED_KV_PREFIXES` in `src/agent/http.rs`, kept in step with `src/lib.rs`'s ownership table by
+`every_namespace_in_the_table_is_classified_for_the_raw_kv_routes` — **403** `protected_key`, naming the route that owns it where there is one; the checkpointer's `ckpt/`/`ckptw/`
 rows, the mesh manifest, the schema registry and an application's `agent/{node}/provision/…` report stay writable,
-and the log routes refuse streams under `cn/`, `wiki/` or `reason/`. Under `kv:write` they could publish a governance
-intent, rewrite a prompt template, enrol another node in a group, forge a capability, a requirement or a mailbox
-sender, plant the `sys/caller-context/` marker or delete an acceptor's ballot. The topology escape hatch moved to
-`POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance`).
-[`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md).
+and `POST /gateway/overlay/log/{append,compact}` refuse a stream under `cn/`, `wiki/` or `reason/` **403**
+`protected_stream` (`OWNED_LOG_STREAMS`). Under `kv:write` the KV doors could publish a governance intent, rewrite a prompt template,
+enrol another node in a group, forge a capability, a requirement or a mailbox sender, plant the `sys/caller-context/`
+marker or delete an acceptor's ballot; under `consensus:write` the log routes could forge a reason trace or delete a
+commitment's offers. The topology escape hatch moved to
+`POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance` and `[tls]`).
+[`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md) ·
+[`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
+
+**`/a2a` calls only what its agent card lists (2.27.0, unreleased on `main` — #550).** `/.well-known/agent.json`
+listed every advertised capability as a skill, so an external agent was offered the fleet's plumbing — provisioning
+tiers (`{ns}/loading`, `{ns}/installable`), `prov-shed/*` marks, `llm-meta/*`, `artifact/librarian`,
+`reason/blob-cache`, the companions' election and role marks (`.primary`/`.secondary`/`.candidate`/`.curator`) — none
+of which answers `skill.invoke`, and **prompt skills** (`register_prompt_skill`: `mycelium-reason`'s `llm/{model}`, a
+stem's `[[serve]]`), which answer `llm.invoke`. Worse, `tasks/send` resolved an id the card left out and dispatched
+`skill.invoke` there, where a co-hosted receiver could run under the guessed name. One predicate now serves both
+doors — `not_an_a2a_skill` (`src/agent/a2a.rs`, over `is_infrastructure_capability`), used by `card_skill_ids` and by
+`resolve_skill` on the send and stream paths — so the card lists exactly what `tasks/send` will call. The rest is
+refused (`-32001` on `tasks/send`, a `failed` status event on the stream), a prompt skill naming
+`POST /gateway/llm/call`, because routing it through `/a2a` would reach a model without `llm:invoke`. A companion
+advertising a new kind of plumbing capability adds it to `is_infrastructure_capability`. Gate:
+`agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
+[`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
 
 ## Threat model revision 3 draft — Boundary H (2026-09-23)
 

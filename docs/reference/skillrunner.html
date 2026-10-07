@@ -682,14 +682,14 @@ console.<span class="fn">log</span>(JSON.<span class="fn">parse</span>(result.<s
   <p>Build SkillRunner with <code>--features a2a</code> and any node with an
   <code>http_port</code> set automatically exposes the Agent-to-Agent protocol:
   external frameworks (LangChain, AutoGen, anything that speaks A2A) discover
-  every skill on the mesh and invoke them as native tools, with no hardcoded
+  every <code>skill.invoke</code> skill on the mesh (prompt skills are called through <code>/gateway/llm/call</code> instead) and invoke them as native tools, with no hardcoded
   knowledge of what skills exist or where they run.</p>
 
   <div class="tbl-wrap">
     <table>
       <thead><tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr></thead>
       <tbody>
-        <tr><td><code>/.well-known/agent.json</code></td><td>GET</td><td>Agent card — one entry per live skill, built from the <code>cap/</code> KV prefix so it reflects the mesh in real time</td></tr>
+        <tr><td><code>/.well-known/agent.json</code></td><td>GET</td><td>Agent card — one entry per live skill <code>/a2a</code> can call, built from the <code>cap/</code> KV prefix so it reflects the mesh in real time</td></tr>
         <tr><td><code>/a2a</code></td><td>POST</td><td>JSON-RPC 2.0 — <code>tasks/send</code> resolves a skill, RPC-calls <code>skill.invoke</code>, returns the completed task</td></tr>
       </tbody>
     </table>

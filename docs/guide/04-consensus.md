@@ -152,7 +152,7 @@ MYCELIUM_ROLE=overlay MYCELIUM_PORT=57012 MYCELIUM_HTTP_PORT=8402 \
 # Linearizable write
 curl -X POST http://localhost:8400/gateway/overlay/consistent/set \
   -H 'Content-Type: application/json' \
-  -d '{"key":"counter","value_b64":"MQ==","group":"overlay"}'   # "1"; the route reads value_b64
+  -d '{"key":"counter","value_b64":"MQ=="}'   # "1"; a cluster-wide round — the route takes no group
 
 # Read committed value
 curl http://localhost:8400/gateway/overlay/consistent/get?key=counter
@@ -352,9 +352,13 @@ declared locality spread — e.g. `spread_min_distinct: 2` at `spread_depth:
 Some(1)` demands voters from at least two availability zones. Use it when
 correctness depends on failure-domain diversity (compliance, split-brain
 resistance). The operator can relax a live group as an escape hatch:
-`POST /gateway/govern/topology-override {"group": "G", "override": true}` (scope `govern:write`, audited in a `compliance` build;
+`POST /gateway/govern/topology-override {"group": "G", "override": true}` (scope `govern:write`, audited in a `compliance` build with `[tls]`;
 `"override": false` releases it). It writes `sys/topology-override/{group}`, which the gate reads as active only
-when its value is exactly `true`; the raw KV routes refuse that key since 2.27.0.
+when its value is exactly `true`; the raw KV routes refuse that key since 2.27.0. An embedded node sets the
+same key directly (`agent.kv().set("sys/topology-override/G", &b"true"[..])`). The override has **no lease**: it
+stays until released. A group commit the gate refuses answers **409** `{"ok": false, "error":
+"topology_unsatisfied"}` over HTTP (`ConsistencyError::TopologyUnsatisfied` in Rust); the operator's runbook
+is [diagnostics.md § Consensus refused](../operations/diagnostics.md#consensus-refused--topology_unsatisfied).
 
 **Consensus and partition tolerance.** The overlay is CP (consistent,
 partition-tolerant) within the quorum group — it blocks, not fails, when

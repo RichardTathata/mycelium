@@ -71,7 +71,7 @@ verifying everywhere. Two ways:
 
 ```bash
 curl -X POST https://gateway:9443/gateway/identity/revoke \
-  -H "authorization: Bearer $TOKEN" \
+  -H "authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"revoked_key":"<old-verifying-key-hex>","reason":"suspected compromise"}'
 ```
 

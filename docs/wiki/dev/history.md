@@ -22,6 +22,22 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Unreleased on `main` (2026-10-07) — application keys only, a card that lists what it calls, a wider test universe
+
+**#549** — the `kv:write` decision 2.26.0 recorded and left open: the raw KV doors (`POST`/`DELETE /gateway/kv`,
+`/kv/quorum`, `/overlay/consistent/set`) write **application keys only**, refusing every namespace the substrate or a
+companion owns `403 protected_key` and naming its route (`OWNED_KV_PREFIXES`, held against `src/lib.rs`'s table by
+`every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`); `ckpt/`/`ckptw/`, `manifest/`, `schemas/` and an
+application's `agent/{node}/provision/` report stay writable. Its review found the log routes took an unchecked stream —
+`consensus:write` reached `log/cn/`, `log/reason/`, `log/wiki/` — now `403 protected_stream`. The topology escape hatch
+became `POST /gateway/govern/topology-override` (`govern:write`, audited with `compliance`). **#550** — the A2A agent
+card listed the fleet's plumbing and prompt skills, and `tasks/send` dispatched to ids the card left out; one predicate
+(`not_an_a2a_skill`) now serves both. **#551** — the `test-coverage` universe knows every TypeScript test by title and
+every workspace crate's featureless build; its review made the jest join refuse duplicated leaf titles. Each went
+through an independent adversarial review that found something. Pages: [security.md](security.md),
+[operations.md](operations.md), [testing/verification-policy.md](testing/verification-policy.md);
+[`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
+
 ## v2.26.0 release — 2026-10-07 (tag `v2.26.0`) — the verification policy and the recorded code gaps
 
 Doc-coverage run 20 found six code gaps behind green CI and repeated analysis; the answer was a policy, not

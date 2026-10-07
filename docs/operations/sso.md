@@ -101,7 +101,7 @@ too. Network-layer egress control must allow the same hosts.
 curl -H "Authorization: Bearer $JWT" http://NODE:PORT/gateway/kv/keys      # 200
 # …but not a kv:write route:
 curl -X POST -H "Authorization: Bearer $JWT" http://NODE:PORT/gateway/kv \
-     -d '{"key":"k","value":"v"}'                                          # 403 {"required_scope":"kv:write"}
+     -H 'Content-Type: application/json' -d '{"key":"k","value_b64":"dg=="}'   # 403 {"required_scope":"kv:write"}
 # No / invalid token:
 curl http://NODE:PORT/gateway/kv/keys                                      # 401
 ```

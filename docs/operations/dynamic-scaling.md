@@ -30,7 +30,7 @@ band. Publish the intent over the gateway:
 
 ```bash
 curl -X POST http://node:8080/gateway/govern/membership \
-  -H "Authorization: Bearer $GOVERN_TOKEN" \
+  -H "Authorization: Bearer $GOVERN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"group":"rush-pool","min":2,"max":3}'
 ```
 
@@ -109,11 +109,12 @@ tuning governor:
 
 ```bash
 curl -X POST http://node:8080/gateway/govern/tuning \
-  -H "Authorization: Bearer $GOVERN_TOKEN" \
+  -H "Authorization: Bearer $GOVERN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"params":[{"param":"writer_depth","floor":4096}]}'   # keys: inbound_fps · writer_depth · bulk_handlers
 curl -s http://node:8080/gateway/govern        # this node's effective tuning snapshot, and `.control`
 curl -X POST http://node:8080/gateway/govern/profile \
-  -H "Authorization: Bearer $GOVERN_TOKEN" -d '{"profile":"observe"}'   # step the control profile (§7 ladder)
+  -H "Authorization: Bearer $GOVERN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"profile":"observe"}'   # step the control profile (§7 ladder)
 ```
 
 Each node clamps its *own* scalar (local-pin beats fleet intent), so a per-node

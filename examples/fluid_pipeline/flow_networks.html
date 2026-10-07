@@ -786,7 +786,7 @@ items = agent.<span class="cf">keys</span>(prefix=<span class="cv">"pipeline/sta
     metadata: Default::default(),
 };
 <span class="cm">// Template written to KV, capability advertised — all workers can resolve it.</span>
-<span class="ck">let</span> _skill = agent.<span class="cf">register_prompt_skill</span>(<span class="cv">"stage_c"</span>, <span class="cv">"score"</span>, template, backend).<span class="cd">await</span>?;</pre>
+<span class="ck">let</span> _skill = agent.<span class="cf">llm</span>().<span class="cf">register_prompt_skill</span>(<span class="cv">"stage_c"</span>, <span class="cv">"score"</span>, template, std::sync::Arc::new(backend)).<span class="cd">await</span>?;</pre>
 </div>
 
 <p><strong>Step 2 — Call the skill from Stage C (Python worker).</strong>
@@ -795,18 +795,23 @@ items = agent.<span class="cf">keys</span>(prefix=<span class="cv">"pipeline/sta
 
 <div class="code-wrap">
   <div class="code-header"><span class="code-lang">Python</span>stages/score.py — replace simulated sleep with live inference</div>
-  <pre><span class="ck">from</span> mycelium.prompt_skill <span class="ck">import</span> PromptSkillClient
+  <pre><span class="ck">import</span> asyncio, json
+<span class="ck">from</span> mycelium <span class="ck">import</span> PromptSkillClient
 
-_client = PromptSkillClient(<span class="cv">"http://localhost:8300"</span>)
+<span class="ck">async def</span> <span class="cf">_score</span>(title: str) <span class="ck">-></span> dict:
+    client = PromptSkillClient(<span class="cv">"127.0.0.1"</span>, <span class="cn">8300</span>)   <span class="cm"># host, port; token="…" on a protected gateway</span>
+    <span class="ck">try</span>:
+        <span class="cm"># POST /gateway/llm/call (llm:invoke) — a prompt skill is not called through /a2a</span>
+        <span class="ck">return await</span> client.<span class="cf">call</span>(<span class="cv">"stage_c"</span>, <span class="cv">"score"</span>, title, timeout_ms=<span class="cn">30_000</span>)
+    <span class="ck">finally</span>:
+        <span class="ck">await</span> client.<span class="cf">close</span>()
 
 <span class="ck">def</span> <span class="cf">score_article</span>(payload: dict) <span class="ck">-></span> dict:
     <span class="cm"># Previously: time.sleep(STAGE_C_SLEEP)</span>
-    result = _client.<span class="cf">call</span>(<span class="cv">"stage_c"</span>, <span class="cv">"score"</span>,
-                          input=payload[<span class="cv">"title"</span>], timeout_secs=<span class="cn">30.0</span>)
-
-    <span class="cm"># result.output is the JSON string the model returned</span>
-    scores = json.<span class="cf">loads</span>(result.output)
-    <span class="ck">return</span> {**payload, <span class="cv">"scores"</span>: scores, <span class="cv">"model_used"</span>: result.model_used}</pre>
+    result = asyncio.<span class="cf">run</span>(_score(payload[<span class="cv">"title"</span>]))
+    <span class="cm"># result["output"] is the JSON string the model returned; result["provider"] the node that served it</span>
+    scores = json.<span class="cf">loads</span>(result[<span class="cv">"output"</span>])
+    <span class="ck">return</span> {**payload, <span class="cv">"scores"</span>: scores, <span class="cv">"provider"</span>: result[<span class="cv">"provider"</span>]}</pre>
 </div>
 
 <p><strong>Step 3 — Nothing else changes.</strong>

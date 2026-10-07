@@ -73,7 +73,10 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   docs/wiki` — exists as a literal in `http.rs` **and its segment shape matches**: a `{param}` pattern matches
   one path segment, so a slash-bearing value needs a `{*tail}` capture (the plan's *identifiers in paths* rule,
   §9 — `/consensus/{*slot}` since 2026-09-06; before that the runbooks' literal lock URL 404ed for two months,
-  ledger 2026-09-06). When in doubt, probe it with a test — the router, not the doc, is canon.
+  ledger 2026-09-06). When in doubt, probe it with a test — the router, not the doc, is canon. **A brace list of
+  routes (`govern/{timing,tuning,…}`) is a set**: diff it against every router route with that prefix
+  (`grep '.route("/govern/' src/agent/http.rs`), not member by member — checking each listed member exists let
+  `/profile` go missing from 2026-09-18 and `/topology-override` from its first day (ledger 2026-10-07).
 - **CI-gate list** (`docs/wiki/dev/testing/testing.md`): diff the documented gate block against the
   *actual* `run:` steps in `.github/workflows/*.yml`. A page that lists the *clippy* of a crate's
   tests can imply coverage CI doesn't provide — `mycelium-core`'s whole suite was clippy-compiled but
@@ -84,7 +87,10 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   `mycelium`'s dev-dependencies unify `gateway` and `tls` back on —
   `cargo tree -e features,normal,dev --no-default-features -i mycelium` shows it. The CI "Gateway-free
   build" job's clippy was described as the dead-code catcher for months while linting a gateway build
-  (ledger 2026-10-06).
+  (ledger 2026-10-06). **A sentence naming which tests a step runs** ("runs the node-free `auth.test.ts`")
+  is a set too: diff it against the runner's own collection — jest's `testMatch`/`--listTests`, a
+  `--test '*'` glob, the pytest directory — since the step's flags say nothing about which files exist
+  (`testing.md` named one jest file of eight, ledger 2026-10-07).
 - **External front-door docs that *restate* code facts** — `docs/guide/building-on-mycelium.md`
   (and lightly `docs/guide/faq.md`). These live outside `docs/wiki/` but duplicate code by
   design, so they drift like a wiki page and are higher-stakes (downstream integrators act on
@@ -107,7 +113,9 @@ convention is "run the suite for the live total".
 Pages contradicted by work merged since the last lint: check each section's `.log/` dates
 against `git log --oneline --since=<last lint>` — merged PRs with durable knowledge but no
 ingest entry indicate a stale or missing page. ✅-shipped items still described as
-pending/planned = a finding.
+pending/planned = a finding. **Every "unreleased" marker** on a live page (`grep -rn "unreleased" docs/wiki docs/guide
+docs/operations docs/design`, minus `.log/`) is checked against the PR it names: `git tag --contains <merge sha>`
+non-empty means it shipped, and the marker is a finding — two survived v2.26.0's release (ledger 2026-10-07).
 
 ## 3. Orphans & dead links
 
@@ -140,6 +148,10 @@ that names *which* bins carry `required-features`, which crates a feature pulls 
 compose file has is a parallel copy of a `Cargo.toml`/compose fact, and it drifts like one: `testing.md`
 said *"Four bins need it"* (wasm) from 2026-07-07 while the manifest grew to nine, through five passes
 (ledger 2026-10-02). Derive the set from the manifest (`awk` over `[[bin]]` blocks) and diff the names.
+
+**A page listing a suite's demos is diffed by name against the runner** — the `run_demo` lines in
+`examples/coop/ci_smoke.sh`, the `[[bin]]` names in the crate's manifest — not counted: `examples.md` said fourteen
+demos with twelve in CI while `procurement_authority` ran as the thirteenth for two weeks (ledger 2026-10-07).
 
 **Enumeration pages: audit by *category*, not by pinned count.** For pages that list a set
 (`dev/examples.md`, the sub-handle list, the feature list), a re-checked count is not coverage — a

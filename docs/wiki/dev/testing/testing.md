@@ -31,10 +31,12 @@ cargo test -p mycelium-gateway-free-tests                   # the one test build
 ```
 
 **`make check-full` is NOT the whole CI gate — a green local run does not prove CI is green.** The
-block above is the *Rust lib + clippy* set. CI **also** runs **live-node / cross-language integration
+block above is the *Rust lib + clippy* set (CI runs its test lines through `scripts/ci-retest.sh`, the compliance
+line as `--features compliance,a2a`, and adds the root crate's integration tests, bins and doctests by discovery —
+`--test '*'`, `--bins`, `--doc`; [verification-policy.md](verification-policy.md) rule 3). CI **also** runs **live-node / cross-language integration
 jobs** that `make check-full` does not: **Reason (v3.0 Tier-3)** and **Python SDK + LangGraph** (spin
 up real `reason_node` binaries and drive them over HTTP/Python), the **Food-Rescue coop demo suite**
-(`examples/coop/ci_smoke.sh` — 12 multi-node demos), **Blackboard / WASM-host / AFN** smokes, the
+(`examples/coop/ci_smoke.sh` — 13 multi-node demos), **Blackboard / WASM-host / AFN** smokes, the
 **Docker cluster suites**, and the nightly **fuzz** job. These exercise *runtime behaviour across the
 network and across crates* that no `cargo test --lib` reaches.
 
@@ -338,7 +340,9 @@ The lessons it taught are dated in `.log/` (`2026-09-30-x2-stem-examples.md` onw
 disk is not a catalogue (a librarian publishes it); a librarian manages only its own key's lines; the
 checker accepted a placeholder publisher key the stem refused.
 
-CI additionally gates `tsc --noEmit` + `jest` (mycelium-ts — the node-free `auth.test.ts`; the live suite self-skips), the AFN smoke (pull+push), the coop
+CI additionally gates `tsc --noEmit` + `jest` (mycelium-ts — every file jest's `testMatch` collects, the live ones skipping
+themselves there; then `tests/live` again against a `mycelium` node the job starts, with `MYCELIUM_LIVE_REQUIRED` set so a missing node variable
+fails the step rather than letting every live test skip green — since 2026-10-05, realignment repairs S4), the AFN smoke (pull+push), the coop
 smoke, time-boxed fuzz (skipped on PRs), and `cargo audit` (RUSTSEC). **Don't trust a
 memorised test count** — the counts grow every PR; run the suites for the live total (the
 CLAUDE.md count bullet drifted twice before this rule).

@@ -185,8 +185,9 @@ The wiki has a genuinely different operational model: a **node-independent store
 
 ## mycelium-reason — routed inference, the OpenAI façade, fleet traces
 
-The Tier-3 reasoning companion (`mycelium-reason`, its own version line — 0.6.2 since 2026-09-06: 0.6.0 the PAIR imports, 0.6.1 the atomic
-rank-and-reserve, 0.6.2 the OpenAI façade no longer fabricating a token split).
+The Tier-3 reasoning companion (`mycelium-reason`, its own version line — 0.7.0 since 2026-10-07: 0.6.0 the PAIR imports, 0.6.1 the atomic
+rank-and-reserve, 0.6.2 the OpenAI façade no longer fabricating a token split, 0.7.0 the blob route's
+404 / 503 / 502 reasons).
 Nothing to persist: routing state is capability pheromone + **node-local** in-flight reservations
 (never gossiped); traces ride the KV log (`log/reason/{run}`); payload blobs live in the blob tier
 (`BLOB_DIR`, content-addressed, fetched peer-to-peer on demand).
@@ -199,14 +200,16 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   optional `BOOTSTRAP`, optional `GOSSIP_GATEWAY_AUTH_TOKEN`.
 - **Checkpointer reads (`langgraph-checkpoint-mycelium` ≥ 0.2.0).** A client raising
   `IncompleteCheckpoint` means an index row arrived before its blobs were fetchable — transient while
-  blobs propagate. If it persists: `GET /gateway/capability/resolve?ns=reason&name=blob-cache` must list a
-  live holder, and `GET /gateway/reason/blob/{id}` (scope `llm:read`) for an id the error names says why
+  blobs propagate when `e.retriable` is true. If it persists: `GET /gateway/capability/resolve?ns=reason&name=blob-cache` must list a
+  live holder, and `GET /gateway/reason/blob/{id}` (scope `llm:read`) for a full 64-hex id from the exception's `e.missing` says why (its message prints
+  only the first 12 characters, which the route refuses **400** `bad_id`)
   (`mycelium-reason` 0.7.0): **404 `not_found`** — no holder has it yet; **503 `unavailable`** — a holder
   could not be reached; **502 `corrupt`** — every copy currently on offer (this node's, and each provider still
   advertising `reason/blob-cache`) fails its content address
   (a copy damaged on a holder's disk, or bytes a provider forged) and no provider merely lacks it or is
   unreachable; the node logs each bad copy (`mesh blob failed content verification — trying next provider`,
-  `blob failed content verification on read — damaged at rest`). The client's `IncompleteCheckpoint.reasons`
+  `blob failed content verification on read — damaged at rest`, `blob present but unreadable — damaged at
+  rest`). The client's `IncompleteCheckpoint.reasons`
   carries the same word per blob — read from the route's body, so a proxy's own 502 page is `unavailable` —
   plus `unauthorized` for a 401/403 and `unsupported` for a bare 404 (that node serves no blob route), and
   `retriable` is false for `corrupt`, `unauthorized` and `unsupported`: a damaged or forged blob, a token
@@ -270,8 +273,9 @@ an absent section.
   requirement's streams are `cn/{requirement}/offers`, `cn/{requirement}/reports` and
   `cn/{requirement}/assessments`; `offers(requirement)` returns each offer with its HLC. Compact a
   requirement's offers only **after its award is settled** (`award_of` returns it) — the award is
-  planned from those offers. Over HTTP the same tombstoning is `POST /gateway/overlay/log/compact`
-  with `{"stream", "before_hlc"}` (scope `consensus:write`); there is no `cn/`-specific route.
+  planned from those offers. There is no HTTP door for it: since 2.27.0 `POST /gateway/overlay/log/{append,compact}`
+  refuse a stream under `cn/` **403** `protected_stream` (the commitment net owns those streams), so
+  compaction runs in the embedding process through `agent.kv().compact_log(…)`.
 - **Observe.** The KV heads and streams directly. No metrics.
 
 ### mycelium-effects — the transactional destination
