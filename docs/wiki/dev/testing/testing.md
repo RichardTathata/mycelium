@@ -655,6 +655,12 @@ forces: per-agent with fresh ports when nodes join one at a time (the wasm-host 
 starts (`start_pair()` in the wiki tests — shut the half-started survivor down before
 re-attempting, and shut a discarded `Wiki` down explicitly, the Run-32 task-leak lesson).
 
+
+**`--no-fail-fast` on the first pass (2026-10-07).** Without it cargo stopped at the first failing test binary,
+and the retry re-ran only the failed test — so one flake left every later binary in that step unexecuted while
+the step went green. The test-coverage job (verification policy rule 3) found it on its first real run:
+`mycelium-reason`'s `tests/ollama.rs` had not executed. `scripts/ci-retest.sh` passes `--no-fail-fast` now.
+
 ## A client deadline below the server's budget is a defect, not a flake
 
 "Never fix a flake by widening a timeout" (above) has a sharp exception that is easy to

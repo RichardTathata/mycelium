@@ -46,10 +46,33 @@ PY_COLLECTED = re.compile(r"^(\S+\.py::\S+)\s*$")
 JEST_FILE = re.compile(r"^(PASS|FAIL)\s+(\S+\.test\.ts)")
 JEST_TEST = re.compile(r"^\s+(✓|✕|○ skipped|○ todo|○)\s+(.+?)(?: \(\d+ m?s\))?$")
 UNIVERSE_MARK = "@@test-universe@@"
+# libtest names a should-panic test "<name> - should panic" and rustdoc a `no_run` / `compile_fail` doctest
+# "<name> - compile" / "- compile fail" when running them; `--list` names them without. (A `no_run` doctest
+# compiling *is* its run.)
+RUST_SUFFIX = re.compile(r" - (?:should panic(?: with .*)?|compile(?: fail)?)$")
+
+
+def canonical_py(nodeid: str, tracked: list[str]) -> str:
+    """pytest names a test relative to its rootdir, which differs between invocations (each package's
+    pyproject is a rootdir), so the same test can appear as `tests/x.py::t` and `pkg/tests/x.py::t`. Resolve
+    the file to the one tracked file it can be — the path as a suffix, then with leading components dropped."""
+    path, sep, rest = nodeid.partition("::")
+    parts = path.split("/")
+    for i in range(len(parts)):
+        suffix = "/".join(parts[i:])
+        hits = [f for f in tracked if f == suffix or f.endswith("/" + suffix)]
+        if len(hits) == 1:
+            return hits[0] + sep + rest
+        if len(hits) > 1:
+            break
+    return nodeid
 
 
 def clean(line: str) -> str:
     return ANSI.sub("", STAMP.sub("", line.rstrip("\r\n")))
+
+
+TRACKED: list[str] = []
 
 
 def scan(text: str, executed: set, universe: set):
@@ -72,7 +95,7 @@ def scan(text: str, executed: set, universe: set):
         if target:
             m = RUST_RESULT.match(line)
             if m:
-                key = f"rust {target}::{m.group(1)}"
+                key = f"rust {target}::{RUST_SUFFIX.sub('', m.group(1))}"
                 universe.add(key)
                 if m.group(2) in ("ok", "FAILED") and not universe_mode:
                     executed.add(key)
@@ -83,7 +106,7 @@ def scan(text: str, executed: set, universe: set):
                 continue
         m = PY_RESULT.match(line.strip())
         if m:
-            key = f"python {m.group(1)}"
+            key = f"python {canonical_py(m.group(1), TRACKED)}"
             universe.add(key)
             if m.group(2) != "SKIPPED" and not universe_mode:
                 executed.add(key)
@@ -91,7 +114,7 @@ def scan(text: str, executed: set, universe: set):
         if universe_mode:
             m = PY_COLLECTED.match(line.strip())
             if m:
-                universe.add(f"python {m.group(1)}")
+                universe.add(f"python {canonical_py(m.group(1), TRACKED)}")
                 continue
         m = JEST_FILE.match(line.strip())
         if m:
@@ -137,15 +160,18 @@ def fetch(dest: str):
         if status != "completed":
             unfinished.append(name)
             continue
-        # `gh run view --log` follows the API's redirect to the log blob (`gh api …/logs` does not, and
-        # returned an empty body on the first CI run — which this script then failed on, as it should).
-        log = subprocess.run(["gh", "run", "view", run, "-R", repo, "--job", jid, "--log"],
-                             capture_output=True, text=True)
+        # The jobs-log endpoint answers with a redirect to the log blob. `gh api` does not follow it (the
+        # first CI run fetched empty bodies, and this script failed on that, as it should), and
+        # `gh run view --log` refuses while the run is in progress — which it always is, from inside it.
+        # curl follows the redirect and drops the token on the cross-host hop.
+        log = subprocess.run(
+            ["curl", "-sSfL", "--retry", "3", "-H", f"Authorization: Bearer {os.environ['GH_TOKEN']}",
+             "-H", "Accept: application/vnd.github+json",
+             f"https://api.github.com/repos/{repo}/actions/jobs/{jid}/logs"],
+            capture_output=True, text=True)
         if log.returncode != 0 or not log.stdout.strip():
             sys.exit(f"ci-test-coverage: could not fetch the log of job {name!r} ({jid}): {log.stderr.strip()[:300]}")
-        # Each line is `job<TAB>step<TAB>timestamp text`; keep the last field.
-        text = "\n".join(l.split("\t", 2)[-1] for l in log.stdout.splitlines())
-        open(os.path.join(dest, f"{jid}.log"), "w", encoding="utf-8").write(text)
+        open(os.path.join(dest, f"{jid}.log"), "w", encoding="utf-8").write(log.stdout)
     if unfinished:
         sys.exit("ci-test-coverage: these jobs had not finished, so their tests cannot be observed — add them to "
                  "the test-coverage job's `needs`: " + ", ".join(unfinished))
@@ -158,6 +184,11 @@ def main() -> int:
         args = args[1:]
     logs = args[0]
     root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    try:
+        TRACKED[:] = [f for f in subprocess.run(["git", "-C", root, "ls-files", "*.py"], capture_output=True,
+                                                 text=True, check=True).stdout.split()]
+    except (OSError, subprocess.CalledProcessError):
+        pass
     executed, universe = set(), set()
     for f in sorted(glob.glob(os.path.join(logs, "*"))):
         scan(open(f, encoding="utf-8", errors="replace").read(), executed, universe)

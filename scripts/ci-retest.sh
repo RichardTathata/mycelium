@@ -31,7 +31,11 @@ strict="${CI_RETEST_STRICT:-0}"
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
-if cargo test "$@" 2>&1 | tee "$log"; then
+# --no-fail-fast: without it cargo stops at the first failing test binary, so a flake in one binary meant
+# every later binary in the step never ran — and the retry below re-runs only the failed test, so the step
+# went green with those binaries unexecuted. Found by the test-coverage job's first run (2026-10-07):
+# in that run mycelium-reason's `tests/ollama.rs` did not execute, behind a flake in an earlier binary.
+if cargo test --no-fail-fast "$@" 2>&1 | tee "$log"; then
   exit 0
 fi
 
