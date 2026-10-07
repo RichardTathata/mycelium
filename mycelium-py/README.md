@@ -76,7 +76,7 @@ carry the route's scope (`kv:read`, `mesh:write`, `wiki:*`, … — the node's
 `docs/operations/rbac.md`). Since 0.2.4.
 
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway
-(`rpc_call`, `scatter`, `llm_*`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a
+(`rpc_call`, `scatter`, `PromptSkillClient.call`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a
 node-attested caller context: the provider's `authorized_callers` judges *this client's principal*
 (`token:<issuer>/legacy` for `gateway_auth_token`, `token:<issuer>/<name>` for a named token,
 `token:<issuer>/#i` for the i-th positional scoped token, `oidc:<idp issuer>/<sub>` for a JWT,
@@ -237,6 +237,11 @@ data  = agent.scan_prefix("my/")          # → dict[str, bytes]
 
 All writes are gossiped to peers with last-write-wins (HLC) semantics.
 
+These routes write **application keys** (your own namespaces, plus `ckpt/`, `manifest/`, `schemas/`).
+A key in a namespace the substrate or a companion owns — `sys/`, `grp/`, `cap/`, `prompts/`, `log/`,
+`mailbox/`, … — is refused: `set`, `delete`, `set_with_min_acks` and `consistent_set` raise
+`ProtectedKeyError`, whose message names the route that writes it ([Errors](#errors)).
+
 #### `set_with_min_acks(key, value, min_acks, *, timeout_secs=5.0) → int`
 
 Write `value` and wait for peer acknowledgements. Since the substrate's item 1 PR 4b the gateway **asks** each peer whether it holds the operation, so this now succeeds: `acks_received` counts peers whose store holds this exact write and whose WAL `fdatasync` returned `Ok`. Peers that do not answer are reported as **unknown**, never as "did not persist" — a timeout is not evidence the write failed.
@@ -284,6 +289,7 @@ async for event in agent.mailbox("task.result"):
 
 ```python
 agent.health()  # → {"status": "ok", "node_id": "..."}
+agent.node_id   # → "IP:PORT" — this node's id, read once from /health and cached (since 0.2.6)
 agent.stats()   # → {"node_id": "...", "store_entries": N, "dropped_frames": N}
 ```
 
@@ -413,6 +419,9 @@ recent  = agent.scan_log("events", from_hlc=cursor)  # since cursor
 
 Tombstones all entries with `hlc < before_hlc`. Gossips the tombstones to peers.
 
+A stream under `cn/`, `wiki/` or `reason/` belongs to a component (the commitment net, a wiki,
+`mycelium-reason`): `append` and `compact_log` raise `ProtectedStreamError` for it ([Errors](#errors)).
+
 ```python
 agent.compact_log("events", checkpoint_hlc)
 ```
@@ -506,6 +515,32 @@ except FederationError as e:
 reached the partner. `repeatable=True` on `call` states that *your* effect tolerates being run
 twice — it is the only thing that lets a silent gateway be retried elsewhere, and it defaults to
 `False`.
+
+---
+
+### Errors
+
+Three gateway refusals are raised as typed errors, each a `PermissionError` carrying the gateway's
+`message`, which names the route to use instead. An ordinary scope refusal (`403` without one of
+these codes) stays an `httpx.HTTPStatusError`.
+
+| Error | Gateway answer | Raised by | Attribute |
+|---|---|---|---|
+| `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpc_call`, `scatter_gather`, `emit`, `deliver_event`, `emit_sharded`, `emit_reliable` (0.2.7) | `.kind` |
+| `ProtectedKeyError` (since 0.2.7) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `set_with_min_acks`, `consistent_set` | `.key`, `.message`, `.response` |
+| `ProtectedStreamError` (since 0.2.7) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compact_log` | `.stream`, `.message`, `.response` |
+
+`ProtectedKeyError` and `ProtectedStreamError` are also `httpx.HTTPStatusError`s — what these verbs
+raised for the same `403` before 0.2.7 — so an existing `except httpx.HTTPStatusError` still catches them.
+
+```python
+from mycelium import ProtectedKeyError
+
+try:
+    agent.set("prompts/ai/chat", template_bytes)
+except ProtectedKeyError as e:
+    print(e.key, "→", e.message)   # "prompt templates are written through /gateway/prompts/{ns}/{name} (llm:write)"
+```
 
 ---
 

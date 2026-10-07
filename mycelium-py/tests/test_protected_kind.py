@@ -80,3 +80,12 @@ def test_an_ordinary_403_is_not_mistaken_for_it(agent):
     with pytest.raises(Exception) as e:
         agent.rpc_call("127.0.0.1:1", "echo", b"{}")
     assert not isinstance(e.value, ProtectedKindError)
+
+
+def test_emit_reliable_raises_it_too(agent):
+    """``overlay/emit_reliable`` is the sixth raw route the gateway guards; the SDK raised a bare HTTP
+    error there until 0.2.7, where its five siblings raised ``ProtectedKindError``."""
+    _refuse("mcp.invoke")
+    with pytest.raises(ProtectedKindError) as e:
+        agent.emit_reliable("127.0.0.1:1", "mcp.invoke", b"x")
+    assert e.value.kind == "mcp.invoke"

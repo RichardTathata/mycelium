@@ -78,7 +78,7 @@ The header rides every request including the SSE streams (`onSignal`, `rpcServe`
 `auth.test.ts` suite runs without a node and is CI-gated.
 
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway
-(`rpcCall`, `scatter`, `llm*`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a
+(`rpcCall`, `scatter`, `PromptSkillClient.call`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a
 node-attested caller context: the provider's `authorized_callers` judges *this client's principal*
 (`token:<issuer>/legacy` for `gateway_auth_token`, `token:<issuer>/<name>` for a named token,
 `token:<issuer>/#i` for the i-th positional scoped token, `oidc:<idp issuer>/<sub>` for a JWT,
@@ -233,6 +233,11 @@ const data = await agent.scanPrefix("my/");        // → Record<string, Buffer>
 
 All writes are gossiped to peers with last-write-wins (HLC) semantics.
 
+These routes write **application keys** (your own namespaces, plus `ckpt/`, `manifest/`, `schemas/`).
+A key in a namespace the substrate or a companion owns — `sys/`, `grp/`, `cap/`, `prompts/`, `log/`,
+`mailbox/`, … — is refused: `set`, `delete`, `setWithMinAcks` and `consistentSet` throw
+`ProtectedKeyError`, whose message names the route that writes it ([Errors](#errors)).
+
 #### `setWithMinAcks(key, value, minAcks, options?) → Promise<number>`
 
 Write `value` and wait for peer acknowledgements. Since the substrate's item 1 PR 4b the gateway **asks** each peer whether it holds the operation, so this now succeeds: `acks_received` counts peers whose store holds this exact write and whose WAL `fdatasync` returned `Ok`. Peers that do not answer are reported as **unknown**, never as "did not persist" — a timeout is not evidence the write failed.
@@ -375,6 +380,9 @@ reply could not be read.
 
 Tombstones all entries with `hlc < beforeHlc`. `beforeHlc` is sent as an exact JSON integer.
 
+A stream under `cn/`, `wiki/` or `reason/` belongs to a component (the commitment net, a wiki,
+`mycelium-reason`): `append` and `compactLog` throw `ProtectedStreamError` for it ([Errors](#errors)).
+
 #### `subscribeLog(stream, options?) → AsyncGenerator<LogEntry>`
 
 Live SSE subscription from `options.sinceHlc`, **inclusive** — the gateway yields entries with
@@ -469,6 +477,34 @@ try {
 reached the partner. `{ repeatable: true }` on `call` states that *your* effect tolerates being run
 twice — it is the only thing that lets a silent gateway be retried elsewhere, and it defaults to
 `false`.
+
+---
+
+### Errors
+
+Three gateway refusals are thrown as typed errors (each an `Error` whose `message` is the gateway's,
+naming the route to use instead). Any other non-2xx answer to a write is an `Error` naming the method, path,
+status and response body.
+
+| Error | Gateway answer | Thrown by | Fields |
+|---|---|---|---|
+| `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpcCall`, `scatterGather`, `emit`, `deliverEvent`, `emitSharded`, `emitReliable` | `kind` |
+| `ProtectedKeyError` (0.2.2) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `setWithMinAcks`, `consistentSet` | `key`, `status` |
+| `ProtectedStreamError` (0.2.2) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compactLog` | `stream`, `status` |
+
+```typescript
+import { ProtectedKeyError } from "mycelium-ts";
+
+try {
+  await agent.set("prompts/ai/chat", template);
+} catch (e) {
+  if (e instanceof ProtectedKeyError) console.log(e.key, "→", e.message);
+  else throw e;
+}
+```
+
+Before 0.2.2 `delete` threw `DELETE /gateway/kv failed: 403` and dropped the response body; it now
+carries the body like every other verb.
 
 ---
 
