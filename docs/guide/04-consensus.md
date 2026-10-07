@@ -152,7 +152,7 @@ MYCELIUM_ROLE=overlay MYCELIUM_PORT=57012 MYCELIUM_HTTP_PORT=8402 \
 # Linearizable write
 curl -X POST http://localhost:8400/gateway/overlay/consistent/set \
   -H 'Content-Type: application/json' \
-  -d '{"key":"counter","value":"1","group":"overlay"}'
+  -d '{"key":"counter","value_b64":"MQ==","group":"overlay"}'   # "1"; the route reads value_b64
 
 # Read committed value
 curl http://localhost:8400/gateway/overlay/consistent/get?key=counter
@@ -165,11 +165,11 @@ curl -X POST http://localhost:8400/gateway/overlay/lock/acquire \
 # Append to a log stream
 curl -X POST http://localhost:8400/gateway/overlay/log/append \
   -H 'Content-Type: application/json' \
-  -d '{"stream":"events","entry":"hello"}'
+  -d '{"stream":"events","value_b64":"aGVsbG8="}'   # "hello"
 ```
 
 The key is yours to choose except under `sys/` and `consensus/`, which the substrate owns: those answer **403**
-`protected_key` (2.26.0), bar the operator's `sys/topology-override/{group}`.
+`protected_key` (2.26.0); since 2.27.0 every namespace the substrate or a companion owns is refused the same way, and the topology override has its own route (below).
 
 **What to observe**
 
@@ -351,8 +351,10 @@ a scoped `with_lock` that guarantees release.
 declared locality spread — e.g. `spread_min_distinct: 2` at `spread_depth:
 Some(1)` demands voters from at least two availability zones. Use it when
 correctness depends on failure-domain diversity (compliance, split-brain
-resistance). The operator can relax a live group with a
-`sys/topology-override/{group}` KV entry as an escape hatch.
+resistance). The operator can relax a live group as an escape hatch:
+`POST /gateway/govern/topology-override {"group": "G", "override": true}` (scope `govern:write`, audited in a `compliance` build;
+`"override": false` releases it). It writes `sys/topology-override/{group}`, which the gate reads as active only
+when its value is exactly `true`; the raw KV routes refuse that key since 2.27.0.
 
 **Consensus and partition tolerance.** The overlay is CP (consistent,
 partition-tolerant) within the quorum group — it blocks, not fails, when

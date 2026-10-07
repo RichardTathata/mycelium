@@ -8,9 +8,9 @@
 //! the librarians mirror. Refusals are by name and the plan's exit gate says **403**, not 422:
 //! an unsigned or untrusted entry is a *permission* failure, not a shape failure.
 //!
-//! Two things this route is honest about. First, it is *a* door, not *the* door: a bearer with
-//! `kv:write` can already write `installable/` through `POST /gateway/kv`, and the defence that
-//! holds in every case is the provisioner's own `require_provenance`. Second, a librarian
+//! Two things this route is honest about. First, it is *a* door, not *the* door: the raw KV routes
+//! refuse `installable/` since 2.27.0, but a peer can still write it through Layer I, so the defence
+//! that holds in every case is the provisioner's own `require_provenance`. Second, a librarian
 //! tombstones every catalogue entry under its publisher key that its manifest does not carry —
 //! so an entry published here under a librarian-managed key would be deleted at the next sync,
 //! and the route refuses that by name (**409**) rather than letting it vanish.

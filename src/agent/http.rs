@@ -252,6 +252,7 @@ pub(super) async fn run_http_server(
         .route("/govern/tuning",                  post(gw_govern_tuning))
         .route("/govern/timing",                  post(gw_govern_timing))
         .route("/govern/membership",              post(gw_govern_membership))
+        .route("/govern/topology-override",       post(gw_govern_topology_override))
         .route("/mesh/group",                     get(gw_group_members)
                                                   .post(gw_group_join)
                                                   .delete(gw_group_leave))
@@ -768,6 +769,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/govern/tuning"       => "govern:write",
         "/gateway/govern/timing"       => "govern:write",
         "/gateway/govern/membership"   => "govern:write",
+        "/gateway/govern/topology-override" => "govern:write",
         // Membership is a node speaking for itself: read the roster with `mesh:read`, join or
         // leave **this** node with `mesh:write`. There is deliberately no verb for enrolling
         // another node — see `gw_group_join`.
@@ -1456,6 +1458,36 @@ async fn gw_govern_timing(
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
     }
+}
+
+/// `POST /gateway/govern/topology-override` — set or release a group's Hard-topology escape hatch.
+/// Body: `{"group": "G", "override": true|false}`. `true` writes `sys/topology-override/{group}` = `b"true"`
+/// (the only value the consensus gate reads as active); `false` tombstones it. Scope `govern:write`, audited:
+/// relaxing the failure-domain gate is a governance act, and until 2026-10-07 it was an unaudited `kv:write`.
+async fn gw_govern_topology_override(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(refused) = refuse_unknown_fields(&body, &["group", "override"]) {
+        return refused;
+    }
+    let Some(group) = body.get("group").and_then(|v| v.as_str()) else {
+        return bad_request("missing 'group'".into());
+    };
+    if group.is_empty() || group.contains('/') {
+        return bad_request("`group` must be a non-empty group name without '/'".into());
+    }
+    let Some(engage) = body.get("override").and_then(|v| v.as_bool()) else {
+        return bad_request("`override` must be a boolean".into());
+    };
+    let key = format!("sys/topology-override/{group}");
+    if engage {
+        kv_write(&ctx.agent_ctx, Arc::from(key.as_str()), Bytes::from_static(b"true"), false);
+    } else {
+        kv_write(&ctx.agent_ctx, Arc::from(key.as_str()), Bytes::new(), true);
+    }
+    audit_govern(&ctx.agent_ctx, &key, body.to_string());
+    Json(json!({ "ok": true, "key": key, "override": engage })).into_response()
 }
 
 /// `POST /gateway/govern/membership` — publish an elastic-sizing intent for a group.
@@ -2794,28 +2826,86 @@ async fn gw_kv_set(
     }
 }
 
-/// The doors that take a KV key from the request — `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`,
-/// and `POST /gateway/overlay/consistent/set`, which writes the raw key once consensus commits — do not
-/// write a key the substrate owns. Under `kv:write` (or `consensus:write`) they could publish a governance
-/// intent its route guards with `govern:write`, plant a `sys/caller-context/` marker a secure gateway
-/// checks before dispatch, delete an acceptor's durable ballot (`sys/consensus-accepted/`), forge a
-/// `consensus/committed/` slot, or rewrite `sys/config/` and `sys/capauthz/` — the reviews of #544,
-/// enumerating every door to one invariant. So `sys/` and `consensus/` are refused `403` whatever the
-/// token's scopes, as [`refuse_protected_kind`] does for RPC kinds — with one allowance, the operator's
-/// topology escape hatch `sys/topology-override/{group}` (guide 4). An allow-list, so a new substrate key
-/// is protected the day it is added. Layer I still accepts these keys from a peer — detection, not
-/// prevention; this is the gateway's door.
+/// Top-level KV namespaces the substrate or a companion owns (`src/lib.rs` § KV namespace ownership). The
+/// raw KV routes refuse them: each has its own door, guarded by its own scope, and a write through
+/// `kv:write` would bypass it — a governance intent without `govern:write`, a prompt template without
+/// `llm:write`, another node enrolled in a group (a node joins itself), a forged capability or requirement,
+/// a forged mailbox sender, a planted `sys/caller-context/` marker, a deleted acceptor ballot (the reviews
+/// of #544; the kv:write decision of 2026-10-07). `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`
+/// keeps this in step with the table.
+pub(crate) const OWNED_KV_PREFIXES: &[&str] = &[
+    "sys/", "consensus/", "grp/", "audit/", "cap/", "req/", "cap-group/", "gcap/", "mailbox/", "tools/",
+    "agent/", "svc/", "log/", "clog/", "lock/", "prompts/", "skills/", "installable/", "comp/", "wiki/", "tuple/",
+    "facts/", "mandate/", "knowledge/", "rights/", "cn/",
+];
+
+/// Namespaces the table assigns to an application writing through the gateway's KV routes — the LangGraph
+/// checkpointer's index rows, the mesh manifest (application-owned, `mesh_manifest.rs`) and the schema
+/// registry (`publish_schema` from Rust; this is a non-Rust application's door). (`agent/{node}/provision/{item}/error`,
+/// an application's provisioning report, is the one owned-namespace subtree the raw routes also accept.)
+pub(crate) const APPLICATION_KV_PREFIXES: &[&str] = &["ckpt/", "ckptw/", "manifest/", "schemas/"];
+
+/// Streams under `log/` that a substrate component or companion owns: the commitment net's records, a wiki's
+/// durable proposals, `mycelium-reason`'s traces. The log routes take a stream name, so without this they
+/// reach those as well (the review of #549).
+pub(crate) const OWNED_LOG_STREAMS: &[&str] = &["cn/", "wiki/", "reason/"];
+
+fn refuse_owned_stream(stream: &str) -> Option<axum::response::Response> {
+    let owned = OWNED_LOG_STREAMS.iter().any(|p| stream.starts_with(p) || stream == p.trim_end_matches('/'));
+    owned.then(|| (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "protected_stream",
+            "message": "this log stream belongs to a component (commitment, wiki, reason) and is written through it" })),
+    ).into_response())
+}
+
+/// Whether the raw KV routes write `key`: an application key, not one the substrate or a companion owns.
+pub(crate) fn raw_kv_writable(key: &str) -> bool {
+    if APPLICATION_KV_PREFIXES.iter().any(|p| key.starts_with(p)) {
+        return true;
+    }
+    if let Some(rest) = key.strip_prefix("agent/")
+        && let Some((_node, sub)) = rest.split_once('/')
+        && sub.starts_with("provision/")
+    {
+        return true;
+    }
+    !OWNED_KV_PREFIXES.iter().any(|p| key.starts_with(p) || key == p.trim_end_matches('/'))
+}
+
+/// The doors that take a KV key from the request — `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`, and
+/// `POST /gateway/overlay/consistent/set`, which writes the raw key once consensus commits — write application
+/// keys only ([`raw_kv_writable`]). An owned key is refused `403` whatever the token's scopes, as
+/// [`refuse_protected_kind`] does for RPC kinds, naming the door to use. Layer I still accepts these keys from
+/// a peer — detection, not prevention; this is the gateway's door.
 fn refuse_protected_key(key: &str) -> Option<axum::response::Response> {
-    let substrate = key.starts_with("sys/") || key == "sys" || key.starts_with("consensus/") || key == "consensus";
-    if !substrate || key.starts_with("sys/topology-override/") {
+    if raw_kv_writable(key) {
         return None;
     }
-    warn!(key, "gateway: a substrate-owned key refused on a raw KV route");
+    warn!(key, "gateway: an owned KV key refused on a raw KV route");
     let door = if key.starts_with("sys/govern/") {
         "governance intents are published through /gateway/govern/{tuning,timing,membership} (govern:write)"
+    } else if key.starts_with("sys/topology-override/") {
+        "the topology override is set through POST /gateway/govern/topology-override (govern:write)"
+    } else if key.starts_with("grp/") {
+        "a node joins a group itself: POST /gateway/mesh/group on that node (mesh:write)"
+    } else if key.starts_with("prompts/") {
+        "prompt templates are written through /gateway/prompts/{ns}/{name} (llm:write)"
+    } else if key.starts_with("log/") || key.starts_with("clog/") {
+        "logs are appended through /gateway/overlay/log/append (consensus:write)"
+    } else if key.starts_with("cap/") {
+        "capabilities are advertised through /gateway/capability/advertise (cap:write)"
+    } else if key.starts_with("req/") {
+        "requirements are declared through POST /gateway/units/declare (cap:write)"
+    } else if key.starts_with("mailbox/") {
+        "mailbox entries are delivered through POST /gateway/mailbox/deliver (mesh:write), which records the sender"
+    } else if key.starts_with("installable/") {
+        "catalogue lines are published through POST /gateway/artifacts/publish (artifact:publish), signature-checked"
+    } else if key.starts_with("lock/") {
+        "locks are taken through /gateway/overlay/lock/acquire (consensus:write)"
     } else {
-        "keys under sys/ and consensus/ are written by the substrate, not through the KV routes \
-         (the one exception is sys/topology-override/{group})"
+        "this namespace is written by the substrate or the companion that owns it, not through the KV routes \
+         (src/lib.rs § KV namespace ownership); the KV routes write application keys"
     };
     Some((
         StatusCode::FORBIDDEN,
@@ -3682,6 +3772,9 @@ async fn gw_overlay_log_append(
     Json(body):  Json<LogAppendBody>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    if let Some(refused) = refuse_owned_stream(&body.stream) {
+        return refused;
+    }
     let value = if let Some(b64) = body.value_b64.as_deref() {
         match base64::engine::general_purpose::STANDARD.decode(b64) {
             Ok(v)  => Bytes::from(v),
@@ -3749,6 +3842,9 @@ async fn gw_overlay_log_compact(
     State(ctx): State<Arc<HttpCtx>>,
     Json(body):  Json<LogCompactBody>,
 ) -> impl IntoResponse {
+    if let Some(refused) = refuse_owned_stream(&body.stream) {
+        return refused;
+    }
     let prefix = format!("log/{}/", body.stream);
     for (k, _) in crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, &prefix) {
         let suffix = k.strip_prefix(&prefix).unwrap_or("");
@@ -4605,6 +4701,28 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// The raw KV routes' classification is the namespace table's: every top-level prefix `src/lib.rs`
+    /// documents is either owned (refused at the raw doors) or a named application namespace. A table row
+    /// added without a decision here fails this test, so the doors cannot fall behind the table.
+    #[test]
+    fn every_namespace_in_the_table_is_classified_for_the_raw_kv_routes() {
+        let table = include_str!("../lib.rs");
+        let mut seen = 0;
+        for line in table.lines().filter(|l| l.starts_with("//! | `")) {
+            let cell = line.trim_start_matches("//! | `");
+            let first = cell.split('`').next().unwrap_or("");
+            let Some((top, _)) = first.split_once('/') else { continue };
+            if top.is_empty() || top.chars().any(|c| c.is_ascii_uppercase()) || top.contains(' ') {
+                continue;
+            }
+            let prefix = format!("{top}/");
+            seen += 1;
+            assert!(super::OWNED_KV_PREFIXES.contains(&prefix.as_str()) || super::APPLICATION_KV_PREFIXES.contains(&prefix.as_str()),
+                "namespace {prefix} in src/lib.rs is neither owned nor an application namespace for the raw KV routes");
+        }
+        assert!(seen > 20, "the table was read ({seen} rows)");
+    }
+
     /// The third review of #544: the timing route's strictness, at its two siblings. A `target` that was not
     /// a string, a `min` that was not an integer, a `floor` that was a string — each read as absent.
     #[tokio::test]
@@ -4695,11 +4813,57 @@ mod tests {
             let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": ""})).send().await.unwrap();
             assert_eq!(r.status(), 403, "POST {key}");
         }
-        // The one substrate key operators write through the KV routes: the topology escape hatch (guide 4).
-        let r = client.post(&base)
-            .json(&serde_json::json!({"key": "sys/topology-override/workers", "value_b64": base64::engine::general_purpose::STANDARD.encode(b"true")}))
-            .send().await.unwrap();
-        assert_eq!(r.status(), 200, "the topology override stays an operator's write");
+        // The kv:write decision (2026-10-07): the raw KV routes write application keys only. Every prefix
+        // the namespace table assigns to the substrate or a companion is refused, naming its door — the
+        // topology escape hatch included, which now has an audited governance route.
+        for key in ["sys/topology-override/workers", "grp/workers/10.0.0.5:9000", "prompts/ns/name", "log/s/0001",
+                    "cap/10.0.0.5:9000/demo/echo", "req/n/demo/echo", "mailbox/n/kind/01", "installable/ns/n/ab",
+                    "tools/t/n", "skills/ns/n/node/input", "agent/n/task/1/turn", "lock/l", "svc/k/n",
+                    "wiki/g/proposal/1", "tuple/inflight/ns/1", "facts/n/f", "cn/r", "mandate/m",
+                    "knowledge/head/i/s", "rights/head/h", "clog/x", "comp/n/ns/k", "gcap/g/ns/n/c", "cap-group/g", "audit/1/n"] {
+            let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": base64::engine::general_purpose::STANDARD.encode(b"true")})).send().await.unwrap();
+            assert_eq!(r.status(), 403, "POST {key}");
+            let body: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(body["error"], "protected_key", "{key}");
+            assert!(agent.kv().get(key).is_none(), "{key} was not written");
+        }
+        // The application namespaces the table names stay writable: the checkpointer's rows, and an
+        // application's provisioning error report.
+        // `manifest/` and `schemas/` are application-written by design (src/lib.rs; mesh_manifest.rs) and have
+        // no gateway route of their own — the review of #549.
+        for key in ["ckpt/t/ns/1", "ckptw/t/ns/1/task/0", "agent/n/provision/item/error", "orders/42",
+                    "manifest/current", "manifest/control/system", "schemas/s"] {
+            let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": ""})).send().await.unwrap();
+            assert_eq!(r.status(), 200, "POST {key}");
+        }
+        // The log door names the stream; it must not reach a stream another owner keeps under `log/` — a
+        // commitment's offers, a wiki's durable proposals, a reason trace (the review of #549).
+        #[cfg(feature = "consensus")]
+        {
+            let ov = format!("http://127.0.0.1:{http_port}/gateway/overlay/log");
+            for stream in ["cn/req-1/offers", "wiki/g/proposals", "reason/run-1/n"] {
+                let r = client.post(format!("{ov}/append")).json(&serde_json::json!({"stream": stream, "value_b64": ""})).send().await.unwrap();
+                assert_eq!(r.status(), 403, "append to {stream}");
+                let r = client.post(format!("{ov}/compact")).json(&serde_json::json!({"stream": stream, "before_hlc": u64::MAX})).send().await.unwrap();
+                assert_eq!(r.status(), 403, "compact {stream}");
+            }
+            let r = client.post(format!("{ov}/append")).json(&serde_json::json!({"stream": "events", "value_b64": ""})).send().await.unwrap();
+            assert_eq!(r.status(), 200, "an application stream");
+        }
+        // The override's own door: govern:write, audited; `true` engages it, `false` tombstones it.
+        let over = format!("http://127.0.0.1:{http_port}/gateway/govern/topology-override");
+        let r = client.post(&over).json(&serde_json::json!({"group": "workers", "override": true})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(agent.kv().get("sys/topology-override/workers").as_deref(), Some(&b"true"[..]));
+        let r = client.post(&over).json(&serde_json::json!({"group": "workers", "override": false})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(agent.kv().get("sys/topology-override/workers").is_none(), "released");
+        for bad in [serde_json::json!({"group": "workers"}), serde_json::json!({"group": "workers", "override": "true"}),
+                    serde_json::json!({"override": true}), serde_json::json!({"group": "a/b", "override": true}),
+                    serde_json::json!({"group": "workers", "override": true, "x": 1})] {
+            let r = client.post(&over).json(&bad).send().await.unwrap();
+            assert_eq!(r.status(), 400, "{bad}");
+        }
         // An ordinary key is unaffected.
         let r = client.post(&base)
             .json(&serde_json::json!({"key": "app/x", "value_b64": ""})).send().await.unwrap();

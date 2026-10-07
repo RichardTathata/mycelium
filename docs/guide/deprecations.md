@@ -313,3 +313,23 @@ error under `-D warnings`. A `with_egress` call with an `EgressPolicy` or a `&Eg
 that wrote a `sys/` or `consensus/` key through the KV routes uses the route that owns it — the governance
 routes for `sys/govern/`; for a member removal, `GossipAgent::offer_member_removal` (the record is verified on
 ingest, so only the door changes); the rest are written only by the substrate.
+
+## 19. The raw KV routes write application keys only; the topology override has a route (2.27.0)
+
+**What changes.** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set`
+refuse **403** `protected_key` for every key in a namespace the substrate or a companion owns (`src/lib.rs` § KV
+namespace ownership) — 2.26.0 refused `sys/` and `consensus/`; 2.27.0 refuses the rest, with
+`sys/topology-override/` no longer excepted. The LangGraph checkpointer's `ckpt/`/`ckptw/` rows, the mesh
+manifest (`manifest/`), the schema registry (`schemas/`) and an application's `agent/{node}/provision/…` report
+are unaffected, as is every key outside the table. The log routes refuse a stream under `cn/`, `wiki/` or
+`reason/` (403 `protected_stream`).
+
+**Will the compiler tell me?** No — it is an HTTP status. The 403's `message` names the route to use where the namespace has one.
+
+**Migration.** Use the route that owns the namespace: `POST /gateway/govern/topology-override` (`govern:write`) for
+the topology escape hatch; `/gateway/prompts/{ns}/{name}` for prompt templates; `/gateway/overlay/log/append` for
+logs; `POST /gateway/mesh/group` on the node that joins a group; `/gateway/capability/*` for capabilities and
+requirements (`POST /gateway/units/declare` for requirements); `/gateway/mailbox/deliver`;
+`/gateway/artifacts/publish` for catalogue lines; `/gateway/overlay/lock/acquire` for locks. A namespace with no
+gateway route of its own is written by the substrate or the companion that owns it.
+

@@ -199,15 +199,16 @@ a version that could report full coverage over a false history. Also from its ex
 at the limit behind a stale head is now `Unknown` — a later term breaks a run.
 [`.log/2026-10-07-a3-history-source.md`](.log/2026-10-07-a3-history-source.md).
 
-**The doors that take a KV key do not write the substrate's (unreleased on `main`, #544).** `POST`/`DELETE
-/gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set` refuse every key under
-`sys/` and `consensus/` **403** `protected_key`, whatever the token's scopes — an allow-list with one
-allowance, the operator's `sys/topology-override/{group}` (`refuse_protected_key`, `src/agent/http.rs`). Under
-`kv:write` they could publish a governance intent without `govern:write`, plant the `sys/caller-context/`
-marker a secure gateway checks before dispatch, delete an acceptor's durable ballot, or forge a committed slot.
-**Recorded, not decided:** `kv:write` stays a data-plane superuser scope for every *other* route-owned
-namespace (`prompts/`, `log/`, `grp/`, `cap/`, `mailbox/`, `installable/`, companions'), and the topology
-override is an unaudited `kv:write` write — `rbac.md` says so.
+**The doors that take a KV key write application keys only (2.26.0 for `sys/`/`consensus/`, #544; 2.27.0 for every
+owned namespace).** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set`
+refuse every key in a namespace the substrate or a companion owns — `OWNED_KV_PREFIXES` in `src/agent/http.rs`,
+kept in step with `src/lib.rs`'s ownership table by `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`
+— **403** `protected_key`, naming the route that owns it where there is one; the checkpointer's `ckpt/`/`ckptw/`
+rows, the mesh manifest, the schema registry and an application's `agent/{node}/provision/…` report stay writable,
+and the log routes refuse streams under `cn/`, `wiki/` or `reason/`. Under `kv:write` they could publish a governance
+intent, rewrite a prompt template, enrol another node in a group, forge a capability, a requirement or a mailbox
+sender, plant the `sys/caller-context/` marker or delete an acceptor's ballot. The topology escape hatch moved to
+`POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance`).
 [`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md).
 
 ## Threat model revision 3 draft — Boundary H (2026-09-23)
