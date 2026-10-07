@@ -302,7 +302,7 @@ you know is in range.
 non-negative integer. Every client's `with_egress` now takes `impl Into<EgressPolicy>`: a reference or a value.
 
 **Will the compiler tell me?** For `govern_timing`, it warns (`unused_must_use`) where the result is ignored, an
-error under `-D warnings`. `with_egress` callers compile unchanged.
+error under `-D warnings`. A `with_egress` call with an `EgressPolicy` or a `&EgressPolicy` compiles unchanged; one that relied on deref coercion (`&Arc<EgressPolicy>`, `&Box<…>`) or inference (`with_egress(Default::default())`, `with_egress(x.into())`) now needs the type spelled — `&*arc`, `EgressPolicy::default()`.
 
 **Migration.** `agent.govern_timing(30, 5, None)?;`. An HTTP client that relied on `"30"` being accepted sends
 `30`.

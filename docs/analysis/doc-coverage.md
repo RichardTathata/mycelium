@@ -613,6 +613,8 @@ verifying-against-code finds real problems:
 
 ### Run 20 (2026-10-06) — code gaps the audit surfaced
 
+*Status, 2026-10-07:* 1, 4 and 5 fixed in #544 (with the raw-KV door to `sys/govern/` the fix's review found); 2 in #542; 3 in #543; 6 in #541. Each item below is as it was found.
+
 1. **`POST /gateway/govern/timing` publishes any value.** The setters refuse past `validate()`'s bounds since
    2.25.0 and every node's reconciler ignores an intent outside 1–3600 / 1–300, but the route accepts and
    publishes it, answering `{"published": true}` (`src/agent/http.rs` `gw_govern_timing`). The R9 rule at the

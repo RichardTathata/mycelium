@@ -1373,7 +1373,14 @@ async fn gw_govern_timing(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // A present field must be a non-negative integer: `as_u64().unwrap_or(0)` read `"30"` or `-5` as
-    // `0`, "ungoverned", and answered success for an intent that governs nothing.
+    // `0`, "ungoverned", and answered success for an intent that governs nothing. The same for the shape
+    // around them: a non-object, a misspelled field, or a `target` that is not a node id (read as *no*
+    // target — the whole fleet) each published something other than what was asked.
+    let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+    let Some(obj) = body.as_object() else { return bad("the body must be a JSON object".into()) };
+    if let Some(k) = obj.keys().find(|k| !["health_check_interval_secs", "reconnect_backoff_secs", "target"].contains(&k.as_str())) {
+        return bad(format!("unknown field `{k}`"));
+    }
     let mut fields = [0u64; 2];
     for (slot, name) in fields.iter_mut().zip(["health_check_interval_secs", "reconnect_backoff_secs"]) {
         match body.get(name) {
@@ -1385,7 +1392,13 @@ async fn gw_govern_timing(
         }
     }
     let [health, reconnect] = fields;
-    let target = body.get("target").and_then(|v| v.as_str()).and_then(|s| s.parse::<crate::node_id::NodeId>().ok());
+    let target = match body.get("target") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match v.as_str().and_then(|s| s.parse::<crate::node_id::NodeId>().ok()) {
+            Some(n) => Some(n),
+            None => return bad("`target` must be a node id (host:port)".into()),
+        },
+    };
     let intent = super::timing_governor::TimingIntent {
         health_check_interval_secs: health,
         reconnect_backoff_secs: reconnect,
@@ -2677,6 +2690,9 @@ async fn gw_kv_set(
         Some(k) => Arc::from(k),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing key"}))).into_response(),
     };
+    if let Some(refused) = refuse_protected_key(&key) {
+        return refused;
+    }
     // A write must say what it writes. Until 2026-09-24 a missing `value_b64` silently wrote an
     // EMPTY value and answered `{"ok": true}` — so a misspelled field name erased a key and
     // reported success. The overlay test helper had been sending `value` since it was written, and
@@ -2718,6 +2734,27 @@ async fn gw_kv_set(
     }
 }
 
+/// The raw KV doors (`POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`) take the key from the
+/// request, so under `kv:write` they could publish a governance intent at `sys/govern/…` that its own
+/// route guards with `govern:write` — the adversarial review of #544, enumerating every door to the
+/// timing intent. Refused `403` whatever the token's scopes, naming the route to use, as
+/// [`refuse_protected_kind`] does for RPC kinds. Layer I still accepts the key from a peer — detection,
+/// not prevention; this is the gateway's door.
+fn refuse_protected_key(key: &str) -> Option<axum::response::Response> {
+    if !key.starts_with("sys/govern/") && key != "sys/govern" {
+        return None;
+    }
+    warn!(key, "gateway: governance key refused on a raw KV route");
+    Some((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "ok": false,
+            "error": "protected_key",
+            "detail": "governance intents are published through /gateway/govern/{tuning,timing,membership} (govern:write)",
+        })),
+    ).into_response())
+}
+
 /// `DELETE /gateway/kv?key=K` — tombstone a KV entry.
 ///
 /// Returns `{"ok": true}`.
@@ -2725,6 +2762,9 @@ async fn gw_kv_delete(
     Query(q):   Query<KvKeyQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
+    if let Some(refused) = refuse_protected_key(&q.key) {
+        return refused;
+    }
     kv_write(&ctx.agent_ctx, Arc::from(q.key.as_str()), Bytes::new(), true);
     Json(json!({ "ok": true })).into_response()
 }
@@ -2791,6 +2831,9 @@ async fn gw_kv_quorum(
 ) -> impl IntoResponse {
     use base64::Engine as _;
 
+    if let Some(refused) = refuse_protected_key(&body.key) {
+        return refused;
+    }
     let value = match base64::engine::general_purpose::STANDARD.decode(&body.value_b64) {
         Ok(v)  => Bytes::from(v),
         Err(_) => return (StatusCode::BAD_REQUEST,
@@ -4478,7 +4521,62 @@ mod tests {
         assert_eq!(post(serde_json::json!({"reconnect_backoff_secs": 301})).await, 400, "above 300");
         assert_eq!(post(serde_json::json!({"health_check_interval_secs": "30"})).await, 400, "not an integer");
         assert_eq!(post(serde_json::json!({"health_check_interval_secs": 30, "reconnect_backoff_secs": 5})).await, 200, "in range");
-        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 0})).await, 200, "0 = ungoverned");
+        // The adversarial review of #544: the route still published intents that govern nothing, or the
+        // wrong thing — each was 200 and `published: true`.
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 0})).await, 400, "governs nothing");
+        assert_eq!(post(serde_json::json!({})).await, 400, "an empty intent governs nothing");
+        assert_eq!(post(serde_json::json!([30])).await, 400, "not an object");
+        assert_eq!(post(serde_json::json!({"health_check_interval": 30})).await, 400, "a misspelled field");
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 30, "target": "node-b"})).await, 400,
+            "a target that is not a node id would have governed the whole fleet");
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 30, "target": 5})).await, 400, "a target that is not a string");
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 30, "target": format!("127.0.0.1:{gossip_port}")})).await, 200, "a node id");
+        agent.shutdown().await;
+    }
+
+    /// The adversarial review of #544 (enumerating every door to the timing intent): the raw KV routes
+    /// wrote `sys/govern/…` under `kv:write`, publishing a governance intent without `govern:write`. They
+    /// refuse every `sys/govern/` key now, naming the route to use.
+    #[tokio::test]
+    async fn the_raw_kv_routes_refuse_governance_intents() {
+        use base64::Engine as _;
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.http_addr = "127.0.0.1".to_string();
+        // No token table: the gateway is open, so the caller holds every scope — the refusal must not
+        // depend on scopes (as for protected kinds), so a `kv:write` token is refused a fortiori.
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let base = format!("http://127.0.0.1:{http_port}/gateway/kv");
+        let client = reqwest::Client::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let intent = base64::engine::general_purpose::STANDARD.encode(br#"{"health_check_interval_secs":5}"#);
+        let r = loop {
+            match client.post(&base)
+                .json(&serde_json::json!({"key": "sys/govern/timing", "value_b64": intent})).send().await {
+                Ok(r) => break r,
+                Err(e) => { assert!(tokio::time::Instant::now() < deadline, "{e}"); tokio::time::sleep(Duration::from_millis(50)).await; }
+            }
+        };
+        assert_eq!(r.status(), 403, "a governance intent through the raw KV route");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["error"], "protected_key");
+        assert!(agent.kv().get("sys/govern/timing").is_none(), "nothing was written");
+        for key in ["sys/govern/fleet", "sys/govern/membership/workers"] {
+            let r = client.delete(format!("{base}?key={key}")).send().await.unwrap();
+            assert_eq!(r.status(), 403, "DELETE {key}");
+        }
+        let r = client.post(format!("{base}/quorum"))
+            .json(&serde_json::json!({"key": "sys/govern/timing", "value_b64": intent, "min_acks": 0, "timeout_secs": 1})).send().await.unwrap();
+        assert_eq!(r.status(), 403, "the quorum door");
+        assert!(agent.kv().get("sys/govern/timing").is_none(), "nothing was written");
+        // An ordinary key is unaffected.
+        let r = client.post(&base)
+            .json(&serde_json::json!({"key": "app/x", "value_b64": ""})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
         agent.shutdown().await;
     }
 

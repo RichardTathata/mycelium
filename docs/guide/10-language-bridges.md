@@ -338,7 +338,7 @@ shapes; the SDK READMEs carry the receipt narrative, this table carries the wire
 | `POST /gateway/kv/quorum` | `{"key", "value_b64", "min_acks", "timeout_secs"}` → `{"ok", "acks_received"}` or `{"ok": false, "error": "timeout", "acks_received", "unknown_peers"}` | rung 3: `unknown_peers` is *silence*, not refusal — `DeliveryUnknown` in the receipt vocabulary |
 | consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why |
 | `GET /gateway/signal/sse/{kind}` | SSE; event name = the kind; data `{"kind", "sender", "payload_b64", "nonce"}` (`kind` in the data since 2.24.0; `nonce` is a u64 — parse it losslessly) | delivered to **this** subscriber. The node holds at most 256 undelivered signals per subscription and drops past that, logging `Signal handler channel full; signal dropped` — signals are best-effort |
-| `GET /signals/{kind}` | the same event; data `{"kind", "sender", "payload"}` — base64 under `payload`, no `nonce` | as above |
+| `GET /signals/{kind}` | the same event; data `{"kind", "sender", "payload_b64", "nonce", "payload"}` — `payload` is the same base64 as `payload_b64`, kept for readers of the older shape (2.26.0) | as above |
 
 Scopes: `kv:read` for the GET, `kv:write` for both POSTs; `mesh:read` for the two signal streams
 ([rbac.md §2](../operations/rbac.md)).

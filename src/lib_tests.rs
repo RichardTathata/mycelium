@@ -5717,8 +5717,9 @@ fn every_with_egress_takes_the_policy_by_reference_or_by_value() {
 fn govern_timing_does_not_publish_an_intent_no_node_would_apply() {
     let port = alloc_port();
     let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), GossipConfig::default());
-    let _ = agent.govern_timing(99_999, 0, None);
-    let _ = agent.govern_timing(0, 301, None);
+    assert!(agent.govern_timing(99_999, 0, None).is_err(), "above 3600");
+    assert!(agent.govern_timing(0, 301, None).is_err(), "above 300");
+    assert!(agent.govern_timing(0, 0, None).is_err(), "governs nothing (the review of #544)");
     assert!(agent.kv().get(crate::agent::timing_governor::TIMING_INTENT_KEY).is_none(),
         "an out-of-range timing intent is not published");
 }

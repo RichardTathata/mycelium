@@ -69,6 +69,15 @@ impl TimingIntent {
                 });
             }
         }
+        // An intent that governs neither setting is newest-wins at the key, so it would *replace* the
+        // previous intent while changing nothing — the review of #544. Release governance by not
+        // publishing: an intent lapses with its lease.
+        if self.health_check_interval_secs == 0 && self.reconnect_backoff_secs == 0 {
+            return Err(crate::GossipError::InvalidField {
+                field: "health_check_interval_secs",
+                reason: "the intent governs neither setting; to release governance, stop publishing (an intent lapses with its lease)".into(),
+            });
+        }
         Ok(())
     }
 }

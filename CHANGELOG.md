@@ -28,7 +28,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     every node's reconciler ignored one outside `validate()`'s bounds, so the route answered `published: true`
     for an intent that governed nothing. Both refuse it now (`TimingIntent::check`, at the one publish path they
     share); the route also refuses a field that is not a non-negative integer, which it read as `0`
-    ("ungoverned"). **Upgrade note:** `govern_timing` returns `Result<bool, GossipError>`.
+    ("ungoverned"). Its review found more doors to the same intent, each closed: an intent that governs neither
+    setting (it *replaced* the previous one while changing nothing) is refused by both; the route refuses a
+    non-object body, an unknown field, and a `target` that is not a node id (read as no target — the whole
+    fleet); and the raw KV doors — `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` — refuse every
+    `sys/govern/` key **403** `protected_key`, because under `kv:write` they published a governance intent its
+    route guards with `govern:write`. **Upgrade notes:** `govern_timing` returns `Result<bool, GossipError>`;
+    a client writing `sys/govern/…` through the KV routes must use the governance routes; `with_egress` callers
+    that relied on deref coercion or inference spell the type (`deprecations.md` §18).
   - **Cooling-off decides a visible term regardless.** A candidate visibly inside the cooling window read
     `Unknown` behind a stale head, asking for history that could only confirm the "no"; it is `Ineligible`, as the
     other two limits already were.
