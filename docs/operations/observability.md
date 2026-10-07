@@ -94,8 +94,10 @@ Cluster-wide health is `/stats` + `/metrics` + `/gateway/fleet` (above). For a *
   `GroupStatus { min, max, observed, conflict }` on `GET /gateway/fleet` (`governed_groups`) and as
   the `mycelium_emergent_governed_group_conflicts` gauge → alert on it (see
   [diagnostics.md](diagnostics.md#governed-group-conflict--thrash-the-56-pattern)).
-- **Ungoverned groups have no per-group gauge yet** — scrape `group_members().len()` via your own
-  exporter if you need it, or put the group under a governor. (Tracked as a metrics gap.)
+- **Every group's size, governed or not** — `group_sizes` on `GET /gateway/fleet` (`fleet:read`), one
+  `{group, observed}` per group with a live member (2.27.0, #168). A group that empties is **absent** from the
+  list rather than `0`, so alert on absence. No per-group Prometheus label, by design (cardinality); any node
+  answers the snapshot.
 
 Full how-to (define + monitor): the cookbook recipe
 [*"define a group, and monitor who's in it"*](../guide/cookbook.md#how-do-i-define-a-group-and-monitor-whos-in-it).

@@ -60,7 +60,8 @@ apply it everywhere.
 **Defining and monitoring a group** (who's in it, is it healthy): see the cookbook recipe
 [*"How do I define a group, and monitor who's in it?"*](cookbook.md#how-do-i-define-a-group-and-monitor-whos-in-it)
 — `join_group` / `define_capability_group` to define; `mesh().group_members(name)`,
-`capabilities().resolve(filter)`, and `fleet_snapshot().governed_groups` to monitor.
+`capabilities().resolve(filter)`, `fleet_snapshot().governed_groups` and `fleet_snapshot().group_sizes` (every
+group's size, governed or not) to monitor.
 **Monitoring the whole cluster** is `/stats` · `/metrics` · `/gateway/fleet` · `/gateway/diagnose`
 → [operations/observability](../operations/observability.md).
 

@@ -803,6 +803,34 @@ pub fn governed_group_statuses(kv_state: &crate::store::KvState, now: u64) -> Ve
     out
 }
 
+/// One group's observed size (#168): every group with at least one live member under `grp/`, governed or
+/// not. An ungoverned group (`join_group`, or a capability group with no membership intent) had no
+/// operator-visible size. Pull-based, with no per-group metric label (the cardinality trap the issue
+/// names); a group nobody belongs to is **absent**, never reported as zero.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GroupSize {
+    pub group:    String,
+    pub observed: usize,
+}
+
+/// **Pure** — every group with a live member and its observed size, sorted by group so independent nodes at
+/// convergence produce byte-identical output. Counts with the same [`group_members`] the governed view uses.
+pub fn group_sizes(kv_state: &crate::store::KvState) -> Vec<GroupSize> {
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (key, bytes) in scan_prefix_kv(kv_state, crate::signal::kv_ns::GROUP) {
+        if bytes.is_empty() {
+            continue;
+        }
+        if let Some((group, _node)) = key.strip_prefix(crate::signal::kv_ns::GROUP).and_then(|t| t.rsplit_once('/')) {
+            names.insert(group.to_string());
+        }
+    }
+    names.into_iter()
+        .map(|group| GroupSize { observed: group_members(kv_state, &group).len(), group })
+        .filter(|g| g.observed > 0)
+        .collect()
+}
+
 /// One edge of the throttle graph: `observer` observed `sender` sending at `observed_fps`
 /// (M7 `sys/rate/{observer}/{sender}` shared evidence — "who is throttling whom").
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -840,6 +868,8 @@ pub struct FleetSnapshot {
     pub observer:                 String,
     pub view_confidence:          ViewConfidence,
     pub governed_groups:          Vec<GroupStatus>,
+    /// Every group with a live member and its observed size, governed or not (#168) — see [`group_sizes`].
+    pub group_sizes:              Vec<GroupSize>,
     pub capability_coverage_gaps: Vec<String>,
     /// **P10** — the largest share of the fleet's live single-writer roles held by one node, or
     /// `None` when there is too little to read (see [`detect_role_concentration`]). Present whether
@@ -881,6 +911,7 @@ pub fn compute_fleet_snapshot(ctx: &TaskCtx) -> FleetSnapshot {
         observer:                 ctx.node_id.to_string(),
         view_confidence:          compute_view_confidence(ctx),
         governed_groups:          governed_group_statuses(&ctx.kv_state, now),
+        group_sizes:              group_sizes(&ctx.kv_state),
         capability_coverage_gaps: gaps,
         role_concentration:       detect_role_concentration(&ctx.kv_state, now),
         opaque_node_pct:          opaque_node_pct(&ctx.kv_state, live_nodes, now, OPAQUE_MAX_AGE_MS),
@@ -1876,6 +1907,22 @@ mod tests {
     }
 
     /// A healthy-fleet snapshot with a full, current view. Tests mutate one axis at a time.
+    /// #168: every group with a live member appears with its size, governed or not; a group whose members
+    /// all left is absent, not zero; the order is the group's, so converged nodes agree.
+    #[test]
+    fn group_sizes_counts_every_group_with_a_live_member() {
+        let kv = KvState::new(0);
+        let hlc = Hlc::new();
+        seed_members(&kv, &hlc, "workers", 2);
+        seed_members(&kv, &hlc, "archivists", 1);
+        let gone = NodeId::new("127.0.0.1", 20900).unwrap();
+        apply_and_notify(&kv, &make_gossip_update(&gone, 4, Arc::from(format!("grp/gone/{gone}").as_str()), Bytes::new(), true, &hlc));
+        assert_eq!(group_sizes(&kv), vec![
+            GroupSize { group: "archivists".into(), observed: 1 },
+            GroupSize { group: "workers".into(), observed: 2 },
+        ]);
+    }
+
     fn nominal_snapshot() -> FleetSnapshot {
         FleetSnapshot {
             observer: "n1".into(),
@@ -1885,6 +1932,7 @@ mod tests {
             },
             role_concentration: None,
             governed_groups: vec![],
+            group_sizes: vec![],
             capability_coverage_gaps: vec![],
             opaque_node_pct: 0,
             opaque_pairs: vec![],

@@ -42,6 +42,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   routing one through `/a2a` would reach a model without `llm:invoke`. Before, a guessed id resolved a provider
   and dispatched `skill.invoke` there, where a co-hosted receiver could run under the guessed name. Test
   `agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
+### Added
+- **Every group's size on the fleet snapshot (#168).** `fleet_snapshot().group_sizes` and `group_sizes` on
+  `GET /gateway/fleet`: one `{group, observed}` per group with a live member, governed or not — an ungoverned
+  group (`join_group`, or a capability group with no membership intent) had no operator-visible size. Pull-based,
+  with no per-group Prometheus label (the cardinality trap the issue names); a group nobody belongs to is absent,
+  never `0`. **Upgrade note:** `FleetSnapshot` gained a field (an exhaustive struct literal breaks).
 
 ## [2.26.0] — 2026-10-07
 
