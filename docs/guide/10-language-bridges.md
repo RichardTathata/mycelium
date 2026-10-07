@@ -345,10 +345,10 @@ Scopes: `kv:read` for the GET, `kv:write` for both POSTs; `mesh:read` for the tw
 ([rbac.md §2](../operations/rbac.md)).
 
 **What an SDK raises on a 403 refusal.** `protected_kind` raises `ProtectedKindError` in both SDKs.
-`protected_key` and `protected_stream` have no typed error yet: Python raises `httpx.HTTPStatusError` (read
-`e.response.json()["message"]`), TypeScript throws an `Error` whose message carries the 403 body — except
-`delete()`, whose error carries only the status. No scope fixes either refusal: use the route the message
-names ([deprecations.md §19](deprecations.md)).
+`protected_key` raises `ProtectedKeyError` (`.key`) and `protected_stream` `ProtectedStreamError` (`.stream`),
+each carrying the gateway's message (`mycelium-py` 0.2.7, where each is also the `httpx.HTTPStatusError` it raised
+before; `mycelium-ts` 0.2.2, where `delete()` now carries the body too). No scope fixes either refusal: use the
+route the message names ([deprecations.md §19](deprecations.md)).
 
 ## Authenticating to a token-protected gateway
 
