@@ -26,13 +26,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   marked the row merged with its source unbuilt; doc-coverage run 20, code gap 3). `mandate::history_source::
   history_from_appointment_stream` (`tls`) builds a `TermHistory` from an appointment stream in the knowledge
   layer, pinned by `(issuer, stream)`: it walks back from this node's reader's checkpoint along each head's `prev`
-  digest, authenticating every head, so a presenter's other heads — another member's stream, a newer head,
-  duplicates, any order — change nothing and the read moves no checkpoint; a linked head whose record cannot be
-  fetched is a gap; reaching `prev: None` is genesis, and a `StreamOrigin::Baseline` binds only at the head
-  digest it names. "Current" means as of this reader's checkpoint. Before, nothing in
-  the substrate built a `TermHistory` — the embedding application did, so "the source establishes coverage"
-  rested on the caller. `HandoverJournal` records its scope, start and endpoint (`for_scope`, `start()`,
-  `endpoint()`; a journal saved before loads with them absent). `mycelium-wiki/examples/curator_handover.rs`
+  digest — the starting head under a current key, older heads under any key the issuer held, since the
+  current-key signature fixes them by hash — so a presenter's other heads (another member's stream, a newer
+  head, duplicates, any order) change nothing and the read moves no checkpoint. A linked head whose record
+  cannot be fetched is a gap, and so is a repeated term; reaching `prev: None` is genesis; a
+  `StreamOrigin::Baseline` binds only at the head digest it names; a stream the reader saw fork since it was
+  opened vouches for nothing. "Current" means as of this reader's checkpoint (`AppointmentStream::from_reader`,
+  `from_parts`). Before, nothing in the substrate built a `TermHistory` — the embedding application did, so
+  "the source establishes coverage" rested on the caller. `HandoverJournal` records its scope (`for_scope`),
+  and says which terms it covers (`start()`, `endpoint()`, read from its entries; a journal saved before
+  loads with no scope). `mycelium-wiki/examples/curator_handover.rs`
   withholds the re-appointment until the successor has read the journal and the history reaches the current
   head, and shows the successor's write refused at the resource meanwhile. Fail-first: with the reader bypassed,
   heads signed by a key the authority does not hold vouched for six terms; the plan's two witnesses (a missing

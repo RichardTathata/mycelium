@@ -119,7 +119,15 @@ had no ancestry, so a higher `seq` from a different history passed.
   is the durable reader.
 - `KnowledgeStore::advance_head` remains, unsigned and without ancestry, for local use. Its doc comment now says so
   and points to `HeadCheckpoints`.
-- Forks are held in memory, not persisted.
+- Forks are held in memory, not persisted. A consumer that refuses a forked stream — the mandate history
+  source (`src/mandate/history_source.rs`) does — therefore refuses it only since its reader was opened.
+- **A third resolver position (2026-10-07, realignment repairs A3).** K1b excludes revoked-key records from a
+  present decision and K2 refuses a revoked head as a present-tense claim. The mandate history source takes a
+  third position, consistent with §3 of the issuer-binding record (*attribution outlives authority*): the head
+  it starts from must be under a current key, and every **older** head it reaches through `prev` digests need
+  only be attributable, because the current-key head's signature already fixes them by hash. It does not
+  change K2: the reader still refuses revoked intermediates when advancing, so the relaxation helps only a
+  reader already past the revocation.
 - `BodyUnavailable` (a head whose record cannot be fetched) belongs to K3's transport. `is_resolvable` already
   reports it locally.
 

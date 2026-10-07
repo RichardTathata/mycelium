@@ -358,4 +358,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
 - **A current reader.** A3's history source decides as of **this node's reader's checkpoint**. A reader not yet
   offered the authority's newest appointment decides on the head it holds — `Eligible` for a candidate whose
   unseen term would make them ineligible (pinned in `the_head_is_the_readers_checkpoint_and_reading_does_not_move_it`).
-  Freshness is the reader's: how promptly gossip offers it new heads, which nothing here bounds.
+  Freshness is the reader's: how promptly gossip offers it new heads, which nothing here bounds. Likewise a
+  fork: the source refuses a stream its reader saw fork **since it was opened** — the knowledge layer holds forks
+  in memory. And revocation: older heads under a revoked key count only for a reader already past it; one that
+  must advance across a revoked head stays where it is (knowledge K2).

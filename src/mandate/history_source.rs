@@ -15,14 +15,21 @@
 //! - **Continuity is the `prev` chain.** From that head the walk follows each head's `prev` digest back
 //!   through the presented heads, authenticating each against the pinned issuer's keys in this node's
 //!   view: the checkpoint head under a key held as current, each older head under any key the issuer is
-//!   known to have held — a `prev` digest a later signature committed to already fixes it, so revoking a
-//!   compromised key does not end the role's history. Order, duplicates and unrelated heads in the presented
-//!   set cannot matter: only the linked chain is read. A stream the reader has seen **fork** vouches for
-//!   nothing ([`AppointmentStream::from_reader`] reads that from the reader).
+//!   known to have held — a `prev` digest a later signature committed to already fixes it. So trust rests on
+//!   the current-key head's commitment: a publisher must chain each head from its *own* previous head, never
+//!   from one it received. Revoking a compromised key does not end the history **for a reader whose
+//!   checkpoint is already on a current-key head**; a reader whose checkpoint is under the revoked key, or
+//!   that must advance across a revoked head, vouches for nothing until it holds a current-key checkpoint
+//!   (the reader's `offer` refuses revoked intermediates — knowledge K2). Order, duplicates and unrelated
+//!   heads in the presented set cannot matter: only the linked chain is read. A stream the reader has seen
+//!   **fork since it was opened** vouches for nothing ([`AppointmentStream::from_reader`] /
+//!   [`AppointmentStream::from_parts`] read that); the knowledge layer holds forks in memory, so a restart
+//!   forgets one.
 //! - **Availability.** A linked head whose appointment record cannot be fetched is a **gap**; only the
-//!   terms after the last gap are vouched for. The stream must carry one appointment per head: a head
-//!   pointing at a non-appointment record is a gap, and one repeating an earlier term breaks the chain
-//!   rather than counting it twice.
+//!   terms after the last gap are vouched for. The stream must carry one appointment per head: `records`
+//!   must answer `None` for a record that is not an appointment (a gap), and a head repeating an earlier
+//!   term breaks the chain rather than counting it twice — so re-publishing a term (an amended end time
+//!   under the same id) collapses coverage to what follows it.
 //! - **The origin.** The walk reaching a head with `prev: None` is the role's genesis. Reaching the head
 //!   a caller's [`StreamOrigin::Baseline`] names (by digest) binds that baseline there; a baseline taken at
 //!   the checkpoint itself binds nothing (no term after it to carry it), so take it one head back. Anything
@@ -43,8 +50,11 @@ use crate::knowledge::issuer::{verify_signed_by, Authenticity, MemberKeySource, 
 use crate::knowledge::{IssuerId, RecordId};
 use std::collections::HashMap;
 
-/// Which stream, and the head this node's reader holds for it.
+/// Which stream, and the head this node's reader holds for it. Built by [`from_reader`](Self::from_reader)
+/// or [`from_parts`](Self::from_parts), which read the fork state with the checkpoint — not by literal, where
+/// `forked: false` could be written by hand.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct AppointmentStream<'a> {
     /// The appointing authority — every head and every record it points at must be this issuer's.
     pub issuer: &'a IssuerId,
@@ -68,6 +78,22 @@ impl<'a> AppointmentStream<'a> {
             stream,
             checkpoint: reader.checkpoint(issuer, stream),
             forked: reader.forks().iter().any(|f| &f.issuer == issuer && f.stream == stream),
+        }
+    }
+
+    /// The same from a reader's parts — for the durable reader, whose `checkpoint` and `forks` are exposed
+    /// separately ([`DurableHeadCheckpoints`](crate::knowledge::durable::DurableHeadCheckpoints)).
+    pub fn from_parts(
+        issuer: &'a IssuerId,
+        stream: &'a str,
+        checkpoint: Option<Checkpoint>,
+        forks: &[crate::knowledge::heads::ForkRecord],
+    ) -> Self {
+        Self {
+            issuer,
+            stream,
+            checkpoint,
+            forked: forks.iter().any(|f| &f.issuer == issuer && f.stream == stream),
         }
     }
 }
@@ -117,8 +143,8 @@ pub fn history_from_appointment_stream(
     }
     // The checkpoint head must verify under a key this node holds as current. An older head is reached only
     // through a `prev` digest a later authority signature committed to, so the hash chain already fixes it;
-    // its own signature need only be attributable — a key since rotated or revoked still says who signed,
-    // and refusing it would end every role's history at the rotation.
+    // its own signature need only be attributable — a key since revoked still says who signed, and refusing
+    // it would end every role's history at the revocation (rotation never did: retained keys stay current).
     let verified = |sh: &SignedHead, newest: bool| -> bool {
         let a = verify_signed_by(stream.issuer, &sh.head.canonical_bytes(), &sh.signature, members, external);
         if newest { matches!(a, Authenticity::Current { .. }) } else { a.is_attributable() }
@@ -505,6 +531,9 @@ mod tests {
         });
         let _ = reader.offer(&alt, &heads, &a.members, &a.ext);
         assert!(!reader.forks().is_empty(), "the reader recorded the fork");
+        let parts = AppointmentStream::from_parts(&a.issuer, "appointments/curator",
+            reader.checkpoint(&a.issuer, "appointments/curator"), reader.forks());
+        assert!(parts.forked, "from_parts reads the fork as from_reader does");
         let h = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
         assert_eq!(h.coverage().continuous_suffix, 0);
         assert!(!h.coverage().through_head);
