@@ -355,7 +355,7 @@ resistance). The operator can relax a live group as an escape hatch:
 `POST /gateway/govern/topology-override {"group": "G", "override": true}` (scope `govern:write`, audited in a `compliance` build with `[tls]`;
 `"override": false` releases it). It writes `sys/topology-override/{group}`, which the gate reads as active only
 when its value is exactly `true`; the raw KV routes refuse that key since 2.27.0. An embedded node sets the
-same key directly (`agent.kv().set("sys/topology-override/G", b"true")`). The override has **no lease**: it
+same key directly (`agent.kv().set("sys/topology-override/G", &b"true"[..])`). The override has **no lease**: it
 stays until released. A group commit the gate refuses answers **409** `{"ok": false, "error":
 "topology_unsatisfied"}` over HTTP (`ConsistencyError::TopologyUnsatisfied` in Rust); the operator's runbook
 is [diagnostics.md § Consensus refused](../operations/diagnostics.md#consensus-refused--topology_unsatisfied).

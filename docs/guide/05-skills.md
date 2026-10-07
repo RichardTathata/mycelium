@@ -325,7 +325,7 @@ for a full 3-skill walkthrough with live monitoring instructions.
 
 **Rust:**
 ```rust
-let (node_id, _) = agent.capabilities().resolve(&CapFilter::new("llm", "chat"))[0].clone();
+let (node_id, _) = agent.capabilities().resolve(&CapFilter::new("llm", "hello"))[0].clone();
 let payload = serde_json::to_vec(&json!({"message": "Hello!"}))?;
 let result = agent.service().rpc_call(node_id, "skill.invoke", payload, Duration::from_secs(30)).await?;
 ```
@@ -339,7 +339,7 @@ import json
 # POST /gateway/rpc/call (agent.rpc_call) refuses it 403 `protected_kind` whatever the token.
 a2a = A2aClient("http://127.0.0.1:8300")                 # token="…" on a protected gateway
 card = a2a.fetch_card()                                  # card["skills"]: what /a2a can call
-reply = a2a.send("llm/chat", json.dumps({"message": "Hello!"}), timeout_secs=30)
+reply = a2a.send("llm/hello", json.dumps({"message": "Hello!"}), timeout_secs=30)   # hello.skill.toml: a SkillRunner skill, not a prompt skill
 ```
 
 A **prompt skill** (`register_prompt_skill`, below) is not on the card and `/a2a` refuses it — it

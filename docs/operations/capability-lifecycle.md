@@ -183,7 +183,10 @@ does not — registered in code, a stem without the band — keeps its place onc
 intervals. What to expect and do:
 
 - **Bound.** A view with *k* wrong entries (a crashed provider still advertised, a mark not yet arrived) can
-  leave the band at `max − k` for a round; the floor refills it, and it never cascades.
+  leave the band at `max − k` for a round, and it never cascades. The floor refills only below `min`: between
+  `min` and `max` the band stays where the round left it until demand or a new install moves it. A stem drops its
+  `prov-shed` mark while it serves the band without an install it could withdraw (`marks_band`), so it then
+  counts as fixed.
 - **Rolling upgrade.** A stem older than 2.26.0 advertises no mark and still sheds by its draw, so while old and
   new stems share a band it can dip below the ceiling until the floor refills — upgrade a band's stems together
   where that matters.

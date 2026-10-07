@@ -87,27 +87,31 @@ cd examples/a2a_langchain
 python langchain_agent.py
 ```
 
+**Expected output** (`langchain_agent.py`; the shape — descriptions and the model's text vary)
+
+```
+Connecting to Mycelium at http://localhost:9050 ...
+
+  Connected to: Mycelium cluster
+  Discovered 4 skill(s):
+    · llm/orchestrator                …
+    · llm/researcher                  …
+    · llm/writer                      …
+    · llm/verifier                    …
+
+Query: …
+
+  [tool call]   llm_orchestrator({'topic': …})
+  [tool result] {"title": …, "article": …}...
+
+============================================================
+<the model's answer>
+```
+
 **Run — AutoGen agent**
 
 ```bash
 python autogen_agent.py
-```
-
-**Expected output**
-
-```
-Connecting to Mycelium at http://localhost:9050 ...
-Found 3 skills: llm/orchestrator, llm/researcher, llm/writer
-Wrapping as LangChain tools...
-
-> What are the key properties of gossip protocols?
-
-[LangChain] Selecting tool: llm/orchestrator
-[Mycelium]  orchestrator → researcher → writer
-[LangChain] Tool result: {"title": "Gossip Protocols...", "article": "..."}
-
-Final answer: Gossip protocols achieve eventual consistency via epidemic
-propagation. Key properties include...
 ```
 
 ---
@@ -166,7 +170,7 @@ def make_tool(skill):
         func=call,
         name=skill["id"].replace("/", "_"),
         description=skill.get("description", ""),
-        args_schema=build_schema(skill.get("inputSchema")),
+        args_schema=_args_model(skill["id"].replace("/", "_"), skill.get("inputSchema")),  # a pydantic model built from the card's JSON Schema — see the file
     )
 
 tools = [make_tool(s) for s in client.fetch_card().get("skills", [])]

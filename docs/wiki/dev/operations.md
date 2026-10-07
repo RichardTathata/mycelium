@@ -49,7 +49,7 @@ All three are also programmatic (**diagnostics as data**): `agent.fleet_snapshot
 
 Governance surface: `POST /gateway/govern/{timing,tuning,membership,profile,topology-override}` +
 `GET /gateway/govern` (deny-by-default scopes, `govern:read`/`govern:write`; each write is sealed into the audit
-trail in a `compliance` build — **except `profile`**, whose handler (`gw_govern_profile`, `src/agent/http.rs`) records
+trail in a `compliance` build with `[tls]` — **except `profile`**, whose handler (`gw_govern_profile`, `src/agent/http.rs`) records
 nothing, a gap reported by the 2026-10-07 lint; `topology-override` sets or releases `sys/topology-override/{group}`,
 which the raw KV routes refuse — 2.27.0, unreleased on `main`, #549) — see
 [management-as-intent](../domain/theory/management-as-intent.md) for the model.

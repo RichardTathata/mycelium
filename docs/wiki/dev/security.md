@@ -212,7 +212,7 @@ and `POST /gateway/overlay/log/{append,compact}` refuse a stream under `cn/`, `w
 enrol another node in a group, forge a capability, a requirement or a mailbox sender, plant the `sys/caller-context/`
 marker or delete an acceptor's ballot; under `consensus:write` the log routes could forge a reason trace or delete a
 commitment's offers. The topology escape hatch moved to
-`POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance`).
+`POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance` and `[tls]`).
 [`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md) ·
 [`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
 
