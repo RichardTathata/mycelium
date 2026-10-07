@@ -27,7 +27,8 @@
 //! - **consecutive terms** — a run is decided once it is broken inside the verified suffix, or the
 //!   suffix starts at the role's origin; a run reaching the start of a suffix that does not is
 //!   `Unknown` (an earlier term may extend it). A run already at the limit is `Ineligible` however
-//!   much is missing.
+//!   much *earlier* history is missing — but only when the history reaches the head: a later term
+//!   by someone else would have broken it, so behind a stale head the rule is `Unknown`.
 //! - **cumulative tenure** — needs the origin, or a baseline naming the candidate's earlier total.
 //!   Exceeding the limit inside the suffix alone is `Ineligible` regardless.
 //! - **cooling-off** — a visible term of the candidate inside the window is `Ineligible` regardless;
@@ -195,10 +196,13 @@ pub fn eligible_strict(
 
     let consecutive = rules.max_consecutive_terms.map(|limit| {
         let run = suffix.iter().rev().take_while(|t| same(&t.holder, candidate)).count() as u32;
-        if run >= limit {
-            RuleVerdict::Ineligible(Ineligible::ConsecutiveTerms { served: run, limit })
-        } else if !cov.through_head {
+        // Staleness first: a later term by someone else breaks the run, so a run at the limit behind
+        // a stale head decides nothing. Missing *earlier* history only lengthens a run, so at the head
+        // a run at the limit is decided however much of the start is missing.
+        if !cov.through_head {
             RuleVerdict::Unknown(format!("consecutive terms: {stale}"))
+        } else if run >= limit {
+            RuleVerdict::Ineligible(Ineligible::ConsecutiveTerms { served: run, limit })
         } else if (run as usize) < suffix.len() || cov.from_genesis {
             RuleVerdict::Eligible
         } else {
@@ -380,7 +384,7 @@ mod tests {
     }
 
     /// A run that reaches the start of the verified history is unknown — unless that start is the
-    /// role's first term. A run already at the limit is ineligible however much is missing.
+    /// role's first term. A run already at the limit is ineligible however much earlier history is missing.
     #[test]
     fn a_run_reaching_the_start_of_the_history_is_unknown_unless_that_start_is_genesis() {
         let only = IncumbencyRules { max_consecutive_terms: Some(3), ..IncumbencyRules::default() };
@@ -395,6 +399,22 @@ mod tests {
         let at_limit = chain(20, 22, |_| "ada");
         let h = TermHistory::from_chain(at_limit, Origin::Unknown, &tid(22));
         assert!(matches!(eligible_strict(&only, &h, &pid("ada"), 0).consecutive, Some(RuleVerdict::Ineligible(_))));
+    }
+
+    /// A run at the limit decides nothing when the history stops short of the head: a later term
+    /// by someone else breaks the run, so the candidate may be eligible. Unlike cumulative tenure, later
+    /// history can *lower* this count (or extend it — either way the visible run decides nothing). It answered `Ineligible` here — found
+    /// by the A3 example, where the council's history lacked the term that broke B's run.
+    #[test]
+    fn a_run_at_the_limit_behind_a_stale_head_is_unknown_not_ineligible() {
+        let only = IncumbencyRules { max_consecutive_terms: Some(3), ..IncumbencyRules::default() };
+        // ada held 20–22; the source names term 25 as the head, which this history lacks.
+        let stale = TermHistory::from_chain(chain(20, 22, |_| "ada"), Origin::Unknown, &tid(25));
+        assert!(!stale.coverage().through_head);
+        assert!(matches!(eligible_strict(&only, &stale, &pid("ada"), 0).consecutive, Some(RuleVerdict::Unknown(_))));
+        // Reaching the head, the same run is decided: ineligible.
+        let current = TermHistory::from_chain(chain(20, 22, |_| "ada"), Origin::Unknown, &tid(22));
+        assert!(matches!(eligible_strict(&only, &current, &pid("ada"), 0).consecutive, Some(RuleVerdict::Ineligible(_))));
     }
 
     /// History that does not reach the head the source names cannot say what happened since.

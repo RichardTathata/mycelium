@@ -101,9 +101,17 @@ impl Inherited {
 }
 
 /// What one appointment leaves for the next.
+///
+/// It also says what it **covers** (realignment repairs A3): the scope it is kept for, the first term it
+/// recorded, and the latest — so a successor, or a strict-eligibility source, can see which stretch of a
+/// role's history this journal speaks for rather than assuming it speaks for all of it. The start and the
+/// endpoint are read from the entries themselves, so they cannot disagree with them — and a journal
+/// serialized before the scope existed loads with none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoverJournal {
     entries: Vec<JournalEntry>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 impl HandoverJournal {
@@ -112,9 +120,29 @@ impl HandoverJournal {
         Self::default()
     }
 
+    /// An empty journal kept for `scope` (a role, a council, a mandate's scope).
+    pub fn for_scope(scope: impl Into<String>) -> Self {
+        Self { scope: Some(scope.into()), ..Self::default() }
+    }
+
     /// Append an entry.
     pub fn record(&mut self, entry: JournalEntry) {
         self.entries.push(entry);
+    }
+
+    /// The scope this journal is kept for, if one was named.
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
+    }
+
+    /// The term of the first entry — the journal says nothing about terms before it.
+    pub fn start(&self) -> Option<&TermId> {
+        self.entries.first().map(|e| &e.term)
+    }
+
+    /// The term of the latest entry.
+    pub fn endpoint(&self) -> Option<&TermId> {
+        self.entries.last().map(|e| &e.term)
     }
 
     /// How many entries there are.
@@ -338,6 +366,41 @@ pub fn eligible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A3: a journal says what stretch of the role it covers — its scope, the first term it recorded, the
+    /// latest — and a journal saved before those fields existed still loads, reading them as absent.
+    #[test]
+    fn a_journal_says_which_stretch_of_the_role_it_covers() {
+        let mut j = HandoverJournal::for_scope("council/allotments");
+        assert_eq!((j.start(), j.endpoint()), (None, None));
+        for n in [3, 4, 5] {
+            j.record(JournalEntry {
+                term: TermId::new(format!("term-{n}")).unwrap(),
+                author: PrincipalId::new("curator-bo").unwrap(),
+                at_ms: n,
+                kind: EntryKind::Observation,
+                text: "noted".into(),
+            });
+        }
+        assert_eq!(j.scope(), Some("council/allotments"));
+        assert_eq!(j.start().map(TermId::as_str), Some("term-3"));
+        assert_eq!(j.endpoint().map(TermId::as_str), Some("term-5"));
+        let old: HandoverJournal = serde_json::from_str(r#"{"entries":[]}"#).expect("an old journal loads");
+        assert_eq!((old.scope(), old.start(), old.endpoint()), (None, None, None));
+        // The second review of #543: a journal saved with entries, before these accessors existed, says
+        // what its entries cover — it did not, when the start was a field set by the next `record`.
+        let mut older = HandoverJournal { scope: None, entries: j.entries.clone() };
+        older.record(JournalEntry {
+            term: TermId::new("term-6").unwrap(),
+            author: PrincipalId::new("curator-bo").unwrap(),
+            at_ms: 6,
+            kind: EntryKind::Observation,
+            text: "later".into(),
+        });
+        let back: HandoverJournal = serde_json::from_str(&serde_json::to_string(&older).unwrap()).unwrap();
+        assert_eq!(back.start().map(TermId::as_str), Some("term-3"));
+        assert_eq!(back.endpoint().map(TermId::as_str), Some("term-6"));
+    }
 
     fn pid(s: &str) -> PrincipalId {
         PrincipalId::new(s).unwrap()

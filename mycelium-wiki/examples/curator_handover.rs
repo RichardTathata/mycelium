@@ -33,6 +33,11 @@
 //! about a remote: `push` carries the same fence as `--force-with-lease`, and that path needs a
 //! second repository to be worth showing.
 
+use mycelium::mandate::eligibility::{eligible_strict, ready, ChainedTerm, Origin, TermHistory};
+use mycelium::mandate::handover::{
+    EntryKind, HandoverJournal, IncumbencyRules, JournalEntry, Successor, TermRecord,
+};
+use mycelium::mandate::{PrincipalId, TermId};
 use mycelium_wiki::mandate_fence::MandateFence;
 use mycelium_wiki::{GitStore, GitStoreConfig, Section, WikiStore};
 use std::collections::BTreeMap;
@@ -119,9 +124,58 @@ fn main() {
     note("One `git update-ref --stdin` transaction: `verify <mandate-ref> <expected>` beside");
     note("`update <content-ref> <new> <old>`, then prepare and commit. Both, or neither.");
 
-    // ── 3. The appointment changes ────────────────────────────────────────────────────────────
-    step(3, "the council re-appoints — the mandate ref moves");
+    // ── 3. The appointment changes — only once the successor is ready ─────────────────────────
+    step(3, "the council re-appoints — once the successor has read the history and is eligible");
     let appointment_b = git(&dir, &["rev-parse", "HEAD"]);
+    // What A leaves for B, and the role's appointment history (realignment repairs A3): B held term 1,
+    // A holds term 2. The council's rule: no curator serves two terms in a row.
+    let mut journal = HandoverJournal::for_scope(COUNCIL);
+    journal.record(JournalEntry {
+        term: tid("term-2"),
+        author: pid("Curator A"),
+        at_ms: 2,
+        kind: EntryKind::Observation,
+        text: "the repair café's insurance is not yet confirmed".into(),
+    });
+    journal.record(JournalEntry {
+        term: tid("term-2"),
+        author: pid("Curator A"),
+        at_ms: 3,
+        kind: EntryKind::Conclusion,
+        text: "the supplier list should be reviewed before anything is ordered".into(),
+    });
+    let rules = IncumbencyRules { max_consecutive_terms: Some(1), ..IncumbencyRules::default() };
+    let term = |n: u64, who: &str, prev: Option<&str>| ChainedTerm {
+        record: TermRecord { holder: pid(who), term: tid(&format!("term-{n}")), started_ms: n * 10, ended_ms: n * 10 + 9 },
+        previous: prev.map(tid),
+    };
+    let mut successor = Successor::new();
+    // The record of A's term has not reached the council's store yet.
+    let partial = TermHistory::from_chain(vec![term(1, "Curator B", None)], Origin::Genesis, &tid("term-2"));
+    let early = eligible_strict(&rules, &partial, &pid("Curator B"), 100);
+    note(format!("eligibility on the history the council holds: {:?}", early.verdict()));
+    let verdict = ready(&successor, &journal, &early);
+    note(format!("is curator B ready? {:?}", verdict.map_err(|e| e.to_string())));
+    note("Two reasons, each enough: the history stops short of term 2, so B's eligibility is unknown —");
+    note("never assumed — and B has read nothing A left. The appointment is withheld.");
+    let curator_b_early = store_for(&dir, "Curator B", &appointment_b);
+    match curator_b_early.write_section("minutes", &section("B, before the appointment."), current_version(&curator_b_early)) {
+        Ok(_) => note("UNEXPECTED: an unappointed curator's write was accepted"),
+        Err(e) => note(format!("B writes anyway — refused at the resource: {e}")),
+    }
+    // The record arrives; B reads what A left.
+    let whole = TermHistory::from_chain(
+        vec![term(1, "Curator B", None), term(2, "Curator A", Some("term-1"))],
+        Origin::Genesis,
+        &tid("term-2"),
+    );
+    successor.read_through(journal.len());
+    let eligibility = eligible_strict(&rules, &whole, &pid("Curator B"), 100);
+    assert!(ready(&successor, &journal, &eligibility).is_ok(), "read, and A's term breaks B's run");
+    note("the history reaches term 2 and B has read the journal — conclusions inherited with their author:");
+    for inherited in journal.inherit() {
+        note(format!("  · {}", inherited.render()));
+    }
     git(&dir, &["update-ref", MANDATE_REF, &appointment_b]);
     note(format!("{MANDATE_REF} -> {}", &appointment_b[..12.min(appointment_b.len())]));
     note("Curator A still holds a store configured with the old appointment. Nothing told it.");
@@ -195,6 +249,14 @@ fn main() {
     println!();
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn pid(s: &str) -> PrincipalId {
+    PrincipalId::new(s).expect("a principal")
+}
+
+fn tid(s: &str) -> TermId {
+    TermId::new(s).expect("a term id")
 }
 
 /// The council's own store with no fence — used once, to create the commit an appointment can

@@ -10,6 +10,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A3's history source, built** (`docs/plans/realignment-repairs.md` A3 — 2.24.0 shipped the evaluator and
+  marked the row merged with its source unbuilt; doc-coverage run 20, code gap 3). `mandate::history_source::
+  history_from_appointment_stream` (`tls`) builds a `TermHistory` from an appointment stream in the knowledge
+  layer, pinned by `(issuer, stream)`: it walks back from this node's reader's checkpoint along each head's `prev`
+  digest — the starting head under a current key, older heads under any key the issuer held, since the
+  current-key signature fixes them by hash — so a presenter's other heads (another member's stream, a newer
+  head, duplicates, any order) change nothing and the read moves no checkpoint. A linked head whose record
+  cannot be fetched is a gap, and so is a repeated term; reaching `prev: None` is genesis; a
+  `StreamOrigin::Baseline` binds only at the head digest it names; a stream the reader saw fork since it was
+  opened vouches for nothing. "Current" means as of this reader's checkpoint (`AppointmentStream::from_reader`,
+  `from_parts`). Before, nothing in the substrate built a `TermHistory` — the embedding application did, so
+  "the source establishes coverage" rested on the caller. `HandoverJournal` records its scope (`for_scope`),
+  and says which terms it covers (`start()`, `endpoint()`, read from its entries; a journal saved before
+  loads with no scope). `mycelium-wiki/examples/curator_handover.rs`
+  withholds the re-appointment until the successor has read the journal and the history reaches the current
+  head, and shows the successor's write refused at the resource meanwhile. Fail-first: with the reader bypassed,
+  heads signed by a key the authority does not hold vouched for six terms; the plan's two witnesses (a missing
+  appointment record is `Unknown`, its return decides; terms 20–30 decide consecutive terms, not cumulative
+  tenure) pass on the real source.
 - **The verification policy** (`CLAUDE.md` § Verification policy; `docs/wiki/dev/testing/verification-policy.md`):
   enumerate before fixing, plan rows close on evidence, CI collects tests by discovery, an independent
   adversarial review after each PR — adopted after doc-coverage run 20 found six code gaps behind green CI. Rule
@@ -31,6 +50,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joins the table in run 20, which now names four things called *profile*.
 
 ### Fixed
+- **Strict eligibility: a consecutive-terms run at the limit behind a stale head is `Unknown`, not `Ineligible`.**
+  `eligible_strict` decided a visible run at the limit before checking that the history reached the head — but
+  a later term by someone else breaks the run, so the candidate may be eligible. Missing *earlier* history only
+  lengthens a run, which is why the shortcut holds at the head; cumulative tenure keeps its shortcut (later
+  history can only add). Found by the A3 example: the council's history lacked term 2, A's, which broke
+  B's run, and B read as `Ineligible`. Test `a_run_at_the_limit_behind_a_stale_head_is_unknown_not_ineligible`,
+  seen failing first.
 - **The recorded code gaps of doc-coverage run 20, closed under the verification policy** (enumerated entry points,
   tests seen failing first, an independent review):
   - **R9's third door.** `POST /gateway/govern/timing` and `GossipAgent::govern_timing` published any value, and
