@@ -50,6 +50,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joins the table in run 20, which now names four things called *profile*.
 
 ### Fixed
+- **A presence ceiling sheds the surplus, not every host (#545).** Above `max_providers`, each hosting stem
+  drew to withdraw at its bring-up probability, so at `self_elect_p = 1.0` every host withdrew at once: the
+  count went max+1 → 0 → max+1, round after round — measured on `first_stem_fleet`, where two of four runs
+  oscillated for several seconds and one CI run's snapshot caught three providers. The hosts ranked beyond
+  `max` by the band's rendezvous order withdraw now (`mycelium::election::rank`, new), so hosts with the same
+  view agree that exactly the surplus leaves; the same probe settles at the ceiling within ~1.3 s, never
+  returning to zero. `prov.shed` is catalogue revision 2 (its deferral reason is `ranked_within_ceiling`;
+  the shed no longer draws, so a recording has one draw fewer per shed). The example also snapshots only once
+  the observer's providers are the hosting stems and unchanged for a declare-and-tick cycle.
 - **Strict eligibility: a consecutive-terms run at the limit behind a stale head is `Unknown`, not `Ineligible`.**
   `eligible_strict` decided a visible run at the limit before checking that the history reached the head — but
   a later term by someone else breaks the run, so the candidate may be eligible. Missing *earlier* history only

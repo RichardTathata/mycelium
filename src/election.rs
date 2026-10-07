@@ -152,6 +152,22 @@ pub fn winner<'a>(ring: &str, candidates: &'a [NodeId], rule: Rule) -> Option<&'
     }
 }
 
+/// Every candidate in `rule`'s order, the [`winner`] first — the same pure, total ordering, so every node
+/// with the same candidate list ranks them identically. A band of `n` holders is the first `n`: the
+/// stem provisioner sheds a surplus by it, so the nodes above a ceiling agree on **which** withdraw rather
+/// than each drawing at random (where every one could withdraw at once, issue #545).
+pub fn rank<'a>(ring: &str, candidates: &'a [NodeId], rule: Rule) -> Vec<&'a NodeId> {
+    let mut ranked: Vec<&NodeId> = candidates.iter().collect();
+    match rule {
+        Rule::LowestId => ranked.sort_by_key(|n| n.to_string()),
+        Rule::Rendezvous => ranked.sort_by(|a, b| {
+            weight(ring, a).cmp(&weight(ring, b)).then_with(|| a.to_string().cmp(&b.to_string()))
+        }),
+    }
+    ranked.dedup();
+    ranked
+}
+
 /// [`winner`] with the rule negotiated from the resolved candidates — the form a companion calls.
 pub fn elect<'a>(ring: &str, resolved: &'a [(NodeId, Capability)]) -> Option<&'a NodeId> {
     let rule = negotiated(resolved.iter().map(|(_, cap)| cap));
@@ -256,4 +272,20 @@ mod tests {
         assert!(seen.len() > 1, "eight rings over four nodes must not all pick the same node");
         assert_ne!(weight("ab", &candidates[0]), weight("a", &candidates[0]), "the separator must bite");
     }
+    /// `rank` is the ordering `winner` picks the first of, for both rules, over any candidate set.
+    #[test]
+    fn rank_puts_the_winner_first_and_orders_every_candidate() {
+        let ids: Vec<NodeId> = (0..7).map(|i| NodeId::new("127.0.0.1", 9000 + i).unwrap()).collect();
+        for rule in [Rule::LowestId, Rule::Rendezvous] {
+            for ring in ["demo/echo", "tuple/orders.primary"] {
+                let r = rank(ring, &ids, rule);
+                assert_eq!(r.len(), ids.len());
+                assert_eq!(Some(r[0]), winner(ring, &ids, rule));
+                let mut reversed = ids.clone();
+                reversed.reverse();
+                assert_eq!(rank(ring, &reversed, rule), r, "independent of input order");
+            }
+        }
+    }
+
 }

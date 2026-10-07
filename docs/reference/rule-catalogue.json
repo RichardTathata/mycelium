@@ -1212,8 +1212,7 @@
       "may_trigger": [],
       "may_inhibit": [
         "prov.demand_response",
-        "prov.presence_floor",
-        "prov.shed"
+        "prov.presence_floor"
       ],
       "depends_on": [],
       "symbol": "provisioner::Provisioner::self_elects",
@@ -1226,7 +1225,7 @@
     },
     {
       "id": "prov.shed",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -1254,7 +1253,7 @@
         {
           "kind": "deferral",
           "reasons": [
-            "self_election_declined"
+            "ranked_within_ceiling"
           ]
         },
         {
@@ -1273,16 +1272,15 @@
       "may_inhibit": [
         "prov.presence_floor"
       ],
-      "depends_on": [
-        "prov.self_election"
-      ],
+      "depends_on": [],
       "symbol": "provisioner::Provisioner::provision_round",
       "docs": "docs/reference/unit-file.md",
       "tests": [
-        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+        "the_stem_fleet_fills_a_presence_floor_and_reheals",
+        "exactly_the_surplus_above_a_ceiling_withdraws"
       ],
       "trace": "instrumented",
-      "summary": "More live providers than the declared ceiling makes a hosting node a candidate to withdraw its own install."
+      "summary": "More live providers than the declared ceiling withdraws the hosts ranked beyond it (rev 2: ranked by the band's rendezvous order, so exactly the surplus leaves; rev 1 drew per host, and every host could withdraw at once)."
     },
     {
       "id": "prov.withdraw",

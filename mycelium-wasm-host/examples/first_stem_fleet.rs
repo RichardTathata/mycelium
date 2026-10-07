@@ -134,9 +134,44 @@ name = "echo"
         "exactly two stems host: {:?}",
         hosts_of(&fleet)
     );
+    // The band can overshoot — stems that self-elect together all install, then the shed trims back to
+    // two — so "two live" and "two hosting" can each be true for an instant while an install or a
+    // withdrawal is still in flight, and a later read sees three (#545). Take the snapshot only once the
+    // observer's providers are exactly the stems that host, two of them, unchanged for a full declare-
+    // and-tick cycle: by then no stem is mid-change, and nothing below reads the set again.
+    let settle = opts.declare_interval + opts.tick;
+    let settled = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut last: Option<(Vec<NodeId>, std::time::Instant)> = None;
+        loop {
+            let mut seen: Vec<NodeId> = seed.capabilities().resolve(&filter).into_iter().map(|(n, _)| n).collect();
+            seen.sort_by_key(|n| n.to_string());
+            let mut hosting_ids: Vec<NodeId> =
+                hosts_of(&fleet).into_iter().map(|i| fleet[i].0.node_id().clone()).collect();
+            hosting_ids.sort_by_key(|n| n.to_string());
+            let agrees = seen.len() == 2 && seen == hosting_ids;
+            last = match last {
+                Some((prev, since)) if agrees && prev == seen => {
+                    if since.elapsed() >= settle {
+                        break Some(seen);
+                    }
+                    Some((prev, since))
+                }
+                _ if agrees => Some((seen, std::time::Instant::now())),
+                _ => None,
+            };
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    let settled = settled.unwrap_or_else(|| {
+        panic!("the observer's providers never settled on the two hosting stems: seen {} live, hosting {:?}", live(&seed), hosts_of(&fleet))
+    });
     let hosting = hosts_of(&fleet);
     println!("PASS: two generic hosts installed demo/echo; one remains available");
-    let provider = seed.capabilities().resolve(&filter)[0].0.clone();
+    let provider = settled[0].clone();
     let reply = seed
         .service()
         .rpc_call(
@@ -173,11 +208,11 @@ name = "echo"
         report.render_text()
     );
     let mut observed = Vec::new();
-    for (node, _cap) in seed.capabilities().resolve(&filter) {
+    for node in &settled {
         let (i, _) = fleet
             .iter()
             .enumerate()
-            .find(|(_, (a, _))| a.node_id() == &node)
+            .find(|(_, (a, _))| a.node_id() == node)
             .expect("a provider is one of the stems");
         observed.push(serde_json::json!({"node":node.to_string(), "unit":format!("stem-{i}"), "capability":"demo/echo"}));
         assert!(

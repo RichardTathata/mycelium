@@ -129,8 +129,9 @@ pub struct SupervisionPolicy {
     pub filter:        CapFilter,
     pub min_providers: usize,
     /// Upper bound (Track 2b elastic sizing). `Some(max)` ⇒ when the live provider count exceeds
-    /// `max`, a hosting node self-elects to **withdraw** (cooperative self-removal — tombstone its
-    /// `cap/` + stop serving), the symmetric shed path to bring-up. `None` ⇒ unbounded.
+    /// `max`, the hosts ranked beyond `max` by the band's rendezvous order **withdraw** (cooperative
+    /// self-removal — tombstone its `cap/` + stop serving), the symmetric shed path to bring-up.
+    /// `None` ⇒ unbounded.
     pub max_providers: Option<usize>,
 }
 
@@ -568,9 +569,10 @@ impl Provisioner {
     }
 
     /// Like [`supervise`](Self::supervise) but with an upper bound (Track 2b elastic sizing): keep
-    /// the live provider count within `[min, max]`. Below `min` → bring up; above `max` → a hosting
-    /// node self-elects to **withdraw** (cooperative self-removal). Bounds are convergence targets,
-    /// not guarantees (sovereign veto / soft self-election), consistent with the membership governor.
+    /// the live provider count within `[min, max]`. Below `min` → bring up (soft self-election); above
+    /// `max` → the hosts ranked beyond `max` **withdraw** (cooperative self-removal; ranked, so hosts with
+    /// the same view agree on which). Bounds are convergence targets, not guarantees, consistent with
+    /// the membership governor.
     pub fn supervise_band(&mut self, filter: CapFilter, min_providers: usize, max_providers: usize) {
         self.policies.push(SupervisionPolicy {
             filter,
@@ -1051,9 +1053,9 @@ impl Provisioner {
         }
 
         // ── Shed-driven (Track 2b elastic sizing) ────────────────────────────
-        // Symmetric to bring-up: when a band's live provider count exceeds `max`, a hosting node
-        // self-elects to withdraw. Over-provisioning (e.g. a transient duplicate after a herd of
-        // self-elections) self-corrects here.
+        // Symmetric to bring-up: when a band's live provider count exceeds `max`, the hosts ranked
+        // beyond `max` withdraw. Over-provisioning (e.g. a transient duplicate after a herd of
+        // self-elections) self-corrects here, in one round.
         for policy in &policies {
             let Some(max) = policy.max_providers else { continue };
             let live = self.agent.capabilities().demand(&policy.filter).providers.len();
@@ -1076,18 +1078,32 @@ impl Provisioner {
                 }
                 continue;
             }
-            if self.self_elects_traced(&target) {
+            // Which of the hosts above the ceiling withdraw is ranked, not drawn: every host with the same
+            // view of the providers agrees that exactly the surplus goes. A per-host draw at
+            // `self_elect_p` let every one withdraw at once — the count went max+1 → 0 → back, round
+            // after round (issue #545, measured on `first_stem_fleet`).
+            let providers = self.agent.capabilities().demand(&policy.filter).providers;
+            if sheds(self.agent.node_id(), &providers, max, &target) {
                 self.withdraw(&artifact); // cooperative self-removal
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::Action, "above_ceiling", target, inputs(), Some(format!("withdraw {artifact}")));
                 }
             } else if let Some(t) = self.round_trace() {
-                t.record("prov.shed", OutcomeKind::Deferral, "self_election_declined", target, inputs(), None);
+                t.record("prov.shed", OutcomeKind::Deferral, "ranked_within_ceiling", target, inputs(), None);
             }
         }
 
         started
     }
+}
+
+/// Whether `me`, a host of a band whose live `providers` exceed `max`, is one that withdraws: those ranked
+/// beyond the first `max` by [`mycelium::election::rank`] on the band's name. Hosts that see the same
+/// providers agree, so the surplus withdraws and the rest stay. A host absent from its own view stays —
+/// its advertisement has not reached itself, so it cannot know its rank.
+fn sheds(me: &mycelium::NodeId, providers: &[mycelium::NodeId], max: usize, band: &str) -> bool {
+    let ranked = mycelium::election::rank(band, providers, mycelium::election::Rule::Rendezvous);
+    ranked.iter().position(|n| *n == me).is_some_and(|i| i >= max)
 }
 
 #[cfg(test)]
@@ -1098,6 +1114,24 @@ mod tests {
     use mycelium::Capability;
 
     const ECHO_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/echo_component.wasm");
+
+    /// Issue #545: over one view of a band's providers, exactly the surplus withdraws — never all of them,
+    /// never none — whatever the band or the size. The draw this replaced let every host withdraw at once.
+    #[test]
+    fn exactly_the_surplus_above_a_ceiling_withdraws() {
+        for n in 1..=7u16 {
+            let providers: Vec<mycelium::NodeId> = (0..n).map(|i| mycelium::NodeId::new("127.0.0.1", 7000 + i).unwrap()).collect();
+            for max in 0..n as usize {
+                for band in ["demo/echo", "route/optimize"] {
+                    let leaving = providers.iter().filter(|p| sheds(p, &providers, max, band)).count();
+                    assert_eq!(leaving, providers.len() - max, "n={n} max={max} band={band}");
+                }
+            }
+        }
+        // A host that cannot see itself among the providers does not withdraw.
+        let others: Vec<mycelium::NodeId> = (0..3).map(|i| mycelium::NodeId::new("127.0.0.1", 7100 + i).unwrap()).collect();
+        assert!(!sheds(&mycelium::NodeId::new("127.0.0.1", 7199).unwrap(), &others, 1, "demo/echo"));
+    }
 
     fn alloc_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
@@ -1418,7 +1452,7 @@ mod tests {
     #[tokio::test]
     async fn track2b_sheds_a_provider_when_over_max() {
         // Track 2b: the symmetric shed path. Bring a capability live, then a band whose `max` is
-        // below the live count makes a hosting node self-elect to withdraw (tombstone + stop
+        // below the live count makes the hosting node ranked beyond it withdraw (tombstone + stop
         // serving). (Single-node: max=0 forces shed of the one local provider — the cross-node
         // case is the identical code path against real provider counts.)
         let agent = live_agent().await;
