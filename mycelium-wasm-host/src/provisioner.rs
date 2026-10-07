@@ -156,6 +156,10 @@ pub struct Provisioner {
     trace:        Option<Arc<Trace>>,
     /// Rounds run here; the trigger every record of a round names.
     rounds:       u64,
+    /// Per band, how many consecutive rounds each provider has stayed advertised while ranked beyond the
+    /// ceiling — one that never leaves (a provider registered in code, a stem not running this band)
+    /// is passed over after [`SHED_STALL_ROUNDS`], so the next host down sheds instead (#547's review).
+    shed_stalls:  HashMap<String, HashMap<mycelium::NodeId, u32>>,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -255,6 +259,7 @@ impl Provisioner {
             self_elect_p,
             trace: None,
             rounds: 0,
+            shed_stalls: HashMap::new(),
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -1058,16 +1063,33 @@ impl Provisioner {
         // self-elections) self-corrects here, in one round.
         for policy in &policies {
             let Some(max) = policy.max_providers else { continue };
-            let live = self.agent.capabilities().demand(&policy.filter).providers.len();
+            let providers = self.agent.capabilities().demand(&policy.filter).providers;
+            let live = providers.len();
             let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
-            let inputs = || vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
-                format!("live={live} max={max}"), Provenance::Gossiped)];
             if live <= max {
+                self.shed_stalls.remove(&target);
                 if let Some(t) = self.round_trace() {
-                    t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target, inputs(), None);
+                    t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target,
+                        vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
+                            format!("live={live} max={max}"), Provenance::Gossiped)], None);
                 }
                 continue; // within the band
             }
+            // Which hosts above the ceiling withdraw is ranked, not drawn: every host with the same view
+            // agrees that exactly the surplus goes. A per-host draw at `self_elect_p` let every one
+            // withdraw at once — max+1 → 0 → back, round after round (#545). A provider ranked beyond
+            // the ceiling that stays put for SHED_STALL_ROUNDS is passed over, so the next one sheds.
+            let stalls = self.shed_stalls.remove(&target).unwrap_or_default();
+            let view = shed_view(&providers, max, &target, &stalls);
+            self.shed_stalls.insert(target.clone(), view.next_stalls(&stalls));
+            let me = self.agent.node_id().clone();
+            let position = view.ranked.iter().position(|n| *n == me);
+            let inputs = || vec![
+                InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
+                    format!("live={live} max={max}"), Provenance::Gossiped),
+                InputSnapshot::new("the band's rendezvous ranking (mycelium::election::rank) over the providers that can shed",
+                    format!("position={position:?} keep={} stuck={}", view.keep, view.stuck.len()), Provenance::Local),
+            ];
             let Some(artifact) = self.catalog.resolve_best(&policy.filter).map(|e| e.artifact)
             else {
                 continue;
@@ -1078,18 +1100,13 @@ impl Provisioner {
                 }
                 continue;
             }
-            // Which of the hosts above the ceiling withdraw is ranked, not drawn: every host with the same
-            // view of the providers agrees that exactly the surplus goes. A per-host draw at
-            // `self_elect_p` let every one withdraw at once — the count went max+1 → 0 → back, round
-            // after round (issue #545, measured on `first_stem_fleet`).
-            let providers = self.agent.capabilities().demand(&policy.filter).providers;
-            if sheds(self.agent.node_id(), &providers, max, &target) {
+            if view.sheds(&me) {
                 self.withdraw(&artifact); // cooperative self-removal
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::Action, "above_ceiling", target, inputs(), Some(format!("withdraw {artifact}")));
                 }
             } else if let Some(t) = self.round_trace() {
-                t.record("prov.shed", OutcomeKind::Deferral, "ranked_within_ceiling", target, inputs(), None);
+                t.record("prov.shed", OutcomeKind::NoAction, "ranked_within_ceiling", target, inputs(), None);
             }
         }
 
@@ -1097,13 +1114,44 @@ impl Provisioner {
     }
 }
 
-/// Whether `me`, a host of a band whose live `providers` exceed `max`, is one that withdraws: those ranked
-/// beyond the first `max` by [`mycelium::election::rank`] on the band's name. Hosts that see the same
-/// providers agree, so the surplus withdraws and the rest stay. A host absent from its own view stays —
-/// its advertisement has not reached itself, so it cannot know its rank.
-fn sheds(me: &mycelium::NodeId, providers: &[mycelium::NodeId], max: usize, band: &str) -> bool {
-    let ranked = mycelium::election::rank(band, providers, mycelium::election::Rule::Rendezvous);
-    ranked.iter().position(|n| *n == me).is_some_and(|i| i >= max)
+/// Rounds a provider may stay advertised while ranked beyond a ceiling before it is presumed unable to
+/// shed — it runs no provisioner for this band, or cannot match the entry the band resolves to.
+const SHED_STALL_ROUNDS: u32 = 5;
+
+/// One round's shedding view of a band whose live providers exceed its ceiling.
+struct ShedView {
+    /// The providers that can shed, best first, by [`mycelium::election::rank`] on the band's name.
+    ranked: Vec<mycelium::NodeId>,
+    /// How many of `ranked` stay: the ceiling, less the providers presumed unable to shed.
+    keep: usize,
+    /// Providers passed over: still advertised after [`SHED_STALL_ROUNDS`] rounds ranked beyond the ceiling.
+    stuck: Vec<mycelium::NodeId>,
+}
+
+fn shed_view(providers: &[mycelium::NodeId], max: usize, band: &str, stalls: &HashMap<mycelium::NodeId, u32>) -> ShedView {
+    let stuck: Vec<mycelium::NodeId> = providers.iter()
+        .filter(|n| stalls.get(*n).is_some_and(|c| *c >= SHED_STALL_ROUNDS))
+        .cloned().collect();
+    let capable: Vec<mycelium::NodeId> = providers.iter().filter(|n| !stuck.contains(n)).cloned().collect();
+    let ranked = mycelium::election::rank(band, &capable, mycelium::election::Rule::Rendezvous)
+        .into_iter().cloned().collect();
+    ShedView { ranked, keep: max.saturating_sub(stuck.len()), stuck }
+}
+
+impl ShedView {
+    /// Whether `me` withdraws: ranked beyond the ones that stay. A host absent from its own view stays —
+    /// its advertisement has not reached itself, so it cannot know its rank.
+    fn sheds(&self, me: &mycelium::NodeId) -> bool {
+        self.ranked.iter().position(|n| n == me).is_some_and(|i| i >= self.keep)
+    }
+
+    /// The stall counts after this round: each provider ranked beyond the ceiling, or already passed over,
+    /// gains one; everyone else (within the ceiling, or gone) starts again.
+    fn next_stalls(&self, prev: &HashMap<mycelium::NodeId, u32>) -> HashMap<mycelium::NodeId, u32> {
+        self.ranked.iter().skip(self.keep).chain(self.stuck.iter())
+            .map(|n| (n.clone(), prev.get(n).copied().unwrap_or(0) + 1))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1115,22 +1163,54 @@ mod tests {
 
     const ECHO_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/echo_component.wasm");
 
+    fn nodes(base: u16, n: u16) -> Vec<mycelium::NodeId> {
+        (0..n).map(|i| mycelium::NodeId::new("127.0.0.1", base + i).unwrap()).collect()
+    }
+
     /// Issue #545: over one view of a band's providers, exactly the surplus withdraws — never all of them,
     /// never none — whatever the band or the size. The draw this replaced let every host withdraw at once.
     #[test]
     fn exactly_the_surplus_above_a_ceiling_withdraws() {
         for n in 1..=7u16 {
-            let providers: Vec<mycelium::NodeId> = (0..n).map(|i| mycelium::NodeId::new("127.0.0.1", 7000 + i).unwrap()).collect();
+            let providers = nodes(7000, n);
             for max in 0..n as usize {
                 for band in ["demo/echo", "route/optimize"] {
-                    let leaving = providers.iter().filter(|p| sheds(p, &providers, max, band)).count();
+                    let view = shed_view(&providers, max, band, &HashMap::new());
+                    let leaving = providers.iter().filter(|p| view.sheds(p)).count();
                     assert_eq!(leaving, providers.len() - max, "n={n} max={max} band={band}");
                 }
             }
         }
         // A host that cannot see itself among the providers does not withdraw.
-        let others: Vec<mycelium::NodeId> = (0..3).map(|i| mycelium::NodeId::new("127.0.0.1", 7100 + i).unwrap()).collect();
-        assert!(!sheds(&mycelium::NodeId::new("127.0.0.1", 7199).unwrap(), &others, 1, "demo/echo"));
+        let view = shed_view(&nodes(7100, 3), 1, "demo/echo", &HashMap::new());
+        assert!(!view.sheds(&mycelium::NodeId::new("127.0.0.1", 7199).unwrap()));
+    }
+
+    /// The review of #547: a provider that never sheds — registered in code, or a stem not running this
+    /// band — must not hold a band above its ceiling. Ranked alone, the hosts within the ceiling never step
+    /// in for it and the count stays above forever; after SHED_STALL_ROUNDS it is passed over and the next
+    /// host down sheds. Simulated with every host sharing one view, over every placement of the stuck one.
+    #[test]
+    fn a_provider_that_never_sheds_does_not_hold_the_band_above_its_ceiling() {
+        let all = nodes(7200, 4);
+        for stuck_at in 0..all.len() {
+            for (max, band) in [(2usize, "demo/echo"), (1, "route/optimize"), (2, "route/optimize")] {
+                let never = all[stuck_at].clone();
+                let mut live = all.clone();
+                let mut stalls = HashMap::new();
+                let mut rounds = 0;
+                while live.len() > max && rounds < 50 {
+                    let view = shed_view(&live, max, band, &stalls);
+                    stalls = view.next_stalls(&stalls);
+                    live.retain(|n| *n == never || !view.sheds(n));
+                    assert!(live.len() >= max, "never below the ceiling's count: {live:?}");
+                    rounds += 1;
+                }
+                assert_eq!(live.len(), max, "stuck at {stuck_at}, max {max}, band {band}: converged in {rounds} rounds");
+                assert!(live.contains(&never));
+                assert!(rounds <= SHED_STALL_ROUNDS as usize + 2, "{rounds} rounds");
+            }
+        }
     }
 
     fn alloc_port() -> u16 {

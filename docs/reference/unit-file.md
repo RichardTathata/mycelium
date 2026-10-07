@@ -210,7 +210,7 @@ independent of demand. A stem refuses `[[presence]]` without `[hosts]`.
 |---|---|---|---|
 | `ns`, `name`, `schema_id`, `attrs`, `ranking` | as `[[requirement]]` | — | The filter, written inline. |
 | `min_providers` | integer | required | The floor. `0` is refused. |
-| `max_providers` | integer | absent (no ceiling) | The ceiling. Refused when below the floor. Above it, the hosts ranked beyond `max` by the band's rendezvous order withdraw — every host with the same view of the providers agrees which (rule `prov.shed` rev 2). |
+| `max_providers` | integer | absent (no ceiling) | The ceiling. Refused when below the floor. Above it, the hosts ranked beyond `max` by the band's rendezvous order withdraw — every host with the same view of the providers agrees which (rule `prov.shed` rev 2). A provider that cannot withdraw (registered in code, or a stem not running this band) is passed over after five rounds ranked beyond the ceiling, and the next host down withdraws instead. |
 
 ```toml
 # examples/units/catalog/late.toml

@@ -802,9 +802,9 @@ mod tests {
         };
         // Three stems, started so that the fleet is **deterministic**: with `self_elect_p: 1.0`
         // (no herd damping) three stems started together can all elect in one round — three hosts
-        // over a band of two, then all three shed at once, and the band oscillates until tick
-        // interleavings break the symmetry (seen under a loaded full run, 2026-10-03). So the first
-        // two come up and host, and only then the third, which sees the floor met and stands by.
+        // over a band of two, trimmed back by the ranked shed (before #547 all three shed at once and
+        // the band oscillated, seen under a loaded run on 2026-10-03). The staggered start keeps
+        // which two host predictable: the first two come up and host, then the third stands by.
         let filter = CapFilter::new("route", "optimize");
         let live = |n: &Arc<GossipAgent>| n.capabilities().resolve(&filter).len();
         let hosts_of = |fleet: &Vec<(Arc<GossipAgent>, Stem)>| -> Vec<usize> {

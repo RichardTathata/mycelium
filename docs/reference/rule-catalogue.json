@@ -1251,16 +1251,11 @@
           ]
         },
         {
-          "kind": "deferral",
-          "reasons": [
-            "ranked_within_ceiling"
-          ]
-        },
-        {
           "kind": "no_action",
           "reasons": [
             "within_ceiling",
-            "not_hosting"
+            "not_hosting",
+            "ranked_within_ceiling"
           ]
         }
       ],
@@ -1277,10 +1272,11 @@
       "docs": "docs/reference/unit-file.md",
       "tests": [
         "the_stem_fleet_fills_a_presence_floor_and_reheals",
-        "exactly_the_surplus_above_a_ceiling_withdraws"
+        "exactly_the_surplus_above_a_ceiling_withdraws",
+        "a_provider_that_never_sheds_does_not_hold_the_band_above_its_ceiling"
       ],
       "trace": "instrumented",
-      "summary": "More live providers than the declared ceiling withdraws the hosts ranked beyond it (rev 2: ranked by the band's rendezvous order, so exactly the surplus leaves; rev 1 drew per host, and every host could withdraw at once)."
+      "summary": "More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, passing over a provider that stays put for five rounds (rev 2; rev 1 drew per host, and every host could withdraw at once)."
     },
     {
       "id": "prov.withdraw",

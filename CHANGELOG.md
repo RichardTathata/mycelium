@@ -55,9 +55,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   count went max+1 → 0 → max+1, round after round — measured on `first_stem_fleet`, where two of four runs
   oscillated for several seconds and one CI run's snapshot caught three providers. The hosts ranked beyond
   `max` by the band's rendezvous order withdraw now (`mycelium::election::rank`, new), so hosts with the same
-  view agree that exactly the surplus leaves; the same probe settles at the ceiling within ~1.3 s, never
-  returning to zero. `prov.shed` is catalogue revision 2 (its deferral reason is `ranked_within_ceiling`;
-  the shed no longer draws, so a recording has one draw fewer per shed). The example also snapshots only once
+  view agree that exactly the surplus leaves; a provider that cannot withdraw — registered in code, or a stem
+  not running the band — is passed over after five rounds ranked beyond the ceiling, so the next host down
+  sheds instead of the band staying above it. The same probe settles at the ceiling within ~1.3 s, never
+  returning to zero. `prov.shed` is catalogue revision 2 (staying within is `NoAction`
+  `ranked_within_ceiling`, and the trace records the rank); the shed no longer draws, so a recording has one
+  draw fewer per host per round spent above the ceiling. The example also snapshots only once
   the observer's providers are the hosting stems and unchanged for a declare-and-tick cycle.
 - **Strict eligibility: a consecutive-terms run at the limit behind a stale head is `Unknown`, not `Ineligible`.**
   `eligible_strict` decided a visible run at the limit before checking that the history reached the head — but
