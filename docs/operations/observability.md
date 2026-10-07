@@ -96,7 +96,8 @@ Cluster-wide health is `/stats` + `/metrics` + `/gateway/fleet` (above). For a *
   [diagnostics.md](diagnostics.md#governed-group-conflict--thrash-the-56-pattern)).
 - **Every group's size, governed or not** — `group_sizes` on `GET /gateway/fleet` (`fleet:read`), one
   `{group, observed}` per group with a live member (2.27.0, #168). A group that empties is **absent** from the
-  list rather than `0`, so alert on absence. No per-group Prometheus label, by design (cardinality); any node
+  list rather than `0`. The count is of membership keys, not live nodes: a crashed member stays counted until its
+  `grp/` key is removed, as in `governed_groups` — read peer health from `/stats` alongside it. No per-group Prometheus label, by design (cardinality); any node
   answers the snapshot.
 
 Full how-to (define + monitor): the cookbook recipe

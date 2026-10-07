@@ -814,21 +814,23 @@ pub struct GroupSize {
 }
 
 /// **Pure** — every group with a live member and its observed size, sorted by group so independent nodes at
-/// convergence produce byte-identical output. Counts with the same [`group_members`] the governed view uses.
+/// convergence produce byte-identical output. One pass over `grp/`, counting what [`group_members`] counts: a
+/// key whose last segment parses as a [`NodeId`] (which never contains `/`, so a nested group name splits one
+/// way) and is not a tombstone. "Live" is the key's, not the node's: nothing reaps a crashed node's `grp/`
+/// entry, so a group whose only member crashed still reports it — as `governed_groups` does.
 pub fn group_sizes(kv_state: &crate::store::KvState) -> Vec<GroupSize> {
-    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut groups: std::collections::BTreeMap<String, HashSet<crate::node_id::NodeId>> = std::collections::BTreeMap::new();
     for (key, bytes) in scan_prefix_kv(kv_state, crate::signal::kv_ns::GROUP) {
         if bytes.is_empty() {
             continue;
         }
-        if let Some((group, _node)) = key.strip_prefix(crate::signal::kv_ns::GROUP).and_then(|t| t.rsplit_once('/')) {
-            names.insert(group.to_string());
+        if let Some((group, node)) = key.strip_prefix(crate::signal::kv_ns::GROUP).and_then(|t| t.rsplit_once('/'))
+            && let Ok(node) = node.parse::<crate::node_id::NodeId>()
+        {
+            groups.entry(group.to_string()).or_default().insert(node);
         }
     }
-    names.into_iter()
-        .map(|group| GroupSize { observed: group_members(kv_state, &group).len(), group })
-        .filter(|g| g.observed > 0)
-        .collect()
+    groups.into_iter().map(|(group, members)| GroupSize { group, observed: members.len() }).collect()
 }
 
 /// One edge of the throttle graph: `observer` observed `sender` sending at `observed_fps`
@@ -1906,7 +1908,6 @@ mod tests {
         assert!(!vc.staleness_known(), "nothing heard ⇒ unknown, not fresh");
     }
 
-    /// A healthy-fleet snapshot with a full, current view. Tests mutate one axis at a time.
     /// #168: every group with a live member appears with its size, governed or not; a group whose members
     /// all left is absent, not zero; the order is the group's, so converged nodes agree.
     #[test]
@@ -1915,14 +1916,19 @@ mod tests {
         let hlc = Hlc::new();
         seed_members(&kv, &hlc, "workers", 2);
         seed_members(&kv, &hlc, "archivists", 1);
+        seed_members(&kv, &hlc, "council/east", 1); // a nested name splits at the node id, once
         let gone = NodeId::new("127.0.0.1", 20900).unwrap();
+        // A trailing segment that is not a node id counts nothing, as in `group_members`.
+        apply_and_notify(&kv, &make_gossip_update(&gone, 4, Arc::from("grp/stray/not-a-node"), Bytes::from_static(b"1"), false, &hlc));
         apply_and_notify(&kv, &make_gossip_update(&gone, 4, Arc::from(format!("grp/gone/{gone}").as_str()), Bytes::new(), true, &hlc));
         assert_eq!(group_sizes(&kv), vec![
             GroupSize { group: "archivists".into(), observed: 1 },
+            GroupSize { group: "council/east".into(), observed: 1 },
             GroupSize { group: "workers".into(), observed: 2 },
         ]);
     }
 
+    /// A healthy-fleet snapshot with a full, current view. Tests mutate one axis at a time.
     fn nominal_snapshot() -> FleetSnapshot {
         FleetSnapshot {
             observer: "n1".into(),

@@ -148,7 +148,9 @@ one), with `node ∈ group(s) ⊆ cluster`. See [13 · Cluster Topology](13-clus
 
 - *How big is every group* — governed or not: `agent.fleet_snapshot().group_sizes` and
   `group_sizes` on `GET /gateway/fleet`, one `{group, observed}` per group with a live member (2.27.0, #168).
-  A group nobody belongs to is **absent**, not zero — alert on its absence. There is deliberately no
+  A group nobody belongs to is **absent**, not zero. "Belongs" is the membership key, not liveness: a member that
+  crashed stays counted until its key is removed (as in `governed_groups`), so pair an absence alert with
+  `/stats`' peer view for crashed members. There is deliberately no
   per-group Prometheus label (an unbounded `group` label is a cardinality trap); scrape the snapshot.
 
 ### How do I give a group a durable, curated knowledge canon (wiki)?
