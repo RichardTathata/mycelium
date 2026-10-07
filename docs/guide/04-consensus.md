@@ -169,7 +169,7 @@ curl -X POST http://localhost:8400/gateway/overlay/log/append \
 ```
 
 The key is yours to choose except under `sys/` and `consensus/`, which the substrate owns: those answer **403**
-`protected_key` (2.26.0), bar the operator's `sys/topology-override/{group}`.
+`protected_key` (2.26.0); since 2.27.0 every namespace the substrate or a companion owns is refused the same way, and the topology override has its own route (below).
 
 **What to observe**
 
@@ -351,8 +351,10 @@ a scoped `with_lock` that guarantees release.
 declared locality spread — e.g. `spread_min_distinct: 2` at `spread_depth:
 Some(1)` demands voters from at least two availability zones. Use it when
 correctness depends on failure-domain diversity (compliance, split-brain
-resistance). The operator can relax a live group with a
-`sys/topology-override/{group}` KV entry as an escape hatch.
+resistance). The operator can relax a live group as an escape hatch:
+`POST /gateway/govern/topology-override {"group": "G", "override": true}` (scope `govern:write`, audited;
+`"override": false` releases it). It writes `sys/topology-override/{group}`, which the gate reads as active only
+when its value is exactly `true`; the raw KV routes refuse that key since 2.27.0.
 
 **Consensus and partition tolerance.** The overlay is CP (consistent,
 partition-tolerant) within the quorum group — it blocks, not fails, when

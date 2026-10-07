@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The raw KV routes write application keys only** (the `kv:write` decision, 2026-10-07). `POST`/`DELETE
+  /gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set` refuse **403**
+  `protected_key` for a key in any namespace the substrate or a companion owns — 2.26.0 covered `sys/` and
+  `consensus/`; now `grp/`, `cap/`, `req/`, `prompts/`, `log/`, `mailbox/`, `installable/`, `agent/`, the companions'
+  and the rest of `src/lib.rs` § KV namespace ownership, each refusal naming the route that owns it. Under
+  `kv:write` they could rewrite a prompt template (`llm:write`), enrol another node in a group (a node joins
+  itself), forge a capability, a requirement or a mailbox sender, or append to a log (`consensus:write`). The
+  checkpointer's `ckpt/`/`ckptw/` rows and an application's `agent/{node}/provision/…` report stay writable. A
+  test parses the ownership table, so a new namespace must be classified before it ships. **Upgrade note:** a
+  client writing an owned namespace through the KV routes uses its route (`deprecations.md` §19).
+- **The topology override has a governance route.** `POST /gateway/govern/topology-override {"group", "override"}`
+  (`govern:write`, audited) sets or releases `sys/topology-override/{group}`; it was an unaudited `kv:write`
+  write, the one owned key 2.26.0 still let through.
+
 ## [2.26.0] — 2026-10-07
 
 The **verification policy** release. Doc-coverage run 20 found six code gaps behind green CI and repeated
