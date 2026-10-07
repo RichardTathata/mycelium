@@ -298,11 +298,17 @@ you know is in range.
 ## 18. `govern_timing` returns `Result`; `with_egress` takes either form (2.26.0)
 
 **What changes.** `GossipAgent::govern_timing` returns `Result<bool, GossipError>` and refuses an intent above
-3600 / 300 — `POST /gateway/govern/timing` answers 400 for the same intent, and for a field that is not a
-non-negative integer. Every client's `with_egress` now takes `impl Into<EgressPolicy>`: a reference or a value.
+3600 / 300, or one governing neither setting. The three `POST /gateway/govern/*` routes answer **400** for the
+same, and for a body that is not an object, an unknown field, a field that is not the type it names (`"30"` for
+a number, `"true"` for a boolean), a `target` that is not a node-id string, and — membership — a missing `min`.
+The KV doors (`POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`, `POST /gateway/overlay/consistent/set`)
+answer **403** `protected_key` for any key under `sys/` or `consensus/` except `sys/topology-override/{group}`.
+Every client's `with_egress` now takes `impl Into<EgressPolicy>`: a reference or a value.
 
 **Will the compiler tell me?** For `govern_timing`, it warns (`unused_must_use`) where the result is ignored, an
 error under `-D warnings`. A `with_egress` call with an `EgressPolicy` or a `&EgressPolicy` compiles unchanged; one that relied on deref coercion (`&Arc<EgressPolicy>`, `&Box<…>`) or inference (`with_egress(Default::default())`, `with_egress(x.into())`) now needs the type spelled — `&*arc`, `EgressPolicy::default()`.
 
 **Migration.** `agent.govern_timing(30, 5, None)?;`. An HTTP client that relied on `"30"` being accepted sends
-`30`.
+`30`; one that released governance by publishing zeros stops publishing (the intent lapses with its lease); one
+that wrote a `sys/` or `consensus/` key through the KV routes uses the route that owns it — the governance
+routes for `sys/govern/`, and the substrate itself for the rest.

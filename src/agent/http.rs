@@ -1189,11 +1189,41 @@ fn audit_govern(_ctx: &Arc<TaskCtx>, _target: &str, _detail: String) {}
 
 /// Parse an optional `"target"` field into a node id. `Err` carries a message the
 /// caller turns into a 400 (a small error type keeps the `Result` cheap).
+///
+/// A `target` that is present but not a node-id string is refused: read as *no* target it governed the
+/// whole fleet (the reviews of #544).
 fn parse_optional_target(body: &serde_json::Value) -> Result<Option<crate::node_id::NodeId>, &'static str> {
-    match body.get("target").and_then(|v| v.as_str()) {
-        None => Ok(None),
-        Some(s) => s.parse().map(Some).map_err(|_| "invalid target node id"),
+    match body.get("target") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match v.as_str() {
+            Some(s) => s.parse().map(Some).map_err(|_| "invalid target node id"),
+            None => Err("`target` must be a node id string (host:port)"),
+        },
     }
+}
+
+/// A governance body must be an object naming only the fields its route reads: a misspelled field was
+/// ignored and the intent published without it.
+fn refuse_unknown_fields(body: &serde_json::Value, known: &[&str]) -> Option<axum::response::Response> {
+    let Some(obj) = body.as_object() else {
+        return Some((StatusCode::BAD_REQUEST, Json(json!({"error": "the body must be a JSON object"}))).into_response());
+    };
+    obj.keys().find(|k| !known.contains(&k.as_str())).map(|k| {
+        (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown field `{k}`")}))).into_response()
+    })
+}
+
+/// An optional non-negative integer field: absent or `null` is `None`; anything else that is not a `u64`
+/// is refused rather than read as absent.
+fn optional_u64(v: Option<&serde_json::Value>, name: &str) -> Result<Option<u64>, String> {
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v.as_u64().map(Some).ok_or_else(|| format!("{name} must be a non-negative integer")),
+    }
+}
+
+fn bad_request(msg: String) -> axum::response::Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
 }
 
 /// `GET /gateway/govern` — this node's **effective** tuning-governor state (the
@@ -1319,11 +1349,23 @@ async fn gw_govern_tuning(
 ) -> impl IntoResponse {
     use super::tuning_governor::{GovernIntent, HotParam, ParamDirective, Ratchet};
 
-    let enabled = body.get("enabled").and_then(|v| v.as_bool());
+    if let Some(refused) = refuse_unknown_fields(&body, &["enabled", "params", "target"]) {
+        return refused;
+    }
+    let enabled = match body.get("enabled") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => match v.as_bool() {
+            Some(b) => Some(b),
+            None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "`enabled` must be a boolean"}))).into_response(),
+        },
+    };
 
     let mut params = Vec::new();
     if let Some(arr) = body.get("params").and_then(|v| v.as_array()) {
         for d in arr {
+            if let Some(refused) = refuse_unknown_fields(d, &["param", "floor", "ceiling", "ratchet"]) {
+                return refused;
+            }
             let Some(pkey) = d.get("param").and_then(|v| v.as_str()) else {
                 return (StatusCode::BAD_REQUEST, Json(json!({"error": "param directive missing 'param'"}))).into_response();
             };
@@ -1336,12 +1378,9 @@ async fn gw_govern_tuning(
                 Some("off") | None => Ratchet::Off,
                 Some(other)  => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown ratchet '{other}'")}))).into_response(),
             };
-            params.push(ParamDirective {
-                param:   pkey.to_string(),
-                floor:   d.get("floor").and_then(|v| v.as_u64()),
-                ceiling: d.get("ceiling").and_then(|v| v.as_u64()),
-                ratchet,
-            });
+            let floor = match optional_u64(d.get("floor"), "floor") { Ok(v) => v, Err(e) => return bad_request(e) };
+            let ceiling = match optional_u64(d.get("ceiling"), "ceiling") { Ok(v) => v, Err(e) => return bad_request(e) };
+            params.push(ParamDirective { param: pkey.to_string(), floor, ceiling, ratchet });
         }
     }
 
@@ -1376,10 +1415,8 @@ async fn gw_govern_timing(
     // `0`, "ungoverned", and answered success for an intent that governs nothing. The same for the shape
     // around them: a non-object, a misspelled field, or a `target` that is not a node id (read as *no*
     // target — the whole fleet) each published something other than what was asked.
-    let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
-    let Some(obj) = body.as_object() else { return bad("the body must be a JSON object".into()) };
-    if let Some(k) = obj.keys().find(|k| !["health_check_interval_secs", "reconnect_backoff_secs", "target"].contains(&k.as_str())) {
-        return bad(format!("unknown field `{k}`"));
+    if let Some(refused) = refuse_unknown_fields(&body, &["health_check_interval_secs", "reconnect_backoff_secs", "target"]) {
+        return refused;
     }
     let mut fields = [0u64; 2];
     for (slot, name) in fields.iter_mut().zip(["health_check_interval_secs", "reconnect_backoff_secs"]) {
@@ -1392,12 +1429,9 @@ async fn gw_govern_timing(
         }
     }
     let [health, reconnect] = fields;
-    let target = match body.get("target") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => match v.as_str().and_then(|s| s.parse::<crate::node_id::NodeId>().ok()) {
-            Some(n) => Some(n),
-            None => return bad("`target` must be a node id (host:port)".into()),
-        },
+    let target = match parse_optional_target(&body) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
     };
     let intent = super::timing_governor::TimingIntent {
         health_check_interval_secs: health,
@@ -1406,7 +1440,11 @@ async fn gw_govern_timing(
         written_at_ms: 0,
     };
     match super::timing_governor::publish_timing_intent(&ctx.agent_ctx, intent) {
-        Ok(ok) => Json(json!({ "published": ok, "key": super::timing_governor::TIMING_INTENT_KEY })).into_response(),
+        Ok(ok) => {
+            // Audited as its siblings are; it never was (the third review of #544).
+            audit_govern(&ctx.agent_ctx, super::timing_governor::TIMING_INTENT_KEY, body.to_string());
+            Json(json!({ "published": ok, "key": super::timing_governor::TIMING_INTENT_KEY })).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }
@@ -1496,11 +1534,19 @@ async fn gw_govern_membership(
 ) -> impl IntoResponse {
     use super::membership_governor::{MembershipIntent, MEMBERSHIP_PREFIX};
 
+    if let Some(refused) = refuse_unknown_fields(&body, &["group", "min", "max", "drain", "target"]) {
+        return refused;
+    }
     let Some(group) = body.get("group").and_then(|v| v.as_str()) else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing 'group'"}))).into_response();
     };
-    let min = body.get("min").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let max = body.get("max").and_then(|v| v.as_u64()).map(|m| m as usize);
+    // `min` is required (the route's contract); a `"3"` or `-1` read as 0 and published a floor of nothing.
+    let min = match optional_u64(body.get("min"), "min") {
+        Ok(Some(m)) => m as usize,
+        Ok(None) => return bad_request("missing 'min'".into()),
+        Err(e) => return bad_request(e),
+    };
+    let max = match optional_u64(body.get("max"), "max") { Ok(v) => v.map(|m| m as usize), Err(e) => return bad_request(e) };
 
     let mut drain: Vec<crate::node_id::NodeId> = Vec::new();
     if let Some(arr) = body.get("drain").and_then(|v| v.as_array()) {
@@ -2734,24 +2780,32 @@ async fn gw_kv_set(
     }
 }
 
-/// The raw KV doors (`POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`) take the key from the
-/// request, so under `kv:write` they could publish a governance intent at `sys/govern/…` that its own
-/// route guards with `govern:write` — the adversarial review of #544, enumerating every door to the
-/// timing intent. Refused `403` whatever the token's scopes, naming the route to use, as
-/// [`refuse_protected_kind`] does for RPC kinds. Layer I still accepts the key from a peer — detection,
-/// not prevention; this is the gateway's door.
+/// The doors that take a KV key from the request — `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`,
+/// and `POST /gateway/overlay/consistent/set`, which writes the raw key once consensus commits — do not
+/// write a key the substrate owns. Under `kv:write` (or `consensus:write`) they could publish a governance
+/// intent its route guards with `govern:write`, plant a `sys/caller-context/` marker a secure gateway
+/// checks before dispatch, delete an acceptor's durable ballot (`sys/consensus-accepted/`), forge a
+/// `consensus/committed/` slot, or rewrite `sys/config/` and `sys/capauthz/` — the reviews of #544,
+/// enumerating every door to one invariant. So `sys/` and `consensus/` are refused `403` whatever the
+/// token's scopes, as [`refuse_protected_kind`] does for RPC kinds — with one allowance, the operator's
+/// topology escape hatch `sys/topology-override/{group}` (guide 4). An allow-list, so a new substrate key
+/// is protected the day it is added. Layer I still accepts these keys from a peer — detection, not
+/// prevention; this is the gateway's door.
 fn refuse_protected_key(key: &str) -> Option<axum::response::Response> {
-    if !key.starts_with("sys/govern/") && key != "sys/govern" {
+    let substrate = key.starts_with("sys/") || key == "sys" || key.starts_with("consensus/") || key == "consensus";
+    if !substrate || key.starts_with("sys/topology-override/") {
         return None;
     }
-    warn!(key, "gateway: governance key refused on a raw KV route");
+    warn!(key, "gateway: a substrate-owned key refused on a raw KV route");
+    let door = if key.starts_with("sys/govern/") {
+        "governance intents are published through /gateway/govern/{tuning,timing,membership} (govern:write)"
+    } else {
+        "keys under sys/ and consensus/ are written by the substrate, not through the KV routes \
+         (the one exception is sys/topology-override/{group})"
+    };
     Some((
         StatusCode::FORBIDDEN,
-        Json(json!({
-            "ok": false,
-            "error": "protected_key",
-            "detail": "governance intents are published through /gateway/govern/{tuning,timing,membership} (govern:write)",
-        })),
+        Json(json!({ "ok": false, "error": "protected_key", "detail": door })),
     ).into_response())
 }
 
@@ -3389,6 +3443,9 @@ async fn gw_overlay_consistent_set(
         Some(k) => k.to_string(),
         None    => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing key"}))).into_response(),
     };
+    if let Some(refused) = refuse_protected_key(&key) {
+        return refused;
+    }
     let value = if let Some(b64) = body["value_b64"].as_str() {
         match base64::engine::general_purpose::STANDARD.decode(b64) {
             Ok(v)  => Bytes::from(v),
@@ -4534,6 +4591,41 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// The third review of #544: the timing route's strictness, at its two siblings. A `target` that was not
+    /// a string, a `min` that was not an integer, a `floor` that was a string — each read as absent.
+    #[tokio::test]
+    async fn the_governance_routes_parse_strictly() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.http_addr = "127.0.0.1".to_string();
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let client = reqwest::Client::new();
+        let post = |route: &'static str, body: serde_json::Value| { let c = client.clone(); async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match c.post(format!("http://127.0.0.1:{http_port}/gateway/govern/{route}")).json(&body).send().await {
+                    Ok(r) => break r.status().as_u16(),
+                    Err(e) => { assert!(tokio::time::Instant::now() < deadline, "{e}"); tokio::time::sleep(Duration::from_millis(50)).await; }
+                }
+            }
+        }};
+        assert_eq!(post("tuning", serde_json::json!({"enabled": true, "target": 5})).await, 400, "a target that is not a string");
+        assert_eq!(post("tuning", serde_json::json!({"enabled": true, "enabeld": false})).await, 400, "an unknown field");
+        assert_eq!(post("tuning", serde_json::json!({"params": [{"param": "inbound_fps", "floor": "5"}]})).await, 400, "a floor that is not an integer");
+        assert_eq!(post("tuning", serde_json::json!({"enabled": true})).await, 200);
+        assert_eq!(post("membership", serde_json::json!({"group": "w", "min": "3"})).await, 400, "a min that is not an integer");
+        assert_eq!(post("membership", serde_json::json!({"group": "w"})).await, 400, "min is required");
+        assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "target": ["x"]})).await, 400, "a target that is not a string");
+        assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "max": "10"})).await, 400, "a max that is not an integer");
+        assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "mn": 2})).await, 400, "an unknown field");
+        assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "max": null})).await, 200);
+        agent.shutdown().await;
+    }
+
     /// The adversarial review of #544 (enumerating every door to the timing intent): the raw KV routes
     /// wrote `sys/govern/…` under `kv:write`, publishing a governance intent without `govern:write`. They
     /// refuse every `sys/govern/` key now, naming the route to use.
@@ -4573,6 +4665,21 @@ mod tests {
             .json(&serde_json::json!({"key": "sys/govern/timing", "value_b64": intent, "min_acks": 0, "timeout_secs": 1})).send().await.unwrap();
         assert_eq!(r.status(), 403, "the quorum door");
         assert!(agent.kv().get("sys/govern/timing").is_none(), "nothing was written");
+        // The third review of #544: the consensus door wrote the raw key too, and the doors reached every
+        // other key the substrate owns — a planted caller-context marker fails a secure gateway's check
+        // open; a forged commit or a deleted acceptor record undoes consensus.
+        let r = client.post(format!("http://127.0.0.1:{http_port}/gateway/overlay/consistent/set"))
+            .json(&serde_json::json!({"key": "sys/govern/timing", "value_b64": intent})).send().await.unwrap();
+        assert_eq!(r.status(), 403, "the consensus door");
+        for key in ["sys/caller-context/10.0.0.9:9000", "consensus/committed/slot-x", "sys/consensus-accepted/n/s", "sys/config/x", "sys/capauthz/ns/name"] {
+            let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": ""})).send().await.unwrap();
+            assert_eq!(r.status(), 403, "POST {key}");
+        }
+        // The one substrate key operators write through the KV routes: the topology escape hatch (guide 4).
+        let r = client.post(&base)
+            .json(&serde_json::json!({"key": "sys/topology-override/workers", "value_b64": base64::engine::general_purpose::STANDARD.encode(b"true")}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "the topology override stays an operator's write");
         // An ordinary key is unaffected.
         let r = client.post(&base)
             .json(&serde_json::json!({"key": "app/x", "value_b64": ""})).send().await.unwrap();

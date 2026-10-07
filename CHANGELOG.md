@@ -28,14 +28,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     every node's reconciler ignored one outside `validate()`'s bounds, so the route answered `published: true`
     for an intent that governed nothing. Both refuse it now (`TimingIntent::check`, at the one publish path they
     share); the route also refuses a field that is not a non-negative integer, which it read as `0`
-    ("ungoverned"). Its review found more doors to the same intent, each closed: an intent that governs neither
-    setting (it *replaced* the previous one while changing nothing) is refused by both; the route refuses a
-    non-object body, an unknown field, and a `target` that is not a node id (read as no target — the whole
-    fleet); and the raw KV doors — `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` — refuse every
-    `sys/govern/` key **403** `protected_key`, because under `kv:write` they published a governance intent its
-    route guards with `govern:write`. **Upgrade notes:** `govern_timing` returns `Result<bool, GossipError>`;
-    a client writing `sys/govern/…` through the KV routes must use the governance routes; `with_egress` callers
-    that relied on deref coercion or inference spell the type (`deprecations.md` §18).
+    ("ungoverned"). Its reviews found more doors to the same invariant: an intent that governs neither setting
+    (it *replaced* the previous one while changing nothing) is refused by both; all three `govern/*` routes
+    refuse a non-object body, an unknown field, a value of the wrong type, and a `target` that is not a
+    node-id string (read as no target — the whole fleet), and membership a missing `min` (read as 0); timing's
+    publishes are audited as its siblings' are. And the four doors that take a KV key from the request —
+    `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`, `POST /gateway/overlay/consistent/set` — refuse
+    every key under `sys/` and `consensus/` **403** `protected_key`, except the operator's
+    `sys/topology-override/{group}`: under `kv:write` or `consensus:write` they could publish a governance
+    intent without `govern:write`, plant the `sys/caller-context/` marker a secure gateway checks before
+    dispatch, delete an acceptor's durable ballot, forge a committed slot, or rewrite `sys/config/` and
+    `sys/capauthz/`. An allow-list, so a new substrate key is covered the day it is added. **Not claimed:** a
+    peer writing these keys through Layer I (detection, not prevention). **Upgrade notes:** `govern_timing`
+    returns `Result<bool, GossipError>`; a client writing `sys/` or `consensus/` keys through the KV routes, or
+    sending the governance routes loose bodies, now gets 403 / 400; `with_egress` callers that relied on deref
+    coercion or inference spell the type (`deprecations.md` §18).
   - **Cooling-off decides a visible term regardless.** A candidate visibly inside the cooling window read
     `Unknown` behind a stale head, asking for history that could only confirm the "no"; it is `Ineligible`, as the
     other two limits already were.
