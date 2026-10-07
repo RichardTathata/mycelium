@@ -130,8 +130,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `eligible_strict` decided a visible run at the limit before checking that the history reached the head — but
   a later term by someone else breaks the run, so the candidate may be eligible. Missing *earlier* history only
   lengthens a run, which is why the shortcut holds at the head; cumulative tenure keeps its shortcut (later
-  history can only add), and cooling-off already checked staleness first except for a term visibly inside the
-  window (a later term can only move the end of the window later). Found by the A3 example: the council's history lacked term 2, A's, which broke
+  history can only add). Found by the A3 example: the council's history lacked term 2, A's, which broke
   B's run, and B read as `Ineligible`. Test `a_run_at_the_limit_behind_a_stale_head_is_unknown_not_ineligible`,
   seen failing first.
 >>>>>>> a15221c5 (A3: the history source — signed appointment heads become a TermHistory; the journal says what it covers)

@@ -14,13 +14,20 @@
 //!   are ignored; a presenter cannot make the history look more current, or splice in another stream.
 //! - **Continuity is the `prev` chain.** From that head the walk follows each head's `prev` digest back
 //!   through the presented heads, authenticating each against the pinned issuer's keys in this node's
-//!   view (a head under a revoked key stops the walk — fail closed, stated). Order, duplicates and
-//!   unrelated heads in the presented set therefore cannot matter: only the linked chain is read.
+//!   view: the checkpoint head under a key held as current, each older head under any key the issuer is
+//!   known to have held — a `prev` digest a later signature committed to already fixes it, so revoking a
+//!   compromised key does not end the role's history. Order, duplicates and unrelated heads in the presented
+//!   set cannot matter: only the linked chain is read. A stream the reader has seen **fork** vouches for
+//!   nothing ([`AppointmentStream::from_reader`] reads that from the reader).
 //! - **Availability.** A linked head whose appointment record cannot be fetched is a **gap**; only the
-//!   terms after the last gap are vouched for.
+//!   terms after the last gap are vouched for. The stream must carry one appointment per head: a head
+//!   pointing at a non-appointment record is a gap, and one repeating an earlier term breaks the chain
+//!   rather than counting it twice.
 //! - **The origin.** The walk reaching a head with `prev: None` is the role's genesis. Reaching the head
-//!   a caller's [`StreamOrigin::Baseline`] names (by digest) binds that baseline there. Anything else —
-//!   a missing link, a head that fails to authenticate — leaves the origin unknown.
+//!   a caller's [`StreamOrigin::Baseline`] names (by digest) binds that baseline there; a baseline taken at
+//!   the checkpoint itself binds nothing (no term after it to carry it), so take it one head back. Anything
+//!   else — a missing link, a head that fails to authenticate — leaves the origin unknown. A baseline's
+//!   `after` and totals are the caller's: the source checks only where it attaches.
 //!
 //! What it does not claim: that the appointing authority published every appointment there was, or that
 //! this node's reader has heard the authority's newest head. "Through the head" means through **this
@@ -45,6 +52,24 @@ pub struct AppointmentStream<'a> {
     pub stream: &'a str,
     /// This node's reader's checkpoint for `(issuer, stream)`; `None` if it holds none.
     pub checkpoint: Option<Checkpoint>,
+    /// Whether the reader has recorded a fork on `(issuer, stream)` — then nothing is vouched for.
+    pub forked: bool,
+}
+
+impl<'a> AppointmentStream<'a> {
+    /// The pinned stream as `reader` holds it: its checkpoint, and whether it has seen a fork there.
+    pub fn from_reader<S: crate::knowledge::heads::CheckpointStore>(
+        reader: &crate::knowledge::heads::HeadCheckpoints<S>,
+        issuer: &'a IssuerId,
+        stream: &'a str,
+    ) -> Self {
+        Self {
+            issuer,
+            stream,
+            checkpoint: reader.checkpoint(issuer, stream),
+            forked: reader.forks().iter().any(|f| &f.issuer == issuer && f.stream == stream),
+        }
+    }
 }
 
 /// What the caller trusts about the role before the earliest head the walk can reach.
@@ -78,17 +103,26 @@ pub fn history_from_appointment_stream(
     let Some(cp) = stream.checkpoint else {
         return TermHistory::from_chain(Vec::new(), Origin::Unknown, &unknown_head);
     };
-    let authentic = |sh: &SignedHead| -> bool {
-        sh.head.issuer == *stream.issuer
-            && sh.head.stream == stream.stream
-            && sh.head.record.issuer == *stream.issuer
-            && matches!(
-                verify_signed_by(stream.issuer, &sh.head.canonical_bytes(), &sh.signature, members, external),
-                Authenticity::Current { .. }
-            )
+    if stream.forked {
+        // The authority equivocated on this stream: which branch is its history is not this node's to pick.
+        return TermHistory::from_chain(Vec::new(), Origin::Unknown, &unknown_head);
+    }
+    // Every presented copy of each digest on the pinned stream; signatures are checked only along the walk,
+    // so the cost is bounded by the chain, and one bad copy cannot hide a good one.
+    let mut by_digest: HashMap<[u8; 32], Vec<&SignedHead>> = HashMap::new();
+    for sh in presented {
+        if sh.head.issuer == *stream.issuer && sh.head.stream == stream.stream && sh.head.record.issuer == *stream.issuer {
+            by_digest.entry(sh.head.digest()).or_default().push(sh);
+        }
+    }
+    // The checkpoint head must verify under a key this node holds as current. An older head is reached only
+    // through a `prev` digest a later authority signature committed to, so the hash chain already fixes it;
+    // its own signature need only be attributable — a key since rotated or revoked still says who signed,
+    // and refusing it would end every role's history at the rotation.
+    let verified = |sh: &SignedHead, newest: bool| -> bool {
+        let a = verify_signed_by(stream.issuer, &sh.head.canonical_bytes(), &sh.signature, members, external);
+        if newest { matches!(a, Authenticity::Current { .. }) } else { a.is_attributable() }
     };
-    let by_digest: HashMap<[u8; 32], &SignedHead> =
-        presented.iter().filter(|sh| authentic(sh)).map(|sh| (sh.head.digest(), sh)).collect();
 
     // Walk back from the checkpoint along `prev`, newest first.
     let mut linked: Vec<&SignedHead> = Vec::new();
@@ -102,7 +136,10 @@ pub fn history_from_appointment_stream(
             reached = Some(true);
             break;
         }
-        let Some(sh) = by_digest.get(&d) else { break };
+        let newest = linked.is_empty();
+        let Some(sh) = by_digest.get(&d).and_then(|copies| copies.iter().copied().find(|sh| verified(sh, newest))) else {
+            break;
+        };
         if linked.last().is_some_and(|child| sh.head.seq >= child.head.seq) {
             break; // not a descending chain
         }
@@ -120,8 +157,17 @@ pub fn history_from_appointment_stream(
     }
     linked.reverse(); // oldest first
 
-    // Terms after the last gap: a head whose record is unavailable breaks the chain there.
-    let resolved: Vec<Option<TermRecord>> = linked.iter().map(|sh| records(&sh.head.record)).collect();
+    // Terms after the last gap: a head whose record is unavailable breaks the chain there — and so does a
+    // record repeating a term already seen (a head re-pointed at an earlier appointment would count it twice).
+    let mut resolved: Vec<Option<TermRecord>> = linked.iter().map(|sh| records(&sh.head.record)).collect();
+    let mut seen = std::collections::HashSet::new();
+    for r in resolved.iter_mut() {
+        if let Some(t) = r
+            && !seen.insert(t.term.clone())
+        {
+            *r = None;
+        }
+    }
     let last_gap = resolved.iter().rposition(Option::is_none);
     let head_term = match resolved.last() {
         Some(Some(r)) => r.term.clone(),
@@ -232,11 +278,7 @@ mod tests {
         records: &HashMap<RecordId, TermRecord>,
         origin: StreamOrigin,
     ) -> TermHistory {
-        let stream = AppointmentStream {
-            issuer: &a.issuer,
-            stream: "appointments/curator",
-            checkpoint: reader.checkpoint(&a.issuer, "appointments/curator"),
-        };
+        let stream = AppointmentStream::from_reader(reader, &a.issuer, "appointments/curator");
         history_from_appointment_stream(&stream, presented, |r| records.get(r).cloned(), &a.members, &a.ext, origin)
     }
 
@@ -291,6 +333,7 @@ mod tests {
             issuer: &a.issuer,
             stream: "appointments/curator",
             checkpoint: Some(Checkpoint { seq: 6, digest: heads[5].head.digest() }),
+            forked: false,
         };
         let h = history_from_appointment_stream(&stream_, &heads, |r| records.get(r).cloned(), &a.members, &a.ext, StreamOrigin::Unknown);
         assert_eq!(h.coverage().continuous_suffix, 0, "no head is accepted");
@@ -375,6 +418,12 @@ mod tests {
         assert_eq!(h1.coverage(), h2.coverage());
         assert_eq!(h1.coverage().continuous_suffix, 3, "terms 4 and 5 are past what this reader holds");
         assert_eq!(reader.checkpoint(&a.issuer, "appointments/curator").map(|c| c.seq), Some(3));
+        // The limit, pinned in the open: ada holds terms 4 and 5, which this reader has not been offered, so
+        // under a two-term limit it decides her eligible — "current" means as of this reader's checkpoint.
+        let rules = IncumbencyRules { max_consecutive_terms: Some(2), ..IncumbencyRules::default() };
+        assert_eq!(eligible_strict(&rules, &h1, &pid("ada"), 6 * DAY).consecutive, Some(RuleVerdict::Eligible));
+        let current = history_at(&a, &reader_through(&a, &heads), &heads, &records, StreamOrigin::Unknown);
+        assert!(matches!(eligible_strict(&rules, &current, &pid("ada"), 6 * DAY).consecutive, Some(RuleVerdict::Ineligible(_))));
     }
 
     /// A missing record in the middle leaves the terms after it vouched for and nothing before; the
@@ -392,5 +441,101 @@ mod tests {
         records.retain(|_, t| t.term != tid(6));
         let h = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
         assert!(!h.coverage().through_head);
+    }
+
+    fn signed(sk: &SigningKey, head: Head) -> SignedHead {
+        let signature = mycelium_core::tls::sign_bytes(sk, &head.canonical_bytes()).to_vec();
+        SignedHead { head, signature }
+    }
+
+    /// The second review of #543, Q7: the stream is pinned too. An authority head on the curator stream
+    /// whose `prev` names a head on another of its streams does not pull that stream's terms in.
+    #[test]
+    fn a_link_into_another_stream_of_the_same_authority_ends_the_walk() {
+        let a = authority();
+        let other_rec = RecordId { issuer: a.issuer.clone(), digest: [0xA1; 32] };
+        let other = signed(&a.sk, Head { issuer: a.issuer.clone(), stream: "appointments/other".into(), record: other_rec.clone(), seq: 1, prev: None });
+        let rec = RecordId { issuer: a.issuer.clone(), digest: [0xA2; 32] };
+        let cur = signed(&a.sk, Head { issuer: a.issuer.clone(), stream: "appointments/curator".into(), record: rec.clone(), seq: 2, prev: Some(other.head.digest()) });
+        let records = HashMap::from([
+            (other_rec, TermRecord { holder: pid("ada"), term: tid(1), started_ms: DAY, ended_ms: 2 * DAY }),
+            (rec, TermRecord { holder: pid("bo"), term: tid(2), started_ms: 2 * DAY, ended_ms: 3 * DAY }),
+        ]);
+        let reader = reader_through(&a, std::slice::from_ref(&cur));
+        let h = history_at(&a, &reader, &[other, cur], &records, StreamOrigin::Unknown);
+        assert_eq!(h.coverage().continuous_suffix, 1, "only the curator stream's own head");
+        assert!(!h.coverage().from_genesis, "the other stream's first head is not this role's genesis");
+    }
+
+    /// The second review of #543, Q3: a head re-pointed at an earlier appointment would count that term
+    /// twice; a repeated term breaks the chain instead.
+    #[test]
+    fn a_head_repeating_an_earlier_term_breaks_the_chain() {
+        let a = authority();
+        let (mut heads, records) = stream(&a, 1, 2, |_| "ada", None);
+        let again = signed(&a.sk, Head {
+            issuer: a.issuer.clone(),
+            stream: "appointments/curator".into(),
+            record: heads[0].head.record.clone(),
+            seq: 3,
+            prev: Some(heads[1].head.digest()),
+        });
+        heads.push(again);
+        let reader = reader_through(&a, &heads);
+        let h = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
+        assert!(!h.coverage().through_head, "the head's term repeats term 1");
+        let rules = IncumbencyRules { max_cumulative_ms: Some(3 * DAY), ..IncumbencyRules::default() };
+        assert!(matches!(eligible_strict(&rules, &h, &pid("ada"), 5 * DAY).cumulative, Some(RuleVerdict::Unknown(_))),
+            "not 3 days from counting term 1 twice");
+    }
+
+    /// The second review of #543, Q4: when the reader has recorded the authority equivocating on the
+    /// stream, no branch is vouched for.
+    #[test]
+    fn a_forked_stream_vouches_for_nothing() {
+        let a = authority();
+        let (heads, records) = stream(&a, 1, 3, |_| "bo", None);
+        let mut reader = reader_through(&a, &heads);
+        let alt = signed(&a.sk, Head {
+            issuer: a.issuer.clone(),
+            stream: "appointments/curator".into(),
+            record: RecordId { issuer: a.issuer.clone(), digest: [0xF0; 32] },
+            seq: 3,
+            prev: Some(heads[1].head.digest()),
+        });
+        let _ = reader.offer(&alt, &heads, &a.members, &a.ext);
+        assert!(!reader.forks().is_empty(), "the reader recorded the fork");
+        let h = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
+        assert_eq!(h.coverage().continuous_suffix, 0);
+        assert!(!h.coverage().through_head);
+    }
+
+    /// The second review of #543, Q2: revoking the authority's old key does not end the role's history
+    /// (routine rotation never did — a retained key still verifies as current). Heads signed under the
+    /// revoked key, reached through `prev` digests the new key's heads committed to, still count; the
+    /// checkpoint head itself must be under a current key.
+    #[test]
+    fn a_revoked_old_key_does_not_end_the_history() {
+        let mut a = authority();
+        let old = a.sk.clone();
+        let new = SigningKey::from_bytes(&[13u8; 32]);
+        let n = NodeId::new("127.0.0.1", 7311).unwrap();
+        let (mut heads, mut records) = stream(&a, 1, 2, |_| "bo", Some(&old));
+        for k in 3..=4u64 {
+            let rec = RecordId { issuer: a.issuer.clone(), digest: [k as u8; 32] };
+            records.insert(rec.clone(), TermRecord { holder: pid("bo"), term: tid(k), started_ms: k * DAY, ended_ms: (k + 1) * DAY });
+            let h = Head { issuer: a.issuer.clone(), stream: "appointments/curator".into(), record: rec, seq: k, prev: Some(heads.last().unwrap().head.digest()) };
+            heads.push(signed(&new, h));
+        }
+        // The reader followed the stream while both keys were current; then the old key is revoked.
+        a.members.insert(n.clone(), MemberKeys { retained: vec![old.verifying_key().to_bytes(), new.verifying_key().to_bytes()], ..Default::default() });
+        let reader = reader_through(&a, &heads);
+        a.members.insert(n, MemberKeys {
+            retained: vec![old.verifying_key().to_bytes(), new.verifying_key().to_bytes()],
+            revoked: std::collections::HashSet::from([old.verifying_key().to_bytes()]),
+        });
+        let h = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
+        assert!(h.coverage().from_genesis && h.coverage().through_head, "{:?}", h.coverage());
+        assert_eq!(h.coverage().continuous_suffix, 4);
     }
 }

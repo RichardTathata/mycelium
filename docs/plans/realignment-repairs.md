@@ -355,3 +355,7 @@ Guide 21 and the handover design record say who establishes coverage (the source
   plan and its candidate record in `COMPATIBILITY.md`.
 - **The hypotheses.** Nothing here is evidence for lower coordination effort or better recovery; those remain the
   research track's.
+- **A current reader.** A3's history source decides as of **this node's reader's checkpoint**. A reader not yet
+  offered the authority's newest appointment decides on the head it holds — `Eligible` for a candidate whose
+  unseen term would make them ineligible (pinned in `the_head_is_the_readers_checkpoint_and_reading_does_not_move_it`).
+  Freshness is the reader's: how promptly gossip offers it new heads, which nothing here bounds.
