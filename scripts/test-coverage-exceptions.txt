@@ -1,0 +1,25 @@
+# Tests that legitimately never execute in CI — read by scripts/ci-test-coverage.py (verification policy
+# rule 3). One per line: '<key-glob> — <reason>'. An entry that matches no unexecuted test fails the job,
+# so this list cannot outlive what it excuses. Prefer making a test run to listing it here.
+
+# Loom's broken twins: each models the racy pattern and is *expected* to fail under loom — executable
+# proof the model checker catches the race. Their correct counterparts run in the loom job.
+rust tests/bounded_append.rs::bounded_append::append_borrow_then_send_LOSES_UPDATE — broken twin, fails by design under loom
+rust tests/once_guard.rs::once_guard::once_guard_load_then_store_RACES — broken twin, fails by design under loom
+rust tests/publish.rs::publish::publish_relaxed_MISSES_ORDERING — broken twin, fails by design under loom
+rust tests/unique_id.rs::unique_id::unique_id_load_then_store_COLLIDES — broken twin, fails by design under loom
+
+# Measurements and tools, not assertions about correctness.
+rust src/lib.rs::mycelium_core::store::tests::apply_and_notify_throughput_smoke — perf smoke, meaningful only under --release on quiet hardware
+rust src/lib.rs::mycelium_tuple_space::store::tests::wal_throughput_smoke — perf smoke, meaningful only under --release on quiet hardware
+rust src/lib.rs::mycelium::swim_oracle_tests::swim_scale_oracle — heavy scale harness (minutes of CPU), run by hand
+rust src/lib.rs::mycelium::lib_tests::probe_constructing_an_agent_takes_milliseconds_not_a_minute — a wall-clock probe of first-launch page-in, which depends on the volume, not the code
+rust src/lib.rs::mycelium_core::persistence::durability_tests::regenerate_golden_fixture_fixint_v1 — writes the checked-in fixture; running it in CI would rewrite what the replay test checks
+
+# Illustrative fragments in module docs (`rust,ignore`): they show registration order against an agent
+# the snippet does not construct.
+rust doc:mycelium_agentfacts::mycelium-agentfacts/src/http.rs - http (line 9) — illustrative fragment, not a program
+rust doc:mycelium_tuple_space::mycelium-tuple-space/src/http.rs - http (line 5) — illustrative fragment, not a program
+rust doc:mycelium::src/agent/rpc.rs - agent::rpc::RpcRequest::authority_lapsed (line 57) — illustrative fragment (`ignore`): a serve loop's select! against an agent the snippet does not build
+rust doc:mycelium::src/federation.rs - federation::TrustBundle::tls_pins_for (line 291) — illustrative fragment (`ignore`): one line of wiring
+rust doc:mycelium::src/federation/client.rs - federation::client::FederationClient::with_tls_pins (line 354) — illustrative fragment (`ignore`): one line of wiring

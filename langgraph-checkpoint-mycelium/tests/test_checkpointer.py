@@ -36,6 +36,11 @@ TEST_HOST = os.getenv("MYCELIUM_TEST_HOST", "127.0.0.1")
 TEST_PORT = os.getenv("MYCELIUM_TEST_PORT")
 TEST_PORT_B = os.getenv("MYCELIUM_TEST_PORT_B")
 
+# A live CI step sets MYCELIUM_REASON_LIVE_REQUIRED, so a step that lost its reason node fails here
+# instead of skipping green (verification policy rule 3).
+if os.getenv("MYCELIUM_REASON_LIVE_REQUIRED") and not (TEST_PORT and TEST_PORT_B):
+    raise RuntimeError("MYCELIUM_REASON_LIVE_REQUIRED is set but MYCELIUM_TEST_PORT or MYCELIUM_TEST_PORT_B is not: this live suite would skip")
+
 pytestmark = pytest.mark.skipif(
     TEST_PORT is None,
     reason="MYCELIUM_TEST_PORT not set — no reason node to test against",

@@ -511,9 +511,11 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 ## Running the tests
 
-Every test file except `tests/test_gateway.py` needs no node — they mock the transport:
-`pytest tests/ --ignore=tests/test_gateway.py -v`. The live suite, `tests/test_gateway.py`, needs a real
-node and fails without one; the recipe CI uses:
+`pytest tests/ -v` with no node configured runs the node-free tests (they mock the transport) and skips the
+live ones: the suites in `tests/live/` skip without `MYCELIUM_TEST_HOST`, and `test_reason.py` and
+`test_typed.py` without `MYCELIUM_TEST_PORT` (a reason node — CI sets `MYCELIUM_REASON_LIVE_REQUIRED` there so
+a lost port fails instead). The suites in `tests/live/` need a plain node; the recipe CI uses (`MYCELIUM_LIVE_REQUIRED=1` turns a missing node into an error rather than a run
+that skips everything):
 
 ```sh
 cargo build --bin mycelium
@@ -523,8 +525,12 @@ until curl -sf "http://127.0.0.1:9312/gateway/kv/keys?prefix=sys/caller-context/
 
 cd mycelium-py
 pip install -e ".[dev]"
-MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest tests/test_gateway.py -v
+MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest tests/live -v
 ```
+
+Run `tests/live` on its own. A whole-directory `pytest tests/` with `MYCELIUM_TEST_HOST` set also runs the
+reason suites (`test_reason.py`, `test_typed.py`), which read `MYCELIUM_TEST_PORT` for a **reason** node — point
+both variables at the node each suite expects, or run them separately.
 
 ## Gateway endpoint reference
 

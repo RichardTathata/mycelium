@@ -12,11 +12,16 @@
  *   MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=8300 npm test
  */
 
-import { MyceliumAgent } from "../src/agent";
+import { MyceliumAgent } from "../../src/agent";
 
 const TEST_HOST = process.env.MYCELIUM_TEST_HOST;
 const TEST_PORT = parseInt(process.env.MYCELIUM_TEST_PORT ?? "0", 10);
 
+// A live CI step sets MYCELIUM_LIVE_REQUIRED, so a step that forgot the node fails instead of
+// skipping every test and reporting green (verification policy rule 3).
+if (process.env.MYCELIUM_LIVE_REQUIRED && !TEST_HOST) {
+  throw new Error("MYCELIUM_LIVE_REQUIRED is set but MYCELIUM_TEST_HOST is not: the live suite would skip");
+}
 const describe_ = TEST_HOST ? describe : describe.skip;
 const it_ = TEST_HOST ? it : it.skip;
 

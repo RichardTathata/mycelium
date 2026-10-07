@@ -59,6 +59,28 @@ still accepts `"system"`); `system_stats()` is unrelated — node-local runtime 
 Private memory (`~/.claude/.../memory/`) holds user preferences and session state only —
 promote durable project knowledge to the wiki.
 
+## Verification policy (non-negotiable, adopted 2026-10-06)
+
+**Verify a change against the surface it touches, not against its own description.** Checks derived from
+a change's description only confirm what its author already thought of; the defects that survived green CI
+and repeated analysis runs sat at the edges — sibling functions, other doors, plan promises not in the PR,
+files missing from an allow-list ([verification-policy](docs/wiki/dev/testing/verification-policy.md) has
+the evidence).
+
+1. **Enumerate before fixing.** For any fix to an invariant, first list every entry point that reads or
+   writes the same thing — and the grep that found them — and test each one.
+2. **Plan rows close on evidence.** Closing a row means quoting each of its promises next to the code or
+   test that delivers it; an undelivered promise is written *not built*. Someone who did not write the PR
+   checks it.
+3. **CI collects tests by discovery, not a list.** Point runners at directories; live suites skip themselves
+   when no node is configured, except in the step that starts the node, which sets their `*_LIVE_REQUIRED`
+   guard. The CI job `test-coverage` (`scripts/ci-test-coverage.py`) fails on any test it knows of — from the
+   logs and the listed universe — that did not execute in the run; `scripts/check-test-inventory.py` is its fast
+   pre-push approximation and covers what the universe cannot list.
+4. **Independent adversarial review after each PR.** Before merge, an agent other than the author enumerates
+   the surfaces the change touches and tries to break them (`/adversarial-review`); its findings are fixed or
+   answered in the PR.
+
 ## Where to read what
 
 | For | Read |

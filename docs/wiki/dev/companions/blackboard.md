@@ -21,5 +21,5 @@ attributes** where the tuple space routes by lane position. WS-G G3, PRs #95–#
   snapshot-on-join + live replication keep the mirror complete.
 - **WAL:** magic `MBBWAL`; replay liveness = Posted-and-not-Acked.
 - **Gates:** `cargo test -p mycelium-blackboard --features gateway` (+ clippy); `microgrid`
-  example + CI smoke; cross-node `tests/failover.rs`; gateway `POST /gateway/bb/*` +
+  example + CI smoke; cross-node `tests/board_failover.rs`; gateway `POST /gateway/bb/*` +
   `GET /gateway/bb/depth`; py/ts SDKs.

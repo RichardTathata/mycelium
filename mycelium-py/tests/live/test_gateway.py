@@ -3,14 +3,14 @@ Integration tests for the mycelium-py HTTP gateway client.
 
 Requires a running Mycelium node with http_port configured.
 
-Run with:
-    # terminal 1 — start Mycelium node
-    MOCK_LLM=1 cargo run --example llm_agent
+Run with (CI's recipe; MYCELIUM_LIVE_REQUIRED makes a missing node an error, not an all-skipped run):
+    # terminal 1 — start a Mycelium node
+    GOSSIP_HTTP_PORT=9312 cargo run --bin mycelium -- --port 9302
 
-    # terminal 2 — run tests (connecting to n-0's HTTP port 8100)
+    # terminal 2
     cd mycelium-py
     pip install -e ".[dev]"
-    pytest tests/ -v -k gateway
+    MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest tests/live -v
 """
 
 import asyncio
@@ -18,6 +18,14 @@ import os
 import pytest
 
 from mycelium import MyceliumAgent, DemandStatus, RpcRequest, MailboxEvent
+
+# A live suite: it runs only when MYCELIUM_TEST_HOST names a node, and skips itself otherwise, so a
+# directory-wide `pytest mycelium-py/tests` collects it without a node (verification policy rule 3).
+# MYCELIUM_TEST_PORT alone is not enough — the reason suites use it for a different node.
+pytestmark = pytest.mark.skipif(
+    not os.getenv("MYCELIUM_TEST_HOST"),
+    reason="MYCELIUM_TEST_HOST not set — the live gateway suite needs a running node",
+)
 
 # Default to n-0's HTTP port; override with MYCELIUM_TEST_PORT env var.
 TEST_HOST = os.getenv("MYCELIUM_TEST_HOST", "127.0.0.1")

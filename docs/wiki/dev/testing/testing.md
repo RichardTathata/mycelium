@@ -1,7 +1,11 @@
 # dev/testing — conventions
 
 ↑ [dev/](../dev.md) · child pages: [scale-tests.md](scale-tests.md) ·
-[cluster-suites.md](cluster-suites.md)
+[cluster-suites.md](cluster-suites.md) · [verification-policy.md](verification-policy.md)
+
+**Read first: [verification-policy.md](verification-policy.md)** — a change is verified against the surface
+it touches, not its own description: enumerate every entry point before fixing, close plan rows on quoted
+evidence, CI discovers tests, an independent adversarial review before merge (adopted 2026-10-06).
 
 ## Run the full feature matrix before pushing
 
@@ -650,6 +654,16 @@ forces: per-agent with fresh ports when nodes join one at a time (the wasm-host 
 16-attempt loop), **per-pair** when mutual bootstrap fixes both ports before either agent
 starts (`start_pair()` in the wiki tests — shut the half-started survivor down before
 re-attempting, and shut a discarded `Wiki` down explicitly, the Run-32 task-leak lesson).
+
+
+**`--no-fail-fast` on the first pass (2026-10-07).** Without it cargo stopped at the first failing test binary,
+and the retry re-ran only the failed test — so one flake left every later binary in that step unexecuted while
+the step went green. The test-coverage job (verification policy rule 3) found it on its first real run:
+`mycelium-reason`'s `tests/ollama.rs` had not executed. `scripts/ci-retest.sh` passes `--no-fail-fast` now — and,
+because a binary that **crashes** (a signal, or an exit other than libtest's 101) prints no failure list, it
+fails the step on any such exit rather than retrying around it; a failed test's name is the whole line (a
+doctest's has spaces, and `$1` retried `src/lib.rs`, which ran nothing and passed as a flake); and a retry
+passes only if it ran a test. `scripts/test-ci-retest.sh` holds each case.
 
 ## A client deadline below the server's budget is a defect, not a flake
 

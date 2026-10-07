@@ -484,7 +484,7 @@ GOSSIP_HTTP_PORT=9311 cargo run --bin mycelium -- --port 9301
 
 cd mycelium-ts
 npm ci
-MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9311 npx jest tests/gateway.test.ts
+MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9311 npx jest tests/live
 ```
 
 ## Gateway endpoint reference

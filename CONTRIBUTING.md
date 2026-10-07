@@ -86,6 +86,14 @@ make test
 The integration suite requires Docker. The first run builds images from scratch;
 subsequent runs reuse the layer cache and are fast.
 
+### Verification policy
+
+A change is verified against the surface it touches, not its own description — four rules, with the
+evidence that produced them, in [`docs/wiki/dev/testing/verification-policy.md`](docs/wiki/dev/testing/verification-policy.md):
+enumerate every entry point to an invariant before fixing it; close a plan row only on quoted evidence;
+CI discovers tests rather than listing them; an independent adversarial review before merge. The PR
+template asks for each.
+
 ### Test conventions
 
 **Structural polling, not fixed sleeps.** Use `for _ in 0..40 { if condition { break; } sleep(50ms) }` rather than `sleep(500ms)`. A structural assertion fails deterministically and points to the root cause.
