@@ -203,11 +203,12 @@ at the limit behind a stale head is now `Unknown` — a later term breaks a run.
 owned namespace).** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and `POST /gateway/overlay/consistent/set`
 refuse every key in a namespace the substrate or a companion owns — `OWNED_KV_PREFIXES` in `src/agent/http.rs`,
 kept in step with `src/lib.rs`'s ownership table by `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`
-— **403** `protected_key`, naming the route that owns it; the checkpointer's `ckpt/`/`ckptw/` rows and an
-application's `agent/{node}/provision/…` report stay writable. Under `kv:write` they could publish a governance
+— **403** `protected_key`, naming the route that owns it where there is one; the checkpointer's `ckpt/`/`ckptw/`
+rows, the mesh manifest, the schema registry and an application's `agent/{node}/provision/…` report stay writable,
+and the log routes refuse streams under `cn/`, `wiki/` or `reason/`. Under `kv:write` they could publish a governance
 intent, rewrite a prompt template, enrol another node in a group, forge a capability, a requirement or a mailbox
 sender, plant the `sys/caller-context/` marker or delete an acceptor's ballot. The topology escape hatch moved to
-`POST /gateway/govern/topology-override` (`govern:write`, audited).
+`POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance`).
 [`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md).
 
 ## Threat model revision 3 draft — Boundary H (2026-09-23)

@@ -17,11 +17,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the rest of `src/lib.rs` § KV namespace ownership, each refusal naming the route that owns it. Under
   `kv:write` they could rewrite a prompt template (`llm:write`), enrol another node in a group (a node joins
   itself), forge a capability, a requirement or a mailbox sender, or append to a log (`consensus:write`). The
-  checkpointer's `ckpt/`/`ckptw/` rows and an application's `agent/{node}/provision/…` report stay writable. A
+  checkpointer's `ckpt/`/`ckptw/` rows, the mesh manifest (`manifest/`, application-owned), the schema registry
+  (`schemas/`, a non-Rust application's only door) and an application's `agent/{node}/provision/…` report stay
+  writable. The log routes (`append`, `compact`) refuse a stream under `cn/`, `wiki/` or `reason/` **403**
+  `protected_stream` — under `consensus:write` they could forge a reason trace or delete a commitment's offers. A
   test parses the ownership table, so a new namespace must be classified before it ships. **Upgrade note:** a
   client writing an owned namespace through the KV routes uses its route (`deprecations.md` §19).
 - **The topology override has a governance route.** `POST /gateway/govern/topology-override {"group", "override"}`
-  (`govern:write`, audited) sets or releases `sys/topology-override/{group}`; it was an unaudited `kv:write`
+  (`govern:write`, audited in a `compliance` build) sets or releases `sys/topology-override/{group}`; it was an unaudited `kv:write`
   write, the one owned key 2.26.0 still let through.
 
 ## [2.26.0] — 2026-10-07

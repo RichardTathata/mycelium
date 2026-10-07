@@ -2834,15 +2834,30 @@ async fn gw_kv_set(
 /// of #544; the kv:write decision of 2026-10-07). `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes`
 /// keeps this in step with the table.
 pub(crate) const OWNED_KV_PREFIXES: &[&str] = &[
-    "sys/", "consensus/", "grp/", "audit/", "cap/", "req/", "cap-group/", "gcap/", "mailbox/", "schemas/", "tools/",
+    "sys/", "consensus/", "grp/", "audit/", "cap/", "req/", "cap-group/", "gcap/", "mailbox/", "tools/",
     "agent/", "svc/", "log/", "clog/", "lock/", "prompts/", "skills/", "installable/", "comp/", "wiki/", "tuple/",
-    "facts/", "mandate/", "knowledge/", "rights/", "cn/", "manifest/",
+    "facts/", "mandate/", "knowledge/", "rights/", "cn/",
 ];
 
 /// Namespaces the table assigns to an application writing through the gateway's KV routes — the LangGraph
-/// checkpointer's index rows. (`agent/{node}/provision/{item}/error`, an application's provisioning report,
-/// is the one owned-namespace subtree the raw routes also accept.)
-pub(crate) const APPLICATION_KV_PREFIXES: &[&str] = &["ckpt/", "ckptw/"];
+/// checkpointer's index rows, the mesh manifest (application-owned, `mesh_manifest.rs`) and the schema
+/// registry (`publish_schema` from Rust; this is a non-Rust application's door). (`agent/{node}/provision/{item}/error`,
+/// an application's provisioning report, is the one owned-namespace subtree the raw routes also accept.)
+pub(crate) const APPLICATION_KV_PREFIXES: &[&str] = &["ckpt/", "ckptw/", "manifest/", "schemas/"];
+
+/// Streams under `log/` that a substrate component or companion owns: the commitment net's records, a wiki's
+/// durable proposals, `mycelium-reason`'s traces. The log routes take a stream name, so without this they
+/// reach those as well (the review of #549).
+pub(crate) const OWNED_LOG_STREAMS: &[&str] = &["cn/", "wiki/", "reason/"];
+
+fn refuse_owned_stream(stream: &str) -> Option<axum::response::Response> {
+    let owned = OWNED_LOG_STREAMS.iter().any(|p| stream.starts_with(p) || stream == p.trim_end_matches('/'));
+    owned.then(|| (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "protected_stream",
+            "message": "this log stream belongs to a component (commitment, wiki, reason) and is written through it" })),
+    ).into_response())
+}
 
 /// Whether the raw KV routes write `key`: an application key, not one the substrate or a companion owns.
 pub(crate) fn raw_kv_writable(key: &str) -> bool {
@@ -2871,15 +2886,23 @@ fn refuse_protected_key(key: &str) -> Option<axum::response::Response> {
     let door = if key.starts_with("sys/govern/") {
         "governance intents are published through /gateway/govern/{tuning,timing,membership} (govern:write)"
     } else if key.starts_with("sys/topology-override/") {
-        "the topology override is set through POST /gateway/govern/topology-override (govern:write, audited)"
+        "the topology override is set through POST /gateway/govern/topology-override (govern:write)"
     } else if key.starts_with("grp/") {
         "a node joins a group itself: POST /gateway/mesh/group on that node (mesh:write)"
     } else if key.starts_with("prompts/") {
         "prompt templates are written through /gateway/prompts/{ns}/{name} (llm:write)"
     } else if key.starts_with("log/") || key.starts_with("clog/") {
         "logs are appended through /gateway/overlay/log/append (consensus:write)"
-    } else if key.starts_with("cap/") || key.starts_with("req/") {
-        "capabilities and requirements are advertised through /gateway/capability/* (cap:write)"
+    } else if key.starts_with("cap/") {
+        "capabilities are advertised through /gateway/capability/advertise (cap:write)"
+    } else if key.starts_with("req/") {
+        "requirements are declared through POST /gateway/units/declare (cap:write)"
+    } else if key.starts_with("mailbox/") {
+        "mailbox entries are delivered through POST /gateway/mailbox/deliver (mesh:write), which records the sender"
+    } else if key.starts_with("installable/") {
+        "catalogue lines are published through POST /gateway/artifacts/publish (artifact:publish), signature-checked"
+    } else if key.starts_with("lock/") {
+        "locks are taken through /gateway/overlay/lock/acquire (consensus:write)"
     } else {
         "this namespace is written by the substrate or the companion that owns it, not through the KV routes \
          (src/lib.rs § KV namespace ownership); the KV routes write application keys"
@@ -3749,6 +3772,9 @@ async fn gw_overlay_log_append(
     Json(body):  Json<LogAppendBody>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    if let Some(refused) = refuse_owned_stream(&body.stream) {
+        return refused;
+    }
     let value = if let Some(b64) = body.value_b64.as_deref() {
         match base64::engine::general_purpose::STANDARD.decode(b64) {
             Ok(v)  => Bytes::from(v),
@@ -3816,6 +3842,9 @@ async fn gw_overlay_log_compact(
     State(ctx): State<Arc<HttpCtx>>,
     Json(body):  Json<LogCompactBody>,
 ) -> impl IntoResponse {
+    if let Some(refused) = refuse_owned_stream(&body.stream) {
+        return refused;
+    }
     let prefix = format!("log/{}/", body.stream);
     for (k, _) in crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, &prefix) {
         let suffix = k.strip_prefix(&prefix).unwrap_or("");
@@ -4688,8 +4717,7 @@ mod tests {
             }
             let prefix = format!("{top}/");
             seen += 1;
-            assert!(super::OWNED_KV_PREFIXES.contains(&prefix.as_str()) || super::APPLICATION_KV_PREFIXES.contains(&prefix.as_str())
-                    || prefix == "agent/",
+            assert!(super::OWNED_KV_PREFIXES.contains(&prefix.as_str()) || super::APPLICATION_KV_PREFIXES.contains(&prefix.as_str()),
                 "namespace {prefix} in src/lib.rs is neither owned nor an application namespace for the raw KV routes");
         }
         assert!(seen > 20, "the table was read ({seen} rows)");
@@ -4790,8 +4818,8 @@ mod tests {
         // topology escape hatch included, which now has an audited governance route.
         for key in ["sys/topology-override/workers", "grp/workers/10.0.0.5:9000", "prompts/ns/name", "log/s/0001",
                     "cap/10.0.0.5:9000/demo/echo", "req/n/demo/echo", "mailbox/n/kind/01", "installable/ns/n/ab",
-                    "tools/t/n", "skills/ns/n/node/input", "agent/n/task/1/turn", "lock/l", "svc/k/n", "manifest/current",
-                    "wiki/g/proposal/1", "tuple/inflight/ns/1", "facts/n/f", "schemas/s", "cn/r", "mandate/m",
+                    "tools/t/n", "skills/ns/n/node/input", "agent/n/task/1/turn", "lock/l", "svc/k/n",
+                    "wiki/g/proposal/1", "tuple/inflight/ns/1", "facts/n/f", "cn/r", "mandate/m",
                     "knowledge/head/i/s", "rights/head/h", "clog/x", "comp/n/ns/k", "gcap/g/ns/n/c", "cap-group/g", "audit/1/n"] {
             let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": base64::engine::general_purpose::STANDARD.encode(b"true")})).send().await.unwrap();
             assert_eq!(r.status(), 403, "POST {key}");
@@ -4801,9 +4829,26 @@ mod tests {
         }
         // The application namespaces the table names stay writable: the checkpointer's rows, and an
         // application's provisioning error report.
-        for key in ["ckpt/t/ns/1", "ckptw/t/ns/1/task/0", "agent/n/provision/item/error", "orders/42"] {
+        // `manifest/` and `schemas/` are application-written by design (src/lib.rs; mesh_manifest.rs) and have
+        // no gateway route of their own — the review of #549.
+        for key in ["ckpt/t/ns/1", "ckptw/t/ns/1/task/0", "agent/n/provision/item/error", "orders/42",
+                    "manifest/current", "manifest/control/system", "schemas/s"] {
             let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": ""})).send().await.unwrap();
             assert_eq!(r.status(), 200, "POST {key}");
+        }
+        // The log door names the stream; it must not reach a stream another owner keeps under `log/` — a
+        // commitment's offers, a wiki's durable proposals, a reason trace (the review of #549).
+        #[cfg(feature = "consensus")]
+        {
+            let ov = format!("http://127.0.0.1:{http_port}/gateway/overlay/log");
+            for stream in ["cn/req-1/offers", "wiki/g/proposals", "reason/run-1/n"] {
+                let r = client.post(format!("{ov}/append")).json(&serde_json::json!({"stream": stream, "value_b64": ""})).send().await.unwrap();
+                assert_eq!(r.status(), 403, "append to {stream}");
+                let r = client.post(format!("{ov}/compact")).json(&serde_json::json!({"stream": stream, "before_hlc": u64::MAX})).send().await.unwrap();
+                assert_eq!(r.status(), 403, "compact {stream}");
+            }
+            let r = client.post(format!("{ov}/append")).json(&serde_json::json!({"stream": "events", "value_b64": ""})).send().await.unwrap();
+            assert_eq!(r.status(), 200, "an application stream");
         }
         // The override's own door: govern:write, audited; `true` engages it, `false` tombstones it.
         let over = format!("http://127.0.0.1:{http_port}/gateway/govern/topology-override");

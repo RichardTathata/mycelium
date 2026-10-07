@@ -94,7 +94,7 @@
 //! | `sys/load/{node}/req/{ns}/{name}`   | Phase 3 requirement opacity (composes via `is_self_opaque`)  |
 //! | `sys/load/{node}/group-req/{g}/{i}` | Group-requirement opacity; written by the emergent-group membership task when a `CapabilityGroupDef::requires` filter is unsatisfied |
 //! | `sys/quorum/{kind}/{sender}`        | Persistent quorum evidence                                   |
-//! | `sys/topology-override/{group}`     | Consensus — operator escape hatch (value: `b"true"`); written through `POST /gateway/govern/topology-override` (`govern:write`, audited) |
+//! | `sys/topology-override/{group}`     | Consensus — operator escape hatch (value: `b"true"`); written through `POST /gateway/govern/topology-override` (`govern:write`; audited with `compliance`) |
 //! | `sys/health/{node}`                 | Emergent detectors (Phase 2) — periodic store self-report feeding cross-node store-convergence |
 //! | `sys/rate/{observer}/{sender}`      | Distributed rate observation (WS-C M7) — per-observer rate evidence, fps as ASCII u64, short-TTL |
 //! | `sys/role/{node}`                   | RBAC — signature-verified role claim (checked against `sys/identity/{node}` at read) |
