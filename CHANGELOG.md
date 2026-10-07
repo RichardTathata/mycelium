@@ -21,6 +21,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files ran in no step; they run now. The PR template, `RELEASING.md` § 5b and `/adversarial-review` carry
   the rules.
 
+### Documentation
+- **Doc-coverage run 20** (`docs/analysis/doc-coverage.md`): the realignment repairs' operator and developer
+  landings — persistence start refusals with their messages and actions, every `start()` refusal by field, the
+  live timing tunables and their route, the object-store endpoint rule, the discovered-JWKS case in SSO, the
+  SDK quick starts that subscribed after emitting, a configuration-ownership row; six code gaps recorded.
+- **Correction to 2.24.0's Documentation entry:** it said the guarantee, domain and control profiles were told
+  apart. What shipped named the guarantee (startup), control and consensus profiles; the **domain profile**
+  joins the table in run 20, which now names four things called *profile*.
+
 ### Fixed
 - **Why a checkpoint blob is missing stays distinguishable** (`docs/plans/realignment-repairs.md` S5 — the half
   2.24.0 did not build: *"absence, temporary unavailability, authorization refusal and corrupt content stay
@@ -53,16 +62,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkpointer reads only 404 as a missing blob, so a 503 or a 502 from a 0.7.0 node escapes its retry loop as an
   `httpx.HTTPStatusError`. `mycelium-py`'s `ReasonClient.blob_get` returns `None` only for 404 and raises for
   502/503, whose body names the reason.
-
-### Documentation
-- **Doc-coverage run 20** (`docs/analysis/doc-coverage.md`): the realignment repairs' operator and developer
-  landings — persistence start refusals with their messages and actions, every `start()` refusal by field, the
-  live timing tunables and their route, the object-store endpoint rule, the discovered-JWKS case in SSO, the
-  SDK quick starts that subscribed after emitting, a configuration-ownership row; six code gaps recorded.
-- **Correction to 2.24.0's Documentation entry:** it said the guarantee, domain and control profiles were told
-  apart. What shipped named the guarantee (startup), control and consensus profiles; the **domain profile**
-  joins the table in run 20, which now names four things called *profile*.
-### Fixed
 - **The CI flake tier (`scripts/ci-retest.sh`) passed steps that had not run their tests.** Without
   `--no-fail-fast`, a flake in one test binary stopped cargo before later binaries and the isolated retry ran
   only the flaked test — the step went green with them unexecuted (the test-coverage job's first run:
