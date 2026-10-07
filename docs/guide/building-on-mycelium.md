@@ -24,15 +24,15 @@ The supported path here is a **pinned git tag**. [Installation and integration m
 
 ```toml
 # Full runtime (KV + signals + consensus + capabilities + gateway/MCP/A2A + TLS).
-mycelium = { git = "https://github.com/RichardTathata/mycelium", tag = "v2.25.0" }
+mycelium = { git = "https://github.com/RichardTathata/mycelium", tag = "v2.26.0" }
 
 # Or the minimal substrate — Layers I+II only, ~⅓ the dep tree, no Axum:
-mycelium-core = { git = "https://github.com/RichardTathata/mycelium", tag = "v2.25.0" }
+mycelium-core = { git = "https://github.com/RichardTathata/mycelium", tag = "v2.26.0" }
 
 # Companion crates — independent version lines, same repo (a git dep on a
 # companion resolves the workspace-internal `mycelium` automatically):
 mycelium-guardrails = { git = "https://github.com/RichardTathata/mycelium", tag = "mycelium-guardrails-v1.0.0" }
-mycelium-reason     = { git = "https://github.com/RichardTathata/mycelium", tag = "mycelium-reason-v0.6.2", features = ["llm", "gateway"] }
+mycelium-reason     = { git = "https://github.com/RichardTathata/mycelium", tag = "mycelium-reason-v0.7.0", features = ["llm", "gateway"] }
 ```
 
 > **Why git, not `cargo add mycelium`.** The `mycelium`/`mycelium-core` names on
