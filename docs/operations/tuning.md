@@ -139,20 +139,22 @@ accepts the POST and it gossips to converge — no elected/active endpoint, no f
 | `POST /gateway/govern/timing` | `govern:write` | `{"health_check_interval_secs"?, "reconnect_backoff_secs"?, "target":NodeId?}` (`0`/absent = leave that setting as it is — a value an earlier intent applied stays while any fresh intent stands, and reverts only when none does) → publishes a `TimingIntent`; a node that pinned its timing locally ignores it. Refused **400** (2.26.0; before, each was published and answered `published: true`): a value above 3600 / 300, a field that is not a non-negative integer, a body that is not an object or names an unknown field, an intent that governs neither setting, and a `target` that is not a node id (it was read as *no target* — the whole fleet). To release governance, stop publishing: an intent lapses after its 30 s lease. The KV doors (`/gateway/kv`, `/gateway/kv/quorum`, `/gateway/overlay/consistent/set`) refuse every key in a namespace the substrate or a companion owns **403** `protected_key` (2.27.0; `sys/` and `consensus/` since 2.26.0), the topology override included — it has its own route below — an intent goes through its `govern:write` route. **Not claimed:** a peer writing `sys/govern/…` through Layer I is accepted (detection, not prevention), and the intent's `written_at_ms` is the writer's — a future stamp keeps it fresh until a newer intent replaces it |
 | `POST /gateway/govern/membership` | `govern:write` | `{"group", "min", "max"?, "drain":[NodeId]?, "target":NodeId?}` → publishes a `MembershipIntent` to `sys/govern/membership/{group}`. **400** (2.26.0) for a missing or non-integer `min`, a non-integer `max`, an unknown field, or a `target` that is not a node-id string |
 | `POST /gateway/govern/topology-override` | `govern:write` | `{"group", "override": bool}` → `true` writes `sys/topology-override/{group}` = `true`, relaxing the group's Hard topology gate; `false` tombstones it. Audited in a `compliance` build with `[tls]` configured. **400** for a missing or `/`-bearing group, a non-boolean `override`, or an unknown field (2.27.0; before, the escape hatch was an unaudited raw `kv:write`) |
-| `POST /gateway/govern/profile` | `govern:write` | `{"profile": "legacy"\|"observe"\|"enforce-local"\|"enforce-allocated"}` → steps **this** node's control profile ([control-profiles.md](control-profiles.md)); an unknown name is **400**. Other fields — `target` included — are ignored, not refused, and the step is not audited |
+| `POST /gateway/govern/profile` | `govern:write` | `{"profile": "legacy"\|"observe"\|"enforce-local"\|"enforce-allocated"}` → steps **this** node's control profile ([control-profiles.md](control-profiles.md)); an unknown name is **400**, as is a non-object body or any other field (`target` included — 2.27.0; before, it was dropped and the step applied here). Audited like the others |
 | `GET /gateway/govern` | `govern:read` | this node's **effective** tuning-governor snapshot (reconciled local pins + fleet intent) |
 
 - **Per-node control without per-node HTTP:** set `target: <NodeId>` on a tuning, timing or membership intent and POST
   it to *any* gateway node — it gossips to everyone (including headless nodes) and only the
   named node applies it (with local veto). Never reach a node's own HTTP for this. (`/govern/profile`
-  takes no `target`: it steps the node that answers.)
+  takes no `target` — it refuses one, 400 — and steps the node that answers.)
 - **Scopes are deny-by-default** (`compliance`): `govern:read` / `govern:write` must be granted
   via `gateway_scoped_tokens` (or OIDC group mapping); an unmapped token is 401, an
   insufficient one 403.
-- **Provenance:** in a `compliance` build with `[tls]` configured, the tuning, timing, membership and
-  topology-override POSTs are sealed into the WS2 tamper-evident audit trail (`/govern/profile` is not
-  recorded, and a node without `[tls]` records nothing)
-  (`action = Admin`, principal `gateway/govern`), queryable + verifiable at `GET /gateway/audit`.
+- **Provenance:** in a `compliance` build with `[tls]` configured, every governance POST — tuning, timing,
+  membership, profile, topology-override, and `POST /gateway/identity/revoke` — is sealed into the WS2
+  tamper-evident audit trail (`action = Admin`, principal `gateway/govern`), queryable + verifiable at
+  `GET /gateway/audit`. One that leaves no record — no `compliance`, or no `[tls]` identity to seal with (warned) —
+  is counted: `/stats` `governance_unaudited` beside `governance_changes` (2.27.0). Alert on it where the audit
+  trail is a control.
 - **Observability:** per-node Prometheus gauges (`mycelium_governor_auto_enabled`,
   `mycelium_governor_{floor,ceiling,ratchet,locally_pinned}{param=…}`) report **effective**
   state on `/metrics` (`metrics` feature; ceiling `-1` = unbounded, floor `0` = no floor). The
