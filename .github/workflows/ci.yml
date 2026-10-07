@@ -174,6 +174,7 @@ jobs:
       # mutation suite: each bypass an adversarial review found must fail it.
       - run: ./scripts/with-pyyaml.sh scripts/check-test-inventory.py
       - run: ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py
+      - run: python3 scripts/test-ci-test-coverage.py
       # Closure plan C11: no new unclassified read of Hlc::current(), which stands still on a quiet
       # node and fails a deadline check open.
       - run: ./scripts/check-hlc-current.sh
@@ -668,7 +669,7 @@ jobs:
           cache-dependency-path: mycelium-ts/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
-      - run: npx jest
+      - run: npx jest --verbose   # --verbose: each test's ✓/○ line, which the test-coverage job reads
       # The live suite against a real node (realignment repairs S4). It skips itself without
       # MYCELIUM_TEST_HOST, which nothing here set until 2026-10-05 — so it never ran in CI, and
       # run by hand it failed 9 of its 19 assertions against the gateway it was written for.
@@ -698,7 +699,7 @@ jobs:
       - name: Live suite
         # The live directory, not a file (verification policy rule 3); MYCELIUM_LIVE_REQUIRED fails the
         # step if the node variable is missing rather than letting every live test skip green.
-        run: npx jest tests/live
+        run: npx jest --verbose tests/live
         env:
           MYCELIUM_LIVE_REQUIRED: "1"
           MYCELIUM_TEST_HOST: 127.0.0.1
@@ -770,3 +771,51 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - run: RUSTFLAGS="--cfg loom" cargo test -p loom-spike --release
+
+  test-universe:
+    # Verification policy rule 3, the universe half: every test the compiler and the runners know of,
+    # including ones gated on a feature no other step enables. `cargo test --all-features -- --list`
+    # builds every crate's every test target with all its features and lists without running; the
+    # no-default-features build lists what `not(feature = …)` gates hide from it. The marker lines bracket
+    # what the test-coverage job reads as listed rather than executed.
+    name: Test universe (listed, not run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
+      - name: List every test
+        run: |
+          echo "@@test-universe@@ begin"
+          cargo test --workspace --all-features --no-fail-fast -- --list
+          cargo test -p mycelium --no-default-features --lib -- --list
+          cargo test -p mycelium-core --no-default-features --lib -- --list
+          pytest --collect-only -q langgraph-checkpoint-mycelium/tests mycelium-py/tests
+          echo "@@test-universe@@ end"
+
+  test-coverage:
+    # Verification policy rule 3, observed: fails unless every test in the universe EXECUTED (passed or
+    # failed — not skipped, ignored, filtered out, or in a step that did not run) in some job of this run.
+    # It reads the jobs' own logs, so it needs every job that runs tests; a job it does not wait for and
+    # finds unfinished fails it (add the job to `needs`). Exceptions, each with a reason:
+    # scripts/test-coverage-exceptions.txt. The static scripts/check-test-inventory.py is the fast
+    # pre-push approximation of this.
+    name: Test coverage (observed)
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test, embedded, wasm-host, agentfacts, blackboard, effects, commitment, wiki, reason, guardrails,
+            python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy, audit,
+            test-universe]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/ci-test-coverage.py --fetch "$RUNNER_TEMP/job-logs"
+        env:
+          GH_TOKEN: ${{ github.token }}
+

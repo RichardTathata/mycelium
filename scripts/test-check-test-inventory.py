@@ -92,7 +92,7 @@ MUTATIONS = {
     # live suites
     "python live step removed": regex(CI, r"^.*pytest mycelium-py/tests/live.*\n", ""),
     "python live step without the guard": edit(CI, "MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST", "MYCELIUM_TEST_HOST"),
-    "jest live step replaced": regex(CI, r"npx jest tests/live", "echo jest"),
+    "jest live step replaced": regex(CI, r"npx jest --verbose tests/live", "echo jest"),
     "reason-node guard dropped": regex(CI, r'^\s*MYCELIUM_REASON_LIVE_REQUIRED: "1"\n', ""),
     "a live python file without a guard": write("mycelium-py/tests/test_new_live.py",
         'import os, pytest\npytestmark = pytest.mark.skipif(os.getenv("MYCELIUM_TEST_PORT") is None, reason="x")\n'
@@ -103,12 +103,72 @@ MUTATIONS = {
                                        "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v --ignore mycelium-py/tests"),
     "pytest -k filter": edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v",
                              "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v -k crud"),
-    "jest with a path filter": regex(CI, r"npx jest\s*$", "npx jest agent"),
+    "jest with a path filter": regex(CI, r"npx jest --verbose\s", "npx jest --verbose agent "),
     # fuzz
     "a fuzz target not run": regex(CI, r"^.*fuzz run .* fixint_decode .*\n", ""),
     # integration tests
     "integration tests by one name": edit(CI, "cargo test --features tls,a2a --test '*'",
                                           "cargo test --features tls,a2a --test proptest_tests"),
+}
+
+LIB_TESTS = "src/lib_tests.rs"
+CORE_TLS = "./scripts/ci-retest.sh -p mycelium-core --features tls"
+
+
+def append(path, text):
+    def apply(d):
+        open(os.path.join(d, path), "a").write(text)
+    return apply
+
+
+# The third review's bypasses: each must produce the named key (a substring of the reported line).
+EXPECT = {
+    "cfg below #[test]": (append(LIB_TESTS, '\n#[test]\n#[cfg(not(feature = "gateway"))]\nfn zz_probe() {}\n'),
+                          "src/lib_tests.rs  (needs without gateway"),
+    "two stacked cfgs on a test mod": (append(LIB_TESTS, '\n#[cfg(test)]\n#[cfg(not(feature = "gateway"))]\nmod zzm {\n    #[test]\n    fn a() {}\n}\n'),
+                                       "src/lib_tests.rs  (needs without gateway"),
+    "an attribute between a test mod's cfg and the mod": (
+        append(LIB_TESTS, '\n#[cfg(all(test, not(feature = "gateway")))]\n#[allow(clippy::unwrap_used)]\nmod zzm2 {\n    #[test]\n    fn a() {}\n}\n'),
+        "src/lib_tests.rs  (needs without gateway"),
+    "a gate inside a gated inline mod composes": (
+        append("mycelium-core/src/hlc.rs", '\n#[cfg(all(test, feature = "sim"))]\nmod zzc {\n    #[cfg(feature = "tls")]\n    #[test]\n    fn a() {}\n}\n'),
+        "mycelium-core/src/hlc.rs  (needs features sim,tls"),
+    "a string holding /* before a real comment": (
+        append("mycelium-core/src/hlc.rs", '\nconst ZZ: &str = "sys/*";\n#[cfg(loom)]\n#[test]\nfn zz() {}\n/* end */\n'),
+        "mycelium-core/src/hlc.rs  (needs RUSTFLAGS --cfg loom"),
+    "an integration test's submodule": (append("mycelium-reason/tests/common/mod.rs", "\n#[cfg(loom)]\n#[test]\nfn zz() {}\n"),
+                                        "integration mycelium-reason::gateway  (needs features gateway,llm; RUSTFLAGS --cfg loom"),
+    "a file reached only by include!": (both(write("src/zz_inc.rs", "#[test]\nfn zz() {}\n"),
+                                             append(LIB_TESTS, '\nmod zz_holder { include!("zz_inc.rs"); }\n')),
+                                        "unreached mycelium::src/zz_inc.rs"),
+    "a step only on schedule": (regex(CI, r"^(\s*)- run: " + re.escape(CORE_TLS),
+                                      r"\1- if: github.event_name == 'schedule'\n\1  run: " + CORE_TLS),
+                                "mycelium-core/src/erasure.rs"),
+    "a job only on schedule": (edit(CI, "    name: Loom (concurrency model-check)\n",
+                                    "    name: Loom (concurrency model-check)\n    if: github.event_name == 'schedule'\n"),
+                               "loom-spike"),
+    "continue-on-error as a string": (regex(CI, r"^(\s*)- run: " + re.escape(CORE_TLS),
+                                            r"\1- continue-on-error: 'true'\n\1  run: " + CORE_TLS),
+                                      "mycelium-core/src/erasure.rs"),
+    "a failure swallowed by || true": (edit(CI, CORE_TLS + "\n", CORE_TLS + " || true\n"), "mycelium-core/src/erasure.rs"),
+    "a run inside a shell if": (regex(CI, r"^(\s*)- run: " + re.escape(CORE_TLS),
+                                      r"\1- run: |\n\1    if [ -n \"$NEVER\" ]; then\n\1      " + CORE_TLS + r"\n\1    fi"),
+                                "mycelium-core/src/erasure.rs"),
+    "a run after exit 0": (regex(CI, r"^(\s*)- run: " + re.escape(CORE_TLS), r"\1- run: |\n\1    exit 0\n\1    " + CORE_TLS),
+                           "mycelium-core/src/erasure.rs"),
+    "a bin gains required-features": (edit("Cargo.toml", 'path = "src/bin/skillrunner/main.rs"\n',
+                                           'path = "src/bin/skillrunner/main.rs"\nrequired-features = ["llm"]\n'),
+                                      "bin mycelium::src/bin/skillrunner"),
+    "[lib] test = false": (append("mycelium-commitment/Cargo.toml", "\n[lib]\ntest = false\n"), "lib mycelium-commitment"),
+    "a bin filter that matches no test path": (edit(CI, "cargo test --features tls,a2a --bins", "cargo test --features tls,a2a --bins skillrunner"),
+                                               "bin mycelium::src/bin/skillrunner"),
+    "pytest --collect-only": (edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v",
+                                   "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v --co"),
+                              "python langgraph-checkpoint-mycelium/tests/"),
+    "jest --listTests": (regex(CI, r"npx jest --verbose\s", "npx jest --verbose --listTests "), "typescript mycelium-ts/tests/"),
+    "npm test narrowed in package.json": (both(regex(CI, r"npx jest --verbose\s", "npm test "),
+                                               edit("mycelium-ts/package.json", '"test": "jest"', '"test": "jest tests/live"')),
+                                          "typescript mycelium-ts/tests/artifacts.test.ts"),
 }
 
 
@@ -133,23 +193,25 @@ def main() -> int:
             print("control: the unmutated tree fails the check")
             return 1
         print("control: ok")
-        for name, mutate in MUTATIONS.items():
+        cases = {n: (m, None) for n, m in MUTATIONS.items()} | EXPECT
+        for name, (mutate, expect) in cases.items():
             d = os.path.join(base, "m")
             shutil.copytree(pristine, d, symlinks=True)
-            try:
-                mutate(d)
-                missing = inv.check(d, os.path.join(d, ".github", "workflows"))
-            finally:
-                pass
-            verdict = "caught" if missing else "MISSED"
-            print(f"{verdict:7} {name}" + (f"  ({missing[0][:90]})" if missing else ""))
-            if not missing:
+            mutate(d)
+            missing = inv.check(d, os.path.join(d, ".github", "workflows"))
+            ok = bool(missing) and (expect is None or any(expect in m for m in missing))
+            verdict = "caught" if ok else ("WRONG" if missing else "MISSED")
+            shown = next((m for m in missing if expect and expect in m), missing[0] if missing else "")
+            print(f"{verdict:7} {name}" + (f"  ({shown[:100]})" if missing else ""))
+            if not ok:
                 failures.append(name)
+                if missing and expect:
+                    print(f"        expected a line containing {expect!r}; got {missing[:3]}")
             shutil.rmtree(d)
     if failures:
         print(f"{len(failures)} mutation(s) the inventory check did not catch")
         return 1
-    print(f"all {len(MUTATIONS)} mutations caught")
+    print(f"all {len(MUTATIONS) + len(EXPECT)} mutations caught")
     return 0
 
 

@@ -29,3 +29,11 @@ switched to discovery; the live suites moved to `tests/live/`, run as directorie
   suites with no guard) run in CI now, and the reviewer's bypasses are a mutation suite the check runs against
   itself (`scripts/test-check-test-inventory.py`, 28 mutations). A checker is a claim too: it gets a test that
   fails when the checker is wrong.
+- **The third review ended the treadmill (2026-10-07).** About 40 more bypasses — a cfg below `#[test]`, an
+  attribute between a test module's cfg and the `mod`, `if:` expressions, `|| true`, a `#[path]` module's
+  name filter — showed that no static scan of Rust source and shell can be complete. Rule 3's record is now
+  **observed**: a CI job reads the run's own logs and fails on any known test that did not execute, against a
+  universe the compiler lists under `--all-features`. The static check stays, fixed for the round's cheap
+  items and mutation-tested, as the seconds-fast pre-push approximation. The lesson generalises the earlier
+  one: when a check keeps being bypassed, stop modelling the system and observe it.
+

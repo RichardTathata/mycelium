@@ -47,8 +47,19 @@ an auditor enumerated surfaces from the code instead of the description:
 - `CLAUDE.md` § Verification policy — every session reads it.
 - `.github/pull_request_template.md` — the enumeration, the plan-row evidence and the review link are fields.
 - `RELEASING.md` § 5b — no release while a delivery row marked merged lacks its evidence.
-- `scripts/check-test-inventory.py` (in `make check` and CI, through `scripts/with-pyyaml.sh`) — rule 3 checked
-  **positively**. It inventories every test *requirement*: per crate, the library's, each integration test's,
+- **The record: the `test-coverage` CI job** (`scripts/ci-test-coverage.py`). After every test job finishes,
+  it reads this run's own job logs and fails unless every test known to CI **executed** — passed or failed;
+  not skipped, ignored, filtered out, or in a step that did not run. Known means seen in any log (including
+  as skipped or ignored) or listed by the `test-universe` job (`cargo test --workspace --all-features --
+  --list`, the no-default-features builds, `pytest --collect-only`). A job it does not wait for and finds
+  unfinished fails it, so a new test job must join its `needs`. Tests that never run in CI by design — loom's
+  broken twins, perf smokes, the fixture regenerator, illustrative doc fragments — are listed with a reason
+  in `scripts/test-coverage-exceptions.txt`, and an exception that matches nothing fails too. Against
+  `main`'s last run (2026-10-06): 1,792 tests known, 1,781 executed, the 11 others exactly those exceptions.
+  Its parser has a self-test (`scripts/test-ci-test-coverage.py`). This is the answer to three rounds of
+  review finding ways around a static check: observing what ran needs no model of cfg, shell or YAML.
+- `scripts/check-test-inventory.py` (in `make check` and CI, through `scripts/with-pyyaml.sh`) — the fast,
+  **approximate** pre-push half: rule 3 checked positively from source and workflow text. It inventories every test *requirement*: per crate, the library's, each integration test's,
   each binary's and the doctests' test code under every distinct `cfg` gate (a file's `#![cfg]`, the gate on the
   `mod` that declares it, `#[cfg(all(test, feature = …))]` on a module, `#[cfg]` on a test function,
   `required-features`) — resolved to features to enable, features to leave off, and bare cfgs `RUSTFLAGS` must
@@ -58,11 +69,15 @@ an auditor enumerated surfaces from the code instead of the description:
   command is not `--no-run`, `-- --list`, `-- --ignored`, or filtered past the gate (a name filter counts only if
   it provably selects the whole gate — the module's path or the one gated function's name). Exceptions go in
   `scripts/test-inventory-exceptions.txt` with a reason; there are none.
-- `scripts/test-check-test-inventory.py` — the check's own **mutation suite** (also in `make check` and CI): 28
-  edits that each leave a test unrun, every one of which the check must fail on. They are the bypasses two
-  adversarial reviews of #541 found: the first version refused *named* test files and was bypassed fourteen
-  ways; the second inventoried targets but not library unit tests, read non-feature cfgs as "needs nothing",
-  and counted steps that never run tests — 20 of the reviewer's 38 mutations passed it.
+- `scripts/test-check-test-inventory.py` — the static check's own **mutation suite** (also in `make check` and
+  CI): 47 edits that each leave a test unrun, every one of which the check must fail on — the round-3 ones
+  asserting the exact key reported. They are the bypasses three adversarial reviews of #541 found: the first
+  version refused *named* test files and was bypassed fourteen ways; the second inventoried targets but not
+  library unit tests, read non-feature cfgs as "needs nothing", and counted steps that never run tests (20 of
+  38 mutations passed it); the third read only a cfg directly above `#[test]` or a test `mod`, treated any
+  `if:` but `false` as running, and flattened shell control flow (about 40 bypasses). The scan is now
+  scope- and string-aware, follows `#[path]`, inline modules, binary roots and integration-test submodules,
+  reports files it cannot reach, allow-lists step conditions, and reads manifest switches.
 - **What the inventory found** (each now runs in CI, all passing): `mycelium-wasm-host`'s `rule_catalogue` and
   `gateway` integration tests, its provisioner's `gateway` tests and the stem's `llm` (`[[serve]]`) tests; the
   skillrunner binary's unit tests; the root and co-op doctests (one, `lock_service`'s `with_lock`, had stopped

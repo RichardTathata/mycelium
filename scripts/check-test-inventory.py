@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Verification policy rule 3, checked positively: every test in the repository runs in some CI step.
+"""Verification policy rule 3, the fast half: infer from source and workflow text that every test in the
+repository has a CI step that would run it. **An approximation, and a pre-push lint.** The record is
+scripts/ci-test-coverage.py, the CI job that observes which tests executed in the run itself; this check
+exists so most gaps are caught before a push, in seconds, without a build.
 
 It **inventories** test *requirements* and maps each to a CI step that satisfies it:
 
@@ -22,7 +25,11 @@ workflow YAML with their ``env`` (workflow, job, step, inline) and ``working-dir
 followed within a script. ``make <target>`` is expanded one level.
 
 What it does not claim: that a test *passes*, or that a step's environment brings up whatever node a live
-test talks to — only that a step exists which would run it, with the features and guards it needs.
+test talks to — only that a step exists which would run it, with the features and guards it needs. Known
+limits, each left to the observed job: cargo's feature unification through dev-dependencies, macro-generated
+tests, live-skip idioms other than a skipif on a MYCELIUM_TEST_ variable or a `*_LIVE_REQUIRED` guard, pytest
+and jest configuration files, and `#[ignore]`d tests (skipped here; the observed job holds each to a stated
+exception).
 
 Run: ``python3 scripts/check-test-inventory.py`` (needs Python ≥ 3.11 and PyYAML). The mutation suite is
 ``scripts/test-check-test-inventory.py``.
@@ -159,72 +166,229 @@ def attrs_in(text: str):
         yield m.group(1) == "!", text[m.end():i - 1], i
 
 
-def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), text, flags=re.S)
-    return re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
+def strip_code(text: str) -> str:
+    """Blank comments (nested block comments too) and the contents of string, byte-string, raw-string
+    and char literals, keeping every offset and newline — so braces, attributes and `mod` items are
+    found only in code, and a `"sys/*"` cannot open a comment."""
+    out = list(text)
+    n, i = len(text), 0
+
+    def blank(a, b):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j); i = j
+        elif text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth += 1; j += 2
+                elif text.startswith("*/", j):
+                    depth -= 1; j += 2
+                else:
+                    j += 1
+            blank(i, j); i = j
+        elif (m := re.match(r'b?r(#*)"', text[i:i + 300])) and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            close = '"' + m.group(1)
+            j = text.find(close, i + m.end())
+            j = n if j < 0 else j + len(close)
+            blank(i + m.end(), j - len(close)); i = j
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            blank(i + 1, min(j, n)); i = j + 1
+        elif c == "'" and (m := re.match(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)|[^\\'\n])'", text[i:i + 14])):
+            blank(i + 1, i + m.end() - 1); i += m.end()
+        else:
+            i += 1
+    return "".join(out)
+
+
+strip_comments = strip_code
+
+
+ANY_ATTR = re.compile(r"#!?\[")
+TEST_ATTR = re.compile(r"^#\[\s*(?:\w+::)*test\s*[\](]")
+FN_ITEM = re.compile(r'\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:async|unsafe|const|extern(?:\s*"[^"]*")?)\s+)*fn\s+(\w+)')
+MOD_ITEM = re.compile(r"\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)\s*([{;])")
+
+
+def attributes(code: str) -> list[tuple[int, int, bool]]:
+    """(start, end, inner?) for every attribute, brackets balanced."""
+    out = []
+    for m in ANY_ATTR.finditer(code):
+        i, depth = m.end(), 1
+        while i < len(code) and depth:
+            depth += {"[": 1, "]": -1}.get(code[i], 0)
+            i += 1
+        out.append((m.start(), i, m.group(0) == "#!["))
+    return out
+
+
+def stacks(code: str, attrs) -> list[list[tuple[int, int, bool]]]:
+    """Runs of outer attributes separated only by whitespace — the attributes of one item."""
+    runs, cur = [], []
+    for a in attrs:
+        if a[2]:
+            continue
+        if cur and code[cur[-1][1]:a[0]].strip() == "":
+            cur.append(a)
+        else:
+            if cur:
+                runs.append(cur)
+            cur = [a]
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def cfg_of(code: str, spans) -> tuple[Req, ...]:
+    g = TRUE
+    for s, e, _ in spans:
+        for _, pred, _ in attrs_in(code[s:e]):
+            g = conj(g, parse_cfg(pred))
+    return g
+
+
+def match_brace(code: str, i: int) -> int:
+    depth = 0
+    for j in range(i, len(code)):
+        if code[j] == "{":
+            depth += 1
+        elif code[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(code)
+
+
+@dataclass
+class Scanned:
+    file_gate: tuple
+    tests: list            # (gate, full name relative to the file's module, ignored?)
+    mod_decls: list        # (name, gate, inline module path prefix, #[path] value or None)
+
+
+def scan_file(raw: str) -> Scanned:
+    code = strip_code(raw)
+    attrs = attributes(code)
+    # inner attributes at the top of the file, before any item
+    fgate, prev = TRUE, 0
+    for st, e, inner in attrs:
+        if not inner or code[prev:st].strip() != "":
+            break
+        fgate = conj(fgate, cfg_of(raw, [(st, e, inner)]))
+        prev = e
+    # inline modules: span, own gate (outer cfgs + inner cfgs at the top of the body), name
+    mods = []
+    tests, decls = [], []
+    for st in stacks(code, attrs):
+        tail = code[st[-1][1]:]
+        mm = MOD_ITEM.match(tail)
+        if mm:
+            if mm.group(2) == "{":
+                open_at = st[-1][1] + mm.end() - 1
+                close_at = match_brace(code, open_at)
+                inner = [a for a in attrs if a[2] and open_at < a[0] < close_at and code[open_at + 1:a[0]].strip() == ""]
+                mods.append((open_at, close_at, mm.group(1), conj(cfg_of(raw, st), cfg_of(raw, inner))))
+    # inline modules with no attribute stack
+    for mm in re.finditer(r"(?<![\w:])(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)\s*\{", code):
+        open_at = mm.end() - 1
+        if not any(o == open_at for o, *_ in mods):
+            close_at = match_brace(code, open_at)
+            inner = [a for a in attrs if a[2] and open_at < a[0] < close_at and code[open_at + 1:a[0]].strip() == ""]
+            mods.append((open_at, close_at, mm.group(1), cfg_of(raw, inner)))
+
+    def enclosing(p):
+        return sorted((m for m in mods if m[0] < p < m[1]), key=lambda m: m[0])
+
+    handled = set()   # offsets of the names of `mod x;` items that carry attributes
+    for st in stacks(code, attrs):
+        tail = code[st[-1][1]:]
+        texts = [code[s:e] for s, e, _ in st]
+        if any(TEST_ATTR.match(t) for t in texts):
+            fm = FN_ITEM.match(tail)
+            if not fm:
+                continue
+            g = cfg_of(raw, st)
+            prefix = []
+            for o, c, name, mg in enclosing(st[0][0]):
+                g = conj(g, mg)
+                prefix.append(name)
+            ignored = any(re.match(r"^#\[\s*ignore\b", t) for t in texts)
+            tests.append((g, "::".join(prefix + [fm.group(1)]), ignored))
+        mm = MOD_ITEM.match(tail)
+        if mm and mm.group(2) == ";":
+            handled.add(st[-1][1] + mm.start(1))
+            g = cfg_of(raw, st)
+            prefix = []
+            for o, c, name, mg in enclosing(st[0][0]):
+                g = conj(g, mg)
+                prefix.append(name)
+            pm = re.search(r'#\[\s*path\s*=\s*"([^"]+)"\s*\]', raw[st[0][0]:st[-1][1]])
+            decls.append((mm.group(1), g, prefix, pm.group(1) if pm else None))
+    # `mod x;` with no attributes
+    for mm in re.finditer(r"(?<![\w:])(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)\s*;", code):
+        if mm.start(1) in handled:
+            continue
+        prefix, g = [], TRUE
+        for o, c, name, mg in enclosing(mm.start()):
+            g = conj(g, mg)
+            prefix.append(name)
+        decls.append((mm.group(1), g, prefix, None))
+    return Scanned(fgate, tests, decls)
 
 
 def file_gate(text: str) -> tuple[Req, ...]:
-    gate = TRUE
-    for inner, pred, _ in attrs_in(text):
-        if inner:
-            gate = conj(gate, parse_cfg(pred))
-    return gate
+    return scan_file(text).file_gate
 
 
-TEST_ITEM = re.compile(r"#\[\s*(?:tokio::|async_std::)?test\b|#\[\s*test\s*\]")
+@dataclass
+class Walked:
+    path: str
+    gate: tuple
+    modpath: str           # the module's real path inside its crate root ("" for the root)
+    root: str              # the root file this module hangs from (lib.rs, a bin's main, a test file)
 
 
-def test_gates(text: str) -> list[tuple[tuple[Req, ...], tuple[str, ...]]]:
-    """Distinct gates on test code in a file — the cfg attribute directly in front of a test module or a
-    test function, and TRUE for ungated test functions — each with the item names under it (a name filter
-    that contains one of them selects that item)."""
-    gates: dict = {}
-    for m in TEST_ITEM.finditer(text):
-        # the attributes stacked directly above this test fn
-        head = text[max(0, m.start() - 600):m.start()]
-        stack = re.findall(r"#\[\s*cfg\s*\(((?:[^()]|\([^()]*(?:\([^()]*\)[^()]*)*\))*)\)\s*\]\s*$", head.rstrip() + "\n", re.S)
-        fn = re.search(r"\bfn\s+(\w+)", text[m.end():m.end() + 400])
-        g = parse_cfg(stack[-1]) if stack else TRUE
-        gates.setdefault(g, []).append(fn.group(1) if fn else "")
-    for inner, pred, end in attrs_in(text):
-        mm = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*\{", text[end:end + 200])
-        if not inner and mm and "test" in pred:
-            gates.setdefault(parse_cfg(pred), []).append(mm.group(1))
-    return [(g, tuple(n)) for g, n in gates.items()]
+def walk_modules(root_file: str) -> list[Walked]:
+    """Every module file reachable from one crate root, with its composed gate and real module path —
+    through inline modules and `#[path]`, as rustc resolves them."""
+    out: list[Walked] = []
+    seen = set()
 
-
-def module_gates(src: str) -> dict[str, tuple[Req, ...]]:
-    """path → the gate its `mod` declaration carries, composed down the tree from the crate root."""
-    gates: dict[str, tuple[Req, ...]] = {}
-    roots = [p for p in (os.path.join(src, "lib.rs"), os.path.join(src, "main.rs")) if os.path.exists(p)]
-    roots += glob.glob(os.path.join(src, "bin", "*.rs")) + glob.glob(os.path.join(src, "bin", "*", "main.rs"))
-
-    def walk(path: str, gate: tuple[Req, ...]):
-        if path in gates or not os.path.exists(path):
+    def walk(path, gate, modpath, child_dir):
+        if path in seen or not os.path.exists(path):
             return
-        text = strip_comments(open(path).read())
-        gate = conj(gate, file_gate(text))
-        gates[path] = gate
+        seen.add(path)
+        raw = open(path, encoding="utf-8", errors="replace").read()
+        sc = scan_file(raw)
+        gate = conj(gate, sc.file_gate)
+        out.append(Walked(path, gate, modpath, root_file))
         base = os.path.dirname(path)
-        stem = os.path.basename(path)[:-3]
-        child_dir = base if stem in ("lib", "main", "mod") else os.path.join(base, stem)
-        decl = re.compile(r"((?:#\[[^\]]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;")
-        for m in decl.finditer(text):
-            g = gate
-            for _, pred, _ in attrs_in(m.group(1)):
-                g = conj(g, parse_cfg(pred))
-            pm = re.search(r'#\[\s*path\s*=\s*"([^"]+)"\s*\]', m.group(1))
-            name = m.group(2)
-            cands = [os.path.join(base, pm.group(1))] if pm else [os.path.join(child_dir, name + ".rs"), os.path.join(child_dir, name, "mod.rs")]
+        for name, g, prefix, pathattr in sc.mod_decls:
+            sub = "::".join([p for p in [modpath] + prefix + [name] if p])
+            if pathattr:
+                # #[path] is relative to the directory of the current file (or of the inline module's)
+                cands = [os.path.normpath(os.path.join(base if not prefix else os.path.join(child_dir, *prefix), pathattr))]
+            else:
+                d = os.path.join(child_dir, *prefix)
+                cands = [os.path.join(d, name + ".rs"), os.path.join(d, name, "mod.rs")]
             for c in cands:
                 if os.path.exists(c):
-                    walk(c, g)
+                    stem = os.path.basename(c)[:-3]
+                    walk(c, conj(gate, g), sub, os.path.dirname(c) if stem == "mod" else os.path.join(os.path.dirname(c), stem))
                     break
 
-    for r in roots:
-        walk(r, TRUE)
-    return gates
+    walk(root_file, TRUE, "", os.path.dirname(root_file))
+    return out
 
 
 # ── the inventory ─────────────────────────────────────────────────────────────────────────────────
@@ -236,7 +400,7 @@ class Target:
     name: str
     alts: tuple          # alternatives (Req, ...): any one satisfies it
     where: str = ""
-    names: tuple = ()    # strings any one of which a cargo name filter may contain to select this whole gate
+    names: tuple = ()    # every test's full name under this gate: a name filter selects the gate only if it is in each
 
 
 def crates(root: str) -> dict[str, str]:
@@ -252,48 +416,91 @@ def crates(root: str) -> dict[str, str]:
     return out
 
 
+DOC_FENCE = re.compile(r"^\s*//[/!]\s*```(?:rust|no_run|should_panic|compile_fail|edition\d+|)\s*(?:,[^\n]*)?$", re.M)
+
+
 def rust_targets(root: str, crs: dict[str, str]) -> list[Target]:
     out: list[Target] = []
     for pkg, d in crs.items():
-        cdir = os.path.join(root, d)
+        cdir = os.path.normpath(os.path.join(root, d))
         manifest = tomllib.load(open(os.path.join(cdir, "Cargo.toml"), "rb"))
         src = os.path.join(cdir, "src")
-        gates = module_gates(src)
-        bin_files = set(glob.glob(os.path.join(src, "bin", "**", "*.rs"), recursive=True)) | {os.path.join(src, "main.rs")}
-        for path, gate in gates.items():
-            text = strip_comments(open(path).read())
-            in_bin = any(path == b or path.startswith(os.path.join(src, "bin") + os.sep) for b in bin_files) or path.endswith(os.sep + "main.rs") and os.path.dirname(path) == src
-            modpath = os.path.relpath(path, src)[:-3].replace(os.sep, "::")
-            modpath = re.sub(r"(^|::)(lib|main|mod)$", "", modpath)
-            for tg, items in test_gates(text):
-                # a filter selects the gate if it names the module (every test in the file) or, when every
-                # gated item is one function, that function
-                names = ((modpath,) if modpath else ()) + (items if len(items) == 1 and items[0] else ())
-                out.append(Target("bin" if in_bin else "lib", pkg, os.path.relpath(path, root), conj(gate, tg), names=names))
-            raw = open(path).read()
-            if not in_bin and re.search(r"^\s*//[/!]\s*```(?:rust|no_run|should_panic|compile_fail|edition\d+|)\s*(?:,[^\n]*)?$", raw, re.M):
-                out.append(Target("doc", pkg, os.path.relpath(path, root), gate))
+        lib = manifest.get("lib", {})
+        roots: list[tuple[str, str, tuple, str | None]] = []   # (kind, root file, base gate, disabled-why)
+        lib_path = os.path.join(cdir, lib.get("path", "src/lib.rs"))
+        if os.path.exists(lib_path):
+            roots.append(("lib", lib_path, TRUE, None if lib.get("test", True) else "[lib] test = false"))
+        bins = {b.get("name"): b for b in manifest.get("bin", [])}
+        bin_files = {}
+        if manifest.get("package", {}).get("autobins", True):
+            if os.path.exists(os.path.join(src, "main.rs")):
+                bin_files[manifest["package"]["name"]] = os.path.join(src, "main.rs")
+            for f in glob.glob(os.path.join(src, "bin", "*.rs")):
+                bin_files[os.path.basename(f)[:-3]] = f
+            for f in glob.glob(os.path.join(src, "bin", "*", "main.rs")):
+                bin_files[os.path.basename(os.path.dirname(f))] = f
+        for name, b in bins.items():
+            if "path" in b:
+                bin_files[name] = os.path.join(cdir, b["path"])
+        for name, f in bin_files.items():
+            b = bins.get(name, {})
+            base = (Req(need=frozenset(b["required-features"])),) if "required-features" in b else TRUE
+            roots.append(("bin", f, base, None if b.get("test", True) else "[[bin]] test = false"))
+        reached = set()
+        for kind, rf, base, disabled in roots:
+            for w in walk_modules(rf):
+                reached.add(os.path.normpath(w.path))
+                raw = open(w.path, encoding="utf-8", errors="replace").read()
+                sc = scan_file(raw)
+                groups: dict = {}
+                for g, name, ignored in sc.tests:
+                    if ignored:
+                        continue  # libtest skips it; scripts/ci-test-coverage.py holds ignored tests to an exception
+                    full = "::".join(p for p in [w.modpath, name] if p)
+                    groups.setdefault(conj(conj(base, w.gate), g), []).append(full)
+                for g, names in groups.items():
+                    if disabled:
+                        g = (Req(impossible=disabled),)
+                    out.append(Target(kind, pkg, os.path.relpath(w.path, root), g, names=tuple(names)))
+                if kind == "lib" and DOC_FENCE.search(raw):
+                    dg = w.gate if lib.get("doctest", True) else (Req(impossible="[lib] doctest = false"),)
+                    out.append(Target("doc", pkg, os.path.relpath(w.path, root), dg))
+        # integration tests
         declared = {t["name"]: t for t in manifest.get("test", [])}
         files = {}
-        for f in glob.glob(os.path.join(cdir, "tests", "*.rs")):
-            files[os.path.basename(f)[:-3]] = f
-        for f in glob.glob(os.path.join(cdir, "tests", "*", "main.rs")):
-            files[os.path.basename(os.path.dirname(f))] = f
+        if manifest.get("package", {}).get("autotests", True):
+            for f in glob.glob(os.path.join(cdir, "tests", "*.rs")):
+                files[os.path.basename(f)[:-3]] = f
+            for f in glob.glob(os.path.join(cdir, "tests", "*", "main.rs")):
+                files[os.path.basename(os.path.dirname(f))] = f
         for name, t in declared.items():
-            if "path" in t:
-                files[name] = os.path.join(cdir, t["path"])
-            else:
-                files.setdefault(name, os.path.join(cdir, "tests", name + ".rs"))
+            files[name] = os.path.join(cdir, t["path"]) if "path" in t else os.path.join(cdir, "tests", name + ".rs")
         for name, f in files.items():
             t = declared.get(name, {})
-            if t.get("test") is False or not os.path.exists(f):
+            if not os.path.exists(f):
                 continue
             base = (Req(need=frozenset(t["required-features"])),) if "required-features" in t else TRUE
-            text = strip_comments(open(f).read())
-            base = conj(base, file_gate(text))
-            for tg, items in test_gates(text) or [(TRUE, ())]:
-                names = items if len(items) == 1 and items[0] else ()
-                out.append(Target("integration", pkg, name, conj(base, tg), os.path.relpath(f, root), names))
+            for w in walk_modules(f):
+                reached.add(os.path.normpath(w.path))
+                sc = scan_file(open(w.path, encoding="utf-8", errors="replace").read())
+                groups = {}
+                for g, tname, ignored in sc.tests:
+                    if not ignored:
+                        groups.setdefault(conj(conj(base, w.gate), g), []).append("::".join(p for p in [w.modpath, tname] if p))
+                for g, names in groups.items():
+                    if t.get("test") is False:
+                        g = (Req(impossible="[[test]] test = false"),)
+                    out.append(Target("integration", pkg, name, g, os.path.relpath(w.path, root), tuple(names)))
+        # a file with tests that no root reaches: an unusual layout this check cannot follow (include!,
+        # a macro-generated module, autotests = false) — uncovered until it is reachable or excepted
+        for f in glob.glob(os.path.join(cdir, "src", "**", "*.rs"), recursive=True) + \
+                 glob.glob(os.path.join(cdir, "tests", "**", "*.rs"), recursive=True):
+            if os.path.normpath(f) in reached or "/fixtures/" in f:
+                continue
+            sc = scan_file(open(f, encoding="utf-8", errors="replace").read())
+            if any(not ig for _, _, ig in sc.tests):
+                out.append(Target("unreached", pkg, os.path.relpath(f, root),
+                                  (Req(impossible="not reached from any crate root by the module walk"),)))
     return out
 
 
@@ -307,8 +514,40 @@ class Cmd:
     where: str
 
 
-def _falsy(v) -> bool:
-    return v is False or (isinstance(v, str) and v.strip() in ("false", "${{ false }}"))
+# A step or job counts only when its condition is absent or one of these: each holds on every pull request
+# or push to main (the fuzz job's `!= 'pull_request'` holds on push). Anything else — a schedule, a
+# dispatch, a label — is treated as not running (allow-list, not deny-list).
+RUNS_ON_EVERY_CHANGE = {"always()", "success()", "!cancelled()", "github.event_name != 'pull_request'"}
+
+
+def _runs(v) -> bool:
+    if v is None:
+        return True
+    t = str(v).strip()
+    if t.startswith("${{") and t.endswith("}}"):
+        t = t[3:-2].strip()
+    return t in RUNS_ON_EVERY_CHANGE
+
+
+def _truthy(v) -> bool:
+    return v is True or (isinstance(v, str) and v.strip().lower() in ("true", "${{ true }}"))
+
+
+def _triggers(on) -> bool:
+    """Does the workflow run on pull requests (any) or on pushes to main?"""
+    if isinstance(on, str):
+        on = {on: None}
+    elif isinstance(on, list):
+        on = {k: None for k in on}
+    on = on or {}
+    if "pull_request" in on or "merge_group" in on:
+        return True
+    push = on.get("push", False)
+    if push is False:
+        return False
+    push = push or {}
+    branches = push.get("branches")
+    return (branches is None and "tags" not in push) or (branches is not None and "main" in branches)
 
 
 def ci_commands(root: str, workflows: str) -> list[Cmd]:
@@ -316,18 +555,27 @@ def ci_commands(root: str, workflows: str) -> list[Cmd]:
     makefile = open(os.path.join(root, "Makefile")).read() if os.path.exists(os.path.join(root, "Makefile")) else ""
     for wf in sorted(glob.glob(os.path.join(workflows, "*.yml")) + glob.glob(os.path.join(workflows, "*.yaml"))):
         doc = yaml.safe_load(open(wf)) or {}
-        on = doc.get("on", doc.get(True, {}))
-        triggers = set([on] if isinstance(on, str) else on or [])
-        if not triggers & {"push", "pull_request", "merge_group"}:
+        if not _triggers(doc.get("on", doc.get(True, {}))):
             continue
         wenv = {k: str(v) for k, v in (doc.get("env") or {}).items()}
-        for jname, job in (doc.get("jobs") or {}).items():
-            if _falsy(job.get("if")) or job.get("continue-on-error") is True:
+        jobs = doc.get("jobs") or {}
+
+        def job_runs(name, seen=()):
+            job = jobs.get(name) or {}
+            if name in seen or not _runs(job.get("if")) or _truthy(job.get("continue-on-error")):
+                return False
+            needs = job.get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            # a job that waits on one that never runs is skipped, unless it runs `if: always()`
+            return str(job.get("if", "")).strip().strip("${} ") == "always()" or all(job_runs(n, seen + (name,)) for n in needs)
+
+        for jname, job in jobs.items():
+            if not job_runs(jname):
                 continue
             jenv = {**wenv, **{k: str(v) for k, v in (job.get("env") or {}).items()}}
             jdir = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", ".")
             for i, step in enumerate(job.get("steps") or []):
-                if "run" not in step or _falsy(step.get("if")) or step.get("continue-on-error") is True:
+                if "run" not in step or not _runs(step.get("if")) or _truthy(step.get("continue-on-error")):
                     continue
                 env = {**jenv, **{k: str(v) for k, v in (step.get("env") or {}).items()}}
                 cwd = step.get("working-directory", jdir)
@@ -336,13 +584,47 @@ def ci_commands(root: str, workflows: str) -> list[Cmd]:
     return out
 
 
+FAIL_FAST = re.compile(r"\|\|\s*(?:exit(?:\s+[1-9]\d*|\s+\$\?)?|false)\s*$")
+
+
 def split_script(script: str, env: dict, cwd: str, where: str, makefile: str, depth: int = 0) -> list[Cmd]:
+    """The commands a shell script runs unconditionally. A command inside `if/for/while/case` or a
+    heredoc, after an `exit`, or whose failure is swallowed (`|| true`, `|| :`), does not count — only
+    `|| exit N` and `|| false` keep it. A `${{ … }}` expression in a command makes it unknowable."""
     out: list[Cmd] = []
     script = script.replace("\\\n", " ")
+    nest = 0
+    heredoc = None
     for line in script.split("\n"):
+        stripped = line.strip()
+        if heredoc is not None:
+            if stripped == heredoc:
+                heredoc = None
+            continue
+        hm = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
+        if hm:
+            heredoc = hm.group(1)
+        # the first word of each command segment, past `then`/`do`/`else`
+        words = []
+        for seg in re.split(r";|&&|\|\||\|", stripped):
+            w = seg.strip().split()
+            while w and w[0] in ("then", "do", "else", "elif"):
+                w = w[1:]
+            if w:
+                words.append(w[0])
+        opens = sum(w in ("if", "for", "while", "until", "case", "select") for w in words)
+        opens += bool(re.match(r"^\w+\s*\(\)\s*\{", stripped))
+        closes = sum(w in ("fi", "done", "esac", "}") for w in words)
+        was = nest
+        nest = max(0, nest + opens - closes)
+        if was or opens or hm:
+            continue
+        if words[:1] == ["exit"]:
+            break
+        swallowed = "||" in line and not FAIL_FAST.search(line)
         for part in re.split(r"&&|;|\|\|", line):
             part = part.strip()
-            if not part or part.startswith("#"):
+            if not part or part.startswith("#") or swallowed or "${{" in part:
                 continue
             try:
                 argv = shlex.split(part, comments=True)
@@ -352,7 +634,7 @@ def split_script(script: str, env: dict, cwd: str, where: str, makefile: str, de
             while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
                 k, _, v = argv.pop(0).partition("=")
                 local[k] = v
-            if not argv:
+            if not argv or argv[0] in ("echo", "printf", "true", ":"):
                 continue
             if argv[0] == "cd" and len(argv) > 1:
                 cwd = os.path.normpath(os.path.join(cwd, argv[1]))
@@ -496,11 +778,12 @@ def runs_package(r: CargoRun, pkg: str, crs: dict, root_pkg: str) -> bool:
 
 
 def selects(r: CargoRun, t: Target) -> bool:
-    """No filter, or a filter that provably selects the whole gate: cargo runs a test whose full name
-    contains a filter, so a filter inside the module path, or inside the one gated function's name, does."""
+    """No filter, or filters that select every test under the gate: cargo runs a test whose full path
+    contains one of its filters, and the scan knows each test's full path (through `#[path]`, inline
+    modules and binary roots), so this is exact up to the scan."""
     if None in r.filters:
         return False
-    return not r.filters or any(f in n for f in r.filters for n in t.names)
+    return not r.filters or (bool(t.names) and all(any(f in n for f in r.filters) for n in t.names))
 
 
 def runs_kind(r: CargoRun, t: Target) -> bool:
@@ -568,8 +851,8 @@ def pytest_collects(cmd: Cmd, path: str) -> bool:
     while i < len(a):
         x = a[i]
         k, eq, v = x.partition("=")
-        if k in ("-k", "-m"):
-            return False  # a selection: not the whole file
+        if k in ("-k", "-m", "--co", "--collect-only", "--lf", "--last-failed", "--sw", "--stepwise", "-x", "--exitfirst"):
+            return False  # a selection, a listing, or a run that may stop early: not the whole file
         if k in ("--ignore", "--ignore-glob", "--deselect"):
             ignored.append(v if eq else (a[i + 1] if i + 1 < len(a) else "")); i += 1 if eq else 2; continue
         if k in ("-p", "-c", "--rootdir", "-o", "--junitxml", "--basetemp", "--maxfail", "--tb", "-W"):
@@ -588,8 +871,13 @@ def pytest_collects(cmd: Cmd, path: str) -> bool:
 
 def jest_collects(root: str, cmd: Cmd, path: str) -> bool:
     a = cmd.argv
-    if a[:2] == ["npm", "test"]:
-        a = ["jest"] + [x for x in a[2:] if x != "--"]
+    if a[:2] in (["npm", "test"], ["npm", "run"]) and (a[:2] == ["npm", "test"] or a[2:3] == ["test"]):
+        pj0 = os.path.join(root, os.path.normpath(cmd.cwd), "package.json")
+        script = json.load(open(pj0)).get("scripts", {}).get("test", "") if os.path.exists(pj0) else ""
+        rest = a[2:] if a[1] == "test" else a[3:]
+        a = shlex.split(script) + [x for x in rest if x != "--"]
+        if a[:1] == ["npx"]:
+            a = a[1:]
     elif a[:2] == ["npx", "jest"]:
         a = ["jest"] + a[2:]
     if a[:1] != ["jest"]:
@@ -607,8 +895,9 @@ def jest_collects(root: str, cmd: Cmd, path: str) -> bool:
     while i < len(a):
         x = a[i]
         k = x.partition("=")[0]
-        if k in ("-t", "--testNamePattern"):
-            return False
+        if k in ("-t", "--testNamePattern", "--listTests", "-o", "--onlyChanged", "--shard", "--findRelatedTests",
+                 "--changedSince", "--lastCommit", "--onlyFailures", "-f", "--bail", "-b"):
+            return False  # a name filter, a listing, or a subset
         if k in ("--testPathPattern", "--testPathPatterns"):
             filters.append(x.partition("=")[2] or (a[i + 1] if i + 1 < len(a) else "")); i += 1 if "=" in x else 2; continue
         if k in ("--testPathIgnorePatterns",):
