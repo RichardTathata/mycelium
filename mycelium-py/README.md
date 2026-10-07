@@ -76,7 +76,7 @@ carry the route's scope (`kv:read`, `mesh:write`, `wiki:*`, … — the node's
 `docs/operations/rbac.md`). Since 0.2.4.
 
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway
-(`rpc_call`, `scatter`, `PromptSkillClient.call`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a
+(`rpc_call`, `scatter_gather`, `PromptSkillClient.call`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a
 node-attested caller context: the provider's `authorized_callers` judges *this client's principal*
 (`token:<issuer>/legacy` for `gateway_auth_token`, `token:<issuer>/<name>` for a named token,
 `token:<issuer>/#i` for the i-th positional scoped token, `oidc:<idp issuer>/<sub>` for a JWT,
@@ -237,7 +237,7 @@ data  = agent.scan_prefix("my/")          # → dict[str, bytes]
 
 All writes are gossiped to peers with last-write-wins (HLC) semantics.
 
-These routes write **application keys** (your own namespaces, plus `ckpt/`, `manifest/`, `schemas/`).
+These routes write **application keys**: your own namespaces, plus `ckpt/`, `ckptw/`, `manifest/`, `schemas/` and an application's `agent/{node}/provision/…` report. Every other namespace in [`src/lib.rs` § KV namespace ownership](https://github.com/RichardTathata/mycelium/blob/main/src/lib.rs) is owned — including names an application might take for its own, such as `agent/`, `tools/`, `facts/`, `knowledge/`, `svc/`, `comp/`, `tuple/` and `rights/`.
 A key in a namespace the substrate or a companion owns — `sys/`, `grp/`, `cap/`, `prompts/`, `log/`,
 `mailbox/`, … — is refused: `set`, `delete`, `set_with_min_acks` and `consistent_set` raise
 `ProtectedKeyError`, whose message names the route that writes it ([Errors](#errors)).

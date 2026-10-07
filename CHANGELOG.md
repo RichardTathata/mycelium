@@ -50,7 +50,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `not_found` and `unavailable` are) and states the upgrade order (checkpointer 0.3.0 before `mycelium-reason`
   0.7.0). Fail-first: seven Python and seven TypeScript tests failed against the unwired SDKs
   (`mycelium-py/tests/test_protected_key.py`, `mycelium-ts/tests/protected_key.test.ts`), and
-  `test_emit_reliable_raises_it_too` against 0.2.6.
+  `test_emit_reliable_raises_it_too` against 0.2.6. **Behaviour changes to check:** in Python the new errors are
+  `OSError`s (through `PermissionError`), so an `except OSError` retry loop now catches — and could retry — a
+  permanent refusal, and `str(e)` is the gateway's message rather than httpx's status-and-URL text (`e.response`
+  still has both); `emit_reliable`'s `ProtectedKindError` is a `PermissionError` only, like its siblings', so an
+  `except httpx.HTTPStatusError` around it no longer catches a `protected_kind` 403. In TypeScript every DELETE
+  (KV delete, capability drop, lock release) now fails through the shared path: the message is
+  `DELETE <path with query> failed: <status> <body>` — the key appears in it — and a 504 is a `TimeoutError`.
 - **The A2A agent card lists what `/a2a` can call, and `tasks/send` refuses the rest.** `/.well-known/agent.json`
   listed every advertised capability as a skill, so an external agent was offered `prov-shed/…` (2.26.0's shed
   marks), `{ns}/loading`, `{ns}/installable`, `llm-meta/…`, `artifact/librarian`, `reason/blob-cache` and the
