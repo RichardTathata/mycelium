@@ -26,7 +26,7 @@ Schema `mycelium.rules/1` · 26 rules.
 | [`prov.provenance`](#provprovenance) | Authority | catalogue only | An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says. |
 | [`prov.rights_admission`](#provrights_admission) | Authority | instrumented | An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did. |
 | [`prov.self_election`](#provself_election) | Response | instrumented | Herd damping: a candidate acts this round with probability p, drawn after the guards so a decline costs nothing. Replay-covered since the draw went through the seam. |
-| [`prov.shed`](#provshed) | Response | instrumented | More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, passing over a provider that stays put for five rounds (rev 2; rev 1 drew per host, and every host could withdraw at once). |
+| [`prov.shed`](#provshed) | Response | instrumented | More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, among the providers that advertise `prov-shed/{band}` (rev 2; rev 1 drew per host, and every host could withdraw at once). |
 | [`prov.withdraw`](#provwithdraw) | Propagation, Response | catalogue only | Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back. |
 | [`provider.enforcement`](#providerenforcement) | Authority | catalogue only | Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused, with it off nothing is checked. |
 | [`signal.admission`](#signaladmission) | Admission | partial — refusals and sheds only; an admitted signal is the hot path and records nothing | Admission is scoped (Cluster · Group · Individual) and shed under load — except Individual and the boundary transitions; shedding happens before the sender is recorded. |
@@ -413,18 +413,19 @@ Herd damping: a candidate acts this round with probability p, drawn after the gu
 
 rev 2 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
-More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, passing over a provider that stays put for five rounds (rev 2; rev 1 drew per host, and every host could withdraw at once).
+More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, among the providers that advertise `prov-shed/{band}` (rev 2; rev 1 drew per host, and every host could withdraw at once).
 
 - **Trigger:** every provisioning round, per `[[presence]]` declaration with a ceiling
 - **Reads:**
   - `capabilities().demand(filter) — `demand/` and `cap/` as gossiped` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
+  - ``prov-shed/{band}` advertisements — which providers act on this band's shed` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
 - **Outcomes:**
   - Action: `above_ceiling`
   - NoAction: `within_ceiling`, `not_hosting`, `ranked_within_ceiling`
 - **Effects:** withdraw() of this node's install
 - **May inhibit:** [`prov.presence_floor`](#provpresence_floor)
-- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_never_sheds_does_not_hold_the_band_above_its_ceiling`
+- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_stale_view_costs_at_most_one_round_never_a_cascade`
 
 ## `prov.withdraw`
 

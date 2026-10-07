@@ -156,10 +156,9 @@ pub struct Provisioner {
     trace:        Option<Arc<Trace>>,
     /// Rounds run here; the trigger every record of a round names.
     rounds:       u64,
-    /// Per band, how many consecutive rounds each provider has stayed advertised while ranked beyond the
-    /// ceiling — one that never leaves (a provider registered in code, a stem not running this band)
-    /// is passed over after [`SHED_STALL_ROUNDS`], so the next host down sheds instead (#547's review).
-    shed_stalls:  HashMap<String, HashMap<mycelium::NodeId, u32>>,
+    /// One `prov-shed/{band}` advertisement per band this node supervises with a ceiling: it says this node
+    /// acts on that band's shed, so the band ranks only providers that will (#547's reviews).
+    shed_regs:    Vec<CapabilityReg>,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -259,7 +258,7 @@ impl Provisioner {
             self_elect_p,
             trace: None,
             rounds: 0,
-            shed_stalls: HashMap::new(),
+            shed_regs: Vec::new(),
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -579,6 +578,8 @@ impl Provisioner {
     /// the same view agree on which). Bounds are convergence targets, not guarantees, consistent with
     /// the membership governor.
     pub fn supervise_band(&mut self, filter: CapFilter, min_providers: usize, max_providers: usize) {
+        self.shed_regs.push(self.agent.capabilities().advertise_capability(
+            Capability::new(SHED_NS, shed_band(&filter)), ADVERTISE_INTERVAL));
         self.policies.push(SupervisionPolicy {
             filter,
             min_providers,
@@ -627,6 +628,14 @@ impl Provisioner {
     /// True if `artifact` is reserved or live on this node.
     fn is_hosted(&self, artifact: &ArtifactId) -> bool {
         self.hosted.lock().unwrap().contains_key(artifact)
+    }
+
+    /// The artifact this node hosts for `filter`, if any — whichever catalogue entry it installed, not
+    /// only the one the band resolves to now (a host serving another entry could never shed).
+    fn hosted_artifact_for(&self, filter: &CapFilter) -> Option<ArtifactId> {
+        let candidates: Vec<ArtifactId> = self.catalog.resolve(filter).into_iter().map(|e| e.artifact).collect();
+        let hosted = self.hosted.lock().unwrap();
+        candidates.into_iter().find(|a| hosted.contains_key(a))
     }
 
     /// Start bringing one capability live on this node: **reserve** the artifact, then run the
@@ -1067,7 +1076,6 @@ impl Provisioner {
             let live = providers.len();
             let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
             if live <= max {
-                self.shed_stalls.remove(&target);
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target,
                         vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
@@ -1077,29 +1085,32 @@ impl Provisioner {
             }
             // Which hosts above the ceiling withdraw is ranked, not drawn: every host with the same view
             // agrees that exactly the surplus goes. A per-host draw at `self_elect_p` let every one
-            // withdraw at once — max+1 → 0 → back, round after round (#545). A provider ranked beyond
-            // the ceiling that stays put for SHED_STALL_ROUNDS is passed over, so the next one sheds.
-            let stalls = self.shed_stalls.remove(&target).unwrap_or_default();
-            let view = shed_view(&providers, max, &target, &stalls);
-            self.shed_stalls.insert(target.clone(), view.next_stalls(&stalls));
+            // withdraw at once — max+1 → 0 → back, round after round (#545). Only providers that will act
+            // on the ceiling are ranked — they advertise `prov-shed/{band}`; one that does not
+            // (registered in code, a stem without this band) keeps its place, and the rest rank against
+            // what is left. Nothing here is inferred from timing, so a stale view can only delay a shed.
+            // Which providers shed is read from their `prov-shed/{band}` advertisements.
             let me = self.agent.node_id().clone();
+            let shedders: Vec<mycelium::NodeId> =
+                self.agent.capabilities().demand(&CapFilter::new(SHED_NS, shed_band(&policy.filter))).providers;
+            // This node supervises the band (the policy is its own), whether or not its advertisement of
+            // that has been written yet.
+            let entries: Vec<(mycelium::NodeId, bool)> =
+                providers.iter().map(|n| (n.clone(), *n == me || shedders.contains(n))).collect();
+            let view = shed_view(&entries, max, &target);
             let position = view.ranked.iter().position(|n| *n == me);
             let inputs = || vec![
                 InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
                     format!("live={live} max={max}"), Provenance::Gossiped),
-                InputSnapshot::new("the band's rendezvous ranking (mycelium::election::rank) over the providers that can shed",
-                    format!("position={position:?} keep={} stuck={}", view.keep, view.stuck.len()), Provenance::Local),
+                InputSnapshot::new("the providers that shed (marked), ranked by the band's rendezvous order",
+                    format!("position={position:?} keep={} unmarked={}", view.keep, live - view.ranked.len()), Provenance::Gossiped),
             ];
-            let Some(artifact) = self.catalog.resolve_best(&policy.filter).map(|e| e.artifact)
-            else {
-                continue;
-            };
-            if !self.is_hosted(&artifact) {
+            let Some(artifact) = self.hosted_artifact_for(&policy.filter) else {
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::NoAction, "not_hosting", target, inputs(), None);
                 }
                 continue;
-            }
+            };
             if view.sheds(&me) {
                 self.withdraw(&artifact); // cooperative self-removal
                 if let Some(t) = self.round_trace() {
@@ -1114,28 +1125,30 @@ impl Provisioner {
     }
 }
 
-/// Rounds a provider may stay advertised while ranked beyond a ceiling before it is presumed unable to
-/// shed — it runs no provisioner for this band, or cannot match the entry the band resolves to.
-const SHED_STALL_ROUNDS: u32 = 5;
+/// The capability namespace a provisioner advertises, once per band it supervises with a ceiling, to say it
+/// acts on that band's shed: `prov-shed/{ns}:{name}`. A band ranks only providers that advertise it (#547).
+pub const SHED_NS: &str = "prov-shed";
+
+/// The `prov-shed` name for a band: its filter's `{ns}:{name}`.
+pub fn shed_band(filter: &CapFilter) -> String {
+    format!("{}:{}", filter.namespace, filter.name)
+}
 
 /// One round's shedding view of a band whose live providers exceed its ceiling.
 struct ShedView {
-    /// The providers that can shed, best first, by [`mycelium::election::rank`] on the band's name.
+    /// The providers that shed, best first, by [`mycelium::election::rank`] on the band's name.
     ranked: Vec<mycelium::NodeId>,
-    /// How many of `ranked` stay: the ceiling, less the providers presumed unable to shed.
+    /// How many of `ranked` stay: the ceiling, less the providers that do not shed (they stay regardless).
     keep: usize,
-    /// Providers passed over: still advertised after [`SHED_STALL_ROUNDS`] rounds ranked beyond the ceiling.
-    stuck: Vec<mycelium::NodeId>,
 }
 
-fn shed_view(providers: &[mycelium::NodeId], max: usize, band: &str, stalls: &HashMap<mycelium::NodeId, u32>) -> ShedView {
-    let stuck: Vec<mycelium::NodeId> = providers.iter()
-        .filter(|n| stalls.get(*n).is_some_and(|c| *c >= SHED_STALL_ROUNDS))
-        .cloned().collect();
-    let capable: Vec<mycelium::NodeId> = providers.iter().filter(|n| !stuck.contains(n)).cloned().collect();
-    let ranked = mycelium::election::rank(band, &capable, mycelium::election::Rule::Rendezvous)
+/// `entries` is each live provider and whether it sheds (it advertises [`SHED_NS`] for the band).
+fn shed_view(entries: &[(mycelium::NodeId, bool)], max: usize, band: &str) -> ShedView {
+    let shedders: Vec<mycelium::NodeId> = entries.iter().filter(|(_, s)| *s).map(|(n, _)| n.clone()).collect();
+    let fixed = entries.len() - shedders.len();
+    let ranked = mycelium::election::rank(band, &shedders, mycelium::election::Rule::Rendezvous)
         .into_iter().cloned().collect();
-    ShedView { ranked, keep: max.saturating_sub(stuck.len()), stuck }
+    ShedView { ranked, keep: max.saturating_sub(fixed) }
 }
 
 impl ShedView {
@@ -1143,14 +1156,6 @@ impl ShedView {
     /// its advertisement has not reached itself, so it cannot know its rank.
     fn sheds(&self, me: &mycelium::NodeId) -> bool {
         self.ranked.iter().position(|n| n == me).is_some_and(|i| i >= self.keep)
-    }
-
-    /// The stall counts after this round: each provider ranked beyond the ceiling, or already passed over,
-    /// gains one; everyone else (within the ceiling, or gone) starts again.
-    fn next_stalls(&self, prev: &HashMap<mycelium::NodeId, u32>) -> HashMap<mycelium::NodeId, u32> {
-        self.ranked.iter().skip(self.keep).chain(self.stuck.iter())
-            .map(|n| (n.clone(), prev.get(n).copied().unwrap_or(0) + 1))
-            .collect()
     }
 }
 
@@ -1167,6 +1172,10 @@ mod tests {
         (0..n).map(|i| mycelium::NodeId::new("127.0.0.1", base + i).unwrap()).collect()
     }
 
+    fn all_shed(ns: &[mycelium::NodeId]) -> Vec<(mycelium::NodeId, bool)> {
+        ns.iter().map(|n| (n.clone(), true)).collect()
+    }
+
     /// Issue #545: over one view of a band's providers, exactly the surplus withdraws — never all of them,
     /// never none — whatever the band or the size. The draw this replaced let every host withdraw at once.
     #[test]
@@ -1175,42 +1184,66 @@ mod tests {
             let providers = nodes(7000, n);
             for max in 0..n as usize {
                 for band in ["demo/echo", "route/optimize"] {
-                    let view = shed_view(&providers, max, band, &HashMap::new());
+                    let view = shed_view(&all_shed(&providers), max, band);
                     let leaving = providers.iter().filter(|p| view.sheds(p)).count();
                     assert_eq!(leaving, providers.len() - max, "n={n} max={max} band={band}");
                 }
             }
         }
         // A host that cannot see itself among the providers does not withdraw.
-        let view = shed_view(&nodes(7100, 3), 1, "demo/echo", &HashMap::new());
+        let view = shed_view(&all_shed(&nodes(7100, 3)), 1, "demo/echo");
         assert!(!view.sheds(&mycelium::NodeId::new("127.0.0.1", 7199).unwrap()));
     }
 
-    /// The review of #547: a provider that never sheds — registered in code, or a stem not running this
-    /// band — must not hold a band above its ceiling. Ranked alone, the hosts within the ceiling never step
-    /// in for it and the count stays above forever; after SHED_STALL_ROUNDS it is passed over and the next
-    /// host down sheds. Simulated with every host sharing one view, over every placement of the stuck one.
+    /// The first review of #547: a provider that does not shed — registered in code, or a stem without
+    /// this band — must not hold a band above its ceiling. It does not advertise `prov-shed`, keeps its place,
+    /// and the providers that do shed rank against what is left, in one round.
     #[test]
-    fn a_provider_that_never_sheds_does_not_hold_the_band_above_its_ceiling() {
+    fn a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling() {
         let all = nodes(7200, 4);
-        for stuck_at in 0..all.len() {
-            for (max, band) in [(2usize, "demo/echo"), (1, "route/optimize"), (2, "route/optimize")] {
-                let never = all[stuck_at].clone();
-                let mut live = all.clone();
-                let mut stalls = HashMap::new();
-                let mut rounds = 0;
-                while live.len() > max && rounds < 50 {
-                    let view = shed_view(&live, max, band, &stalls);
-                    stalls = view.next_stalls(&stalls);
-                    live.retain(|n| *n == never || !view.sheds(n));
-                    assert!(live.len() >= max, "never below the ceiling's count: {live:?}");
-                    rounds += 1;
-                }
-                assert_eq!(live.len(), max, "stuck at {stuck_at}, max {max}, band {band}: converged in {rounds} rounds");
-                assert!(live.contains(&never));
-                assert!(rounds <= SHED_STALL_ROUNDS as usize + 2, "{rounds} rounds");
+        for fixed_at in 0..all.len() {
+            for (max, band) in [(2usize, "demo/echo"), (1, "route/optimize"), (3, "route/optimize")] {
+                let entries: Vec<(mycelium::NodeId, bool)> =
+                    all.iter().enumerate().map(|(i, n)| (n.clone(), i != fixed_at)).collect();
+                let view = shed_view(&entries, max, band);
+                let remaining: Vec<_> = all.iter().enumerate().filter(|(i, n)| *i == fixed_at || !view.sheds(n)).collect();
+                assert_eq!(remaining.len(), max.max(1), "fixed at {fixed_at}, max {max}, band {band}");
+                assert!(remaining.iter().any(|(i, _)| *i == fixed_at));
             }
         }
+    }
+
+    /// The second review of #547: a host with a stale view — an entry it will not drop for a while, a
+    /// partition — must not work its way down to withdrawing everyone. Each host decides from its own view
+    /// once per round, rounds repeat, and nothing accumulates across rounds, so an extra entry can cost at
+    /// most one extra withdrawal, once. Partition: {A,B} | {C,D} at a ceiling of 2, each side still seeing
+    /// the other's entries; nobody is left with zero.
+    #[test]
+    fn a_stale_view_costs_at_most_one_round_never_a_cascade() {
+        let all = nodes(7300, 4);
+        let max = 2;
+        let mut live: Vec<mycelium::NodeId> = all.clone();
+        let sides = [vec![all[0].clone(), all[1].clone()], vec![all[2].clone(), all[3].clone()]];
+        let mut history = Vec::new();
+        for _round in 0..20 {
+            // Each host's view: its own side as it is now, plus the other side as it was at the split.
+            let mut leaving = Vec::new();
+            for (s, side) in sides.iter().enumerate() {
+                let other = &sides[1 - s];
+                let mut view: Vec<mycelium::NodeId> = side.iter().filter(|n| live.contains(n)).cloned().collect();
+                view.extend(other.iter().cloned());
+                for host in side.iter().filter(|n| live.contains(n)) {
+                    if view.len() > max && shed_view(&all_shed(&view), max, "demo/echo").sheds(host) {
+                        leaving.push(host.clone());
+                    }
+                }
+            }
+            live.retain(|n| !leaving.contains(n));
+            history.push(live.len());
+        }
+        assert!(!live.is_empty(), "the partition never takes the band to zero: {history:?}");
+        assert!(history.iter().all(|c| *c == history[0]),
+            "after the first round nothing more changes — no cascade: {history:?}");
     }
 
     fn alloc_port() -> u16 {
