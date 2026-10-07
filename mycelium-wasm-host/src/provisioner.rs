@@ -1126,7 +1126,8 @@ impl Provisioner {
             // withdraw at once — max+1 → 0 → back, round after round (#545). Only providers that will act
             // on the ceiling are ranked — they advertise `prov-shed/{band}`; one that does not
             // (registered in code, a stem without this band) keeps its place, and the rest rank against
-            // what is left. Which providers shed is read from their `prov-shed/{band}` advertisements, present
+            // what is left — once seen unmarked for FIXED_AFTER; until then it is presumed to shed (a `cap/`
+            // entry and its mark can arrive apart). Which providers shed is read from their marks, present
             // from a band's first round, so a new install is never unmarked. A view with k wrong entries can
             // leave the band at max − k for a round (the floor refills); it never cascades.
             let band = shed_band(&policy.filter, max);
@@ -1136,24 +1137,16 @@ impl Provisioner {
             let i_can_shed = can_shed.contains(&band);
             let now = mycelium::sim_seam::mono_now_ns();
             let seen = self.unmarked_since.entry(band.clone()).or_default();
-            seen.retain(|n, _| providers.contains(n) && !shedders.contains(n));
-            let entries: Vec<(mycelium::NodeId, bool)> = providers.iter()
-                .map(|n| {
-                    if *n == me {
-                        return (n.clone(), i_can_shed);
-                    }
-                    let marked = shedders.contains(n);
-                    let since = (!marked).then(|| *seen.entry(n.clone()).or_insert(now));
-                    (n.clone(), presumed_sheds(marked, since.map(mycelium::sim_seam::mono_since)))
-                })
-                .collect();
+            let (entries, presumed) = rank_entries(&providers, &shedders, &me, i_can_shed, seen, now);
             let view = shed_view(&entries, max, &target);
             let position = view.ranked.iter().position(|n| *n == me);
             let inputs = || vec![
                 InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
                     format!("live={live} max={max}"), Provenance::Gossiped),
                 InputSnapshot::new("the providers that shed (marked), ranked by the band's rendezvous order",
-                    format!("position={position:?} keep={} unmarked={}", view.keep, live - view.ranked.len()), Provenance::Gossiped),
+                    format!("position={position:?} keep={} fixed={}", view.keep, live - view.ranked.len()), Provenance::Gossiped),
+                InputSnapshot::new("unmarked peers presumed to shed — seen unmarked for less than FIXED_AFTER (this node's monotonic observation)",
+                    format!("presumed={presumed}"), Provenance::Local),
             ];
             let Some(artifact) = self.hosted_artifact_for(&policy.filter) else {
                 if let Some(t) = self.round_trace() {
@@ -1224,6 +1217,35 @@ const FIXED_AFTER: Duration = Duration::from_secs(2 * ADVERTISE_INTERVAL.as_secs
 /// below it; counting a provider fixed too early is what over-sheds (#547's fifth review).
 fn presumed_sheds(marked: bool, unmarked_for: Option<Duration>) -> bool {
     marked || unmarked_for.is_none_or(|d| d < FIXED_AFTER)
+}
+
+/// Each provider of a band and whether it is ranked as one that sheds, updating `seen` (when each unmarked
+/// peer was first seen unmarked, monotonic ns) — and how many unmarked peers are presumed to shed. This node
+/// counts itself by `i_can_shed`; a peer by its mark, or, unmarked, by [`presumed_sheds`]. `seen` keeps only
+/// current, unmarked providers, so a peer that is marked and later unmarked starts again.
+fn rank_entries(
+    providers: &[mycelium::NodeId],
+    shedders: &[mycelium::NodeId],
+    me: &mycelium::NodeId,
+    i_can_shed: bool,
+    seen: &mut HashMap<mycelium::NodeId, u64>,
+    now_ns: u64,
+) -> (Vec<(mycelium::NodeId, bool)>, usize) {
+    seen.retain(|n, _| providers.contains(n) && !shedders.contains(n));
+    let mut presumed = 0;
+    let entries = providers.iter().map(|n| {
+        if n == me {
+            return (n.clone(), i_can_shed);
+        }
+        if shedders.contains(n) {
+            return (n.clone(), true);
+        }
+        let since = *seen.entry(n.clone()).or_insert(now_ns);
+        let sheds = presumed_sheds(false, Some(Duration::from_nanos(now_ns.saturating_sub(since))));
+        presumed += usize::from(sheds);
+        (n.clone(), sheds)
+    }).collect();
+    (entries, presumed)
 }
 
 /// `entries` is each live provider and whether it sheds (it advertises [`SHED_NS`] for the band).
@@ -1375,13 +1397,41 @@ mod tests {
             all.iter().map(|n| (n.clone(), presumed_sheds(a.contains(n), (!a.contains(n)).then_some(unmarked_for)))).collect()
         };
         let just_healed = shed_view(&entries(Duration::from_millis(400)), max, "demo/echo");
-        let a_left = a.iter().filter(|h| !just_healed.sheds(h)).count();
-        assert!(a_left >= 1, "side A keeps its share of the ceiling: {a_left}");
+        let kept = all.iter().filter(|h| !just_healed.sheds(h)).count();
+        assert_eq!(kept, max, "every provider ranks with every other: exactly the ceiling stays");
         // The same view, read as a truly fixed pair of peers long after: A then yields to them.
         let settled = shed_view(&entries(FIXED_AFTER), max, "demo/echo");
         assert!(a.iter().all(|h| settled.sheds(h)), "providers unmarked for FIXED_AFTER are fixed");
         assert!(presumed_sheds(true, None) && presumed_sheds(false, None) && presumed_sheds(false, Some(Duration::ZERO)));
         assert!(!presumed_sheds(false, Some(FIXED_AFTER)));
+    }
+
+    /// The bookkeeping behind FIXED_AFTER: an unmarked peer is timed from first sight, presumed to shed until
+    /// FIXED_AFTER has passed, then fixed; a peer that gains its mark is dropped from the map, and one that
+    /// loses it again starts over; a peer that stops providing is forgotten.
+    #[test]
+    fn an_unmarked_peer_is_timed_from_first_sight_and_reset_by_its_mark() {
+        let me = mycelium::NodeId::new("127.0.0.1", 7700).unwrap();
+        let peer = mycelium::NodeId::new("127.0.0.1", 7701).unwrap();
+        let providers = vec![me.clone(), peer.clone()];
+        let mut seen = HashMap::new();
+        let t0 = 1_000_000_000u64;
+        let fixed = FIXED_AFTER.as_nanos() as u64;
+        let sheds = |seen: &mut HashMap<_, _>, shedders: &[mycelium::NodeId], now: u64| {
+            rank_entries(&providers, shedders, &me, true, seen, now).0.into_iter().find(|(n, _)| *n == peer).unwrap().1
+        };
+        assert!(sheds(&mut seen, &[], t0), "first sight: presumed to shed");
+        assert_eq!(seen.get(&peer), Some(&t0));
+        assert!(sheds(&mut seen, &[], t0 + fixed - 1), "still within FIXED_AFTER");
+        assert!(!sheds(&mut seen, &[], t0 + fixed), "unmarked for FIXED_AFTER: fixed");
+        assert!(sheds(&mut seen, std::slice::from_ref(&peer), t0 + fixed + 1), "marked: sheds");
+        assert!(!seen.contains_key(&peer), "a marked peer is dropped from the map");
+        assert!(sheds(&mut seen, &[], t0 + 2 * fixed), "unmarked again: timed from the start");
+        assert_eq!(seen.get(&peer), Some(&(t0 + 2 * fixed)));
+        let (_, presumed) = rank_entries(&providers, &[], &me, true, &mut seen, t0 + 2 * fixed + 1);
+        assert_eq!(presumed, 1);
+        rank_entries(std::slice::from_ref(&me), &[], &me, true, &mut seen, t0 + 3 * fixed);
+        assert!(seen.is_empty(), "a peer that stops providing is forgotten");
     }
 
     /// The third review of #547: two bands on one capability that differ in an attribute, a schema or the
