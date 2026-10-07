@@ -95,7 +95,9 @@ only against the *same* node's gateway; a cross-node reader polls until the head
 in — an honest consequence of eventual consistency, not a bug). The poll treats
 `IncompleteCheckpoint` (0.2.0) as *not converged yet*: the index row can arrive before its blobs are
 fetchable. An application calling `graph.invoke` on node B meets the same error and should retry it with
-a bound — the checkpointer README has the loop.
+a bound while `e.retriable` — the checkpointer README has the loop. Since 0.3.0 the error says why each
+blob is missing (`e.reasons`: `not_found`, `unavailable`, `unauthorized`, `corrupt`); the last two are not
+retriable.
 
 ### What a checkpoint's acknowledgement actually proves
 

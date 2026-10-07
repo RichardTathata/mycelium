@@ -291,3 +291,64 @@ class TestCrossNodeResume:
             assert final["steps"] == ["one", "two"]
 
             saver_b.delete_thread(thread)
+
+
+@pytest.mark.skipif(
+    TEST_PORT_B is None,
+    reason="MYCELIUM_TEST_PORT_B not set — the gossip-before-blob window needs a two-node mesh",
+)
+class TestRowBeforeBlob:
+    def test_a_row_that_arrives_before_its_blob_raises_not_found_then_reads_whole(self) -> None:
+        """Plan S5's two-node witness, made to happen rather than hoped for: node A writes a checkpoint
+        but holds one channel blob back, so the row gossips to B while the blob exists nowhere. B must
+        raise `IncompleteCheckpoint` naming that blob `not_found` (retriable) — never read the
+        checkpoint as absent or smaller — and read it whole once A uploads the blob."""
+        import hashlib
+
+        from langgraph_checkpoint_mycelium import IncompleteCheckpoint
+
+        thread = fresh_thread()
+        config = config_for(thread)
+        held: dict[str, bytes] = {}
+        with MyceliumCheckpointSaver(TEST_HOST, int(TEST_PORT)) as saver_a:
+            real_put = saver_a._blob_put
+            withheld_value = ["the withheld channel value", thread]
+            _t, withheld_bytes = saver_a.serde.dumps_typed(withheld_value)
+
+            def put_holding_one_back(data: bytes) -> str:
+                if data == withheld_bytes:
+                    blob_id = hashlib.sha256(data).hexdigest()
+                    held[blob_id] = data
+                    return blob_id
+                return real_put(data)
+
+            saver_a._blob_put = put_holding_one_back
+            saver_a.put(config, make_checkpoint({"withheld": withheld_value}), {"source": "loop", "step": 1, "parents": {}}, {"withheld": 1})
+            saver_a._blob_put = real_put
+            assert len(held) == 1
+            blob_id = next(iter(held))
+
+            with MyceliumCheckpointSaver(TEST_HOST, int(TEST_PORT_B)) as saver_b:
+                deadline = time.monotonic() + 60.0
+                while True:
+                    try:
+                        saver_b.get_tuple(config)
+                    except IncompleteCheckpoint as e:
+                        assert e.reasons.get(blob_id) == "not_found", e.reasons
+                        assert e.retriable
+                        break
+                    assert time.monotonic() < deadline, "the row never reached B, or B did not raise"
+                    time.sleep(0.25)
+
+                real_put(held[blob_id])
+                deadline = time.monotonic() + 60.0
+                while True:
+                    try:
+                        tup = saver_b.get_tuple(config)
+                    except IncompleteCheckpoint:
+                        tup = None
+                    if tup is not None:
+                        assert tup.checkpoint["channel_values"]["withheld"] == withheld_value
+                        break
+                    assert time.monotonic() < deadline, "B never read the checkpoint whole"
+                    time.sleep(0.25)

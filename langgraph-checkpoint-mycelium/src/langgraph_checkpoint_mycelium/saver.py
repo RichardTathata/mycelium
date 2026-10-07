@@ -70,20 +70,80 @@ class IncompleteCheckpoint(Exception):
     over, and dropping a pending write made it re-run a task that had already completed (and could
     lose an ``__error__``/``__interrupt__``/``__resume__`` write). Retry once the blobs propagate.
 
-    ``missing`` lists the content ids that could not be fetched.
+    ``missing`` lists the content ids that could not be fetched, and ``reasons`` says why for each
+    (0.3.0 — the plan's "absence, temporary unavailability, authorization refusal and corrupt content
+    stay distinguishable"): ``"not_found"`` (no reachable holder has it yet), ``"unavailable"`` (a
+    holder could not be reached, the node or a proxy in front of it failed, or the read was throttled),
+    ``"unauthorized"`` (the gateway refused the read — a token or scope problem), ``"corrupt"`` (every copy
+    currently on offer — the node's own and each advertised provider's — fails the content address),
+    ``"unsupported"`` (the node does not serve the blob route — no reason companion). ``retriable`` is
+    true only when every reason is transient (``not_found`` or ``unavailable``).
     """
 
-    retriable = True
+    retriable = True  # the class default; an instance says whether *its* reasons are all transient
+    TRANSIENT = frozenset({"not_found", "unavailable"})
 
-    def __init__(self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, missing: list[str]):
+    def __init__(
+        self,
+        thread_id: str,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        missing: list[str],
+        reasons: dict[str, str] | None = None,
+    ):
         self.thread_id = thread_id
         self.checkpoint_ns = checkpoint_ns
         self.checkpoint_id = checkpoint_id
         self.missing = missing
+        self.reasons = reasons if reasons is not None else {m: "not_found" for m in missing}
+        self.retriable = all(r in self.TRANSIENT for r in self.reasons.values())
+        why = ", ".join(f"{m[:12]} {self.reasons.get(m, 'not_found')}" for m in missing)
         super().__init__(
             f"checkpoint {checkpoint_id} of thread {thread_id!r} (ns {checkpoint_ns!r}) is incomplete: "
-            f"{len(missing)} referenced blob(s) not fetchable yet ({', '.join(m[:12] for m in missing)}); retry"
+            f"{len(missing)} referenced blob(s) not fetchable ({why}); "
+            + ("retry" if self.retriable else "retrying will not fix this")
         )
+
+
+def _route_error(resp: httpx.Response) -> str | None:
+    """The blob route's own ``{"error": …}`` word, or ``None`` if the body is not the route's."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    return body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), str) else None
+
+
+def _blob_reason(resp: httpx.Response) -> str | None:
+    """Why the blob route did not serve a blob (``None`` = it did, or the status is not a miss).
+
+    The status alone is not enough: a reverse proxy answers 502 with its own page when the node is down,
+    and a node without the reason companion answers a bare 404 — so ``corrupt`` and ``not_found`` are
+    read only from the route's own body (``mycelium-reason`` 0.7.0+).
+    """
+    status = resp.status_code
+    if status == 200:
+        return None
+    if status == 404:
+        return "not_found" if _route_error(resp) == "not_found" else "unsupported"
+    if status in (401, 403):
+        return "unauthorized"
+    if status == 502 and _route_error(resp) == "corrupt":
+        return "corrupt"
+    if status >= 500 or status in (408, 429):
+        return "unavailable"
+    return None  # a client error: let raise_for_status report it
+
+
+# How serious a reason is: a blob fetched more than once in one read keeps its most serious reason, so
+# ``retriable`` does not depend on which fetch came last.
+_SEVERITY = {"not_found": 1, "unavailable": 2, "corrupt": 3, "unauthorized": 3, "unsupported": 3}
+
+
+def _merge_reason(reasons: dict[str, str], blob_id: str, reason: str) -> None:
+    held = reasons.get(blob_id)
+    if held is None or _SEVERITY.get(reason, 3) > _SEVERITY.get(held, 3):
+        reasons[blob_id] = reason
 
 
 CKPT_PREFIX  = "ckpt"
@@ -185,8 +245,20 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         return resp.json()["id"]
 
     def _blob_get(self, blob_id: str) -> bytes | None:
-        resp = self._client.get(f"/gateway/reason/blob/{blob_id}")
-        if resp.status_code == 404:
+        return self._blob_try(blob_id)
+
+    def _blob_try(self, blob_id: str, reasons: dict[str, str] | None = None) -> bytes | None:
+        """The blob, or ``None`` with why recorded in ``reasons`` (``IncompleteCheckpoint.reasons``)."""
+        try:
+            resp = self._client.get(f"/gateway/reason/blob/{blob_id}")
+        except httpx.TransportError:
+            if reasons is not None:
+                _merge_reason(reasons, blob_id, "unavailable")
+            return None
+        reason = _blob_reason(resp)
+        if reason is not None:
+            if reasons is not None:
+                _merge_reason(reasons, blob_id, reason)
             return None
         resp.raise_for_status()
         return resp.content
@@ -221,8 +293,20 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         return resp.json()["id"]
 
     async def _ablob_get(self, blob_id: str) -> bytes | None:
-        resp = await self._aclient.get(f"/gateway/reason/blob/{blob_id}")
-        if resp.status_code == 404:
+        return await self._ablob_try(blob_id)
+
+    async def _ablob_try(self, blob_id: str, reasons: dict[str, str] | None = None) -> bytes | None:
+        """Async :meth:`_blob_try`."""
+        try:
+            resp = await self._aclient.get(f"/gateway/reason/blob/{blob_id}")
+        except httpx.TransportError:
+            if reasons is not None:
+                _merge_reason(reasons, blob_id, "unavailable")
+            return None
+        reason = _blob_reason(resp)
+        if reason is not None:
+            if reasons is not None:
+                _merge_reason(reasons, blob_id, reason)
             return None
         resp.raise_for_status()
         return resp.content
@@ -337,12 +421,13 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         # The row exists, so this checkpoint exists: a payload that cannot be fetched makes it
         # *incomplete*, never absent or smaller (realignment repairs S5).
         missing: list[str] = []
-        skeleton = self._blob_get(row["blob"])
+        reasons: dict[str, str] = {}
+        skeleton = self._blob_try(row["blob"], reasons)
         if skeleton is None:
             missing.append(row["blob"])
         channel_bytes: dict[str, bytes] = {}
         for ch, (blob_id, _type) in row.get("channels", {}).items():
-            data = self._blob_get(blob_id)
+            data = self._blob_try(blob_id, reasons)
             if data is None:
                 missing.append(blob_id)
             else:
@@ -355,13 +440,13 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             if parsed is None or raw is None:
                 continue  # a malformed key, or a row deleted since the listing: not part of it
             wrow = json.loads(raw)
-            data = self._blob_get(wrow["blob"])
+            data = self._blob_try(wrow["blob"], reasons)
             if data is None:
                 missing.append(wrow["blob"])
                 continue
             writes.append((parsed[0], parsed[1], wrow, data))
         if missing:
-            raise IncompleteCheckpoint(thread_id, checkpoint_ns, checkpoint_id, missing)
+            raise IncompleteCheckpoint(thread_id, checkpoint_ns, checkpoint_id, missing, reasons)
         assert skeleton is not None
         return self._assemble(
             thread_id, checkpoint_ns, checkpoint_id, row, skeleton, channel_bytes, writes, config
@@ -603,12 +688,13 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             row = json.loads(raw)
         # The same rule as the sync loader: present but unfetchable is *incomplete* (S5).
         missing: list[str] = []
-        skeleton = await self._ablob_get(row["blob"])
+        reasons: dict[str, str] = {}
+        skeleton = await self._ablob_try(row["blob"], reasons)
         if skeleton is None:
             missing.append(row["blob"])
         channel_bytes: dict[str, bytes] = {}
         for ch, (blob_id, _type) in row.get("channels", {}).items():
-            data = await self._ablob_get(blob_id)
+            data = await self._ablob_try(blob_id, reasons)
             if data is None:
                 missing.append(blob_id)
             else:
@@ -621,13 +707,13 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             if parsed is None or raw is None:
                 continue
             wrow = json.loads(raw)
-            data = await self._ablob_get(wrow["blob"])
+            data = await self._ablob_try(wrow["blob"], reasons)
             if data is None:
                 missing.append(wrow["blob"])
                 continue
             writes.append((parsed[0], parsed[1], wrow, data))
         if missing:
-            raise IncompleteCheckpoint(thread_id, checkpoint_ns, checkpoint_id, missing)
+            raise IncompleteCheckpoint(thread_id, checkpoint_ns, checkpoint_id, missing, reasons)
         assert skeleton is not None
         return self._assemble(
             thread_id, checkpoint_ns, checkpoint_id, row, skeleton, channel_bytes, writes, config

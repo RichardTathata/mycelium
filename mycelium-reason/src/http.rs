@@ -48,7 +48,7 @@ use serde_json::json;
 
 use mycelium::{CapFilter, GossipAgent};
 
-use crate::blob::{BlobId, FsBlobStore, MAX_BLOB_BYTES, MeshBlobStore};
+use crate::blob::{BlobId, BlobMiss, FsBlobStore, MAX_BLOB_BYTES, MeshBlobStore};
 use crate::route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig};
 use crate::trace::{TraceRecorder, narrate, replay};
 
@@ -137,14 +137,18 @@ async fn gw_blob_get(State(s): State<ReasonState>, Path(id): Path<String>) -> Re
     let Some(id) = BlobId::from_hex(&id) else {
         return error_json(StatusCode::BAD_REQUEST, "bad_id");
     };
-    match s.blobs.get(&id).await {
-        Some(bytes) => (
+    // Each reason has its own status (S5), so a client can tell "not here yet" (404), "a holder is
+    // unreachable" (503) and "every holder served bytes that fail the content address" (502) apart.
+    match s.blobs.fetch(&id).await {
+        Ok(bytes) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/octet-stream")],
             bytes,
         )
             .into_response(),
-        None => error_json(StatusCode::NOT_FOUND, "not_found"),
+        Err(miss @ BlobMiss::NotFound) => error_json(StatusCode::NOT_FOUND, miss.as_str()),
+        Err(miss @ BlobMiss::Corrupt) => error_json(StatusCode::BAD_GATEWAY, miss.as_str()),
+        Err(miss) => error_json(StatusCode::SERVICE_UNAVAILABLE, miss.as_str()),
     }
 }
 

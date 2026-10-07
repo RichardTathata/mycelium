@@ -38,6 +38,10 @@ class FakeGateway:
     def __init__(self) -> None:
         self.kv: dict[str, bytes] = {}
         self.blobs: dict[str, bytes] = {}
+        # A status the blob route answers for an id instead of serving it (S5's four reasons).
+        self.blob_status: dict[str, int] = {}
+        # A body the blob route answers with instead of the gateway's own JSON (a proxy's page, nothing).
+        self.blob_body: dict[str, bytes] = {}
 
     def handle(self, req: httpx.Request) -> httpx.Response:
         path, q = req.url.path, req.url.params
@@ -60,8 +64,16 @@ class FakeGateway:
             self.blobs[blob_id] = req.content
             return httpx.Response(200, json={"id": blob_id})
         if path.startswith("/gateway/reason/blob/"):
-            blob = self.blobs.get(path.rsplit("/", 1)[1])
-            return httpx.Response(404) if blob is None else httpx.Response(200, content=blob)
+            wanted = path.rsplit("/", 1)[1]
+            if wanted in self.blob_status:
+                code = self.blob_status[wanted]
+                body = self.blob_body.get(wanted)
+                if body is not None:
+                    return httpx.Response(code, content=body)
+                return httpx.Response(code, json={"error": {404: "not_found", 503: "unavailable", 502: "corrupt"}.get(code, "denied")})
+            blob = self.blobs.get(wanted)
+            # The real route's miss carries its reason in the body (mycelium-reason` 0.7.0+).
+            return httpx.Response(404, json={"error": "not_found"}) if blob is None else httpx.Response(200, content=blob)
         return httpx.Response(404)
 
 
@@ -151,3 +163,102 @@ def gw_restore_and_reread(gw, saver, cfg, missing, value):
     gw.blobs[missing] = data
     tup = saver.get_tuple(cfg)
     assert [w[2] for w in tup.pending_writes] == [value]
+
+
+# ── S5's unbuilt half: why a blob is missing stays distinguishable (doc-coverage run 20) ──────────
+# The plan promised "absence, temporary unavailability, authorization refusal and corrupt content stay
+# distinguishable in the error". The saver read 404 as missing and raised a bare HTTP error for any
+# other status, so a corrupt or refused blob was either indistinguishable from a slow one or escaped as
+# an unrelated exception.
+
+@pytest.mark.parametrize("status,reason,retriable", [
+    (404, "not_found", True),
+    (503, "unavailable", True),
+    (502, "corrupt", False),
+    (401, "unauthorized", False),
+    (403, "unauthorized", False),
+])
+def test_why_a_blob_is_missing_is_named_and_decides_retriable(world, status, reason, retriable):
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, f"t-why-{status}")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = status
+    with pytest.raises(IncompleteCheckpoint) as e:
+        saver.get_tuple(cfg)
+    assert e.value.reasons[blob] == reason
+    assert e.value.retriable is retriable
+
+
+async def test_the_async_loader_names_the_reason_too(world):
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, "t-why-async")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = 502
+    with pytest.raises(IncompleteCheckpoint) as e:
+        await saver.aget_tuple(cfg)
+    assert e.value.reasons[blob] == "corrupt"
+    assert e.value.retriable is False
+
+
+
+# ── The adversarial review of #542: what the status alone cannot say ────────────────────────────────
+
+def test_a_proxys_502_is_unavailable_not_corrupt(world):
+    """nginx / an ELB / Envoy answer 502 with their own page when the node is down or restarting. Only
+    the route's own `{"error":"corrupt"}` body means corrupt content."""
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, "t-proxy")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = 502
+    gw.blob_body[blob] = b"<html><body>502 Bad Gateway</body></html>"
+    with pytest.raises(IncompleteCheckpoint) as e:
+        saver.get_tuple(cfg)
+    assert e.value.reasons[blob] == "unavailable"
+    assert e.value.retriable is True
+
+
+def test_a_404_without_the_routes_body_means_the_route_is_not_served(world):
+    """A node without the reason companion answers a bodyless 404: the blob route does not exist there, and
+    retrying will not make it appear — not "not found yet"."""
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, "t-noroute")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = 404
+    gw.blob_body[blob] = b""
+    with pytest.raises(IncompleteCheckpoint) as e:
+        saver.get_tuple(cfg)
+    assert e.value.reasons[blob] == "unsupported"
+    assert e.value.retriable is False
+
+
+@pytest.mark.parametrize("status", [408, 429])
+def test_a_throttled_or_timed_out_read_is_unavailable(world, status):
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, f"t-transient-{status}")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = status
+    with pytest.raises(IncompleteCheckpoint) as e:
+        saver.get_tuple(cfg)
+    assert e.value.reasons[blob] == "unavailable"
+    assert e.value.retriable is True
+
+
+def test_the_sync_blob_helper_returns_the_bytes(world):
+    gw, saver = world
+    blob_id = saver._blob_put(b"payload")
+    assert saver._blob_get(blob_id) == b"payload"
+    assert saver._blob_get("0" * 64) is None
+
+
+def test_a_blob_fetched_twice_keeps_its_most_serious_reason():
+    """Content addressing makes repeated ids common (two channels with one value). The reason recorded
+    must not depend on which fetch came last: the more serious one stands."""
+    from langgraph_checkpoint_mycelium.saver import _merge_reason
+
+    reasons: dict[str, str] = {}
+    for r in ("unavailable", "not_found"):
+        _merge_reason(reasons, "b", r)
+    assert reasons == {"b": "unavailable"}
+    for r in ("corrupt", "unavailable"):
+        _merge_reason(reasons, "c", r)
+    assert reasons["c"] == "corrupt"

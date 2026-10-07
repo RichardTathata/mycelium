@@ -29,7 +29,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Correction to 2.24.0's Documentation entry:** it said the guarantee, domain and control profiles were told
   apart. What shipped named the guarantee (startup), control and consensus profiles; the **domain profile**
   joins the table in run 20, which now names four things called *profile*.
+
 ### Fixed
+- **Why a checkpoint blob is missing stays distinguishable** (`docs/plans/realignment-repairs.md` S5 — the half
+  2.24.0 did not build: *"absence, temporary unavailability, authorization refusal and corrupt content stay
+  distinguishable in the error"*; doc-coverage run 20, code gap 2). **`mycelium-reason` 0.7.0:** the blob tier's
+  `MeshBlobStore::fetch` returns a `BlobMiss` — `NotFound`, `Unavailable` (a provider unreachable), `Corrupt` —
+  and `GET /gateway/reason/blob/{id}` answers 404 / 503 / 502 with the reason in its body; it answered 404 for
+  all three. **Corrupt** only when every copy currently on offer fails its content address — the local copy and
+  every **advertised** provider's reply — with no advertised provider unreachable and none merely lacking it (a
+  holder offline past its 30 s capability lease is not counted, so it cannot hold the answer at retriable), so one faulty or hostile provider
+  cannot turn a blob that is still spreading into a permanent failure. **Damage at rest** is corruption, not
+  absence: `FsBlobStore::read` returns `LocalRead::Damaged` for a copy that fails its address or cannot be read
+  (EIO, EACCES), and the stock blob server answers a damaged copy — even one truncated to nothing — with a marker
+  that fails every content address, instead of the empty *miss* (it read as `NotFound`, retriable forever); a
+  holder still on 0.6.x answers the miss as before, so in a mixed fleet its damage reads as `not_found` until it
+  upgrades. `FsBlobStore::put` of the right bytes **repairs** a damaged copy, where it returned early because a
+  file existed; an existing copy is now read and compared on every put (no second hash).
+  **`langgraph-checkpoint-mycelium` 0.3.0** (a MINOR — three behaviours change against 0.2.0: a 401/403 on a blob raises a
+  non-retriable `IncompleteCheckpoint` where it raised `httpx.HTTPStatusError`; a 5xx, 408 or 429 raises a
+  retriable one where it raised `HTTPStatusError`; and a bare 404 — a node without the reason companion — is
+  `unsupported`, non-retriable, where 0.2.0 treated it as a missing blob and kept retrying)**:** `IncompleteCheckpoint.reasons` names each missing blob's reason,
+  read from the route's **body** as well as its status — a proxy's 502 page is `unavailable`, not `corrupt`;
+  a bare 404 (no reason companion on that node) is `unsupported`; 408/429 are `unavailable`; a 401/403 is
+  `unauthorized` (it escaped as a raw HTTP error) — a blob fetched twice keeps its most serious reason, and
+  `retriable` is false for `corrupt`, `unauthorized` and `unsupported`. The example rungs' polls re-raise a
+  non-retriable error. Fail-first: a two-node test with a provider serving the wrong bytes answered `404
+  not_found`; a blob damaged on its only holder's disk answered `404`; one bad provider beside an honest one
+  answered `502 corrupt` (the PR's own adversarial review found the last two); twelve checkpointer tests failed
+  against 0.2.0; a live two-node test makes the row arrive before its blob and asserts the raise.
+  **Upgrade order:** upgrade `langgraph-checkpoint-mycelium` to 0.3.0 **before** the reason nodes to 0.7.0 — a 0.2.x
+  checkpointer reads only 404 as a missing blob, so a 503 or a 502 from a 0.7.0 node escapes its retry loop as an
+  `httpx.HTTPStatusError`. `mycelium-py`'s `ReasonClient.blob_get` returns `None` only for 404 and raises for
+  502/503, whose body names the reason.
 - **The CI flake tier (`scripts/ci-retest.sh`) passed steps that had not run their tests.** Without
   `--no-fail-fast`, a flake in one test binary stopped cargo before later binaries and the isolated retry ran
   only the flaked test — the step went green with them unexecuted (the test-coverage job's first run:
