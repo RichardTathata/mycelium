@@ -108,6 +108,9 @@ pub fn verify_published_head(published: &PublishedRightsHead, key: &[u8; 32]) ->
 struct LiveHosted {
     _cap:      CapabilityReg,
     installed: Box<dyn Installed>,
+    /// What this install advertises — read by the shed to find what it can withdraw for a band, from
+    /// the install itself rather than a catalogue that may have moved on.
+    provides:  Capability,
     /// D20: loaded into the shadow lane — advertised as `{ns}/{name}.shadow`, so no filter for
     /// `{ns}/{name}` ever resolves it and no call for the incumbent ever reaches it.
     shadow:    bool,
@@ -129,8 +132,9 @@ pub struct SupervisionPolicy {
     pub filter:        CapFilter,
     pub min_providers: usize,
     /// Upper bound (Track 2b elastic sizing). `Some(max)` ⇒ when the live provider count exceeds
-    /// `max`, a hosting node self-elects to **withdraw** (cooperative self-removal — tombstone its
-    /// `cap/` + stop serving), the symmetric shed path to bring-up. `None` ⇒ unbounded.
+    /// `max`, the hosts ranked beyond `max` by the band's rendezvous order **withdraw** (cooperative
+    /// self-removal — tombstone its `cap/` + stop serving), the symmetric shed path to bring-up.
+    /// `None` ⇒ unbounded.
     pub max_providers: Option<usize>,
 }
 
@@ -155,6 +159,16 @@ pub struct Provisioner {
     trace:        Option<Arc<Trace>>,
     /// Rounds run here; the trigger every record of a round names.
     rounds:       u64,
+    /// One `prov-shed/{band}` advertisement per band this node supervises with a ceiling, reconciled every
+    /// round. Present from the first round, so a new install is never unmarked; retracted only while this node
+    /// provides the band without holding an install it could withdraw (code, a group projection) — see
+    /// [`marks_band`] (#547's reviews).
+    shed_regs:    HashMap<String, CapabilityReg>,
+    /// Per band, since when (monotonic ns, through the replay seam) each peer has been seen providing it
+    /// **without** a `prov-shed` mark. A peer is counted fixed only after [`FIXED_AFTER`] of that — a mark
+    /// and a `cap/` entry are separate keys and can arrive apart (a partition healing), and until then the
+    /// safe reading is that it sheds (#547's fifth review).
+    unmarked_since: HashMap<String, HashMap<mycelium::NodeId, u64>>,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -254,6 +268,8 @@ impl Provisioner {
             self_elect_p,
             trace: None,
             rounds: 0,
+            shed_regs: HashMap::new(),
+            unmarked_since: HashMap::new(),
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -568,9 +584,10 @@ impl Provisioner {
     }
 
     /// Like [`supervise`](Self::supervise) but with an upper bound (Track 2b elastic sizing): keep
-    /// the live provider count within `[min, max]`. Below `min` → bring up; above `max` → a hosting
-    /// node self-elects to **withdraw** (cooperative self-removal). Bounds are convergence targets,
-    /// not guarantees (sovereign veto / soft self-election), consistent with the membership governor.
+    /// the live provider count within `[min, max]`. Below `min` → bring up (soft self-election); above
+    /// `max` → the hosts ranked beyond `max` **withdraw** (cooperative self-removal; ranked, so hosts with
+    /// the same view agree on which). Bounds are convergence targets, not guarantees, consistent with
+    /// the membership governor.
     pub fn supervise_band(&mut self, filter: CapFilter, min_providers: usize, max_providers: usize) {
         self.policies.push(SupervisionPolicy {
             filter,
@@ -620,6 +637,18 @@ impl Provisioner {
     /// True if `artifact` is reserved or live on this node.
     fn is_hosted(&self, artifact: &ArtifactId) -> bool {
         self.hosted.lock().unwrap().contains_key(artifact)
+    }
+
+    /// The live install this node can withdraw for `filter`, if any — read from what each install
+    /// advertises, so an entry since removed from the catalogue, or a different entry for the same band,
+    /// still counts; a shadow never matches (its name is the shadow name), and an `Installing` reservation
+    /// is not a provider yet.
+    fn hosted_artifact_for(&self, filter: &CapFilter) -> Option<ArtifactId> {
+        let hosted = self.hosted.lock().unwrap();
+        hosted.iter().find_map(|(artifact, state)| match state {
+            HostedState::Live(live) if filter.matches(&live.provides) => Some(*artifact),
+            _ => None,
+        })
     }
 
     /// Start bringing one capability live on this node: **reserve** the artifact, then run the
@@ -730,7 +759,7 @@ impl Provisioner {
                             Some(HostedState::Installing { token: t, .. }) if *t == token => {
                                 map.insert(
                                     artifact,
-                                    HostedState::Live(LiveHosted { _cap: cap, installed, shadow }),
+                                    HostedState::Live(LiveHosted { _cap: cap, installed, provides: provides.clone(), shadow }),
                                 );
                                 None
                             }
@@ -1051,42 +1080,188 @@ impl Provisioner {
         }
 
         // ── Shed-driven (Track 2b elastic sizing) ────────────────────────────
-        // Symmetric to bring-up: when a band's live provider count exceeds `max`, a hosting node
-        // self-elects to withdraw. Over-provisioning (e.g. a transient duplicate after a herd of
-        // self-elections) self-corrects here.
+        // Symmetric to bring-up: when a band's live provider count exceeds `max`, the hosts ranked
+        // beyond `max` withdraw. Over-provisioning (e.g. a transient duplicate after a herd of
+        // self-elections) self-corrects here, in one round.
+        // `prov-shed/{band}` for every band this node supervises with a ceiling, except while it provides the
+        // band without an install it could withdraw — the one case where being ranked would stall the band.
+        let me = self.agent.node_id().clone();
+        let mut marked: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut can_shed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in &policies {
+            let Some(max) = p.max_providers else { continue };
+            let band = shed_band(&p.filter, max);
+            let holds = self.hosted_artifact_for(&p.filter).is_some();
+            let provides = self.agent.capabilities().demand(&p.filter).providers.contains(&me);
+            if holds {
+                can_shed.insert(band.clone());
+            }
+            if marks_band(provides, holds) {
+                marked.insert(band);
+            }
+        }
+        self.shed_regs.retain(|band, _| marked.contains(band));
+        for band in &marked {
+            if !self.shed_regs.contains_key(band) {
+                let reg = self.agent.capabilities().advertise_capability(Capability::new(SHED_NS, band.clone()), ADVERTISE_INTERVAL);
+                self.shed_regs.insert(band.clone(), reg);
+            }
+        }
         for policy in &policies {
             let Some(max) = policy.max_providers else { continue };
-            let live = self.agent.capabilities().demand(&policy.filter).providers.len();
+            let providers = self.agent.capabilities().demand(&policy.filter).providers;
+            let live = providers.len();
             let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
-            let inputs = || vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
-                format!("live={live} max={max}"), Provenance::Gossiped)];
             if live <= max {
+                self.unmarked_since.remove(&shed_band(&policy.filter, max));
                 if let Some(t) = self.round_trace() {
-                    t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target, inputs(), None);
+                    t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target,
+                        vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
+                            format!("live={live} max={max}"), Provenance::Gossiped)], None);
                 }
                 continue; // within the band
             }
-            let Some(artifact) = self.catalog.resolve_best(&policy.filter).map(|e| e.artifact)
-            else {
-                continue;
-            };
-            if !self.is_hosted(&artifact) {
+            // Which hosts above the ceiling withdraw is ranked, not drawn: every host with the same view
+            // agrees that exactly the surplus goes. A per-host draw at `self_elect_p` let every one
+            // withdraw at once — max+1 → 0 → back, round after round (#545). Only providers that will act
+            // on the ceiling are ranked — they advertise `prov-shed/{band}`; one that does not
+            // (registered in code, a stem without this band) keeps its place, and the rest rank against
+            // what is left — once seen unmarked for FIXED_AFTER; until then it is presumed to shed (a `cap/`
+            // entry and its mark can arrive apart). Which providers shed is read from their marks, present
+            // from a band's first round, so a new install is never unmarked. A view with k wrong entries can
+            // leave the band at max − k for a round (the floor refills); it never cascades.
+            let band = shed_band(&policy.filter, max);
+            let shedders: Vec<mycelium::NodeId> =
+                self.agent.capabilities().demand(&CapFilter::new(SHED_NS, band.clone())).providers;
+            // This node by what it holds now — whether or not its advertisement has been written yet.
+            let i_can_shed = can_shed.contains(&band);
+            let now = mycelium::sim_seam::mono_now_ns();
+            let seen = self.unmarked_since.entry(band.clone()).or_default();
+            let (entries, presumed) = rank_entries(&providers, &shedders, &me, i_can_shed, seen, now);
+            let view = shed_view(&entries, max, &target);
+            let position = view.ranked.iter().position(|n| *n == me);
+            let inputs = || vec![
+                InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
+                    format!("live={live} max={max}"), Provenance::Gossiped),
+                InputSnapshot::new("the providers that shed (marked), ranked by the band's rendezvous order",
+                    format!("position={position:?} keep={} fixed={}", view.keep, live - view.ranked.len()), Provenance::Gossiped),
+                InputSnapshot::new("unmarked peers presumed to shed — seen unmarked for less than FIXED_AFTER (this node's monotonic observation)",
+                    format!("presumed={presumed}"), Provenance::Local),
+            ];
+            let Some(artifact) = self.hosted_artifact_for(&policy.filter) else {
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::NoAction, "not_hosting", target, inputs(), None);
                 }
                 continue;
-            }
-            if self.self_elects_traced(&target) {
+            };
+            if view.sheds(&me) {
                 self.withdraw(&artifact); // cooperative self-removal
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::Action, "above_ceiling", target, inputs(), Some(format!("withdraw {artifact}")));
                 }
             } else if let Some(t) = self.round_trace() {
-                t.record("prov.shed", OutcomeKind::Deferral, "self_election_declined", target, inputs(), None);
+                t.record("prov.shed", OutcomeKind::NoAction, "ranked_within_ceiling", target, inputs(), None);
             }
         }
 
         started
+    }
+}
+
+/// The capability namespace a provisioner advertises to say it will act on a band's shed: once per band it
+/// supervises with a ceiling **and** holds a live install it can withdraw for. A band ranks only providers
+/// that advertise it (#547).
+pub const SHED_NS: &str = "prov-shed";
+
+/// The `prov-shed` name for a band: `{ns}:{name}:{hash}`, the hash over the filter's gossip encoding (the
+/// one `req/` carries: attributes and schema; ranking reset, `max_age` is never encoded) and the ceiling —
+/// two bands on one capability that differ in any of them are different bands, and every node, of any
+/// build that speaks this wire, computes the same name.
+pub fn shed_band(filter: &CapFilter, max: usize) -> String {
+    let mut identity = CapFilter { ranking: None, ..filter.clone() };
+    identity.max_age = None;
+    let mut bytes = identity.encode().to_vec();
+    bytes.extend_from_slice(&(max as u64).to_le_bytes());
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in &bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{}:{}:{h:016x}", filter.namespace, filter.name)
+}
+
+/// One round's shedding view of a band whose live providers exceed its ceiling.
+struct ShedView {
+    /// The providers that shed, best first, by [`mycelium::election::rank`] on the band's name.
+    ranked: Vec<mycelium::NodeId>,
+    /// How many of `ranked` stay: the ceiling, less the providers that do not shed (they stay regardless).
+    keep: usize,
+}
+
+/// Whether a node advertises `prov-shed` for a band it supervises with a ceiling: always, except while it
+/// **provides** the band without holding an install it could withdraw — then ranking it would stall the band
+/// above its ceiling, since it cannot leave. A node that does not provide the band is never read (only
+/// providers are ranked), so marking it from the start costs nothing and means a new install is marked the
+/// moment it goes live — a herd of new installs ranks exactly (#547's fourth review).
+fn marks_band(provides: bool, holds_withdrawable: bool) -> bool {
+    !provides || holds_withdrawable
+}
+
+/// How long a peer must be seen providing a band without a `prov-shed` mark before it is counted as one
+/// that will not shed: two advertise intervals, more than the gap between a `cap/` entry and a mark
+/// arriving apart.
+const FIXED_AFTER: Duration = Duration::from_secs(2 * ADVERTISE_INTERVAL.as_secs());
+
+/// Whether a peer providing the band is ranked as one that sheds: marked, or unmarked for less than
+/// [`FIXED_AFTER`]. In doubt it sheds — the error is a band above its ceiling for a few seconds, never
+/// below it; counting a provider fixed too early is what over-sheds (#547's fifth review).
+fn presumed_sheds(marked: bool, unmarked_for: Option<Duration>) -> bool {
+    marked || unmarked_for.is_none_or(|d| d < FIXED_AFTER)
+}
+
+/// Each provider of a band and whether it is ranked as one that sheds, updating `seen` (when each unmarked
+/// peer was first seen unmarked, monotonic ns) — and how many unmarked peers are presumed to shed. This node
+/// counts itself by `i_can_shed`; a peer by its mark, or, unmarked, by [`presumed_sheds`]. `seen` keeps only
+/// current, unmarked providers, so a peer that is marked and later unmarked starts again.
+fn rank_entries(
+    providers: &[mycelium::NodeId],
+    shedders: &[mycelium::NodeId],
+    me: &mycelium::NodeId,
+    i_can_shed: bool,
+    seen: &mut HashMap<mycelium::NodeId, u64>,
+    now_ns: u64,
+) -> (Vec<(mycelium::NodeId, bool)>, usize) {
+    seen.retain(|n, _| providers.contains(n) && !shedders.contains(n));
+    let mut presumed = 0;
+    let entries = providers.iter().map(|n| {
+        if n == me {
+            return (n.clone(), i_can_shed);
+        }
+        if shedders.contains(n) {
+            return (n.clone(), true);
+        }
+        let since = *seen.entry(n.clone()).or_insert(now_ns);
+        let sheds = presumed_sheds(false, Some(Duration::from_nanos(now_ns.saturating_sub(since))));
+        presumed += usize::from(sheds);
+        (n.clone(), sheds)
+    }).collect();
+    (entries, presumed)
+}
+
+/// `entries` is each live provider and whether it sheds (it advertises [`SHED_NS`] for the band).
+fn shed_view(entries: &[(mycelium::NodeId, bool)], max: usize, band: &str) -> ShedView {
+    let shedders: Vec<mycelium::NodeId> = entries.iter().filter(|(_, s)| *s).map(|(n, _)| n.clone()).collect();
+    let fixed = entries.len() - shedders.len();
+    let ranked = mycelium::election::rank(band, &shedders, mycelium::election::Rule::Rendezvous)
+        .into_iter().cloned().collect();
+    ShedView { ranked, keep: max.saturating_sub(fixed) }
+}
+
+impl ShedView {
+    /// Whether `me` withdraws: ranked beyond the ones that stay. A host absent from its own view stays —
+    /// its advertisement has not reached itself, so it cannot know its rank.
+    fn sheds(&self, me: &mycelium::NodeId) -> bool {
+        self.ranked.iter().position(|n| n == me).is_some_and(|i| i >= self.keep)
     }
 }
 
@@ -1098,6 +1273,181 @@ mod tests {
     use mycelium::Capability;
 
     const ECHO_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/echo_component.wasm");
+
+    fn nodes(base: u16, n: u16) -> Vec<mycelium::NodeId> {
+        (0..n).map(|i| mycelium::NodeId::new("127.0.0.1", base + i).unwrap()).collect()
+    }
+
+    fn all_shed(ns: &[mycelium::NodeId]) -> Vec<(mycelium::NodeId, bool)> {
+        ns.iter().map(|n| (n.clone(), true)).collect()
+    }
+
+    /// Issue #545: over one view of a band's providers, exactly the surplus withdraws — never all of them,
+    /// never none — whatever the band or the size. The draw this replaced let every host withdraw at once.
+    #[test]
+    fn exactly_the_surplus_above_a_ceiling_withdraws() {
+        for n in 1..=7u16 {
+            let providers = nodes(7000, n);
+            for max in 0..n as usize {
+                for band in ["demo/echo", "route/optimize"] {
+                    let view = shed_view(&all_shed(&providers), max, band);
+                    let leaving = providers.iter().filter(|p| view.sheds(p)).count();
+                    assert_eq!(leaving, providers.len() - max, "n={n} max={max} band={band}");
+                }
+            }
+        }
+        // A host that cannot see itself among the providers does not withdraw.
+        let view = shed_view(&all_shed(&nodes(7100, 3)), 1, "demo/echo");
+        assert!(!view.sheds(&mycelium::NodeId::new("127.0.0.1", 7199).unwrap()));
+    }
+
+    /// The first review of #547: a provider that does not shed — registered in code, or a stem without
+    /// this band — must not hold a band above its ceiling. It does not advertise `prov-shed`, keeps its place,
+    /// and the providers that do shed rank against what is left, in one round.
+    #[test]
+    fn a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling() {
+        let all = nodes(7200, 4);
+        for fixed_at in 0..all.len() {
+            for (max, band) in [(2usize, "demo/echo"), (1, "route/optimize"), (3, "route/optimize")] {
+                let entries: Vec<(mycelium::NodeId, bool)> =
+                    all.iter().enumerate().map(|(i, n)| (n.clone(), i != fixed_at)).collect();
+                let view = shed_view(&entries, max, band);
+                let remaining: Vec<_> = all.iter().enumerate().filter(|(i, n)| *i == fixed_at || !view.sheds(n)).collect();
+                assert_eq!(remaining.len(), max.max(1), "fixed at {fixed_at}, max {max}, band {band}");
+                assert!(remaining.iter().any(|(i, _)| *i == fixed_at));
+            }
+        }
+    }
+
+    /// The reviews of #547: views differ — a crashed shedder still advertised, a peer's mark not yet
+    /// arrived. The bound: the count stays at or above `max − (entries the view gets wrong)`, and it does
+    /// not cascade — nothing accumulates across rounds, and a surviving host's rank only improves as others
+    /// leave. Here two stale shedders ranked above everyone, and one missing mark, at a ceiling of 4 — so
+    /// the bound is 1. (With as many wrong entries as the ceiling, the bound is 0: the band can empty for a
+    /// round, and the floor refills it.)
+    #[test]
+    fn a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades() {
+        let real = nodes(7300, 5);
+        let max = 4;
+        // Two crashed providers still advertised everywhere, ranked above every real one: search band names
+        // until two of a pool rank first, so the worst placement is constructed rather than hoped for.
+        let pool = nodes(7400, 40);
+        let all: Vec<mycelium::NodeId> = real.iter().chain(pool.iter()).cloned().collect();
+        let (band, ghosts) = (0..1000).find_map(|k| {
+            let band = format!("demo/echo-{k}");
+            let order = mycelium::election::rank(&band, &all, mycelium::election::Rule::Rendezvous);
+            let top: Vec<mycelium::NodeId> = order.iter().take(2).map(|n| (*n).clone()).collect();
+            top.iter().all(|n| pool.contains(n)).then_some((band, top))
+        }).expect("some band ranks two pool nodes first");
+        let band = band.as_str();
+        assert_eq!(ghosts.len(), 2, "two ghosts rank above every real provider");
+        let missing_mark = real[0].clone(); // every other node counts it as one that does not shed
+        let wrong = ghosts.len() + 1;
+        let mut live = real.clone();
+        let mut history = Vec::new();
+        for _round in 0..10 {
+            let mut leaving = Vec::new();
+            for host in &live {
+                let entries: Vec<(mycelium::NodeId, bool)> = live.iter().chain(ghosts.iter())
+                    .map(|n| (n.clone(), n == host || *n != missing_mark))
+                    .collect();
+                if entries.len() > max && shed_view(&entries, max, band).sheds(host) {
+                    leaving.push(host.clone());
+                }
+            }
+            live.retain(|n| !leaving.contains(n));
+            history.push(live.len());
+        }
+        assert!(live.len() + wrong >= max, "never below max − wrong entries: {history:?}");
+        assert!(history.iter().all(|c| *c == history[0]), "nothing changes after the first round: {history:?}");
+    }
+
+    /// The fourth review of #547: a herd — every stem installs at once (self_elect_p = 1.0, the band below
+    /// its floor) — must land on the ceiling, not empty. The marks are present before the installs go live,
+    /// so every host sees every other new provider as one that sheds, and ranks exactly. Had a new install
+    /// been unmarked until its next round, each host would count the others fixed and every one withdraw.
+    #[test]
+    fn a_herd_of_new_installs_lands_on_the_ceiling() {
+        for n in 2..=7u16 {
+            let herd = nodes(7500, n);
+            for max in 1..n as usize {
+                // Marks exist from the band's first round: every provider is marked in every view.
+                let marked: Vec<(mycelium::NodeId, bool)> = herd.iter().map(|h| (h.clone(), marks_band(false, false))).collect();
+                let view = shed_view(&marked, max, "demo/echo");
+                let left = herd.iter().filter(|h| !view.sheds(h)).count();
+                assert_eq!(left, max, "n={n} max={max}");
+            }
+        }
+        // The rule: marked unless providing without anything withdrawable.
+        assert!(marks_band(false, false) && marks_band(true, true) && marks_band(false, true));
+        assert!(!marks_band(true, false));
+    }
+
+    /// The fifth review of #547: a partition heals and the other side's `cap/` entries arrive before their
+    /// marks. Counted fixed at once, they would push keep to 0 and empty this side; presumed to shed until
+    /// unmarked for FIXED_AFTER, they rank with everyone and the band lands on its ceiling.
+    #[test]
+    fn a_partition_heals_without_emptying_the_band() {
+        let a = nodes(7600, 2);
+        let b = nodes(7610, 2);
+        let all: Vec<mycelium::NodeId> = a.iter().chain(b.iter()).cloned().collect();
+        let max = 2;
+        // Side A's view just after the heal: its own providers marked, B's caps arrived, B's marks not yet.
+        let entries = |unmarked_for: Duration| -> Vec<(mycelium::NodeId, bool)> {
+            all.iter().map(|n| (n.clone(), presumed_sheds(a.contains(n), (!a.contains(n)).then_some(unmarked_for)))).collect()
+        };
+        let just_healed = shed_view(&entries(Duration::from_millis(400)), max, "demo/echo");
+        let kept = all.iter().filter(|h| !just_healed.sheds(h)).count();
+        assert_eq!(kept, max, "every provider ranks with every other: exactly the ceiling stays");
+        // The same view, read as a truly fixed pair of peers long after: A then yields to them.
+        let settled = shed_view(&entries(FIXED_AFTER), max, "demo/echo");
+        assert!(a.iter().all(|h| settled.sheds(h)), "providers unmarked for FIXED_AFTER are fixed");
+        assert!(presumed_sheds(true, None) && presumed_sheds(false, None) && presumed_sheds(false, Some(Duration::ZERO)));
+        assert!(!presumed_sheds(false, Some(FIXED_AFTER)));
+    }
+
+    /// The bookkeeping behind FIXED_AFTER: an unmarked peer is timed from first sight, presumed to shed until
+    /// FIXED_AFTER has passed, then fixed; a peer that gains its mark is dropped from the map, and one that
+    /// loses it again starts over; a peer that stops providing is forgotten.
+    #[test]
+    fn an_unmarked_peer_is_timed_from_first_sight_and_reset_by_its_mark() {
+        let me = mycelium::NodeId::new("127.0.0.1", 7700).unwrap();
+        let peer = mycelium::NodeId::new("127.0.0.1", 7701).unwrap();
+        let providers = vec![me.clone(), peer.clone()];
+        let mut seen = HashMap::new();
+        let t0 = 1_000_000_000u64;
+        let fixed = FIXED_AFTER.as_nanos() as u64;
+        let sheds = |seen: &mut HashMap<_, _>, shedders: &[mycelium::NodeId], now: u64| {
+            rank_entries(&providers, shedders, &me, true, seen, now).0.into_iter().find(|(n, _)| *n == peer).unwrap().1
+        };
+        assert!(sheds(&mut seen, &[], t0), "first sight: presumed to shed");
+        assert_eq!(seen.get(&peer), Some(&t0));
+        assert!(sheds(&mut seen, &[], t0 + fixed - 1), "still within FIXED_AFTER");
+        assert!(!sheds(&mut seen, &[], t0 + fixed), "unmarked for FIXED_AFTER: fixed");
+        assert!(sheds(&mut seen, std::slice::from_ref(&peer), t0 + fixed + 1), "marked: sheds");
+        assert!(!seen.contains_key(&peer), "a marked peer is dropped from the map");
+        assert!(sheds(&mut seen, &[], t0 + 2 * fixed), "unmarked again: timed from the start");
+        assert_eq!(seen.get(&peer), Some(&(t0 + 2 * fixed)));
+        let (_, presumed) = rank_entries(&providers, &[], &me, true, &mut seen, t0 + 2 * fixed + 1);
+        assert_eq!(presumed, 1);
+        rank_entries(std::slice::from_ref(&me), &[], &me, true, &mut seen, t0 + 3 * fixed);
+        assert!(seen.is_empty(), "a peer that stops providing is forgotten");
+    }
+
+    /// The third review of #547: two bands on one capability that differ in an attribute, a schema or the
+    /// ceiling are different bands — so a node acting on one is never ranked as acting on the other.
+    #[test]
+    fn bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names() {
+        let mut eu = CapFilter::new("route", "optimize");
+        eu.attributes.insert("region".into(), mycelium::CapConstraint::Eq(CapValue::Text("eu".into())));
+        let mut us = CapFilter::new("route", "optimize");
+        us.attributes.insert("region".into(), mycelium::CapConstraint::Eq(CapValue::Text("us".into())));
+        assert_ne!(shed_band(&eu, 2), shed_band(&us, 2));
+        assert_ne!(shed_band(&eu, 2), shed_band(&eu, 3));
+        assert_eq!(shed_band(&eu, 2), shed_band(&eu.clone(), 2));
+        assert!(!shed_band(&CapFilter::new("tuple", "orders.primary"), 1).ends_with(".primary"),
+            "never mistaken for a single-writer role by P10");
+    }
 
     fn alloc_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
@@ -1418,7 +1768,7 @@ mod tests {
     #[tokio::test]
     async fn track2b_sheds_a_provider_when_over_max() {
         // Track 2b: the symmetric shed path. Bring a capability live, then a band whose `max` is
-        // below the live count makes a hosting node self-elect to withdraw (tombstone + stop
+        // below the live count makes the hosting node ranked beyond it withdraw (tombstone + stop
         // serving). (Single-node: max=0 forces shed of the one local provider — the cross-node
         // case is the identical code path against real provider counts.)
         let agent = live_agent().await;

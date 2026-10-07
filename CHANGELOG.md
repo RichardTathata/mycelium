@@ -50,6 +50,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joins the table in run 20, which now names four things called *profile*.
 
 ### Fixed
+- **A presence ceiling sheds the surplus, not every host (#545).** Above `max_providers`, each hosting stem
+  drew to withdraw at its bring-up probability, so at `self_elect_p = 1.0` every host withdrew at once: the
+  count went max+1 → 0 → max+1, round after round — measured on `first_stem_fleet`, where two of four runs
+  oscillated for several seconds and one CI run's snapshot caught three providers. The hosts ranked beyond
+  `max` by the band's rendezvous order withdraw now (`mycelium::election::rank`, new), so hosts with the same
+  view agree that exactly the surplus leaves. Only providers that will act are ranked: a stem advertises
+  `prov-shed/{ns}:{name}:{hash}` for each band it supervises with a ceiling from the band's first round (the hash
+  over the filter's gossip encoding and the ceiling, so bands on one capability are told apart), so a herd of new
+  installs is marked the moment it goes live and lands exactly on the ceiling; it retracts the mark only while it
+  provides the band without an install it could withdraw. A provider that does not advertise it — registered in
+  code, a group projection, a stem without the band — keeps its place once it has been seen unmarked for two
+  advertise intervals (until then it is presumed to shed, since a `cap/` entry and its mark can arrive apart — a
+  partition healing — and counting it fixed too early is what over-sheds), and the rest rank against what is
+  left, so it cannot hold the band above its ceiling for more than those few seconds — each time the band rises above it. Bound: a view with *k* wrong
+  entries (a crashed provider still advertised, a mark not yet arrived) can leave the band at `max − k` for a
+  round — zero if *k* ≥ `max`, which the floor then refills — and it never cascades. Overlapping bands (one
+  unattributed, one attribute-restricted, both with tight ceilings) can still trade a provider back and forth. A host now withdraws
+  whichever install it holds for the band, read from the install, so an entry since removed from the catalogue
+  no longer leaves it unable to shed. **Rolling upgrade:** a stem still on the old code advertises no
+  `prov-shed` and still sheds by its draw, so while old and new stems share a band it can dip below the
+  ceiling until the floor refills; upgrade a band's stems together where that matters. The same probe settles at the ceiling within ~1.3 s, never
+  returning to zero. `prov.shed` is catalogue revision 2 (staying within is `NoAction`
+  `ranked_within_ceiling`, and the trace records the rank and the unmarked count); the shed no longer draws, so a recording has one
+  draw fewer per host per round spent above the ceiling. The example also snapshots only once
+  the observer's providers are the hosting stems and unchanged for a declare-and-tick cycle.
 - **Strict eligibility: a consecutive-terms run at the limit behind a stale head is `Unknown`, not `Ineligible`.**
   `eligible_strict` decided a visible run at the limit before checking that the history reached the head — but
   a later term by someone else breaks the run, so the candidate may be eligible. Missing *earlier* history only
