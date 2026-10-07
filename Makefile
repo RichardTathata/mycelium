@@ -179,6 +179,7 @@ check:
 	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)
 	./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py  # …and the check catches every bypass a review found
 	python3 scripts/test-ci-test-coverage.py                    # the observed-coverage job's log parser (the record of rule 3)
+	./scripts/test-ci-retest.sh                                 # the flake tier fails a crash, and a retry that ran nothing
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 	./scripts/check-positioning.sh                              # shared proposition, audience routes, resources and capability coverage

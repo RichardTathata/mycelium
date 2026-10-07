@@ -48,16 +48,24 @@ an auditor enumerated surfaces from the code instead of the description:
 - `.github/pull_request_template.md` — the enumeration, the plan-row evidence and the review link are fields.
 - `RELEASING.md` § 5b — no release while a delivery row marked merged lacks its evidence.
 - **The record: the `test-coverage` CI job** (`scripts/ci-test-coverage.py`). After every test job finishes,
-  it reads this run's own job logs and fails unless every test known to CI **executed** — passed or failed;
-  not skipped, ignored, filtered out, or in a step that did not run. Known means seen in any log (including
-  as skipped or ignored) or listed by the `test-universe` job (`cargo test --workspace --all-features --
-  --list`, the no-default-features builds, `pytest --collect-only`). A job it does not wait for and finds
-  unfinished fails it, so a new test job must join its `needs`. Tests that never run in CI by design — loom's
-  broken twins, perf smokes, the fixture regenerator, illustrative doc fragments — are listed with a reason
-  in `scripts/test-coverage-exceptions.txt`, and an exception that matches nothing fails too. Against
-  `main`'s last run (2026-10-06): 1,792 tests known, 1,781 executed, the 11 others exactly those exceptions.
-  Its parser has a self-test (`scripts/test-ci-test-coverage.py`). This is the answer to three rounds of
-  review finding ways around a static check: observing what ran needs no model of cfg, shell or YAML.
+  it reads this run's own job logs and fails unless every test it knows of **executed** — passed or failed;
+  not skipped, ignored, filtered out, or in a step that did not run. It knows a test if any log names it
+  (including as skipped or ignored) or the universe lists it: the `test-universe` job (`cargo test --workspace
+  --all-features -- --list`, `mycelium` and `mycelium-core` without default features, `pytest --collect-only`
+  over both Python test directories) and the TypeScript job (`jest --listTests`, per file). It fails if the
+  universe was not listed, and if a job it does not wait for is unfinished. Tests that never run in CI by
+  design — loom's broken twins, perf smokes, the fixture regenerator, `ignore` doctest fragments — are listed
+  with a reason in `scripts/test-coverage-exceptions.txt`, and an exception that matches nothing fails. On
+  #541's own CI (2026-10-07): 1,950 known, 1,936 executed, 14 excepted. Its first real run found the flake
+  tier skipping test binaries behind a flake (`--no-fail-fast`, below). Self-tests: `scripts/test-ci-test-coverage.py`
+  (the parser), `scripts/test-ci-retest.sh` (the retry tier).
+- **What the observed job cannot see**, so the static check below still matters: a test compiled under no
+  feature set the universe builds — a `not(feature = …)` gate in a crate other than `mycelium` and
+  `mycelium-core`, `all(a, not(b))`, a root-crate test gated `not(feature = "gateway")` (the root's
+  dev-dependencies unify `gateway` back in), a `--cfg` other than the loom job's; TypeScript test *names*
+  (files are listed, names are known only once printed); script-style suites (`scripts/test-*`, the Docker
+  workflows). And it keys an integration test by file and name, not crate, so two crates' same-named tests
+  would mask each other — the static check refuses that pair.
 - `scripts/check-test-inventory.py` (in `make check` and CI, through `scripts/with-pyyaml.sh`) — the fast,
   **approximate** pre-push half: rule 3 checked positively from source and workflow text. It inventories every test *requirement*: per crate, the library's, each integration test's,
   each binary's and the doctests' test code under every distinct `cfg` gate (a file's `#![cfg]`, the gate on the

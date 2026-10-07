@@ -942,7 +942,20 @@ def check(root: str, workflows: str) -> list[str]:
     exc = exceptions(root)
     missing: list[str] = []
 
-    for t in rust_targets(root, crs):
+    targets = rust_targets(root, crs)
+    # The observed job (ci-test-coverage.py) keys a test by its target file and name, not its crate — a log
+    # does not say which crate a `tests/x.rs` belongs to. Two crates' same-named integration tests would mask
+    # each other there, so they are refused here (blackboard's `failover.rs` masked tuple-space's).
+    seen: dict = {}
+    for t in targets:
+        if t.kind == "integration":
+            for n in t.names:
+                k = (t.name, n)
+                if k in seen and seen[k] != t.pkg:
+                    missing.append(f"integration {t.pkg}::{t.name}::{n}  (the same file and test name as in {seen[k]} — "
+                                   f"the observed coverage job cannot tell them apart; rename one)")
+                seen.setdefault(k, t.pkg)
+    for t in targets:
         cdir = os.path.join(root, crs[t.pkg])
         ok = any(runs_package(r, t.pkg, crs, root_pkg) and runs_kind(r, t) and satisfies(r, cdir, alt)
                  for r in runs for alt in t.alts)

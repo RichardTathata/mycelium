@@ -166,6 +166,9 @@ EXPECT = {
                                    "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v --co"),
                               "python langgraph-checkpoint-mycelium/tests/"),
     "jest --listTests": (regex(CI, r"npx jest --verbose\s", "npx jest --verbose --listTests "), "typescript mycelium-ts/tests/"),
+    "two crates' same-named integration tests": (
+        write("mycelium-blackboard/tests/failover.rs", "#[test]\nfn secondary_startup_lag_is_not_evaporation() {}\n"),
+        "integration mycelium-blackboard::failover::secondary_startup_lag_is_not_evaporation"),
     "npm test narrowed in package.json": (both(regex(CI, r"npx jest --verbose\s", "npm test "),
                                                edit("mycelium-ts/package.json", '"test": "jest"', '"test": "jest tests/live"')),
                                           "typescript mycelium-ts/tests/artifacts.test.ts"),

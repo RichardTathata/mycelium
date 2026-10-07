@@ -74,8 +74,9 @@ the evidence).
    checks it.
 3. **CI collects tests by discovery, not a list.** Point runners at directories; live suites skip themselves
    when no node is configured, except in the step that starts the node, which sets their `*_LIVE_REQUIRED`
-   guard. The CI job `test-coverage` (`scripts/ci-test-coverage.py`) fails on any test that did not execute in the
-   run; `scripts/check-test-inventory.py` is its fast pre-push approximation.
+   guard. The CI job `test-coverage` (`scripts/ci-test-coverage.py`) fails on any test it knows of — from the
+   logs and the listed universe — that did not execute in the run; `scripts/check-test-inventory.py` is its fast
+   pre-push approximation and covers what the universe cannot list.
 4. **Independent adversarial review after each PR.** Before merge, an agent other than the author enumerates
    the surfaces the change touches and tries to break them (`/adversarial-review`); its findings are fixed or
    answered in the PR.

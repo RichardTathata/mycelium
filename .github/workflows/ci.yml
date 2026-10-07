@@ -180,6 +180,7 @@ jobs:
       - run: ./scripts/with-pyyaml.sh scripts/check-test-inventory.py
       - run: ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py
       - run: python3 scripts/test-ci-test-coverage.py
+      - run: ./scripts/test-ci-retest.sh
       # Closure plan C11: no new unclassified read of Hlc::current(), which stands still on a quiet
       # node and fails a deadline check open.
       - run: ./scripts/check-hlc-current.sh
@@ -675,6 +676,13 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx jest --verbose   # --verbose: each test's ✓/○ line, which the test-coverage job reads
+      # The TypeScript half of the test universe: every test file jest would collect, listed (the
+      # test-coverage job checks each executed somewhere — a fully skipped suite prints no test lines).
+      - name: List the TypeScript test universe
+        run: |
+          echo "@@test-universe@@ begin"
+          npx jest --listTests
+          echo "@@test-universe@@ end"
       # The live suite against a real node (realignment repairs S4). It skips itself without
       # MYCELIUM_TEST_HOST, which nothing here set until 2026-10-05 — so it never ran in CI, and
       # run by hand it failed 9 of its 19 assertions against the gateway it was written for.

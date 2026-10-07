@@ -44,6 +44,7 @@ RUST_LISTED = re.compile(r"^(.+): (test|bench)$")
 PY_RESULT = re.compile(r"^(\S+\.py::\S.*?) (PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR)\b")
 PY_COLLECTED = re.compile(r"^(\S+\.py::\S+)\s*$")
 JEST_FILE = re.compile(r"^(PASS|FAIL)\s+(\S+\.test\.ts)")
+JEST_LISTED = re.compile(r"(?:^|/)mycelium-ts/(\S+\.test\.ts)\s*$")
 JEST_TEST = re.compile(r"^\s+(✓|✕|○ skipped|○ todo|○)\s+(.+?)(?: \(\d+ m?s\))?$")
 UNIVERSE_MARK = "@@test-universe@@"
 # libtest names a should-panic test "<name> - should panic" and rustdoc a `no_run` / `compile_fail` doctest
@@ -75,15 +76,32 @@ def clean(line: str) -> str:
 TRACKED: list[str] = []
 
 
+LISTED_BLOCKS: list[int] = []   # entries listed per complete universe block (begin…end)
+
+
 def scan(text: str, executed: set, universe: set):
     target = None
     jest_file = None
     universe_mode = False
+    listed = 0
     for raw in text.split("\n"):
         line = clean(raw)
         if UNIVERSE_MARK in line:
-            universe_mode = line.split(UNIVERSE_MARK, 1)[1].strip() == "begin"
+            mark = line.split(UNIVERSE_MARK, 1)[1].strip()
+            if mark == "begin":
+                universe_mode, listed = True, 0
+            elif mark == "end" and universe_mode:
+                universe_mode = False
+                LISTED_BLOCKS.append(listed)
             continue
+        if universe_mode:
+            m = JEST_LISTED.search(line.strip())
+            if m:
+                universe.add(f"typescript-file {m.group(1)}")
+                listed += 1
+                continue
+        if line.startswith("Test Suites:"):
+            jest_file = None
         m = RUNNING.match(line)
         if m:
             target = f"{m.group(1)}::{m.group(2)}"
@@ -103,6 +121,7 @@ def scan(text: str, executed: set, universe: set):
             m = RUST_LISTED.match(line)
             if m and universe_mode:
                 universe.add(f"rust {target}::{m.group(1)}")
+                listed += 1
                 continue
         m = PY_RESULT.match(line.strip())
         if m:
@@ -115,6 +134,7 @@ def scan(text: str, executed: set, universe: set):
             m = PY_COLLECTED.match(line.strip())
             if m:
                 universe.add(f"python {canonical_py(m.group(1), TRACKED)}")
+                listed += 1
                 continue
         m = JEST_FILE.match(line.strip())
         if m:
@@ -127,6 +147,9 @@ def scan(text: str, executed: set, universe: set):
                 universe.add(key)
                 if m.group(1) in ("✓", "✕") and not universe_mode:
                     executed.add(key)
+                    # The file ran: jest lists files, not tests, so a file is known by its listing and
+                    # covered when any of its tests executed somewhere.
+                    executed.add(f"typescript-file {jest_file}")
 
 
 def exceptions(root: str) -> list[tuple[str, str]]:
@@ -168,7 +191,7 @@ def fetch(dest: str):
             ["curl", "-sSfL", "--retry", "3", "-H", f"Authorization: Bearer {os.environ['GH_TOKEN']}",
              "-H", "Accept: application/vnd.github+json",
              f"https://api.github.com/repos/{repo}/actions/jobs/{jid}/logs"],
-            capture_output=True, text=True)
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
         if log.returncode != 0 or not log.stdout.strip():
             sys.exit(f"ci-test-coverage: could not fetch the log of job {name!r} ({jid}): {log.stderr.strip()[:300]}")
         open(os.path.join(dest, f"{jid}.log"), "w", encoding="utf-8").write(log.stdout)
@@ -192,11 +215,18 @@ def main() -> int:
     executed, universe = set(), set()
     for f in sorted(glob.glob(os.path.join(logs, "*"))):
         scan(open(f, encoding="utf-8", errors="replace").read(), executed, universe)
+    # The universe must have been listed: a test-universe job that failed or was cancelled would otherwise
+    # leave only what ran, and a test that never ran anywhere would be unknown rather than missing.
+    if len(LISTED_BLOCKS) < 2 or min(LISTED_BLOCKS) == 0:
+        print(f"ci-test-coverage: the test universe was not listed ({len(LISTED_BLOCKS)} complete block(s), "
+              f"sizes {LISTED_BLOCKS}): expected the test-universe job's and the TypeScript job's, each non-empty")
+        return 1
     exc = exceptions(root)
     used = set()
     missing = []
     for key in sorted(universe - executed):
-        hit = next((p for p, _ in exc if fnmatch.fnmatchcase(key, p)), None)
+        # Exact unless the pattern has a `*`: a pytest id's `[param]` is not a character class.
+        hit = next((p for p, _ in exc if (fnmatch.fnmatchcase(key, p.replace("[", "[[]")) if "*" in p else key == p)), None)
         if hit:
             used.add(hit)
         else:

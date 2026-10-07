@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **The verification policy** (`CLAUDE.md` § Verification policy; `docs/wiki/dev/testing/verification-policy.md`):
+  enumerate before fixing, plan rows close on evidence, CI collects tests by discovery, an independent
+  adversarial review after each PR — adopted after doc-coverage run 20 found six code gaps behind green CI. Rule
+  3 is **observed**: the `test-coverage` CI job reads the run's own logs and fails on any test it knows of
+  (logged, or listed by the new `test-universe` job and `jest --listTests`) that did not execute, against a
+  reasoned exceptions file; `scripts/check-test-inventory.py` is the fast pre-push approximation (in `make
+  check`, with a 48-case mutation suite). What it found running: `mycelium-core`'s `tls` unit tests, five
+  wasm-host and binary targets, the root doctests (one no longer compiled) and the Python live and node-free
+  files ran in no step; they run now. The PR template, `RELEASING.md` § 5b and `/adversarial-review` carry
+  the rules.
+
 ### Documentation
 - **Doc-coverage run 20** (`docs/analysis/doc-coverage.md`): the realignment repairs' operator and developer
   landings — persistence start refusals with their messages and actions, every `start()` refusal by field, the
@@ -18,6 +30,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   apart. What shipped named the guarantee (startup), control and consensus profiles; the **domain profile**
   joins the table in run 20, which now names four things called *profile*.
 ### Fixed
+- **The CI flake tier (`scripts/ci-retest.sh`) passed steps that had not run their tests.** Without
+  `--no-fail-fast`, a flake in one test binary stopped cargo before later binaries and the isolated retry ran
+  only the flaked test — the step went green with them unexecuted (the test-coverage job's first run:
+  `mycelium-reason`'s `tests/ollama.rs`). With it, a binary that crashed printed no failure list and went green
+  beside a retried flake; and a failing doctest's name was cut at its first space, so its retry ran nothing and
+  passed as a flake. Now: `--no-fail-fast`, a crashed binary fails the step, the whole name is retried, and a
+  retry passes only if it ran a test (`scripts/test-ci-retest.sh`, each case seen failing first).
 - **`mycelium-ts` 0.2.1 — two verbs that did not match their gateway handlers, found by sweeping every
   SDK verb's request and response against its handler.** `scatterGather` sent the method under `kind`;
   `gw_scatter` reads `method` and answered **every call 400 `missing method`** — since the client was
