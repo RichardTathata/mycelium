@@ -5701,6 +5701,29 @@ fn hot_timing_setters_refuse_what_validate_refuses() {
     assert_eq!(agent.timing_tunables(), (0, 0), "0 still reverts to the static value");
 }
 
+/// Every outbound client's `with_egress` takes the node's policy as `agent.egress_policy()` hands it —
+/// a reference — or by value (doc-coverage run 20, code gap 5: `OpenAiBackend` took only a reference,
+/// the other three only a value, and the docs wrote one form for all four).
+#[cfg(feature = "llm")]
+#[test]
+fn every_with_egress_takes_the_policy_by_reference_or_by_value() {
+    let policy = crate::config::EgressPolicy { allow_hosts: vec!["llm.internal".into()] };
+    let _ = crate::OpenAiBackend::new("http://llm.internal/v1", "", "m").with_egress(&policy);
+    let _ = crate::OpenAiBackend::new("http://llm.internal/v1", "", "m").with_egress(policy.clone());
+}
+
+/// R9's third door, from Rust: `govern_timing` publishes nothing a node would not apply.
+#[test]
+fn govern_timing_does_not_publish_an_intent_no_node_would_apply() {
+    let port = alloc_port();
+    let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), GossipConfig::default());
+    assert!(agent.govern_timing(99_999, 0, None).is_err(), "above 3600");
+    assert!(agent.govern_timing(0, 301, None).is_err(), "above 300");
+    assert!(agent.govern_timing(0, 0, None).is_err(), "governs nothing (the review of #544)");
+    assert!(agent.kv().get(crate::agent::timing_governor::TIMING_INTENT_KEY).is_none(),
+        "an out-of-range timing intent is not published");
+}
+
 /// WS-C / M10.2 gate (G-M10.2): live timing reconfiguration cluster-wide, intent-governed and
 /// fence-free. A `TimingIntent` published on one node is reconciled by every node within the TTL; a
 /// node-local `set_*` wins over the fleet intent (local-wins); and letting the intent evaporate
@@ -5727,7 +5750,7 @@ async fn test_wsc_m10_timing_intent_governs_fleet_with_local_wins() {
     b.set_health_check_interval_secs(9).unwrap();
 
     // A publishes a fleet TimingIntent (whole fleet).
-    assert!(a.govern_timing(2, 3, None), "intent published");
+    assert!(a.govern_timing(2, 3, None).unwrap(), "intent published");
 
     // A (not pinned) adopts the fleet intent; B (pinned) keeps its local value.
     poll_until(|| a.timing_tunables() == (2, 3), 6_000).await;
@@ -10921,7 +10944,8 @@ async fn a_federation_client_refuses_an_endpoint_the_egress_policy_denies() {
         DomainId::new("beta").unwrap(), "svc/billing", sk, DomainId::new("alpha").unwrap(),
         vec![GatewayEndpoint { id: "gw".into(), base_url: format!("http://127.0.0.1:{port}") }],
         1, Duration::from_secs(30),
-    ).with_egress(crate::EgressPolicy { allow_hosts: vec!["partner.example".into()] });
+    // By reference, as `agent.egress_policy()` hands it (doc-coverage run 20, code gap 5).
+    ).with_egress(&crate::EgressPolicy { allow_hosts: vec!["partner.example".into()] });
     let r = client.connect().await;
     assert!(matches!(r, Err(ClientError::Egress { .. })), "{r:?}");
     assert_eq!(client.link_state(), LinkState::Down);

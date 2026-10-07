@@ -828,7 +828,7 @@
 <span class="cm">// Management = intent + local reconcile. No command. No coordinator.</span>
 <span class="cm">// Posted by anyone — a human or an agent — they are substrate-identical.</span>
 POST /gateway/govern/membership  { <span class="cv">"group"</span>:<span class="cv">"workers"</span>, <span class="cv">"min"</span>:<span class="cn">3</span>, <span class="cv">"max"</span>:<span class="cn">12</span> }
-POST /gateway/govern/timing      { <span class="cv">"health_secs"</span>:<span class="cn">2</span>, <span class="cv">"backoff_secs"</span>:<span class="cn">1</span> }
+POST /gateway/govern/timing      { <span class="cv">"health_check_interval_secs"</span>:<span class="cn">2</span>, <span class="cv">"reconnect_backoff_secs"</span>:<span class="cn">1</span> }
 
 <span class="cm">// → written as evaporating soft-state; every node reconciles toward it</span>
 <span class="cm">// → newest-wins, node-sovereign; kill the poster and the last intent holds</span>

@@ -251,8 +251,8 @@ impl HttpLibrarySource {
     /// Gate pulls with the node's egress policy — the same WS3 posture as the LLM backends:
     /// an outbound pull is a reach this node chooses, and a denied host fails before any
     /// connection is attempted.
-    pub fn with_egress(mut self, egress: EgressPolicy) -> Self {
-        self.egress = egress;
+    pub fn with_egress(mut self, egress: impl Into<EgressPolicy>) -> Self {
+        self.egress = egress.into();
         self.egress_set = true;
         self.rebuild_client();
         self
@@ -470,6 +470,15 @@ impl RangedArtifactSource for DiskStagedSource {
 
 #[cfg(test)]
 mod tests {
+    /// `with_egress` takes the node's policy by reference, as `agent.egress_policy()` hands it, or by
+    /// value (doc-coverage run 20, code gap 5).
+    #[test]
+    fn with_egress_takes_the_policy_by_reference_or_by_value() {
+        let policy = mycelium::EgressPolicy { allow_hosts: vec!["artifacts.internal".into()] };
+        let _ = HttpLibrarySource::new("http://artifacts.internal").with_egress(&policy);
+        let _ = HttpLibrarySource::new("http://artifacts.internal").with_egress(policy.clone());
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};

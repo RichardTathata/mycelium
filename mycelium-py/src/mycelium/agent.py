@@ -293,7 +293,8 @@ class LockGuard:
         with agent.distributed_lock("my-lock") as guard:
             print("fencing token:", guard.token)
 
-        async with agent.distributed_lock_async("my-lock") as guard:
+        guard = agent.distributed_lock("my-lock")   # acquired here, synchronously
+        async with guard:                             # released on exit (``arelease``)
             ...
     """
 
@@ -1165,6 +1166,16 @@ class MyceliumAgent:
             return r.json()["owner"]
 
     # ── Health / introspection ──────────────────────────────────────────────
+
+    @property
+    def node_id(self) -> str:
+        """This node's id (``"ip:port"``), read once from ``GET /health`` and cached — the TypeScript
+        SDK's ``nodeId``. Use it to compare with :meth:`elect_leader`'s answer or to target this node."""
+        cached = getattr(self, "_node_id", None)
+        if cached is None:
+            cached = str(self.health()["node_id"])
+            self._node_id = cached
+        return cached
 
     def health(self) -> dict[str, Any]:
         """Return the node's health response."""

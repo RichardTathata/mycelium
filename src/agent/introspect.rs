@@ -109,14 +109,20 @@ impl GossipAgent {
     /// **Govern timing cluster-wide** (WS-C / M10.2): publish an evaporating `TimingIntent` that every
     /// node reconciles toward — newest-wins, **local-wins** (a node that called a `set_*` setter is
     /// pinned and ignores the intent), self-healing on evaporation. `0` for a field leaves it
-    /// ungoverned; `target = None` ⇒ whole fleet, `Some(node)` ⇒ just that node. Intent, never
+    /// as it is — a value an earlier intent applied stays while any fresh intent stands, and reverts only when none does; `target = None` ⇒ whole fleet, `Some(node)` ⇒ just that node. Intent, never
     /// command — and **no consensus fence** (see `timing_governor` docs). Returns whether queued.
+    ///
+    /// # Errors
+    /// [`GossipError::InvalidField`] for a value above 3600 / 300 — `validate()`'s bounds, which every
+    /// node's reconciler enforces, so such an intent would govern nothing — and for an intent governing
+    /// neither setting (both `0`), which would replace the previous intent while changing nothing. Release
+    /// governance by not publishing: an intent lapses with its lease (since 2.26.0).
     pub fn govern_timing(
         &self,
         health_check_interval_secs: u64,
         reconnect_backoff_secs: u64,
         target: Option<crate::node_id::NodeId>,
-    ) -> bool {
+    ) -> Result<bool, crate::GossipError> {
         super::timing_governor::publish_timing_intent(
             &self.task_ctx,
             super::timing_governor::TimingIntent {

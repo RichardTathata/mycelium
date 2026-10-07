@@ -168,6 +168,9 @@ curl -X POST http://localhost:8400/gateway/overlay/log/append \
   -d '{"stream":"events","entry":"hello"}'
 ```
 
+The key is yours to choose except under `sys/` and `consensus/`, which the substrate owns: those answer **403**
+`protected_key` (2.26.0), bar the operator's `sys/topology-override/{group}`.
+
 **What to observe**
 
 - Kill one overlay node and re-run the consistent_set — it still succeeds

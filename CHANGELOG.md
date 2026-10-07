@@ -31,6 +31,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   joins the table in run 20, which now names four things called *profile*.
 
 ### Fixed
+- **The recorded code gaps of doc-coverage run 20, closed under the verification policy** (enumerated entry points,
+  tests seen failing first, an independent review):
+  - **R9's third door.** `POST /gateway/govern/timing` and `GossipAgent::govern_timing` published any value, and
+    every node's reconciler ignored one outside `validate()`'s bounds, so the route answered `published: true`
+    for an intent that governed nothing. Both refuse it now (`TimingIntent::check`, at the one publish path they
+    share); the route also refuses a field that is not a non-negative integer, which it read as `0`
+    ("ungoverned"). Its reviews found more doors to the same invariant: an intent that governs neither setting
+    (it *replaced* the previous one while changing nothing) is refused by both; all three `govern/*` routes
+    refuse a non-object body, an unknown field, a value of the wrong type, and a `target` that is not a
+    node-id string (read as no target — the whole fleet), and membership a missing `min` (read as 0); timing's
+    publishes are audited as its siblings' are. And the four doors that take a KV key from the request —
+    `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum`, `POST /gateway/overlay/consistent/set` — refuse
+    every key under `sys/` and `consensus/` **403** `protected_key`, except the operator's
+    `sys/topology-override/{group}`: under `kv:write` or `consensus:write` they could publish a governance
+    intent without `govern:write`, plant the `sys/caller-context/` marker a secure gateway checks before
+    dispatch, delete an acceptor's durable ballot, forge a committed slot, or rewrite `sys/config/` and
+    `sys/capauthz/`. Within `sys/` and `consensus/` it is an allow-list, so a new key there is covered the day it is
+    added. **Not claimed:** a peer writing these keys through Layer I (detection, not prevention); and the other
+    route-owned namespaces — `prompts/`, `log/`, `grp/`, `cap/`, `mailbox/`, `installable/`, the companions' —
+    stay writable under `kv:write`, which `rbac.md` now states as a data-plane superuser scope (a decision
+    recorded, not made here); the topology override stays a `kv:write` write, unaudited. **Upgrade notes:** `govern_timing`
+    returns `Result<bool, GossipError>`; a client writing `sys/` or `consensus/` keys through the KV routes, or
+    sending the governance routes loose bodies, now gets 403 / 400; `with_egress` callers that relied on deref
+    coercion or inference spell the type (`deprecations.md` §18).
+  - **Cooling-off decides a visible term regardless.** A candidate visibly inside the cooling window read
+    `Unknown` behind a stale head, asking for history that could only confirm the "no"; it is `Ineligible`, as the
+    other two limits already were.
+  - **One `with_egress` for four clients.** `OpenAiBackend::with_egress` took a reference and `OllamaProbe`,
+    `HttpLibrarySource` and `FederationClient` a value; all four take `impl Into<EgressPolicy>`
+    (`From<&EgressPolicy>` added), so `agent.egress_policy()` works everywhere.
+  - **One signal-stream shape.** `GET /signals/{kind}` gains `payload_b64` and `nonce` beside its original
+    `payload`, matching `GET /gateway/signal/sse/{kind}`.
+  - **`mycelium-py` 0.2.6:** `MyceliumAgent.node_id` (the TypeScript SDK's `nodeId`), read once from `/health`; the README's
+    leader-election example used it and raised `AttributeError`. `LockGuard`'s docstring named a method that does
+    not exist.
 - **Why a checkpoint blob is missing stays distinguishable** (`docs/plans/realignment-repairs.md` S5 — the half
   2.24.0 did not build: *"absence, temporary unavailability, authorization refusal and corrupt content stay
   distinguishable in the error"*; doc-coverage run 20, code gap 2). **`mycelium-reason` 0.7.0:** the blob tier's

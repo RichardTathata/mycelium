@@ -307,8 +307,8 @@ impl FederationClient {
 
     /// Hold this client to an outbound allow-list: an endpoint whose host it does not permit is
     /// refused **before any byte is sent** ([`ClientError::Egress`]). Set once.
-    pub fn with_egress(self, policy: crate::config::EgressPolicy) -> Self {
-        self.set_egress(policy);
+    pub fn with_egress(self, policy: impl Into<crate::config::EgressPolicy>) -> Self {
+        self.set_egress(policy.into());
         self
     }
 
