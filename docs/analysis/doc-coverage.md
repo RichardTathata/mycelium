@@ -58,7 +58,10 @@ concern). WHY is usually shared Dev+Ops.
   - **Code gaps recorded, not papered** (§ Bugs): the timing door publishes out-of-range values every node
     ignores; the checkpointer cannot tell a lost or corrupt blob from a slow one; A3's strict eligibility has
     no shipped source; cooling-off answers `Unknown` before `Ineligible`; one `with_egress` takes a reference;
-    five node-free Python test files run in no CI job.
+    five node-free Python test files run in no CI job. **Closing (2026-10-07):** the timing door, cooling-off
+    and `with_egress` in the recorded-code-gaps PR (with Python `node_id`, the `/signals` data shape and the
+    `LockGuard` docstring); the blob distinction in #542 (S5); A3's source in #543; the Python files in #541,
+    which also made CI's test coverage something a job observes (verification policy rule 3).
 
 - **2026-10-03 (zero gaps, not a run)** — the four `~` cells that recorded a *code gap* close with
   `docs/plans/zero-gaps.md` (#507–#512): the stem reads an object store and pulls past the frame cap

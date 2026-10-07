@@ -279,9 +279,9 @@ is gated on the **endpoint host it dials**, not the bucket.
 
 **Will the compiler tell me?** No — a redirect that used to be followed now fails at request time.
 
-**Migration.** `OpenAiBackend::new(…).with_egress(agent.egress_policy())` (this one takes a reference);
-`OllamaProbe`, `HttpLibrarySource` and `FederationClient` take the policy by value —
-`.with_egress(agent.egress_policy().clone())`. For object stores list the endpoint
+**Migration.** `.with_egress(agent.egress_policy())` on each — since 2.26.0 all four (`OpenAiBackend`,
+`OllamaProbe`, `HttpLibrarySource`, `FederationClient`) take the policy by reference or by value. For object
+stores list the endpoint
 (`docs/operations/artifacts.md` § *Remote blob stores*).
 
 ## 17. The live timing setters return `Result` (2.25.0)
@@ -294,3 +294,15 @@ is gated on the **endpoint host it dials**, not the bucket.
 
 **Migration.** `agent.set_health_check_interval_secs(30)?;` — or `.expect(…)` where the value is a constant
 you know is in range.
+
+## 18. `govern_timing` returns `Result`; `with_egress` takes either form (2.26.0)
+
+**What changes.** `GossipAgent::govern_timing` returns `Result<bool, GossipError>` and refuses an intent above
+3600 / 300 — `POST /gateway/govern/timing` answers 400 for the same intent, and for a field that is not a
+non-negative integer. Every client's `with_egress` now takes `impl Into<EgressPolicy>`: a reference or a value.
+
+**Will the compiler tell me?** For `govern_timing`, it warns (`unused_must_use`) where the result is ignored, an
+error under `-D warnings`. `with_egress` callers compile unchanged.
+
+**Migration.** `agent.govern_timing(30, 5, None)?;`. An HTTP client that relied on `"30"` being accepted sends
+`30`.

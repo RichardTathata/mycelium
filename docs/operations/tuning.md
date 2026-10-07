@@ -136,7 +136,7 @@ accepts the POST and it gossips to converge — no elected/active endpoint, no f
 | Route | Scope | Body / effect |
 |---|---|---|
 | `POST /gateway/govern/tuning` | `govern:write` | `{"enabled":bool?, "params":[{"param","floor"?,"ceiling"?,"ratchet":"up\|down\|off"}], "target":NodeId?}` → publishes a `GovernIntent` to `sys/govern/fleet` |
-| `POST /gateway/govern/timing` | `govern:write` | `{"health_check_interval_secs"?, "reconnect_backoff_secs"?, "target":NodeId?}` (`0`/absent = leave ungoverned) → publishes a `TimingIntent`; a node that pinned its timing locally ignores it. **Each node applies only values in 1–3600 / 1–300**; the route does not refuse an out-of-range value today, it publishes one every node then ignores |
+| `POST /gateway/govern/timing` | `govern:write` | `{"health_check_interval_secs"?, "reconnect_backoff_secs"?, "target":NodeId?}` (`0`/absent = leave ungoverned) → publishes a `TimingIntent`; a node that pinned its timing locally ignores it. values above 3600 / 300 are refused **400** naming the field, and a field that is not a non-negative integer is refused rather than read as `0` (2.26.0; before, the route published an intent every node ignored and answered `published: true`) |
 | `POST /gateway/govern/membership` | `govern:write` | `{"group", "min", "max"?, "drain":[NodeId]?, "target":NodeId?}` → publishes a `MembershipIntent` to `sys/govern/membership/{group}` |
 | `GET /gateway/govern` | `govern:read` | this node's **effective** tuning-governor snapshot (reconciled local pins + fleet intent) |
 

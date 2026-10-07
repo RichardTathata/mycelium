@@ -93,8 +93,9 @@ impl OpenAiBackend {
 
     /// Follow redirects, re-checking every hop against `egress` (realignment repairs R3). What a
     /// node registering a backend should call with its own policy.
-    pub fn with_egress(mut self, egress: &crate::config::EgressPolicy) -> Self {
-        self.client = crate::agent::egress_client::build_or_none(crate::agent::egress_client::with_policy(egress));
+    pub fn with_egress(mut self, egress: impl Into<crate::config::EgressPolicy>) -> Self {
+        let egress = egress.into();
+        self.client = crate::agent::egress_client::build_or_none(crate::agent::egress_client::with_policy(&egress));
         self
     }
 }

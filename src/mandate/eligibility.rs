@@ -30,8 +30,9 @@
 //!   much is missing.
 //! - **cumulative tenure** — needs the origin, or a baseline naming the candidate's earlier total.
 //!   Exceeding the limit inside the suffix alone is `Ineligible` regardless.
-//! - **cooling-off** — needs the verified suffix to reach back across the cooling window, so a term
-//!   that ended inside it cannot be missing.
+//! - **cooling-off** — a visible term of the candidate inside the window is `Ineligible` regardless;
+//!   otherwise it needs the history to reach the head and the verified suffix to reach back across the
+//!   window, so a term that ended inside it cannot be missing.
 //!
 //! A rule the operator did not configure is not evaluated. [`StrictEligibility::verdict`] is
 //! `Ineligible` if any rule is, else `Unknown` if any rule is, else `Eligible`.
@@ -234,16 +235,21 @@ pub fn eligible_strict(
     });
 
     let cooling_off = rules.cooling_off_ms.map(|cool_ms| {
+        // A visible term inside the window decides it whatever is missing — the rule the other two
+        // limits follow (a limit met within what is visible is decided regardless). Only then does a
+        // stale head matter: a later term may be missing.
+        let last = suffix.iter().rev().find(|t| same(&t.holder, candidate));
+        if let Some(last) = last {
+            let eligible_at_ms = last.ended_ms.saturating_add(cool_ms);
+            if now_ms < eligible_at_ms {
+                return RuleVerdict::Ineligible(Ineligible::CoolingOff { eligible_at_ms, now_ms });
+            }
+        }
         if !cov.through_head {
             return RuleVerdict::Unknown(format!("cooling-off: {stale}"));
         }
-        if let Some(last) = suffix.iter().rev().find(|t| same(&t.holder, candidate)) {
-            let eligible_at_ms = last.ended_ms.saturating_add(cool_ms);
-            return if now_ms < eligible_at_ms {
-                RuleVerdict::Ineligible(Ineligible::CoolingOff { eligible_at_ms, now_ms })
-            } else {
-                RuleVerdict::Eligible
-            };
+        if last.is_some() {
+            return RuleVerdict::Eligible;
         }
         // No term of the candidate in the verified suffix: that settles it only if the suffix
         // reaches back across the whole cooling window.
@@ -415,6 +421,24 @@ mod tests {
         // ada's term ending at day 30 is inside the window: ineligible until day 35.
         let recent = TermHistory::from_chain(chain(20, 29, |n| if n == 29 { "ada" } else { "bo" }), Origin::Unknown, &tid(29));
         assert!(matches!(eligible_strict(&only, &recent, &pid("ada"), 31 * DAY).cooling_off, Some(RuleVerdict::Ineligible(_))));
+    }
+
+    /// A candidate visibly inside the cooling window is `Ineligible` however much history is missing —
+    /// the same rule consecutive terms and cumulative tenure follow (a limit met within what is visible
+    /// is decided regardless). This read `Unknown` behind a stale head, asking for history that could
+    /// only confirm the "no" (doc-coverage run 20, code gap 4).
+    #[test]
+    fn a_candidate_visibly_inside_the_cooling_window_is_ineligible_even_behind_a_stale_head() {
+        let only = IncumbencyRules { cooling_off_ms: Some(5 * DAY), ..IncumbencyRules::default() };
+        // ada's term ended at day 30; now is day 31; the source says the head is term 31, which it lacks.
+        let stale = TermHistory::from_chain(chain(20, 29, |n| if n == 29 { "ada" } else { "bo" }), Origin::Unknown, &tid(31));
+        assert!(!stale.coverage().through_head);
+        assert!(matches!(
+            eligible_strict(&only, &stale, &pid("ada"), 31 * DAY).cooling_off,
+            Some(RuleVerdict::Ineligible(Ineligible::CoolingOff { .. }))
+        ));
+        // Outside the window, the stale head still leaves it unknown: a later term may be missing.
+        assert!(matches!(eligible_strict(&only, &stale, &pid("ada"), 40 * DAY).cooling_off, Some(RuleVerdict::Unknown(_))));
     }
 
     /// Readiness needs both: the journal read, and every configured rule decided in favour.

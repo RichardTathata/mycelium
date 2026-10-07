@@ -387,7 +387,7 @@ All nodes calling concurrently converge on the same winner.
 
 ```python
 leader = agent.elect_leader("shard-0")
-if leader == agent.health()["node_id"]:   # this node's id string
+if leader == agent.node_id:   # this node's id, read once from /health and cached
     start_serving()
 ```
 

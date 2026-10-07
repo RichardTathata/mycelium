@@ -111,12 +111,16 @@ impl GossipAgent {
     /// pinned and ignores the intent), self-healing on evaporation. `0` for a field leaves it
     /// ungoverned; `target = None` ⇒ whole fleet, `Some(node)` ⇒ just that node. Intent, never
     /// command — and **no consensus fence** (see `timing_governor` docs). Returns whether queued.
+    ///
+    /// # Errors
+    /// [`GossipError::InvalidField`] for a value above 3600 / 300 — `validate()`'s bounds, which every
+    /// node's reconciler enforces, so such an intent would govern nothing (since 2.26.0).
     pub fn govern_timing(
         &self,
         health_check_interval_secs: u64,
         reconnect_backoff_secs: u64,
         target: Option<crate::node_id::NodeId>,
-    ) -> bool {
+    ) -> Result<bool, crate::GossipError> {
         super::timing_governor::publish_timing_intent(
             &self.task_ctx,
             super::timing_governor::TimingIntent {

@@ -83,7 +83,8 @@ impl OllamaProbe {
     /// Gate the daemon's host with the node's egress policy before each probe, and re-check every
     /// redirect hop against it (realignment repairs R3). Without this the probe was the one
     /// outbound client in the workspace no allow-list reached.
-    pub fn with_egress(mut self, egress: mycelium::EgressPolicy) -> Self {
+    pub fn with_egress(mut self, egress: impl Into<mycelium::EgressPolicy>) -> Self {
+        let egress: mycelium::EgressPolicy = egress.into();
         let check = egress.clone();
         let redirect = reqwest::redirect::Policy::custom(move |attempt| {
             let hop = attempt.previous().len();
@@ -242,6 +243,15 @@ pub fn spawn_meta_refresher(
 
 #[cfg(test)]
 mod tests {
+    /// `with_egress` takes the node's policy by reference, as `agent.egress_policy()` hands it, or by
+    /// value (doc-coverage run 20, code gap 5).
+    #[test]
+    fn with_egress_takes_the_policy_by_reference_or_by_value() {
+        let policy = mycelium::EgressPolicy { allow_hosts: vec!["ollama.internal".into()] };
+        let _ = OllamaProbe::new("http://ollama.internal:11434").with_egress(&policy);
+        let _ = OllamaProbe::new("http://ollama.internal:11434").with_egress(policy.clone());
+    }
+
     use super::*;
 
     #[test]

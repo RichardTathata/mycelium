@@ -21,6 +21,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files ran in no step; they run now. The PR template, `RELEASING.md` § 5b and `/adversarial-review` carry
   the rules.
 
+### Fixed
+- **The recorded code gaps of doc-coverage run 20, closed under the verification policy** (enumerated entry points,
+  tests seen failing first, an independent review):
+  - **R9's third door.** `POST /gateway/govern/timing` and `GossipAgent::govern_timing` published any value, and
+    every node's reconciler ignored one outside `validate()`'s bounds, so the route answered `published: true`
+    for an intent that governed nothing. Both refuse it now (`TimingIntent::check`, at the one publish path they
+    share); the route also refuses a field that is not a non-negative integer, which it read as `0`
+    ("ungoverned"). **Upgrade note:** `govern_timing` returns `Result<bool, GossipError>`.
+  - **Cooling-off decides a visible term regardless.** A candidate visibly inside the cooling window read
+    `Unknown` behind a stale head, asking for history that could only confirm the "no"; it is `Ineligible`, as the
+    other two limits already were.
+  - **One `with_egress` for four clients.** `OpenAiBackend::with_egress` took a reference and `OllamaProbe`,
+    `HttpLibrarySource` and `FederationClient` a value; all four take `impl Into<EgressPolicy>`
+    (`From<&EgressPolicy>` added), so `agent.egress_policy()` works everywhere.
+  - **One signal-stream shape.** `GET /signals/{kind}` gains `payload_b64` and `nonce` beside its original
+    `payload`, matching `GET /gateway/signal/sse/{kind}`.
+  - **`mycelium-py` 0.2.6:** `MyceliumAgent.node_id` (the TypeScript SDK's `nodeId`), read once from `/health`; the README's
+    leader-election example used it and raised `AttributeError`. `LockGuard`'s docstring named a method that does
+    not exist.
+
 ### Documentation
 - **Doc-coverage run 20** (`docs/analysis/doc-coverage.md`): the realignment repairs' operator and developer
   landings — persistence start refusals with their messages and actions, every `start()` refusal by field, the

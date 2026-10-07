@@ -285,6 +285,15 @@ pub struct EgressPolicy {
     pub allow_hosts: Vec<String>,
 }
 
+/// A borrowed policy converts by cloning, so every client's `with_egress` takes the node's policy as
+/// `agent.egress_policy()` hands it — a reference — or by value (doc-coverage run 20, code gap 5: one
+/// client took only a reference, three only a value, and the docs wrote one form for all four).
+impl From<&EgressPolicy> for EgressPolicy {
+    fn from(p: &EgressPolicy) -> Self {
+        p.clone()
+    }
+}
+
 impl EgressPolicy {
     /// True if outbound to `host` is permitted. Empty allowlist ⇒ permit all.
     pub fn permits_host(&self, host: &str) -> bool {

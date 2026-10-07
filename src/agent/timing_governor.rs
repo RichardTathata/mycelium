@@ -53,6 +53,26 @@ pub struct TimingIntent {
     pub written_at_ms: u64,
 }
 
+impl TimingIntent {
+    /// Would a node apply this? `0` leaves a field ungoverned; otherwise the value must be inside
+    /// `validate()`'s bound — `apply` ignores anything else, so publishing it would govern nothing
+    /// while reporting success (R9's third door, verification policy 2026-10-06).
+    pub fn check(&self) -> Result<(), crate::GossipError> {
+        for (field, v, max) in [
+            ("health_check_interval_secs", self.health_check_interval_secs, 3600u64),
+            ("reconnect_backoff_secs", self.reconnect_backoff_secs, 300u64),
+        ] {
+            if v > max {
+                return Err(crate::GossipError::InvalidField {
+                    field,
+                    reason: format!("{v} is above {max}, the bound validate() applies and every node's reconciler enforces; 0 leaves the field ungoverned"),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 impl super::intent::FleetIntent for TimingIntent {
     fn written_at_ms(&self) -> u64 { self.written_at_ms }
     fn stamp(&mut self, now_ms: u64) { self.written_at_ms = now_ms; }
@@ -109,9 +129,13 @@ pub fn spawn_timing_reconciler(ctx: &Arc<TaskCtx>) {
 
 /// Publish a `TimingIntent` to the fleet (or one `target` node). Intent, not command — any node may
 /// publish; every node reconciles. Returns whether the write was queued.
-pub fn publish_timing_intent(ctx: &Arc<TaskCtx>, intent: TimingIntent) -> bool {
+///
+/// # Errors
+/// An intent no node would apply ([`TimingIntent::check`]) is refused and nothing is published.
+pub fn publish_timing_intent(ctx: &Arc<TaskCtx>, intent: TimingIntent) -> Result<bool, crate::GossipError> {
+    intent.check()?;
     let kv = KvHandle::from_core(Arc::clone(&ctx.core));
-    super::intent::publish_intent(&kv, TIMING_INTENT_KEY, intent)
+    Ok(super::intent::publish_intent(&kv, TIMING_INTENT_KEY, intent))
 }
 
 #[cfg(test)]

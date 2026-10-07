@@ -1372,8 +1372,19 @@ async fn gw_govern_timing(
     State(ctx): State<Arc<HttpCtx>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let health = body.get("health_check_interval_secs").and_then(|v| v.as_u64()).unwrap_or(0);
-    let reconnect = body.get("reconnect_backoff_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    // A present field must be a non-negative integer: `as_u64().unwrap_or(0)` read `"30"` or `-5` as
+    // `0`, "ungoverned", and answered success for an intent that governs nothing.
+    let mut fields = [0u64; 2];
+    for (slot, name) in fields.iter_mut().zip(["health_check_interval_secs", "reconnect_backoff_secs"]) {
+        match body.get(name) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(v) => match v.as_u64() {
+                Some(n) => *slot = n,
+                None => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("{name} must be a non-negative integer")}))).into_response(),
+            },
+        }
+    }
+    let [health, reconnect] = fields;
     let target = body.get("target").and_then(|v| v.as_str()).and_then(|s| s.parse::<crate::node_id::NodeId>().ok());
     let intent = super::timing_governor::TimingIntent {
         health_check_interval_secs: health,
@@ -1381,8 +1392,10 @@ async fn gw_govern_timing(
         target,
         written_at_ms: 0,
     };
-    let ok = super::timing_governor::publish_timing_intent(&ctx.agent_ctx, intent);
-    Json(json!({ "published": ok, "key": super::timing_governor::TIMING_INTENT_KEY })).into_response()
+    match super::timing_governor::publish_timing_intent(&ctx.agent_ctx, intent) {
+        Ok(ok) => Json(json!({ "published": ok, "key": super::timing_governor::TIMING_INTENT_KEY })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 /// `POST /gateway/govern/membership` — publish an elastic-sizing intent for a group.
@@ -1509,8 +1522,9 @@ async fn gw_govern_membership(
 ///
 /// Each event carries:
 /// - `event` field: the signal kind
-/// - `data` field: JSON `{"kind":"<kind>","sender":"<node_id>","payload":"<base64>"}` — `kind`
-///   repeats the event name (since 2.24.0) so a client reading the body alone is not wrong
+/// - `data` field: JSON `{"kind","sender","payload_b64","nonce","payload"}` — the gateway stream's shape
+///   (`kind` since 2.24.0; `payload_b64` and `nonce` since 2.26.0), plus `payload`, the same base64 under
+///   the name this route used first, kept for existing readers
 ///
 /// The subscription is torn down automatically when the client disconnects.
 async fn signal_sse_handler(
@@ -1525,10 +1539,14 @@ async fn signal_sse_handler(
     let stream = ReceiverStream::new(rx).map(|sig: crate::signal::Signal| {
         use base64::Engine as _;
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&sig.payload);
+        // The gateway stream's shape, so one parser reads both routes (doc-coverage run 20): `payload_b64`
+        // and the `nonce` added; `payload` kept, the same bytes, for readers of the original shape.
         let data = json!({
-            "kind":    sig.kind.as_ref(),
-            "sender":  sig.sender.to_string(),
-            "payload": payload_b64,
+            "kind":        sig.kind.as_ref(),
+            "sender":      sig.sender.to_string(),
+            "payload_b64": payload_b64.clone(),
+            "nonce":       sig.nonce,
+            "payload":     payload_b64,
         });
         Ok(Event::default()
             .event(sig.kind.as_ref())
@@ -4431,6 +4449,39 @@ mod tests {
         assert_eq!(failed["ok"], true, "a failed *durability* is still a committed value");
     }
 
+    /// Realignment repairs R9's third door (verification policy, 2026-10-06): `POST /gateway/govern/timing`
+    /// published any value — every node's reconciler then ignored one outside `validate()`'s bounds, so
+    /// the route answered `published: true` for an intent that governs nothing. It refuses it now, and a
+    /// field that is present but not an integer is refused rather than read as `0` ("ungoverned").
+    #[tokio::test]
+    async fn govern_timing_refuses_what_no_node_would_apply() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.http_addr = "127.0.0.1".to_string();
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let url = format!("http://127.0.0.1:{http_port}/gateway/govern/timing");
+        let client = reqwest::Client::new();
+        let post = |body: serde_json::Value| { let (c, u) = (client.clone(), url.clone()); async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match c.post(&u).json(&body).send().await {
+                    Ok(r) => break r.status().as_u16(),
+                    Err(e) => { assert!(tokio::time::Instant::now() < deadline, "{e}"); tokio::time::sleep(Duration::from_millis(50)).await; }
+                }
+            }
+        }};
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 99999})).await, 400, "above 3600");
+        assert_eq!(post(serde_json::json!({"reconnect_backoff_secs": 301})).await, 400, "above 300");
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": "30"})).await, 400, "not an integer");
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 30, "reconnect_backoff_secs": 5})).await, 200, "in range");
+        assert_eq!(post(serde_json::json!({"health_check_interval_secs": 0})).await, 200, "0 = ungoverned");
+        agent.shutdown().await;
+    }
+
     /// Both signal SSE routes carry the kind in the data object as well as the SSE event name, so a
     /// client that reads the body alone is not wrong (realignment repairs §3.2: `mycelium-ts`'s old
     /// `raw.kind` was always undefined). Additive: the event name is unchanged.
@@ -4480,6 +4531,10 @@ mod tests {
             let data = seen.lines().find_map(|l| l.strip_prefix("data:")).expect("a data line").trim();
             let v: serde_json::Value = serde_json::from_str(data).unwrap();
             assert_eq!(v["kind"], "repair.request", "{path}: the data object names its kind: {data}");
+            // One shape on both routes (doc-coverage run 20): `payload_b64` and the `nonce` on the
+            // node-level route too; its `payload` stays for existing readers.
+            assert_eq!(v["payload_b64"], "a2V0dGxl", "{path}: payload_b64: {data}");
+            assert_eq!(v["nonce"], 7, "{path}: nonce: {data}");
         }
         agent.shutdown().await;
     }

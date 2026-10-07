@@ -191,7 +191,9 @@ let (health, reconnect) = agent.timing_tunables();
 
 Both return `Result<(), GossipError>` since 2.25.0: a value past `validate()`'s bound is refused and
 changes nothing. A successful set **pins** the node — the fleet's `TimingIntent` (published through
-`POST /gateway/govern/timing`) no longer moves it, which is the local-wins rule the governors share.
+`POST /gateway/govern/timing`, or `agent.govern_timing(health, reconnect, target)?` from Rust) no longer
+moves it, which is the local-wins rule the governors share. Publishing an intent no node would apply is
+refused the same way, since 2.26.0.
 The three capacity tunables and the routes are in [operations/tuning.md](../operations/tuning.md)
 § *Live retuning*.
 
