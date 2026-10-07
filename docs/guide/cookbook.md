@@ -201,8 +201,9 @@ pipeline-scale writes (stage a batch, submit only its reference via `Wiki::submi
 
 ### How do I make my agents reachable from LangChain / AutoGen (A2A)?
 
-Serve the A2A AgentCard — built automatically from your capabilities at
-`/.well-known/agent.json`. An external ReAct agent discovers and calls your
+Serve the A2A AgentCard — built automatically at `/.well-known/agent.json` from the
+capabilities `/a2a` can call (prompt skills and the fleet's plumbing are left out; call a prompt
+skill through `POST /gateway/llm/call`). An external ReAct agent discovers and calls your
 skills as tools. Demo: [`examples/a2a_langchain`](../../examples/a2a_langchain/).
 Chapter: [08 · A2A interop](08-a2a-interop.md).
 
@@ -322,7 +323,8 @@ Chapter: [23 · Knowledge](23-knowledge.md).
 
 ### How do I shed load / signal "I'm busy"?
 
-Write your own `sys/load/` pheromone (or run an opacity governor); `resolve`
+From Rust, write your own `sys/load/` pheromone or run an opacity governor (the gateway's KV routes refuse
+`sys/` **403** `protected_key`, so an SDK agent has no door for it); `resolve`
 skips opaque providers automatically. Demo:
 [`stigmergy`](../../examples/coop/src/bin/stigmergy.rs).
 

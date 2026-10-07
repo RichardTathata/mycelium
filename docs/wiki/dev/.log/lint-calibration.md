@@ -328,3 +328,29 @@ Entry format:
   `mcp_toolgrowth` has none, so it implied a bin the manifest lacks (eight gated, not nine). No new
   sharpening — the 10-02 rule (derive the names, diff them) catches it when the diff is by name rather
   than by reading the sentence; this pass did that.
+
+- 2026-10-07 (full pass): **§1 endpoint list — a brace-expanded route list checked for existence, not
+  completeness.** `operations.md`'s governance line read `POST /gateway/govern/{timing,tuning,membership}` from
+  2026-07-07; `/gateway/govern/profile` joined the router on 2026-09-18 (#289) and stayed off the list through five
+  passes (09-24, 09-26, 10-02, 10-03, 10-06), each of which expanded the braces and confirmed every *named* route
+  existed. #549 then added `topology-override`. Found because this pass diffed the list against the router's routes
+  under the same prefix while ingesting #549. Sharpening (proposed for §1's endpoint bullet): a `{a,b,c}` route list
+  is an enumeration — diff its members against every router literal sharing the prefix, the same rule the 2026-10-02
+  entry gave prose lists of a manifest. The same diff found the profile route writes no audit record while the
+  runbook says every governance POST does (reported as a code gap, not fixed in the docs).
+- 2026-10-07 (same pass): **§1 CI-gate list — a sentence naming which test files a CI step runs, stale twice
+  over.** `testing.md` said CI's `jest` ran "the node-free `auth.test.ts`; the live suite self-skips". Seven more
+  node-free files joined from 2026-09-05 (`commit_result.test.ts`, the same day) to 2026-10-05, and since #526
+  (2026-10-05) the live suite runs against a started node with `MYCELIUM_LIVE_REQUIRED` — the 10-06 pass ran a day
+  after that and diffed only the page's gate *block* against `run:` lines, not this prose. Sharpening (proposed for
+  §1's CI-gate bullet): prose that names which tests a step runs is an enumeration of a directory — diff it against
+  the runner's own collection (`testMatch` / `jest --listTests`, `--test '*'`, a pytest directory), and read every
+  sentence about CI on the testing pages, not only the fenced block.
+- 2026-10-07 (same pass): **§4 enumeration — a coop demo missing from the suite's list for fifteen days.**
+  `procurement_authority` (the AE gallery row, #348, 2026-09-22) is a coop bin and `ci_smoke.sh`'s thirteenth
+  demo; `examples.md` still said fourteen demos (twelve CI) without it, and `testing.md` "12 multi-node demos",
+  through five passes. The 2026-07-14/15 sharpenings derive *categories* from the tree, and this demo sat in an
+  existing category, so a category diff could not see it. Found by checking the pinned count while fixing the jest
+  sentence. Sharpening (proposed for §4): for a page that enumerates a suite, diff the **names** against the
+  runner (`run_demo` lines in `ci_smoke.sh`, the `[[bin]]` names) — the category check and the name check catch
+  different misses.

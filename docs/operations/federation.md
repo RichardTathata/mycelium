@@ -95,10 +95,10 @@ Then, from any local client holding a bearer:
 
 ```bash
 curl -sX POST localhost:7946/gateway/federation/connect -H "Authorization: Bearer $TOKEN" \
-     -d '{"domain":"partner.example"}'                         # federation:invoke
+     -H 'Content-Type: application/json' -d '{"domain":"partner.example"}'                         # federation:invoke
 curl -s localhost:7946/gateway/federation/partners -H "Authorization: Bearer $TOKEN"   # federation:read
 curl -sX POST localhost:7946/gateway/federation/call -H "Authorization: Bearer $TOKEN" \
-     -d '{"domain":"partner.example","export":"surplus-food/collection","text":"…"}'
+     -H 'Content-Type: application/json' -d '{"domain":"partner.example","export":"surplus-food/collection","text":"…"}'
 ```
 
 ```python

@@ -51,8 +51,11 @@ an auditor enumerated surfaces from the code instead of the description:
   it reads this run's own job logs and fails unless every test it knows of **executed** — passed or failed;
   not skipped, ignored, filtered out, or in a step that did not run. It knows a test if any log names it
   (including as skipped or ignored) or the universe lists it: the `test-universe` job (`cargo test --workspace
-  --all-features -- --list`, `mycelium` and `mycelium-core` without default features, `pytest --collect-only`
-  over both Python test directories) and the TypeScript job (`jest --listTests`, per file). It fails if the
+  --all-features -- --list`, then every workspace crate's own build without default features — the crate list
+  read from `cargo metadata`, so a new crate is covered the day it joins — and `pytest --collect-only` over both
+  Python test directories) and the TypeScript job (`jest --listTests` per file, and every test's title from jest's
+  `--json` report, skipped ones included — `scripts/ci-jest-universe.py`, which refuses two same-titled tests in one
+  file because the verbose log keys a test by its leaf title). It fails if the
   universe was not listed, and if a job it does not wait for is unfinished. Tests that never run in CI by
   design — loom's broken twins, perf smokes, the fixture regenerator, `ignore` doctest fragments — are listed
   with a reason in `scripts/test-coverage-exceptions.txt`, and an exception that matches nothing fails. On
@@ -60,12 +63,12 @@ an auditor enumerated surfaces from the code instead of the description:
   tier skipping test binaries behind a flake (`--no-fail-fast`, below). Self-tests: `scripts/test-ci-test-coverage.py`
   (the parser), `scripts/test-ci-retest.sh` (the retry tier).
 - **What the observed job cannot see**, so the static check below still matters: a test compiled under no
-  feature set the universe builds — the universe lists `--all-features`, `mycelium` and `mycelium-core` without
-  default features, and every workspace crate's own featureless build (2.27.0), so the remaining gap is a root-crate
-  test gated off `gateway` (its dev-dependencies unify `gateway` back in — `mycelium-gateway-free-tests` is where
+  feature set the universe builds — the universe lists `--all-features` and every workspace crate's own featureless
+  build (#551, unreleased on `main`; before it, only `mycelium`'s and `mycelium-core`'s libraries), so the remaining
+  gap is a root-crate test gated off `gateway` (its dev-dependencies unify `gateway` back in — `mycelium-gateway-free-tests` is where
   those live), an `all(a, not(b))` gate in any crate (one non-default feature on, another off), or a `--cfg`
   other than the loom job's; script-style suites (`scripts/test-*`, the Docker workflows). TypeScript
-  tests are known by name since 2.27.0 (jest's `--json` report lists skipped ones too). It keys an integration
+  tests are known by name since #551 (jest's `--json` report lists skipped ones too). It keys an integration
   test by file and name, not crate, so two crates' same-named tests would mask each other — the static check
   refuses that pair.
 - `scripts/check-test-inventory.py` (in `make check` and CI, through `scripts/with-pyyaml.sh`) — the fast,
@@ -80,7 +83,7 @@ an auditor enumerated surfaces from the code instead of the description:
   it provably selects the whole gate — the module's path or the one gated function's name). Exceptions go in
   `scripts/test-inventory-exceptions.txt` with a reason; there are none.
 - `scripts/test-check-test-inventory.py` — the static check's own **mutation suite** (also in `make check` and
-  CI): 47 edits that each leave a test unrun, every one of which the check must fail on — the round-3 ones
+  CI): 48 edits that each leave a test unrun, every one of which the check must fail on — the round-3 ones
   asserting the exact key reported. They are the bypasses three adversarial reviews of #541 found: the first
   version refused *named* test files and was bypassed fourteen ways; the second inventoried targets but not
   library unit tests, read non-feature cfgs as "needs nothing", and counted steps that never run tests (20 of

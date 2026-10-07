@@ -379,7 +379,7 @@ agent.define_capability_group(
     "gpu-pool",
     CapabilityGroupDef {
         filter:          CapFilter::new("compute", "gpu"),
-        topology_policy: None,   // or Some(GroupTopologyPolicy { .. }) — see chapter 13
+        topology_policy: None,   // or Some(GroupTopologyPolicy { .. }) — see chapter 04 § Hard topology
         provides:        vec![Capability::new("compute", "gpu")],
         requires:        vec![],
     },

@@ -75,7 +75,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | *(none)* — `/a2a` | **No scope is required on this route.** Auth is *optional*: a federation credential names the partner; a bearer resolves to a principal but its **scopes are dropped**; nothing presented is anonymous. Authority here comes from an `ActionEvaluator`, not the scope table — and with no evaluator attached an anonymous caller reaches skill dispatch. `with_a2a()` warns in that configuration |
 | `mesh:serve` | the RPC serve stream (`/gateway/rpc/serve/{kind}`) and `/gateway/rpc/respond`: **serving without the power to call**. Added 2026-09-25 (closure plan C1). The one-release window that admitted a `mesh:read` or `mesh:write` token here closed in 2.18.2: such a token now gets `403 {"required_scope": "mesh:serve"}` — reissue it |
 | `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox subscribe, demand / signal emit, rpc call, scatter, **group membership** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node) |
-| `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose — consistent set refuses `sys/` and `consensus/` keys as the KV routes do |
+| `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose — consistent set refuses every owned-namespace key as the KV routes do (403 `protected_key`), and log append/compact refuse a stream under `cn/`, `wiki/` or `reason/` (403 `protected_stream`) |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
 | `audit:read` / `transparency:read` | audit-trail query / revocation transparency log |
@@ -169,7 +169,7 @@ authorized_callers = ["orchestrator", "127.0.0.1:8080"]   # role names or NodeId
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer readonly' \
      http://NODE:PORT/gateway/kv/keys            # 200 (kv:read)
 curl -s -w '%{http_code}\n' -H 'Authorization: Bearer readonly' \
-     -X POST http://NODE:PORT/gateway/kv -d '{"key":"k","value":"v"}'   # 403 + {"required_scope":"kv:write"}
+     -H 'Content-Type: application/json' -X POST http://NODE:PORT/gateway/kv -d '{"key":"k","value_b64":"dg=="}'   # 403 + {"required_scope":"kv:write"}
 curl -s -o /dev/null -w '%{http_code}\n' http://NODE:PORT/gateway/kv/keys   # 401 (no token)
 curl -s -o /dev/null -w '%{http_code}\n' http://NODE:PORT/health             # 200 (public)
 ```
@@ -206,6 +206,7 @@ endpoint as the two "promise-strength namespace violated" signals.
 | `roles_of(peer)` always `None` | peer's `sys/identity/` not yet learned, or unshared CA | confirm peering + that the CA cert is distributed |
 | every gateway request → 401 | token not in `gateway_scoped_tokens` / no `Bearer` header | check the token list and header |
 | legitimate route → 403 | scope not granted; or route is unmapped (needs `admin`) | grant the scope shown in `required_scope`, or `"*"` |
+| KV write → 403 `protected_key` / log append or compact → 403 `protected_stream` (after upgrading to 2.26.0 / 2.27.0) | the key's namespace (or the stream) is owned by the substrate or a companion; no scope, not even `"*"`, admits it | send the write through the route the response's `message` names ([deprecations.md §18–§19](../guide/deprecations.md)) |
 | `sys_namespace_violations` climbing | a peer clobbering this node's owned keys | identify the source from the `warn!` log; treat as a trust-boundary incident |
 
 ---

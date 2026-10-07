@@ -270,7 +270,9 @@ Register the prompt skill `{ns}/{name}` — routable over `llm.invoke`, which an
 resolves — backed by an OpenAI-compatible endpoint, **while** this node hosts the install named by
 `while_live`. When that install is withdrawn, the skill is retracted, so a router fails over to a
 node that still has the model. A stem built without feature `llm` refuses to start when the file
-has a `[[serve]]` section.
+has a `[[serve]]` section. Call it through `POST /gateway/llm/call` (`llm:invoke`; `PromptSkillClient.call`)
+or the reason router (`/gateway/reason/route`, `/gateway/reason/v1/chat/completions`); it is not on the
+A2A agent card, and `/a2a` `tasks/send` refuses it, naming that route.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|

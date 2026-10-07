@@ -96,7 +96,7 @@ python autogen_agent.py
 **Expected output**
 
 ```
-Discovering skills at http://localhost:9050...
+Connecting to Mycelium at http://localhost:9050 ...
 Found 3 skills: llm/orchestrator, llm/researcher, llm/writer
 Wrapping as LangChain tools...
 
@@ -143,12 +143,15 @@ capability KV entries at request time. Since 2.27.0 it leaves out what `tasks/se
 and dispatches via RPC. The HTTP response waits for the RPC result:
 
 ```python
-# langchain_agent.py — simplified
-response = requests.post(
-    "http://localhost:9050/a2a",
-    json={"skill": "llm/orchestrator", "input": {"topic": "gossip protocols"}}
-)
-result = response.json()["result"]
+# What A2aClient.send does (mycelium-py) — JSON-RPC 2.0, the input as a text part
+import json
+from mycelium import A2aClient
+
+client = A2aClient("http://localhost:9050")          # token="…" on a protected gateway
+text = client.send("llm/orchestrator", json.dumps({"topic": "gossip protocols"}), timeout_secs=120)
+# on the wire: {"jsonrpc":"2.0","id":1,"method":"tasks/send",
+#   "params":{"id":"<task>","skillId":"llm/orchestrator",
+#             "message":{"role":"user","parts":[{"type":"text","text":"…"}]}}}
 ```
 
 **LangChain tool wrapping** (`langchain_agent.py`):
@@ -158,17 +161,15 @@ from langchain.tools import StructuredTool
 
 def make_tool(skill):
     def call(**kwargs):
-        resp = requests.post(gateway + "/a2a",
-                             json={"skill": skill["id"], "input": kwargs})
-        return resp.json().get("result", resp.json())
+        return client.send(skill["id"], json.dumps(kwargs), timeout_secs=120.0)
     return StructuredTool.from_function(
         func=call,
-        name=skill["name"],
-        description=skill["description"],
-        args_schema=build_schema(skill["input_schema"]),
+        name=skill["id"].replace("/", "_"),
+        description=skill.get("description", ""),
+        args_schema=build_schema(skill.get("inputSchema")),
     )
 
-tools = [make_tool(s) for s in discover_skills(gateway)]
+tools = [make_tool(s) for s in client.fetch_card().get("skills", [])]
 ```
 
 ---

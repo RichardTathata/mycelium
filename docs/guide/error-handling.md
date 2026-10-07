@@ -86,10 +86,12 @@ setting — the full list, by `field`:
 ## `ConsistencyError`
 
 ```rust
+#[non_exhaustive]
 pub enum ConsistencyError {
     Timeout { ballots_tried: u32 }, // no quorum reached within deadline
     Superseded,                     // another node committed first
     TopologyUnsatisfied,            // quorum met but Hard topology gate failed
+    ElectorateUnavailable { observed_members: usize, declared_min: usize }, // no electorate: nothing decided
 }
 ```
 
@@ -101,9 +103,17 @@ pub enum ConsistencyError {
   `ballots_tried` to distinguish a slow cluster from a hard split.
 - `Superseded` — a concurrent writer won the slot. Re-read the current value
   and decide whether to retry with a new key or accept the other writer's value.
+- `ElectorateUnavailable` — the group roster this node sees is empty (an unknown or unjoined group) or
+  smaller than a fresh `MembershipIntent { min }` declares, so no electorate could be established and nothing
+  was decided. Join the group or wait for the roster to converge (`GET /gateway/mesh/group?group=G`); do not
+  read it as a refusal of the value.
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
-  help unless nodes rejoin from the missing segments.
+  help unless nodes rejoin from the missing segments. If availability matters more than the spread
+  for a while, an operator can relax the group's gate with `POST /gateway/govern/topology-override
+  {"group": "G", "override": true}` (`govern:write`), which does not lapse — release it with
+  `"override": false` ([04 § Hard topology](04-consensus.md)). Over HTTP this refusal is **409**
+  `{"error": "topology_unsatisfied"}`.
 
 ---
 

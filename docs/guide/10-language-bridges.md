@@ -128,11 +128,12 @@ entries = agent.scan_log("events", from_hlc=0)              # [from_hlc, to_hlc)
 from mycelium import A2aClient, PromptSkillClient
 
 a2a    = A2aClient("http://localhost:9050")
-skills = a2a.fetch_card()   # list discovered skills
+card   = a2a.fetch_card()   # the AgentCard dict; card["skills"] is what /a2a can call
 result = a2a.send("llm/orchestrator", "gossip protocols", timeout_secs=120)   # message is a string
 
 ps = PromptSkillClient("127.0.0.1", 8300)                # host, then port
-reply = await ps.call("demo", "summarizer", "...")      # async: (ns, name, input)
+reply = await ps.call("demo", "summarizer", "...")      # async: (ns, name, input) → {"output", "provider"}
+# A prompt skill is called here (POST /gateway/llm/call, llm:invoke) — never through a2a.send, which refuses it.
 ```
 
 See [`mycelium-py/README.md`](../../mycelium-py/README.md) for the full API
@@ -213,7 +214,7 @@ const entries = await agent.scanLog("events", { fromHlc: 0n });   // [fromHlc, t
 import { A2aClient, PromptSkillClient } from "mycelium-ts";
 
 const a2a    = new A2aClient("http://localhost:9050", { timeoutMs: 120_000 });
-const skills = await a2a.fetchCard();
+const card   = await a2a.fetchCard();                  // card.skills: what /a2a can call
 const result = await a2a.send("llm/orchestrator", "gossip protocols");   // message is a string
 
 const ps      = new PromptSkillClient("127.0.0.1", 8300);                // host, then port
@@ -334,7 +335,7 @@ shapes; the SDK READMEs carry the receipt narrative, this table carries the wire
 | Route | Body → answer | What it proves |
 |---|---|---|
 | `GET /gateway/kv?key=K` | → `{"found": true, "value_b64": "…"}` or `{"found": false}` | a local read |
-| `POST /gateway/kv` | `{"key", "value_b64"}` → `{"ok": true, "operation_id", "local_durability", "local_durability_error"?}` | the write's **receipt**: rung 1, and rung 2 as `local_durability` (`on_disk` · `buffered` · `not_configured` · `failed`, the SDKs' vocabulary) — added 2026-09-26; before it the route answered a bare `{"ok": true}`; a missing `value_b64` is **400 and no mutation** since 2.14.0; `""` writes an empty value |
+| `POST /gateway/kv` | `{"key", "value_b64"}` → `{"ok": true, "operation_id", "local_durability", "local_durability_error"?}` | the write's **receipt**: rung 1, and rung 2 as `local_durability` (`on_disk` · `buffered` · `not_configured` · `failed`, the SDKs' vocabulary) — added 2026-09-26; before it the route answered a bare `{"ok": true}`; a missing `value_b64` is **400 and no mutation** since 2.14.0; `""` writes an empty value. A key in a namespace the substrate or a companion owns (`src/lib.rs` § KV namespace ownership; `ckpt/`, `ckptw/`, `manifest/`, `schemas/` and `agent/{node}/provision/…` excepted) is **403** `{"error": "protected_key", "message": <the route that owns it>}` whatever the token (2.27.0; `sys/`/`consensus/` since 2.26.0) — the same for `DELETE`, `/kv/quorum` and `consistent/set` |
 | `POST /gateway/kv/quorum` | `{"key", "value_b64", "min_acks", "timeout_secs"}` → `{"ok", "acks_received"}` or `{"ok": false, "error": "timeout", "acks_received", "unknown_peers"}` | rung 3: `unknown_peers` is *silence*, not refusal — `DeliveryUnknown` in the receipt vocabulary |
 | consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why |
 | `GET /gateway/signal/sse/{kind}` | SSE; event name = the kind; data `{"kind", "sender", "payload_b64", "nonce"}` (`kind` in the data since 2.24.0; `nonce` is a u64 — parse it losslessly) | delivered to **this** subscriber. The node holds at most 256 undelivered signals per subscription and drops past that, logging `Signal handler channel full; signal dropped` — signals are best-effort |
@@ -342,6 +343,12 @@ shapes; the SDK READMEs carry the receipt narrative, this table carries the wire
 
 Scopes: `kv:read` for the GET, `kv:write` for both POSTs; `mesh:read` for the two signal streams
 ([rbac.md §2](../operations/rbac.md)).
+
+**What an SDK raises on a 403 refusal.** `protected_kind` raises `ProtectedKindError` in both SDKs.
+`protected_key` and `protected_stream` have no typed error yet: Python raises `httpx.HTTPStatusError` (read
+`e.response.json()["message"]`), TypeScript throws an `Error` whose message carries the 403 body — except
+`delete()`, whose error carries only the status. No scope fixes either refusal: use the route the message
+names ([deprecations.md §19](deprecations.md)).
 
 ## Authenticating to a token-protected gateway
 

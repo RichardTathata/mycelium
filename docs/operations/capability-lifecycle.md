@@ -173,6 +173,26 @@ Kill the host and a standby does the same. Watch it: `mycelium_artifact_*` in
 [metrics.md](metrics.md), `ineligible_skips` for a host that could not take an entry, and
 [dynamic-scaling.md](dynamic-scaling.md) for the governors above it.
 
+**Presence ceilings — which host withdraws.** Above a band's `max_providers`
+([`[[presence]]`](../reference/unit-file.md)), the hosts ranked beyond `max` by the band's rendezvous order
+withdraw (`mycelium::election::rank`, rule `prov.shed` rev 2, 2.26.0) — every host with the same view agrees
+which, so exactly the surplus leaves; before 2.26.0 every host drew, and at `self_elect_p = 1.0` all withdrew at
+once. Only providers that will act are ranked: a stem advertises a `prov-shed/{ns}:{name}:{hash}` capability
+for each band it supervises with a ceiling (visible under `GET /gateway/kv/keys?prefix=cap/`); a provider that
+does not — registered in code, a stem without the band — keeps its place once seen unmarked for two advertise
+intervals. What to expect and do:
+
+- **Bound.** A view with *k* wrong entries (a crashed provider still advertised, a mark not yet arrived) can
+  leave the band at `max − k` for a round; the floor refills it, and it never cascades.
+- **Rolling upgrade.** A stem older than 2.26.0 advertises no mark and still sheds by its draw, so while old and
+  new stems share a band it can dip below the ceiling until the floor refills — upgrade a band's stems together
+  where that matters.
+- **Overlapping bands** (one unattributed, one attribute-restricted, both with tight ceilings over the same
+  capability) can trade a provider back and forth — give them room or drop one ceiling.
+- **Seeing who withdrew.** There is no shed metric; run the stem with `--trace-dir` and read the `prov.shed`
+  decisions with `mycelium explain` ([diagnostics.md](diagnostics.md) § reading what a node decided):
+  `above_ceiling` is a withdrawal, `ranked_within_ceiling` a host that stayed, with its rank in the inputs.
+
 **Placed blobs that need a runtime.** A model or data pack is *placed* by a hosting unit, but a
 placed file serves nothing until the node-local runtime has it. A unit says how, per capability
 (every field and placeholder: [`[[activation]]`](../reference/unit-file.md#activation)):

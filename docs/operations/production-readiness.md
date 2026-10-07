@@ -97,7 +97,9 @@ this page is the index + the gate.
   credential required at the edge** (`CallPolicy`, [federation.md](federation.md)); or an **ingress
   in front of the route** that terminates TLS and rejects unauthenticated requests before they reach
   the node. Pick one, and then run the negative probe — an unauthenticated `POST /a2a`
-  `tasks/send` naming a real skill must **not** dispatch it (the handler's methods are `tasks/send`,
+  `tasks/send` naming a real skill — one listed on `/.well-known/agent.json` — must **not** dispatch it
+  (a prompt skill or a plumbing capability is refused `-32001` whatever your authority setup, so naming one
+  proves nothing) (the handler's methods are `tasks/send`,
   `tasks/sendSubscribe`, `tasks/get`, `tasks/cancel`; any other name is `-32601` and proves nothing) (the skill's own counter stays at zero,
   the response is a refusal, and the evidence journal records the denial if an evaluator is attached).
   `start()` **warns** whenever `/a2a` is mounted with no evaluator, whatever bearer is configured

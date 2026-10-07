@@ -257,7 +257,11 @@ window fails CI, not your rollout.
 **Client-facing changes that are not wire changes** still need a plan. Since 2.14.0 a
 `POST /gateway/kv` without `value_b64` answers **400 and writes nothing** (it used to store an empty
 value); an HTTP client or an old SDK that relied on the silent default breaks at upgrade, not at the
-wire. The list is [deprecations.md](../guide/deprecations.md) (§12 for this one).
+wire. The list is [deprecations.md](../guide/deprecations.md) (§12 for this one). Two more of this kind:
+since 2.26.0 the `/gateway/govern/*` intent routes answer **400** to a loose body (unknown field, wrong type),
+and the KV doors answer **403** `protected_key` for `sys/`/`consensus/` keys; since 2.27.0 for every owned
+namespace, with the log routes refusing `cn/`, `wiki/` and `reason/` streams (`protected_stream`) (§18, §19).
+Before upgrading, grep client code for raw KV writes outside your own prefixes.
 
 **Behaviour changes that refuse a start.** These upgrades make `start()` refuse a node that used to start
 degraded — each was running without the protection it was configured for, so check before upgrading:

@@ -325,21 +325,26 @@ for a full 3-skill walkthrough with live monitoring instructions.
 
 **Rust:**
 ```rust
-let (node_id, _) = agent.resolve(&CapFilter::new("llm", "chat"))[0];
+let (node_id, _) = agent.capabilities().resolve(&CapFilter::new("llm", "chat"))[0].clone();
 let payload = serde_json::to_vec(&json!({"message": "Hello!"}))?;
-let result = agent.rpc_call(node_id, "skill.invoke", payload, Duration::from_secs(30)).await?;
+let result = agent.service().rpc_call(node_id, "skill.invoke", payload, Duration::from_secs(30)).await?;
 ```
 
 **Python (`mycelium-py`):**
 ```python
-from mycelium import MyceliumAgent
+from mycelium import A2aClient
 import json
 
-agent = MyceliumAgent("127.0.0.1", 8300)
-providers = agent.resolve_capability("llm", "chat")
-result = agent.rpc_call(providers[0].node_id, "skill.invoke",
-                        json.dumps({"message": "Hello!"}).encode())
+# Through a gateway a skill is called at /a2a: `skill.invoke` is a protected kind, so
+# POST /gateway/rpc/call (agent.rpc_call) refuses it 403 `protected_kind` whatever the token.
+a2a = A2aClient("http://127.0.0.1:8300")                 # token="…" on a protected gateway
+card = a2a.fetch_card()                                  # card["skills"]: what /a2a can call
+reply = a2a.send("llm/chat", json.dumps({"message": "Hello!"}), timeout_secs=30)
 ```
+
+A **prompt skill** (`register_prompt_skill`, below) is not on the card and `/a2a` refuses it — it
+answers `llm.invoke`, not `skill.invoke`; call it through `POST /gateway/llm/call` (`llm:invoke`,
+`PromptSkillClient.call`).
 
 #### Ready-to-run examples
 
@@ -391,15 +396,16 @@ let template = PromptTemplate {
     metadata: Default::default(),
 };
 
-// Advertises cap `llm/chat` on the mesh; template stored in KV with TTL=1 week.
-let _handle = agent.register_prompt_skill("llm", "chat", template, backend).await?;
+// Advertises cap `llm/chat` (a 30 s presence TTL, refreshed); the template is configuration
+// in `prompts/llm/chat`, written without a TTL.
+let _handle = agent.llm().register_prompt_skill("llm", "chat", template, std::sync::Arc::new(backend)).await?;
 // Drop _handle to retract the capability and stop the dispatch loop.
 ```
 
 #### Calling from Rust
 
 ```rust
-let output = agent
+let output = agent.llm()
     .call_prompt_skill("llm", "chat", "Hello!", Default::default(), Duration::from_secs(30))
     .await?;
 println!("{output}");
@@ -433,23 +439,30 @@ curl -N http://localhost:8300/gateway/llm/stream \
 #### Python (`mycelium-py`)
 
 ```python
-from mycelium.prompt_skill import PromptSkillClient, PromptTemplate
+import asyncio
+from mycelium import PromptSkillClient, PromptTemplate
 
-client = PromptSkillClient("http://localhost:8300")
+async def main():
+    client = PromptSkillClient("127.0.0.1", 8300)   # host, then port; token="…" on a protected gateway
+    # A Rust node registers the skill (register_prompt_skill); a client can replace its
+    # template (PUT /gateway/prompts/{ns}/{name}, llm:write):
+    await client.update_prompt("llm", "chat", PromptTemplate(
+        system="You are a helpful assistant.",
+        user_template="{{input}}",
+        max_tokens=512,
+        temperature=0.7,
+    ))
+    result = await client.call("llm", "chat", "What is 2+2?")   # POST /gateway/llm/call (llm:invoke)
+    print(result["output"])     # "4" or similar
+    print(result["provider"])   # the node that served it, "ip:port"
+    await client.close()
 
-template = PromptTemplate(
-    system="You are a helpful assistant.",
-    user_template="{{input}}",
-    max_tokens=512,
-    temperature=0.7,
-)
-client.register("llm", "chat", template)
-
-result = client.call("llm", "chat", "What is 2+2?")
-print(result.output)          # "4" or similar
-print(result.model_used)      # "llama3.2"
-print(result.tokens_used)     # 12
+asyncio.run(main())
 ```
+
+The gateway's reply carries `output` and `provider` only (`model_used` and `tokens_used` are on the Rust
+`LlmResult`). A template is written through `/gateway/prompts/{ns}/{name}`: the raw KV routes refuse a
+`prompts/` key **403** `protected_key` (2.27.0, [`deprecations.md` §19](deprecations.md)).
 
 #### Template variables
 
