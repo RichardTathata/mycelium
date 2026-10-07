@@ -38,8 +38,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `sys/topology-override/{group}`: under `kv:write` or `consensus:write` they could publish a governance
     intent without `govern:write`, plant the `sys/caller-context/` marker a secure gateway checks before
     dispatch, delete an acceptor's durable ballot, forge a committed slot, or rewrite `sys/config/` and
-    `sys/capauthz/`. An allow-list, so a new substrate key is covered the day it is added. **Not claimed:** a
-    peer writing these keys through Layer I (detection, not prevention). **Upgrade notes:** `govern_timing`
+    `sys/capauthz/`. Within `sys/` and `consensus/` it is an allow-list, so a new key there is covered the day it is
+    added. **Not claimed:** a peer writing these keys through Layer I (detection, not prevention); and the other
+    route-owned namespaces — `prompts/`, `log/`, `grp/`, `cap/`, `mailbox/`, `installable/`, the companions' —
+    stay writable under `kv:write`, which `rbac.md` now states as a data-plane superuser scope (a decision
+    recorded, not made here); the topology override stays a `kv:write` write, unaudited. **Upgrade notes:** `govern_timing`
     returns `Result<bool, GossipError>`; a client writing `sys/` or `consensus/` keys through the KV routes, or
     sending the governance routes loose bodies, now gets 403 / 400; `with_egress` callers that relied on deref
     coercion or inference spell the type (`deprecations.md` §18).

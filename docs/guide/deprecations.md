@@ -311,4 +311,5 @@ error under `-D warnings`. A `with_egress` call with an `EgressPolicy` or a `&Eg
 **Migration.** `agent.govern_timing(30, 5, None)?;`. An HTTP client that relied on `"30"` being accepted sends
 `30`; one that released governance by publishing zeros stops publishing (the intent lapses with its lease); one
 that wrote a `sys/` or `consensus/` key through the KV routes uses the route that owns it — the governance
-routes for `sys/govern/`, and the substrate itself for the rest.
+routes for `sys/govern/`; for a member removal, `GossipAgent::offer_member_removal` (the record is verified on
+ingest, so only the door changes); the rest are written only by the substrate.

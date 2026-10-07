@@ -68,14 +68,14 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 
 | Scope | Grants |
 |---|---|
-| `kv:read` / `kv:write` | `GET /gateway/kv*` / `POST`,`DELETE /gateway/kv*`, `/kv/quorum` |
+| `kv:read` / `kv:write` | `GET /gateway/kv*` / `POST`,`DELETE /gateway/kv*`, `/kv/quorum` — a write to a key under `sys/` or `consensus/` is refused **403** `protected_key` whatever the scopes, except `sys/topology-override/{group}` (2.26.0). **`kv:write` is otherwise a data-plane superuser scope:** other route-owned namespaces (`prompts/`, `log/`, `grp/`, `cap/`, `mailbox/`, `installable/`, companions' prefixes) are writable through it — grant it only to callers you would trust with each of those routes |
 | `cap:read` / `cap:write` | capability resolve, shard owner / advertise, drop; `POST /gateway/units/declare` (an SDK agent's unit file, under one handle) is `cap:write` |
 | `fleet:read` | `GET /gateway/fleet`, `/gateway/explain`, `/gateway/diagnose` (legible emergence) and `GET /gateway/guarantees` (the startup report, recomputed live) |
 | `govern:read` / `govern:write` | `GET /gateway/govern` / `POST /gateway/govern/{tuning,timing,membership,profile}` — the governors' admission contract and the control profile ladder (`control-profiles.md`) |
 | *(none)* — `/a2a` | **No scope is required on this route.** Auth is *optional*: a federation credential names the partner; a bearer resolves to a principal but its **scopes are dropped**; nothing presented is anonymous. Authority here comes from an `ActionEvaluator`, not the scope table — and with no evaluator attached an anonymous caller reaches skill dispatch. `with_a2a()` warns in that configuration |
 | `mesh:serve` | the RPC serve stream (`/gateway/rpc/serve/{kind}`) and `/gateway/rpc/respond`: **serving without the power to call**. Added 2026-09-25 (closure plan C1). The one-release window that admitted a `mesh:read` or `mesh:write` token here closed in 2.18.2: such a token now gets `403 {"required_scope": "mesh:serve"}` — reissue it |
 | `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox subscribe, demand / signal emit, rpc call, scatter, **group membership** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node) |
-| `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose |
+| `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose — consistent set refuses `sys/` and `consensus/` keys as the KV routes do |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
 | `audit:read` / `transparency:read` | audit-trail query / revocation transparency log |

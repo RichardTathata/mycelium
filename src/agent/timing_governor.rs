@@ -54,7 +54,7 @@ pub struct TimingIntent {
 }
 
 impl TimingIntent {
-    /// Would a node apply this? `0` leaves a field ungoverned; otherwise the value must be inside
+    /// Would a node apply this? `0` leaves a field as it is; otherwise the value must be inside
     /// `validate()`'s bound — `apply` ignores anything else, so publishing it would govern nothing
     /// while reporting success (R9's third door, verification policy 2026-10-06).
     pub fn check(&self) -> Result<(), crate::GossipError> {
@@ -65,7 +65,7 @@ impl TimingIntent {
             if v > max {
                 return Err(crate::GossipError::InvalidField {
                     field,
-                    reason: format!("{v} is above {max}, the bound validate() applies and every node's reconciler enforces; 0 leaves the field ungoverned"),
+                    reason: format!("{v} is above {max}, the bound validate() applies and every node's reconciler enforces; 0 leaves the field as it is"),
                 });
             }
         }

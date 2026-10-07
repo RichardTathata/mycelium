@@ -1361,8 +1361,13 @@ async fn gw_govern_tuning(
     };
 
     let mut params = Vec::new();
-    if let Some(arr) = body.get("params").and_then(|v| v.as_array()) {
-        for d in arr {
+    let params_in = match body.get("params") {
+        None | Some(serde_json::Value::Null) => &[][..],
+        Some(serde_json::Value::Array(a)) => a.as_slice(),
+        Some(_) => return bad_request("`params` must be an array of directives".into()),
+    };
+    {
+        for d in params_in {
             if let Some(refused) = refuse_unknown_fields(d, &["param", "floor", "ceiling", "ratchet"]) {
                 return refused;
             }
@@ -1372,11 +1377,15 @@ async fn gw_govern_tuning(
             if HotParam::from_key(pkey).is_none() {
                 return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown param '{pkey}'")}))).into_response();
             }
-            let ratchet = match d.get("ratchet").and_then(|v| v.as_str()) {
-                Some("up")   => Ratchet::Up,
-                Some("down") => Ratchet::Down,
-                Some("off") | None => Ratchet::Off,
-                Some(other)  => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("unknown ratchet '{other}'")}))).into_response(),
+            let ratchet = match d.get("ratchet") {
+                None | Some(serde_json::Value::Null) => Ratchet::Off,
+                Some(v) => match v.as_str() {
+                    Some("up")   => Ratchet::Up,
+                    Some("down") => Ratchet::Down,
+                    Some("off")  => Ratchet::Off,
+                    Some(other)  => return bad_request(format!("unknown ratchet '{other}'")),
+                    None         => return bad_request("`ratchet` must be \"up\", \"down\" or \"off\"".into()),
+                },
             };
             let floor = match optional_u64(d.get("floor"), "floor") { Ok(v) => v, Err(e) => return bad_request(e) };
             let ceiling = match optional_u64(d.get("ceiling"), "ceiling") { Ok(v) => v, Err(e) => return bad_request(e) };
@@ -1405,7 +1414,7 @@ async fn gw_govern_tuning(
 /// ```json
 /// {"health_check_interval_secs": 2, "reconnect_backoff_secs": 3, "target": null}
 /// ```
-/// `0`/absent for a field leaves it ungoverned; `target` `null` = whole fleet. Newest-wins,
+/// `0`/absent for a field leaves it as it is; `target` `null` = whole fleet. Newest-wins,
 /// local-wins (a node that called a `set_*` setter ignores it), evaporating. No consensus fence.
 async fn gw_govern_timing(
     State(ctx): State<Arc<HttpCtx>>,
@@ -1549,7 +1558,12 @@ async fn gw_govern_membership(
     let max = match optional_u64(body.get("max"), "max") { Ok(v) => v.map(|m| m as usize), Err(e) => return bad_request(e) };
 
     let mut drain: Vec<crate::node_id::NodeId> = Vec::new();
-    if let Some(arr) = body.get("drain").and_then(|v| v.as_array()) {
+    let drain_in = match body.get("drain") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(a)) => Some(a),
+        Some(_) => return bad_request("`drain` must be an array of node ids".into()),
+    };
+    if let Some(arr) = drain_in {
         for v in arr {
             let Some(s) = v.as_str() else {
                 return (StatusCode::BAD_REQUEST, Json(json!({"error": "drain entries must be node-id strings"}))).into_response();
@@ -2805,7 +2819,7 @@ fn refuse_protected_key(key: &str) -> Option<axum::response::Response> {
     };
     Some((
         StatusCode::FORBIDDEN,
-        Json(json!({ "ok": false, "error": "protected_key", "detail": door })),
+        Json(json!({ "ok": false, "error": "protected_key", "message": door })),
     ).into_response())
 }
 
@@ -4616,19 +4630,22 @@ mod tests {
         assert_eq!(post("tuning", serde_json::json!({"enabled": true, "target": 5})).await, 400, "a target that is not a string");
         assert_eq!(post("tuning", serde_json::json!({"enabled": true, "enabeld": false})).await, 400, "an unknown field");
         assert_eq!(post("tuning", serde_json::json!({"params": [{"param": "inbound_fps", "floor": "5"}]})).await, 400, "a floor that is not an integer");
+        assert_eq!(post("tuning", serde_json::json!({"enabled": true, "params": {"param": "writer_depth"}})).await, 400, "params that is not an array");
+        assert_eq!(post("tuning", serde_json::json!({"params": [{"param": "inbound_fps", "ratchet": 1}]})).await, 400, "a ratchet that is not a string");
         assert_eq!(post("tuning", serde_json::json!({"enabled": true})).await, 200);
         assert_eq!(post("membership", serde_json::json!({"group": "w", "min": "3"})).await, 400, "a min that is not an integer");
         assert_eq!(post("membership", serde_json::json!({"group": "w"})).await, 400, "min is required");
         assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "target": ["x"]})).await, 400, "a target that is not a string");
         assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "max": "10"})).await, 400, "a max that is not an integer");
         assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "mn": 2})).await, 400, "an unknown field");
+        assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "drain": "10.0.0.5:9000"})).await, 400, "a drain that is not an array");
         assert_eq!(post("membership", serde_json::json!({"group": "w", "min": 1, "max": null})).await, 200);
         agent.shutdown().await;
     }
 
-    /// The adversarial review of #544 (enumerating every door to the timing intent): the raw KV routes
-    /// wrote `sys/govern/…` under `kv:write`, publishing a governance intent without `govern:write`. They
-    /// refuse every `sys/govern/` key now, naming the route to use.
+    /// The reviews of #544 (enumerating every door to the timing intent): the doors that take a KV key
+    /// wrote `sys/govern/…` under `kv:write`, publishing a governance intent without `govern:write`, and
+    /// reached every other key the substrate owns. They refuse `sys/` and `consensus/` now, naming the route.
     #[tokio::test]
     async fn the_raw_kv_routes_refuse_governance_intents() {
         use base64::Engine as _;
@@ -4668,9 +4685,12 @@ mod tests {
         // The third review of #544: the consensus door wrote the raw key too, and the doors reached every
         // other key the substrate owns — a planted caller-context marker fails a secure gateway's check
         // open; a forged commit or a deleted acceptor record undoes consensus.
-        let r = client.post(format!("http://127.0.0.1:{http_port}/gateway/overlay/consistent/set"))
-            .json(&serde_json::json!({"key": "sys/govern/timing", "value_b64": intent})).send().await.unwrap();
-        assert_eq!(r.status(), 403, "the consensus door");
+        #[cfg(feature = "consensus")]
+        {
+            let r = client.post(format!("http://127.0.0.1:{http_port}/gateway/overlay/consistent/set"))
+                .json(&serde_json::json!({"key": "sys/govern/timing", "value_b64": intent})).send().await.unwrap();
+            assert_eq!(r.status(), 403, "the consensus door");
+        }
         for key in ["sys/caller-context/10.0.0.9:9000", "consensus/committed/slot-x", "sys/consensus-accepted/n/s", "sys/config/x", "sys/capauthz/ns/name"] {
             let r = client.post(&base).json(&serde_json::json!({"key": key, "value_b64": ""})).send().await.unwrap();
             assert_eq!(r.status(), 403, "POST {key}");

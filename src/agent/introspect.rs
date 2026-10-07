@@ -109,7 +109,7 @@ impl GossipAgent {
     /// **Govern timing cluster-wide** (WS-C / M10.2): publish an evaporating `TimingIntent` that every
     /// node reconciles toward — newest-wins, **local-wins** (a node that called a `set_*` setter is
     /// pinned and ignores the intent), self-healing on evaporation. `0` for a field leaves it
-    /// as it is — a value an earlier intent applied stays until that intent lapses; `target = None` ⇒ whole fleet, `Some(node)` ⇒ just that node. Intent, never
+    /// as it is — a value an earlier intent applied stays while any fresh intent stands, and reverts only when none does; `target = None` ⇒ whole fleet, `Some(node)` ⇒ just that node. Intent, never
     /// command — and **no consensus fence** (see `timing_governor` docs). Returns whether queued.
     ///
     /// # Errors
