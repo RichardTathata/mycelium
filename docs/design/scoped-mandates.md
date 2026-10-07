@@ -86,10 +86,11 @@ a checkpoint) and the current head, and `from_chain` verifies the chain rather t
 `complete: true` — which would only move the assumption. Sufficiency belongs to the *evaluator*, per rule:
 a run broken inside the verified suffix decides consecutive terms; cumulative tenure needs the origin or a
 baseline; cooling-off needs the window covered. What it does not claim: that the source recorded every
-appointment there was. The source the plan named is built in 2.26.0: an appointment stream read through the
-signed-heads reader (`src/mandate/history_source.rs`) — continuity from the reader's checkpoint onward and
-the availability of what the heads reference, never earlier history — and the handover journal records its
-scope, start and endpoint (`src/mandate/eligibility.rs`; guide 21 § Eligibility).
+appointment there was. The source the plan named is built (unreleased): an appointment stream, pinned by
+issuer and stream, walked back along `prev` links from this node's reader's checkpoint
+(`src/mandate/history_source.rs`) — continuity up to the reader's checkpoint and the availability of what the
+heads reference, never earlier history than the walk reaches — and the handover journal records its scope,
+start and endpoint (`src/mandate/handover.rs`; guide 21 § Eligibility).
 
 ## 5. D26 — the enforcement lives inside the resource's atomic boundary
 

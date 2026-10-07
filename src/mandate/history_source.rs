@@ -4,136 +4,161 @@
 //! history"*).
 //!
 //! [`eligibility::eligible_strict`](super::eligibility::eligible_strict) decides each incumbency rule from a
-//! [`TermHistory`], and a `TermHistory` is only as good as whoever built it. Until this module, nothing in
-//! the substrate built one: the embedding application assembled `ChainedTerm`s and chose an `Origin`, so
-//! "the source establishes coverage" rested on the caller. Here the source is an **appointment stream** in
-//! the knowledge layer, and coverage comes from what the substrate can verify about it:
+//! [`TermHistory`], and a `TermHistory` is only as good as whoever built it. Here the source is an
+//! **appointment stream** in the knowledge layer — one `(issuer, stream)` the appointing authority
+//! publishes — and coverage comes only from what this node can verify about it:
 //!
-//! - **Authenticity and continuity** — each appointment is a record its appointing authority published on
-//!   one stream; each [`SignedHead`] points at one appointment. The heads are offered to the reader's
-//!   [`HeadCheckpoints`], which authenticates every head and advances only through an unbroken chain from its
-//!   durable checkpoint. A head the reader does not accept contributes nothing.
-//! - **Availability** — a verified head whose appointment record cannot be fetched is a **gap**: the term
-//!   it names is absent, so the chain breaks there and only the suffix after it is vouched for.
-//! - **The head** — the latest head the reader verified. If its record is unavailable, nothing reaches the
-//!   present.
-//! - **The origin** — the stream's first head (`prev: None`) is the role's genesis. Anything else began
-//!   before what this reader can vouch for: [`Origin::Unknown`] unless the caller supplies a
-//!   [`Origin::Baseline`] it trusts at that point. Trust on first use, stated: the reader vouches for
-//!   continuity from its first checkpoint, **never earlier history**.
+//! - **The head is the reader's own.** The walk starts at the [`Checkpoint`] this node's reader holds for
+//!   the pinned `(issuer, stream)` — [`HeadCheckpoints::checkpoint`](crate::knowledge::heads::HeadCheckpoints::checkpoint)
+//!   or the durable reader's — never at whatever head a presenter offers. Heads newer than the checkpoint
+//!   are ignored; a presenter cannot make the history look more current, or splice in another stream.
+//! - **Continuity is the `prev` chain.** From that head the walk follows each head's `prev` digest back
+//!   through the presented heads, authenticating each against the pinned issuer's keys in this node's
+//!   view (a head under a revoked key stops the walk — fail closed, stated). Order, duplicates and
+//!   unrelated heads in the presented set therefore cannot matter: only the linked chain is read.
+//! - **Availability.** A linked head whose appointment record cannot be fetched is a **gap**; only the
+//!   terms after the last gap are vouched for.
+//! - **The origin.** The walk reaching a head with `prev: None` is the role's genesis. Reaching the head
+//!   a caller's [`StreamOrigin::Baseline`] names (by digest) binds that baseline there. Anything else —
+//!   a missing link, a head that fails to authenticate — leaves the origin unknown.
 //!
-//! What it does not claim: that the appointing authority published every appointment there was.
+//! What it does not claim: that the appointing authority published every appointment there was, or that
+//! this node's reader has heard the authority's newest head. "Through the head" means through **this
+//! reader's checkpoint**: a node whose reader has not yet been offered the newest head decides as of the
+//! head it holds. `records` must return only a record whose content matches the [`RecordId`] (the
+//! knowledge store's content-addressed read does).
 
 use super::eligibility::{ChainedTerm, Origin, TermHistory};
 use super::handover::TermRecord;
-use super::TermId;
-use crate::knowledge::heads::{CheckpointStore, HeadCheckpoints, HeadVerdict, SignedHead};
-use crate::knowledge::issuer::{MemberKeySource, TrustedExternalIssuers};
-use crate::knowledge::RecordId;
+use super::{PrincipalId, TermId};
+use crate::knowledge::heads::{Checkpoint, SignedHead};
+use crate::knowledge::issuer::{verify_signed_by, Authenticity, MemberKeySource, TrustedExternalIssuers};
+use crate::knowledge::{IssuerId, RecordId};
+use std::collections::HashMap;
 
-/// A term id standing for a record the source could not produce; it never matches a real term, so the
-/// chain breaks there.
-fn unavailable(seq: u64) -> TermId {
-    TermId::new(format!("<unavailable appointment at head seq {seq}>")).expect("non-empty")
+/// Which stream, and the head this node's reader holds for it.
+#[derive(Clone, Debug)]
+pub struct AppointmentStream<'a> {
+    /// The appointing authority — every head and every record it points at must be this issuer's.
+    pub issuer: &'a IssuerId,
+    /// The stream it publishes appointments on.
+    pub stream: &'a str,
+    /// This node's reader's checkpoint for `(issuer, stream)`; `None` if it holds none.
+    pub checkpoint: Option<Checkpoint>,
 }
 
-/// Build the [`TermHistory`] an appointment stream supports.
-///
-/// `chain` is the stream's heads as the source holds them, oldest first. `records` resolves a head's
-/// [`RecordId`] to the appointment it records, or `None` when it cannot be fetched. `origin` is used only if
-/// the verified chain does not begin at the stream's first head — a baseline the caller trusts at the
-/// point the chain begins.
-pub fn history_from_appointment_stream<S: CheckpointStore>(
-    reader: &mut HeadCheckpoints<S>,
-    chain: &[SignedHead],
+/// What the caller trusts about the role before the earliest head the walk can reach.
+#[derive(Clone, Debug)]
+pub enum StreamOrigin {
+    /// Nothing: earlier history is unknown unless the walk reaches the stream's first head.
+    Unknown,
+    /// A baseline taken **at a head**: the term that head recorded, and each principal's cumulative
+    /// tenure through it. It binds only if the walk links to exactly that head's digest.
+    Baseline {
+        /// [`Head::digest`](crate::knowledge::store::Head::digest) of the head the baseline was taken at.
+        at: [u8; 32],
+        /// The term that head recorded — the one the baseline counts through.
+        after: TermId,
+        /// Each principal's cumulative tenure through `after`.
+        cumulative_ms: HashMap<PrincipalId, u64>,
+    },
+}
+
+/// Build the [`TermHistory`] an appointment stream supports. `presented` is any set of heads — the
+/// source's, a presenter's, in any order; only those linked from the reader's checkpoint are read.
+pub fn history_from_appointment_stream(
+    stream: &AppointmentStream<'_>,
+    presented: &[SignedHead],
     records: impl Fn(&RecordId) -> Option<TermRecord>,
     members: &impl MemberKeySource,
     external: &TrustedExternalIssuers,
-    origin: Origin,
+    origin: StreamOrigin,
 ) -> TermHistory {
-    let verified = accepted(reader, chain, members, external);
-    build(&verified, records, origin)
-}
-
-/// From verified heads (oldest first) to chained terms, the origin and the head.
-fn build(
-    verified: &[&SignedHead],
-    records: impl Fn(&RecordId) -> Option<TermRecord>,
-    origin: Origin,
-) -> TermHistory {
-    let Some(last) = verified.last() else {
-        return TermHistory::from_chain(Vec::new(), Origin::Unknown, &unavailable(0));
+    let unknown_head = TermId::new("<no head held for this stream>").expect("non-empty");
+    let Some(cp) = stream.checkpoint else {
+        return TermHistory::from_chain(Vec::new(), Origin::Unknown, &unknown_head);
     };
-    let mut terms: Vec<ChainedTerm> = Vec::new();
-    // The term id of the previous verified head, or the marker for one whose record was unavailable.
-    let mut previous: Option<TermId> = None;
-    let mut head_term = unavailable(last.head.seq);
-    for (i, sh) in verified.iter().enumerate() {
-        let this = records(&sh.head.record);
-        let prev_for_this = if i == 0 {
-            match (&sh.head.prev, &origin) {
-                (None, _) => None,
-                (Some(_), Origin::Baseline { after, .. }) => Some(after.clone()),
-                (Some(_), _) => Some(unavailable(sh.head.seq.saturating_sub(1))),
+    let authentic = |sh: &SignedHead| -> bool {
+        sh.head.issuer == *stream.issuer
+            && sh.head.stream == stream.stream
+            && sh.head.record.issuer == *stream.issuer
+            && matches!(
+                verify_signed_by(stream.issuer, &sh.head.canonical_bytes(), &sh.signature, members, external),
+                Authenticity::Current { .. }
+            )
+    };
+    let by_digest: HashMap<[u8; 32], &SignedHead> =
+        presented.iter().filter(|sh| authentic(sh)).map(|sh| (sh.head.digest(), sh)).collect();
+
+    // Walk back from the checkpoint along `prev`, newest first.
+    let mut linked: Vec<&SignedHead> = Vec::new();
+    let mut next = Some(cp.digest);
+    let mut reached = None; // how the walk ended: Some(Genesis) / Some(Baseline) / None (unknown)
+    while let Some(d) = next {
+        if let StreamOrigin::Baseline { at, .. } = &origin
+            && !linked.is_empty()
+            && d == *at
+        {
+            reached = Some(true);
+            break;
+        }
+        let Some(sh) = by_digest.get(&d) else { break };
+        if linked.last().is_some_and(|child| sh.head.seq >= child.head.seq) {
+            break; // not a descending chain
+        }
+        linked.push(sh);
+        match sh.head.prev {
+            None => {
+                reached = Some(false);
+                break;
             }
-        } else {
-            previous.clone()
-        };
-        match this {
-            Some(record) => {
-                previous = Some(record.term.clone());
-                if std::ptr::eq(*sh, *last) {
-                    head_term = record.term.clone();
-                }
-                terms.push(ChainedTerm { record, previous: prev_for_this });
-            }
-            None => previous = Some(unavailable(sh.head.seq)),
+            Some(p) => next = Some(p),
         }
     }
-    let first_is_genesis = verified.first().is_some_and(|h| h.head.prev.is_none());
-    let origin = if first_is_genesis {
-        Origin::Genesis
-    } else {
-        match origin {
-            Origin::Genesis => Origin::Unknown, // a caller's "genesis" the stream does not show
-            other => other,
+    if linked.is_empty() {
+        return TermHistory::from_chain(Vec::new(), Origin::Unknown, &unknown_head);
+    }
+    linked.reverse(); // oldest first
+
+    // Terms after the last gap: a head whose record is unavailable breaks the chain there.
+    let resolved: Vec<Option<TermRecord>> = linked.iter().map(|sh| records(&sh.head.record)).collect();
+    let last_gap = resolved.iter().rposition(Option::is_none);
+    let head_term = match resolved.last() {
+        Some(Some(r)) => r.term.clone(),
+        _ => TermId::new("<the head's appointment record is unavailable>").expect("non-empty"),
+    };
+    let start = last_gap.map_or(0, |g| g + 1);
+    let whole = last_gap.is_none();
+    let mut terms: Vec<ChainedTerm> = Vec::new();
+    for r in resolved.into_iter().skip(start).flatten() {
+        let previous = terms.last().map(|t: &ChainedTerm| t.record.term.clone());
+        terms.push(ChainedTerm { record: r, previous });
+    }
+    // The origin holds only when nothing is missing between it and the head.
+    let origin = match (whole, reached, origin) {
+        (true, Some(false), _) => Origin::Genesis,
+        (true, Some(true), StreamOrigin::Baseline { after, cumulative_ms, .. }) => {
+            if let Some(first) = terms.first_mut() {
+                first.previous = Some(after.clone());
+            }
+            Origin::Baseline { after, cumulative_ms }
         }
+        _ => Origin::Unknown,
     };
     TermHistory::from_chain(terms, origin, &head_term)
-}
-
-/// Which offered heads the reader accepted, oldest first. Continuity stops at the first head the
-/// reader will not vouch for — an unauthenticated head, a fork, a gap it cannot bridge — so nothing after
-/// it counts, even if a later head would authenticate on its own.
-fn accepted<'a, S: CheckpointStore>(
-    reader: &mut HeadCheckpoints<S>,
-    chain: &'a [SignedHead],
-    members: &impl MemberKeySource,
-    external: &TrustedExternalIssuers,
-) -> Vec<&'a SignedHead> {
-    let mut out = Vec::new();
-    for sh in chain {
-        match reader.offer(sh, chain, members, external) {
-            HeadVerdict::Advanced { .. } | HeadVerdict::AlreadyHeld => out.push(sh),
-            _ => break, // continuity stops at the first head the reader will not vouch for
-        }
-    }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::knowledge::heads::MemoryCheckpointStore;
+    use crate::knowledge::heads::{HeadCheckpoints, HeadVerdict, MemoryCheckpointStore};
     use crate::knowledge::issuer::MemberKeys;
     use crate::knowledge::store::Head;
-    use crate::knowledge::IssuerId;
     use crate::mandate::eligibility::{eligible_strict, RuleVerdict};
     use crate::mandate::handover::{IncumbencyRules, Ineligible};
     use crate::mandate::PrincipalId;
     use crate::node_id::NodeId;
     use ed25519_dalek::SigningKey;
-    use std::collections::HashMap;
 
     const DAY: u64 = 86_400_000;
 
@@ -189,9 +214,34 @@ mod tests {
         (heads, records)
     }
 
-    fn history(a: &Authority, heads: &[SignedHead], records: &HashMap<RecordId, TermRecord>, origin: Origin) -> TermHistory {
+    /// A reader that has been offered the stream's heads in order, as gossip would — its checkpoint is
+    /// the newest it verified.
+    fn reader_through(a: &Authority, heads: &[SignedHead]) -> HeadCheckpoints<MemoryCheckpointStore> {
         let mut reader = HeadCheckpoints::open(MemoryCheckpointStore::new()).unwrap();
-        history_from_appointment_stream(&mut reader, heads, |r| records.get(r).cloned(), &a.members, &a.ext, origin)
+        for h in heads {
+            let v = reader.offer(h, heads, &a.members, &a.ext);
+            assert!(matches!(v, HeadVerdict::Advanced { .. }), "{v:?}");
+        }
+        reader
+    }
+
+    fn history_at(
+        a: &Authority,
+        reader: &HeadCheckpoints<MemoryCheckpointStore>,
+        presented: &[SignedHead],
+        records: &HashMap<RecordId, TermRecord>,
+        origin: StreamOrigin,
+    ) -> TermHistory {
+        let stream = AppointmentStream {
+            issuer: &a.issuer,
+            stream: "appointments/curator",
+            checkpoint: reader.checkpoint(&a.issuer, "appointments/curator"),
+        };
+        history_from_appointment_stream(&stream, presented, |r| records.get(r).cloned(), &a.members, &a.ext, origin)
+    }
+
+    fn history(a: &Authority, heads: &[SignedHead], records: &HashMap<RecordId, TermRecord>, origin: StreamOrigin) -> TermHistory {
+        history_at(a, &reader_through(a, heads), heads, records, origin)
     }
 
     /// The plan's witness: correctly signed heads with one required record missing → `Unknown`; the
@@ -204,9 +254,9 @@ mod tests {
         let rules = IncumbencyRules { max_cumulative_ms: Some(8 * DAY), ..IncumbencyRules::default() };
         let full = records.clone();
         records.retain(|_, t| t.term != tid(7));
-        let gapped = history(&a, &heads, &records, Origin::Unknown);
+        let gapped = history(&a, &heads, &records, StreamOrigin::Unknown);
         assert!(matches!(eligible_strict(&rules, &gapped, &pid("ada"), 17 * DAY).cumulative, Some(RuleVerdict::Unknown(_))));
-        let whole = history(&a, &heads, &full, Origin::Unknown);
+        let whole = history(&a, &heads, &full, StreamOrigin::Unknown);
         assert!(whole.coverage().from_genesis, "the stream's first head is the role's genesis");
         assert!(matches!(
             eligible_strict(&rules, &whole, &pid("ada"), 17 * DAY).cumulative,
@@ -221,8 +271,8 @@ mod tests {
         let a = authority();
         let (heads, records) = stream(&a, 20, 30, |n| if n >= 29 { "ada" } else { "bo" }, None);
         let rules = IncumbencyRules { max_consecutive_terms: Some(3), max_cumulative_ms: Some(10 * DAY), ..IncumbencyRules::default() };
-        let h = history(&a, &heads, &records, Origin::Genesis);
-        assert!(!h.coverage().from_genesis, "a caller's Genesis the stream does not show is not taken");
+        let h = history(&a, &heads, &records, StreamOrigin::Unknown);
+        assert!(!h.coverage().from_genesis, "the stream's earliest held head is not its first");
         let e = eligible_strict(&rules, &h, &pid("ada"), 40 * DAY);
         assert_eq!(e.consecutive, Some(RuleVerdict::Eligible));
         assert!(matches!(e.cumulative, Some(RuleVerdict::Unknown(_))));
@@ -236,8 +286,111 @@ mod tests {
         let stranger = SigningKey::from_bytes(&[99u8; 32]);
         let (heads, records) = stream(&a, 1, 6, |_| "bo", Some(&stranger));
         let rules = IncumbencyRules { max_cumulative_ms: Some(30 * DAY), ..IncumbencyRules::default() };
-        let h = history(&a, &heads, &records, Origin::Unknown);
+        // Even handed a checkpoint naming the last of them, nothing authenticates.
+        let stream_ = AppointmentStream {
+            issuer: &a.issuer,
+            stream: "appointments/curator",
+            checkpoint: Some(Checkpoint { seq: 6, digest: heads[5].head.digest() }),
+        };
+        let h = history_from_appointment_stream(&stream_, &heads, |r| records.get(r).cloned(), &a.members, &a.ext, StreamOrigin::Unknown);
         assert_eq!(h.coverage().continuous_suffix, 0, "no head is accepted");
         assert!(matches!(eligible_strict(&rules, &h, &pid("ada"), 10 * DAY).cumulative, Some(RuleVerdict::Unknown(_))));
+    }
+
+    /// Review of #543, H1: another member's stream — authentic under its own key, ada never in it — does
+    /// not stand in for the authority's. The source reads only the pinned `(issuer, stream)`.
+    #[test]
+    fn another_members_stream_is_not_the_authoritys_history() {
+        let a = authority();
+        let (real, real_records) = stream(&a, 1, 3, |_| "ada", None);
+        let reader = reader_through(&a, &real);
+        // A second member signs its own stream of the same name in which bo held every term.
+        let sk_n = SigningKey::from_bytes(&[12u8; 32]);
+        let n = NodeId::new("127.0.0.1", 7312).unwrap();
+        let mut b = Authority { sk: sk_n.clone(), issuer: IssuerId::for_node(&n), members: a.members.clone(), ext: TrustedExternalIssuers::new() };
+        b.members.insert(n, MemberKeys { retained: vec![sk_n.verifying_key().to_bytes()], ..Default::default() });
+        let (forged, forged_records) = stream(&b, 1, 3, |_| "bo", None);
+        let mut presented = forged.clone();
+        presented.extend(real.iter().cloned());
+        let mut records = forged_records;
+        records.extend(real_records);
+        let rules = IncumbencyRules { max_consecutive_terms: Some(3), ..IncumbencyRules::default() };
+        let h = history_at(&a, &reader, &presented, &records, StreamOrigin::Unknown);
+        assert!(matches!(eligible_strict(&rules, &h, &pid("ada"), 5 * DAY).consecutive, Some(RuleVerdict::Ineligible(_))),
+            "ada's three terms on the authority's stream decide it");
+        let alone = history_at(&a, &reader, &forged, &records, StreamOrigin::Unknown);
+        assert_eq!(alone.coverage().continuous_suffix, 0, "the other member's heads link to nothing the reader holds");
+    }
+
+    /// Review of #543, H2 and M2: presentation order and duplicates do not change the history — the walk
+    /// follows `prev` links from the reader's head.
+    #[test]
+    fn order_and_duplicates_in_the_presented_heads_change_nothing() {
+        let a = authority();
+        let (heads, records) = stream(&a, 1, 3, |_| "ada", None);
+        let reader = reader_through(&a, &heads);
+        let shuffled = vec![heads[0].clone(), heads[2].clone(), heads[1].clone(), heads[1].clone()];
+        let rules = IncumbencyRules { max_cumulative_ms: Some(3 * DAY), max_consecutive_terms: Some(4), ..IncumbencyRules::default() };
+        let h = history_at(&a, &reader, &shuffled, &records, StreamOrigin::Unknown);
+        assert!(h.coverage().from_genesis && h.coverage().through_head);
+        assert_eq!(h.coverage().continuous_suffix, 3, "three terms, each once");
+        let e = eligible_strict(&rules, &h, &pid("ada"), 5 * DAY);
+        assert!(matches!(e.cumulative, Some(RuleVerdict::Ineligible(Ineligible::CumulativeTenure { served_ms, .. })) if served_ms == 3 * DAY));
+        assert_eq!(e.consecutive, Some(RuleVerdict::Eligible), "a run of three under a limit of four, not five");
+    }
+
+    /// Review of #543, H3: a baseline binds only at the head it names. Offered heads 25.. against a
+    /// baseline taken at term 19's head, the terms between are missing, so tenure is unknown.
+    #[test]
+    fn a_baseline_binds_only_at_the_head_it_was_taken_at() {
+        let a = authority();
+        let (heads, records) = stream(&a, 1, 30, |n| if n % 2 == 0 { "ada" } else { "bo" }, None);
+        let reader = reader_through(&a, &heads);
+        let baseline = |at: usize| StreamOrigin::Baseline {
+            at: heads[at].head.digest(),
+            after: tid(at as u64 + 1),
+            cumulative_ms: HashMap::from([(pid("ada"), 5 * DAY)]),
+        };
+        let rules = IncumbencyRules { max_cumulative_ms: Some(30 * DAY), ..IncumbencyRules::default() };
+        // Heads 25..=30 presented; the baseline was taken at term 19 (index 18): not linked.
+        let late = &heads[24..];
+        let h = history_at(&a, &reader, late, &records, baseline(18));
+        assert!(!h.coverage().from_baseline);
+        assert!(matches!(eligible_strict(&rules, &h, &pid("ada"), 31 * DAY).cumulative, Some(RuleVerdict::Unknown(_))));
+        // Heads 20..=30 presented: the walk reaches term 19's head, and the baseline binds.
+        let h = history_at(&a, &reader, &heads[19..], &records, baseline(18));
+        assert!(h.coverage().from_baseline && h.coverage().through_head);
+        assert_eq!(eligible_strict(&rules, &h, &pid("ada"), 31 * DAY).cumulative, Some(RuleVerdict::Eligible), "5 + 6 days under 30");
+    }
+
+    /// Review of #543, M1/M3: the head is the reader's checkpoint, and reading does not move it. Heads
+    /// beyond the checkpoint are ignored; the same call twice gives the same history.
+    #[test]
+    fn the_head_is_the_readers_checkpoint_and_reading_does_not_move_it() {
+        let a = authority();
+        let (heads, records) = stream(&a, 1, 5, |n| if n <= 3 { "bo" } else { "ada" }, None);
+        let reader = reader_through(&a, &heads[..3]);
+        let h1 = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
+        let h2 = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
+        assert_eq!(h1.coverage(), h2.coverage());
+        assert_eq!(h1.coverage().continuous_suffix, 3, "terms 4 and 5 are past what this reader holds");
+        assert_eq!(reader.checkpoint(&a.issuer, "appointments/curator").map(|c| c.seq), Some(3));
+    }
+
+    /// A missing record in the middle leaves the terms after it vouched for and nothing before; the
+    /// head's own record missing means nothing reaches the present.
+    #[test]
+    fn a_gap_keeps_the_suffix_and_a_missing_head_record_keeps_nothing_current() {
+        let a = authority();
+        let (heads, mut records) = stream(&a, 1, 6, |_| "bo", None);
+        let reader = reader_through(&a, &heads);
+        let mut gapped = records.clone();
+        gapped.retain(|_, t| t.term != tid(3));
+        let h = history_at(&a, &reader, &heads, &gapped, StreamOrigin::Unknown);
+        assert_eq!(h.coverage().continuous_suffix, 3);
+        assert!(!h.coverage().from_genesis && h.coverage().through_head);
+        records.retain(|_, t| t.term != tid(6));
+        let h = history_at(&a, &reader, &heads, &records, StreamOrigin::Unknown);
+        assert!(!h.coverage().through_head);
     }
 }

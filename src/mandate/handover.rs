@@ -372,6 +372,8 @@ pub fn eligible(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// A3: a journal says what stretch of the role it covers — its scope, the first term it recorded, the
     /// latest — and a journal saved before those fields existed still loads, reading them as absent.
     #[test]
@@ -393,8 +395,6 @@ mod tests {
         let old: HandoverJournal = serde_json::from_str(r#"{"entries":[]}"#).expect("an old journal loads");
         assert_eq!((old.scope(), old.start(), old.endpoint()), (None, None, None));
     }
-
-    use super::*;
 
     fn pid(s: &str) -> PrincipalId {
         PrincipalId::new(s).unwrap()

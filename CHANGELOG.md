@@ -25,9 +25,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A3's history source, built** (`docs/plans/realignment-repairs.md` A3 — 2.24.0 shipped the evaluator and
   marked the row merged with its source unbuilt; doc-coverage run 20, code gap 3). `mandate::history_source::
   history_from_appointment_stream` (`tls`) builds a `TermHistory` from an appointment stream in the knowledge
-  layer: the heads are offered to the signed-heads reader, which authenticates them and advances only through
-  an unbroken chain from its durable checkpoint; a verified head whose record cannot be fetched is a gap; the
-  stream's first head is genesis, and earlier history counts only through a trusted baseline. Before, nothing in
+  layer, pinned by `(issuer, stream)`: it walks back from this node's reader's checkpoint along each head's `prev`
+  digest, authenticating every head, so a presenter's other heads — another member's stream, a newer head,
+  duplicates, any order — change nothing and the read moves no checkpoint; a linked head whose record cannot be
+  fetched is a gap; reaching `prev: None` is genesis, and a `StreamOrigin::Baseline` binds only at the head
+  digest it names. "Current" means as of this reader's checkpoint. Before, nothing in
   the substrate built a `TermHistory` — the embedding application did, so "the source establishes coverage"
   rested on the caller. `HandoverJournal` records its scope, start and endpoint (`for_scope`, `start()`,
   `endpoint()`; a journal saved before loads with them absent). `mycelium-wiki/examples/curator_handover.rs`
@@ -127,8 +129,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Strict eligibility: a consecutive-terms run at the limit behind a stale head is `Unknown`, not `Ineligible`.**
   `eligible_strict` decided a visible run at the limit before checking that the history reached the head — but
   a later term by someone else breaks the run, so the candidate may be eligible. Missing *earlier* history only
-  lengthens a run, which is why the shortcut holds at the head (and for cumulative tenure and cooling-off, where
-  later history can only add). Found by the A3 example: the council's history lacked term 2, A's, which broke
+  lengthens a run, which is why the shortcut holds at the head; cumulative tenure keeps its shortcut (later
+  history can only add), and cooling-off already checked staleness first except for a term visibly inside the
+  window (a later term can only move the end of the window later). Found by the A3 example: the council's history lacked term 2, A's, which broke
   B's run, and B read as `Ineligible`. Test `a_run_at_the_limit_behind_a_stale_head_is_unknown_not_ineligible`,
   seen failing first.
 >>>>>>> a15221c5 (A3: the history source — signed appointment heads become a TermHistory; the journal says what it covers)

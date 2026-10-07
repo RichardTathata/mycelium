@@ -251,8 +251,6 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The council's own store with no fence — used once, to create the commit an appointment can
-/// point at. A repository with no commits has no object for a mandate ref to name.
 fn pid(s: &str) -> PrincipalId {
     PrincipalId::new(s).expect("a principal")
 }
@@ -261,6 +259,8 @@ fn tid(s: &str) -> TermId {
     TermId::new(s).expect("a term id")
 }
 
+/// The council's own store with no fence — used once, to create the commit an appointment can
+/// point at. A repository with no commits has no object for a mandate ref to name.
 fn store_for_bootstrap(dir: &Path) -> GitStore {
     let mut cfg = GitStoreConfig::for_group(dir, COUNCIL);
     cfg.author_name = "Council".to_string();

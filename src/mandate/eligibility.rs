@@ -402,8 +402,8 @@ mod tests {
     }
 
     /// A run at the limit decides nothing when the history stops short of the head: a later term
-    /// by someone else breaks the run, so the candidate may be eligible. Unlike cumulative tenure and
-    /// cooling-off, later history can only *lower* this count. It answered `Ineligible` here — found
+    /// by someone else breaks the run, so the candidate may be eligible. Unlike cumulative tenure, later
+    /// history can *lower* this count (or extend it — either way the visible run decides nothing). It answered `Ineligible` here — found
     /// by the A3 example, where the council's history lacked the term that broke B's run.
     #[test]
     fn a_run_at_the_limit_behind_a_stale_head_is_unknown_not_ineligible() {

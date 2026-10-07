@@ -171,15 +171,10 @@ the assumption. Each rule then needs its own kind of coverage:
 | cumulative tenure | the history reaches the head **and** the suffix starts at the first term or a trusted baseline — or the visible total already meets the limit (then `Ineligible` regardless) |
 | cooling-off | a term of the candidate visibly inside the window — then `Ineligible` however much is missing (2.26.0; it read `Unknown` behind a stale head). Behind a stale head its `eligible_at_ms` is a lower bound: a later term of the candidate's may push it later — or the history reaches the head **and** a term of the candidate is in the suffix, or the suffix starts at the role's first term or reaches back across the whole cooling window |
 
-**Who the source is.** Whoever builds the `ChainedTerm`s and chooses the `Origin`. Since 2.26.0 the
-substrate has one that establishes coverage itself: `mandate::history_source::history_from_appointment_stream`
-(`tls`) reads an **appointment stream** in the knowledge layer — each appointment a record its appointing
-authority published, each `SignedHead` pointing at one — and offers the heads to the signed-heads reader
-(`HeadCheckpoints`), which authenticates them and advances only through an unbroken chain from its durable
-checkpoint. A head the reader does not accept contributes nothing; a verified head whose appointment record
-cannot be fetched is a gap; the reader's checkpoint is the head; the stream's first head (`prev: None`) is
-genesis, and anything earlier counts only through a `Baseline` the caller trusts — the reader vouches for
-continuity from its first checkpoint, never earlier history. `from_chain` remains for a source of your own.
+**Who the source is.** Whoever builds the `ChainedTerm`s and chooses the `Origin`. The substrate now has one
+that establishes coverage itself (unreleased): `mandate::history_source::history_from_appointment_stream` (`tls`)
+reads an **appointment stream** in the knowledge layer — one `(issuer, stream)` the appointing authority publishes, pinned by the caller. It walks **back from this node's reader's checkpoint** for that stream (`HeadCheckpoints::checkpoint`, or the durable reader's) along each head's `prev` digest, authenticating every head against the pinned issuer's keys; heads a presenter offers that are not on that chain — another member's stream, a newer head, a duplicate, any order — change nothing, and the read moves no checkpoint. A linked head whose record cannot be fetched is a gap (only the terms after it count); the walk reaching `prev: None` is genesis, and reaching the head a `StreamOrigin::Baseline` names by digest binds that baseline — anything else leaves the origin unknown. "Through the head" means through **this reader's** checkpoint: a reader not yet offered the authority's newest head decides as of the one it holds. A head signed under a since-revoked key stops the walk — fail closed. `from_chain` remains for
+a source of your own.
 
 **What the journal covers.** A `HandoverJournal` says which stretch of the role it speaks for —
 `HandoverJournal::for_scope(scope)`, then `start()` (the first term it recorded) and `endpoint()` (the latest) —
