@@ -618,3 +618,41 @@ async fn a_copy_truncated_on_the_only_remote_holder_is_corrupt_through_the_stock
     c.shutdown_with_timeout(Duration::from_secs(5)).await;
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
+
+/// The third review of #542: a copy damaged on this node's disk is repaired by the next successful mesh
+/// fetch — the read answers whole bytes from an honest provider, and the local copy is valid afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_damaged_local_copy_is_repaired_by_the_next_mesh_fetch() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let store_a = Arc::new(FsBlobStore::open(dir_a.path()).unwrap());
+    let (a, a_port, http_port) = start_gateway_node(Arc::clone(&store_a), None).await;
+    let b_port = mycelium::test_util::alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = b_port;
+    cfg.bootstrap_peers = vec![NodeId::new("127.0.0.1", a_port).unwrap()];
+    let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", b_port).unwrap(), cfg));
+    b.start().await.unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let store_b = Arc::new(FsBlobStore::open(dir_b.path()).unwrap());
+    let bytes: &[u8] = b"the honest copy B still holds";
+    let id = store_b.put(bytes).unwrap();
+    let _server = mycelium_reason::spawn_blob_server(&b, store_b);
+    store_a.put(bytes).unwrap();
+    std::fs::write(dir_a.path().join(id.to_hex()), b"rot").unwrap();
+    assert!(matches!(store_a.read(&id), mycelium_reason::LocalRead::Damaged(_)));
+    let filter = mycelium::CapFilter::new("reason", "blob-cache");
+    for _ in 0..200 {
+        if a.capabilities().resolve(&filter).iter().any(|(n, _)| n == b.node_id()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(a.capabilities().resolve(&filter).iter().any(|(n, _)| n == b.node_id()), "B must be visible to A");
+    let got = reqwest::get(format!("http://127.0.0.1:{http_port}/gateway/reason/blob/{id}")).await.unwrap();
+    assert_eq!(got.status().as_u16(), 200);
+    assert_eq!(got.bytes().await.unwrap().as_ref(), bytes);
+    assert!(matches!(store_a.read(&id), mycelium_reason::LocalRead::Valid(_)), "A's copy was repaired");
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+

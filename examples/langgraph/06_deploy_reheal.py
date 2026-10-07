@@ -265,7 +265,7 @@ def main() -> int:
         try:
             head_b = saver_b.get_tuple(config)
         except IncompleteCheckpoint as e:
-            if not e.retriable:   # a refused read or a corrupt blob: waiting will not fix it (0.2.1)
+            if not e.retriable:   # a refused read or a corrupt blob: waiting will not fix it (0.3.0)
                 raise
             head_b = None
         if head_b is not None and head_b.checkpoint["id"] == expected_id:

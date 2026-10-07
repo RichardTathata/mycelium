@@ -74,8 +74,8 @@ class IncompleteCheckpoint(Exception):
     (0.3.0 — the plan's "absence, temporary unavailability, authorization refusal and corrupt content
     stay distinguishable"): ``"not_found"`` (no reachable holder has it yet), ``"unavailable"`` (a
     holder could not be reached, the node or a proxy in front of it failed, or the read was throttled),
-    ``"unauthorized"`` (the gateway refused the read — a token or scope problem), ``"corrupt"`` (every
-    holder that answered served bytes failing the content address, and none could still serve it),
+    ``"unauthorized"`` (the gateway refused the read — a token or scope problem), ``"corrupt"`` (every copy
+    currently on offer — the node's own and each advertised provider's — fails the content address),
     ``"unsupported"`` (the node does not serve the blob route — no reason companion). ``retriable`` is
     true only when every reason is transient (``not_found`` or ``unavailable``).
     """

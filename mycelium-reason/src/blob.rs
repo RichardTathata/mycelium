@@ -88,7 +88,9 @@ pub enum LocalRead {
 /// Filesystem content-addressed blob store. One file per blob, named by its hex id.
 ///
 /// No locks: writes are **complete-or-absent** (uniquely-named temp file + rename — the
-/// `FsLibrarySource` discipline), so a concurrent reader never observes a partial blob,
+/// `FsLibrarySource` discipline), so a concurrent reader never observes a partial blob — though not
+/// crash-durable (no fsync; a crash can leave a short file, which reads as damaged and is repaired by
+/// the next put of the right bytes),
 /// and reads verify the hash: [`get`](FsBlobStore::get) never returns bad data, and [`read`](FsBlobStore::read)
 /// says when a copy on disk is damaged rather than absent.
 pub struct FsBlobStore {
@@ -107,8 +109,9 @@ impl FsBlobStore {
         self.dir.join(id.to_hex())
     }
 
-    /// Store `bytes`, returning their content address. Idempotent — storing bytes the
-    /// store already holds is a no-op returning the same id. Rejects blobs over
+    /// Store `bytes`, returning their content address. Idempotent — storing bytes the store already
+    /// holds is a no-op returning the same id, at the cost of reading the existing copy to compare (a
+    /// copy that differs is damaged and is replaced). Rejects blobs over
     /// [`MAX_BLOB_BYTES`] with `InvalidInput` (they could never travel the mesh).
     pub fn put(&self, bytes: &[u8]) -> std::io::Result<BlobId> {
         if bytes.len() > MAX_BLOB_BYTES {
@@ -119,9 +122,12 @@ impl FsBlobStore {
         }
         let id = BlobId::of(bytes);
         let path = self.path_of(&id);
-        // A valid copy is a no-op. A damaged one is replaced: returning early because a file existed left
-        // damage unrepairable — the mesh write-back and a client's re-upload both did nothing (S5).
-        if matches!(self.read(&id), LocalRead::Valid(_)) {
+        // A copy holding exactly these bytes is a no-op. Anything else at the path — damaged, truncated,
+        // unreadable — is replaced: returning early because a file existed left damage unrepairable (S5).
+        // The check compares the length first and the bytes only on a match — no second hash.
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64)
+            && std::fs::read(&path).is_ok_and(|existing| existing == bytes)
+        {
             return Ok(id);
         }
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -150,8 +156,15 @@ impl FsBlobStore {
     /// but no longer matching its content address. Damage is not absence: it is evidence a reader must be
     /// able to see (realignment repairs S5).
     pub fn read(&self, id: &BlobId) -> LocalRead {
-        let Ok(bytes) = std::fs::read(self.path_of(id)) else {
-            return LocalRead::Absent;
+        let bytes = match std::fs::read(self.path_of(id)) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LocalRead::Absent,
+            // EIO, EACCES, a directory where the file should be: the copy is there and cannot be read —
+            // damage at rest, not absence (an `Absent` would be the retriable miss, forever).
+            Err(e) => {
+                warn!(id = %id, error = %e, "blob present but unreadable — damaged at rest");
+                return LocalRead::Damaged(Bytes::new());
+            }
         };
         if BlobId::of(&bytes) != *id {
             warn!(id = %id, "blob failed content verification on read — damaged at rest");
@@ -409,6 +422,16 @@ mod tests {
         assert!(matches!(s.read(&id), LocalRead::Damaged(_)));
         assert_eq!(s.put(b"honest bytes").unwrap(), id);
         assert_eq!(s.read(&id), LocalRead::Valid(Bytes::from_static(b"honest bytes")));
+    }
+
+    /// The third review of #542: a copy the disk cannot read (EIO, EACCES — here a directory where the
+    /// file should be) is damage at rest, not absence. It read as `Absent`, the retriable miss.
+    #[test]
+    fn an_unreadable_copy_is_damaged_not_absent() {
+        let (_d, s) = store();
+        let id = BlobId::of(b"unreadable");
+        std::fs::create_dir(s.path_of(&id)).unwrap();
+        assert!(matches!(s.read(&id), LocalRead::Damaged(_)));
     }
 
     #[test]
