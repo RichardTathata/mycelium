@@ -67,13 +67,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   routing one through `/a2a` would reach a model without `llm:invoke`. Before, a guessed id resolved a provider
   and dispatched `skill.invoke` there, where a co-hosted receiver could run under the guessed name. Test
   `agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
-- **Every governance write is audited, and one that is not is counted.** `POST /gateway/govern/profile` neither
+- **Every governance write at the gateway is audited, and one that is not is counted.** `POST /gateway/govern/profile` neither
   refused a loose body (a `target` was dropped and the step applied to the node answering) nor recorded the change
   — every other governance route did both; it now answers **400** on a non-object body or an unknown field, and is
   audited. `audit_govern` discarded a failed seal (a `compliance` build without `[tls]` records nothing): a change
   that leaves no audit record — no `compliance`, or a seal that failed, now warned about — is counted, and `/stats`
-  carries `governance_changes` and `governance_unaudited`. A test enumerates the governance write routes from the
-  router and requires one audit attempt per accepted change, so a new route is covered the day it lands. Fail-first:
+  carries `governance_changes` and `governance_unaudited` — accepted governance POSTs at this gateway
+  (`/gateway/govern/*` and `POST /gateway/identity/revoke`, which is now audited too; a refresh of a standing intent
+  or a no-op profile step counts), not changes an embedder makes through the Rust API. A test enumerates every
+  `"/govern/…"` route literal in the gateway's source and requires one audit attempt per accepted change and none
+  for a refused body; with `compliance` and `[tls]`, each change, the revocation included, is sealed. Fail-first:
   `govern/profile` recorded no attempt and accepted `target`. Found by the 2026-10-07 wiki lint and doc-coverage
   run 21.
 - **The rule catalogue's inputs render.** An input whose source carried its own code spans was wrapped in another,

@@ -1120,7 +1120,10 @@ async fn gw_identity_revoke(
     };
     let reason = body["reason"].as_str().map(|s| s.to_string());
     match super::revocation::revoke_key(&ctx.agent_ctx, revoked_key, reason) {
-        Ok(())  => Json(json!({"ok": true, "revoked_key": key_s})).into_response(),
+        Ok(())  => {
+            audit_govern(&ctx.agent_ctx, "identity/revoke", body.to_string());
+            Json(json!({"ok": true, "revoked_key": key_s})).into_response()
+        }
         Err(e)  => (StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -6581,10 +6584,14 @@ mod tests {
     #[tokio::test]
     async fn every_governance_write_route_audits_its_change() {
         use axum::http::header::AUTHORIZATION;
-        let routed: std::collections::BTreeSet<String> = include_str!("http.rs").lines()
-            .filter_map(|l| l.trim().strip_prefix(".route(\"/govern/"))
-            .filter(|l| l.contains("post("))
-            .filter_map(|l| l.split('"').next().map(|r| format!("/gateway/govern/{r}")))
+        // Every `"/govern/…"` route literal in the production half of this file, whatever its layout (a chained
+        // `.route(`, a feature-gated `let gateway = gateway.route(`, a call split across lines); `/govern` alone is
+        // the read route. Scope-map and doc lines carry `/gateway/govern/`, not a bare `"/govern/`.
+        let src = include_str!("http.rs");
+        let production = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let routed: std::collections::BTreeSet<String> = production.split("\"/govern/").skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(|r| format!("/gateway/govern/{r}"))
             .collect();
         let bodies: Vec<(&str, serde_json::Value)> = vec![
             ("/gateway/govern/tuning", serde_json::json!({"enabled": true})),
@@ -6607,14 +6614,67 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let client = reqwest::Client::new();
         let changes = || agent.task_ctx.governance_changes.load(std::sync::atomic::Ordering::Relaxed);
+        let unaudited = || agent.task_ctx.governance_unaudited.load(std::sync::atomic::Ordering::Relaxed);
         for (route, body) in bodies {
+            let url = format!("http://127.0.0.1:{http_port}{route}");
+            // A refused body changes nothing and is not counted — validation comes before the audit.
             let before = changes();
-            let r = client.post(format!("http://127.0.0.1:{http_port}{route}"))
-                .header(AUTHORIZATION, "Bearer t").json(&body).send().await.unwrap();
+            let r = client.post(&url).header(AUTHORIZATION, "Bearer t")
+                .json(&serde_json::json!({"no_such_field": 1})).send().await.unwrap();
+            assert_eq!(r.status(), 400, "{route}");
+            assert_eq!(changes(), before, "{route} counted a refused body");
+            let r = client.post(&url).header(AUTHORIZATION, "Bearer t").json(&body).send().await.unwrap();
             assert_eq!(r.status(), 200, "{route}: {}", r.text().await.unwrap_or_default());
             assert_eq!(changes(), before + 1, "{route} recorded no audit attempt");
         }
+        // No `[tls]` identity here, so nothing could be sealed (and without `compliance` nothing is tried):
+        // every accepted change is counted as unaudited.
+        assert_eq!(unaudited(), changes());
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// With `compliance` and a `[tls]` identity every accepted governance change is sealed into this node's audit
+    /// stream — the profile step and an identity revocation included — and none is counted unaudited.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn governance_changes_are_sealed_with_an_identity() {
+        use crate::config::TlsConfig;
+        use axum::http::header::AUTHORIZATION;
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let cert_dir = std::env::temp_dir().join(format!("myc-govern-audit-{gossip_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.gateway_scoped_tokens = vec![crate::GatewayToken {
+            token: "gov".into(), scopes: vec!["govern:write".into(), "identity:write".into()],
+        }];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let old_key = agent.identity_public_key().expect("tls identity");
+        agent.rotate_identity(Duration::from_millis(0)).await.expect("rotate");
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}/gateway");
+        for (route, body) in [
+            ("govern/profile", serde_json::json!({"profile": "observe"})),
+            ("govern/topology-override", serde_json::json!({"group": "workers", "override": true})),
+            ("identity/revoke", serde_json::json!({"revoked_key": super::hex32(&old_key)})),
+        ] {
+            let r = client.post(format!("{base}/{route}")).header(AUTHORIZATION, "Bearer gov").json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 200, "{route}: {}", r.text().await.unwrap_or_default());
+        }
+        let sealed: Vec<String> = agent.audit_stream(&id).into_iter()
+            .filter(|r| r.record.principal == "gateway/govern").map(|r| r.record.target).collect();
+        for target in ["govern/profile", "sys/topology-override/workers", "identity/revoke"] {
+            assert!(sealed.iter().any(|t| t == target), "{target} not sealed: {sealed:?}");
+        }
+        assert_eq!(agent.task_ctx.governance_unaudited.load(std::sync::atomic::Ordering::Relaxed), 0);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
     }
 
     /// WS-C governance scope gating (Track 3, compliance): `govern:read` reaches the

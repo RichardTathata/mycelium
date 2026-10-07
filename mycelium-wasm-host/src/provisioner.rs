@@ -1155,8 +1155,9 @@ impl Provisioner {
                 continue;
             };
             if view.sheds(&me) {
-                self.withdraw(&artifact); // cooperative self-removal
-                metrics::counter!("mycelium_artifact_presence_sheds_total").increment(1);
+                if self.withdraw(&artifact) { // cooperative self-removal
+                    metrics::counter!("mycelium_artifact_presence_sheds_total").increment(1);
+                }
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::Action, "above_ceiling", target, inputs(), Some(format!("withdraw {artifact}")));
                 }
