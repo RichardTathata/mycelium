@@ -334,7 +334,7 @@ Entry format:
   2026-07-07; `/gateway/govern/profile` joined the router on 2026-09-18 (#289) and stayed off the list through five
   passes (09-24, 09-26, 10-02, 10-03, 10-06), each of which expanded the braces and confirmed every *named* route
   existed. #549 then added `topology-override`. Found because this pass diffed the list against the router's routes
-  under the same prefix while ingesting #549. Sharpening (proposed for §1's endpoint bullet): a `{a,b,c}` route list
+  under the same prefix while ingesting #549. Sharpening (folded into §1's endpoint bullet): a `{a,b,c}` route list
   is an enumeration — diff its members against every router literal sharing the prefix, the same rule the 2026-10-02
   entry gave prose lists of a manifest. The same diff found the profile route writes no audit record while the
   runbook says every governance POST does (reported as a code gap, not fixed in the docs).
@@ -342,7 +342,7 @@ Entry format:
   over.** `testing.md` said CI's `jest` ran "the node-free `auth.test.ts`; the live suite self-skips". Seven more
   node-free files joined from 2026-09-05 (`commit_result.test.ts`, the same day) to 2026-10-05, and since #526
   (2026-10-05) the live suite runs against a started node with `MYCELIUM_LIVE_REQUIRED` — the 10-06 pass ran a day
-  after that and diffed only the page's gate *block* against `run:` lines, not this prose. Sharpening (proposed for
+  after that and diffed only the page's gate *block* against `run:` lines, not this prose. Sharpening (folded into
   §1's CI-gate bullet): prose that names which tests a step runs is an enumeration of a directory — diff it against
   the runner's own collection (`testMatch` / `jest --listTests`, `--test '*'`, a pytest directory), and read every
   sentence about CI on the testing pages, not only the fenced block.
@@ -351,6 +351,10 @@ Entry format:
   demo; `examples.md` still said fourteen demos (twelve CI) without it, and `testing.md` "12 multi-node demos",
   through five passes. The 2026-07-14/15 sharpenings derive *categories* from the tree, and this demo sat in an
   existing category, so a category diff could not see it. Found by checking the pinned count while fixing the jest
-  sentence. Sharpening (proposed for §4): for a page that enumerates a suite, diff the **names** against the
+  sentence. Sharpening (folded into §4): for a page that enumerates a suite, diff the **names** against the
   runner (`run_demo` lines in `ci_smoke.sh`, the `[[bin]]` names) — the category check and the name check catch
   different misses.
+- 2026-10-07 (same pass): **§2 staleness — an "unreleased" marker outlived its release.** `security.md` (#543) and
+  `companions.md` (#542) still said "unreleased on `main`" after v2.26.0 shipped both; §2 compared `.log` dates to
+  merged PRs and never asked whether a marker's PR was in a tag. Sharpening (folded into §2): every "unreleased"
+  marker is checked with `git tag --contains` against the PR it names.

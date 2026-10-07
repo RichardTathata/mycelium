@@ -63,25 +63,27 @@ cargo build --lib --no-default-features
 cargo build --bin mycelium
 ```
 
-The pinned toolchain (`rust-toolchain.toml`) is `stable`. No nightly features are used.
+The toolchain is pinned in `rust-toolchain.toml` (1.96.0, in lockstep with CI; the crate's `rust-version` floor is
+1.89). No nightly features are used outside the fuzz job.
 
 ## Testing
 
-Run the full matrix before pushing.
+Run the gate before pushing. Do not trust a remembered test count — run the suite and read its total.
 
 ```sh
-# Unit tests (287+ tests, ~5 s)
-cargo test --lib --features tls,metrics,a2a,llm
+# The pre-push gate: clippy across the feature matrix CI enforces (incl. --no-default-features, which
+# catches feature-gated dead code), the sim-seam and test-inventory checks — a few minutes, no wasmtime
+make check
 
-# Lint — zero warnings required
-cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
+# The same plus the test suites and the WASM host's clippy
+make check-full
 
-# Gateway-free build — must compile
-cargo build --lib --no-default-features
-
-# Integration tests (12 scenarios, requires Docker, ~5 min warm / ~10 min cold)
+# Integration scenarios on a 4-node Docker cluster (requires Docker)
 make test
 ```
+
+The underlying commands, and the companion crates' gates, are listed in
+[`CLAUDE.md` § Build & test gates](CLAUDE.md#build--test-gates-run-before-pushing).
 
 The integration suite requires Docker. The first run builds images from scratch;
 subsequent runs reuse the layer cache and are fast.
@@ -98,9 +100,10 @@ template asks for each.
 
 **Structural polling, not fixed sleeps.** Use `for _ in 0..40 { if condition { break; } sleep(50ms) }` rather than `sleep(500ms)`. A structural assertion fails deterministically and points to the root cause.
 
-**Multi-node consensus tests need listeners on every node.** `system_propose` computes
+**Multi-node consensus tests need listeners on every node.** `cluster_propose` computes
 `quorum = ⌊(peers+1)/2⌋ + 1`. If peer nodes have no `ConsensusListener`, ballots time
-out. See `CLAUDE.md §Testing conventions` for the required pattern.
+out. The required pattern (a listener on every node, a structural peer-ready poll) is in
+[the testing page](docs/wiki/dev/testing/testing.md#multi-node-consensus-tests-need-listeners-everywhere).
 
 **Unit tests run in-process.** No Docker, no network. A unit test that spawns real TCP
 connections is an integration test and belongs in `tests/`.
@@ -123,7 +126,7 @@ explain *why* the branch cannot be reached.
 rather than `GossipError::Network(format!("..."))` for typed conditions — callers need
 to match on kind without parsing strings.
 
-**Atomics.** Follow the memory ordering policy in `CLAUDE.md §Memory ordering policy`.
+**Atomics.** Follow the [memory-ordering policy](docs/wiki/dev/concurrency/lock-free-and-atomics.md#memory-ordering-policy-for-atomics).
 Do not use `SeqCst` unless you can justify it with a concrete data race.
 
 ## Layer rules
