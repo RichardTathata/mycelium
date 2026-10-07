@@ -216,13 +216,15 @@ fn jsonrpc_ok(id: Option<Value>, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-/// Resolves the first node for `skill_id` ("ns/name") from the live cap/ KV prefix.
-fn resolve_skill(ctx: &TaskCtx, skill_id: &str) -> Option<crate::node_id::NodeId> {
-    let parts: Vec<&str> = skill_id.splitn(2, '/').collect();
-    if parts.len() != 2 { return None; }
-    let filter = CapFilter::new(parts[0], parts[1]);
+/// Resolves the first node for `skill_id` ("ns/name") from the live cap/ KV prefix, or says why not.
+fn resolve_skill(ctx: &TaskCtx, skill_id: &str) -> Result<crate::node_id::NodeId, String> {
+    let Some((ns, name)) = skill_id.split_once('/') else { return Err("skill not found".into()) };
+    if let Some(why) = not_an_a2a_skill(&ctx.kv_state, ns, name) {
+        return Err(why);
+    }
+    let filter = CapFilter::new(ns, name);
     let providers = resolve_providers(ctx, &filter);
-    providers.into_iter().next().map(|(n, _)| n)
+    providers.into_iter().next().map(|(n, _)| n).ok_or_else(|| "skill not found".into())
 }
 
 fn resolve_providers(
@@ -287,17 +289,54 @@ fn skill_input_description(kv: &crate::store::KvState, skill_id: &str) -> (Strin
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse {
-    let kv = &state.task_ctx.kv_state;
+/// Whether an advertised capability is the fleet's plumbing rather than a skill an agent can be asked
+/// for: a provisioning tier (`{ns}/loading`, `{ns}/installable`), a stem's shed mark (`prov-shed/*`),
+/// model metadata (`llm-meta/*`), the artifact librarian (`artifact/librarian`), the reason blob cache
+/// (`reason/blob-cache`), and a companion's election and role marks (`{ns}/{x}.primary`, `.secondary`,
+/// `.candidate`, `.curator` — tuple space, blackboard, wiki) — each serves its own RPC or none, never
+/// `skill.invoke`. A new kind of plumbing capability is added here, so the agent card does not list it.
+pub fn is_infrastructure_capability(ns: &str, name: &str) -> bool {
+    matches!(ns, "prov-shed" | "llm-meta")
+        || matches!(name, "loading" | "installable")
+        || (ns, name) == ("artifact", "librarian")
+        || (ns, name) == ("reason", "blob-cache")
+        || [".primary", ".secondary", ".candidate", ".curator"].iter().any(|s| name.ends_with(s))
+}
+
+/// Why `/a2a` cannot call `{ns}/{name}`, or `None` when it can. `/a2a` sends `skill.invoke`; plumbing answers
+/// none, and a prompt skill (`register_prompt_skill`, with its template at `prompts/{ns}/{name}`) answers
+/// `llm.invoke`, which is reached through `POST /gateway/llm/call` under `llm:invoke` — routing it here
+/// would let an A2A caller reach a model without that scope. The card and `tasks/send` both use this, so
+/// the card lists exactly what `tasks/send` will call.
+fn not_an_a2a_skill(kv: &crate::store::KvState, ns: &str, name: &str) -> Option<String> {
+    if is_infrastructure_capability(ns, name) {
+        return Some("skill not found".into());
+    }
+    let prompt_key = format!("{}{ns}/{name}", crate::signal::kv_ns::PROMPTS);
+    if kv.store.pin().get(prompt_key.as_str()).and_then(|e| e.data.clone()).is_some_and(|b| !b.is_empty()) {
+        return Some(format!("{ns}/{name} is a prompt skill: call it through POST /gateway/llm/call (llm:invoke)"));
+    }
+    None
+}
+
+/// The skill ids an agent card lists: every advertised capability that is not infrastructure, once.
+fn card_skill_ids(kv: &crate::store::KvState) -> std::collections::HashSet<String> {
     let mut skill_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (key, bytes) in scan_kv_prefix(kv, "cap/") {
         if is_cap_locality_key(&key) { continue; }
         let Some((_node_id, ns, name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
+        if not_an_a2a_skill(kv, &ns, &name).is_some() { continue; }
         use crate::capability::Capability;
         if Capability::decode(&bytes).is_some() {
             skill_ids.insert(format!("{}/{}", ns, name));
         }
     }
+    skill_ids
+}
+
+async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse {
+    let kv = &state.task_ctx.kv_state;
+    let skill_ids = card_skill_ids(kv);
     let skills: Vec<AgentSkill> = skill_ids.into_iter().map(|id| {
         let (description, input_schema) = skill_input_description(kv, &id);
         AgentSkill { name: id.clone(), id, description, input_schema }
@@ -364,8 +403,9 @@ async fn handle_tasks_send(
     let message  = params.get("message").cloned().unwrap_or(Value::Null);
     let text     = text_from_message(&message);
 
-    let Some(target) = resolve_skill(&state.task_ctx, skill_id) else {
-        return jsonrpc_error(id, -32001, "skill not found");
+    let target = match resolve_skill(&state.task_ctx, skill_id) {
+        Ok(target) => target,
+        Err(why) => return jsonrpc_error(id, -32001, &why),
     };
 
     // Generous: A2A skills are frequently multi-step LLM pipelines
@@ -486,12 +526,14 @@ pub(crate) async fn tasks_send_subscribe(
     let task_id2 = task_id.clone();
     let id2      = id.clone();
     tokio::spawn(async move {
-        let target = resolve_skill(&state2.task_ctx, &skill_id);
-        let Some(target) = target else {
-            let _ = tx.send(Ok(Event::default()
-                .event("task_status_update")
-                .data(json!({ "id": &task_id2, "status": { "state": "failed" }, "error": "skill not found" }).to_string()))).await;
-            return;
+        let target = match resolve_skill(&state2.task_ctx, &skill_id) {
+            Ok(target) => target,
+            Err(why) => {
+                let _ = tx.send(Ok(Event::default()
+                    .event("task_status_update")
+                    .data(json!({ "id": &task_id2, "status": { "state": "failed" }, "error": why }).to_string()))).await;
+                return;
+            }
         };
 
         // Emit "working" after a short delay while the RPC runs.
@@ -800,6 +842,38 @@ mod tests {
         assert!(pairs.is_empty(), "fresh agent has no caps");
     }
 
+    /// The card lists what an agent can be asked to do, not the fleet's plumbing: a provisioning tier, a
+    /// shed mark, model metadata, the librarian and the blob cache are capabilities nobody invokes as a skill.
+    #[test]
+    fn agent_card_leaves_out_infrastructure_capabilities() {
+        use crate::capability::Capability;
+        use crate::framing::make_gossip_update;
+        use crate::store::apply_and_notify;
+        let ctx = make_ctx();
+        for (ns, name) in [("demo", "echo"), ("prov-shed", "demo:echo:00ff"), ("llm", "loading"), ("demo", "installable"),
+                           ("llm-meta", "qwen"), ("artifact", "librarian"), ("reason", "blob-cache"),
+                           // A companion's election and role marks (the review of #550).
+                           ("tuple", "orders.primary"), ("blackboard", "plan.secondary"), ("tuple", "orders.candidate"),
+                           ("wiki", "council.curator"),
+                           // A prompt skill answers llm.invoke, which `/a2a` does not send.
+                           ("llm", "qwen3")] {
+            let key = format!("cap/127.0.0.1:9001/{ns}/{name}");
+            let upd = make_gossip_update(&ctx.node_id, 5, std::sync::Arc::from(key.as_str()),
+                Capability::new(ns, name).encode(), false, &ctx.hlc);
+            apply_and_notify(&ctx.kv_state, &upd);
+        }
+        apply_and_notify(&ctx.kv_state, &make_gossip_update(&ctx.node_id, 5, std::sync::Arc::from("prompts/llm/qwen3"),
+            bytes::Bytes::from_static(b"{}"), false, &ctx.hlc));
+        let ids = card_skill_ids(&ctx.kv_state);
+        assert_eq!(ids, std::collections::HashSet::from(["demo/echo".to_string()]), "{ids:?}");
+        // tasks/send agrees with the card: what the card leaves out does not resolve.
+        assert!(resolve_skill(&ctx, "demo/echo").is_ok());
+        for id in ["prov-shed/demo:echo:00ff", "artifact/librarian", "tuple/orders.primary", "llm/qwen3"] {
+            assert!(resolve_skill(&ctx, id).is_err(), "{id} resolved");
+        }
+        assert!(resolve_skill(&ctx, "llm/qwen3").unwrap_err().contains("/gateway/llm/call"));
+    }
+
     #[test]
     fn agent_card_deduplicates_skills() {
         use crate::capability::Capability;
@@ -820,14 +894,7 @@ mod tests {
             apply_and_notify(&ctx.kv_state, &upd);
         }
 
-        let mut skill_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (key, kv_bytes) in scan_kv_prefix(&ctx.kv_state, "cap/") {
-            if is_cap_locality_key(&key) { continue; }
-            let Some((_n, ns, name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
-            if Capability::decode(&kv_bytes).is_some() {
-                skill_ids.insert(format!("{}/{}", ns, name));
-            }
-        }
+        let skill_ids = card_skill_ids(&ctx.kv_state);
         assert_eq!(skill_ids.len(), 1, "two nodes with same cap must produce one skill");
     }
 

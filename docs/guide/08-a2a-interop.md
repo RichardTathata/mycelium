@@ -114,18 +114,26 @@ propagation. Key properties include...
 
 ## How It Works
 
-**`/.well-known/agent.json`** is served by the SkillRunner HTTP gateway when
-built with `--features a2a`. It lists all skills currently advertising on the
-mesh (scanned from the capability KV entries at request time):
+**`/.well-known/agent.json`** is served by the node's gateway when the node is built with
+`--features a2a` and enables it (`with_a2a()`). It lists the skills `/a2a` can call, scanned from the
+capability KV entries at request time. Since 2.27.0 it leaves out what `tasks/send` cannot reach, and
+`tasks/send` refuses the same set (`-32001`):
+
+- the fleet's own plumbing — a provisioning tier (`{ns}/loading`, `{ns}/installable`), a stem's shed mark
+  (`prov-shed/*`), model metadata (`llm-meta/*`), the artifact librarian, the reason blob cache, and a
+  companion's election and role marks (`{ns}/{x}.primary`, `.secondary`, `.candidate`, `.curator`);
+- **prompt skills** (`register_prompt_skill` — `mycelium-reason`'s `llm/{model}`, a stem's `[[serve]]`):
+  they answer `llm.invoke`, not the `skill.invoke` `/a2a` sends, and are called through
+  `POST /gateway/llm/call` under `llm:invoke`. The refusal names that route.
 
 ```json
 {
   "skills": [
     {
       "id":          "llm/orchestrator",
-      "name":        "orchestrator",
+      "name":        "llm/orchestrator",
       "description": "Coordinates research and writing to produce articles",
-      "input_schema": { "type": "object", "properties": { "topic": {"type": "string"} } }
+      "inputSchema": { "type": "object", "properties": { "topic": {"type": "string"} } }
     }
   ]
 }

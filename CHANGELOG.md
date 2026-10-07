@@ -27,6 +27,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`govern:write`, audited in a `compliance` build) sets or releases `sys/topology-override/{group}`; it was an unaudited `kv:write`
   write, the one owned key 2.26.0 still let through.
 
+### Fixed
+- **The A2A agent card lists what `/a2a` can call, and `tasks/send` refuses the rest.** `/.well-known/agent.json`
+  listed every advertised capability as a skill, so an external agent was offered `prov-shed/…` (2.26.0's shed
+  marks), `{ns}/loading`, `{ns}/installable`, `llm-meta/…`, `artifact/librarian`, `reason/blob-cache` and the
+  companions' role marks (`{ns}/{x}.primary`/`.secondary`/`.candidate`/`.curator`) — none of which answers
+  `skill.invoke` — and **prompt skills** (`mycelium-reason`'s `llm/{model}`, a stem's `[[serve]]`), which answer
+  `llm.invoke`, so a call through `/a2a` failed or waited out its 120 s timeout. They are left out of the card,
+  and `tasks/send` (and its stream) refuses them `-32001`, naming `POST /gateway/llm/call` for a prompt skill —
+  routing one through `/a2a` would reach a model without `llm:invoke`. Before, a guessed id resolved a provider
+  and dispatched `skill.invoke` there, where a co-hosted receiver could run under the guessed name. Test
+  `agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
+
 ## [2.26.0] — 2026-10-07
 
 The **verification policy** release. Doc-coverage run 20 found six code gaps behind green CI and repeated
