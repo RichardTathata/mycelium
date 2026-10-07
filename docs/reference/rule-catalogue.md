@@ -425,7 +425,7 @@ More live providers than the declared ceiling withdraws the hosts ranked beyond 
   - NoAction: `within_ceiling`, `not_hosting`, `ranked_within_ceiling`
 - **Effects:** withdraw() of this node's install
 - **May inhibit:** [`prov.presence_floor`](#provpresence_floor)
-- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades`, `bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names`, `a_herd_of_new_installs_lands_on_the_ceiling`
+- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades`, `bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names`, `a_herd_of_new_installs_lands_on_the_ceiling`, `a_partition_heals_without_emptying_the_band`
 
 ## `prov.withdraw`
 

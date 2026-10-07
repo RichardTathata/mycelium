@@ -60,8 +60,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the filter's gossip encoding and the ceiling, so bands on one capability are told apart), so a herd of new
   installs is marked the moment it goes live and lands exactly on the ceiling; it retracts the mark only while it
   provides the band without an install it could withdraw. A provider that does not advertise it — registered in
-  code, a group projection, a stem without the band — keeps its place, and the rest rank against what is left,
-  so it cannot hold the band above its ceiling. Nothing is inferred from timing. Bound: a view with *k* wrong
+  code, a group projection, a stem without the band — keeps its place once it has been seen unmarked for two
+  advertise intervals (until then it is presumed to shed, since a `cap/` entry and its mark can arrive apart — a
+  partition healing — and counting it fixed too early is what over-sheds), and the rest rank against what is
+  left, so it cannot hold the band above its ceiling for more than those few seconds. Bound: a view with *k* wrong
   entries (a crashed provider still advertised, a mark not yet arrived) can leave the band at `max − k` for a
   round — zero if *k* ≥ `max`, which the floor then refills — and it never cascades. Overlapping bands (one
   unattributed, one attribute-restricted, both with tight ceilings) can still trade a provider back and forth. A host now withdraws

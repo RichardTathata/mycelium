@@ -164,6 +164,11 @@ pub struct Provisioner {
     /// provides the band without holding an install it could withdraw (code, a group projection) — see
     /// [`marks_band`] (#547's reviews).
     shed_regs:    HashMap<String, CapabilityReg>,
+    /// Per band, since when (monotonic ns, through the replay seam) each peer has been seen providing it
+    /// **without** a `prov-shed` mark. A peer is counted fixed only after [`FIXED_AFTER`] of that — a mark
+    /// and a `cap/` entry are separate keys and can arrive apart (a partition healing), and until then the
+    /// safe reading is that it sheds (#547's fifth review).
+    unmarked_since: HashMap<String, HashMap<mycelium::NodeId, u64>>,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -264,6 +269,7 @@ impl Provisioner {
             trace: None,
             rounds: 0,
             shed_regs: HashMap::new(),
+            unmarked_since: HashMap::new(),
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -1107,6 +1113,7 @@ impl Provisioner {
             let live = providers.len();
             let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
             if live <= max {
+                self.unmarked_since.remove(&shed_band(&policy.filter, max));
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target,
                         vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
@@ -1127,8 +1134,18 @@ impl Provisioner {
                 self.agent.capabilities().demand(&CapFilter::new(SHED_NS, band.clone())).providers;
             // This node by what it holds now — whether or not its advertisement has been written yet.
             let i_can_shed = can_shed.contains(&band);
+            let now = mycelium::sim_seam::mono_now_ns();
+            let seen = self.unmarked_since.entry(band.clone()).or_default();
+            seen.retain(|n, _| providers.contains(n) && !shedders.contains(n));
             let entries: Vec<(mycelium::NodeId, bool)> = providers.iter()
-                .map(|n| (n.clone(), if *n == me { i_can_shed } else { shedders.contains(n) }))
+                .map(|n| {
+                    if *n == me {
+                        return (n.clone(), i_can_shed);
+                    }
+                    let marked = shedders.contains(n);
+                    let since = (!marked).then(|| *seen.entry(n.clone()).or_insert(now));
+                    (n.clone(), presumed_sheds(marked, since.map(mycelium::sim_seam::mono_since)))
+                })
                 .collect();
             let view = shed_view(&entries, max, &target);
             let position = view.ranked.iter().position(|n| *n == me);
@@ -1195,6 +1212,18 @@ struct ShedView {
 /// moment it goes live — a herd of new installs ranks exactly (#547's fourth review).
 fn marks_band(provides: bool, holds_withdrawable: bool) -> bool {
     !provides || holds_withdrawable
+}
+
+/// How long a peer must be seen providing a band without a `prov-shed` mark before it is counted as one
+/// that will not shed: two advertise intervals, more than the gap between a `cap/` entry and a mark
+/// arriving apart.
+const FIXED_AFTER: Duration = Duration::from_secs(2 * ADVERTISE_INTERVAL.as_secs());
+
+/// Whether a peer providing the band is ranked as one that sheds: marked, or unmarked for less than
+/// [`FIXED_AFTER`]. In doubt it sheds — the error is a band above its ceiling for a few seconds, never
+/// below it; counting a provider fixed too early is what over-sheds (#547's fifth review).
+fn presumed_sheds(marked: bool, unmarked_for: Option<Duration>) -> bool {
+    marked || unmarked_for.is_none_or(|d| d < FIXED_AFTER)
 }
 
 /// `entries` is each live provider and whether it sheds (it advertises [`SHED_NS`] for the band).
@@ -1330,6 +1359,29 @@ mod tests {
         // The rule: marked unless providing without anything withdrawable.
         assert!(marks_band(false, false) && marks_band(true, true) && marks_band(false, true));
         assert!(!marks_band(true, false));
+    }
+
+    /// The fifth review of #547: a partition heals and the other side's `cap/` entries arrive before their
+    /// marks. Counted fixed at once, they would push keep to 0 and empty this side; presumed to shed until
+    /// unmarked for FIXED_AFTER, they rank with everyone and the band lands on its ceiling.
+    #[test]
+    fn a_partition_heals_without_emptying_the_band() {
+        let a = nodes(7600, 2);
+        let b = nodes(7610, 2);
+        let all: Vec<mycelium::NodeId> = a.iter().chain(b.iter()).cloned().collect();
+        let max = 2;
+        // Side A's view just after the heal: its own providers marked, B's caps arrived, B's marks not yet.
+        let entries = |unmarked_for: Duration| -> Vec<(mycelium::NodeId, bool)> {
+            all.iter().map(|n| (n.clone(), presumed_sheds(a.contains(n), (!a.contains(n)).then_some(unmarked_for)))).collect()
+        };
+        let just_healed = shed_view(&entries(Duration::from_millis(400)), max, "demo/echo");
+        let a_left = a.iter().filter(|h| !just_healed.sheds(h)).count();
+        assert!(a_left >= 1, "side A keeps its share of the ceiling: {a_left}");
+        // The same view, read as a truly fixed pair of peers long after: A then yields to them.
+        let settled = shed_view(&entries(FIXED_AFTER), max, "demo/echo");
+        assert!(a.iter().all(|h| settled.sheds(h)), "providers unmarked for FIXED_AFTER are fixed");
+        assert!(presumed_sheds(true, None) && presumed_sheds(false, None) && presumed_sheds(false, Some(Duration::ZERO)));
+        assert!(!presumed_sheds(false, Some(FIXED_AFTER)));
     }
 
     /// The third review of #547: two bands on one capability that differ in an attribute, a schema or the
