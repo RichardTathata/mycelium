@@ -64,7 +64,7 @@ an auditor enumerated surfaces from the code instead of the description:
   (the parser), `scripts/test-ci-retest.sh` (the retry tier).
 - **What the observed job cannot see**, so the static check below still matters: a test compiled under no
   feature set the universe builds — the universe lists `--all-features` and every workspace crate's own featureless
-  build (#551, unreleased on `main`; before it, only `mycelium`'s and `mycelium-core`'s libraries), so the remaining
+  build (#551, 2.27.0; before it, only `mycelium`'s and `mycelium-core`'s libraries), so the remaining
   gap is a root-crate test gated off `gateway` (its dev-dependencies unify `gateway` back in — `mycelium-gateway-free-tests` is where
   those live), an `all(a, not(b))` gate in any crate (one non-default feature on, another off), or a `--cfg`
   other than the loom job's; script-style suites (`scripts/test-*`, the Docker workflows). TypeScript

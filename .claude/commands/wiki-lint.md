@@ -114,7 +114,7 @@ Pages contradicted by work merged since the last lint: check each section's `.lo
 against `git log --oneline --since=<last lint>` — merged PRs with durable knowledge but no
 ingest entry indicate a stale or missing page. ✅-shipped items still described as
 pending/planned = a finding. **Every "unreleased" marker** on a live page (`grep -rn "unreleased" docs/wiki docs/guide
-docs/operations docs/design`, minus `.log/`) is checked against the PR it names: `git tag --contains <merge sha>`
+docs/operations docs/design`, minus `.log/` and `history.md`'s dated section headings, which are records like a `.log` entry) is checked against the PR it names: `git tag --contains <merge sha>`
 non-empty means it shipped, and the marker is a finding — two survived v2.26.0's release (ledger 2026-10-07).
 
 ## 3. Orphans & dead links
