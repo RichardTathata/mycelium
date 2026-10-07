@@ -287,17 +287,36 @@ fn skill_input_description(kv: &crate::store::KvState, skill_id: &str) -> (Strin
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse {
-    let kv = &state.task_ctx.kv_state;
+/// Whether an advertised capability is the fleet's plumbing rather than a skill an agent can be asked
+/// for: a provisioning tier (`{ns}/loading`, `{ns}/installable`), a stem's shed mark (`prov-shed/*`),
+/// model metadata (`llm-meta/*`), the artifact librarian (`artifact/librarian`) and the reason blob cache
+/// (`reason/blob-cache`) — each serves its own RPC or none, never `skill.invoke`. A companion that advertises
+/// another infrastructure capability names it here, so the agent card does not list it as a skill.
+pub fn is_infrastructure_capability(ns: &str, name: &str) -> bool {
+    matches!(ns, "prov-shed" | "llm-meta")
+        || matches!(name, "loading" | "installable")
+        || (ns, name) == ("artifact", "librarian")
+        || (ns, name) == ("reason", "blob-cache")
+}
+
+/// The skill ids an agent card lists: every advertised capability that is not infrastructure, once.
+fn card_skill_ids(kv: &crate::store::KvState) -> std::collections::HashSet<String> {
     let mut skill_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (key, bytes) in scan_kv_prefix(kv, "cap/") {
         if is_cap_locality_key(&key) { continue; }
         let Some((_node_id, ns, name)) = parse_cap_key_or_warn("cap/", &key) else { continue };
+        if is_infrastructure_capability(&ns, &name) { continue; }
         use crate::capability::Capability;
         if Capability::decode(&bytes).is_some() {
             skill_ids.insert(format!("{}/{}", ns, name));
         }
     }
+    skill_ids
+}
+
+async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse {
+    let kv = &state.task_ctx.kv_state;
+    let skill_ids = card_skill_ids(kv);
     let skills: Vec<AgentSkill> = skill_ids.into_iter().map(|id| {
         let (description, input_schema) = skill_input_description(kv, &id);
         AgentSkill { name: id.clone(), id, description, input_schema }
@@ -798,6 +817,25 @@ mod tests {
         let kv    = &ctx.kv_state;
         let pairs = scan_kv_prefix(kv, "cap/");
         assert!(pairs.is_empty(), "fresh agent has no caps");
+    }
+
+    /// The card lists what an agent can be asked to do, not the fleet's plumbing: a provisioning tier, a
+    /// shed mark, model metadata, the librarian and the blob cache are capabilities nobody invokes as a skill.
+    #[test]
+    fn agent_card_leaves_out_infrastructure_capabilities() {
+        use crate::capability::Capability;
+        use crate::framing::make_gossip_update;
+        use crate::store::apply_and_notify;
+        let ctx = make_ctx();
+        for (ns, name) in [("demo", "echo"), ("prov-shed", "demo:echo:00ff"), ("llm", "loading"), ("demo", "installable"),
+                           ("llm-meta", "qwen"), ("artifact", "librarian"), ("reason", "blob-cache")] {
+            let key = format!("cap/127.0.0.1:9001/{ns}/{name}");
+            let upd = make_gossip_update(&ctx.node_id, 5, std::sync::Arc::from(key.as_str()),
+                Capability::new(ns, name).encode(), false, &ctx.hlc);
+            apply_and_notify(&ctx.kv_state, &upd);
+        }
+        let ids = card_skill_ids(&ctx.kv_state);
+        assert_eq!(ids, std::collections::HashSet::from(["demo/echo".to_string()]), "{ids:?}");
     }
 
     #[test]

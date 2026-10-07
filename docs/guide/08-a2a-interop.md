@@ -116,7 +116,10 @@ propagation. Key properties include...
 
 **`/.well-known/agent.json`** is served by the SkillRunner HTTP gateway when
 built with `--features a2a`. It lists all skills currently advertising on the
-mesh (scanned from the capability KV entries at request time):
+mesh (scanned from the capability KV entries at request time), leaving out the fleet's own plumbing — a
+provisioning tier (`{ns}/loading`, `{ns}/installable`), a stem's shed mark (`prov-shed/*`), model metadata
+(`llm-meta/*`), the artifact librarian and the reason blob cache, which no agent invokes as a skill
+(`a2a::is_infrastructure_capability`, 2.27.0):
 
 ```json
 {

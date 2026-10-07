@@ -26,6 +26,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The topology override has a governance route.** `POST /gateway/govern/topology-override {"group", "override"}`
   (`govern:write`, audited in a `compliance` build) sets or releases `sys/topology-override/{group}`; it was an unaudited `kv:write`
   write, the one owned key 2.26.0 still let through.
+### Fixed
+- **The A2A agent card lists skills, not the fleet's plumbing.** `/.well-known/agent.json` listed every advertised
+  capability as a skill, so an external agent was offered `prov-shed/…` (2.26.0's shed marks), `{ns}/loading`,
+  `{ns}/installable`, `llm-meta/…`, `artifact/librarian` and `reason/blob-cache` — none of which answers
+  `skill.invoke`. They are left out now (`is_infrastructure_capability`; a companion advertising another
+  infrastructure capability adds it there). Test `agent_card_leaves_out_infrastructure_capabilities`, seen failing
+  first.
 
 ## [2.26.0] — 2026-10-07
 
