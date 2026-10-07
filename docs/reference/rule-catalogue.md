@@ -419,13 +419,13 @@ More live providers than the declared ceiling withdraws the hosts ranked beyond 
 - **Reads:**
   - `capabilities().demand(filter) — `demand/` and `cap/` as gossiped` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
-  - ``prov-shed/{ns}:{name}:{hash}` advertisements — which providers hold an install they will withdraw for this band` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
+  - ``prov-shed/{ns}:{name}:{hash}` advertisements — which providers will act on this band's shed` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
 - **Outcomes:**
   - Action: `above_ceiling`
   - NoAction: `within_ceiling`, `not_hosting`, `ranked_within_ceiling`
 - **Effects:** withdraw() of this node's install
 - **May inhibit:** [`prov.presence_floor`](#provpresence_floor)
-- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades`, `bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names`
+- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades`, `bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names`, `a_herd_of_new_installs_lands_on_the_ceiling`
 
 ## `prov.withdraw`
 
