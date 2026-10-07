@@ -79,12 +79,12 @@ pub static RULES: &[RuleDescriptor] = &[
     RuleDescriptor {
         id: "prov.shed", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
         trigger: "every provisioning round, per `[[presence]]` declaration with a ceiling",
-        inputs: &[DEMAND, HOSTED, Input { source: "`prov-shed/{band}` advertisements — which providers act on this band's shed", scope: "the fleet as this node sees it", freshness: "as gossiped; may be stale or partial" }],
+        inputs: &[DEMAND, HOSTED, Input { source: "`prov-shed/{ns}:{name}:{hash}` advertisements — which providers hold an install they will withdraw for this band", scope: "the fleet as this node sees it", freshness: "as gossiped; may be stale or partial" }],
         outcomes: &[Outcome { kind: Action, reasons: &["above_ceiling"] }, Outcome { kind: NoAction, reasons: &["within_ceiling", "not_hosting", "ranked_within_ceiling"] }],
         effects: &["withdraw() of this node's install"], guards: &[], may_trigger: &[], may_inhibit: &["prov.presence_floor"], depends_on: &[],
         symbol: "provisioner::Provisioner::provision_round", docs: "docs/reference/unit-file.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "exactly_the_surplus_above_a_ceiling_withdraws", "a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling", "a_stale_view_costs_at_most_one_round_never_a_cascade"], trace: Instrumented,
-        summary: "More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, among the providers that advertise `prov-shed/{band}` (rev 2; rev 1 drew per host, and every host could withdraw at once).",
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "exactly_the_surplus_above_a_ceiling_withdraws", "a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling", "a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades", "bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names"], trace: Instrumented,
+        summary: "More live providers than the declared ceiling withdraws the hosts ranked beyond it by the band's rendezvous order, among the providers that advertise they will act on it (`prov-shed`; rev 2; rev 1 drew per host, and every host could withdraw at once).",
     },
     RuleDescriptor {
         id: "prov.provenance", revision: 1, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Authority],

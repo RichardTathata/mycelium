@@ -108,6 +108,9 @@ pub fn verify_published_head(published: &PublishedRightsHead, key: &[u8; 32]) ->
 struct LiveHosted {
     _cap:      CapabilityReg,
     installed: Box<dyn Installed>,
+    /// What this install advertises — read by the shed to find what it can withdraw for a band, from
+    /// the install itself rather than a catalogue that may have moved on.
+    provides:  Capability,
     /// D20: loaded into the shadow lane — advertised as `{ns}/{name}.shadow`, so no filter for
     /// `{ns}/{name}` ever resolves it and no call for the incumbent ever reaches it.
     shadow:    bool,
@@ -156,9 +159,10 @@ pub struct Provisioner {
     trace:        Option<Arc<Trace>>,
     /// Rounds run here; the trigger every record of a round names.
     rounds:       u64,
-    /// One `prov-shed/{band}` advertisement per band this node supervises with a ceiling: it says this node
-    /// acts on that band's shed, so the band ranks only providers that will (#547's reviews).
-    shed_regs:    Vec<CapabilityReg>,
+    /// One `prov-shed/{band}` advertisement per band this node can shed for right now — it supervises the
+    /// band's ceiling **and** holds a live install it can withdraw for it — reconciled every round, so the
+    /// band ranks only providers that will act (#547's reviews).
+    shed_regs:    HashMap<String, CapabilityReg>,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -258,7 +262,7 @@ impl Provisioner {
             self_elect_p,
             trace: None,
             rounds: 0,
-            shed_regs: Vec::new(),
+            shed_regs: HashMap::new(),
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -578,8 +582,6 @@ impl Provisioner {
     /// the same view agree on which). Bounds are convergence targets, not guarantees, consistent with
     /// the membership governor.
     pub fn supervise_band(&mut self, filter: CapFilter, min_providers: usize, max_providers: usize) {
-        self.shed_regs.push(self.agent.capabilities().advertise_capability(
-            Capability::new(SHED_NS, shed_band(&filter)), ADVERTISE_INTERVAL));
         self.policies.push(SupervisionPolicy {
             filter,
             min_providers,
@@ -630,12 +632,16 @@ impl Provisioner {
         self.hosted.lock().unwrap().contains_key(artifact)
     }
 
-    /// The artifact this node hosts for `filter`, if any — whichever catalogue entry it installed, not
-    /// only the one the band resolves to now (a host serving another entry could never shed).
+    /// The live install this node can withdraw for `filter`, if any — read from what each install
+    /// advertises, so an entry since removed from the catalogue, or a different entry for the same band,
+    /// still counts; a shadow never matches (its name is the shadow name), and an `Installing` reservation
+    /// is not a provider yet.
     fn hosted_artifact_for(&self, filter: &CapFilter) -> Option<ArtifactId> {
-        let candidates: Vec<ArtifactId> = self.catalog.resolve(filter).into_iter().map(|e| e.artifact).collect();
         let hosted = self.hosted.lock().unwrap();
-        candidates.into_iter().find(|a| hosted.contains_key(a))
+        hosted.iter().find_map(|(artifact, state)| match state {
+            HostedState::Live(live) if filter.matches(&live.provides) => Some(*artifact),
+            _ => None,
+        })
     }
 
     /// Start bringing one capability live on this node: **reserve** the artifact, then run the
@@ -746,7 +752,7 @@ impl Provisioner {
                             Some(HostedState::Installing { token: t, .. }) if *t == token => {
                                 map.insert(
                                     artifact,
-                                    HostedState::Live(LiveHosted { _cap: cap, installed, shadow }),
+                                    HostedState::Live(LiveHosted { _cap: cap, installed, provides: provides.clone(), shadow }),
                                 );
                                 None
                             }
@@ -1070,6 +1076,21 @@ impl Provisioner {
         // Symmetric to bring-up: when a band's live provider count exceeds `max`, the hosts ranked
         // beyond `max` withdraw. Over-provisioning (e.g. a transient duplicate after a herd of
         // self-elections) self-corrects here, in one round.
+        // Advertise `prov-shed/{band}` for exactly the bands this node can shed for now, and retract the
+        // rest: a node that supervises a band but holds nothing it could withdraw must not be ranked as one
+        // that will act (#547's third review).
+        let can_shed: HashMap<String, ()> = policies.iter()
+            .filter_map(|p| p.max_providers.map(|max| (p, max)))
+            .filter(|(p, _)| self.hosted_artifact_for(&p.filter).is_some())
+            .map(|(p, max)| (shed_band(&p.filter, max), ()))
+            .collect();
+        self.shed_regs.retain(|band, _| can_shed.contains_key(band));
+        for band in can_shed.keys() {
+            if !self.shed_regs.contains_key(band) {
+                let reg = self.agent.capabilities().advertise_capability(Capability::new(SHED_NS, band.clone()), ADVERTISE_INTERVAL);
+                self.shed_regs.insert(band.clone(), reg);
+            }
+        }
         for policy in &policies {
             let Some(max) = policy.max_providers else { continue };
             let providers = self.agent.capabilities().demand(&policy.filter).providers;
@@ -1091,12 +1112,14 @@ impl Provisioner {
             // what is left. Nothing here is inferred from timing, so a stale view can only delay a shed.
             // Which providers shed is read from their `prov-shed/{band}` advertisements.
             let me = self.agent.node_id().clone();
+            let band = shed_band(&policy.filter, max);
             let shedders: Vec<mycelium::NodeId> =
-                self.agent.capabilities().demand(&CapFilter::new(SHED_NS, shed_band(&policy.filter))).providers;
-            // This node supervises the band (the policy is its own), whether or not its advertisement of
-            // that has been written yet.
-            let entries: Vec<(mycelium::NodeId, bool)> =
-                providers.iter().map(|n| (n.clone(), *n == me || shedders.contains(n))).collect();
+                self.agent.capabilities().demand(&CapFilter::new(SHED_NS, band.clone())).providers;
+            // This node by what it holds now — whether or not its advertisement has been written yet.
+            let i_can_shed = can_shed.contains_key(&band);
+            let entries: Vec<(mycelium::NodeId, bool)> = providers.iter()
+                .map(|n| (n.clone(), if *n == me { i_can_shed } else { shedders.contains(n) }))
+                .collect();
             let view = shed_view(&entries, max, &target);
             let position = view.ranked.iter().position(|n| *n == me);
             let inputs = || vec![
@@ -1125,13 +1148,22 @@ impl Provisioner {
     }
 }
 
-/// The capability namespace a provisioner advertises, once per band it supervises with a ceiling, to say it
-/// acts on that band's shed: `prov-shed/{ns}:{name}`. A band ranks only providers that advertise it (#547).
+/// The capability namespace a provisioner advertises to say it will act on a band's shed: once per band it
+/// supervises with a ceiling **and** holds a live install it can withdraw for. A band ranks only providers
+/// that advertise it (#547).
 pub const SHED_NS: &str = "prov-shed";
 
-/// The `prov-shed` name for a band: its filter's `{ns}:{name}`.
-pub fn shed_band(filter: &CapFilter) -> String {
-    format!("{}:{}", filter.namespace, filter.name)
+/// The `prov-shed` name for a band: `{ns}:{name}:{hash}`, the hash over the filter's attribute
+/// constraints, schema and the ceiling — two bands on one capability that differ in any of them are
+/// different bands. FNV-1a over a fixed rendering, so every node of one build computes the same name.
+pub fn shed_band(filter: &CapFilter, max: usize) -> String {
+    let identity = format!("{:?}|{:?}|{max}", filter.attributes, filter.schema_id);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in identity.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{}:{}:{h:016x}", filter.namespace, filter.name)
 }
 
 /// One round's shedding view of a band whose live providers exceed its ceiling.
@@ -1213,37 +1245,62 @@ mod tests {
         }
     }
 
-    /// The second review of #547: a host with a stale view — an entry it will not drop for a while, a
-    /// partition — must not work its way down to withdrawing everyone. Each host decides from its own view
-    /// once per round, rounds repeat, and nothing accumulates across rounds, so an extra entry can cost at
-    /// most one extra withdrawal, once. Partition: {A,B} | {C,D} at a ceiling of 2, each side still seeing
-    /// the other's entries; nobody is left with zero.
+    /// The reviews of #547: views differ — a crashed shedder still advertised, a peer's mark not yet
+    /// arrived. The bound: the count stays at or above `max − (entries the view gets wrong)`, and it does
+    /// not cascade — nothing accumulates across rounds, and a surviving host's rank only improves as others
+    /// leave. Here two stale shedders ranked above everyone, and one missing mark, at a ceiling of 4 — so
+    /// the bound is 1. (With as many wrong entries as the ceiling, the bound is 0: the band can empty for a
+    /// round, and the floor refills it.)
     #[test]
-    fn a_stale_view_costs_at_most_one_round_never_a_cascade() {
-        let all = nodes(7300, 4);
-        let max = 2;
-        let mut live: Vec<mycelium::NodeId> = all.clone();
-        let sides = [vec![all[0].clone(), all[1].clone()], vec![all[2].clone(), all[3].clone()]];
+    fn a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades() {
+        let real = nodes(7300, 5);
+        let max = 4;
+        // Two crashed providers still advertised everywhere, ranked above every real one: search band names
+        // until two of a pool rank first, so the worst placement is constructed rather than hoped for.
+        let pool = nodes(7400, 40);
+        let all: Vec<mycelium::NodeId> = real.iter().chain(pool.iter()).cloned().collect();
+        let (band, ghosts) = (0..1000).find_map(|k| {
+            let band = format!("demo/echo-{k}");
+            let order = mycelium::election::rank(&band, &all, mycelium::election::Rule::Rendezvous);
+            let top: Vec<mycelium::NodeId> = order.iter().take(2).map(|n| (*n).clone()).collect();
+            top.iter().all(|n| pool.contains(n)).then_some((band, top))
+        }).expect("some band ranks two pool nodes first");
+        let band = band.as_str();
+        assert_eq!(ghosts.len(), 2, "two ghosts rank above every real provider");
+        let missing_mark = real[0].clone(); // every other node counts it as one that does not shed
+        let wrong = ghosts.len() + 1;
+        let mut live = real.clone();
         let mut history = Vec::new();
-        for _round in 0..20 {
-            // Each host's view: its own side as it is now, plus the other side as it was at the split.
+        for _round in 0..10 {
             let mut leaving = Vec::new();
-            for (s, side) in sides.iter().enumerate() {
-                let other = &sides[1 - s];
-                let mut view: Vec<mycelium::NodeId> = side.iter().filter(|n| live.contains(n)).cloned().collect();
-                view.extend(other.iter().cloned());
-                for host in side.iter().filter(|n| live.contains(n)) {
-                    if view.len() > max && shed_view(&all_shed(&view), max, "demo/echo").sheds(host) {
-                        leaving.push(host.clone());
-                    }
+            for host in &live {
+                let entries: Vec<(mycelium::NodeId, bool)> = live.iter().chain(ghosts.iter())
+                    .map(|n| (n.clone(), n == host || *n != missing_mark))
+                    .collect();
+                if entries.len() > max && shed_view(&entries, max, band).sheds(host) {
+                    leaving.push(host.clone());
                 }
             }
             live.retain(|n| !leaving.contains(n));
             history.push(live.len());
         }
-        assert!(!live.is_empty(), "the partition never takes the band to zero: {history:?}");
-        assert!(history.iter().all(|c| *c == history[0]),
-            "after the first round nothing more changes — no cascade: {history:?}");
+        assert!(live.len() + wrong >= max, "never below max − wrong entries: {history:?}");
+        assert!(history.iter().all(|c| *c == history[0]), "nothing changes after the first round: {history:?}");
+    }
+
+    /// The third review of #547: two bands on one capability that differ in an attribute, a schema or the
+    /// ceiling are different bands — so a node acting on one is never ranked as acting on the other.
+    #[test]
+    fn bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names() {
+        let mut eu = CapFilter::new("route", "optimize");
+        eu.attributes.insert("region".into(), mycelium::CapConstraint::Eq(CapValue::Text("eu".into())));
+        let mut us = CapFilter::new("route", "optimize");
+        us.attributes.insert("region".into(), mycelium::CapConstraint::Eq(CapValue::Text("us".into())));
+        assert_ne!(shed_band(&eu, 2), shed_band(&us, 2));
+        assert_ne!(shed_band(&eu, 2), shed_band(&eu, 3));
+        assert_eq!(shed_band(&eu, 2), shed_band(&eu.clone(), 2));
+        assert!(!shed_band(&CapFilter::new("tuple", "orders.primary"), 1).ends_with(".primary"),
+            "never mistaken for a single-writer role by P10");
     }
 
     fn alloc_port() -> u16 {

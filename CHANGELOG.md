@@ -55,10 +55,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   count went max+1 → 0 → max+1, round after round — measured on `first_stem_fleet`, where two of four runs
   oscillated for several seconds and one CI run's snapshot caught three providers. The hosts ranked beyond
   `max` by the band's rendezvous order withdraw now (`mycelium::election::rank`, new), so hosts with the same
-  view agree that exactly the surplus leaves. Only providers that act on the band are ranked — a stem that
-  supervises a ceiling advertises `prov-shed/{ns}:{name}` for it — so a provider that does not (registered in
-  code, a stem without the band) keeps its place and cannot hold the band above its ceiling; nothing is inferred
-  from timing, so a stale or partitioned view can cost at most one extra withdrawal, never a cascade. The same probe settles at the ceiling within ~1.3 s, never
+  view agree that exactly the surplus leaves. Only providers that will act are ranked: each round a stem
+  advertises `prov-shed/{ns}:{name}:{hash}` for exactly the bands it supervises with a ceiling **and** holds a
+  live install it can withdraw for (the hash covers the filter's attributes, schema and the ceiling, so bands on
+  one capability are told apart), and retracts it otherwise. A provider that does not advertise it — registered
+  in code, a group projection, a stem without the band — keeps its place, and the rest rank against what is
+  left, so it cannot hold the band above its ceiling. Nothing is inferred from timing. Bound: a view with *k*
+  wrong entries (a crashed provider still advertised, a mark not yet arrived) can leave the band at `max − k`
+  for a round — zero if *k* ≥ `max`, which the floor then refills — and it never cascades. A host now withdraws
+  whichever install it holds for the band, read from the install, so an entry since removed from the catalogue
+  no longer leaves it unable to shed. **Rolling upgrade:** a stem still on the old code advertises no
+  `prov-shed` and still sheds by its draw, so while old and new stems share a band it can dip below the
+  ceiling until the floor refills; upgrade a band's stems together where that matters. The same probe settles at the ceiling within ~1.3 s, never
   returning to zero. `prov.shed` is catalogue revision 2 (staying within is `NoAction`
   `ranked_within_ceiling`, and the trace records the rank and the unmarked count); the shed no longer draws, so a recording has one
   draw fewer per host per round spent above the ceiling. The example also snapshots only once
