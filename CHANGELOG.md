@@ -67,12 +67,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   routing one through `/a2a` would reach a model without `llm:invoke`. Before, a guessed id resolved a provider
   and dispatched `skill.invoke` there, where a co-hosted receiver could run under the guessed name. Test
   `agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
+- **Every governance write at the gateway is audited, and one that is not is counted.** `POST /gateway/govern/profile` neither
+  refused a loose body (a `target` was dropped and the step applied to the node answering) nor recorded the change
+  — every other governance route did both; it now answers **400** on a non-object body or an unknown field, and is
+  audited. `audit_govern` discarded a failed seal (a `compliance` build without `[tls]` records nothing): a change
+  that leaves no audit record — no `compliance`, or a seal that failed, now warned about — is counted, and `/stats`
+  carries `governance_changes` and `governance_unaudited` — accepted governance POSTs at this gateway
+  (`/gateway/govern/*` and `POST /gateway/identity/revoke`, which is now audited too; a refresh of a standing intent
+  or a no-op profile step counts), not changes an embedder makes through the Rust API. A test enumerates every
+  `"/govern/…"` route literal in the gateway's source and requires one audit attempt per accepted change and none
+  for a refused body; with `compliance` and `[tls]`, each change, the revocation included, is sealed. Fail-first:
+  `govern/profile` recorded no attempt and accepted `target`. Found by the 2026-10-07 wiki lint and doc-coverage
+  run 21.
+- **The rule catalogue's inputs render.** An input whose source carried its own code spans was wrapped in another,
+  breaking 25 inputs across the generated `docs/reference/rule-catalogue.md`; such a source now renders as prose.
+  Test `an_input_with_its_own_code_spans_renders_unwrapped`, seen failing first.
+
 ### Added
 - **Every group's size on the fleet snapshot (#168).** `fleet_snapshot().group_sizes` and `group_sizes` on
   `GET /gateway/fleet`: one `{group, observed}` per group with a live member, governed or not — an ungoverned
   group (`join_group`, or a capability group with no membership intent) had no operator-visible size. Pull-based,
   with no per-group Prometheus label (the cardinality trap the issue names); a group nobody belongs to is absent,
   never `0`. **Upgrade note:** `FleetSnapshot` gained a field (an exhaustive struct literal breaks).
+- **`mycelium_artifact_presence_sheds_total`** — installs a node withdrew because a `[[presence]]` band was above its
+  ceiling and it ranked beyond it (`prov.shed`); before, a withdrawal showed only in the decision trace.
 
 ## [2.26.0] — 2026-10-07
 

@@ -511,6 +511,14 @@ pub(crate) struct TaskCtx {
     /// see `SystemStats::schema_mismatch`). Relaxed — diagnostic.
     pub(crate) schema_mismatch: Arc<AtomicU64>,
 
+    /// Governance changes accepted through `/gateway/govern/*`, and those that left no audit record — a
+    /// build without `compliance`, or a seal that failed (no `[tls]` identity). On `/stats` as
+    /// `governance_changes` / `governance_unaudited`. Relaxed — diagnostic.
+    #[cfg(feature = "gateway")]
+    pub(crate) governance_changes: Arc<AtomicU64>,
+    #[cfg(feature = "gateway")]
+    pub(crate) governance_unaudited: Arc<AtomicU64>,
+
     /// Head of this node's tamper-evident audit chain (WS2). `audit()` seals a
     /// record under this lock so the per-node chain stays linear, then releases
     /// it before writing to KV. Lock #8 in the lock-order table (leaf).
@@ -998,6 +1006,10 @@ impl GossipAgent {
             opacity_oscillations: Arc::new(AtomicU64::new(0)),
             cap_authz_violations: Arc::new(AtomicU64::new(0)),
             schema_mismatch: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "gateway")]
+            governance_changes: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "gateway")]
+            governance_unaudited: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "compliance")]
             audit_chain: Arc::new(std::sync::Mutex::new(audit::AuditChainState::new())),
             #[cfg(all(feature = "gateway", feature = "tls"))]

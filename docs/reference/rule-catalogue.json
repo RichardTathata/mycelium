@@ -1270,7 +1270,8 @@
         }
       ],
       "effects": [
-        "withdraw() of this node's install"
+        "withdraw() of this node's install",
+        "`mycelium_artifact_presence_sheds_total`"
       ],
       "guards": [],
       "may_trigger": [],

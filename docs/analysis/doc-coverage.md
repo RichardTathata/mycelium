@@ -700,12 +700,13 @@ cooling-off order; the four `with_egress` signatures; the Python tests run by di
 **Code gaps (documented as they behave, not papered):**
 1. **`POST /gateway/govern/profile` neither parses strictly nor audits** — it never calls
    `refuse_unknown_fields` or `audit_govern`, so a `target` is silently ignored and the step leaves no record
-   (`src/agent/http.rs` `gw_govern_profile`). Its siblings do both. `tuning.md` says so.
+   (`src/agent/http.rs` `gw_govern_profile`). Its siblings do both. `tuning.md` says so. **Closed by #555.**
 2. **"Audited" needs `[tls]`.** `audit_govern` discards `seal_and_write`'s error, which a node without the TLS
    identity always returns — a `compliance` build without `[tls]` records no governance action and says nothing.
+   **Closed by #555** (warned and counted: `/stats` `governance_unaudited`).
 3. **No typed SDK error for `protected_key` / `protected_stream`.** Both SDKs type `protected_kind` only; Python
    raises `httpx.HTTPStatusError`, TypeScript a plain `Error`, and TypeScript's `delete()` drops the body, losing
-   the route-naming `message` (`mycelium-ts/src/agent.ts` `delete`).
+   the route-naming `message` (`mycelium-ts/src/agent.ts` `delete`). **Closed by #553** (py 0.2.7, ts 0.2.2).
 4. **The shipped strict-eligibility source has no caller and no example** — `history_from_appointment_stream`
    is reached only by its own tests; both examples build `TermHistory` by hand.
 5. **No metric for the ranked shed** — a withdrawal is visible only in the decision trace.

@@ -75,7 +75,7 @@ The one matching rule, shared by the resolver and the offline check: namespace, 
 
 - **Trigger:** a resolve, a demand, the offline check, a group filter
 - **Reads:**
-  - ``cap/` advertisements as gossiped` — scope: the fleet as this node sees it; freshness: as gossiped; TTL-bounded
+  - `cap/` advertisements as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; TTL-bounded
 - **Outcomes:**
   - Action: `matched`
   - NoAction: `ns_or_name_differs`, `schema_id_differs`, `constraint_unmet`, `opaque_skipped`
@@ -91,7 +91,7 @@ Deny by default under `compliance`: a route needs its scope; with no credential 
 
 - **Trigger:** every gateway request
 - **Reads:**
-  - `the bearer or JWT presented, the token tables, `[oidc]`` — scope: this node; freshness: local
+  - the bearer or JWT presented, the token tables, `[oidc]` — scope: this node; freshness: local
 - **Outcomes:**
   - Action: `admitted`, `anonymous_open_gateway`
   - Refusal: `authentication_required`, `insufficient_scope`
@@ -144,7 +144,7 @@ This node rolls to join or leave a governed group against the intent's band — 
 
 - **Trigger:** the governor tick
 - **Reads:**
-  - `the governed group's roster and floor (`grp/`, `sys/`)` — scope: the group as this node sees it; freshness: as gossiped; the confidence bound applies
+  - the governed group's roster and floor (`grp/`, `sys/`) — scope: the group as this node sees it; freshness: as gossiped; the confidence bound applies
   - `ViewConfidence (peers heard, staleness)` — scope: this node; freshness: computed at the tick
 - **Outcomes:**
   - Action: `join`, `leave`
@@ -164,8 +164,8 @@ After placement the declared command hands the blob to its local runtime; a fail
 
 - **Trigger:** a placed blob whose capability a `[[activation]]` names
 - **Reads:**
-  - `the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)` — scope: this node; freshness: read at start
-  - `the placed path, and `artifact:<hex>` references rendered to placed paths` — scope: this node; freshness: local
+  - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
+  - the placed path, and `artifact:<hex>` references rendered to placed paths — scope: this node; freshness: local
 - **Outcomes:**
   - Action: `activated`
   - Refusal: `command_failed`, `command_timed_out`, `reference_not_placed_yet`, `render_failed`
@@ -184,7 +184,7 @@ A completed install advertises its capability to the mesh; the advertisement's l
 
 - **Trigger:** an install that completed, before its state swaps to `Live`
 - **Reads:**
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
 - **Outcomes:**
   - Action: `advertised`
 - **Effects:** `cap/` advertisement of the entry's capability, held by the install; tombstoned on withdrawal
@@ -200,10 +200,10 @@ A requirement with demanding nodes and no provider, as this node sees it, makes 
 
 - **Trigger:** every provisioning round, per catalogue entry this node could host
 - **Reads:**
-  - `capabilities().demand(filter) — `demand/` and `cap/` as gossiped` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
+  - capabilities().demand(filter) — `demand/` and `cap/` as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
-  - `the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)` — scope: this node; freshness: read at start
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `unmet_demand_live`, `unmet_demand_shadow`
   - Deferral: `self_election_declined`, `already_started_this_round`
@@ -223,8 +223,8 @@ This node hosts the entry's kind, has install budget left, and has memory and di
 
 - **Trigger:** a candidate entry that passed provenance
 - **Reads:**
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
-  - `the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)` — scope: this node; freshness: read at start
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
   - `ResourceProbe (memory, disk headroom)` — scope: this node; freshness: sampled at the decision
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
 - **Outcomes:**
@@ -245,7 +245,7 @@ A live install whose probe fails this round is withdrawn; restart ≡ provisioni
 - **Trigger:** every provisioning round, first
 - **Reads:**
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
-  - `each live install's `probe()` (file present, and the activation health flag)` — scope: this node; freshness: sampled under row 21
+  - each live install's `probe()` (file present, and the activation health flag) — scope: this node; freshness: sampled under row 21
 - **Outcomes:**
   - Action: `probe_failed`
   - NoAction: `all_healthy`
@@ -263,7 +263,7 @@ Fetch, verify, place and host the artifact under an install token; a superseded 
 
 - **Trigger:** an admitted install
 - **Reads:**
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
   - `the artifact bytes, by content address (library, mesh, or store)` — scope: wherever the source reaches; freshness: verified against the entry's hash
 - **Outcomes:**
@@ -284,8 +284,8 @@ A proposed entry loads live only once a listed reviewer has accepted it; until t
 
 - **Trigger:** a candidate entry
 - **Reads:**
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
-  - ``[hosts].trusted_reviewers`` — scope: this node; freshness: read at start
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - `[hosts].trusted_reviewers` — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `accepted`, `not_a_proposal`
   - Refusal: `proposed_unaccepted`
@@ -301,10 +301,10 @@ Fewer live providers than the declared floor, as this node sees it, makes this n
 
 - **Trigger:** every provisioning round, per `[[presence]]` declaration
 - **Reads:**
-  - `capabilities().demand(filter) — `demand/` and `cap/` as gossiped` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
+  - capabilities().demand(filter) — `demand/` and `cap/` as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
-  - `the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)` — scope: this node; freshness: read at start
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `below_floor`
   - Deferral: `self_election_declined`
@@ -324,7 +324,7 @@ The probe gates the capability: a failing initial probe is an activation error (
 
 - **Trigger:** after activation, and on every re-probe tick
 - **Reads:**
-  - `the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)` — scope: this node; freshness: read at start
+  - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
   - `the declared probe argv's exit status` — scope: this node; freshness: sampled
 - **Outcomes:**
   - Action: `healthy`
@@ -346,8 +346,8 @@ A shadow install whose entry a listed reviewer has since accepted is withdrawn f
 - **Trigger:** every provisioning round, after the health pass
 - **Reads:**
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
-  - `the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`)` — scope: this node; freshness: read at start
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `accepted_withdraw_shadow`
   - NoAction: `still_proposed`, `no_shadow_installs`
@@ -365,8 +365,8 @@ An entry is a candidate only if a trusted publisher signed it; an empty trust li
 
 - **Trigger:** a candidate entry, before any other check
 - **Reads:**
-  - `the signed catalogue (`installable/` as gossiped, or the library manifest)` — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
-  - ``[hosts].trusted_publishers`` — scope: this node; freshness: read at start
+  - the signed catalogue (`installable/` as gossiped, or the library manifest) — scope: the fleet as this node sees it; freshness: as gossiped; verified on read
+  - `[hosts].trusted_publishers` — scope: this node; freshness: read at start
 - **Outcomes:**
   - Action: `signed_by_trusted_publisher`, `no_trust_list_configured`
   - Refusal: `signature_invalid`, `publisher_untrusted`
@@ -401,7 +401,7 @@ Herd damping: a candidate acts this round with probability p, drawn after the gu
 
 - **Trigger:** a candidate that passed every other check
 - **Reads:**
-  - ``StemOptions::self_elect_p` and one draw from the `select` RNG stream (through the seam since 2026-10-03)` — scope: this node; freshness: the draw
+  - `StemOptions::self_elect_p` and one draw from the `select` RNG stream (through the seam since 2026-10-03) — scope: this node; freshness: the draw
 - **Outcomes:**
   - Action: `elected`
   - Deferral: `declined`
@@ -417,14 +417,14 @@ More live providers than the declared ceiling withdraws the hosts ranked beyond 
 
 - **Trigger:** every provisioning round, per `[[presence]]` declaration with a ceiling
 - **Reads:**
-  - `capabilities().demand(filter) — `demand/` and `cap/` as gossiped` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
+  - capabilities().demand(filter) — `demand/` and `cap/` as gossiped — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
-  - ``prov-shed/{ns}:{name}:{hash}` advertisements — which providers will act on this band's shed` — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
-  - `when each unmarked peer was first seen unmarked (`Provisioner::unmarked_since`) — fixed only after FIXED_AFTER` — scope: this node; freshness: local, monotonic clock through the replay seam
+  - `prov-shed/{ns}:{name}:{hash}` advertisements — which providers will act on this band's shed — scope: the fleet as this node sees it; freshness: as gossiped; may be stale or partial
+  - when each unmarked peer was first seen unmarked (`Provisioner::unmarked_since`) — fixed only after FIXED_AFTER — scope: this node; freshness: local, monotonic clock through the replay seam
 - **Outcomes:**
   - Action: `above_ceiling`
   - NoAction: `within_ceiling`, `not_hosting`, `ranked_within_ceiling`
-- **Effects:** withdraw() of this node's install
+- **Effects:** withdraw() of this node's install · `mycelium_artifact_presence_sheds_total`
 - **May inhibit:** [`prov.presence_floor`](#provpresence_floor)
 - **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades`, `bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names`, `a_herd_of_new_installs_lands_on_the_ceiling`, `a_partition_heals_without_emptying_the_band`, `an_unmarked_peer_is_timed_from_first_sight_and_reset_by_its_mark`
 
@@ -469,7 +469,7 @@ Admission is scoped (Cluster · Group · Individual) and shed under load — exc
 
 - **Trigger:** a signal arriving at this node, local or forwarded
 - **Reads:**
-  - `the signal's scope and this node's boundary groups (`grp/`)` — scope: this node; freshness: local
+  - the signal's scope and this node's boundary groups (`grp/`) — scope: this node; freshness: local
   - `the gossip shards' fill and the handlers' fill` — scope: this node; freshness: sampled
 - **Outcomes:**
   - Action: `admitted`

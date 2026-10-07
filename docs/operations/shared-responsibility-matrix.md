@@ -53,7 +53,7 @@ board. Mycelium contributes only as a well-documented **vendor** in your CC9 ven
 
 | Control | Who | Mycelium provides | You own |
 |---|---|---|---|
-| Security tripwires | **M** | `sys_namespace_violations`, `cap_authz_violations`, `commit_conflicts`, `schema_mismatch` on `/stats` (feature-free) + Prometheus | Alert on them (esp. namespace-violation > 0) |
+| Security tripwires | **M** | `sys_namespace_violations`, `cap_authz_violations`, `commit_conflicts`, `schema_mismatch` on `/stats` (feature-free) + Prometheus; `governance_unaudited` on `/stats` (governance changes at the gateway that left no audit record) | Alert on them (esp. namespace-violation > 0, and `governance_unaudited` > 0 where the audit trail is a control) |
 | Metrics / observability | **M** | Prometheus `/metrics` (`metrics`); emergent-pathology + view-health gauges | Scrape; Grafana; alert recipes → [diagnostics](diagnostics.md) |
 | Coordinator-free diagnosis | **M** | `/gateway/{fleet,explain,diagnose}` — plain-English fleet findings | Consume in your ops flow |
 | Audit trail | **M** | Per-node hash-chained, Ed25519-signed records + verification API (`compliance`) | Requires `tls` to seal; **instrument application-level events yourself** |

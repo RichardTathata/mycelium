@@ -963,6 +963,10 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
             .load(std::sync::atomic::Ordering::Relaxed),
         "schema_mismatch": ctx.agent_ctx.schema_mismatch
             .load(std::sync::atomic::Ordering::Relaxed),
+        "governance_changes": ctx.agent_ctx.governance_changes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "governance_unaudited": ctx.agent_ctx.governance_unaudited
+            .load(std::sync::atomic::Ordering::Relaxed),
         "rate_limited_senders": mycelium_core::rate::throttled_sender_count(&ctx.agent_ctx.core),
         // Legible-Emergence Phase 1 (emergent detectors). The conflict gauge is always present
         // (0 unless the detector loop is running); `view_confidence` — the RT1/RT2 "this is a
@@ -1116,7 +1120,10 @@ async fn gw_identity_revoke(
     };
     let reason = body["reason"].as_str().map(|s| s.to_string());
     match super::revocation::revoke_key(&ctx.agent_ctx, revoked_key, reason) {
-        Ok(())  => Json(json!({"ok": true, "revoked_key": key_s})).into_response(),
+        Ok(())  => {
+            audit_govern(&ctx.agent_ctx, "identity/revoke", body.to_string());
+            Json(json!({"ok": true, "revoked_key": key_s})).into_response()
+        }
         Err(e)  => (StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -1173,21 +1180,33 @@ async fn gw_transparency(
 // publish surface (POST) plus an effective-state snapshot (GET). They never command
 // a node — they only seed soft-state that nodes choose to honour (Principles 1 & 5).
 
-/// Record a governance change in the tamper-evident audit trail (best-effort;
-/// requires the `tls` identity, no-op otherwise). Without `compliance`, a no-op.
-#[cfg(feature = "compliance")]
+/// Record a governance change in the tamper-evident audit trail. It needs `compliance` and a `[tls]` identity
+/// to seal; a change that leaves no record — either missing, or a seal that failed — is counted
+/// (`governance_unaudited` on `/stats`) and, when the seal failed, warned about, rather than vanishing.
 fn audit_govern(ctx: &Arc<TaskCtx>, target: &str, detail: String) {
-    let _ = super::audit::seal_and_write(
+    use std::sync::atomic::Ordering::Relaxed;
+    ctx.governance_changes.fetch_add(1, Relaxed);
+    #[cfg(feature = "compliance")]
+    let recorded = match super::audit::seal_and_write(
         ctx,
         super::audit::AuditAction::Admin,
         "gateway/govern",
         target,
         super::audit::AuditOutcome::Success,
         Some(detail),
-    );
+    ) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(target, "governance change applied but not audited: {e}");
+            false
+        }
+    };
+    #[cfg(not(feature = "compliance"))]
+    let recorded = { let _ = (target, detail); false };
+    if !recorded {
+        ctx.governance_unaudited.fetch_add(1, Relaxed);
+    }
 }
-#[cfg(not(feature = "compliance"))]
-fn audit_govern(_ctx: &Arc<TaskCtx>, _target: &str, _detail: String) {}
 
 /// Parse an optional `"target"` field into a node id. `Err` carries a message the
 /// caller turns into a 400 (a small error type keeps the `Result` cheap).
@@ -1281,6 +1300,9 @@ async fn gw_govern_profile(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use crate::control::Profile;
+    if let Some(refused) = refuse_unknown_fields(&body, &["profile"]) {
+        return refused;
+    }
     let Some(name) = body.get("profile").and_then(|v| v.as_str()) else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing 'profile'"}))).into_response();
     };
@@ -1291,6 +1313,7 @@ async fn gw_govern_profile(
     };
     let was = Profile::from_u8(ctx.agent_ctx.control_profile.load(std::sync::atomic::Ordering::Relaxed));
     ctx.agent_ctx.set_control_profile(profile);
+    audit_govern(&ctx.agent_ctx, "govern/profile", body.to_string());
     Json(json!({ "ok": true, "profile": profile.name(), "was": was.name() })).into_response()
 }
 
@@ -2900,7 +2923,7 @@ fn refuse_protected_key(key: &str) -> Option<axum::response::Response> {
     } else if key.starts_with("mailbox/") {
         "mailbox entries are delivered through POST /gateway/mailbox/deliver (mesh:write), which records the sender"
     } else if key.starts_with("installable/") {
-        "catalogue lines are published through POST /gateway/artifacts/publish (artifact:publish), signature-checked"
+        "catalogue lines are published through POST /gateway/artifacts/publish (artifact:publish, signature-checked) where mycelium-wasm-host's routes are merged, or by a librarian"
     } else if key.starts_with("lock/") {
         "locks are taken through /gateway/overlay/lock/acquire (consensus:write)"
     } else {
@@ -6543,8 +6566,115 @@ mod tests {
             .json(&serde_json::json!({"profile": "enforce_local"})).send().await.unwrap();
         assert_eq!(r.status(), 400, "a misspelt name is refused");
         assert_eq!(agent.control_profile(), crate::control::Profile::Observe, "and changes nothing");
+        // Like every governance route: a non-object body and an unknown field are refused, not ignored — a
+        // `target` here used to be dropped and the step applied to this node.
+        for bad in [serde_json::json!(["observe"]), serde_json::json!({"profile": "legacy", "target": "127.0.0.1:1"})] {
+            let r = client.post(format!("{base}/gateway/govern/profile"))
+                .header(AUTHORIZATION, "Bearer t").json(&bad).send().await.unwrap();
+            assert_eq!(r.status(), 400, "{bad}");
+        }
+        assert_eq!(agent.control_profile(), crate::control::Profile::Observe, "and changes nothing");
 
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// Every governance write route — enumerated from this file's router, so a new one is covered the day it
+    /// lands — records one audit attempt per accepted change (#549's review: `govern/profile` recorded none).
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn every_governance_write_route_audits_its_change() {
+        use axum::http::header::AUTHORIZATION;
+        // Every `"/govern/…"` route literal in the production half of this file, whatever its layout (a chained
+        // `.route(`, a feature-gated `let gateway = gateway.route(`, a call split across lines); `/govern` alone is
+        // the read route. Scope-map and doc lines carry `/gateway/govern/`, not a bare `"/govern/`.
+        let src = include_str!("http.rs");
+        let production = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let routed: std::collections::BTreeSet<String> = production.split("\"/govern/").skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(|r| format!("/gateway/govern/{r}"))
+            .collect();
+        let bodies: Vec<(&str, serde_json::Value)> = vec![
+            ("/gateway/govern/tuning", serde_json::json!({"enabled": true})),
+            ("/gateway/govern/timing", serde_json::json!({"health_check_interval_secs": 5})),
+            ("/gateway/govern/membership", serde_json::json!({"group": "workers", "min": 1})),
+            ("/gateway/govern/topology-override", serde_json::json!({"group": "workers", "override": true})),
+            ("/gateway/govern/profile", serde_json::json!({"profile": "observe"})),
+        ];
+        let listed: std::collections::BTreeSet<String> = bodies.iter().map(|(r, _)| r.to_string()).collect();
+        assert_eq!(routed, listed, "a governance write route without a case here");
+
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("t".into());
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let changes = || agent.task_ctx.governance_changes.load(std::sync::atomic::Ordering::Relaxed);
+        let unaudited = || agent.task_ctx.governance_unaudited.load(std::sync::atomic::Ordering::Relaxed);
+        for (route, body) in bodies {
+            let url = format!("http://127.0.0.1:{http_port}{route}");
+            // A refused body changes nothing and is not counted — validation comes before the audit.
+            let before = changes();
+            let r = client.post(&url).header(AUTHORIZATION, "Bearer t")
+                .json(&serde_json::json!({"no_such_field": 1})).send().await.unwrap();
+            assert_eq!(r.status(), 400, "{route}");
+            assert_eq!(changes(), before, "{route} counted a refused body");
+            let r = client.post(&url).header(AUTHORIZATION, "Bearer t").json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 200, "{route}: {}", r.text().await.unwrap_or_default());
+            assert_eq!(changes(), before + 1, "{route} recorded no audit attempt");
+        }
+        // No `[tls]` identity here, so nothing could be sealed (and without `compliance` nothing is tried):
+        // every accepted change is counted as unaudited.
+        assert_eq!(unaudited(), changes());
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// With `compliance` and a `[tls]` identity every accepted governance change is sealed into this node's audit
+    /// stream — the profile step and an identity revocation included — and none is counted unaudited.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn governance_changes_are_sealed_with_an_identity() {
+        use crate::config::TlsConfig;
+        use axum::http::header::AUTHORIZATION;
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let cert_dir = std::env::temp_dir().join(format!("myc-govern-audit-{gossip_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        cfg.gateway_scoped_tokens = vec![crate::GatewayToken {
+            token: "gov".into(), scopes: vec!["govern:write".into(), "identity:write".into()],
+        }];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let old_key = agent.identity_public_key().expect("tls identity");
+        agent.rotate_identity(Duration::from_millis(0)).await.expect("rotate");
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}/gateway");
+        for (route, body) in [
+            ("govern/profile", serde_json::json!({"profile": "observe"})),
+            ("govern/topology-override", serde_json::json!({"group": "workers", "override": true})),
+            ("identity/revoke", serde_json::json!({"revoked_key": super::hex32(&old_key)})),
+        ] {
+            let r = client.post(format!("{base}/{route}")).header(AUTHORIZATION, "Bearer gov").json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 200, "{route}: {}", r.text().await.unwrap_or_default());
+        }
+        let sealed: Vec<String> = agent.audit_stream(&id).into_iter()
+            .filter(|r| r.record.principal == "gateway/govern").map(|r| r.record.target).collect();
+        for target in ["govern/profile", "sys/topology-override/workers", "identity/revoke"] {
+            assert!(sealed.iter().any(|t| t == target), "{target} not sealed: {sealed:?}");
+        }
+        assert_eq!(agent.task_ctx.governance_unaudited.load(std::sync::atomic::Ordering::Relaxed), 0);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
     }
 
     /// WS-C governance scope gating (Track 3, compliance): `govern:read` reaches the
