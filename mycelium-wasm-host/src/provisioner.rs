@@ -1129,7 +1129,7 @@ impl Provisioner {
             // what is left — once seen unmarked for FIXED_AFTER; until then it is presumed to shed (a `cap/`
             // entry and its mark can arrive apart). Which providers shed is read from their marks, present
             // from a band's first round, so a new install is never unmarked. A view with k wrong entries can
-            // leave the band at max − k for a round (the floor refills); it never cascades.
+            // leave the band at max − k for a round (the floor refills only below min); it never cascades.
             let band = shed_band(&policy.filter, max);
             let shedders: Vec<mycelium::NodeId> =
                 self.agent.capabilities().demand(&CapFilter::new(SHED_NS, band.clone())).providers;
@@ -1156,6 +1156,7 @@ impl Provisioner {
             };
             if view.sheds(&me) {
                 self.withdraw(&artifact); // cooperative self-removal
+                metrics::counter!("mycelium_artifact_presence_sheds_total").increment(1);
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::Action, "above_ceiling", target, inputs(), Some(format!("withdraw {artifact}")));
                 }

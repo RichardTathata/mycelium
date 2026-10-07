@@ -285,7 +285,11 @@ The plan is `docs/plans/guarantees-and-rule-catalogue.md`.\n\n");
             out.push_str(&format!("- **Trigger:** {}\n", r.trigger));
             if !r.inputs.is_empty() {
                 out.push_str("- **Reads:**\n");
-                for i in r.inputs { out.push_str(&format!("  - `{}` — scope: {}; freshness: {}\n", i.source, i.scope, i.freshness)); }
+                for i in r.inputs {
+                    // A source that carries its own code spans is prose; wrapping it would break them.
+                    let source = if i.source.contains('`') { i.source.to_string() } else { format!("`{}`", i.source) };
+                    out.push_str(&format!("  - {source} — scope: {}; freshness: {}\n", i.scope, i.freshness));
+                }
             }
             out.push_str("- **Outcomes:**\n");
             for o in r.outcomes { out.push_str(&format!("  - {:?}: `{}`\n", o.kind, o.reasons.join("`, `"))); }
@@ -368,5 +372,20 @@ mod tests {
         let json = serde_json::to_value(&c).unwrap();
         assert_eq!(json["schema"], CATALOGUE_SCHEMA);
         assert_eq!(json["rules"][1]["depends_on"][0], "a.first");
+    }
+
+    /// An input whose source already carries code spans renders as prose, not wrapped in another one —
+    /// wrapping turned `` `cap/` advertisements`` into broken spans across 25 inputs (doc-coverage run 21).
+    #[test]
+    fn an_input_with_its_own_code_spans_renders_unwrapped() {
+        static I: &[Input] = &[
+            Input { source: "`cap/` advertisements as gossiped", scope: "s", freshness: "f" },
+            Input { source: "a plain source", scope: "s", freshness: "f" },
+        ];
+        static X: RuleDescriptor = RuleDescriptor { inputs: I, ..r("a.one", &[], OK, &["t"]) };
+        let md = Catalogue::gather(&[std::slice::from_ref(&X)]).expect("clean").to_markdown();
+        assert!(md.contains("  - `cap/` advertisements as gossiped — scope: s"), "{md}");
+        assert!(md.contains("  - `a plain source` — scope: s"), "{md}");
+        assert!(!md.contains("``"), "{md}");
     }
 }

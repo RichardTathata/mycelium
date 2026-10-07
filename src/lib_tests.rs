@@ -165,6 +165,10 @@ fn spawn_handler(
         opacity_oscillations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         cap_authz_violations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         schema_mismatch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(feature = "gateway")]
+        governance_changes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(feature = "gateway")]
+        governance_unaudited: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(feature = "compliance")]
         audit_chain: Arc::new(std::sync::Mutex::new(crate::agent::audit::AuditChainState::new())),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1219,6 +1223,10 @@ async fn test_subscribe_notified_via_gossip() {
             opacity_oscillations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cap_authz_violations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             schema_mismatch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(feature = "gateway")]
+            governance_changes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(feature = "gateway")]
+            governance_unaudited: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature = "compliance")]
             audit_chain: Arc::new(std::sync::Mutex::new(crate::agent::audit::AuditChainState::new())),
             #[cfg(all(feature = "gateway", feature = "tls"))]
