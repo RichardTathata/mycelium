@@ -45,6 +45,7 @@ PY_RESULT = re.compile(r"^(\S+\.py::\S.*?) (PASSED|FAILED|SKIPPED|XFAIL|XPASS|ER
 PY_COLLECTED = re.compile(r"^(\S+\.py::\S+)\s*$")
 JEST_FILE = re.compile(r"^(PASS|FAIL)\s+(\S+\.test\.ts)")
 JEST_LISTED = re.compile(r"(?:^|/)mycelium-ts/(\S+\.test\.ts)\s*$")
+TS_LISTED = re.compile(r"^@@ts-test@@ (\S+\.test\.ts)::(.+)$")
 JEST_TEST = re.compile(r"^\s+(✓|✕|○ skipped|○ todo|○)\s+(.+?)(?: \(\d+ m?s\))?$")
 UNIVERSE_MARK = "@@test-universe@@"
 # libtest names a should-panic test "<name> - should panic" and rustdoc a `no_run` / `compile_fail` doctest
@@ -95,6 +96,11 @@ def scan(text: str, executed: set, universe: set):
                 LISTED_BLOCKS.append(listed)
             continue
         if universe_mode:
+            m = TS_LISTED.match(line.strip())
+            if m:
+                universe.add(f"typescript {m.group(1)}::{m.group(2).strip()}")
+                listed += 1
+                continue
             m = JEST_LISTED.search(line.strip())
             if m:
                 universe.add(f"typescript-file {m.group(1)}")

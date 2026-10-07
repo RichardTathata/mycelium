@@ -36,6 +36,8 @@ UNIVERSE = f"""2026-10-06T10:20Z @@test-universe@@ begin
 2026-10-06T10:21Z @@test-universe@@ begin
 2026-10-06T10:21Z /home/runner/work/mycelium/mycelium/mycelium-ts/tests/agent.test.ts
 2026-10-06T10:21Z /home/runner/work/mycelium/mycelium/mycelium-ts/tests/live/gateway.test.ts
+2026-10-06T10:21Z @@ts-test@@ tests/agent.test.ts::sets a key
+2026-10-06T10:21Z @@ts-test@@ tests/live/gateway.test.ts::reads a key from a real node
 2026-10-06T10:21Z @@test-universe@@ end
 """
 
@@ -60,8 +62,12 @@ def main() -> int:
         "python tests/test_x.py::test_never_collected_elsewhere",
         "typescript tests/agent.test.ts::needs a node",       # jest skip
         "typescript-file tests/live/gateway.test.ts",         # a suite that printed nothing: listed, never ran
+        "typescript tests/live/gateway.test.ts::reads a key from a real node",  # a named test, listed by --json
     }
     failures = []
+    # The join that matters: a TypeScript test listed by name and run by `--verbose` counts as executed.
+    if "typescript tests/agent.test.ts::sets a key" not in universe:
+        failures.append("the listed TypeScript test was not read into the universe")
     if executed != expect_executed:
         failures.append(f"executed: extra {sorted(executed - expect_executed)}, missing {sorted(expect_executed - executed)}")
     if universe - executed != expect_not_executed:
