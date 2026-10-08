@@ -34,6 +34,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   current-key head and empty for one still on a revoked-key head, and an `Unknown` verdict never makes a successor
   ready. It replaces the earlier `from_chain`-only walk-through, so the run command now needs `--features tls`.
   Guide 21 points at it instead of the source's tests.
+- **Presence bands, the two edge cases 2.26.0 documented.** `mycelium wire-check` names two `[[presence]]` bands with
+  ceilings over the same capability that are not provably disjoint (`presence bands overlap`, a warning) — each sheds
+  against its own ceiling, so they can trade a provider back and forth; one band declared in two units, and bands
+  constrained to different values of one attribute, are not named. And the rolling-upgrade dip is visible: when a band
+  that was above its ceiling falls below it and the providers that left had no `prov-shed` mark (a stem older than
+  2.26.0 withdrawing by its own draw, or a crash), a stem counts `mycelium_artifact_presence_unranked_departures_total`
+  and warns, naming the band and the providers; `capability-lifecycle.md` gives the two remedies. Tests
+  `presence_bands_that_overlap_with_ceilings_are_named` and `an_unmarked_provider_leaving_a_band_below_its_ceiling_is_named`,
+  each seen failing first. Also: `capability-lifecycle.md` still said there was no shed metric.
 
 ### Changed
 

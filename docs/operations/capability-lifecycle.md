@@ -61,6 +61,7 @@ Each finding has a `kind` a script can key on (`src/wire_check.rs`):
 | `orphan lane` — consumed and never produced, or the reverse | error |
 | `unhostable entry` — an artifact would satisfy the filter but no `[hosts]` can take it | error |
 | `presence unhostable` — a `[[presence]]` floor cannot be met | error |
+| `presence bands overlap` — two `[[presence]]` bands with ceilings can match the same providers | warning |
 | `unauthorisable edge` — the requirer declares authority, and no declared rule and mandate could admit the call | error |
 | `would bind by provisioning` — no deployed provider, but a hostable artifact matches | warning; error with `--strict-deployed` |
 | `would bind after acceptance` — as above, but the artifact is **proposed** and loads only into a shadow lane until accepted | warning; error with `--strict-deployed` |
@@ -187,14 +188,20 @@ intervals. What to expect and do:
   `min` and `max` the band stays where the round left it until demand or a new install moves it. A stem drops its
   `prov-shed` mark while it serves the band without an install it could withdraw (`marks_band`), so it then
   counts as fixed.
-- **Rolling upgrade.** A stem older than 2.26.0 advertises no mark and still sheds by its draw, so while old and
-  new stems share a band it can dip below the ceiling until the floor refills — upgrade a band's stems together
-  where that matters.
-- **Overlapping bands** (one unattributed, one attribute-restricted, both with tight ceilings over the same
-  capability) can trade a provider back and forth — give them room or drop one ceiling.
-- **Seeing who withdrew.** There is no shed metric; run the stem with `--trace-dir` and read the `prov.shed`
-  decisions with `mycelium explain` ([diagnostics.md](diagnostics.md) § reading what a node decided):
-  `above_ceiling` is a withdrawal, `ranked_within_ceiling` a host that stayed, with its rank in the inputs.
+- **Rolling upgrade.** A stem older than 2.26.0 advertises no mark and still sheds by its own draw, so while old
+  and new stems share a band it can dip below the ceiling; a new stem cannot stop an old one's draw. **Do one of:**
+  upgrade a band's stems together; or raise the band's `max_providers` by the number of old stems for the roll and
+  lower it after. **See it:** when a band that was above its ceiling falls below it and the providers that left
+  had no `prov-shed` mark, a 2.27.0+ stem counts `mycelium_artifact_presence_unranked_departures_total` and logs a
+  warning naming the band and the providers (an old stem's draw — or a crash, which looks the same from here).
+- **Overlapping bands** (one unattributed, one attribute-restricted, both with ceilings over the same capability)
+  can trade a provider back and forth — each sheds against its own ceiling. `mycelium wire-check` names the pair
+  (`presence bands overlap`, a warning) unless one attribute is constrained to different values in each; give
+  them room, drop one ceiling, or make the filters disjoint.
+- **Seeing who withdrew.** `mycelium_artifact_presence_sheds_total` counts this node's withdrawals; for the band
+  and the rank, run the stem with `--trace-dir` and read the `prov.shed` decisions with `mycelium explain`
+  ([diagnostics.md](diagnostics.md) § reading what a node decided): `above_ceiling` is a withdrawal,
+  `ranked_within_ceiling` a host that stayed, with its rank in the inputs.
 
 **Placed blobs that need a runtime.** A model or data pack is *placed* by a hosting unit, but a
 placed file serves nothing until the node-local runtime has it. A unit says how, per capability

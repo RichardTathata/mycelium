@@ -1271,7 +1271,8 @@
       ],
       "effects": [
         "withdraw() of this node's install",
-        "`mycelium_artifact_presence_sheds_total`"
+        "`mycelium_artifact_presence_sheds_total`",
+        "`mycelium_artifact_presence_unranked_departures_total` and a warning when the band fell below its ceiling as unmarked providers left"
       ],
       "guards": [],
       "may_trigger": [],

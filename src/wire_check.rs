@@ -21,6 +21,7 @@
 //! | `orphan lane` | a lane consumed and never produced, or produced and never consumed | error |
 //! | `unhostable entry` | an artifact would satisfy the filter but no unit's `[hosts]` names its kind with budget for its footprint | error |
 //! | `presence unhostable` | a `[[presence]]` floor cannot be met by deployed providers plus distinct hosting units | error |
+//! | `presence bands overlap` | two `[[presence]]` bands with ceilings, over the same capability and not provably disjoint, can trade a provider back and forth — each sheds against its own ceiling | warning |
 //! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
 //! | `would bind after acceptance` | no deployed provider, and the hostable artifact that matches is **proposed** (D20) — it loads only into a shadow lane until a reviewer accepts it | warning (error with `strict_deployed`) |
@@ -723,6 +724,40 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         }
     }
 
+    // Two capped bands over one capability shed independently, each against its own ceiling, while the other's
+    // floor or demand can bring a provider back. One band declared in two units is one band (the same filter and
+    // ceiling); bands are disjoint when one attribute is constrained to equal different values in each.
+    let capped: Vec<(&Unit, &crate::capability_config::PresenceDecl)> = units.iter()
+        .flat_map(|u| u.config.presence.iter().filter(|p| p.max_providers.is_some()).map(move |p| (u, p)))
+        .collect();
+    let mut named: BTreeSet<(String, String)> = BTreeSet::new();
+    for (i, (ua, a)) in capped.iter().enumerate() {
+        for (ub, b) in &capped[i + 1..] {
+            if (a.filter.ns.as_str(), a.filter.name.as_str()) != (b.filter.ns.as_str(), b.filter.name.as_str()) {
+                continue;
+            }
+            let band = |p: &crate::capability_config::PresenceDecl| (serde_json::to_string(&p.filter).unwrap_or_default(), p.max_providers);
+            if band(a) == band(b) || presence_disjoint(&a.filter, &b.filter) {
+                continue;
+            }
+            let (ka, kb) = (band_label(a), band_label(b));
+            if !named.insert(if ka <= kb { (ka.clone(), kb.clone()) } else { (kb.clone(), ka.clone()) }) {
+                continue;
+            }
+            findings.push(Finding {
+                severity: Severity::Warning,
+                kind:     "presence bands overlap".into(),
+                unit:     Some(ua.name.clone()),
+                message:  format!(
+                    "presence {ka} ({}) and {kb} ({}) can match the same providers and each sheds against its own \
+                     ceiling, so they can trade a provider back and forth — give them room, drop one ceiling, or make \
+                     their filters disjoint",
+                    ua.name, ub.name
+                ),
+            });
+        }
+    }
+
     // ── authority overlay (W4) ─────────────────────────────────────────────────────────
     // For an edge whose requirer has declared any authority vocabulary, some declared rule must be
     // able to admit one of the call shapes the edge could take; a rule that requires a mandate
@@ -876,6 +911,27 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         lanes:     lanes.into_values().collect(),
         findings,
     }
+}
+
+/// `ns/name{attrs}≤max` — how a presence band is named in a finding.
+fn band_label(p: &crate::capability_config::PresenceDecl) -> String {
+    let attrs: Vec<String> = p.filter.attrs.iter()
+        .map(|(k, v)| format!("{k}={}", serde_json::to_string(v).unwrap_or_default()))
+        .collect();
+    let attrs = if attrs.is_empty() { String::new() } else { format!("{{{}}}", attrs.join(",")) };
+    format!("{}/{}{attrs}≤{}", p.filter.ns, p.filter.name, p.max_providers.map_or("∞".into(), |m| m.to_string()))
+}
+
+/// Whether no capability can match both filters: some attribute each constrains to **equal** a different value.
+/// Anything else (ranges, `ne`, an attribute only one names) is treated as possibly overlapping.
+fn presence_disjoint(a: &crate::capability_config::FilterDecl, b: &crate::capability_config::FilterDecl) -> bool {
+    use crate::capability::CapConstraint;
+    a.attrs.iter().any(|(k, ca)| {
+        b.attrs.get(k).is_some_and(|cb| match (ca.to_constraint(), cb.to_constraint()) {
+            (Ok(CapConstraint::Eq(x)), Ok(CapConstraint::Eq(y))) => x != y,
+            _ => false,
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1077,5 +1133,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("unknown artifact kind") && e.contains("native"), "{e}");
+    }
+
+    /// Two `[[presence]]` bands with ceilings over providers both can match trade a provider back and forth —
+    /// each sheds against its own ceiling, and the other's floor or demand brings one back. Named at design time;
+    /// bands provably disjoint (an equality constraint on one attribute, to different values), the same band
+    /// declared in two units, and a band without a ceiling are not.
+    #[test]
+    fn presence_bands_that_overlap_with_ceilings_are_named() {
+        let host = unit("depot", "[[capability]]\nns=\"route\"\nname=\"optimize\"\n[capability.attrs]\nregion=\"eu\"\n");
+        let p = |name: &str, body: &str| unit(name, &format!("[[presence]]\nns=\"route\"\nname=\"optimize\"\nmin_providers=1\n{body}"));
+        let overlap = |units: &[Unit]| {
+            let r = check(units, &[], &CheckOptions::default());
+            kinds(&r).contains(&("presence bands overlap", Severity::Warning))
+        };
+        let any3 = p("a", "max_providers=3\n");
+        let eu2 = p("b", "max_providers=2\n[attrs]\nregion=\"eu\"\n");
+        let us2 = p("c", "max_providers=2\n[attrs]\nregion=\"us\"\n");
+        let floor_only = p("d", "[attrs]\nregion=\"eu\"\n");
+        assert!(overlap(&[host.clone(), any3.clone(), eu2.clone()]), "an unattributed band and an `eu` band, both capped");
+        assert!(!overlap(&[host.clone(), eu2.clone(), us2.clone()]), "`eu` and `us` cannot share a provider");
+        assert!(!overlap(&[host.clone(), eu2.clone(), p("e", "max_providers=2\n[attrs]\nregion=\"eu\"\n")]), "one band, declared twice");
+        assert!(!overlap(&[host.clone(), any3.clone(), floor_only]), "a band with no ceiling sheds nothing");
     }
 }

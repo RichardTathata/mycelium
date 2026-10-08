@@ -26,7 +26,7 @@ TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.
 | `[[lane]]` | name join (`orphan lane`) | logged, nothing to do at runtime | accepted, reported in `not_enforced` |
 | `[[mandate]]`, `[[rule]]` | the authority overlay | logged, nothing to do at runtime | accepted, reported in `not_enforced` |
 | `[hosts]` | who could host an artifact | runs a provisioner | refused, **422** |
-| `[[presence]]` | `presence unhostable` | a standing want (needs `[hosts]`) | refused, **422** |
+| `[[presence]]` | `presence unhostable`, `presence bands overlap` | a standing want (needs `[hosts]`) | refused, **422** |
 | `[[activation]]` | not read | run after a blob is placed | refused, **422** |
 | `[[serve]]` | counted as an offer | registers a routable skill (needs feature `llm`) | refused, **422** |
 

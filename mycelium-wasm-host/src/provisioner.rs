@@ -18,7 +18,7 @@
 //! prevention). Installs run as **background tasks against an `Installing` reservation**, so a
 //! multi-GB pull never blocks the provision tick and a round never double-starts an artifact.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -169,6 +169,10 @@ pub struct Provisioner {
     /// and a `cap/` entry are separate keys and can arrive apart (a partition healing), and until then the
     /// safe reading is that it sheds (#547's fifth review).
     unmarked_since: HashMap<String, HashMap<mycelium::NodeId, u64>>,
+    /// Per band, the providers without a `prov-shed` mark in the last round the band was above its ceiling — so a
+    /// round that finds it **below** the ceiling can name the ones whose leaving overshot it ([`unranked_departures`]:
+    /// a stem older than 2.26.0 withdrawing by its own draw, or a crash).
+    unmarked_above: HashMap<String, HashSet<mycelium::NodeId>>,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -270,6 +274,7 @@ impl Provisioner {
             rounds: 0,
             shed_regs: HashMap::new(),
             unmarked_since: HashMap::new(),
+            unmarked_above: HashMap::new(),
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -1113,7 +1118,18 @@ impl Provisioner {
             let live = providers.len();
             let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
             if live <= max {
-                self.unmarked_since.remove(&shed_band(&policy.filter, max));
+                let band = shed_band(&policy.filter, max);
+                self.unmarked_since.remove(&band);
+                if let Some(above) = self.unmarked_above.remove(&band) {
+                    let gone = unranked_departures(&above, &providers, max);
+                    if !gone.is_empty() {
+                        metrics::counter!("mycelium_artifact_presence_unranked_departures_total").increment(gone.len() as u64);
+                        tracing::warn!(band = %target, live, max, ?gone,
+                            "a presence band fell below its ceiling: providers without a prov-shed mark left — a stem older \
+                             than 2.26.0 withdraws by its own draw (upgrade a band's stems together, or raise the ceiling for \
+                             the roll), or they crashed");
+                    }
+                }
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target,
                         vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
@@ -1133,6 +1149,7 @@ impl Provisioner {
             let band = shed_band(&policy.filter, max);
             let shedders: Vec<mycelium::NodeId> =
                 self.agent.capabilities().demand(&CapFilter::new(SHED_NS, band.clone())).providers;
+            self.unmarked_above.insert(band.clone(), providers.iter().filter(|p| !shedders.contains(p)).cloned().collect());
             // This node by what it holds now — whether or not its advertisement has been written yet.
             let i_can_shed = can_shed.contains(&band);
             let now = mycelium::sim_seam::mono_now_ns();
@@ -1248,6 +1265,20 @@ fn rank_entries(
         (n.clone(), sheds)
     }).collect();
     (entries, presumed)
+}
+
+/// Which of a band's providers that did **not** advertise [`SHED_NS`] while it was above its ceiling have left,
+/// now that it is **below** the ceiling. A stem older than 2.26.0 advertises no mark and withdraws by its own
+/// draw, so while old and new stems share a band it can overshoot the ceiling downward; this names the providers
+/// whose leaving did it (or that crashed — the two look alike from here). Empty unless the band dipped.
+fn unranked_departures(unmarked_above: &HashSet<mycelium::NodeId>, providers: &[mycelium::NodeId],
+                       max: usize) -> Vec<mycelium::NodeId> {
+    if providers.len() >= max {
+        return Vec::new();
+    }
+    let mut gone: Vec<mycelium::NodeId> = unmarked_above.iter().filter(|n| !providers.contains(n)).cloned().collect();
+    gone.sort_by_key(|n| n.to_string());
+    gone
 }
 
 /// `entries` is each live provider and whether it sheds (it advertises [`SHED_NS`] for the band).
@@ -1406,6 +1437,21 @@ mod tests {
         assert!(a.iter().all(|h| settled.sheds(h)), "providers unmarked for FIXED_AFTER are fixed");
         assert!(presumed_sheds(true, None) && presumed_sheds(false, None) && presumed_sheds(false, Some(Duration::ZERO)));
         assert!(!presumed_sheds(false, Some(FIXED_AFTER)));
+    }
+
+    /// A rolling upgrade: an old stem sheds by its own draw and the band falls below its ceiling. The providers
+    /// that left without ever marking are named — not those that marked, and nothing while the band stays at or
+    /// above its ceiling.
+    #[test]
+    fn an_unmarked_provider_leaving_a_band_below_its_ceiling_is_named() {
+        let n = nodes(7600, 5);
+        let unmarked: HashSet<_> = [n[3].clone(), n[4].clone()].into();
+        // max 3: two old stems withdrew and so did one marked host — the band holds 2, below its ceiling.
+        assert_eq!(unranked_departures(&unmarked, &n[..2], 3), vec![n[3].clone(), n[4].clone()]);
+        // One old stem left, the band landed on its ceiling: no dip, nothing to name.
+        assert!(unranked_departures(&unmarked, &[n[0].clone(), n[1].clone(), n[3].clone()], 3).is_empty());
+        // Below the ceiling, but every unmarked provider is still there: the marked ones did it, by rank.
+        assert!(unranked_departures(&unmarked, &[n[3].clone(), n[4].clone()], 3).is_empty());
     }
 
     /// The bookkeeping behind FIXED_AFTER: an unmarked peer is timed from first sight, presumed to shed until
