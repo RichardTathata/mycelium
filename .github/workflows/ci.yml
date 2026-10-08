@@ -592,6 +592,17 @@ jobs:
             [ -f "$RUNNER_TEMP/node-$n.pid" ] && kill "$(cat "$RUNNER_TEMP/node-$n.pid")" 2>/dev/null || true
           done
           [ -f "$RUNNER_TEMP/py-node.pid" ] && kill "$(cat "$RUNNER_TEMP/py-node.pid")" 2>/dev/null || true
+      # The nodes' own logs, kept when the job fails: #561/#563 could not be diagnosed without them (a blob fetch
+      # miss now logs which providers it asked and what each answered).
+      - name: Keep the nodes' logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-job-node-logs
+          path: |
+            ${{ runner.temp }}/node-*.log
+            ${{ runner.temp }}/py-node.log
+          if-no-files-found: ignore
 
   conway-gpu:
     # Standalone GPU demo (examples/conway-gpu): excluded from the workspace so its

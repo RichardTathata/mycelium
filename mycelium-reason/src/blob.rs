@@ -20,7 +20,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use mycelium::{CapFilter, Capability, CapabilityReg, GossipAgent};
 use sha2::{Digest, Sha256};
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Hard per-blob ceiling: a blob must fit one RPC reply frame (KV/signal frames are
 /// size-gated at ~9.94 MiB; 8 MiB leaves envelope headroom).
@@ -327,6 +327,7 @@ impl MeshBlobStore {
         let providers = self.agent.capabilities().resolve(&CapFilter::new(BLOB_CAP_NS, BLOB_CAP_NAME));
         let me = self.agent.node_id().clone();
         let (mut unreachable, mut missed) = (0usize, 0usize);
+        let mut asked: Vec<String> = Vec::new(); // who answered what, for the miss log (#563)
         for (node, _) in providers {
             if node == me {
                 continue; // self is the local tier, already missed
@@ -347,11 +348,17 @@ impl MeshBlobStore {
                     corrupt += 1;
                     warn!(id = %id, provider = %node, "mesh blob failed content verification — trying next provider");
                 }
-                Ok(_) => missed += 1,       // the provider answered: it does not hold it (yet)
-                Err(_) => unreachable += 1, // timeout or transport error: it may
+                Ok(_) => { missed += 1; asked.push(format!("{node}=miss")); } // it does not hold it (yet)
+                Err(e) => { unreachable += 1; asked.push(format!("{node}=unreachable({e})")); } // it may
             }
         }
-        Err(BlobMiss::classify(corrupt, unreachable, missed))
+        let miss = BlobMiss::classify(corrupt, unreachable, missed);
+        // Which of the two not-found cases this was — no provider resolved, or every one answered miss — is what
+        // #563 could not tell from a CI failure; say it once per miss, at info.
+        info!(id = %id, reason = miss.as_str(), local_damaged = corrupt > 0,
+              providers = if asked.is_empty() { "none resolved".to_string() } else { asked.join(", ") },
+              "blob fetch missed");
+        Err(miss)
     }
 }
 
