@@ -28,6 +28,7 @@ cargo clippy -p mycelium-core --lib --tests -- -D warnings  # core's own tests a
 cargo clippy --lib --no-default-features -- -D warnings     # minimal embed — catches feature-gated dead code
 cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings   # wasm-host embeds mycelium default-features=false
 cargo test -p mycelium-gateway-free-tests                   # the one test build of `mycelium` without `gateway` (or `tls`) — run alone (R8, 2026-10-05)
+cargo test -p mycelium-tls-free-tests                       # …and the one with `gateway` and without `tls` — run alone (2026-10-08)
 ```
 
 **`make check-full` is NOT the whole CI gate — a green local run does not prove CI is green.** The
@@ -361,7 +362,9 @@ exercised only by a plain build of the binary (`cargo build --no-default-feature
 was verified: the binary started with a `[tls]` table and listened in plaintext before the fix, and refuses
 by name after it. The lib test that stated it never ran; since 2026-10-08 it lives in `mycelium-tls-free-tests`
 (`mycelium` built with `gateway` and without `tls`, run on its own in CI), and `check-test-inventory.py` refuses a
-root test whose gate no test build satisfies — it models dev-dependency unification now. The same holds for `compliance`? No — nothing in the dev-dependencies enables it, so
+root test whose gate no test build satisfies — it models dev-dependency unification now.
+
+Does the same hold for `compliance`? No — nothing in the dev-dependencies enables it, so
 `not(feature = "compliance")` tests do run. Check `Cargo.toml`'s dev-dependency features before trusting a
 negative feature gate.
 

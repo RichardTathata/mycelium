@@ -29,7 +29,8 @@ followed within a script. ``make <target>`` is expanded one level.
 
 What it does not claim: that a test *passes*, or that a step's environment brings up whatever node a live
 test talks to — only that a step exists which would run it, with the features and guards it needs. Known
-limits, each left to the observed job: macro-generated tests, live-skip idioms other than a skipif on a MYCELIUM_TEST_ variable or a `*_LIVE_REQUIRED` guard, pytest
+limits, each left to the observed job: features a non-path (registry) dependency enables on a workspace crate
+(none can: a registry crate does not depend on this workspace), macro-generated tests, live-skip idioms other than a skipif on a MYCELIUM_TEST_ variable or a `*_LIVE_REQUIRED` guard, pytest
 and jest configuration files, and `#[ignore]`d tests (skipped here; the observed job holds each to a stated
 exception).
 
@@ -774,16 +775,31 @@ def _path_deps(root: str, crs: dict, pkg: str, dev: bool) -> list[tuple[str, str
     """`(key, workspace package, features, default-features, optional)` for each path dependency of `pkg`."""
     cdir = os.path.join(root, crs[pkg])
     m = _manifest(cdir)
+    inherited = _manifest(root).get("workspace", {}).get("dependencies", {})
     by_dir = {os.path.normpath(os.path.join(root, d)): p for p, d in crs.items()}
+    # Every platform's tables count: a target-specific dependency is built on the platform it names, and reading
+    # one the CI runner skips only over-approximates (a `not(...)` gate reads as uncovered, never the reverse).
+    scopes = [m] + list(m.get("target", {}).values())
     out = []
-    for table in ("dependencies",) + (("dev-dependencies",) if dev else ()):
-        for key, spec in m.get(table, {}).items():
-            if not isinstance(spec, dict) or "path" not in spec:
-                continue
-            q = by_dir.get(os.path.normpath(os.path.join(cdir, spec["path"])))
-            if q:
-                out.append((key, q, set(spec.get("features", [])), spec.get("default-features", True),
-                            bool(spec.get("optional")) and table == "dependencies"))
+    for scope in scopes:
+        for table in ("dependencies",) + (("dev-dependencies",) if dev else ()):
+            for key, spec in scope.get(table, {}).items():
+                if not isinstance(spec, dict):
+                    continue
+                base = cdir
+                if spec.get("workspace"):  # `workspace = true`: the root's spec, plus this one's features
+                    ws = inherited.get(key)
+                    if not isinstance(ws, dict):
+                        continue
+                    spec = {**ws, "features": list(ws.get("features", [])) + list(spec.get("features", [])),
+                            "optional": spec.get("optional", False)}
+                    base = root
+                if "path" not in spec:
+                    continue
+                q = by_dir.get(os.path.normpath(os.path.join(base, spec["path"])))
+                if q:
+                    out.append((key, q, set(spec.get("features", [])), spec.get("default-features", True),
+                                bool(spec.get("optional")) and table == "dependencies"))
     return out
 
 
@@ -803,13 +819,16 @@ def unified_features(root: str, crs: dict, r: CargoRun, root_pkg: str) -> dict[s
         selected = [next((p for p, d in crs.items() if os.path.normpath(d) == home), root_pkg)]
     want: dict[str, set] = {p: set() for p in crs}
     default: dict[str, bool] = {p: False for p in crs}
+    cli: dict[str, list] = {p: [] for p in crs}  # `--features dep/feat` naming a dependency: an entry on the package
     for p in selected:
         default[p] = r.default
         for f in r.features:
             if "/" in f:
                 q, _, g = f.partition("/")
-                if q in crs:
+                if q in selected:
                     want[q].add(g)
+                else:
+                    cli[p].append(f)
             else:
                 want[p].add(f)
     deps = {p: _path_deps(root, crs, p, dev=p in selected) for p in crs}
@@ -820,9 +839,12 @@ def unified_features(root: str, crs: dict, r: CargoRun, root_pkg: str) -> dict[s
         changed = False
         for p in sorted(built):
             on = feature_closure(os.path.join(root, crs[p]), want[p], default[p])
-            entries = [e for f in on for e in tables[p].get(f, [])]
+            entries = [e for f in on for e in tables[p].get(f, [])] + cli[p]
             for key, q, feats, dflt, optional in deps[p]:
-                if optional and not any(e in (f"dep:{key}", key) or e.split("/")[0].rstrip("?") == key for e in entries + list(on)):
+                # A weak `key?/feat` never activates an optional dependency; `dep:key`, a feature named `key`, or a
+                # strong `key/feat` does. Once active, a weak entry's feature applies too.
+                if optional and not any(e in (f"dep:{key}", key) or (e.split("/")[0] == key and "/" in e)
+                                        for e in entries + list(on)):
                     continue
                 add = set(feats) | {e.split("/", 1)[1] for e in entries if "/" in e and e.split("/")[0].rstrip("?") == key}
                 if q not in built or not add <= want[q] or (dflt and not default[q]):
