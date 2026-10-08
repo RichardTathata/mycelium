@@ -204,7 +204,8 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   live holder, and `GET /gateway/reason/blob/{id}` (scope `llm:read`) for a full 64-hex id from the exception's `e.missing` says why (its message prints
   only the first 12 characters, which the route refuses **400** `bad_id`)
   (`mycelium-reason` 0.7.0): **404 `not_found`** — no holder has it yet; **503 `unavailable`** — a holder
-  could not be reached; **502 `corrupt`** — every copy currently on offer (this node's, and each provider still
+  could not be reached, or its RPC layer refused for now (0.7.1, #564); **403 `refused`** — every holder that could be
+  asked refused for good (a removed member, a denied action, a bad envelope; 0.7.1); **502 `corrupt`** — every copy currently on offer (this node's, and each provider still
   advertising `reason/blob-cache`) fails its content address
   (a copy damaged on a holder's disk, or bytes a provider forged) and no provider merely lacks it or is
   unreachable; the node logs each bad copy (`mesh blob failed content verification — trying next provider`,

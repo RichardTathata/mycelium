@@ -6,6 +6,20 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
+## [0.7.1] — unreleased
+
+**A refusal is not a corrupt copy** (#564). `MeshBlobStore::fetch` counted every non-empty reply that failed the content
+address as corrupt — including the provider's RPC layer answering for it with a caller-context or provider-enforcement
+refusal, so a transient condition (a signer key not yet gossiped) ended every retry loop as a non-retriable `corrupt`.
+A refusal (a JSON object with an `error`) is now read by its `reason`: one that holds until something changes — a
+removed member, a denied action, a malformed, mismatched, unsigned or badly signed envelope — counts as **refused**, and
+when every holder that could be asked refused for good the route answers **403 `refused`** (`BlobMiss::Refused`, which
+the checkpointer reads as its non-retriable `unauthorized`); any other reason, or none (an older peer), counts as a holder
+not yet askable — **503 `unavailable`**, retriable. The content address is checked first, so a blob that is such JSON is
+still a blob. Needs the substrate's refusal `reason` (2.28.0); against an older substrate every refusal reads as
+transient. A blob fetch miss also logs the providers it asked and each answer (#563). Tests
+`an_rpc_refusal_is_not_a_corrupt_copy` (seen failing first) and the classification table.
+
 ## [0.7.0] — 2026-10-07
 
 **Why a blob is missing stays distinguishable** (realignment repairs S5, #542). `MeshBlobStore::fetch` returns

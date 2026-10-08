@@ -102,7 +102,7 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   ```
 
   **Why each blob is missing** is `e.reasons[blob_id]` (0.3.0, with `mycelium-reason` 0.7.0):
-  `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached, the
+  `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached or refused for now (`mycelium-reason` 0.7.1+), the
   node or a proxy in front of it failed, the read was throttled, or the node itself could not be reached
   (an `httpx.TransportError`, such as a refused connection); `"unauthorized"` — the gateway refused
   the read (a token or scope problem); `"corrupt"` — every copy currently on offer fails the content

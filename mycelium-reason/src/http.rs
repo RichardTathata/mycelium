@@ -148,6 +148,7 @@ async fn gw_blob_get(State(s): State<ReasonState>, Path(id): Path<String>) -> Re
             .into_response(),
         Err(miss @ BlobMiss::NotFound) => error_json(StatusCode::NOT_FOUND, miss.as_str()),
         Err(miss @ BlobMiss::Corrupt) => error_json(StatusCode::BAD_GATEWAY, miss.as_str()),
+        Err(miss @ BlobMiss::Refused) => error_json(StatusCode::FORBIDDEN, miss.as_str()),
         Err(miss) => error_json(StatusCode::SERVICE_UNAVAILABLE, miss.as_str()),
     }
 }
