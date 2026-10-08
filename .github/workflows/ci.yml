@@ -837,6 +837,7 @@ jobs:
           echo "@@test-universe@@ begin scripts"
           python3 scripts/test-check-materials.py --list
           python3 scripts/test-ci-test-coverage.py --list
+          ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py --list
           bash scripts/test-ci-retest.sh --list
           bash scripts/wire-check-examples.sh --list
           bash mycelium-blackboard/ci_smoke.sh --list

@@ -233,17 +233,43 @@ def unification() -> list[str]:
     return bad
 
 
+SUITE = "scripts/test-check-test-inventory.py"
+
+
+def slug(name: str) -> str:
+    """A mutation's name as a coverage case key (`[A-Za-z0-9_./:-]`)."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def case_names() -> list[str]:
+    return ["unification", "control"] + [slug(n) for n in list(MUTATIONS) + list(EXPECT)]
+
+
+def case(name: str) -> None:
+    """Verification policy rule 3: each case says it ran, `--list` names them all (the coverage job joins them)."""
+    print(f"@@case@@ {SUITE}::{name}", flush=True)
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--list"]:
+        names = case_names()
+        assert len(names) == len(set(names)), "two mutations slug to one case name"
+        for n in names:
+            print(f"@@case-list@@ {SUITE}::{n}")
+        return 0
+    case("unification")
     failures = unification()
     with tempfile.TemporaryDirectory() as base:
         pristine = os.path.join(base, "pristine")
         copy_tree(pristine)
+        case("control")
         if inv.check(pristine, os.path.join(pristine, ".github", "workflows")):
             print("control: the unmutated tree fails the check")
             return 1
         print("control: ok")
         cases = {n: (m, None) for n, m in MUTATIONS.items()} | EXPECT
         for name, (mutate, expect) in cases.items():
+            case(slug(name))
             d = os.path.join(base, "m")
             shutil.copytree(pristine, d, symlinks=True)
             mutate(d)
