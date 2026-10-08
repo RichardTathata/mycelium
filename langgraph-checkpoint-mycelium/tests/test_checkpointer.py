@@ -32,6 +32,8 @@ from langgraph.checkpoint.base.id import uuid6
 from langgraph_checkpoint_mycelium import MyceliumCheckpointSaver
 from langgraph_checkpoint_mycelium.saver import _seg
 
+from converge import converged_head
+
 TEST_HOST = os.getenv("MYCELIUM_TEST_HOST", "127.0.0.1")
 TEST_PORT = os.getenv("MYCELIUM_TEST_PORT")
 TEST_PORT_B = os.getenv("MYCELIUM_TEST_PORT_B")
@@ -271,19 +273,9 @@ class TestCrossNodeResume:
             expected_writes = len(head_a.pending_writes or [])
 
         with MyceliumCheckpointSaver(TEST_HOST, int(TEST_PORT_B)) as saver_b:
-            # Structural convergence poll: node B must gossip in the SAME head
-            # (and its pending writes) before the resume — bounded, no fixed sleeps.
-            deadline = time.monotonic() + 60.0
-            while True:
-                head_b = saver_b.get_tuple(config)
-                if (
-                    head_b is not None
-                    and head_b.checkpoint["id"] == expected_id
-                    and len(head_b.pending_writes or []) >= expected_writes
-                ):
-                    break
-                assert time.monotonic() < deadline, "node B never converged on the thread head"
-                time.sleep(0.25)
+            # Structural convergence poll: node B must gossip in the SAME head (and its pending writes) before the
+            # resume — bounded, no fixed sleeps; a row ahead of its blobs is "not yet" (#561).
+            converged_head(saver_b, config, expected_id, expected_writes)
 
             graph_b = build().compile(checkpointer=saver_b, interrupt_before=["two"])
             final = graph_b.invoke(None, config)
@@ -345,7 +337,9 @@ class TestRowBeforeBlob:
                 while True:
                     try:
                         tup = saver_b.get_tuple(config)
-                    except IncompleteCheckpoint:
+                    except IncompleteCheckpoint as e:
+                        if not e.retriable:  # corrupt or refused: waiting will not fix it — say why, now
+                            raise
                         tup = None
                     if tup is not None:
                         assert tup.checkpoint["channel_values"]["withheld"] == withheld_value
