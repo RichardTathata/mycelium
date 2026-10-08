@@ -116,6 +116,11 @@ via wasm-host).
   damage at rest (a bad hash, an unreadable file) is corruption, answered by the stock server with a marker, and
   `put` of the right bytes repairs it; `IncompleteCheckpoint.reasons` reads the route's body, so a proxy's 502 is
   `unavailable` and a bare 404 `unsupported` (`.log/2026-10-07-s5-blob-reasons.md`).
+  **A refusal is not a copy (0.7.1, #564):** a provider's RPC layer answering for it (caller context, provider
+  enforcement) was read as corrupt; it is now read by its `reason` — transient (unknown signer, marker not yet seen, or
+  none) is `Unavailable`, one that holds (removed, denied, a bad envelope) from every askable holder is `BlobMiss::Refused`,
+  403 `refused`, the checkpointer's `unauthorized`. The substrate's caller-context refusal is JSON with
+  `CallerError::code` as its `reason` (`.log/2026-10-08-blob-refusals.md`).
   **COMPLETE (PRs #130–#136, 2026-07-08):** the crate + Python tier, the LangGraph example ladder
   (`examples/langgraph/` rungs 0–6 incl. the echo-CI **deploy/reheal flagship** + a router-robustness
   fix it surfaced — live-SWIM filter + fast failover, #134), the repo's first Python CI job, and guide
