@@ -61,7 +61,7 @@ Each finding has a `kind` a script can key on (`src/wire_check.rs`):
 | `orphan lane` — consumed and never produced, or the reverse | error |
 | `unhostable entry` — an artifact would satisfy the filter but no `[hosts]` can take it | error |
 | `presence unhostable` — a `[[presence]]` floor cannot be met | error |
-| `presence bands overlap` — two `[[presence]]` bands with ceilings can match the same providers | warning |
+| `presence bands overlap` — two `[[presence]]` bands, at least one capped, can match the same providers | warning |
 | `unauthorisable edge` — the requirer declares authority, and no declared rule and mandate could admit the call | error |
 | `would bind by provisioning` — no deployed provider, but a hostable artifact matches | warning; error with `--strict-deployed` |
 | `would bind after acceptance` — as above, but the artifact is **proposed** and loads only into a shadow lane until accepted | warning; error with `--strict-deployed` |
@@ -192,12 +192,14 @@ intervals. What to expect and do:
   and new stems share a band it can dip below the ceiling; a new stem cannot stop an old one's draw. **Do one of:**
   upgrade a band's stems together; or raise the band's `max_providers` by the number of old stems for the roll and
   lower it after. **See it:** when a band that was above its ceiling falls below it and the providers that left
-  had no `prov-shed` mark, a 2.27.0+ stem counts `mycelium_artifact_presence_unranked_departures_total` and logs a
+  had no `prov-shed` mark (and had been unmarked for two advertise intervals), a stem counts (2.28.0) `mycelium_artifact_presence_unranked_departures_total` and logs a
   warning naming the band and the providers (an old stem's draw — or a crash, which looks the same from here).
-- **Overlapping bands** (one unattributed, one attribute-restricted, both with ceilings over the same capability)
-  can trade a provider back and forth — each sheds against its own ceiling. `mycelium wire-check` names the pair
-  (`presence bands overlap`, a warning) unless one attribute is constrained to different values in each; give
-  them room, drop one ceiling, or make the filters disjoint.
+- **Overlapping bands** (say one unattributed, one attribute-restricted, over the same capability, at least one with
+  a ceiling) can trade a provider back and forth — the capped one sheds against its ceiling while the other's floor
+  or ceiling brings one back. `mycelium wire-check` names the pair (`presence bands overlap`, a warning) unless they
+  are disjoint (an `eq` on one attribute to different values, or different `schema_id`s), are one band however
+  spelled, or are a floor and a ceiling over one population with the floor at or below the ceiling; give them
+  room, drop a ceiling, or make the filters disjoint.
 - **Seeing who withdrew.** `mycelium_artifact_presence_sheds_total` counts this node's withdrawals; for the band
   and the rank, run the stem with `--trace-dir` and read the `prov.shed` decisions with `mycelium explain`
   ([diagnostics.md](diagnostics.md) § reading what a node decided): `above_ceiling` is a withdrawal,

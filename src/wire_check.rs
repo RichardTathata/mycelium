@@ -724,21 +724,33 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         }
     }
 
-    // Two capped bands over one capability shed independently, each against its own ceiling, while the other's
-    // floor or demand can bring a provider back. One band declared in two units is one band (the same filter and
-    // ceiling); bands are disjoint when one attribute is constrained to equal different values in each.
-    let capped: Vec<(&Unit, &crate::capability_config::PresenceDecl)> = units.iter()
-        .flat_map(|u| u.config.presence.iter().filter(|p| p.max_providers.is_some()).map(move |p| (u, p)))
+    // Two bands over one capability, at least one capped, fight when a provider both can match is shed by one and
+    // brought back by the other (its floor, or its own different ceiling). Identity is the runtime's (`shed_band`:
+    // the filter with ranking and max age cleared), so one band spelled two ways is one band.
+    let all: Vec<(&Unit, &crate::capability_config::PresenceDecl, Option<CapFilter>)> = units.iter()
+        .flat_map(|u| u.config.presence.iter().map(move |p| (u, p, p.filter.to_filter().ok().map(presence_identity))))
         .collect();
     let mut named: BTreeSet<(String, String)> = BTreeSet::new();
-    for (i, (ua, a)) in capped.iter().enumerate() {
-        for (ub, b) in &capped[i + 1..] {
-            if (a.filter.ns.as_str(), a.filter.name.as_str()) != (b.filter.ns.as_str(), b.filter.name.as_str()) {
+    for (i, (ua, a, fa)) in all.iter().enumerate() {
+        for (ub, b, fb) in &all[i + 1..] {
+            let (Some(fa), Some(fb)) = (fa, fb) else { continue };
+            if (fa.namespace.as_ref(), fa.name.as_ref()) != (fb.namespace.as_ref(), fb.name.as_ref())
+                || (a.max_providers.is_none() && b.max_providers.is_none())
+                || presence_disjoint(a, b)
+            {
                 continue;
             }
-            let band = |p: &crate::capability_config::PresenceDecl| (serde_json::to_string(&p.filter).unwrap_or_default(), p.max_providers);
-            if band(a) == band(b) || presence_disjoint(&a.filter, &b.filter) {
-                continue;
+            if fa.encode() == fb.encode() {
+                // One population: two ceilings fight only if they differ; a floor and a ceiling only if the floor is above it.
+                let fights = match (a.max_providers, b.max_providers) {
+                    (Some(x), Some(y)) => x != y,
+                    (Some(max), None) => b.min_providers > max,
+                    (None, Some(max)) => a.min_providers > max,
+                    (None, None) => false,
+                };
+                if !fights {
+                    continue;
+                }
             }
             let (ka, kb) = (band_label(a), band_label(b));
             if !named.insert(if ka <= kb { (ka.clone(), kb.clone()) } else { (kb.clone(), ka.clone()) }) {
@@ -749,9 +761,9 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                 kind:     "presence bands overlap".into(),
                 unit:     Some(ua.name.clone()),
                 message:  format!(
-                    "presence {ka} ({}) and {kb} ({}) can match the same providers and each sheds against its own \
-                     ceiling, so they can trade a provider back and forth — give them room, drop one ceiling, or make \
-                     their filters disjoint",
+                    "presence {ka} (unit {}) and {kb} (unit {}) can match the same providers: a capped band sheds against \
+                     its ceiling while the other's floor or ceiling brings a provider back, so they can trade one back and \
+                     forth — give them room, drop a ceiling, or make their filters disjoint",
                     ua.name, ub.name
                 ),
             });
@@ -913,21 +925,34 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
     }
 }
 
-/// `ns/name{attrs}≤max` — how a presence band is named in a finding.
-fn band_label(p: &crate::capability_config::PresenceDecl) -> String {
-    let attrs: Vec<String> = p.filter.attrs.iter()
-        .map(|(k, v)| format!("{k}={}", serde_json::to_string(v).unwrap_or_default()))
-        .collect();
-    let attrs = if attrs.is_empty() { String::new() } else { format!("{{{}}}", attrs.join(",")) };
-    format!("{}/{}{attrs}≤{}", p.filter.ns, p.filter.name, p.max_providers.map_or("∞".into(), |m| m.to_string()))
+/// A presence filter's identity, as the runtime reads it (`mycelium_wasm_host::provisioner::shed_band`): ranking and
+/// max age cleared.
+fn presence_identity(f: CapFilter) -> CapFilter {
+    CapFilter { ranking: None, max_age: None, ..f }
 }
 
-/// Whether no capability can match both filters: some attribute each constrains to **equal** a different value.
-/// Anything else (ranges, `ne`, an attribute only one names) is treated as possibly overlapping.
-fn presence_disjoint(a: &crate::capability_config::FilterDecl, b: &crate::capability_config::FilterDecl) -> bool {
+/// `ns/name{attrs}@schema min..max` — how a presence band is named in a finding.
+fn band_label(p: &crate::capability_config::PresenceDecl) -> String {
+    let attrs: Vec<String> = p.filter.attrs.iter()
+        .map(|(k, v)| format!("{k}={}", v.to_constraint().map_or_else(|e| e, |c| format!("{c:?}"))))
+        .collect();
+    let attrs = if attrs.is_empty() { String::new() } else { format!("{{{}}}", attrs.join(",")) };
+    let schema = p.filter.schema_id.as_ref().map_or(String::new(), |s| format!("@{s}"));
+    format!("{}/{}{attrs}{schema} {}..{}", p.filter.ns, p.filter.name, p.min_providers,
+            p.max_providers.map_or("∞".into(), |m| m.to_string()))
+}
+
+/// Whether no capability can match both bands: different `schema_id`s (both set), or some attribute each constrains
+/// to **equal** a different value. Anything else (`ne`, ranges, an attribute only one names) may overlap.
+fn presence_disjoint(a: &crate::capability_config::PresenceDecl, b: &crate::capability_config::PresenceDecl) -> bool {
     use crate::capability::CapConstraint;
-    a.attrs.iter().any(|(k, ca)| {
-        b.attrs.get(k).is_some_and(|cb| match (ca.to_constraint(), cb.to_constraint()) {
+    if let (Some(x), Some(y)) = (&a.filter.schema_id, &b.filter.schema_id)
+        && x != y
+    {
+        return true;
+    }
+    a.filter.attrs.iter().any(|(k, ca)| {
+        b.filter.attrs.get(k).is_some_and(|cb| match (ca.to_constraint(), cb.to_constraint()) {
             (Ok(CapConstraint::Eq(x)), Ok(CapConstraint::Eq(y))) => x != y,
             _ => false,
         })
@@ -1135,25 +1160,34 @@ mod tests {
         assert!(e.contains("unknown artifact kind") && e.contains("native"), "{e}");
     }
 
-    /// Two `[[presence]]` bands with ceilings over providers both can match trade a provider back and forth —
-    /// each sheds against its own ceiling, and the other's floor or demand brings one back. Named at design time;
-    /// bands provably disjoint (an equality constraint on one attribute, to different values), the same band
-    /// declared in two units, and a band without a ceiling are not.
+    /// Two `[[presence]]` bands over providers both can match, at least one with a ceiling, trade a provider back and
+    /// forth — the capped one sheds against its ceiling while the other's floor (or its own ceiling) brings one back.
+    /// Named at design time; not named: bands provably disjoint (an `eq` on one attribute to different values, or
+    /// different `schema_id`s), one band however it is spelled (the runtime's identity: ranking ignored, `x = "v"` and
+    /// `x = { eq = "v" }` alike), a floor and a ceiling over the same population with the floor at or below it, and two
+    /// floors (#560's review).
     #[test]
     fn presence_bands_that_overlap_with_ceilings_are_named() {
         let host = unit("depot", "[[capability]]\nns=\"route\"\nname=\"optimize\"\n[capability.attrs]\nregion=\"eu\"\n");
-        let p = |name: &str, body: &str| unit(name, &format!("[[presence]]\nns=\"route\"\nname=\"optimize\"\nmin_providers=1\n{body}"));
+        let p = |name: &str, body: &str| unit(name, &format!("[[presence]]\nns=\"route\"\nname=\"optimize\"\n{body}"));
         let overlap = |units: &[Unit]| {
             let r = check(units, &[], &CheckOptions::default());
-            kinds(&r).contains(&("presence bands overlap", Severity::Warning))
+            kinds(&r).iter().filter(|k| **k == ("presence bands overlap", Severity::Warning)).count()
         };
-        let any3 = p("a", "max_providers=3\n");
-        let eu2 = p("b", "max_providers=2\n[attrs]\nregion=\"eu\"\n");
-        let us2 = p("c", "max_providers=2\n[attrs]\nregion=\"us\"\n");
-        let floor_only = p("d", "[attrs]\nregion=\"eu\"\n");
-        assert!(overlap(&[host.clone(), any3.clone(), eu2.clone()]), "an unattributed band and an `eu` band, both capped");
-        assert!(!overlap(&[host.clone(), eu2.clone(), us2.clone()]), "`eu` and `us` cannot share a provider");
-        assert!(!overlap(&[host.clone(), eu2.clone(), p("e", "max_providers=2\n[attrs]\nregion=\"eu\"\n")]), "one band, declared twice");
-        assert!(!overlap(&[host.clone(), any3.clone(), floor_only]), "a band with no ceiling sheds nothing");
+        let any3 = p("a", "min_providers=1\nmax_providers=3\n");
+        let eu2 = p("b", "min_providers=1\nmax_providers=2\n[presence.attrs]\nregion=\"eu\"\n");
+        let us2 = p("c", "min_providers=1\nmax_providers=2\n[presence.attrs]\nregion=\"us\"\n");
+        let eu_floor3 = p("d", "min_providers=3\n[presence.attrs]\nregion=\"eu\"\n");
+        assert_eq!(overlap(&[host.clone(), any3.clone(), eu2.clone()]), 1, "an unattributed band and an `eu` band, both capped");
+        assert_eq!(overlap(&[host.clone(), eu2.clone(), us2.clone()]), 0, "`eu` and `us` cannot share a provider");
+        assert_eq!(overlap(&[host.clone(), eu2.clone(), p("e", "min_providers=1\nmax_providers=2\n[presence.attrs]\nregion={ eq = \"eu\" }\n[presence.ranking]\nattribute=\"load\"\norder=\"ascending\"\n")]), 0,
+                   "one band, spelled and ranked differently");
+        assert_eq!(overlap(&[host.clone(), any3.clone(), eu_floor3.clone()]), 1, "an `eu` floor against an unattributed ceiling");
+        assert_eq!(overlap(&[host.clone(), eu2.clone(), eu_floor3]), 1, "a floor above a ceiling over one population");
+        assert_eq!(overlap(&[host.clone(), eu2.clone(), p("f", "min_providers=2\n[presence.attrs]\nregion=\"eu\"\n")]), 0,
+                   "a floor at the ceiling over one population");
+        assert_eq!(overlap(&[host.clone(), p("g", "min_providers=1\n"), p("h", "min_providers=2\n[presence.attrs]\nregion=\"eu\"\n")]), 0, "two floors");
+        assert_eq!(overlap(&[host.clone(), p("i", "min_providers=1\nmax_providers=2\nschema_id=\"v1\"\n"),
+                             p("j", "min_providers=1\nmax_providers=2\nschema_id=\"v2\"\n")]), 0, "different schemas");
     }
 }
