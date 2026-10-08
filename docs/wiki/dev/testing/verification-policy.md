@@ -63,7 +63,14 @@ an auditor enumerated surfaces from the code instead of the description:
   shell grammar and fails the listing on a call it cannot read rather than dropping it. That covers
   `scripts/test-*` (except the inventory's own mutation suite, below), `wire-check-examples.sh` (one case per
   example directory), the seven `ci_smoke.sh` suites (each demo, mode or section a case; one case where the
-  suite is one dependent scenario) and the LangGraph ladder (listed from the directory). The **Docker suites**
+  suite is one dependent scenario), the LangGraph ladder (listed from the directory) and every single `cargo run
+  --example` demonstration in `ci.yml`: each runs through `scripts/example-case.sh`, which prints `@@case@@
+  examples::<NAME>` and runs the command unchanged (it fronts only `cargo [+toolchain] run`), and whose `--list` reads
+  those calls from `ci.yml` — failing on a call it cannot read and on a `cargo run --example` it does not front. A
+  wrapped example that fails to compile counts as executed: its step is red, so the run is red anyway. An example run
+  from inside a script or as a process (`compare_stem_observations`, `reason_node`, `reheal_node`, `wiki_chat`,
+  `three_node_demo`, `confined_fleet_node`) is not a case of its own — its suite's cases are observed, the example
+  only by the static check below. The **Docker suites**
   (`cluster-suites.yml`: the 13 integration scenarios, overlay S11–S13, the ten federation legs, the
   confined-fleet phases, the stem-examples demos) run in a workflow this job never reads, so that workflow
   checks its own: before it starts Docker, each job lists its suite's cases on the host — derived from the
@@ -89,7 +96,7 @@ an auditor enumerated surfaces from the code instead of the description:
   static check refuses before push since 2026-10-08: it evaluates each gate against the features the step's
   **test build** enables, dev-dependency unification included. A test that needs `gateway` or `tls` off lives in
   `mycelium-gateway-free-tests` or `mycelium-tls-free-tests`. Of the script-style suites: a step's inline commands
-  and single `cargo run --example` demonstrations (an exit code, no cases), a case a suite runs but does not list
+  (an exit code, no cases; a single `cargo run --example` demonstration is a case since 2026-10-08), a case a suite runs but does not list
   (it counts as executed — the list catches the opposite drift, a listed case that stopped running), and the scale
   suites (`scale-nightly.yml`, a self-hosted runner that is offline — V1). TypeScript
   tests are known by name since #551 (jest's `--json` report lists skipped ones too). It keys an integration
@@ -115,6 +122,18 @@ an auditor enumerated surfaces from the code instead of the description:
   `if:` but `false` as running, and flattened shell control flow (about 40 bypasses). The scan is now
   scope- and string-aware, follows `#[path]`, inline modules, binary roots and integration-test submodules,
   reports files it cannot reach, allow-lists step conditions, and reads manifest switches.
+- `scripts/check-example-matrix.py` (in `make check` and CI; self-test `scripts/test-check-example-matrix.py`) — the
+  same rule for `examples/README.md`'s **CI** column: every ✓ row needs a step of an **every-change** workflow (an
+  unfiltered `pull_request` trigger) that executes it — a wrapped `cargo run --example`, a built example run as a
+  program, a script a step runs (in an executing position: the program, an interpreter's script argument, `docker
+  build -f`) that runs it, or a listed suite case whose suite a step reached and which takes the case as its cargo
+  target; a **✓ᵖ** row needs such a site only in a **path-filtered** workflow (`cluster-suites.yml`); and every
+  example CI executes needs a ✓/✓ᵖ row (or, if it has no row, a place among the README's harness binaries). It is
+  derived from the workflows, the scripts their steps reach and the suites' own `--list`s, and skips heredoc bodies,
+  comments and Python triple-quoted strings; what it still reads as run or misses is listed in its docstring. Its
+  first run found `reason_node` and `reheal_node` executed in every run under rows saying ·; the first review found
+  `confined_fleet_node` ✓ only through the path-filtered Docker suites (now ✓ᵖ). It reads `paths:` itself:
+  `check-test-inventory.py` still counts a path-filtered workflow as running, unchanged.
 - **What the inventory found** (each now runs in CI, all passing): `mycelium-wasm-host`'s `rule_catalogue` and
   `gateway` integration tests, its provisioner's `gateway` tests and the stem's `llm` (`[[serve]]`) tests; the
   skillrunner binary's unit tests; the root and co-op doctests (one, `lock_service`'s `with_lock`, had stopped

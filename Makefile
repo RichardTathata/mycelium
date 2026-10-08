@@ -178,6 +178,8 @@ check:
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
 	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)
 	./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py  # …and the check catches every bypass a review found
+	./scripts/with-pyyaml.sh scripts/check-example-matrix.py     # examples/README.md's CI column matches what CI executes, both ways
+	./scripts/with-pyyaml.sh scripts/test-check-example-matrix.py  # …and a ✓ row with no run, or a run with a · row, fails it
 	python3 scripts/test-ci-test-coverage.py                    # the observed-coverage job's log parser (the record of rule 3)
 	./scripts/test-ci-retest.sh                                 # the flake tier fails a crash, and a retry that ran nothing
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)

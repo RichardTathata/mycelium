@@ -29,6 +29,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dropped) and CI starts it with `RUST_LOG=warn,mycelium_reason=debug`; the Python job keeps the nodes' logs as an
   artifact on failure. A guard, `tests/first_contact_capability.rs`, holds a capability advertised at start — before the
   peer starts, and after — to reach that peer within 15 s, well under one 30 s refresh.
+- **Single example demonstrations are cases, and the examples matrix's CI column is checked.** The eighteen
+  `cargo run … --example` steps in `ci.yml` were one exit code each, so a step that stopped running was invisible.
+  Each now runs through `scripts/example-case.sh`, which prints `@@case@@ examples::<NAME>` and runs the command
+  unchanged; its `--list` reads the calls from `ci.yml` (failing on one it cannot read, or on a `cargo run
+  --example` it does not front), and the `test-universe` job lists them, so the `test-coverage` job fails on a
+  demonstration that did not execute. `scripts/check-example-matrix.py` (in `make check` and CI; self-test
+  `scripts/test-check-example-matrix.py`, 12 cases) reads `examples/README.md`'s matrix and fails on a ✓ row no CI
+  step executes, and on an example CI executes whose row says · or that has no row — derived from the workflows,
+  the scripts their steps run, and the suites' own listings. Its first run found two rows wrong the other way:
+  `reason_node` and `reheal_node` run in every CI run (the LangGraph rungs' nodes, and the deploy/reheal rung's) and
+  said ·; they now say ✓. A new cell, **✓ᵖ**, marks an example executed only by a path-filtered workflow (the Docker
+  suites run on the changes that touch their paths, not on every change): `confined_fleet_node` was ✓ only through
+  them and is now ✓ᵖ. The wrapper fronts only `cargo [+toolchain] run`; an example run inside a script or as a
+  process is checked statically, not observed as a case of its own.
 
 ### Added
 

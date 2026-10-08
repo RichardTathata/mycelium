@@ -71,7 +71,14 @@ used to share `:8096` (`control_envelope_viz`, `guardrail_viz`) now differ and h
 *Surface* Web (browser UI) / CLI · *LLM* real (needs a model) / mock (echo, no key) / · none · *Audit* ✓
 emits a signed tamper-evident trail · *Metrics* ✓ built with the Prometheus recorder (the Ops Console
 **Metrics** tab climbs live) · *CI* ✓ **executed** on every change (the root `cargo run` gallery in
-`ci.yml`, a suite's `ci_smoke.sh`, the coop smoke, the Docker cluster suites, or the LangGraph rungs);
+`ci.yml`, a suite's `ci_smoke.sh`, the coop smoke, or the LangGraph rungs and the reason nodes they run
+against); ✓ᵖ executed only by a **path-filtered** workflow — the Docker cluster suites (`cluster-suites.yml`), which
+run on the pull requests and pushes to main that touch their paths, and nightly, not on every change — **checked
+both ways**: `scripts/check-example-matrix.py` (in `make check` and CI) finds, for every ✓ row, a step of an
+every-change workflow that executes it, for every ✓ᵖ row a path-filtered one and no every-change one, and fails on
+an example CI executes whose row says · or that has no row; each `cargo run … --example` in `ci.yml` goes through
+`scripts/example-case.sh`, so the `test-coverage` job sees it as a case that executed (an example run from inside
+a script or as a process is checked statically only);
 *Declared* ✓ the example has a **declaration directory** — `examples/units/<example>/`, its units in the
 `src/capability_config.rs` format, checked offline by `mycelium wire-check` in CI
 (`scripts/wire-check-examples.sh`; the `*_viz` variants share their base's directory) ·
@@ -120,7 +127,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`redistribution_cn`](../docs/guide/24-commitments.md#run-it) · [src](../mycelium-commitment/examples/redistribution_cn.rs) | · | ● | · | ● | Adv | CLI | · | · | · | ✓ | · |
 | [`authority_drain`](../docs/design/authority-at-execution.md#4-what-this-does-not-claim) · [src](authority_drain.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | · |
 | [`composed_commit`](../docs/design/composed-effect.md#9-enforced-at-the-destination-2026-09-29) · [src](composed_commit.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | · |
-| [`confined_fleet_node`](../docs/operations/confined-fleet.md#1-before-you-start-does-your-cni-enforce-networkpolicy) · [src](confined_fleet_node.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | [✓](units/confined_fleet_node/) |
+| [`confined_fleet_node`](../docs/operations/confined-fleet.md#1-before-you-start-does-your-cni-enforce-networkpolicy) · [src](confined_fleet_node.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ᵖ | [✓](units/confined_fleet_node/) |
 | **Coordination & identity integrity** | | | | | | | | | | | |
 | [`coordination_integrity`](../docs/guide/04-consensus.md#what-a-successful-election-means) · [src](coordination_integrity.rs) | · | · | ● | ○ | Adv | CLI | · | · | · | ✓ | · |
 | [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md#12--expect-one-node-to-end-up-holding-every-single-writer-role) · [src](coordinator_by_accretion.rs) | · | · | ○ | ● | Adv | CLI | · | · | · | ✓ | · |
@@ -158,8 +165,8 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`wiki_council_viz`](../mycelium-wiki/examples/README.md#wiki_council_viz-) · [src](../mycelium-wiki/examples/wiki_council_viz.rs) ★ | ○ | · | · | ● | Adv | Web | real | · | ✓ | · | · |
 | **Reasoning** — [`mycelium-reason/examples/README.md`](../mycelium-reason/examples/README.md) | | | | | | | | | | | |
 | [`fleet_reasoning`](../mycelium-reason/examples/README.md#fleet_reasoning) · [src](../mycelium-reason/examples/fleet_reasoning.rs) | · | · | · | ● | Adv | CLI | mock | · | · | ✓ | · |
-| [`reason_node`](../mycelium-reason/examples/README.md#reason_node) · [src](../mycelium-reason/examples/reason_node.rs) | ○ | · | · | ● | Adv | CLI | mock | · | · | · | · |
-| [`reheal_node`](../mycelium-reason/examples/README.md#reheal_node) · [src](../mycelium-reason/examples/reheal_node.rs) | ○ | · | ○ | ● | Adv | CLI | mock | · | · | · | · |
+| [`reason_node`](../mycelium-reason/examples/README.md#reason_node) · [src](../mycelium-reason/examples/reason_node.rs) | ○ | · | · | ● | Adv | CLI | mock | · | · | ✓ | · |
+| [`reheal_node`](../mycelium-reason/examples/README.md#reheal_node) · [src](../mycelium-reason/examples/reheal_node.rs) | ○ | · | ○ | ● | Adv | CLI | mock | · | · | ✓ | · |
 | [`ollama_serve`](../mycelium-reason/examples/README.md#ollama_serve) · [src](../mycelium-reason/examples/ollama_serve.rs) | · | · | · | ● | Adv | CLI | real | · | · | · | · |
 | [`openai_serve`](../mycelium-reason/examples/README.md#openai_serve) · [src](../mycelium-reason/examples/openai_serve.rs) | · | · | · | ● | Adv | CLI | real | · | · | · | · |
 | **Guardrails** — [`mycelium-guardrails/examples/README.md`](../mycelium-guardrails/examples/README.md) | | | | | | | | | | | |
