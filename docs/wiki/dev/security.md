@@ -520,3 +520,10 @@ predicate required *no bearer*, though a bearer never gated `/a2a` — the expos
 warning moved to `start()`. Tests seen failing first: `an_oidc_table_…`, `a_tls_table_…`. **The pattern:** a
 `#[cfg]`'d field plus a serde that ignores unknown keys is a setting that vanishes; a field present in every build
 with `#[cfg]`'d consumers is a setting that lies. The plan's I2 report is what makes both visible by construction.
+
+**A governed group's membership is governance (2.29.0).** `/gateway/mesh/group` (`mesh:write`) refuses a group under a
+live membership intent 403 `governed_group`; `/gateway/govern/group` (`govern:write`, audited) moves the node. The
+handler had named *who may change an electorate* an open question since 2026-09-24; the boundary chosen is the
+membership intent, because an election runs over any group and the intent is the operator's statement that this
+group's population is governed. Which membership *version* an election counts stays open.
+

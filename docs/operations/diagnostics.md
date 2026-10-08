@@ -412,7 +412,9 @@ decide**, deliberately. Two shapes, and the body tells you which:
   curl -s 'localhost:PORT/gateway/mesh/group?group=G'   # roster + declared_min
   ```
 
-- **`observed_members` below `declared_min`** — a fresh `MembershipIntent` (fresh = written within
+- **`observed_members` below `declared_min`** — the group is governed (under a membership intent), so a node joins it
+  through `POST /gateway/govern/group` (`govern:write`) — `/gateway/mesh/group` refuses a governed group 403
+  `governed_group`. A fresh `MembershipIntent` (fresh = written within
   the last **30 s**, `ELECTORATE_INTENT_TTL_MS`; the governor's own TTL on the same key is 5 min)
   says the group should hold at least `declared_min` and this node sees fewer, so its **view is
   partial**. Before v2.15.1 that intent never expired on this reader. Wait for the

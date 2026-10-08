@@ -105,7 +105,7 @@ pub enum ConsistencyError {
   and decide whether to retry with a new key or accept the other writer's value.
 - `ElectorateUnavailable` — the group roster this node sees is empty (an unknown or unjoined group) or
   smaller than a fresh `MembershipIntent { min }` declares, so no electorate could be established and nothing
-  was decided. Join the group or wait for the roster to converge (`GET /gateway/mesh/group?group=G`); do not
+  was decided. Join the group — `POST /gateway/mesh/group`, or `/gateway/govern/group` (`govern:write`) for a group under a membership intent — or wait for the roster to converge (`GET /gateway/mesh/group?group=G`); do not
   read it as a refusal of the value.
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
