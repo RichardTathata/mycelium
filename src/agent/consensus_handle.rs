@@ -871,8 +871,17 @@ mod tests {
         );
 
         // An idempotent re-COMMIT of the same value is legal and must not trip — checked once it has been seen
-        // delivered, so a shed emit cannot pass this vacuously.
-        let conflicts = a.system_stats().commit_conflicts;
+        // delivered, so a shed emit cannot pass this vacuously. The baseline is taken once the count is stable: a second
+        // forged frame delivered before the tripwire was seen may still be queued (#569's review).
+        let mut conflicts = a.system_stats().commit_conflicts;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let now = a.system_stats().commit_conflicts;
+            if now == conflicts {
+                break;
+            }
+            conflicts = now;
+        }
         let idempotent = ConsensusMsg::Commit { slot: Arc::from("trip/slot"), ballot: 43, value: Bytes::from_static(b"genuine") };
         let body = encode_consensus_msg(&idempotent);
         // A second subscriber sees what the listener sees (one fan-out, `deliver`), so seeing it here means delivered.
@@ -899,9 +908,11 @@ mod tests {
         tripwire_case(0.0).await;
     }
 
-    /// #568: the tripwire test failed once under the strict gate — its one forged COMMIT, emitted while the queues were
-    /// filling, was shed. With the COMMIT queue held 90% full the forged frame is shed nine times in ten; the test
-    /// still holds because it repeats the emit until the tripwire sees it.
+    /// #568: the tripwire test failed once under the strict gate — its one forged COMMIT was shed: when the proposal
+    /// returns, the proposer's own COMMIT still sits in the listener's 256-slot queue, so the fill is 1/256 and a single
+    /// emit is shed about 0.4% of the time. Here the junk loop drives the COMMIT fill (the max over its subscribers) to
+    /// 0.9, so the forged frame's first emit is shed nine times in ten, and later ones at the stalled subscriber's ~0.23;
+    /// the test holds because it repeats the emit until the tripwire sees it.
     #[tokio::test]
     async fn the_tripwire_holds_under_a_loaded_signal_queue() {
         tripwire_case(0.9).await;
