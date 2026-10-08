@@ -86,6 +86,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that could be asked, is `refused` (403, which the checkpointer reads as `unauthorized`). For that, `rpc_rx`'s
   caller-context refusal is now JSON built with `json!` — an error text with quotes made it invalid JSON, read as
   corrupt — and carries `reason` (`CallerError::code`). See `mycelium-reason/CHANGELOG.md`.
+- **The commit-conflict tripwire test assumed a local emit is a delivery (#568).** It emitted one forged COMMIT right
+  after a consensus round — when the proposer's own COMMIT still sat in the listener's 256-slot queue (fill 1/256) — and a
+  Cluster signal's local delivery is shed with probability equal to that fill, ~0.4%; it failed once under the strict gate. It re-emits until the tripwire
+  fires and checks the idempotent COMMIT only once it is seen delivered (that half could pass vacuously). New
+  `the_tripwire_holds_under_a_loaded_signal_queue` meets the forged frame's first emit with a 90%-full queue: the
+  single-emit version failed it 3/3. `test_signal_group_admitted_when_member`, the same latent shed on an unstarted agent
+  (fill 1/1024), re-emits too.
+  Test-only; the tripwire itself was right.
 
 ## [2.27.0] — 2026-10-07
 
