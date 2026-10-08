@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+- **A recorded consensus limit, stated where operators look.** A vote is bound to the value it voted for (v2.14.0) but
+  not to a membership version, so two proposers whose roster views differ by two or more members during one election
+  can commit different values — detected by the commit-conflict tripwire, converged by LWW, harmless where exclusive work
+  is fenced on the epoch. Guide 04 § *Changing an electorate* (change a governed group one member at a time, let the
+  roster converge, fence on the epoch), `diagnostics.md`'s commit-conflict runbook, a row on `what-is-proven.md`, and the
+  2026-09-24 record's stale "OPEN, unfixed" header corrected (the value half shipped; the membership half is a recorded
+  limit, its full fix — joint-consensus reconfiguration — not planned).
+
 ## [2.29.0] — 2026-10-08
 
 **Who changes an electorate.** A governed group's members are its elections' roster and quorum, yet any `mesh:write`

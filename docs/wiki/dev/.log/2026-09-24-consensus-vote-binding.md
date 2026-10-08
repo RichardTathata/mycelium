@@ -1,6 +1,15 @@
 # Votes are not bound to what they voted for — 2026-09-24
 
-**Status: OPEN, unfixed. Safety class, not liveness.** Found by a third-party source review of the
+**Status (updated 2026-10-08): half fixed.** Binding a vote to the *value* it voted for shipped in v2.14.0
+(`ConsensusMsg::VoteForValue`, #378, with one vote per ballot and accepted-value preservation; restart memory #382). Binding
+it to a *membership epoch* — step 1's second half below — was not built, and stays open as a recorded limit, not planned
+work: two proposers whose roster views differ by two or more members during one election can reach quorums that do not
+intersect and commit different values. A roster digest in the vote alone does not close it (the voters' views differ too);
+the full fix is reconfiguration by joint consensus — committed membership epochs, quorums in old and new during a change —
+which would make governed-group membership consensus-managed state rather than emergent. What limits and detects it, and
+what operators do, is in guide 04 § *Changing an electorate* and `diagnostics.md` § *Consensus commit conflict*.
+
+*Original status:* **OPEN, unfixed. Safety class, not liveness.** Found by a third-party source review of the
 S12 investigation; verified here against `origin/main` @ `7cb3b87`.
 
 Stated in the three-part form this investigation should have used from the start:

@@ -102,6 +102,17 @@ The distinction is not pedantry. LWW can decide which *record* survives; it cann
 callers each performed after being told they had won. *Convergent leader preference* and *exclusive
 ownership* are two capabilities, and only the second needs a fence.
 
+**Changing an electorate: one member at a time.** A vote is bound to the value it voted for, but not to the
+membership it was counted against: each proposer computes its quorum from the roster *it* sees. If that view differs
+by **two or more members** between proposers during one election — say `{a,b,c}` (quorum 2) against `{a,b,c,d,e}`
+(quorum 3) — the two quorums need not share a voter, and both can commit different values for the slot. A single
+member joining or leaving cannot cause it (the quorums still intersect). It is detected — the commit-conflict tripwire
+counts it and refuses to endorse the second value — and LWW converges every node to one value; what it cannot undo is
+work done on the losing value in between. So: **change a governed group's membership one node at a time, and let the
+roster converge on every node** (`GET /gateway/mesh/group?group=G`) before the next change; and **fence exclusive work
+on the epoch** as above, which keeps a resource correct even then. The full fix — committed membership epochs with
+joint-consensus transitions — is recorded, not planned (`docs/wiki/dev/.log/2026-09-24-consensus-vote-binding.md`).
+
 **Run it.** All three claims as one narrative, each act asserting:
 
 ```bash

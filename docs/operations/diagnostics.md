@@ -136,7 +136,12 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   partition healing.
 - **Read:** gauge `mycelium_consensus_commit_conflicts` (`delta > 0`) or the `commit_conflicts`
   tripwire on `/stats`; snapshot `commit_conflict_slots[]` (the hot slots).
-- **Do:** check consensus membership and whether the cluster recently rejoined after a split.
+- **Do:** check consensus membership and whether the cluster recently rejoined after a split — or whether a
+  group's roster changed by **two or more members** during an election (a known limit: votes are not bound to a
+  membership version, so proposers with different views can reach quorums that do not intersect — guide 04 §
+  *Changing an electorate*). Change a governed group's membership one node at a time and let the roster converge
+  before the next change; confirm the work the slot guards is fenced on the epoch, so the losing value's holder was
+  refused at the resource.
 
 ### Consensus stalled — quorum unavailable
 
