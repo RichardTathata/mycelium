@@ -442,8 +442,10 @@ pub(crate) enum ConsensusMsg {
         accepted_digest: Option<[u8; 32]>,
         /// The accepted value, when this acceptor still has it.
         accepted_value:  Option<Bytes>,
-        /// The live committed value for the slot on this acceptor, if any.
-        committed:       Option<Bytes>,
+        /// Digest of the live committed value for the slot on this acceptor, if any — a digest,
+        /// because the proposer only asks whether it is its own value, and a full value here would
+        /// double the reply for a large slot.
+        committed_digest: Option<[u8; 32]>,
     },
 }
 
@@ -466,9 +468,9 @@ pub struct ConsensusListenerHandle {
 
 /// Well-known signal kind strings for consensus messages.
 pub mod consensus_kind {
-    /// Phase 1: proposer broadcasts a candidate value.
+    /// The proposer's messages: phase 1's `Prepare` and phase 2's `Propose` (the candidate value).
     pub const PROPOSE: &str = "consensus.propose";
-    /// Phase 1: voter confirms it will support the ballot.
+    /// The acceptor's answers: phase 1's `PrepareAck` (to the proposer) and phase 2's votes.
     pub const VOTE:    &str = "consensus.vote";
     /// Phase 2: any node broadcasts that quorum has been reached.
     pub const COMMIT:  &str = "consensus.commit";
@@ -718,6 +720,15 @@ impl ConsensusEngine {
         self.get(&format!("{}{}", consensus_ns::DECIDED, slot)).map(|b| decode_ballot(&b)).unwrap_or(0)
     }
 
+    /// Whether this node can see the slot's latest decision is **over**: it holds the committed
+    /// entry — data or tombstone — and the entry is not live (its lease expired, or a lock release
+    /// tombstoned it). An absent entry is *not* over: the commit may simply not have arrived yet.
+    fn decision_over(&self, slot: &str) -> bool {
+        let present = self.task_ctx.kv_state.store.pin()
+            .get(format!("{}{}", consensus_ns::COMMITTED, slot).as_str()).is_some();
+        present && self.live_committed(slot).is_none()
+    }
+
     /// Records that `slot` was decided at `ballot`, never lowering what is recorded.
     fn record_decided(&self, slot: &str, ballot: u64) {
         if ballot > self.decided_floor(slot) {
@@ -755,7 +766,6 @@ impl ConsensusEngine {
     }
 
     /// Tombstones `key` in the KV store and gossips the deletion.
-    /// Used to clean up ballot entries once a slot has committed.
     fn kv_delete(&self, key: &str) {
         let tc  = &self.task_ctx;
         let upd = make_gossip_update(&tc.node_id, tc.default_ttl, Arc::from(key), Bytes::new(), true, &tc.hlc);
@@ -923,7 +933,29 @@ impl ConsensusEngine {
     /// and re-evaluates the effective quorum size mid-ballot when any member transitions.
     /// The callback is built by the call site so `propose` does not read `KvState`
     /// directly — the opacity query strategy is an injected dependency.
+    /// [`propose_inner`](Self::propose_inner), with one translation: a commit of a value **other
+    /// than the caller's** — adopted in phase 1 from what a quorum had already accepted — is
+    /// reported as [`Superseded`](ConsensusResult::Superseded). The slot was decided, and not for
+    /// what the caller asked; a caller acting on `Committed` would otherwise act on its own value
+    /// while the slot holds another (second review, M3).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn propose(
+        &self,
+        scope:             SignalScope,
+        slot:              Arc<str>,
+        value:             Bytes,
+        quorum_size:       usize,
+        config:            ConsensusConfig,
+        opaque_recompute:  Option<OpaqueRecompute>,
+    ) -> ConsensusResult {
+        let asked = value.clone();
+        own_or_superseded(
+            self.propose_inner(scope, slot, value, quorum_size, config, opaque_recompute).await,
+            &asked,
+        )
+    }
+
+    async fn propose_inner(
         &self,
         scope:             SignalScope,
         slot:              Arc<str>,
@@ -1046,14 +1078,11 @@ impl ConsensusEngine {
                     value = v;
                     None
                 }
-                Phase1::Committed(existing) => {
-                    if superseded_by_live(&existing, &value) {
-                        return ConsensusResult::Superseded {
-                            slot,
-                            ballot: self.read_ballot(&ballot_key),
-                        };
-                    }
-                    None
+                Phase1::DecidedOtherwise => {
+                    return ConsensusResult::Superseded {
+                        slot,
+                        ballot: self.read_ballot(&ballot_key),
+                    };
                 }
                 Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
                 Phase1::Refused(seen) => Some(seen),
@@ -1063,6 +1092,12 @@ impl ConsensusEngine {
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
+
+            // Phase 2 listens on a fresh refusal channel: a refusal of this ballot's *prepare*, still
+            // queued after the promise quorum formed, would otherwise abort a ballot already won.
+            nack_rx = self.task_ctx.signal_handlers.register_with_capacity(
+                Arc::from(consensus_kind::NACK), 64,
+            );
 
             // **Claim this node's vote before proposing, not after.** Proposing a value *is*
             // accepting it, so it goes through this node's shared acceptor memory — the same gate
@@ -1214,6 +1249,17 @@ impl ConsensusEngine {
         groups: &[GroupQuorum],
         config: ConsensusConfig,
     ) -> ConsensusResult {
+        let asked = value.clone();
+        own_or_superseded(self.cross_propose_inner(slot, value, groups, config).await, &asked)
+    }
+
+    async fn cross_propose_inner(
+        &self,
+        slot:   Arc<str>,
+        value:  Bytes,
+        groups: &[GroupQuorum],
+        config: ConsensusConfig,
+    ) -> ConsensusResult {
         if groups.is_empty() {
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_consensus_timeouts_total", "reason" => "empty_groups")
@@ -1307,11 +1353,8 @@ impl ConsensusEngine {
                     value = v;
                     None
                 }
-                Phase1::Committed(existing) => {
-                    if superseded_by_live(&existing, &value) {
-                        return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
-                    }
-                    None
+                Phase1::DecidedOtherwise => {
+                    return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
                 Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
                 Phase1::Refused(seen) => Some(seen),
@@ -1321,6 +1364,11 @@ impl ConsensusEngine {
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
+
+            // A fresh refusal channel for phase 2 — see `propose`.
+            nack_rx = self.task_ctx.signal_handlers.register_with_capacity(
+                Arc::from(consensus_kind::NACK), 64,
+            );
 
             // The node-level gate `propose` passes too: one value per ballot from this node, however
             // many proposals it runs for the slot at once. This proposer does not count its own vote
@@ -1514,7 +1562,7 @@ impl ConsensusEngine {
                     Some(sig) = vote_rx.recv() => {
                         let Some(ConsensusMsg::PrepareAck {
                             slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
-                            accepted_value, committed,
+                            accepted_value, committed_digest,
                         }) = self.decode_verify(&sig.payload) else { continue };
                         if s != *slot || b != ballot { continue; }
                         if let Some(ts) = trust_set
@@ -1522,8 +1570,9 @@ impl ConsensusEngine {
                         // A live commit of a different value ends this proposal. The same value — a
                         // leased slot being renewed — is one promise like any other: no shortcut
                         // past the quorum, whose reports still decide.
-                        if let Some(c) = committed
-                            && c != *current { return Phase1::Committed(c); }
+                        if committed_digest.is_some_and(|d| d != value_digest(current)) {
+                            return Phase1::DecidedOtherwise;
+                        }
                         if accepted_ballot > 0 {
                             // A digest is always sent with an acceptance; a value without one is
                             // checked against its own digest by `choose_after_prepare`.
@@ -1554,9 +1603,13 @@ impl ConsensusEngine {
             }
         }
         // `current` is the proposer's own value, or one adopted from a refusal; the reports decide
-        // whether it may still be carried. Acceptances at or below the decided ballot belong to a
-        // finished decision — after a lease expires, to the one the slot reopened from.
-        reports.retain(|r| r.0 > floor);
+        // whether it may still be carried. Acceptances at or below the decided ballot belong to the
+        // previous decision — but are set aside **only when this node can see that decision is
+        // over**: it holds the committed entry and it is not live (a lease expired, a lock released).
+        // `decided` and `committed` travel as separate keys, so a node can learn the floor before
+        // the commit; filtering then would hide a live decision and let a second value commit
+        // (second review, M1). Without the filter the worst case is re-committing the old value.
+        set_aside_finished(&mut reports, floor, self.decision_over(slot));
         Phase1::Ready(choose_after_prepare(current, &reports))
     }
 
@@ -1776,6 +1829,29 @@ impl ConsensusEngine {
     }
 }
 
+/// Phase 1's reports, with the previous decision's acceptances (at or below `floor`) set aside —
+/// **only** when this node sees that decision is `over`; see `ConsensusEngine::prepare_phase`.
+fn set_aside_finished(reports: &mut Vec<AcceptReport>, floor: u64, over: bool) {
+    if over {
+        reports.retain(|r| r.0 > floor);
+    }
+}
+
+/// Whether a COMMIT at `ballot` belongs to a decision this node knows has been superseded (below the
+/// floor) or has ended (at the floor, and `over`) — such a COMMIT is not re-stamped.
+fn commit_is_stale(ballot: u64, floor: u64, over: bool) -> bool {
+    ballot < floor || (ballot == floor && over)
+}
+
+/// A `Committed` for a value other than `asked` becomes `Superseded` — see `ConsensusEngine::propose`.
+fn own_or_superseded(result: ConsensusResult, asked: &Bytes) -> ConsensusResult {
+    match result {
+        ConsensusResult::Committed { slot, value, ballot, .. } if value != *asked =>
+            ConsensusResult::Superseded { slot, ballot },
+        other => other,
+    }
+}
+
 /// The random pause before a ballot retry — breaks lock-step livelock between proposers that
 /// increment their ballots in unison. Through the replay seam, so a recording replays its draws.
 async fn ballot_retry_pause(jitter_ms: u64) {
@@ -1789,8 +1865,8 @@ async fn ballot_retry_pause(jitter_ms: u64) {
 enum Phase1 {
     /// A quorum promised; the choice says what this ballot may carry.
     Ready(Phase1Choice),
-    /// A promiser holds a live committed value for the slot.
-    Committed(Bytes),
+    /// A promiser holds a live commit of a different value for the slot.
+    DecidedOtherwise,
     /// An acceptor has promised this ballot (to another proposer) or a higher one.
     Refused(u64),
     /// No quorum promised within the timeout.
@@ -1907,10 +1983,12 @@ pub(crate) fn encode_acceptor(state: &AcceptorSlot) -> Bytes {
     let (ab, d) = state.accepted.as_ref().map(|(b, a)| (*b, a.digest())).unwrap_or((0, [0u8; 32]));
     v.extend_from_slice(&ab.to_le_bytes());
     v.extend_from_slice(&d);
-    // The value itself when it fits under the KV write cap, so a restarted acceptor can still hand
-    // it to a proposer; without it, a value known only by digest blocks every other proposal.
+    // The value itself when it is small, so a restarted acceptor can still hand it to a proposer;
+    // without it, a value known only by digest blocks every other proposal for the slot. Small,
+    // because the record is gossiped cluster-wide and kept: a large value would be paid for on
+    // every node, per acceptor, for good.
     if let Some((_, Accepted::Full(value))) = &state.accepted
-        && ACCEPTOR_RECORD_LEN + value.len() <= mycelium_core::framing::MAX_KV_WRITE_BYTES {
+        && value.len() <= ACCEPTOR_RECORD_VALUE_CAP {
             v.extend_from_slice(value);
         }
     Bytes::from(v)
@@ -1918,6 +1996,10 @@ pub(crate) fn encode_acceptor(state: &AcceptorSlot) -> Bytes {
 
 #[cfg(feature = "consensus")]
 const ACCEPTOR_RECORD_LEN: usize = 1 + 8 + 1 + 8 + 1 + 8 + 32;
+
+/// The largest accepted value the durable record carries; a larger one is recorded by digest only.
+#[cfg(feature = "consensus")]
+pub(crate) const ACCEPTOR_RECORD_VALUE_CAP: usize = 4096;
 
 /// Decode a durable acceptor record in either shape: the current one ([`encode_acceptor`]) or the
 /// 40-byte acceptance-only record written before 2.30.0, read as *promised at the accepted ballot,
@@ -2245,8 +2327,9 @@ pub(crate) struct SignedConsensusMsg {
 // ── Voter task ───────────────────────────────────────────────────────────────
 
 /// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
-/// promised. The promise is **durable before the answer leaves** — a proposer chooses its value on
-/// the strength of it, so a restart must not let this node break it.
+/// promised. The promise is **recorded before the answer leaves** — applied to the store and handed
+/// to the WAL, the same rung a vote's record reaches (not an fsync) — because a proposer chooses its
+/// value on the strength of it, and a restart must not let this node break it.
 #[cfg(feature = "consensus")]
 fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId) {
     let floor = ctx.decided_floor(&slot);
@@ -2260,7 +2343,7 @@ fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: 
                 accepted_ballot: acc.as_ref().map(|(b, _)| *b).unwrap_or(0),
                 accepted_digest: acc.as_ref().map(|(_, a)| a.digest()),
                 accepted_value:  acc.and_then(|(_, a)| a.value()),
-                committed:       ctx.live_committed(&slot),
+                committed_digest: ctx.live_committed(&slot).map(|c| value_digest(&c)),
             };
             ctx.emit(
                 Arc::from(consensus_kind::VOTE),
@@ -2426,6 +2509,14 @@ pub(crate) async fn run_consensus_listener(
                 let Some(ConsensusMsg::Commit { slot, ballot, value }) =
                     ctx.decode_verify(&sig.payload)
                 else { continue };
+
+                // A COMMIT from a decision already superseded, or one this node already saw end
+                // (a lease expired, a lock released), is not re-stamped: re-stamping gives the old
+                // value a fresh HLC, which revives its lease and can win LWW over a newer decision.
+                let floor = ctx.decided_floor(&slot);
+                if commit_is_stale(ballot, floor, ctx.decision_over(&slot)) {
+                    continue;
+                }
 
                 // ── Commit-conflict tripwire ─────────────────────────────────
                 // Slots are commit-once (or renewed with the same value while an
@@ -3272,6 +3363,45 @@ mod consensus_msg_auth_tests {
         );
     }
 
+    /// **A floor learned before its commit must not hide the commit** (second review, M1). B has
+    /// `decided = 5` but not yet the committed key; acceptor C reports `(5, v1)`. Setting it aside
+    /// would let B keep its own value and commit a second one; B must adopt `v1` instead. Only
+    /// when the decision is visibly over — expired or released — is the old acceptance set aside.
+    #[test]
+    fn a_floor_without_its_commit_sets_nothing_aside() {
+        let v1 = Bytes::from_static(b"v1");
+        let mine = Bytes::from_static(b"mine");
+        let mut reports = vec![(5, value_digest(&v1), Some(v1.clone()))];
+        set_aside_finished(&mut reports, 5, false);
+        assert_eq!(choose_after_prepare(&mine, &reports), Phase1Choice::Adopt(5, v1.clone()),
+                   "a decision not seen to be over still binds the proposer");
+        set_aside_finished(&mut reports, 5, true);
+        assert_eq!(choose_after_prepare(&mine, &reports), Phase1Choice::Keep,
+                   "a decision seen to be over does not");
+    }
+
+    /// A late COMMIT is not re-stamped when it belongs to a superseded decision, or to one this node
+    /// saw end; the decision in force is re-stamped as before (second review, L2).
+    #[test]
+    fn a_late_commit_does_not_resurrect_a_finished_decision() {
+        assert!(commit_is_stale(3, 5, false), "below the floor: superseded");
+        assert!(commit_is_stale(5, 5, true), "at the floor, after it ended: released or expired");
+        assert!(!commit_is_stale(5, 5, false), "at the floor while live: the decision in force");
+        assert!(!commit_is_stale(6, 5, true), "above the floor: a newer decision");
+    }
+
+    /// A commit of an adopted value is the slot's decision, not the caller's (second review, M3).
+    #[test]
+    fn a_commit_of_an_adopted_value_reports_superseded() {
+        let mine = Bytes::from_static(b"mine");
+        let theirs = Bytes::from_static(b"theirs");
+        let committed = |v: &Bytes| ConsensusResult::Committed {
+            slot: Arc::from("s"), value: v.clone(), ballot: 4, persisted: true,
+        };
+        assert!(matches!(own_or_superseded(committed(&theirs), &mine), ConsensusResult::Superseded { ballot: 4, .. }));
+        assert!(matches!(own_or_superseded(committed(&mine), &mine), ConsensusResult::Committed { .. }));
+    }
+
     #[test]
     fn prepare_messages_are_bound_to_their_signer() {
         let a = id(1);
@@ -3281,7 +3411,7 @@ mod consensus_msg_auth_tests {
         assert!(!signer_authorized(&prep, &a), "a node may not prepare as another identity");
         let ack = ConsensusMsg::PrepareAck {
             slot: "s".into(), ballot: 1, voter: b.clone(), accepted_ballot: 0,
-            accepted_digest: None, accepted_value: None, committed: None,
+            accepted_digest: None, accepted_value: None, committed_digest: None,
         };
         assert!(signer_authorized(&ack, &b));
         assert!(!signer_authorized(&ack, &a), "one key must not promise for another node");

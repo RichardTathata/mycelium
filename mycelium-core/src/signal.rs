@@ -989,8 +989,9 @@ pub mod kv_ns {
     ///
     /// **Strictly self-owned**, like every other `sys/{…}/{self}` key: the value is this node's own
     /// testimony, and a peer's write to it under LWW would erase exactly the memory it exists to
-    /// keep. An acceptance is already public — votes are broadcast to the group — so publishing it
-    /// discloses nothing the vote did not.
+    /// keep. **What it discloses:** the record gossips cluster-wide, and since 2.30.0 it carries an
+    /// accepted value of up to 4 KiB — so a value that was proposed to a group but never committed
+    /// is readable by nodes outside that group. Committed values already are (`consensus/committed/`).
     ///
     /// **Kept when the slot commits** (2.30.0). It used to be removed, and that dropped promises: a
     /// delayed lower-ballot proposal reaching acceptors that had forgotten them could commit a second

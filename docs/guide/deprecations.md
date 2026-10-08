@@ -367,6 +367,16 @@ dropped promises), so `sys/consensus-accepted/{node}/` holds one record per slot
 `consensus/ballot/{slot}` is no longer tombstoned at commit, so ballots rise across a leased slot's successive
 decisions; and a commit writes `consensus/decided/{slot}`, the ballot it was decided at.
 
+A proposal that ends by committing **another caller's** value — adopted in the prepare phase from what a quorum had
+already accepted — now returns `ConsensusResult::Superseded`, not `Committed`; `consistent_set` returns
+`Err(Superseded)` and `set_capability_authz_via_consensus` applies nothing. Before, it returned `Committed` with the
+other value, and callers that ignored the value acted on their own.
+
+The acceptor's record now carries an accepted value of up to 4 KiB, gossiped cluster-wide: a value proposed to a group
+and never committed is readable outside it. A slot left **undecided** by a proposal that timed out before the
+upgrade keeps a 40-byte record that names its value only by digest; while such acceptors hold the top acceptance in a
+promise quorum, a proposal of any other value for that slot is refused (`Timeout`) rather than risk overwriting it.
+
 **Will the compiler tell me?** No — it is wire behaviour; the API is unchanged.
 
 **Migration.** Upgrade a group's nodes before relying on consensus from upgraded proposers, or expect timeouts

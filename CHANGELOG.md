@@ -23,6 +23,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a commit records its ballot (`consensus/decided/{slot}`), below which acceptors refuse and which a reopened
   leased slot uses to set the previous decision aside. Seen failing first
   (`two_proposers_cannot_choose_two_values_for_one_slot`; the erasure, by the independent review's probe).
+  A second review found the floor could hide a commit that had not yet arrived (fixed: set aside only once a node
+  sees the decision is over), a late refusal aborting a won ballot, a late COMMIT resurrecting a released lock, and
+  callers acting on a commit of an adopted value — now `Superseded`, which `consistent_set` and
+  `set_capability_authz_via_consensus` already refuse.
   **Correction to 2.14.0's notes:** "a higher ballot overwrote an accepted value" was closed only where an
   acceptor refused. **Upgrade note:** an upgraded proposer times out rather than commits until a quorum of
   its group's acceptors is upgraded (`docs/guide/deprecations.md` §21). **Not claimed:** intersection across

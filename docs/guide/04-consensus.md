@@ -408,7 +408,9 @@ Prepare → (promises, each reporting what it accepted) →
 reports what it has accepted, and the proposer must carry the highest-ballot value its promise
 quorum reports. When the promise quorum shares an acceptor with an accept quorum — a fixed roster
 and a strict-majority quorum guarantee that — a value that quorum accepted reaches the later
-proposer before it may propose anything. Before 2.30.0 a proposer learned an accepted value only
+proposer before it may propose anything (proposers older than 2.30.0 skip this, and carry no such
+guarantee). A proposal that ends up carrying another caller's value returns `Superseded`, not
+`Committed`. Before 2.30.0 a proposer learned an accepted value only
 from a refusal, and a strictly higher ballot is never refused: on a stable roster, two concurrent
 proposers could each commit a different value for one slot, and both were told they had won.
 
@@ -416,8 +418,9 @@ Three rules keep it so. Ballots are drawn from a shared key, so an acceptor prom
 proposing **node**, and a node proposes one value per ballot — its own acceptor is the gate every
 proposal from it passes, however many it runs for the slot at once. An acceptor **never forgets** a
 promise: its memory outlives the commit. And a commit records the ballot it was decided at
-(`consensus/decided/{slot}`); a ballot at or below it is refused, and when a leased slot reopens the
-new decision ignores acceptances at or below it — the previous decision's.
+(`consensus/decided/{slot}`); a ballot at or below it is refused, and once a node sees that decision
+is over — its lease expired, or a lock released it — a new decision ignores acceptances at or below
+it, the previous decision's. A node that has the floor but not yet the commit ignores nothing.
 
 Committed values are written to `consensus/committed/{slot}` and anti-entropy-synced to
 late joiners automatically via the existing KV mechanism.

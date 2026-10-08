@@ -35,10 +35,27 @@ draws under the previous decision; ballots stay monotonic (the ballot key is no 
 same-value `committed` report is one promise; two digests at the top ballot block; persistence re-reads
 and rewrites; phase 2 treats `seen >= ballot` as a refusal; the record carries the value.
 
+**A second review of the rework** found, and this PR fixed: the floor filter applied while the decision
+was still live — `decided` and `committed` gossip separately, so a node with the floor but not the commit
+could set aside `(5, v1)` and commit a second value (M1; now set aside only when the node holds the
+committed entry and it is not live — `set_aside_finished`, `decision_over`); a refusal of the *prepare*,
+queued after the promise quorum, aborting the won phase 2 (M2; a fresh refusal channel per phase);
+callers treating a commit of an adopted value as their own — `consistent_set`,
+`set_capability_authz_via_consensus` wrote their own value (M3; `own_or_superseded`); the full value in
+the gossiped record and the `PrepareAck` (M4; 4 KiB cap, `committed_digest`); a late COMMIT re-stamping
+a released or superseded decision (L2; `commit_is_stale`). Each new rule has a test seen failing on the
+old rule (toggled).
+
 **Still open, recorded:** quorums are counted from each proposer's view, so intersection across an
 electorate change is not enforced — guide 04 § *Changing an electorate*, threat model §7, what-is-proven.
 Leases are judged on each node's clock, so under skew one node can reopen a slot another still renews (the
-lease's bounded-skew assumption); a late COMMIT re-stamps the committed key and revives a lease. Proposers
+lease's bounded-skew assumption). `consensus/decided/` is plain LWW, so a delayed write can lower the floor
+(safe — promises are kept — but one reopen may re-adopt the old value). After a released lock's tombstone is
+garbage-collected, the next acquirer cannot see the decision is over and re-commits the old holder's value
+once, until that lease expires. "Recorded before the vote/promise leaves" is apply + WAL hand-off, not an
+fsync. A slot left undecided before the upgrade with a legacy digest-only record can refuse other values
+(`deprecations.md` §21). With `max_ballots = 3`, concurrent proposers on a slow network time out more often
+than before: each loses an equal-ballot ballot, and the 50 ms jitter is what separates them. Proposers
 older than 2.30.0 keep their old behaviour against upgraded acceptors. `Promise`/`Nack` are not
 signer-bound (CFT, not BFT), and the opacity recompute can shrink the phase-2 quorum below phase 1's.
 Mixed fleets: an upgraded proposer times out until a quorum of acceptors is upgraded (`deprecations.md` §21).
