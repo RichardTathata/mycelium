@@ -20,6 +20,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   beside `mycelium-gateway-free-tests` — and passes. Mutation suite: 49 cases, the new one seen missed before, plus
   five synthetic-workspace unification cases; it now lists its cases and marks each as it runs, so the test-coverage
   job holds it to the script-suite rule (#557).
+- **Diagnostics for #563 — the root cause is not found.** #561's CI failures read `not_found` on node B while node A
+  held the blobs; neither explanation (B had not resolved A as a provider; A answered miss) reproduces locally — 30
+  two-process starts mirroring CI and 20 in-process starts, both orderings, all saw A's capability on B within 0.2–4.8 s.
+  So the next occurrence is made to say which: `MeshBlobStore::fetch` logs each miss at **debug** with its reason,
+  whether the local copy was damaged, and each other provider asked with its answer (`node=miss` / `=corrupt` /
+  `=unreachable(…)`, or none); `reason_node` installs a `tracing` subscriber (it had none, so every line from the crate was
+  dropped) and CI starts it with `RUST_LOG=warn,mycelium_reason=debug`; the Python job keeps the nodes' logs as an
+  artifact on failure. A guard, `tests/first_contact_capability.rs`, holds a capability advertised at start — before the
+  peer starts, and after — to reach that peer within 15 s, well under one 30 s refresh.
 
 ### Added
 
