@@ -63,10 +63,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - **The cross-node checkpointer test waited wrongly (#561).** `TestCrossNodeResume` polled node B for the thread head
-  and failed on the first `IncompleteCheckpoint` — but a row gossips to B ahead of its blobs, and that `not_found` is
-  the documented retriable "not yet" (`examples/langgraph/03_cross_node.py` already waited through it). The poll is a
-  helper now (`tests/converge.py`) that keeps waiting on a retriable miss and stops on a corrupt blob or a refused
-  read, with node-free tests seen failing first. Test-only; no package change.
+  and failed on the first `IncompleteCheckpoint`. B could read the row before it could fetch the row's blobs — in both
+  CI failures because it did not yet resolve node A as a blob provider until A's first 30 s capability refresh (the
+  propagation gap is #563) — and that `not_found` is the documented retriable "not yet"
+  (`examples/langgraph/03_cross_node.py` and `06_deploy_reheal.py` already waited through it). The poll is a helper now
+  (`tests/converge.py`) that keeps waiting on a retriable miss and stops on any non-transient reason, with node-free
+  tests seen failing first; `TestRowBeforeBlob`'s second poll re-raises a non-retriable one instead of spinning to its
+  deadline. Test-only; no package change.
 
 ## [2.27.0] — 2026-10-07
 

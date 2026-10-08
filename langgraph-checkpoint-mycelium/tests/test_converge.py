@@ -1,6 +1,8 @@
-"""The cross-node poll, node-free (issue #561). A row reaches a second node by gossip before its blobs are
-fetchable there, so `get_tuple` raises `IncompleteCheckpoint` with a retriable reason (`not_found`) — that is
-"not converged yet", not a failure. A non-retriable one (a corrupt blob, a refused read) still ends the wait."""
+"""The cross-node poll, node-free (issue #561). A second node can read a thread's row before it can fetch the row's
+blobs — in #561's two CI failures because it did not yet resolve the first node as a blob provider (that node's
+advertisement reached it only at the first 30 s refresh) — so `get_tuple` raises `IncompleteCheckpoint` with a retriable
+reason (`not_found`): "not converged yet", not a failure. A non-retriable one (corrupt, unauthorized, unsupported, or a
+mix with one) still ends the wait, and the deadline still fires."""
 from types import SimpleNamespace
 
 import pytest
@@ -38,3 +40,17 @@ def test_a_corrupt_blob_ends_the_wait():
     stub = Stub([missing("corrupt"), head("c1")])
     with pytest.raises(IncompleteCheckpoint):
         converged_head(stub, {}, "c1", 0, sleep=lambda _s: None)
+
+
+@pytest.mark.parametrize("reasons", [{"a": "unauthorized"}, {"a": "unsupported"}, {"a": "not_found", "b": "corrupt"}])
+def test_any_non_transient_reason_ends_the_wait(reasons):
+    stub = Stub([IncompleteCheckpoint("t", "", "c1", list(reasons), reasons), head("c1")])
+    with pytest.raises(IncompleteCheckpoint):
+        converged_head(stub, {}, "c1", 0, sleep=lambda _s: None)
+
+
+def test_the_deadline_fires_while_misses_keep_coming():
+    clock = iter(range(0, 1000, 10))
+    stub = Stub([missing("not_found")] * 100)
+    with pytest.raises(AssertionError, match="never converged"):
+        converged_head(stub, {}, "c1", 0, timeout=30, sleep=lambda _s: None, now=lambda: next(clock))

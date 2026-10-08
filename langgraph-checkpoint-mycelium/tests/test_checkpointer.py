@@ -337,7 +337,9 @@ class TestRowBeforeBlob:
                 while True:
                     try:
                         tup = saver_b.get_tuple(config)
-                    except IncompleteCheckpoint:
+                    except IncompleteCheckpoint as e:
+                        if not e.retriable:  # corrupt or refused: waiting will not fix it — say why, now
+                            raise
                         tup = None
                     if tup is not None:
                         assert tup.checkpoint["channel_values"]["withheld"] == withheld_value
