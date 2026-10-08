@@ -424,9 +424,9 @@ More live providers than the declared ceiling withdraws the hosts ranked beyond 
 - **Outcomes:**
   - Action: `above_ceiling`
   - NoAction: `within_ceiling`, `not_hosting`, `ranked_within_ceiling`
-- **Effects:** withdraw() of this node's install · `mycelium_artifact_presence_sheds_total`
+- **Effects:** withdraw() of this node's install · `mycelium_artifact_presence_sheds_total` · `mycelium_artifact_presence_unranked_departures_total` and a warning when the band fell below its ceiling as unmarked providers left
 - **May inhibit:** [`prov.presence_floor`](#provpresence_floor)
-- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades`, `bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names`, `a_herd_of_new_installs_lands_on_the_ceiling`, `a_partition_heals_without_emptying_the_band`, `an_unmarked_peer_is_timed_from_first_sight_and_reset_by_its_mark`
+- **Code:** `provisioner::Provisioner::provision_round` · **Docs:** docs/reference/unit-file.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `exactly_the_surplus_above_a_ceiling_withdraws`, `a_provider_that_does_not_shed_does_not_hold_the_band_above_its_ceiling`, `a_wrong_view_costs_at_most_its_wrong_entries_and_never_cascades`, `bands_that_differ_only_in_attributes_or_ceiling_have_different_shed_names`, `a_herd_of_new_installs_lands_on_the_ceiling`, `a_partition_heals_without_emptying_the_band`, `an_unmarked_peer_is_timed_from_first_sight_and_reset_by_its_mark`, `an_unmarked_provider_leaving_a_band_below_its_ceiling_is_named`, `the_departure_watch_sees_a_dip_that_arrives_in_two_steps`
 
 ## `prov.withdraw`
 

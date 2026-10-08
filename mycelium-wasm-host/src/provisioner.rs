@@ -18,7 +18,7 @@
 //! prevention). Installs run as **background tasks against an `Installing` reservation**, so a
 //! multi-GB pull never blocks the provision tick and a round never double-starts an artifact.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -169,6 +169,10 @@ pub struct Provisioner {
     /// and a `cap/` entry are separate keys and can arrive apart (a partition healing), and until then the
     /// safe reading is that it sheds (#547's fifth review).
     unmarked_since: HashMap<String, HashMap<mycelium::NodeId, u64>>,
+    /// What each band's unmarked providers were when it was last above its ceiling, so a later round that finds it
+    /// **below** can name the ones whose leaving overshot it — a stem older than 2.26.0 withdrawing by its own draw,
+    /// or a crash ([`DepartureWatch`]).
+    departures: DepartureWatch,
     /// Capability-presence invariants this node supervises (M14).
     policies:     Vec<SupervisionPolicy>,
     /// If non-empty, only catalog entries with valid provenance from one of these publisher keys
@@ -270,6 +274,7 @@ impl Provisioner {
             rounds: 0,
             shed_regs: HashMap::new(),
             unmarked_since: HashMap::new(),
+            departures: DepartureWatch::default(),
             policies: Vec::new(),
             trusted_publishers: Vec::new(),
             trusted_reviewers: Vec::new(),
@@ -1113,7 +1118,18 @@ impl Provisioner {
             let live = providers.len();
             let target = format!("{}/{}", policy.filter.namespace, policy.filter.name);
             if live <= max {
-                self.unmarked_since.remove(&shed_band(&policy.filter, max));
+                let band = shed_band(&policy.filter, max);
+                self.unmarked_since.remove(&band);
+                {
+                    let gone = self.departures.observe(&band, &providers, max, mycelium::sim_seam::mono_now_ns());
+                    if !gone.is_empty() {
+                        metrics::counter!("mycelium_artifact_presence_unranked_departures_total").increment(gone.len() as u64);
+                        tracing::warn!(band = %target, live, max, ?gone,
+                            "a presence band fell below its ceiling: providers without a prov-shed mark left — a stem older \
+                             than 2.26.0 withdraws by its own draw (upgrade a band's stems together, or raise the ceiling for \
+                             the roll), or they crashed");
+                    }
+                }
                 if let Some(t) = self.round_trace() {
                     t.record("prov.shed", OutcomeKind::NoAction, "within_ceiling", target,
                         vec![InputSnapshot::new("capabilities().demand(filter).providers — `cap/` as gossiped",
@@ -1138,6 +1154,10 @@ impl Provisioner {
             let now = mycelium::sim_seam::mono_now_ns();
             let seen = self.unmarked_since.entry(band.clone()).or_default();
             let (entries, presumed) = rank_entries(&providers, &shedders, &me, i_can_shed, seen, now);
+            // Who could overshoot the ceiling by leaving outside the rank: providers without a mark, seen unmarked for
+            // FIXED_AFTER (a younger one is a new stem whose mark is still in flight), not this node.
+            let unranked: HashSet<mycelium::NodeId> = entries.iter().filter(|(n, sheds)| !sheds && *n != me).map(|(n, _)| n.clone()).collect();
+            self.departures.above(&band, unranked, now);
             let view = shed_view(&entries, max, &target);
             let position = view.ranked.iter().position(|n| *n == me);
             let inputs = || vec![
@@ -1165,6 +1185,7 @@ impl Provisioner {
                 t.record("prov.shed", OutcomeKind::NoAction, "ranked_within_ceiling", target, inputs(), None);
             }
         }
+        self.departures.retain(&policies.iter().filter_map(|p| p.max_providers.map(|m| shed_band(&p.filter, m))).collect());
 
         started
     }
@@ -1248,6 +1269,59 @@ fn rank_entries(
         (n.clone(), sheds)
     }).collect();
     (entries, presumed)
+}
+
+/// How long a band's unmarked providers, seen above its ceiling, can still be named for leaving it below: a dip often
+/// reaches an observer over more than one round (a ranked withdrawal first, an old stem's draw after), and a departure
+/// long after the band was above its ceiling is not that dip's.
+const DEPARTURE_WINDOW: Duration = Duration::from_secs(4 * ADVERTISE_INTERVAL.as_secs());
+
+/// Per band: the unmarked providers last seen while it was above its ceiling, and when (#560's review: kept across a
+/// round **at** the ceiling, each departure named once, forgotten after [`DEPARTURE_WINDOW`] or when the band is no
+/// longer supervised).
+#[derive(Default)]
+struct DepartureWatch {
+    bands: HashMap<String, (HashSet<mycelium::NodeId>, u64)>,
+}
+
+impl DepartureWatch {
+    /// The band is above its ceiling now; these are its providers that could leave outside the rank.
+    fn above(&mut self, band: &str, unranked: HashSet<mycelium::NodeId>, now_ns: u64) {
+        self.bands.insert(band.to_string(), (unranked, now_ns));
+    }
+
+    /// The band is at or below its ceiling: the remembered providers that have left, if it is now below — each once.
+    fn observe(&mut self, band: &str, providers: &[mycelium::NodeId], max: usize, now_ns: u64) -> Vec<mycelium::NodeId> {
+        let Some((set, at)) = self.bands.get_mut(band) else { return Vec::new() };
+        if now_ns.saturating_sub(*at) > DEPARTURE_WINDOW.as_nanos() as u64 {
+            self.bands.remove(band);
+            return Vec::new();
+        }
+        let gone = unranked_departures(set, providers, max);
+        for n in &gone {
+            set.remove(n);
+        }
+        gone
+    }
+
+    /// Forget bands no longer supervised (a policy removed, or its ceiling changed — a new band).
+    fn retain(&mut self, supervised: &HashSet<String>) {
+        self.bands.retain(|b, _| supervised.contains(b));
+    }
+}
+
+/// Which of a band's providers that did **not** advertise [`SHED_NS`] while it was above its ceiling have left,
+/// now that it is **below** the ceiling. A stem older than 2.26.0 advertises no mark and withdraws by its own
+/// draw, so while old and new stems share a band it can overshoot the ceiling downward; this names the providers
+/// whose leaving did it (or that crashed — the two look alike from here). Empty unless the band dipped.
+fn unranked_departures(unmarked_above: &HashSet<mycelium::NodeId>, providers: &[mycelium::NodeId],
+                       max: usize) -> Vec<mycelium::NodeId> {
+    if providers.len() >= max {
+        return Vec::new();
+    }
+    let mut gone: Vec<mycelium::NodeId> = unmarked_above.iter().filter(|n| !providers.contains(n)).cloned().collect();
+    gone.sort_by_key(|n| n.to_string());
+    gone
 }
 
 /// `entries` is each live provider and whether it sheds (it advertises [`SHED_NS`] for the band).
@@ -1406,6 +1480,41 @@ mod tests {
         assert!(a.iter().all(|h| settled.sheds(h)), "providers unmarked for FIXED_AFTER are fixed");
         assert!(presumed_sheds(true, None) && presumed_sheds(false, None) && presumed_sheds(false, Some(Duration::ZERO)));
         assert!(!presumed_sheds(false, Some(FIXED_AFTER)));
+    }
+
+    /// A rolling upgrade: an old stem sheds by its own draw and the band falls below its ceiling. The providers
+    /// that left without ever marking are named — not those that marked, and nothing while the band stays at or
+    /// above its ceiling.
+    #[test]
+    fn an_unmarked_provider_leaving_a_band_below_its_ceiling_is_named() {
+        let n = nodes(7600, 5);
+        let unmarked: HashSet<_> = [n[3].clone(), n[4].clone()].into();
+        // max 3: two old stems withdrew and so did one marked host — the band holds 2, below its ceiling.
+        assert_eq!(unranked_departures(&unmarked, &n[..2], 3), vec![n[3].clone(), n[4].clone()]);
+        // One old stem left, the band landed on its ceiling: no dip, nothing to name.
+        assert!(unranked_departures(&unmarked, &[n[0].clone(), n[1].clone(), n[3].clone()], 3).is_empty());
+        // Below the ceiling, but every unmarked provider is still there: the marked ones did it, by rank.
+        assert!(unranked_departures(&unmarked, &[n[3].clone(), n[4].clone()], 3).is_empty());
+    }
+
+    /// #560's review: a rolling-upgrade dip often reaches an observer in two steps — a new stem's ranked withdrawal
+    /// first (to the ceiling), an old stem's draw a round later (below it). The watch keeps what it saw above the
+    /// ceiling across a round at the ceiling, names each departure once, and forgets after its window.
+    #[test]
+    fn the_departure_watch_sees_a_dip_that_arrives_in_two_steps() {
+        let n = nodes(7700, 4);
+        let mut w = DepartureWatch::default();
+        let t0 = 1_000;
+        w.above("band", [n[3].clone()].into(), t0);
+        assert!(w.observe("band", &n[..3], 3, t0 + 1).is_empty(), "at the ceiling: nothing yet");
+        assert_eq!(w.observe("band", &n[..2], 3, t0 + 2), vec![n[3].clone()], "below it, a round later: named");
+        assert!(w.observe("band", &n[..1], 3, t0 + 3).is_empty(), "named once");
+        w.above("band", [n[2].clone()].into(), t0);
+        let late = t0 + DEPARTURE_WINDOW.as_nanos() as u64 + 1;
+        assert!(w.observe("band", &n[..1], 3, late).is_empty(), "past the window, nothing is attributed");
+        w.above("gone", [n[1].clone()].into(), t0);
+        w.retain(&["band".to_string()].into());
+        assert!(w.observe("gone", &[], 3, t0 + 1).is_empty(), "a band no longer supervised is dropped");
     }
 
     /// The bookkeeping behind FIXED_AFTER: an unmarked peer is timed from first sight, presumed to shed until
