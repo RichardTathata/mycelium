@@ -61,6 +61,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   blocks; a shell suite's list is derived from its calls by `scripts/list-script-cases.py`, which fails on a call
   it cannot read. No suite tests anything different.
 
+### Fixed
+- **The cross-node checkpointer test waited wrongly (#561).** `TestCrossNodeResume` polled node B for the thread head
+  and failed on the first `IncompleteCheckpoint` — but a row gossips to B ahead of its blobs, and that `not_found` is
+  the documented retriable "not yet" (`examples/langgraph/03_cross_node.py` already waited through it). The poll is a
+  helper now (`tests/converge.py`) that keeps waiting on a retriable miss and stops on a corrupt blob or a refused
+  read, with node-free tests seen failing first. Test-only; no package change.
+
 ## [2.27.0] — 2026-10-07
 
 **The doors say what they own.** 2.26.0 recorded `kv:write` as a data-plane superuser scope over namespaces other
