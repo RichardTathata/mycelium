@@ -22,6 +22,22 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.28.0 release — 2026-10-08 (tag `v2.28.0`) — what the gates cannot see, closed; what the flakes were, found
+
+The three limits 2.27.0 documented: **#558** — `examples/strict_eligibility.rs` drives
+`mandate::history_source::history_from_appointment_stream` end to end (eligible, ineligible, unknown on a gap or no
+checkpoint, a revoked old key, cumulative tenure), run in CI. **#559** — `check-test-inventory.py` computes the features a
+step's *test build* enables (dev-dependency unification included); its first run found
+`a_tls_table_this_build_cannot_enforce_refuses_to_start`, never run since 2026-10-02, now in `mycelium-tls-free-tests`.
+**#557** / **#566** — script suites and single `cargo run --example` steps are observed cases; the examples matrix's
+CI column is checked both ways (✓ every change, ✓ᵖ path-filtered). **#560** — `wire-check` names overlapping capped
+presence bands; `DepartureWatch` counts a rolling-upgrade dip. Then the open issues: **#562** (#561 — a retriable miss
+read as fatal by a test's poll), **#567** (#564 — an RPC refusal read as a corrupt blob; `refused` 403 for one that
+holds; the caller-context refusal JSON with a `reason`; `mycelium-reason` 0.7.1), **#569** (#568 — a local emit is not a
+delivery; a sibling found by the review), **#565** (#563 instrumented — not reproduced, reopened). Every PR had an
+independent review whose findings were fixed or answered. Release record:
+[`.log/2026-10-08-release-v2.28.0.md`](.log/2026-10-08-release-v2.28.0.md).
+
 ## v2.27.0 release — 2026-10-07 (tag `v2.27.0`) — the doors say what they own
 
 **#549** — the `kv:write` decision 2.26.0 recorded and left open: the raw KV doors (`POST`/`DELETE /gateway/kv`,
