@@ -1956,11 +1956,18 @@ async fn test_signal_group_admitted_when_member() {
     let agent = make_agent();
     agent.mesh().join_group("nlp");
     let mut rx = agent.mesh().signal_rx("task");
-    let _ = agent.mesh().emit("task", SignalScope::Group(Arc::from("nlp")), b"work".to_vec());
-    let sig = tokio::time::timeout(Duration::from_millis(100), rx.recv())
-        .await
-        .expect("member should receive group signal")
-        .expect("receiver closed");
+    // The agent is never started, so `join_group`'s KV frame stays in a gossip shard (fill 1/1024) and a Group emit's
+    // local delivery is shed with that probability — re-emit until it arrives, bounded (#568's review; the 2026-10-02
+    // precedent, `.log/2026-10-02-group-quorum-test-shed.md`).
+    let mut got = None;
+    for _ in 0..50 {
+        let _ = agent.mesh().emit("task", SignalScope::Group(Arc::from("nlp")), b"work".to_vec());
+        if let Ok(sig) = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+            got = sig;
+            break;
+        }
+    }
+    let sig = got.expect("member should receive group signal");
     assert_eq!(sig.scope, SignalScope::Group(Arc::from("nlp")));
 }
 

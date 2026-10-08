@@ -385,6 +385,20 @@ moment a runner picks up a newer stable than a dev has locally — it bit twice 
 passes only via accidental single-node quorum. Pattern (and the peer-ready poll) in
 `src/lib_tests.rs::consensus_pair`.
 
+## A local emit is not a delivery (2026-10-08, #568)
+
+`mesh().emit(…, SignalScope::Cluster | Group, …)` delivers to this node's own handlers through the same probabilistic
+shed as any other signal: admitted with probability `1 − fill`, where fill is the kind's handler-queue or gossip-shard
+fill (`ops::deliver_locally`) — the max over the kind's subscribers. On a started, quiet node fill is 0 and the emit
+always arrives. It is not 0 right after traffic: when `cluster_propose` returns, the proposer's own COMMIT still sits in
+the listener's 256-slot queue (fill 1/256, a ~0.4% shed), which is how `test_commit_conflict_tripwire` failed once
+under the strict compliance gate (#568). Nor on an *unstarted* agent after any KV write: the frame stays in a gossip
+shard that never drains (fill 1/1024) — the 2026-10-02 precedent (`.log/2026-10-02-group-quorum-test-shed.md`), and
+`test_signal_group_admitted_when_member` had the same latent shed. A test that needs a signal to arrive re-emits until it
+observes the effect (the tripwire firing, a second subscriber seeing the frame), bounded; one that checks a signal *had
+no* effect first observes that it arrived, or the check passes vacuously. `the_tripwire_holds_under_a_loaded_signal_queue`
+drives the COMMIT fill to 0.9 for the forged frame's first emit, and fails the single-emit version three times in three.
+
 ## Structural polling, not fixed sleeps
 
 Assert cluster state with a predicate poll (`poll_until(|| !a.peers().is_empty(), …)`), not
