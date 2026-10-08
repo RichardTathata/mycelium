@@ -352,3 +352,24 @@ refuses a `[[group]]` whose name is governed (403 `governed_group`): its filter 
 **Migration.** A client that joins or leaves a governed group over HTTP uses `/gateway/govern/group` with a
 `govern:write` token. The membership governor's own moves (the embedded API) are unaffected.
 
+## 21. Consensus asks before it proposes: a mixed fleet times out rather than commits (2.30.0)
+
+**What changes.** A proposer now runs a prepare phase — `Prepare`, answered by `PrepareAck` — before it proposes,
+and carries the highest-ballot value its promise quorum reports. An acceptor older than 2.30.0 ignores `Prepare`,
+so **an upgraded proposer cannot assemble a promise quorum until a quorum of the group's acceptors is upgraded**:
+its proposals time out (`ConsensusResult::Timeout`) rather than commit. A proposer older than 2.30.0 keeps working
+against upgraded acceptors, without the guarantee. The acceptor's durable record (`sys/consensus-accepted/`) now
+carries the promise: an upgraded node reads the old record, and a node **downgraded** below 2.30.0 reads the new
+one as no record — it forgets what it promised and accepted for in-flight slots.
+
+Three storage changes ride with it. The acceptor's record is **kept** after a slot commits (it was removed, which
+dropped promises), so `sys/consensus-accepted/{node}/` holds one record per slot this node has voted on;
+`consensus/ballot/{slot}` is no longer tombstoned at commit, so ballots rise across a leased slot's successive
+decisions; and a commit writes `consensus/decided/{slot}`, the ballot it was decided at.
+
+**Will the compiler tell me?** No — it is wire behaviour; the API is unchanged.
+
+**Migration.** Upgrade a group's nodes before relying on consensus from upgraded proposers, or expect timeouts
+while fewer than a quorum are upgraded — the same shape as 2.14.0's value-bound votes. Do not downgrade a node
+mid-slot.
+

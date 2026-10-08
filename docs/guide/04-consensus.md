@@ -102,6 +102,24 @@ The distinction is not pedantry. LWW can decide which *record* survives; it cann
 callers each performed after being told they had won. *Convergent leader preference* and *exclusive
 ownership* are two capabilities, and only the second needs a fence.
 
+**Changing an electorate.** The prepare phase makes every later proposer learn what a quorum
+accepted — *provided its promise quorum shares an acceptor with that accept quorum*. Quorums are
+counted, not agreed: each proposer computes its quorum from the roster it sees and counts any
+member's promise or vote, including a node that has just joined and is in nobody's roster yet. Two
+quorums must share an acceptor only if together they exceed the number of nodes that can answer.
+Views that differ by two or more members (a swap counts as two), an unannounced joiner, or a fixed
+`quorum_size` at or below half the group can each break that, and then two proposers can commit
+different values. That is why the [supported profile](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile)
+fixes the membership for the life of a slot and the quorum as a strict majority of it. If you
+change a governed group anyway: one node at a time, letting the roster converge on **every** node
+(`GET /gateway/mesh/group?group=G` answers for the node you ask) before the next change; and fence
+exclusive work on the epoch, with the resource refusing any token not greater than the last it
+accepted. A conflict that does happen is counted in `commit_conflicts` by a member that receives the
+second COMMIT while holding the first — check every node; one that learned both values by gossip
+counts nothing — and LWW converges every node to whichever value was re-stamped last. Both
+proposers may have been told they won. A versioned electorate (membership epochs, joint-consensus
+transitions) is recorded, not planned.
+
 **Run it.** All three claims as one narrative, each act asserting:
 
 ```bash
@@ -375,14 +393,31 @@ the rest uses gossip.
 
 *Moved from the repo README (2026-07-10).*
 
-Lightweight epidemic two-phase agreement built directly on top of the signal mesh — no extra
-wire format, no separate consensus port. All consensus messages ride existing `Signal` frames.
+Single-decree Paxos built directly on top of the signal mesh — no extra wire format, no separate
+consensus port. All consensus messages ride existing `Signal` frames.
 
 #### Protocol sketch
 
 ```
-Propose → (votes from group members) → Commit → KV committed/{slot}
+Prepare → (promises, each reporting what it accepted) →
+  Propose (the highest-ballot reported value, or the proposer's own) →
+  (votes bound to that value) → Commit → KV committed/{slot}
 ```
+
+**Phase 1 (2.30.0).** Before proposing, a proposer asks for promises; each acceptor that promises
+reports what it has accepted, and the proposer must carry the highest-ballot value its promise
+quorum reports. When the promise quorum shares an acceptor with an accept quorum — a fixed roster
+and a strict-majority quorum guarantee that — a value that quorum accepted reaches the later
+proposer before it may propose anything. Before 2.30.0 a proposer learned an accepted value only
+from a refusal, and a strictly higher ballot is never refused: on a stable roster, two concurrent
+proposers could each commit a different value for one slot, and both were told they had won.
+
+Three rules keep it so. Ballots are drawn from a shared key, so an acceptor promises a ballot to one
+proposing **node**, and a node proposes one value per ballot — its own acceptor is the gate every
+proposal from it passes, however many it runs for the slot at once. An acceptor **never forgets** a
+promise: its memory outlives the commit. And a commit records the ballot it was decided at
+(`consensus/decided/{slot}`); a ballot at or below it is refused, and when a leased slot reopens the
+new decision ignores acceptances at or below it — the previous decision's.
 
 Committed values are written to `consensus/committed/{slot}` and anti-entropy-synced to
 late joiners automatically via the existing KV mechanism.

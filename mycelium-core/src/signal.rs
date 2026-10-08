@@ -973,25 +973,28 @@ pub mod kv_ns {
 
     /// **This node's acceptor record, so a restart cannot make it equivocate.**
     ///
-    /// Key: `sys/consensus-accepted/{node_id}/{slot}`. Value: `ballot(8, LE) ‖ value_digest(32)`.
+    /// Key: `sys/consensus-accepted/{node_id}/{slot}`. Value since 2.30.0: `0x02 ‖ promised(8) ‖
+    /// has_proposer(1) ‖ promised_to(8) ‖ has_accepted(1) ‖ accepted_ballot(8) ‖ value_digest(32) ‖
+    /// value(optional)` — the **promise** as well as the acceptance (`mycelium::consensus`'s
+    /// `encode_acceptor`). Before 2.30.0: `ballot(8, LE) ‖ value_digest(32)`, still read.
     ///
     /// A consensus acceptor's whole guarantee — *at most one value per ballot* — rests on
     /// remembering what it accepted. That memory was in-process, so a node that restarted mid-ballot
     /// forgot, and could vote again for a different value at the same ballot. This is the record
     /// that survives.
     ///
-    /// **Digest, not value**, because the only question ever asked of it is equality, and 40 bytes
-    /// is what makes writing it on the voting path affordable. A node recovered from this record
-    /// can therefore **refuse** a conflicting vote — the safety property — but cannot report the
-    /// value in a `Promise`, which is only a liveness aid to a proposer.
+    /// The value is carried when it fits under the KV write cap: a node recovered from a record
+    /// that has only the digest can **refuse** a conflicting vote — the safety property — but cannot
+    /// hand the value to a proposer, which then cannot propose anything else for the slot.
     ///
     /// **Strictly self-owned**, like every other `sys/{…}/{self}` key: the value is this node's own
     /// testimony, and a peer's write to it under LWW would erase exactly the memory it exists to
     /// keep. An acceptance is already public — votes are broadcast to the group — so publishing it
     /// discloses nothing the vote did not.
     ///
-    /// Removed when the slot commits: a committed slot cannot receive a valid higher ballot, so
-    /// there is nothing left to protect.
+    /// **Kept when the slot commits** (2.30.0). It used to be removed, and that dropped promises: a
+    /// delayed lower-ballot proposal reaching acceptors that had forgotten them could commit a second
+    /// value. The prefix grows with the number of slots, not of ballots.
     pub const CONSENSUS_ACCEPTED: &str = "sys/consensus-accepted/";
 
     /// Gateway caller-context marker (v3 item 7). Key: `sys/caller-context/{node}`, value: the

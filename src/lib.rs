@@ -104,7 +104,8 @@
 //! | `sys/revocation/{node}/{key-hex}`   | WS-D — signed key revocation; excluded on all verify paths incl. consensus (`compliance`) |
 //! | `sys/capauthz/{ns}/{name}`          | Gossip-level capability-authz policy (`required_roles`; resolve-time enforcement) (`compliance`) |
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
-//! | `consensus/ballot/{slot}`           | Consensus — ballot tracking                                  |
+//! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
+//! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
 //! | `consensus/lease/{slot}`            | Consensus — epoch-lease window (u64 LE ms); written when `ConsensusConfig::committed_lease_secs` is set; expiry is evaluated read-side |
 //! | `consensus/trust/{group}/{node}`    | Consensus — trust slices                                     |
 //! | `cap/{node}/{ns}/{name}`            | Node-level capability advertisements                         |
@@ -122,7 +123,7 @@
 //! | `agent/{node}/provision/{item}/error` | Last provisioning failure — written by the **application** provisioning handler, not the substrate |
 //! | `sys/identity/{node}`              | mTLS — 32-byte Ed25519 verifying key history (current‖retained); written at startup by TLS-enabled nodes |
 //! | `sys/identity-proof/{node}`        | identity-auth Phase 2 — `signer_key(32)‖sig(64)` authenticating the identity entry; peers accept a key only if the proof chains to a trusted key (`tls`) |
-//! | `sys/consensus-accepted/{node}/{slot}` | the acceptor's durable record — `ballot(8)‖digest(32)`, so a restart cannot make this node vote twice at one ballot; self-owned, removed on commit (`consensus`) |
+//! | `sys/consensus-accepted/{node}/{slot}` | the acceptor's durable record — its promise and acceptance, `0x02‖promised‖promised_to‖accepted_ballot‖digest‖value?` (2.30.0; the pre-2.30.0 40-byte `ballot‖digest` still reads), so a restart cannot break a promise or vote twice at one ballot; self-owned, kept after commit (`consensus`) |
 //! | `sys/identity-signed/{node}`       | identity-auth Phase 3b — the **sealed** record: `version(1)‖history‖proof(96)` in ONE entry, so keys and proof can never arrive apart; preferred by readers, and the only form accepted under `require_identity_proofs` (`tls`) |
 //! | `sys/caller-context/{node}`        | v3 item 7 — the node strips + verifies the `GatewayCaller` envelope on its RPC receive path (value `b"1"`, the envelope version); a secure-profile gateway dispatches only to nodes carrying it. Written at start by every node; self-owned (`sys/` tripwire) |
 //! | `sys/membership/removed/{node}`    | closure plan C5 — an operator-signed `SignedMemberRemoval` for `{node}` (JSON), written by the node that accepted it so the removal reaches every member by gossip as well as by direct offer. Verified on ingest; a forged entry has no effect. The removed node's own `sys/` tripwire may count it |

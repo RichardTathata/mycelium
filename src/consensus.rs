@@ -1,11 +1,18 @@
 //! Consensus — epidemic two-phase agreement built on the signal mesh.
 //!
 //! Lightweight Group-level and System-level agreement built on top of the
-//! epidemic signal layer. Uses a two-phase gossip voting protocol:
+//! epidemic signal layer. Single-decree Paxos over gossip:
 //!
 //! ```text
-//! Propose → (votes from group members) → Commit → KV committed/{slot}
+//! Prepare → (promises, each reporting what it accepted) →
+//!   Propose (the highest-ballot reported value, or the proposer's own) →
+//!   (votes bound to that value) → Commit → KV committed/{slot}
 //! ```
+//!
+//! The prepare phase (2.30.0) is what makes a value a quorum accepted reach every later proposer:
+//! before it, a proposer learned an accepted value only from a refusal, and a strictly higher ballot
+//! is never refused — so two proposers could commit different values for one slot on a stable
+//! roster. See [`ConsensusMsg::Prepare`].
 //!
 //! Committed values are written to the Layer 1 KV store at
 //! `consensus/committed/{slot}` and anti-entropy synced to late joiners.
@@ -375,8 +382,9 @@ pub(crate) enum ConsensusMsg {
     ///
     /// The commit record guards the *committed* case (`try_commit_if_ready` refuses when
     /// `live_committed` holds a different value), but only once it has propagated; inside that
-    /// window the overwrite stands. Preserving the accepted value is what makes the guard
-    /// unnecessary rather than merely usually-sufficient.
+    /// window the overwrite stands. A refusal is not enough to close it — a strictly higher ballot
+    /// is never refused, so no `Promise` is sent — which is why [`Prepare`](Self::Prepare) exists
+    /// (2.30.0): the closing is phase 1's, and this refusal remains a hint that moves a proposer up.
     ///
     /// This is the classic promise: the acceptor answers a refusal with its highest accepted
     /// `(ballot, value)`, and the proposer adopts the one with the **highest accepted ballot**
@@ -390,6 +398,52 @@ pub(crate) enum ConsensusMsg {
         accepted_ballot: u64,
         /// The value this acceptor has accepted, if any.
         accepted_value: Option<Bytes>,
+    },
+    /// **Phase 1: ask before proposing.** A proposer asks the scope's acceptors to *promise*
+    /// `ballot` and to report what they have already accepted, and proposes only once a quorum has
+    /// promised — carrying the highest-ballot value any of them reported.
+    ///
+    /// ## Why this variant exists
+    ///
+    /// Without it a proposer learned an accepted value only from a **refusal** (`Promise`), and a
+    /// strictly higher ballot is never refused: the acceptor granted it and overwrote what it held.
+    /// So A could choose `v1` at ballot 1 with `{A, 1, 2}` while B, which had not yet seen A's
+    /// COMMIT, chose `v2` at ballot 2 with `{B, 2, 3}` — two values for one slot on a stable
+    /// roster, the only guard being B's local view of the committed key (2026-10-08 review).
+    /// A promise quorum intersects every accept quorum, so the value a quorum accepted is reported
+    /// to every later proposer before it may propose anything.
+    ///
+    /// Ballots come from a shared KV key, so two proposers can draw the same one. An acceptor
+    /// therefore promises a ballot to **one** proposer and refuses another's accept at that ballot,
+    /// which keeps *one value per ballot* — the property the adoption rule depends on.
+    ///
+    /// ## Compatibility
+    ///
+    /// Sent under the `PROPOSE` kind and appended last: an acceptor predating it decodes an unknown
+    /// variant as `None` and ignores it, so an upgraded proposer **times out rather than commits**
+    /// until a quorum is upgraded — fail-closed, as `VoteForValue` was. A proposer predating it
+    /// sends no `Prepare`; upgraded acceptors still accept its higher ballots, so a fleet keeps
+    /// working mid-upgrade, and has the guarantee only once every proposer is upgraded.
+    Prepare {
+        slot:     Arc<str>,
+        ballot:   u64,
+        proposer: NodeId,
+    },
+    /// An acceptor's answer to a [`Prepare`](Self::Prepare) it granted: it will refuse any lower
+    /// ballot and any other proposer at `ballot`, and it reports what it holds.
+    PrepareAck {
+        slot:            Arc<str>,
+        ballot:          u64,
+        voter:           NodeId,
+        /// The ballot `accepted_digest` was accepted at; `0` when nothing is accepted.
+        accepted_ballot: u64,
+        /// Digest of the accepted value — present whenever something is accepted, including after
+        /// a restart, when the value itself is not known.
+        accepted_digest: Option<[u8; 32]>,
+        /// The accepted value, when this acceptor still has it.
+        accepted_value:  Option<Bytes>,
+        /// The live committed value for the slot on this acceptor, if any.
+        committed:       Option<Bytes>,
     },
 }
 
@@ -440,6 +494,10 @@ pub mod consensus_ns {
     /// commitments. Expiry is evaluated read-side against the committed
     /// entry's HLC timestamp — see [`ConsensusConfig::committed_lease_secs`].
     pub const LEASE:     &str = "consensus/lease/";
+    /// The ballot a slot's most recent commit was decided at. Key: `consensus/decided/{slot}`,
+    /// value `u64` LE. A ballot at or below it belongs to a finished decision: acceptors refuse
+    /// it, and a proposer reopening an expired leased slot ignores acceptances at or below it.
+    pub const DECIDED:   &str = "consensus/decided/";
 }
 
 // ── Lease helpers ─────────────────────────────────────────────────────────────
@@ -652,6 +710,48 @@ impl ConsensusEngine {
             &tc.gossip_txs, msg,
             tc.node_id.id_hash(), ForwardHint::All, &tc.kv_state.dropped_frames,
         );
+    }
+
+    /// The ballot this slot's most recent commit was decided at, as this node knows it; `0` when
+    /// none — see [`consensus_ns::DECIDED`].
+    fn decided_floor(&self, slot: &str) -> u64 {
+        self.get(&format!("{}{}", consensus_ns::DECIDED, slot)).map(|b| decode_ballot(&b)).unwrap_or(0)
+    }
+
+    /// Records that `slot` was decided at `ballot`, never lowering what is recorded.
+    fn record_decided(&self, slot: &str, ballot: u64) {
+        if ballot > self.decided_floor(slot) {
+            self.kv_set(format!("{}{}", consensus_ns::DECIDED, slot), encode_ballot(ballot));
+        }
+    }
+
+    /// Writes `ballot` to the slot's shared ballot key unless a higher one is already there, so
+    /// proposers drawing their next ballot start above it.
+    async fn raise_ballot(&self, ballot_key: &str, ballot: u64) {
+        if ballot > self.read_ballot(ballot_key) {
+            self.set_async(ballot_key, encode_ballot(ballot)).await;
+        }
+    }
+
+    /// Writes this node's acceptor state for `slot` to its durable record — the promise and the
+    /// acceptance together, read back from the shared memory so the record is never older than
+    /// the change that prompted it.
+    ///
+    /// The listener and this node's proposer can both change a slot's state; each writes what it
+    /// reads *after* its change, and re-reads after writing — if the state moved meanwhile, the
+    /// newer one is written again, so the record cannot be left behind a vote or promise that has
+    /// already left. Bounded: a slot changing faster than four writes is written as of the last.
+    fn persist_acceptor(&self, slot: &Arc<str>) {
+        let key = accepted_key(&self.task_ctx.node_id, slot);
+        let read = || self.task_ctx.consensus_accepted.pin().get(slot).map(encode_acceptor);
+        let mut current = read();
+        for _ in 0..4 {
+            let Some(bytes) = current else { return };
+            self.kv_set(key.clone(), bytes.clone());
+            let after = read();
+            if after.as_ref() == Some(&bytes) { return; }
+            current = after;
+        }
     }
 
     /// Tombstones `key` in the KV store and gossips the deletion.
@@ -869,7 +969,9 @@ impl ConsensusEngine {
             None
         };
 
-        let mut ballot = self.read_ballot(&ballot_key) + 1;
+        // Above the slot's decided ballot too: the ballot key is no longer reset at commit, but it is
+        // gossiped and may lag what this node knows was decided.
+        let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
         let mut votes_last_ballot: usize = 0;
         // Captured topology-gate failure from the most recent ballot that
         // reached quorum-by-count but failed the Hard gate. Used to surface
@@ -919,13 +1021,61 @@ impl ConsensusEngine {
                 }
             }
 
+            // Register before emitting so no reply can arrive before we listen — one pair for both
+            // phases, so a vote racing ahead of the last promise is not lost between them.
+            let mut vote_rx = self.task_ctx.signal_handlers.register_with_capacity(
+                Arc::from(consensus_kind::VOTE), 512,
+            );
+            let mut nack_rx = self.task_ctx.signal_handlers.register_with_capacity(
+                Arc::from(consensus_kind::NACK), 64,
+            );
+
+            // **Phase 1: ask a quorum what it has accepted before proposing anything** — see
+            // `ConsensusMsg::Prepare`. Whatever the promise quorum reports at its highest ballot
+            // is what this ballot must carry.
+            let needed = quorum_size;
+            let phase1 = self.prepare_phase(
+                &mut vote_rx, &mut nack_rx, &scope, &slot, ballot, &value,
+                &|p: &AHashSet<NodeId>| p.len() >= needed,
+                trust_set.as_ref(), config.phase1_timeout,
+            ).await;
+            let retry_floor = match phase1 {
+                Phase1::Ready(Phase1Choice::Keep) => None,
+                Phase1::Ready(Phase1Choice::Adopt(ab, v)) => {
+                    adopted_from = ab;
+                    value = v;
+                    None
+                }
+                Phase1::Committed(existing) => {
+                    if superseded_by_live(&existing, &value) {
+                        return ConsensusResult::Superseded {
+                            slot,
+                            ballot: self.read_ballot(&ballot_key),
+                        };
+                    }
+                    None
+                }
+                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
+                Phase1::Refused(seen) => Some(seen),
+            };
+            if let Some(floor) = retry_floor {
+                ballot_retry_pause(config.ballot_retry_jitter_ms).await;
+                ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+                continue;
+            }
+
             // **Claim this node's vote before proposing, not after.** Proposing a value *is*
             // accepting it, so it goes through this node's shared acceptor memory — the same gate
             // every other vote passes. Order matters as much as the check: claiming after the
             // broadcast would let this node propose a value it then discovers it may not vote for,
             // and the acceptors that had already accepted it would be holding that ballot against
             // the value this node actually owes its vote to.
-            if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value) {
+            if let Some(existing) = self.live_committed(&slot)
+                && superseded_by_live(&existing, &value) {
+                    return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
+                }
+            let floor = self.decided_floor(&slot);
+            if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
                 // Already committed to a different value at this ballot. Cannot win here; move up
                 // rather than emit a proposal we are not entitled to support.
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
@@ -934,20 +1084,9 @@ impl ConsensusEngine {
             // Durable before the proposal leaves, for the same reason the voter records before its
             // vote leaves: a proposal is an acceptance, and an acceptance a restart forgets is one
             // this node can contradict.
-            self.kv_set(
-                accepted_key(&self.task_ctx.node_id, &slot),
-                encode_accepted(ballot, value_digest(&value)),
-            );
+            self.persist_acceptor(&slot);
 
-            self.set_async(ballot_key.as_str(), encode_ballot(ballot)).await;
-
-            // Register before emitting so no vote/nack can arrive before we listen.
-            let mut vote_rx = self.task_ctx.signal_handlers.register_with_capacity(
-                Arc::from(consensus_kind::VOTE), 512,
-            );
-            let mut nack_rx = self.task_ctx.signal_handlers.register_with_capacity(
-                Arc::from(consensus_kind::NACK), 64,
-            );
+            self.raise_ballot(&ballot_key, ballot).await;
 
             let propose_msg = ConsensusMsg::Propose {
                 slot: Arc::clone(&slot), ballot, value: value.clone(),
@@ -1030,10 +1169,7 @@ impl ConsensusEngine {
                     }
             }
 
-            if config.ballot_retry_jitter_ms > 0 {
-                let jitter = fastrand::u64(0..config.ballot_retry_jitter_ms);
-                tokio::time::sleep(Duration::from_millis(jitter)).await;
-            }
+            ballot_retry_pause(config.ballot_retry_jitter_ms).await;
             ballot = nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
         }
 
@@ -1150,12 +1286,52 @@ impl ConsensusEngine {
             Arc::from(consensus_kind::NACK), 64,
         );
 
-        let mut ballot = self.read_ballot(&ballot_key) + 1;
+        let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
 
         for _attempt in 0..config.max_ballots {
             for gs in group_states.values_mut() { gs.accepts = 0; }
 
-            self.set_async(&ballot_key, encode_ballot(ballot)).await;
+            // Phase 1, with the same per-group quorum the commit needs — see `propose`.
+            let ready = |p: &AHashSet<NodeId>| group_states.values().all(|gs| {
+                gs.members.iter().filter(|m| p.contains(*m)).count()
+                    >= cross_group_quorum(gs.members.len(), gs.quorum_frac)
+            });
+            let phase1 = self.prepare_phase(
+                &mut vote_rx, &mut nack_rx, &scope, &slot, ballot, &value, &ready, None,
+                config.phase1_timeout,
+            ).await;
+            let retry_floor = match phase1 {
+                Phase1::Ready(Phase1Choice::Keep) => None,
+                Phase1::Ready(Phase1Choice::Adopt(ab, v)) => {
+                    adopted_from = ab;
+                    value = v;
+                    None
+                }
+                Phase1::Committed(existing) => {
+                    if superseded_by_live(&existing, &value) {
+                        return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
+                    }
+                    None
+                }
+                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
+                Phase1::Refused(seen) => Some(seen),
+            };
+            if let Some(floor) = retry_floor {
+                ballot_retry_pause(config.ballot_retry_jitter_ms).await;
+                ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+                continue;
+            }
+
+            // The node-level gate `propose` passes too: one value per ballot from this node, however
+            // many proposals it runs for the slot at once. This proposer does not count its own vote
+            // here; the claim is the gate, not a vote.
+            let floor = self.decided_floor(&slot);
+            if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
+                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
+                continue;
+            }
+            self.persist_acceptor(&slot);
+            self.raise_ballot(&ballot_key, ballot).await;
 
             let propose_msg = ConsensusMsg::Propose {
                 slot: Arc::clone(&slot), ballot, value: value.clone(),
@@ -1230,7 +1406,7 @@ impl ConsensusEngine {
                             let committed_upd = self.set_async(&commit_key, value.clone()).await;
                             let persisted = self.persist_committed(&slot, &committed_upd).await
                                 & self.write_lease(&slot, lease_ms).await;
-                            self.kv_delete(&ballot_key);
+                            self.record_decided(&slot, ballot);
                             return ConsensusResult::Committed { slot, value: value.clone(), ballot, persisted };
                         }
                     }
@@ -1238,7 +1414,7 @@ impl ConsensusEngine {
                         match self.decode_verify(&sig.payload) {
                             Some(ConsensusMsg::Promise {
                                 slot: s, seen_ballot, accepted_ballot, accepted_value,
-                            }) if s == slot && seen_ballot > ballot => {
+                            }) if s == slot && seen_ballot >= ballot => {
                                 nack_ballot = seen_ballot;
                                 if let Some(v) = accepted_value
                                     && accepted_ballot >= learned.as_ref().map(|(b, _)| *b).unwrap_or(0) {
@@ -1247,7 +1423,7 @@ impl ConsensusEngine {
                                 break 'collect;
                             }
                             Some(ConsensusMsg::Nack { slot: s, seen_ballot })
-                                if s == slot && seen_ballot > ballot => {
+                                if s == slot && seen_ballot >= ballot => {
                                 nack_ballot = seen_ballot;
                                 break 'collect;
                             }
@@ -1262,10 +1438,7 @@ impl ConsensusEngine {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
 
-            if config.ballot_retry_jitter_ms > 0 {
-                let jitter = fastrand::u64(0..config.ballot_retry_jitter_ms);
-                tokio::time::sleep(Duration::from_millis(jitter)).await;
-            }
+            ballot_retry_pause(config.ballot_retry_jitter_ms).await;
             // Adopt before retrying: a value an acceptor already holds outranks ours.
             if let Some((ab, v)) = learned.take()
                 && ab >= adopted_from {
@@ -1288,10 +1461,109 @@ impl ConsensusEngine {
         }
     }
 
+    /// **Phase 1.** Promise `ballot` locally, ask `scope` to promise it, and collect promises until
+    /// `ready` says the promisers form a quorum, a refusal arrives, or `timeout` elapses.
+    ///
+    /// Counts only [`PrepareAck`](ConsensusMsg::PrepareAck)s for this slot and ballot, from distinct
+    /// acceptors (and, with trust slices, only declared ones), and decides the value with
+    /// [`choose_after_prepare`]. A refusal at or above `ballot` ends the attempt: an acceptor has
+    /// promised that ballot or a higher one to someone else.
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_phase(
+        &self,
+        vote_rx:   &mut mpsc::Receiver<Signal>,
+        nack_rx:   &mut mpsc::Receiver<Signal>,
+        scope:     &SignalScope,
+        slot:      &Arc<str>,
+        ballot:    u64,
+        current:   &Bytes,
+        ready:     &(dyn Fn(&AHashSet<NodeId>) -> bool + Sync),
+        trust_set: Option<&AHashSet<u64>>,
+        timeout:   Duration,
+    ) -> Phase1 {
+        let me = &self.task_ctx.node_id;
+        let mut reports: Vec<AcceptReport> = Vec::new();
+        let floor = self.decided_floor(slot);
+        match prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor) {
+            PrepareOutcome::Refused { promised, .. } => return Phase1::Refused(promised),
+            PrepareOutcome::Promised(acc) => {
+                if let Some((b, a)) = acc { reports.push((b, a.digest(), a.value())); }
+            }
+        }
+        self.persist_acceptor(slot);
+        let mut promisers: AHashSet<NodeId> = AHashSet::new();
+        promisers.insert(me.clone());
+
+        if !ready(&promisers) {
+            // Publish the ballot before asking, so a proposer drawing its next one starts above it
+            // rather than colliding on it.
+            self.raise_ballot(&format!("{}{}", consensus_ns::BALLOT, &**slot), ballot).await;
+            let prepare = ConsensusMsg::Prepare {
+                slot: Arc::clone(slot), ballot, proposer: me.clone(),
+            };
+            self.emit_async(
+                Arc::from(consensus_kind::PROPOSE), scope.clone(),
+                self.sign_payload(encode_consensus_msg(&prepare)),
+            ).await;
+            let ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+            let sleep = mycelium_core::sim_seam::sleep_ms("consensus.prepare", ms);
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! { biased;
+                    _ = &mut sleep => return Phase1::Short,
+                    Some(sig) = vote_rx.recv() => {
+                        let Some(ConsensusMsg::PrepareAck {
+                            slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
+                            accepted_value, committed,
+                        }) = self.decode_verify(&sig.payload) else { continue };
+                        if s != *slot || b != ballot { continue; }
+                        if let Some(ts) = trust_set
+                            && !ts.contains(&voter.id_hash()) { continue; }
+                        // A live commit of a different value ends this proposal. The same value — a
+                        // leased slot being renewed — is one promise like any other: no shortcut
+                        // past the quorum, whose reports still decide.
+                        if let Some(c) = committed
+                            && c != *current { return Phase1::Committed(c); }
+                        if accepted_ballot > 0 {
+                            // A digest is always sent with an acceptance; a value without one is
+                            // checked against its own digest by `choose_after_prepare`.
+                            let digest = accepted_digest
+                                .or_else(|| accepted_value.as_ref().map(value_digest));
+                            match digest {
+                                Some(d) => reports.push((accepted_ballot, d, accepted_value)),
+                                // An acceptance we cannot identify constrains us without telling
+                                // us how: do not count this promiser.
+                                None => continue,
+                            }
+                        }
+                        promisers.insert(voter);
+                        if ready(&promisers) { break; }
+                    }
+                    Some(sig) = nack_rx.recv() => {
+                        match self.decode_verify(&sig.payload) {
+                            Some(ConsensusMsg::Promise { slot: s, seen_ballot, .. })
+                                if s == *slot && seen_ballot >= ballot =>
+                                return Phase1::Refused(seen_ballot),
+                            Some(ConsensusMsg::Nack { slot: s, seen_ballot })
+                                if s == *slot && seen_ballot > ballot =>
+                                return Phase1::Refused(seen_ballot),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        // `current` is the proposer's own value, or one adopted from a refusal; the reports decide
+        // whether it may still be carried. Acceptances at or below the decided ballot belong to a
+        // finished decision — after a lease expires, to the one the slot reopened from.
+        reports.retain(|r| r.0 > floor);
+        Phase1::Ready(choose_after_prepare(current, &reports))
+    }
+
     /// Evaluates quorum-by-count + topology gate. When both pass, dispatches
     /// the commit (emit `COMMIT`, write `consensus/committed/{slot}` and the
-    /// `consensus/lease/{slot}` window when leased, tombstone
-    /// `consensus/ballot/{slot}`) and returns `Some(ConsensusResult::Committed)`.
+    /// `consensus/lease/{slot}` window when leased, record the decided ballot under
+    /// `consensus/decided/{slot}`) and returns `Some(ConsensusResult::Committed)`.
     /// Returns `None` when either gate fails — caller keeps collecting.
     ///
     /// Refuses to clobber a *different* live commitment that landed between the
@@ -1332,7 +1604,7 @@ impl ConsensusEngine {
         let committed_upd = self.set_async(commit_key, value.clone()).await;
         let persisted = self.persist_committed(slot, &committed_upd).await
             & self.write_lease(slot, lease_ms).await;
-        self.kv_delete(ballot_key);
+        self.record_decided(slot, ballot);
         Some(ConsensusResult::Committed {
             slot:   Arc::clone(slot),
             value:  value.clone(),
@@ -1469,11 +1741,11 @@ impl ConsensusEngine {
                         // value at the next ballot instead of retrying with its own.
                         Some(ConsensusMsg::Promise {
                             slot: s, seen_ballot, accepted_ballot, accepted_value,
-                        }) if s == *slot && seen_ballot > ballot =>
+                        }) if s == *slot && seen_ballot >= ballot =>
                             return BallotOutcome::NackHigher(
                                 seen_ballot, accepted_value.map(|v| (accepted_ballot, v))),
                         Some(ConsensusMsg::Nack { slot: s, seen_ballot })
-                            if s == *slot && seen_ballot > ballot =>
+                            if s == *slot && seen_ballot >= ballot =>
                             return BallotOutcome::NackHigher(seen_ballot, None),
                         _ => {}
                     }
@@ -1502,6 +1774,27 @@ impl ConsensusEngine {
             }
         }
     }
+}
+
+/// The random pause before a ballot retry — breaks lock-step livelock between proposers that
+/// increment their ballots in unison. Through the replay seam, so a recording replays its draws.
+async fn ballot_retry_pause(jitter_ms: u64) {
+    if jitter_ms > 0 {
+        let jitter = mycelium_core::sim_seam::rng_u64_below("consensus.ballot_jitter", jitter_ms);
+        mycelium_core::sim_seam::sleep_ms("consensus.ballot_jitter", jitter).await;
+    }
+}
+
+/// Outcome of `ConsensusEngine::prepare_phase`.
+enum Phase1 {
+    /// A quorum promised; the choice says what this ballot may carry.
+    Ready(Phase1Choice),
+    /// A promiser holds a live committed value for the slot.
+    Committed(Bytes),
+    /// An acceptor has promised this ballot (to another proposer) or a higher one.
+    Refused(u64),
+    /// No quorum promised within the timeout.
+    Short,
 }
 
 /// Outcome of `ConsensusEngine::collect_one_ballot`.
@@ -1556,6 +1849,8 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
         ConsensusMsg::VoteWithLocality { voter, .. } => voter == signer,
         ConsensusMsg::VoteForValue { voter, .. }     => voter == signer,
         ConsensusMsg::Propose { proposer, .. }       => proposer == signer,
+        ConsensusMsg::Prepare { proposer, .. }       => proposer == signer,
+        ConsensusMsg::PrepareAck { voter, .. }       => voter == signer,
         ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } | ConsensusMsg::Promise { .. } => true,
     }
 }
@@ -1573,8 +1868,9 @@ pub(crate) fn accepted_key(node: &NodeId, slot: &str) -> String {
     format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED, node, slot)
 }
 
-/// Encode `ballot(8, LE) ‖ digest(32)`.
-#[cfg(feature = "consensus")]
+/// Encode the pre-2.30.0 acceptance-only record, `ballot(8, LE) ‖ digest(32)` — kept so the tests
+/// can write one and check that [`decode_acceptor`] still reads it.
+#[cfg(all(feature = "consensus", test))]
 pub(crate) fn encode_accepted(ballot: u64, digest: [u8; 32]) -> Bytes {
     let mut v = Vec::with_capacity(40);
     v.extend_from_slice(&ballot.to_le_bytes());
@@ -1594,6 +1890,73 @@ pub(crate) fn decode_accepted(bytes: &[u8]) -> Option<(u64, [u8; 32])> {
     Some((ballot, d))
 }
 
+/// Encode the whole acceptor state for a slot — the promise as well as the acceptance:
+/// `0x02 ‖ promised(8) ‖ has_proposer(1) ‖ promised_to(8) ‖ has_accepted(1) ‖ accepted_ballot(8) ‖
+/// digest(32) ‖ value(rest, optional)`.
+///
+/// A promise a restart forgets is one the acceptor can break: it would accept a lower ballot after
+/// telling a higher proposer it would not, and that proposer's choice rests on the promise.
+#[cfg(feature = "consensus")]
+pub(crate) fn encode_acceptor(state: &AcceptorSlot) -> Bytes {
+    let mut v = Vec::with_capacity(ACCEPTOR_RECORD_LEN);
+    v.push(0x02);
+    v.extend_from_slice(&state.promised.to_le_bytes());
+    v.push(u8::from(state.promised_to.is_some()));
+    v.extend_from_slice(&state.promised_to.unwrap_or(0).to_le_bytes());
+    v.push(u8::from(state.accepted.is_some()));
+    let (ab, d) = state.accepted.as_ref().map(|(b, a)| (*b, a.digest())).unwrap_or((0, [0u8; 32]));
+    v.extend_from_slice(&ab.to_le_bytes());
+    v.extend_from_slice(&d);
+    // The value itself when it fits under the KV write cap, so a restarted acceptor can still hand
+    // it to a proposer; without it, a value known only by digest blocks every other proposal.
+    if let Some((_, Accepted::Full(value))) = &state.accepted
+        && ACCEPTOR_RECORD_LEN + value.len() <= mycelium_core::framing::MAX_KV_WRITE_BYTES {
+            v.extend_from_slice(value);
+        }
+    Bytes::from(v)
+}
+
+#[cfg(feature = "consensus")]
+const ACCEPTOR_RECORD_LEN: usize = 1 + 8 + 1 + 8 + 1 + 8 + 32;
+
+/// Decode a durable acceptor record in either shape: the current one ([`encode_acceptor`]) or the
+/// 40-byte acceptance-only record written before 2.30.0, read as *promised at the accepted ballot,
+/// to no named proposer* — which refuses a lower ballot and a different value at that ballot, the
+/// most the old record can justify. Anything else is **no record**, never a partial one.
+#[cfg(feature = "consensus")]
+pub(crate) fn decode_acceptor(bytes: &[u8]) -> Option<AcceptorSlot> {
+    if let Some((ballot, digest)) = decode_accepted(bytes) {
+        return Some(AcceptorSlot {
+            promised:    ballot,
+            promised_to: None,
+            accepted:    Some((ballot, Accepted::DigestOnly(digest))),
+        });
+    }
+    if bytes.len() < ACCEPTOR_RECORD_LEN || bytes[0] != 0x02 { return None; }
+    let u64_at = |i: usize| bytes[i..i + 8].try_into().ok().map(u64::from_le_bytes);
+    let flag = |i: usize| match bytes[i] { 0 => Some(false), 1 => Some(true), _ => None };
+    let promised = u64_at(1)?;
+    let promised_to = flag(9)?.then_some(u64_at(10)?);
+    let accepted = if flag(18)? {
+        let ab = u64_at(19)?;
+        let mut d = [0u8; 32];
+        d.copy_from_slice(&bytes[27..59]);
+        if ab > promised { return None; }
+        let rest = &bytes[ACCEPTOR_RECORD_LEN..];
+        if rest.is_empty() {
+            Some((ab, Accepted::DigestOnly(d)))
+        } else {
+            let value = Bytes::copy_from_slice(rest);
+            if value_digest(&value) != d { return None; }
+            Some((ab, Accepted::Full(value)))
+        }
+    } else {
+        if bytes.len() != ACCEPTOR_RECORD_LEN { return None; }
+        None
+    };
+    Some(AcceptorSlot { promised, promised_to, accepted })
+}
+
 /// **Recover this node's acceptor memory from its durable records.**
 ///
 /// Called at startup **before any listener can vote**. Without it the acceptor's guarantee — *at
@@ -1608,7 +1971,7 @@ pub(crate) fn decode_accepted(bytes: &[u8]) -> Option<(u64, [u8; 32])> {
 pub(crate) fn prewarm_accepted(
     kv_state: &crate::store::KvState,
     node:     &NodeId,
-    accepted: &papaya::HashMap<Arc<str>, (u64, Accepted)>,
+    accepted: &AcceptorMemory,
 ) -> usize {
     let prefix = format!("{}{}/", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED, node);
     let mut recovered = 0;
@@ -1616,11 +1979,119 @@ pub(crate) fn prewarm_accepted(
     for (key, entry) in guard.iter() {
         let Some(slot) = key.strip_prefix(prefix.as_str()) else { continue };
         let Some(bytes) = entry.data.as_ref() else { continue };
-        let Some((ballot, digest)) = decode_accepted(bytes) else { continue };
-        accepted.pin().insert(Arc::from(slot), (ballot, Accepted::DigestOnly(digest)));
+        let Some(state) = decode_acceptor(bytes) else { continue };
+        accepted.pin().insert(Arc::from(slot), state);
         recovered += 1;
     }
     recovered
+}
+
+/// This node's acceptor memory, one entry per slot, shared by its acceptor and proposer roles.
+#[cfg(feature = "consensus")]
+pub(crate) type AcceptorMemory = papaya::HashMap<Arc<str>, AcceptorSlot>;
+
+/// What this node's acceptor holds for one slot: the ballot it has **promised** not to go below,
+/// whom it promised it to, and what it has **accepted**.
+///
+/// `promised` is never below the accepted ballot: accepting at a ballot is also promising it.
+#[cfg(feature = "consensus")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AcceptorSlot {
+    /// The highest ballot promised or accepted; `0` for a fresh slot.
+    pub(crate) promised:    u64,
+    /// The proposer (`NodeId::id_hash`) `promised` was promised to. `None` for a record recovered
+    /// from the pre-2.30.0 shape, which did not name one.
+    pub(crate) promised_to: Option<u64>,
+    /// The ballot and value most recently accepted.
+    pub(crate) accepted:    Option<(u64, Accepted)>,
+}
+
+/// Outcome of [`prepare_slot`].
+#[cfg(feature = "consensus")]
+#[derive(Clone, Debug)]
+pub(crate) enum PrepareOutcome {
+    /// The promise is recorded; carries what this acceptor had accepted.
+    Promised(Option<(u64, Accepted)>),
+    /// Refused: this acceptor has promised `promised` (to another proposer, when equal).
+    Refused { promised: u64, accepted: Option<(u64, Accepted)> },
+}
+
+/// **Promise `ballot` to `proposer`, or refuse.** A ballot at or below `floor` — the slot's decided
+/// ballot ([`consensus_ns::DECIDED`]) — belongs to a finished decision and is always refused.
+/// Otherwise granted for a ballot above anything promised, and
+/// for a re-sent prepare at the ballot already promised **to the same proposer**; refused for a
+/// lower ballot or for a second proposer at an equal one — which is what keeps a ballot to one
+/// proposer, and so to one value, when ballots are drawn from a shared key.
+///
+/// The `compute` closure re-reads the entry on every attempt and is retry-safe.
+#[cfg(feature = "consensus")]
+pub(crate) fn prepare_slot(
+    memory:   &AcceptorMemory,
+    slot:     &Arc<str>,
+    ballot:   u64,
+    proposer: u64,
+    floor:    u64,
+) -> PrepareOutcome {
+    use papaya::Operation;
+    let mut outcome = PrepareOutcome::Refused { promised: 0, accepted: None };
+    memory.pin().compute(Arc::clone(slot), |entry| {
+        let cur = entry.map(|(_, s)| s.clone()).unwrap_or_default();
+        if ballot <= floor {
+            outcome = PrepareOutcome::Refused { promised: cur.promised.max(floor), accepted: cur.accepted };
+            return Operation::Abort(());
+        }
+        let granted = ballot > cur.promised
+            || (ballot == cur.promised && cur.promised_to == Some(proposer));
+        if granted {
+            outcome = PrepareOutcome::Promised(cur.accepted.clone());
+            Operation::Insert(AcceptorSlot { promised: ballot, promised_to: Some(proposer), ..cur })
+        } else {
+            outcome = PrepareOutcome::Refused { promised: cur.promised, accepted: cur.accepted };
+            Operation::Abort(())
+        }
+    });
+    outcome
+}
+
+/// One acceptor's report in a promise quorum: `(accepted_ballot, digest, value if known)`.
+#[cfg(feature = "consensus")]
+pub(crate) type AcceptReport = (u64, [u8; 32], Option<Bytes>);
+
+/// What a proposer may propose after a promise quorum answered — [`choose_after_prepare`].
+#[cfg(feature = "consensus")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Phase1Choice {
+    /// No acceptor in the quorum had accepted anything: any value is safe, so keep the current one.
+    Keep,
+    /// Carry this value, accepted at this ballot — the highest any promiser reported.
+    Adopt(u64, Bytes),
+    /// The highest acceptance is known only by digest (its acceptors restarted), and it is not the
+    /// current value: proposing anything would risk overwriting a chosen value, so do not.
+    Blocked,
+}
+
+/// **The phase-1 rule.** Among the acceptances reported by acceptors that promised this ballot,
+/// the one at the highest ballot decides: carry it. Classic Paxos, stated over digests so an
+/// acceptor that restarted — and holds only the digest — still constrains the proposer.
+///
+/// Note what is *not* consulted: a value adopted earlier from a refusal. A value accepted outside
+/// the promise quorum at a higher ballot was not chosen, and preferring it over the quorum's
+/// highest could overwrite one that was.
+#[cfg(feature = "consensus")]
+pub(crate) fn choose_after_prepare(current: &Bytes, reports: &[AcceptReport]) -> Phase1Choice {
+    let Some(top) = reports.iter().filter(|r| r.0 > 0).map(|r| r.0).max() else {
+        return Phase1Choice::Keep;
+    };
+    let at_top = || reports.iter().filter(move |r| r.0 == top);
+    // One value per ballot is what the rule rests on; two digests at one ballot means it did not
+    // hold (a pre-2.30.0 proposer), and either choice could overwrite the chosen one.
+    let first = at_top().next().map(|r| r.1);
+    if at_top().any(|r| Some(r.1) != first) { return Phase1Choice::Blocked; }
+    if let Some(v) = at_top().find_map(|r| r.2.clone().filter(|v| value_digest(v) == r.1)) {
+        return Phase1Choice::Adopt(top, v);
+    }
+    let mine = value_digest(current);
+    if at_top().all(|r| r.1 == mine) { Phase1Choice::Keep } else { Phase1Choice::Blocked }
 }
 
 /// What this node accepted at a ballot.
@@ -1669,31 +2140,60 @@ impl Accepted {
 /// Returns `true` when the claim is recorded and the caller may vote. The `compute` closure is a
 /// compare-and-set and therefore **retry-safe**: it re-reads the current entry on every attempt and
 /// never acts on a value captured outside the closure.
+///
+/// Since 2.30.0 the claim also honours the **promise**: a ballot below the one promised is refused,
+/// and at the promised ballot only the proposer it was promised to may claim — see
+/// [`ConsensusMsg::Prepare`]. A ballot at or below `floor`, the slot's decided ballot, is refused.
+///
+/// The memory is **never erased** on commit. It used to be, to bound the record prefix, and that
+/// dropped promises: a delayed lower-ballot proposal reached acceptors that had forgotten what they
+/// promised and could commit a second value (2026-10-08 review). The prefix grows with the number
+/// of slots, not of ballots.
 #[cfg(feature = "consensus")]
 pub(crate) fn claim_vote(
-    accepted: &papaya::HashMap<Arc<str>, (u64, Accepted)>,
+    memory:   &AcceptorMemory,
     slot:     &Arc<str>,
     ballot:   u64,
     value:    &Bytes,
+    proposer: u64,
+    floor:    u64,
 ) -> bool {
     use papaya::Operation;
     let want = value_digest(value);
     let mut granted = false;
-    accepted.pin().compute(Arc::clone(slot), |entry| {
+    memory.pin().compute(Arc::clone(slot), |entry| {
         // Recomputed from scratch on every retry — never from a prior attempt's result.
-        granted = match entry {
-            // Comparison is by digest, so a value recovered from the durable record after a
-            // restart is as decisive as one accepted in this process.
-            Some((_, (b, a))) => may_cast_vote_digest(*b, Some(a.digest()), ballot, want),
-            None              => true,
-        };
+        let cur = entry.map(|(_, s)| s.clone()).unwrap_or_default();
+        granted = ballot > floor && may_accept(&cur, ballot, want, proposer);
         if granted {
-            Operation::Insert((ballot, Accepted::Full(value.clone())))
+            Operation::Insert(AcceptorSlot {
+                promised:    ballot,
+                promised_to: Some(proposer),
+                accepted:    Some((ballot, Accepted::Full(value.clone()))),
+            })
         } else {
             Operation::Abort(())
         }
     });
     granted
+}
+
+/// The accept rule over a slot's state: above the promise, always; below it, never; at it, only
+/// for the proposer it was promised to (or no named one — a pre-2.30.0 record) **and** only for the
+/// value already accepted there, if any. Comparison is by digest, so a value recovered from the
+/// durable record after a restart is as decisive as one accepted in this process.
+#[cfg(feature = "consensus")]
+fn may_accept(cur: &AcceptorSlot, ballot: u64, digest: [u8; 32], proposer: u64) -> bool {
+    use std::cmp::Ordering::*;
+    match ballot.cmp(&cur.promised) {
+        Less    => false,
+        Greater => true,
+        Equal   => {
+            let same_proposer = cur.promised_to.is_none_or(|p| p == proposer);
+            let prior = cur.accepted.as_ref().filter(|(b, _)| *b == ballot).map(|(_, a)| a.digest());
+            same_proposer && may_cast_vote_digest(ballot, prior, ballot, digest)
+        }
+    }
 }
 
 /// `may_cast_vote` over digests — the form both roles and the restart path share.
@@ -1744,6 +2244,46 @@ pub(crate) struct SignedConsensusMsg {
 
 // ── Voter task ───────────────────────────────────────────────────────────────
 
+/// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
+/// promised. The promise is **durable before the answer leaves** — a proposer chooses its value on
+/// the strength of it, so a restart must not let this node break it.
+#[cfg(feature = "consensus")]
+fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId) {
+    let floor = ctx.decided_floor(&slot);
+    match prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor) {
+        PrepareOutcome::Promised(acc) => {
+            ctx.persist_acceptor(&slot);
+            let ack = ConsensusMsg::PrepareAck {
+                slot:            Arc::clone(&slot),
+                ballot,
+                voter:           ctx.task_ctx.node_id.clone(),
+                accepted_ballot: acc.as_ref().map(|(b, _)| *b).unwrap_or(0),
+                accepted_digest: acc.as_ref().map(|(_, a)| a.digest()),
+                accepted_value:  acc.and_then(|(_, a)| a.value()),
+                committed:       ctx.live_committed(&slot),
+            };
+            ctx.emit(
+                Arc::from(consensus_kind::VOTE),
+                SignalScope::Individual(proposer),
+                ctx.sign_payload(encode_consensus_msg(&ack)),
+            );
+        }
+        PrepareOutcome::Refused { promised, accepted } => {
+            let refusal = ConsensusMsg::Promise {
+                slot,
+                seen_ballot:     promised,
+                accepted_ballot: accepted.as_ref().map(|(b, _)| *b).unwrap_or(0),
+                accepted_value:  accepted.and_then(|(_, a)| a.value()),
+            };
+            ctx.emit(
+                Arc::from(consensus_kind::NACK),
+                SignalScope::Individual(proposer),
+                ctx.sign_payload(encode_consensus_msg(&refusal)),
+            );
+        }
+    }
+}
+
 /// Background voter task — processes incoming consensus signals and emits
 /// votes, nacks, and KV commit writes on behalf of this node.
 ///
@@ -1787,23 +2327,34 @@ pub(crate) async fn run_consensus_listener(
                 }
                 consecutive_abstains = 0;
 
-                let Some(ConsensusMsg::Propose { slot, ballot, value, proposer }) =
-                    ctx.decode_verify(&sig.payload)
-                else { continue };
-
-                let local = accepted.pin().get(&slot).map(|(b, _)| *b).unwrap_or(0);
+                let (slot, ballot, value, proposer) = match ctx.decode_verify(&sig.payload) {
+                    Some(ConsensusMsg::Prepare { slot, ballot, proposer }) => {
+                        answer_prepare(&ctx, slot, ballot, proposer);
+                        continue;
+                    }
+                    Some(ConsensusMsg::Propose { slot, ballot, value, proposer }) =>
+                        (slot, ballot, value, proposer),
+                    _ => continue,
+                };
                 // Claim this node's single vote at this ballot. Refuses a stale ballot OR an
                 // equal-ballot proposal for a DIFFERENT value than we already accepted: casting a
                 // second vote at one ballot for another value lets two proposers each reach quorum
                 // with an overlapping voter and both Commit different values — a single-decree
                 // safety violation (audit 2026-07-15 pass 2). The claim goes through the *shared*
                 // memory, so this node's proposer role cannot cast a second, conflicting vote.
-                if !claim_vote(&accepted, &slot, ballot, &value) {
+                // A live commit of a different value refuses the proposal outright: the slot is
+                // decided, whatever ballot the proposal carries.
+                let decided_otherwise = ctx.live_committed(&slot).is_some_and(|c| c != value);
+                let floor = ctx.decided_floor(&slot);
+                if decided_otherwise
+                    || !claim_vote(&accepted, &slot, ballot, &value, proposer.id_hash(), floor) {
                     // Report what we hold, so the proposer can **adopt** it at a higher ballot
                     // rather than overwrite it. A bare `Nack` says only "I have seen a ballot",
                     // which leaves the proposer free to retry with its own value and replace a
                     // value a quorum already accepted.
-                    let held = accepted.pin().get(&slot).map(|(b, v)| (*b, v.clone()));
+                    let state = accepted.pin().get(&slot).cloned().unwrap_or_default();
+                    let local = state.promised.max(floor);
+                    let held = state.accepted;
                     let promise = ConsensusMsg::Promise {
                         slot:            Arc::clone(&slot),
                         seen_ballot:     local,
@@ -1831,10 +2382,7 @@ pub(crate) async fn run_consensus_listener(
                     // the proposer counts it, the node forgets it, and after a restart the node can
                     // vote again at the same ballot for another value. Same ordering rule as
                     // "apply to the store, then hand the record to the WAL", one layer up.
-                    ctx.kv_set(
-                        accepted_key(&ctx.task_ctx.node_id, &slot),
-                        encode_accepted(ballot, value_digest(&value)),
-                    );
+                    ctx.persist_acceptor(&slot);
                     ctx.kv_set(
                         format!("{}{}", consensus_ns::BALLOT, &*slot),
                         encode_ballot(ballot),
@@ -1928,20 +2476,14 @@ pub(crate) async fn run_consensus_listener(
                         continue;
                     }
 
-                let current = accepted.pin().get(&slot).map(|(b, _)| *b).unwrap_or(0);
-                if ballot >= current {
-                    // Remove instead of insert: once a slot is committed it cannot
-                    // receive a valid higher ballot, so we don't need to track it. This drops the
-                    // acceptor's memory for the slot — for both roles, which is the point — and the
-                    // durable record with it, so the prefix does not grow without bound.
-                    accepted.pin().remove(&slot);
-                    ctx.kv_delete(&accepted_key(&ctx.task_ctx.node_id, &slot));
-                }
+                // The acceptor's memory is **kept**: erasing it here dropped promises, and a delayed
+                // lower-ballot proposal could then commit a second value (2026-10-08 review). What a
+                // commit changes is the floor — a ballot at or below it is refused from now on.
                 ctx.kv_set(
                     format!("{}{}", consensus_ns::COMMITTED, &*slot),
                     value,
                 );
-                ctx.kv_delete(&format!("{}{}", consensus_ns::BALLOT, &*slot));
+                ctx.record_decided(&slot, ballot);
             }
         }
     }
@@ -2310,29 +2852,30 @@ mod consensus_msg_auth_tests {
     /// to vote, and defeating `VoteForValue`'s binding by the route binding does not cover.
     #[test]
     fn one_node_casts_one_vote_per_ballot_in_either_role() {
-        let accepted: papaya::HashMap<Arc<str>, (u64, Accepted)> = papaya::HashMap::new();
+        let accepted = AcceptorMemory::new();
         let slot: Arc<str> = Arc::from("leader/g");
         let v_x = Bytes::from_static(b"value-X");
         let v_y = Bytes::from_static(b"value-Y");
+        const P: u64 = 1;
 
         // Acting as an acceptor: accept v_X at ballot 1.
-        assert!(claim_vote(&accepted, &slot, 1, &v_x), "first claim at a ballot is granted");
+        assert!(claim_vote(&accepted, &slot, 1, &v_x, P, 0), "first claim at a ballot is granted");
 
         // Acting as a proposer, same node, same ballot, different value — refused. This is the
         // self-vote that used to be unconditional.
         assert!(
-            !claim_vote(&accepted, &slot, 1, &v_y),
+            !claim_vote(&accepted, &slot, 1, &v_y, P, 0),
             "a node must not vote for a second value at a ballot it has already voted in",
         );
 
         // Re-claiming the SAME value at the same ballot is fine — a retransmitted proposal must not
         // look like equivocation.
-        assert!(claim_vote(&accepted, &slot, 1, &v_x), "idempotent for the same value");
+        assert!(claim_vote(&accepted, &slot, 1, &v_x, P, 0), "idempotent for the same value");
 
         // A higher ballot is a fresh decision, and may carry a different value.
-        assert!(claim_vote(&accepted, &slot, 2, &v_y), "a higher ballot may choose anew");
+        assert!(claim_vote(&accepted, &slot, 2, &v_y, P, 0), "a higher ballot may choose anew");
         // …and the memory moved with it: ballot 1 is now stale.
-        assert!(!claim_vote(&accepted, &slot, 1, &v_x), "a stale ballot cannot be voted in again");
+        assert!(!claim_vote(&accepted, &slot, 1, &v_x, P, 0), "a stale ballot cannot be voted in again");
     }
 
     /// **A proposer at a higher ballot adopts what was already accepted.**
@@ -2399,26 +2942,28 @@ mod consensus_msg_auth_tests {
         let v_x = Bytes::from_static(b"value-X");
         let v_y = Bytes::from_static(b"value-Y");
 
+        const P: u64 = 1;
+
         // Before the restart: accept v_X at ballot 4 and write the durable record.
-        let live: papaya::HashMap<Arc<str>, (u64, Accepted)> = papaya::HashMap::new();
-        assert!(claim_vote(&live, &slot, 4, &v_x));
-        let record = encode_accepted(4, value_digest(&v_x));
+        let live = AcceptorMemory::new();
+        assert!(claim_vote(&live, &slot, 4, &v_x, P, 0));
+        let record = encode_acceptor(&live.pin().get(&slot).cloned().expect("claimed"));
         assert_eq!(accepted_key(&node, &slot), format!("sys/consensus-accepted/{node}/leader/g"));
 
         // The restart: the map is gone.
-        let recovered: papaya::HashMap<Arc<str>, (u64, Accepted)> = papaya::HashMap::new();
-        let (ballot, digest) = decode_accepted(&record).expect("a well-formed record");
-        recovered.pin().insert(Arc::clone(&slot), (ballot, Accepted::DigestOnly(digest)));
+        let recovered = AcceptorMemory::new();
+        let state = decode_acceptor(&record).expect("a well-formed record");
+        recovered.pin().insert(Arc::clone(&slot), state);
 
         // After the restart: the conflicting vote is still refused…
         assert!(
-            !claim_vote(&recovered, &slot, 4, &v_y),
+            !claim_vote(&recovered, &slot, 4, &v_y, P, 0),
             "a restarted node must not vote for a second value at a ballot it already voted in",
         );
         // …the same value is still idempotent…
-        assert!(claim_vote(&recovered, &slot, 4, &v_x), "equal digests, so the same vote stands");
+        assert!(claim_vote(&recovered, &slot, 4, &v_x, P, 0), "equal digests, so the same vote stands");
         // …and a higher ballot is still a fresh decision.
-        assert!(claim_vote(&recovered, &slot, 5, &v_y));
+        assert!(claim_vote(&recovered, &slot, 5, &v_y, P, 0));
     }
 
     /// A recovered record refuses, but cannot help a proposer adopt — safety survives the restart,
@@ -2497,6 +3042,249 @@ mod consensus_msg_auth_tests {
         let commit = ConsensusMsg::Commit { slot: "s".into(), ballot: 1, value: Bytes::from_static(b"v") };
         assert!(signer_authorized(&commit, &a));
         assert!(signer_authorized(&ConsensusMsg::Nack { slot: "s".into(), seen_ballot: 1 }, &a));
+    }
+
+    /// **Two proposers cannot choose two values for one slot** — the stable-roster case, no
+    /// membership change, no restart (fail-first model of the 2026-10-08 finding).
+    ///
+    /// Five acceptors, quorum three. A chooses `v1` at ballot 1 with `{A, 1, 2}`. B has not seen
+    /// the COMMIT, proposes `v2` at ballot 2 to `{B, 2, 3}`: its quorum shares acceptor 2 with A's.
+    /// Before the prepare phase, nothing made B learn what acceptor 2 held — a strictly higher
+    /// ballot was granted without reporting the accepted value — so B chose `v2` too. Seen failing
+    /// on the unfixed code with the proposer of the day modelled as `claim_vote` alone (B chose
+    /// `v2`); the round below is the proposer as it is now: `prepare_slot`, then
+    /// `choose_after_prepare`, then `claim_vote`.
+    #[test]
+    fn two_proposers_cannot_choose_two_values_for_one_slot() {
+        let slot: Arc<str> = Arc::from("leader/g");
+        let v1 = Bytes::from_static(b"v1");
+        let v2 = Bytes::from_static(b"v2");
+        let acceptors: Vec<AcceptorMemory> = (0..5).map(|_| AcceptorMemory::new()).collect();
+        let round = |proposer: u64, members: &[usize], ballot: u64, value: &Bytes| -> Option<Bytes> {
+            let mut reports = Vec::new();
+            for &i in members {
+                match prepare_slot(&acceptors[i], &slot, ballot, proposer, 0) {
+                    PrepareOutcome::Promised(acc) => if let Some((b, a)) = acc {
+                        reports.push((b, a.digest(), a.value()));
+                    },
+                    PrepareOutcome::Refused { .. } => return None,
+                }
+            }
+            let value = match choose_after_prepare(value, &reports) {
+                Phase1Choice::Keep => value.clone(),
+                Phase1Choice::Adopt(_, v) => v,
+                Phase1Choice::Blocked => return None,
+            };
+            let granted = members.iter()
+                .filter(|&&i| claim_vote(&acceptors[i], &slot, ballot, &value, proposer, 0))
+                .count();
+            (granted >= 3).then_some(value)
+        };
+        let a = round(100, &[0, 1, 2], 1, &v1);
+        let b = round(200, &[4, 2, 3], 2, &v2);
+        assert_eq!(a.as_ref(), Some(&v1), "A's quorum chose v1");
+        assert_eq!(b.as_ref(), Some(&v1), "B's intersecting quorum must choose v1, not v2");
+    }
+
+    /// **A promise binds the acceptor.** After promising ballot 5 to P it refuses any lower
+    /// ballot, refuses Q at ballot 5 — the same ballot drawn from the shared key — and still lets
+    /// P through, both for a re-sent prepare and for P's accept.
+    #[test]
+    fn a_promise_refuses_lower_ballots_and_other_proposers() {
+        let m = AcceptorMemory::new();
+        let slot: Arc<str> = Arc::from("s");
+        let v = Bytes::from_static(b"v");
+        const P: u64 = 1;
+        const Q: u64 = 2;
+        assert!(matches!(prepare_slot(&m, &slot, 5, P, 0), PrepareOutcome::Promised(None)));
+        assert!(matches!(prepare_slot(&m, &slot, 5, P, 0), PrepareOutcome::Promised(None)),
+                "a re-sent prepare from the same proposer is granted again");
+        assert!(matches!(prepare_slot(&m, &slot, 5, Q, 0), PrepareOutcome::Refused { promised: 5, .. }),
+                "a second proposer at the promised ballot is refused");
+        assert!(matches!(prepare_slot(&m, &slot, 4, Q, 0), PrepareOutcome::Refused { promised: 5, .. }));
+        assert!(!claim_vote(&m, &slot, 4, &v, P, 0), "an accept below the promise is refused");
+        assert!(!claim_vote(&m, &slot, 5, &v, Q, 0), "another proposer's accept at the promised ballot is refused");
+        assert!(claim_vote(&m, &slot, 5, &v, P, 0), "the promised proposer's accept is granted");
+        assert!(matches!(prepare_slot(&m, &slot, 6, Q, 0), PrepareOutcome::Promised(Some((5, _)))),
+                "a higher prepare is granted and reports the acceptance");
+        assert!(!claim_vote(&m, &slot, 5, &v, P, 0), "and P's ballot is now below the promise");
+    }
+
+    /// **Two proposers on one ballot: only one can assemble a quorum.** Three acceptors, quorum
+    /// two; P and Q both draw ballot 1, and their prepares arrive in different orders. Whoever an
+    /// acceptor promised first keeps it, so at most one proposer holds two promises — and the other
+    /// cannot get its accept through either.
+    #[test]
+    fn one_ballot_goes_to_one_proposer() {
+        let slot: Arc<str> = Arc::from("s");
+        let acc: Vec<AcceptorMemory> = (0..3).map(|_| AcceptorMemory::new()).collect();
+        const P: u64 = 1;
+        const Q: u64 = 2;
+        let promised = |i: usize, who: u64| matches!(prepare_slot(&acc[i], &slot, 1, who, 0), PrepareOutcome::Promised(_));
+        // Arrival orders: acceptor 0 sees P first, 1 sees Q first, 2 sees P first.
+        let (p0, q0) = (promised(0, P), promised(0, Q));
+        let (q1, p1) = (promised(1, Q), promised(1, P));
+        let (p2, q2) = (promised(2, P), promised(2, Q));
+        assert_eq!([p0, p1, p2].iter().filter(|x| **x).count(), 2, "P holds a quorum");
+        assert_eq!([q0, q1, q2].iter().filter(|x| **x).count(), 1, "Q holds only acceptor 1");
+        let vq = Bytes::from_static(b"q");
+        let q_accepts = (0..3).filter(|&i| claim_vote(&acc[i], &slot, 1, &vq, Q, 0)).count();
+        assert!(q_accepts < 2, "Q cannot get a quorum to accept at P's ballot");
+    }
+
+    /// The durable record carries the promise as well as the acceptance, so a restart cannot
+    /// break a promise; and a pre-2.30.0 acceptance-only record still reads, as a promise at the
+    /// accepted ballot to no named proposer.
+    #[test]
+    fn a_promise_survives_a_restart() {
+        let slot: Arc<str> = Arc::from("s");
+        let live = AcceptorMemory::new();
+        const P: u64 = 1;
+        const Q: u64 = 2;
+        assert!(matches!(prepare_slot(&live, &slot, 7, P, 0), PrepareOutcome::Promised(None)));
+        let record = encode_acceptor(&live.pin().get(&slot).cloned().unwrap());
+        let recovered = AcceptorMemory::new();
+        recovered.pin().insert(Arc::clone(&slot), decode_acceptor(&record).expect("record"));
+        let v = Bytes::from_static(b"v");
+        assert!(!claim_vote(&recovered, &slot, 6, &v, Q, 0), "a lower ballot is still refused after a restart");
+        assert!(!claim_vote(&recovered, &slot, 7, &v, Q, 0), "so is another proposer at the promised ballot");
+        assert!(claim_vote(&recovered, &slot, 7, &v, P, 0));
+
+        let legacy = decode_acceptor(&encode_accepted(4, value_digest(&v))).expect("legacy record");
+        assert_eq!((legacy.promised, legacy.promised_to), (4, None));
+        let m = AcceptorMemory::new();
+        m.pin().insert(Arc::clone(&slot), legacy);
+        assert!(!claim_vote(&m, &slot, 4, &Bytes::from_static(b"other"), Q, 0), "a different value at the old ballot is refused");
+        assert!(claim_vote(&m, &slot, 4, &v, Q, 0), "the same value is not");
+    }
+
+    /// The current record's shape is checked, never half-read: a wrong tag, a flag that is not
+    /// 0 or 1, an acceptance above the promise, or a wrong length is no record.
+    #[test]
+    fn a_malformed_promise_record_is_no_record() {
+        let st = AcceptorSlot {
+            promised: 9, promised_to: Some(3),
+            accepted: Some((8, Accepted::DigestOnly(value_digest(&Bytes::from_static(b"v"))))),
+        };
+        let good = encode_acceptor(&st).to_vec();
+        let back = decode_acceptor(&good).expect("round trip");
+        assert_eq!((back.promised, back.promised_to), (9, Some(3)));
+        assert_eq!(back.accepted.map(|(b, a)| (b, a.digest())), Some((8, value_digest(&Bytes::from_static(b"v")))));
+        let mut bad_tag = good.clone(); bad_tag[0] = 0x03;
+        assert!(decode_acceptor(&bad_tag).is_none());
+        let mut bad_flag = good.clone(); bad_flag[9] = 2;
+        assert!(decode_acceptor(&bad_flag).is_none());
+        let mut above = good.clone(); above[19..27].copy_from_slice(&10u64.to_le_bytes());
+        assert!(decode_acceptor(&above).is_none(), "an acceptance above the promise is incoherent");
+        assert!(decode_acceptor(&good[..good.len() - 1]).is_none());
+    }
+
+    /// **The phase-1 rule**: the highest acceptance among the promisers decides; a value whose
+    /// bytes do not match its digest is ignored; an acceptance known only by digest blocks a
+    /// different value but not the same one.
+    #[test]
+    fn the_phase1_rule_carries_the_highest_acceptance() {
+        let mine = Bytes::from_static(b"mine");
+        let a = Bytes::from_static(b"a");
+        let b = Bytes::from_static(b"b");
+        assert_eq!(choose_after_prepare(&mine, &[]), Phase1Choice::Keep);
+        assert_eq!(
+            choose_after_prepare(&mine, &[(2, value_digest(&a), Some(a.clone())), (5, value_digest(&b), Some(b.clone()))]),
+            Phase1Choice::Adopt(5, b.clone()),
+        );
+        assert_eq!(choose_after_prepare(&mine, &[(5, value_digest(&b), None)]), Phase1Choice::Blocked,
+                   "a value known only by digest must not be overwritten");
+        assert_eq!(choose_after_prepare(&b, &[(5, value_digest(&b), None)]), Phase1Choice::Keep,
+                   "but the proposer may carry it when it is its own");
+        assert_eq!(choose_after_prepare(&mine, &[(5, value_digest(&b), None), (5, value_digest(&b), Some(b.clone()))]),
+                   Phase1Choice::Adopt(5, b.clone()), "one promiser with the bytes is enough");
+        assert_eq!(choose_after_prepare(&mine, &[(5, value_digest(&b), Some(a))]), Phase1Choice::Blocked,
+                   "bytes that do not match their digest are not adopted");
+    }
+
+    /// The record carries the value when it fits, so a restarted acceptor can still hand it to a
+    /// proposer — and bytes that do not match the digest are no record, not a guess.
+    #[test]
+    fn the_promise_record_carries_the_value() {
+        let v = Bytes::from_static(b"the-value");
+        let st = AcceptorSlot { promised: 3, promised_to: Some(1), accepted: Some((3, Accepted::Full(v.clone()))) };
+        let rec = encode_acceptor(&st);
+        let back = decode_acceptor(&rec).expect("round trip");
+        assert_eq!(back.accepted.and_then(|(_, a)| a.value()), Some(v), "a restart keeps the bytes");
+        let mut bad = rec.to_vec();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(decode_acceptor(&bad).is_none(), "bytes that contradict the digest are no record");
+        let none = AcceptorSlot { promised: 3, promised_to: Some(1), accepted: None };
+        let mut trailing = encode_acceptor(&none).to_vec();
+        trailing.push(7);
+        assert!(decode_acceptor(&trailing).is_none(), "a value with no acceptance is incoherent");
+    }
+
+    /// **A delayed lower-ballot proposal cannot commit a second value** (the 2026-10-08 review's
+    /// HIGH-1). D promised ballot 1 by `{4,0,1}` and sent `Propose(1, v0)`, which is delayed; A then
+    /// chose `v1` at ballot 2 with `{3,1,2}` and committed. The listener used to **erase** an
+    /// acceptor's memory on COMMIT, promises included, so the delayed proposal found `{0,1,2}`
+    /// forgetful and assembled a quorum — seen failing on the erasing code (D held four votes for
+    /// `v0`). Now nothing is erased: 1 and 2 still hold their promise at 2, and once an acceptor
+    /// knows the slot was decided at 2, ballot 1 is below its floor.
+    #[test]
+    fn a_delayed_lower_proposal_cannot_commit_a_second_value() {
+        let slot: Arc<str> = Arc::from("s");
+        let acc: Vec<AcceptorMemory> = (0..5).map(|_| AcceptorMemory::new()).collect();
+        let (v0, v1) = (Bytes::from_static(b"v0"), Bytes::from_static(b"v1"));
+        const D: u64 = 4;
+        const A: u64 = 3;
+        for i in [4usize, 0, 1] { assert!(matches!(prepare_slot(&acc[i], &slot, 1, D, 0), PrepareOutcome::Promised(None))); }
+        assert!(claim_vote(&acc[4], &slot, 1, &v0, D, 0));
+        for i in [3usize, 1, 2] { assert!(matches!(prepare_slot(&acc[i], &slot, 2, A, 0), PrepareOutcome::Promised(None))); }
+        assert_eq!([3usize, 1, 2].iter().filter(|&&i| claim_vote(&acc[i], &slot, 2, &v1, A, 0)).count(), 3);
+        // The COMMIT reaches 0, 1, 2 — which now record the floor and keep their memory.
+        let unaware = [0usize, 1, 2].iter().filter(|&&i| claim_vote(&acc[i], &slot, 1, &v0, D, 0)).count();
+        assert!(1 + unaware < 3, "even without the floor, kept promises refuse it ({} votes)", 1 + unaware);
+        let aware = [0usize, 1, 2].iter().filter(|&&i| claim_vote(&acc[i], &slot, 1, &v0, D, 2)).count();
+        assert_eq!(aware, 0, "below the decided ballot, nothing is accepted");
+    }
+
+    /// The decided ballot is a floor for both phases: a prepare or accept at or below it is
+    /// refused, and the refusal names at least the floor so the proposer moves above it.
+    #[test]
+    fn the_decided_ballot_is_a_floor() {
+        let m = AcceptorMemory::new();
+        let slot: Arc<str> = Arc::from("s");
+        let v = Bytes::from_static(b"v");
+        assert!(matches!(prepare_slot(&m, &slot, 4, 1, 4), PrepareOutcome::Refused { promised: 4, .. }));
+        assert!(!claim_vote(&m, &slot, 3, &v, 1, 4));
+        assert!(matches!(prepare_slot(&m, &slot, 5, 1, 4), PrepareOutcome::Promised(None)));
+        assert!(claim_vote(&m, &slot, 5, &v, 1, 4));
+    }
+
+    /// Two digests at the top ballot means *one value per ballot* did not hold (a proposer older
+    /// than 2.30.0): adopting either could overwrite the chosen one, so the rule refuses.
+    #[test]
+    fn two_values_at_one_ballot_block_the_proposer() {
+        let (a, b) = (Bytes::from_static(b"a"), Bytes::from_static(b"b"));
+        assert_eq!(
+            choose_after_prepare(&Bytes::from_static(b"mine"), &[
+                (4, value_digest(&a), Some(a.clone())), (4, value_digest(&b), Some(b.clone())),
+            ]),
+            Phase1Choice::Blocked,
+        );
+    }
+
+    #[test]
+    fn prepare_messages_are_bound_to_their_signer() {
+        let a = id(1);
+        let b = id(2);
+        let prep = ConsensusMsg::Prepare { slot: "s".into(), ballot: 1, proposer: b.clone() };
+        assert!(signer_authorized(&prep, &b));
+        assert!(!signer_authorized(&prep, &a), "a node may not prepare as another identity");
+        let ack = ConsensusMsg::PrepareAck {
+            slot: "s".into(), ballot: 1, voter: b.clone(), accepted_ballot: 0,
+            accepted_digest: None, accepted_value: None, committed: None,
+        };
+        assert!(signer_authorized(&ack, &b));
+        assert!(!signer_authorized(&ack, &a), "one key must not promise for another node");
     }
 
     // ── F2: acceptor must not equivocate at the same ballot (audit 2026-07-15 pass 2) ──

@@ -1,6 +1,13 @@
 # Votes are not bound to what they voted for — 2026-09-24
 
-**Status: OPEN, unfixed. Safety class, not liveness.** Found by a third-party source review of the
+**Status (updated 2026-10-08).** Binding a vote to its *value* shipped in v2.14.0 (`VoteForValue`, #378,
+with one vote per ballot; restart memory #382). The *higher-ballot transition* in step 2 below was **not** closed
+then: accepted-value preservation ran only when an acceptor refused, and a strictly higher ballot is never
+refused, so two concurrent proposers on a stable roster could still commit different values — closed in 2.30.0
+by a prepare phase ([`2026-10-08-consensus-prepare-phase.md`](2026-10-08-consensus-prepare-phase.md)). Binding a
+vote to a *membership epoch* was not built and stays a recorded limit (guide 04 § *Changing an electorate*).
+
+*Original status:* **OPEN, unfixed. Safety class, not liveness.** Found by a third-party source review of the
 S12 investigation; verified here against `origin/main` @ `7cb3b87`.
 
 Stated in the three-part form this investigation should have used from the start:

@@ -9,6 +9,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Two concurrent proposers could commit different values for one slot, on a stable roster.** A proposer
+  learned what an acceptor had accepted only from a refusal, and a strictly higher ballot is never refused —
+  the acceptor granted it and overwrote what it held. So A could commit `v1` at ballot 1 while B, which had
+  not yet seen A's COMMIT, committed `v2` at ballot 2 through an acceptor A's quorum shared; both were told
+  they had won (`LeadershipBasis::Decided`), and LWW kept whichever was re-stamped last. It held inside the
+  threat model's supported profile too; the fence at the resource is what kept a second holder harmless.
+  Consensus now runs **a prepare phase** before it proposes (`Prepare` / `PrepareAck`): a proposer carries the
+  highest-ballot value its promise quorum reports, an acceptor promises a ballot to one proposer, and the
+  promise survives a restart. The acceptor no longer **erases** its memory when a slot commits — that dropped
+  promises, so a delayed lower-ballot proposal could commit a second value even with the prepare phase in place —
+  and a commit records its ballot (`consensus/decided/{slot}`), below which acceptors refuse and which a reopened
+  leased slot uses to set the previous decision aside. Seen failing first
+  (`two_proposers_cannot_choose_two_values_for_one_slot`; the erasure, by the independent review's probe).
+  **Correction to 2.14.0's notes:** "a higher ballot overwrote an accepted value" was closed only where an
+  acceptor refused. **Upgrade note:** an upgraded proposer times out rather than commits until a quorum of
+  its group's acceptors is upgraded (`docs/guide/deprecations.md` §21). **Not claimed:** intersection across
+  an electorate change — guide 04 § *Changing an electorate*, threat model §7.
+
 ## [2.29.0] — 2026-10-08
 
 **Who changes an electorate.** A governed group's members are its elections' roster and quorum, yet any `mesh:write`
