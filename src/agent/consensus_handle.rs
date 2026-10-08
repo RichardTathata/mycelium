@@ -821,11 +821,25 @@ mod tests {
         a.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn test_commit_conflict_tripwire() {
-        use crate::consensus::{
-            consensus_kind, encode_consensus_msg, ConsensusConfig, ConsensusMsg, ConsensusResult,
-        };
+    /// Emit `msg` as a COMMIT until `done` holds, within 15 s. A Cluster signal's local delivery is shed with probability
+    /// equal to the kind's queue fill (`ops::deliver_locally`), so one emit right after a consensus round — while the
+    /// round's own frames still fill the queues — is not a delivery (#568).
+    async fn emit_commit_until(a: &crate::GossipAgent, msg: &crate::consensus::ConsensusMsg, done: impl Fn() -> bool) -> bool {
+        use crate::consensus::{consensus_kind, encode_consensus_msg};
+        use crate::signal::SignalScope;
+        for _ in 0..300 {
+            if done() {
+                return true;
+            }
+            let _ = a.mesh().emit(consensus_kind::COMMIT, SignalScope::Cluster, encode_consensus_msg(msg));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        done()
+    }
+
+    /// The tripwire on a node whose COMMIT queue is held `fill` full by a subscriber that never reads (0.0 = none).
+    async fn tripwire_case(fill_to: f32) {
+        use crate::consensus::{consensus_kind, encode_consensus_msg, ConsensusConfig, ConsensusMsg, ConsensusResult};
         use crate::signal::SignalScope;
         use std::sync::Arc;
 
@@ -838,39 +852,58 @@ mod tests {
         }
         assert_eq!(a.system_stats().commit_conflicts, 0);
 
-        // Forge a COMMIT carrying a different value for the live slot. Local
-        // emits self-deliver, so the listener on this node receives it.
-        let forged = ConsensusMsg::Commit {
-            slot:   Arc::from("trip/slot"),
-            ballot: 42,
-            value:  Bytes::from_static(b"clobber"),
-        };
-        assert!(a.mesh().emit(consensus_kind::COMMIT, SignalScope::Cluster, encode_consensus_msg(&forged)));
-
-        // Structural poll: the tripwire must fire and refuse to endorse.
-        // 15 s budget: 4 s expired once on a loaded 4-vCPU CI runner
-        // (2026-06-12) with the suite's ~16 threads competing; the poll is
-        // structural, so a broken tripwire still fails — just later.
-        let mut fired = false;
-        for _ in 0..300 {
-            if a.system_stats().commit_conflicts >= 1 { fired = true; break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Load: a COMMIT subscriber that never drains, filled to `fill_to` with junk for a slot nobody holds.
+        let kind: Arc<str> = Arc::from(consensus_kind::COMMIT);
+        let _stalled = (fill_to > 0.0).then(|| a.task_ctx.signal_handlers.register_with_capacity(Arc::clone(&kind), 1000));
+        let junk = ConsensusMsg::Commit { slot: Arc::from("stall/junk"), ballot: 1, value: Bytes::from_static(b"j") };
+        while a.task_ctx.signal_handlers.fill_ratio(&kind) < fill_to {
+            let _ = a.mesh().emit(consensus_kind::COMMIT, SignalScope::Cluster, encode_consensus_msg(&junk));
         }
-        assert!(fired, "tripwire did not fire on conflicting COMMIT");
+
+        // A forged COMMIT carrying a different value for the live slot: the tripwire fires and does not endorse it.
+        // Local emits self-deliver; under load one emit may be shed, so it is repeated until the tripwire sees it.
+        let forged = ConsensusMsg::Commit { slot: Arc::from("trip/slot"), ballot: 42, value: Bytes::from_static(b"clobber") };
+        let fired = emit_commit_until(&a, &forged, || a.system_stats().commit_conflicts >= 1).await;
+        assert!(fired, "tripwire did not fire on conflicting COMMIT (fill {fill_to})");
         assert_eq!(
             a.consensus().consensus_get("trip/slot").as_deref(), Some(b"genuine".as_slice()),
             "conflicting COMMIT must not be endorsed",
         );
 
-        // An idempotent re-COMMIT of the same value is legal and must not trip.
-        let idempotent = ConsensusMsg::Commit {
-            slot:   Arc::from("trip/slot"),
-            ballot: 43,
-            value:  Bytes::from_static(b"genuine"),
-        };
-        assert!(a.mesh().emit(consensus_kind::COMMIT, SignalScope::Cluster, encode_consensus_msg(&idempotent)));
+        // An idempotent re-COMMIT of the same value is legal and must not trip — checked once it has been seen
+        // delivered, so a shed emit cannot pass this vacuously.
+        let conflicts = a.system_stats().commit_conflicts;
+        let idempotent = ConsensusMsg::Commit { slot: Arc::from("trip/slot"), ballot: 43, value: Bytes::from_static(b"genuine") };
+        let body = encode_consensus_msg(&idempotent);
+        // A second subscriber sees what the listener sees (one fan-out, `deliver`), so seeing it here means delivered.
+        let mut watch = a.task_ctx.signal_handlers.register_with_capacity(Arc::clone(&kind), 256);
+        let mut seen = false;
+        for _ in 0..300 {
+            let _ = a.mesh().emit(consensus_kind::COMMIT, SignalScope::Cluster, body.clone());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            while let Ok(sig) = watch.try_recv() {
+                seen |= sig.payload == body;
+            }
+            if seen {
+                break;
+            }
+        }
+        assert!(seen, "the idempotent COMMIT was never delivered (fill {fill_to})");
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(a.system_stats().commit_conflicts, 1, "same-value COMMIT must not count as a conflict");
+        assert_eq!(a.system_stats().commit_conflicts, conflicts, "same-value COMMIT must not count as a conflict");
         a.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_commit_conflict_tripwire() {
+        tripwire_case(0.0).await;
+    }
+
+    /// #568: the tripwire test failed once under the strict gate — its one forged COMMIT, emitted while the queues were
+    /// filling, was shed. With the COMMIT queue held 90% full the forged frame is shed nine times in ten; the test
+    /// still holds because it repeats the emit until the tripwire sees it.
+    #[tokio::test]
+    async fn the_tripwire_holds_under_a_loaded_signal_queue() {
+        tripwire_case(0.9).await;
     }
 }

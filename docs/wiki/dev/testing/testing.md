@@ -385,6 +385,17 @@ moment a runner picks up a newer stable than a dev has locally — it bit twice 
 passes only via accidental single-node quorum. Pattern (and the peer-ready poll) in
 `src/lib_tests.rs::consensus_pair`.
 
+## A local emit is not a delivery (2026-10-08, #568)
+
+`mesh().emit(…, SignalScope::Cluster | Group, …)` delivers to this node's own handlers through the same probabilistic
+shed as any other signal: admitted with probability `1 − fill`, where fill is the kind's handler-queue or gossip-shard
+fill (`ops::deliver_locally`). On a quiet node fill is 0 and the emit always arrives; right after traffic — a consensus
+round's own frames — it may not. `test_commit_conflict_tripwire` emitted one forged COMMIT just after a round and failed
+under the strict compliance gate. A test that needs a signal to arrive re-emits until it observes the effect (the
+tripwire firing, a second subscriber seeing the frame), bounded; one that checks a signal *had no* effect first observes
+that it arrived, or the check passes vacuously. `the_tripwire_holds_under_a_loaded_signal_queue` plants a 90%-full queue
+and fails the single-emit version three times in three.
+
 ## Structural polling, not fixed sleeps
 
 Assert cluster state with a predicate poll (`poll_until(|| !a.peers().is_empty(), …)`), not
