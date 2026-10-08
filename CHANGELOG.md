@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **A test whose gate no CI build satisfies is refused before push.** `scripts/check-test-inventory.py` evaluated
+  each test's `cfg` against a step's flags, so a root-crate test gated off `gateway` or `tls` looked covered by a
+  `--no-default-features` step — but cargo unifies a crate's features through the dev-dependencies a test build
+  compiles, and the root's turn both back on. The check now computes the features each step's test build enables,
+  through `[features]`, every path dependency and the selected packages' dev-dependencies. Its first run found one:
+  `a_tls_table_this_build_cannot_enforce_refuses_to_start` had never executed since it was written (2026-10-02). It
+  now lives in **`mycelium-tls-free-tests`** — `mycelium` with `gateway` and without `tls`, run on its own in CI
+  beside `mycelium-gateway-free-tests` — and passes. Mutation suite: 49 cases, the new one seen missed before, plus
+  five synthetic-workspace unification cases; it now lists its cases and marks each as it runs, so the test-coverage
+  job holds it to the script-suite rule (#557).
+
 ### Added
 
 - **`examples/strict_eligibility.rs` calls the shipped history source** (`--features tls`, run in CI). A food

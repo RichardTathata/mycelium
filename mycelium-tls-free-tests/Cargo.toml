@@ -1,0 +1,20 @@
+[package]
+name         = "mycelium-tls-free-tests"
+version      = "0.0.0"
+edition      = "2024"
+publish      = false
+description  = "Tests that run against `mycelium` built with `gateway` and without `tls`."
+
+# Why a crate of its own: `mycelium`'s own dev-dependencies enable `tls` (`mycelium-effects` with its `envelope`
+# feature depends on `mycelium/tls`), and Cargo unifies features across a test build, so no test build of
+# `mycelium` itself lacks `tls` — a `#[cfg(not(feature = "tls"))]` test there is compiled out of every run
+# (`scripts/check-test-inventory.py` refuses one since 2026-10-08). Run this crate on its own —
+# `cargo test -p mycelium-tls-free-tests` — and `mycelium` is compiled with `gateway` and nothing else. Built in
+# one invocation with a crate that enables `tls`, the features unify again; the first test says so.
+
+[dev-dependencies]
+mycelium = { path = "..", default-features = false, features = ["gateway"] }
+tokio    = { version = "1.35", features = ["full"] }
+
+[lints.clippy]
+field_reassign_with_default = "allow"

@@ -2598,6 +2598,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mycelium-tls-free-tests"
+version = "0.0.0"
+dependencies = [
+ "mycelium",
+ "tokio",
+]
+
+[[package]]
 name = "mycelium-tuple-space"
 version = "2.27.0"
 dependencies = [

@@ -211,6 +211,7 @@ check-full: check
 
 	cargo test  --lib --no-default-features --features gateway
 	cargo test  -p mycelium-gateway-free-tests   # the one test build of `mycelium` without `gateway` (R8)
+	cargo test  -p mycelium-tls-free-tests       # …and the one with `gateway` and without `tls`
 	cargo test  -p mycelium-sim           # the kernel + the same-length/different-content gate
 	cargo test  -p mycelium-core --features sim   # the seams actually route through the kernel
 	cargo test  -p mycelium-core --features tls   # erasure (crypto-shred), key extraction, framing's TLS cases

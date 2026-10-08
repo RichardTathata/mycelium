@@ -12,7 +12,10 @@ It **inventories** test *requirements* and maps each to a CI step that satisfies
     ``#[cfg(...)]`` on a test function, ``[[test]] required-features``). A gate becomes a requirement: the
     features a step must enable (resolved through ``[features]``), the features it must not, and any bare
     ``cfg`` its ``RUSTFLAGS`` must set (``--cfg loom``). A ``cfg`` this script cannot evaluate is
-    **uncovered**, never "needs nothing".
+    **uncovered**, never "needs nothing". A step's features are the ones its **test build** enables:
+    closed through ``[features]`` and through every path dependency, the selected packages'
+    dev-dependencies included — cargo unifies those, so a root-crate test gated off ``gateway`` is
+    uncovered even behind ``--no-default-features`` (the root's dev-dependencies turn ``gateway`` on).
   * Python and TypeScript: every tracked test file, against the pytest/jest invocations that collect it. A
     **live** file — one that skips without a node — is covered only by a step whose environment sets the
     file's ``*_LIVE_REQUIRED`` guard, so a step that forgot the node fails instead of skipping green.
@@ -26,8 +29,8 @@ followed within a script. ``make <target>`` is expanded one level.
 
 What it does not claim: that a test *passes*, or that a step's environment brings up whatever node a live
 test talks to — only that a step exists which would run it, with the features and guards it needs. Known
-limits, each left to the observed job: cargo's feature unification through dev-dependencies, macro-generated
-tests, live-skip idioms other than a skipif on a MYCELIUM_TEST_ variable or a `*_LIVE_REQUIRED` guard, pytest
+limits, each left to the observed job: features a non-path (registry) dependency enables on a workspace crate
+(none can: a registry crate does not depend on this workspace), macro-generated tests, live-skip idioms other than a skipif on a MYCELIUM_TEST_ variable or a `*_LIVE_REQUIRED` guard, pytest
 and jest configuration files, and `#[ignore]`d tests (skipped here; the observed job holds each to a stated
 exception).
 
@@ -764,6 +767,94 @@ def feature_closure(cdir: str, enabled: set, default: bool) -> set:
     return seen
 
 
+def _manifest(cdir: str) -> dict:
+    return tomllib.load(open(os.path.join(cdir, "Cargo.toml"), "rb"))
+
+
+def _path_deps(root: str, crs: dict, pkg: str, dev: bool) -> list[tuple[str, str, set, bool, bool]]:
+    """`(key, workspace package, features, default-features, optional)` for each path dependency of `pkg`."""
+    cdir = os.path.join(root, crs[pkg])
+    m = _manifest(cdir)
+    inherited = _manifest(root).get("workspace", {}).get("dependencies", {})
+    by_dir = {os.path.normpath(os.path.join(root, d)): p for p, d in crs.items()}
+    # Every platform's tables count: a target-specific dependency is built on the platform it names, and reading
+    # one the CI runner skips only over-approximates (a `not(...)` gate reads as uncovered, never the reverse).
+    scopes = [m] + list(m.get("target", {}).values())
+    out = []
+    for scope in scopes:
+        for table in ("dependencies",) + (("dev-dependencies",) if dev else ()):
+            for key, spec in scope.get(table, {}).items():
+                if not isinstance(spec, dict):
+                    continue
+                base = cdir
+                if spec.get("workspace"):  # `workspace = true`: the root's spec, plus this one's features
+                    ws = inherited.get(key)
+                    if not isinstance(ws, dict):
+                        continue
+                    spec = {**ws, "features": list(ws.get("features", [])) + list(spec.get("features", [])),
+                            "optional": spec.get("optional", False)}
+                    base = root
+                if "path" not in spec:
+                    continue
+                q = by_dir.get(os.path.normpath(os.path.join(base, spec["path"])))
+                if q:
+                    out.append((key, q, set(spec.get("features", [])), spec.get("default-features", True),
+                                bool(spec.get("optional")) and table == "dependencies"))
+    return out
+
+
+def unified_features(root: str, crs: dict, r: CargoRun, root_pkg: str) -> dict[str, set]:
+    """The features cargo enables on each workspace crate in this run's **test build**: the flags on the
+    selected packages, closed through `[features]`, then through every path dependency — a dependency's
+    `features = [...]` and default, and a feature's `dep/feature` entries — including the selected packages'
+    **dev-dependencies**, which a test build compiles and resolver 2 unifies into the crates they reach. So
+    the root crate's dev-dependency on a companion whose `gateway` feature is `mycelium/gateway` turns
+    `gateway` back on under `--no-default-features`; a test gated off it never runs there."""
+    if r.workspace:
+        selected = [p for p in crs if p not in r.excluded]
+    elif r.pkgs:
+        selected = [p for p in r.pkgs if p in crs]
+    else:
+        home = os.path.normpath(r.manifest_dir if r.manifest_dir is not None else r.cwd)
+        selected = [next((p for p, d in crs.items() if os.path.normpath(d) == home), root_pkg)]
+    want: dict[str, set] = {p: set() for p in crs}
+    default: dict[str, bool] = {p: False for p in crs}
+    cli: dict[str, list] = {p: [] for p in crs}  # `--features dep/feat` naming a dependency: an entry on the package
+    for p in selected:
+        default[p] = r.default
+        for f in r.features:
+            if "/" in f:
+                q, _, g = f.partition("/")
+                if q in selected:
+                    want[q].add(g)
+                else:
+                    cli[p].append(f)
+            else:
+                want[p].add(f)
+    deps = {p: _path_deps(root, crs, p, dev=p in selected) for p in crs}
+    tables = {p: _manifest(os.path.join(root, d)).get("features", {}) for p, d in crs.items()}
+    built = set(selected)
+    changed = True
+    while changed:
+        changed = False
+        for p in sorted(built):
+            on = feature_closure(os.path.join(root, crs[p]), want[p], default[p])
+            entries = [e for f in on for e in tables[p].get(f, [])] + cli[p]
+            for key, q, feats, dflt, optional in deps[p]:
+                # A weak `key?/feat` never activates an optional dependency; `dep:key`, a feature named `key`, or a
+                # strong `key/feat` does. Once active, a weak entry's feature applies too.
+                if optional and not any(e in (f"dep:{key}", key) or (e.split("/")[0] == key and "/" in e)
+                                        for e in entries + list(on)):
+                    continue
+                add = set(feats) | {e.split("/", 1)[1] for e in entries if "/" in e and e.split("/")[0].rstrip("?") == key}
+                if q not in built or not add <= want[q] or (dflt and not default[q]):
+                    built.add(q)
+                    want[q] |= add
+                    default[q] = default[q] or dflt
+                    changed = True
+    return {p: feature_closure(os.path.join(root, crs[p]), want[p], default[p]) for p in built}
+
+
 def runs_package(r: CargoRun, pkg: str, crs: dict, root_pkg: str) -> bool:
     if pkg in r.excluded:
         return False
@@ -801,10 +892,11 @@ def runs_kind(r: CargoRun, t: Target) -> bool:
     return "--tests" in s or ("--test" in s and ("*" in r.tests or t.name in r.tests))
 
 
-def satisfies(r: CargoRun, cdir: str, req: Req) -> bool:
+def satisfies(r: CargoRun, on: set | None, req: Req) -> bool:
+    """`on`: the features the run's test build enables on the crate ([`unified_features`]); `None` under
+    `--all-features`."""
     if req.impossible:
         return False
-    on = feature_closure(cdir, r.features, r.default) if not r.all_features else None
     if on is not None and not req.need <= on:
         return False
     if req.without and (r.all_features or req.without & on):
@@ -955,10 +1047,11 @@ def check(root: str, workflows: str) -> list[str]:
                     missing.append(f"integration {t.pkg}::{t.name}::{n}  (the same file and test name as in {seen[k]} — "
                                    f"the observed coverage job cannot tell them apart; rename one)")
                 seen.setdefault(k, t.pkg)
+    unified = [None if r.all_features else unified_features(root, crs, r, root_pkg) for r in runs]
     for t in targets:
-        cdir = os.path.join(root, crs[t.pkg])
-        ok = any(runs_package(r, t.pkg, crs, root_pkg) and runs_kind(r, t) and satisfies(r, cdir, alt)
-                 for r in runs for alt in t.alts)
+        ok = any(runs_package(r, t.pkg, crs, root_pkg) and runs_kind(r, t)
+                 and satisfies(r, None if u is None else u.get(t.pkg, set()), alt)
+                 for r, u in zip(runs, unified) for alt in t.alts)
         key = f"{t.kind} {t.pkg}::{t.name}"
         if not ok and key not in exc:
             missing.append(f"{key}  (needs {' OR '.join(describe(a) for a in t.alts)})")

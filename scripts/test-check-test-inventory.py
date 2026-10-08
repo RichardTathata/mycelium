@@ -169,6 +169,13 @@ EXPECT = {
     "two crates' same-named integration tests": (
         write("mycelium-blackboard/tests/failover.rs", "#[test]\nfn secondary_startup_lag_is_not_evaporation() {}\n"),
         "integration mycelium-blackboard::failover::secondary_startup_lag_is_not_evaporation"),
+    # Cargo unifies a crate's features through its dev-dependencies in a test build: the root crate's dev-dependency
+    # on `mycelium-tuple-space` (feature `gateway` → `mycelium/gateway`) turns `gateway` back on, so a root test gated
+    # off `gateway` never runs, whatever the step's flags say (the stated limit this check had until 2026-10-08).
+    "a root test gated off gateway, behind a --no-default-features step": (
+        both(append(LIB_TESTS, '\n#[test]\n#[cfg(not(feature = "gateway"))]\nfn zz_off() {}\n'),
+             regex(CI, r"^(\s*)- run: " + re.escape(CORE_TLS), r"\1- run: cargo test --lib --no-default-features\n\1- run: " + CORE_TLS)),
+        "src/lib_tests.rs  (needs without gateway"),
     "npm test narrowed in package.json": (both(regex(CI, r"npx jest --verbose\s", "npm test "),
                                                edit("mycelium-ts/package.json", '"test": "jest"', '"test": "jest tests/live"')),
                                           "typescript mycelium-ts/tests/artifacts.test.ts"),
@@ -187,17 +194,82 @@ def copy_tree(d):
     subprocess.run(["git", "-C", d, "add", "-A"], check=True, capture_output=True)
 
 
+# Cargo's feature resolution on a synthetic workspace — the cases #559's review checked against `cargo tree` and
+# the first model got wrong: a weak `dep?/feat` must not activate the dependency; a target-specific dependency table
+# counts; `--features dep/feat` naming an optional dependency activates it; `workspace = true` inherits the spec.
+UNIFICATION = {
+    "Cargo.toml": '[package]\nname = "r"\nversion = "0.1.0"\n[workspace]\nmembers = ["a", "b", "c", "w"]\n'
+                  '[workspace.dependencies]\nw = { path = "w", features = ["wf"] }\n'
+                  '[dependencies]\nw = { workspace = true }\n',
+    "a/Cargo.toml": '[package]\nname = "a"\nversion = "0.1.0"\n[features]\nweak = ["c?/cf"]\nstrong = ["c/cf"]\n'
+                    '[dependencies]\nc = { path = "../c", optional = true }\n'
+                    "[target.'cfg(unix)'.dependencies]\nb = { path = \"../b\", features = [\"tf\"] }\n",
+    "b/Cargo.toml": '[package]\nname = "b"\nversion = "0.1.0"\n[features]\ntf = []\n',
+    "c/Cargo.toml": '[package]\nname = "c"\nversion = "0.1.0"\n[features]\ncf = []\n',
+    "w/Cargo.toml": '[package]\nname = "w"\nversion = "0.1.0"\n[features]\nwf = []\n',
+}
+UNIFICATION_CASES = [  # (cargo test argv, crate, its expected features — None: not built)
+    ("cargo test -p a --features weak", "c", None),
+    ("cargo test -p a --features strong", "c", {"cf"}),
+    ("cargo test -p a", "b", {"tf"}),
+    ("cargo test -p a --features c/cf", "c", {"cf"}),
+    ("cargo test -p r", "w", {"wf"}),
+]
+
+
+def unification() -> list[str]:
+    bad = []
+    with tempfile.TemporaryDirectory() as d:
+        for path, text in UNIFICATION.items():
+            os.makedirs(os.path.dirname(os.path.join(d, path)) or d, exist_ok=True)
+            open(os.path.join(d, path), "w").write(text)
+        crs = inv.crates(d)
+        for line, crate, want in UNIFICATION_CASES:
+            r = inv.cargo_run(inv.Cmd(line.split(), {}, ".", "unification"))
+            got = inv.unified_features(d, crs, r, "r").get(crate)
+            print(f"{'ok' if got == want else 'WRONG':7} unification: {line} → {crate} {sorted(got) if got is not None else 'not built'}")
+            if got != want:
+                bad.append(f"unification: {line}")
+    return bad
+
+
+SUITE = "scripts/test-check-test-inventory.py"
+
+
+def slug(name: str) -> str:
+    """A mutation's name as a coverage case key (`[A-Za-z0-9_./:-]`)."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def case_names() -> list[str]:
+    return ["unification", "control"] + [slug(n) for n in list(MUTATIONS) + list(EXPECT)]
+
+
+def case(name: str) -> None:
+    """Verification policy rule 3: each case says it ran, `--list` names them all (the coverage job joins them)."""
+    print(f"@@case@@ {SUITE}::{name}", flush=True)
+
+
 def main() -> int:
-    failures = []
+    if sys.argv[1:] == ["--list"]:
+        names = case_names()
+        assert len(names) == len(set(names)), "two mutations slug to one case name"
+        for n in names:
+            print(f"@@case-list@@ {SUITE}::{n}")
+        return 0
+    case("unification")
+    failures = unification()
     with tempfile.TemporaryDirectory() as base:
         pristine = os.path.join(base, "pristine")
         copy_tree(pristine)
+        case("control")
         if inv.check(pristine, os.path.join(pristine, ".github", "workflows")):
             print("control: the unmutated tree fails the check")
             return 1
         print("control: ok")
         cases = {n: (m, None) for n, m in MUTATIONS.items()} | EXPECT
         for name, (mutate, expect) in cases.items():
+            case(slug(name))
             d = os.path.join(base, "m")
             shutil.copytree(pristine, d, symlinks=True)
             mutate(d)
@@ -212,7 +284,7 @@ def main() -> int:
                     print(f"        expected a line containing {expect!r}; got {missing[:3]}")
             shutil.rmtree(d)
     if failures:
-        print(f"{len(failures)} mutation(s) the inventory check did not catch")
+        print(f"{len(failures)} case(s) the inventory check got wrong: {failures}")
         return 1
     print(f"all {len(MUTATIONS) + len(EXPECT)} mutations caught")
     return 0
