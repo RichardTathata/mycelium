@@ -175,7 +175,9 @@ FAKE = tempfile.mkdtemp(prefix="fake-cargo-")
 with open(os.path.join(FAKE, "cargo"), "w") as f:
     f.write('#!/usr/bin/env bash\necho "ran $*"\nexit 3\n')
 os.chmod(os.path.join(FAKE, "cargo"), 0o755)
-ENV = {**os.environ, "PATH": FAKE + os.pathsep + os.environ["PATH"]}
+# CI's BASH_ENV (scripts/ci-merge-stderr.sh) merges stderr into stdout in every bash it starts; the wrapper's streams
+# are what these cases assert on, so it runs without it.
+ENV = {**{k: v for k, v in os.environ.items() if k != "BASH_ENV"}, "PATH": FAKE + os.pathsep + os.environ["PATH"]}
 
 
 def wrap(*argv):
