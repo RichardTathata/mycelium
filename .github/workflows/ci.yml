@@ -67,7 +67,7 @@ jobs:
       - run: ./scripts/ci-retest.sh -p mycelium-sim
       # Item 6's decisive demonstration (plan §12.1), run rather than only built — see the
       # receipt-ladder step below for why the gallery is gated on running.
-      - run: cargo run -p mycelium-sim --example replay_a_bundle
+      - run: scripts/example-case.sh cargo run -p mycelium-sim --example replay_a_bundle
       # And the seams under `sim`: without this the routed path is never built in CI, and
       # `sim_seam` would be a module that compiles only on the author's machine.
       - run: ./scripts/ci-retest.sh -p mycelium-core --features sim
@@ -106,41 +106,41 @@ jobs:
       # them proves the API still compiles; running them proves the demonstration still
       # demonstrates — which is the thing the gallery is a gate on. They are self-contained, take
       # seconds, and exit non-zero if a step panics.
-      - run: cargo run --example receipt_ladder
+      - run: scripts/example-case.sh cargo run --example receipt_ladder
       # Coordination integrity (2026-09-24): the electorate rule, the leadership rung and the
       # fence, as one narrative. Each act asserts, so a regression fails the job rather than
       # printing a nice story about a substrate that no longer behaves that way.
-      - run: cargo run --example coordination_integrity
-      - run: cargo run --example coordinator_by_accretion
+      - run: scripts/example-case.sh cargo run --example coordination_integrity
+      - run: scripts/example-case.sh cargo run --example coordinator_by_accretion
       # Identity travels as one record; two proof-requiring nodes still authenticate. The race it
       # prevents needs two processes, so that half stays in the Docker suites — the example says so
       # rather than narrating a race it never runs.
-      - run: cargo run --example identity_one_record --features tls,compliance
+      - run: scripts/example-case.sh cargo run --example identity_one_record --features tls,compliance
       # The three questions an auditor asks. Each act asserts — including that an edited audit
       # chain FAILS to verify, which is the one a "trust us" answer cannot make checkable.
-      - run: cargo run --example auditor_questions --features tls,compliance
+      - run: scripts/example-case.sh cargo run --example auditor_questions --features tls,compliance
       # Closure plan C12: the stop, measured. Admit calls under a mandate, revoke it, and check T_admit
       # and T_drain on a live node against the bound the class declares.
-      - run: cargo run --example authority_drain --features compliance
+      - run: scripts/example-case.sh cargo run --example authority_drain --features compliance
       # Policy at the gateway, per MCP tool call. Five acts: permitted-and-executed, denied on an
       # argument value, denied by remit, and twice INDETERMINATE — which refuses. The fourth act
       # is the gate: an unmapped tool must never fall through to permit.
-      - run: cargo run --example mcp_tool_authority --features tls,compliance
+      - run: scripts/example-case.sh cargo run --example mcp_tool_authority --features tls,compliance
       # composed-effect.md §9's demonstration: permitted at the gateway, refused at the resource.
-      - run: cargo run --example composed_commit --features tls,compliance
+      - run: scripts/example-case.sh cargo run --example composed_commit --features tls,compliance
       # The OTHER door, and the unguarded one: `/a2a` requires no bearer, so the evaluator is the
       # whole gate there. Seven acts, including the streaming path — a refusal must arrive as a
       # `failed` task event and CLOSE the stream, not leave a subscriber waiting on silence.
-      - run: cargo run --example a2a_skill_authority --features tls,a2a
-      - run: cargo run --example knowledge_layer --features tls
+      - run: scripts/example-case.sh cargo run --example a2a_skill_authority --features tls,a2a
+      - run: scripts/example-case.sh cargo run --example knowledge_layer --features tls
       # Strict eligibility from the shipped history source: an appointing authority's signed heads, a
       # reader's checkpoint, and each verdict asserted — including `Unknown` for a missing record and for
       # a reader with no checkpoint, the cases where "unknown is never eligible" is the whole point.
-      - run: cargo run --example strict_eligibility --features tls
-      - run: cargo run --example federated_domains --features tls
+      - run: scripts/example-case.sh cargo run --example strict_eligibility --features tls
+      - run: scripts/example-case.sh cargo run --example federated_domains --features tls
       # The third domain: the question two domains cannot ask. Each act asserts, so "trust does
       # not compose" stays a property rather than a paragraph.
-      - run: cargo run --example federation_trust_is_not_transitive --features tls
+      - run: scripts/example-case.sh cargo run --example federation_trust_is_not_transitive --features tls
 
   clippy:
     name: Clippy
@@ -183,6 +183,11 @@ jobs:
       # mutation suite: each bypass an adversarial review found must fail it.
       - run: ./scripts/with-pyyaml.sh scripts/check-test-inventory.py
       - run: ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py
+      # The same rule for single demonstrations: every `cargo run … --example` in this workflow goes through
+      # scripts/example-case.sh (a case the test-coverage job sees executed), and examples/README.md's CI column
+      # names, for each ✓ row, a step that executes it — and no step executes an example whose row says ·.
+      - run: ./scripts/with-pyyaml.sh scripts/check-example-matrix.py
+      - run: ./scripts/with-pyyaml.sh scripts/test-check-example-matrix.py
       - run: python3 scripts/test-ci-test-coverage.py
       - run: ./scripts/test-ci-retest.sh
       # Closure plan C11: no new unclassified read of Hlc::current(), which stands still on a quiet
@@ -312,7 +317,7 @@ jobs:
       - name: Beginner stem fleet and declaration consumer
         run: |
           export_dir="$RUNNER_TEMP/first-stem-fleet"
-          cargo run -p mycelium-wasm-host --example first_stem_fleet -- "$export_dir"
+          scripts/example-case.sh cargo run -p mycelium-wasm-host --example first_stem_fleet -- "$export_dir"
           python3 scripts/check-stem-observations.py "$export_dir"
       # S1's resident-memory gate owns the process (it measures RSS), so it runs alone.
       - run: cargo test -p mycelium-wasm-host --lib a_large_blob_stages_to_disk_within_a_memory_bound -- --ignored
@@ -370,7 +375,7 @@ jobs:
       - run: cargo clippy -p mycelium-effects --features tuple-space,envelope --all-targets -- -D warnings
       # The example is the crate's decisive demonstration (guide 18 § Rung 4); the catalogue said it
       # ran in CI and it did not (2026-09-27).
-      - run: cargo run -p mycelium-effects --example destination_commit
+      - run: scripts/example-case.sh cargo run -p mycelium-effects --example destination_commit
 
   commitment:
     # v3 §6.9 CN1 — the commitment companion: the contract net as five records on the public API.
@@ -385,7 +390,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-retest.sh -p mycelium-commitment
       - run: cargo clippy -p mycelium-commitment --all-targets -- -D warnings
-      - run: cargo run -p mycelium-commitment --example redistribution_cn
+      - run: scripts/example-case.sh cargo run -p mycelium-commitment --example redistribution_cn
 
   wiki:
     # Group-scoped LLM-curated wiki companion crate. Phase 1 = the data plane (Store trait +
@@ -425,7 +430,7 @@ jobs:
       # Item 5's decisive demonstration (plan §12.1), run rather than only built. It is also the
       # fence's only end-to-end exercise outside the tests above — building it is what found the
       # fence reporting a revoked appointment as a retryable conflict.
-      - run: cargo run -p mycelium-wiki --example curator_handover --features "git-store"
+      - run: scripts/example-case.sh cargo run -p mycelium-wiki --example curator_handover --features "git-store"
       # Phase 5 — the worked example: import documents → curator applies → a reader chat-agent answers
       # grounded in the wiki, over both use-case corpora (UC1 org twin + UC2 council). Docker-free.
       - run: ./mycelium-wiki/ci_smoke.sh
@@ -843,8 +848,10 @@ jobs:
       # The script-style suites this workflow runs, case by case: each suite's --list prints one
       # `@@case-list@@ <suite>::<case>` line per case without running anything, and each case prints
       # `@@case@@ <suite>::<case>` as it starts, in whichever job runs it. The LangGraph ladder's rungs are
-      # listed from the directory, so a new rung no step runs is a case that never executed. The Docker suites
-      # list and check theirs in cluster-suites.yml, a workflow this run does not include.
+      # listed from the directory, so a new rung no step runs is a case that never executed. Each single
+      # `cargo run … --example` demonstration above runs through scripts/example-case.sh, whose --list reads
+      # those calls from this file. The Docker suites list and check theirs in cluster-suites.yml, a workflow
+      # this run does not include.
       - name: List the script suites' cases
         run: |
           echo "@@test-universe@@ begin scripts"
@@ -853,6 +860,8 @@ jobs:
           ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py --list
           bash scripts/test-ci-retest.sh --list
           bash scripts/wire-check-examples.sh --list
+          bash scripts/example-case.sh --list
+          ./scripts/with-pyyaml.sh scripts/test-check-example-matrix.py --list
           bash mycelium-blackboard/ci_smoke.sh --list
           bash mycelium-wiki/ci_smoke.sh --list
           bash mycelium-reason/ci_smoke.sh --list
