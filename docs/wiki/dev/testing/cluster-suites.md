@@ -29,6 +29,10 @@ claim (calibration ledger, 2026-07-10).
 - **No retries, by design.** A red gate is signal; both historic flakes were real bugs fixed
   at the substrate layer, not papered over (#155/#158). Do not add retry loops to make it
   green — diagnose (the harness self-diagnoses, below).
+- **Every case is observed** (verification policy rule 3): each job first lists its suite's cases with no
+  Docker (`run.sh --list`, `run.py --list`, `run_federation.sh --list`, `test-confined-fleet.sh --list`,
+  `make -s list-stem-examples`), each case prints `@@case@@ <suite>::<case>` as it starts, and the
+  `case-coverage` job fails on a listed case that never did — [verification-policy](verification-policy.md).
 - The 100-node **scale** suites run separately: `.github/workflows/scale-nightly.yml`,
   nightly 06:00 UTC on a **self-hosted** runner labelled `mycelium-scale` (hosted 2-core
   runners hit the Docker-bridge iptables ceiling ~50 nodes — [scale-tests](scale-tests.md)).

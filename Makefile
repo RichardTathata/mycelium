@@ -229,10 +229,16 @@ check-full: check
 COMPOSE_STEM   = docker compose -f docker/docker-compose.stem-examples.yml
 STEM_DEMOS    ?= provisioning catalog catalog_store mcp_toolgrowth model_deploy reheal_deploy llm_agent
 STEM_PUB_SEED ?= 4242424242424242424242424242424242424242424242424242424242424242
-.PHONY: test-stem-examples examples-both-ways stem-keys
+.PHONY: test-stem-examples list-stem-examples examples-both-ways stem-keys
+
+# Verification policy rule 3: each demo is a case, printed as `@@case@@ <suite>::<demo>` when it starts;
+# `make -s list-stem-examples` names them without Docker (cluster-suites.yml's stem job checks every one ran).
+list-stem-examples:
+	@for demo in $(STEM_DEMOS); do echo "@@case-list@@ Makefile:test-stem-examples::$$demo"; done
 
 test-stem-examples:
 	@set -e; for demo in $(STEM_DEMOS); do \
+	    echo "@@case@@ Makefile:test-stem-examples::$$demo"; \
 	    echo "== stem-examples: $$demo =="; \
 	    docker rm -f mycelium-stem-late mycelium-stem-provider-c mycelium-stem-survivor >/dev/null 2>&1 || true; \
 	    $(COMPOSE_STEM) --profile $$demo down -v --remove-orphans 2>/dev/null || true; \

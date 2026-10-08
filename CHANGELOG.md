@@ -23,6 +23,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ready. It replaces the earlier `from_chain`-only walk-through, so the run command now needs `--features tls`.
   Guide 21 points at it instead of the source's tests.
 
+### Changed
+
+- **The test-coverage job sees script-style suites** (verification policy rule 3). A script suite now lists its
+  cases with `--list` (`@@case-list@@ <suite>::<case>`, nothing run) and prints `@@case@@ <suite>::<case>` as each
+  case starts; `scripts/ci-test-coverage.py` reads both as `script <suite>::<case>` keys. `ci.yml`'s
+  `test-universe` job lists `scripts/test-check-materials.py`, `scripts/test-ci-test-coverage.py`,
+  `scripts/test-ci-retest.sh`, `scripts/wire-check-examples.sh`, the seven `ci_smoke.sh` suites (the co-op's
+  thirteen demos each a case) and the LangGraph ladder, so a case dropped from its script, or a step that stops
+  running it, fails the job. The Docker suites (`cluster-suites.yml`: integration scenarios, overlay, federation
+  legs, confined-fleet phases, stem-examples demos) list theirs before starting Docker and are checked by a new
+  `case-coverage` job in that workflow (`ci-test-coverage.py --scripts-only`). No suite tests anything different.
+
 ## [2.27.0] — 2026-10-07
 
 **The doors say what they own.** 2.26.0 recorded `kv:write` as a data-plane superuser scope over namespaces other

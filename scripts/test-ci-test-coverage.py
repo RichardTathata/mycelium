@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """Self-test for scripts/ci-test-coverage.py: synthetic job logs in each format the parser reads, and each
-way a test can be known but not executed. Run: python3 scripts/test-ci-test-coverage.py"""
+way a test can be known but not executed. Run: python3 scripts/test-ci-test-coverage.py (--list: its cases)"""
 import importlib.util
 import os
+import subprocess
 import sys
+import tempfile
+
+SUITE = "scripts/test-ci-test-coverage.py"
+CASES = ["log-formats", "script-cases", "scripts-only-mode"]
+if sys.argv[1:] == ["--list"]:
+    for c in CASES:
+        print(f"@@case-list@@ {SUITE}::{c}")
+    sys.exit(0)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("cov", os.path.join(HERE, "ci-test-coverage.py"))
@@ -41,8 +50,76 @@ UNIVERSE = f"""2026-10-06T10:20Z @@test-universe@@ begin
 2026-10-06T10:21Z @@test-universe@@ end
 """
 
+# A script-style suite (verification policy rule 3): `--list` prints `@@case-list@@ <suite>::<case>` inside a
+# universe block; a run prints `@@case@@ <suite>::<case>` as each case starts — anywhere on the line, since a
+# Docker runner's lines come prefixed with the container's name.
+SCRIPT_LOG = """2026-10-08T09:00Z @@test-universe@@ begin
+2026-10-08T09:00Z @@case-list@@ examples/coop/ci_smoke.sh::mailbox_llm
+2026-10-08T09:00Z @@case-list@@ examples/coop/ci_smoke.sh::stigmergy
+2026-10-08T09:00Z @@case@@ examples/coop/ci_smoke.sh::listed_only
+2026-10-08T09:00Z @@test-universe@@ end
+2026-10-08T09:01Z @@case@@ examples/coop/ci_smoke.sh::mailbox_llm
+2026-10-08T09:02Z runner-1  | @@case@@ tests/integration/run.sh::01_mesh_convergence
+2026-10-08T09:02Z + echo '@@case@@ examples/coop/ci_smoke.sh::traced'
+"""
+SCRIPT_UNIVERSE = """2026-10-08T09:03Z @@test-universe@@ begin
+2026-10-08T09:03Z @@case-list@@ tests/integration/run.sh::01_mesh_convergence
+2026-10-08T09:03Z @@case-list@@ tests/integration/run.sh::02_mgmt_api
+2026-10-08T09:03Z @@test-universe@@ end
+"""
+
+
+def case(name: str) -> None:
+    print(f"@@case@@ {SUITE}::{name}", flush=True)
+
+
+def script_cases() -> list[str]:
+    executed, universe = set(), set()
+    cov.scan(SCRIPT_LOG, executed, universe)
+    cov.scan(SCRIPT_UNIVERSE, executed, universe)
+    s = "script examples/coop/ci_smoke.sh::"
+    i = "script tests/integration/run.sh::"
+    expect_executed = {s + "mailbox_llm", i + "01_mesh_convergence", s + "traced"}
+    expect_not_executed = {
+        s + "stigmergy",          # listed, never printed its marker
+        s + "listed_only",        # a marker inside a universe block is a listing, not a run
+        i + "02_mgmt_api",        # listed by a Docker suite's --list, its runner never reached it
+    }
+    failures = []
+    if executed != expect_executed:
+        failures.append(f"script executed: extra {sorted(executed - expect_executed)}, "
+                        f"missing {sorted(expect_executed - executed)}")
+    if universe - executed != expect_not_executed:
+        failures.append(f"script not executed: got {sorted(universe - executed)}")
+    return failures
+
+
+def scripts_only_mode() -> list[str]:
+    """The Docker workflow's mode, end to end: a listed case that never ran fails it; all run passes; and with
+    no listing at all it fails rather than passing on nothing."""
+    failures = []
+    for name, logs, want in [
+        ("one listed case never ran", [SCRIPT_LOG, SCRIPT_UNIVERSE], 1),
+        ("every listed case ran", [SCRIPT_UNIVERSE,
+                                   "@@case@@ tests/integration/run.sh::01_mesh_convergence\n"
+                                   "@@case@@ tests/integration/run.sh::02_mgmt_api\n"], 0),
+        ("nothing listed", ["@@case@@ tests/integration/run.sh::01_mesh_convergence\n"], 1),
+    ]:
+        with tempfile.TemporaryDirectory() as d:
+            for i, text in enumerate(logs):
+                with open(os.path.join(d, f"{i}.log"), "w", encoding="utf-8") as f:
+                    f.write(text)
+            r = subprocess.run([sys.executable, os.path.join(HERE, "ci-test-coverage.py"), "--scripts-only", d],
+                               capture_output=True, text=True)
+        if r.returncode != want:
+            failures.append(f"--scripts-only, {name}: rc {r.returncode}, want {want}: {r.stdout.strip()[-300:]}")
+        elif name == "one listed case never ran" and "examples/coop/ci_smoke.sh::stigmergy" not in r.stdout:
+            failures.append(f"--scripts-only did not name the case that never ran: {r.stdout.strip()[-300:]}")
+    return failures
+
 
 def main() -> int:
+    case("log-formats")
     executed, universe = set(), set()
     cov.scan(LOG, executed, universe)
     cov.scan(UNIVERSE, executed, universe)
@@ -72,10 +149,15 @@ def main() -> int:
         failures.append(f"executed: extra {sorted(executed - expect_executed)}, missing {sorted(expect_executed - executed)}")
     if universe - executed != expect_not_executed:
         failures.append(f"not executed: got {sorted(universe - executed)}")
+    case("script-cases")
+    failures += script_cases()
+    case("scripts-only-mode")
+    failures += scripts_only_mode()
     for f in failures:
         print("FAIL", f)
     if not failures:
-        print(f"test-ci-test-coverage: ok ({len(expect_executed)} executed, {len(expect_not_executed)} known and not executed)")
+        print(f"test-ci-test-coverage: ok ({len(expect_executed)} executed, {len(expect_not_executed)} known and not "
+              "executed; script cases: 3 executed, 3 not)")
     return 1 if failures else 0
 
 

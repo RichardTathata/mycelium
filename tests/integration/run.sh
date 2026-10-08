@@ -2,6 +2,13 @@
 # Integration test entry point — runs inside the test-runner container.
 set -euo pipefail
 
+# Verification policy rule 3: each scenario prints `@@case@@ <suite>::<case>` as it starts (the case is its
+# script's name), and --list names the `run_scenario` lines below on the host, without Docker or a cluster.
+if [ "${1:-}" = --list ]; then
+    sed -n 's|^run_scenario "[^"]*" *"$SCENARIOS_DIR/\([^"]*\)\.sh"$|@@case-list@@ tests/integration/run.sh::\1|p' "$0"
+    exit 0
+fi
+
 PASS=0
 FAIL=0
 SCENARIOS_DIR=/tests/scenarios
@@ -14,6 +21,7 @@ fail()   { printf '\033[0;31mFAIL\033[0m  %s\n' "$1"; }
 
 run_scenario() {
     local label="$1" script="$2"
+    echo "@@case@@ tests/integration/run.sh::$(basename "$script" .sh)"
     printf '  %-45s ' "$label"
     if bash "$script" 2>/tmp/scenario.err; then
         PASS=$((PASS + 1))

@@ -8,14 +8,18 @@ executed — passed or failed, not skipped, not ignored, not filtered out, not i
 
   * **Executed:** a Rust ``test <name> ... ok|FAILED`` line under a ``Running <target> (deps/<bin>-…)``
     or ``Doc-tests <crate>`` header (cargo's own lines); a pytest ``-v`` ``<nodeid> PASSED|FAILED|XPASS|XFAIL|ERROR`` line;
-    a jest ``--verbose`` ``✓``/``✕`` line under its ``PASS|FAIL <file>`` header.
+    a jest ``--verbose`` ``✓``/``✕`` line under its ``PASS|FAIL <file>`` header; a script-style suite's
+    ``@@case@@ <suite>::<case>`` line, printed as the case starts (anywhere on the line: a Docker runner's
+    output arrives prefixed with its container's name).
   * **Universe:** everything executed, plus every test any log names as skipped or ignored, plus the
     lists the ``test-universe`` job prints (``cargo test --all-features -- --list`` per crate, the
-    no-default-features builds, ``pytest --collect-only`` over every test directory), so a test gated
-    on a feature no step enables is in the universe and not executed.
+    no-default-features builds, ``pytest --collect-only`` over every test directory, and each script-style
+    suite's ``--list``: one ``@@case-list@@ <suite>::<case>`` line per case, printed without running
+    anything), so a test gated on a feature no step enables is in the universe and not executed.
 
 A test key is ``rust <target>::<binary>::<name>`` (target is ``src/lib.rs``, ``tests/x.rs``,
-``doc:<crate>``…), ``python <nodeid>`` or ``typescript <file>::<title>``. Two crates' same-named
+``doc:<crate>``…), ``python <nodeid>``, ``typescript <file>::<title>`` or ``script <suite>::<case>`` (the suite is the
+script's repository path, or the name of the step or make target that drives it). Two crates' same-named
 integration files share a key, so a same-named test in both counts once — stated, and rare.
 
 ``scripts/test-coverage-exceptions.txt`` lists ``<key-glob> — <reason>`` for tests that legitimately
@@ -24,6 +28,10 @@ the list cannot rot.
 
 Usage: ci-test-coverage.py <dir of job logs>      (each file one job's log, as the API returns it)
        ci-test-coverage.py --fetch <dir>          (GITHUB_REPOSITORY, GITHUB_RUN_ID, GH_TOKEN: fetch, then check)
+       ci-test-coverage.py [--fetch] --scripts-only <dir>
+                                                  (a workflow with no Rust/Python/TypeScript universe — the
+                                                   Docker cluster suites: check only ``script`` cases, and
+                                                   require one non-empty listing)
 """
 from __future__ import annotations
 
@@ -48,6 +56,11 @@ JEST_LISTED = re.compile(r"(?:^|/)mycelium-ts/(\S+\.test\.ts)\s*$")
 TS_LISTED = re.compile(r"^@@ts-test@@ (\S+\.test\.ts)::(.+)$")
 JEST_TEST = re.compile(r"^\s+(✓|✕|○ skipped|○ todo|○)\s+(.+?)(?: \(\d+ m?s\))?$")
 UNIVERSE_MARK = "@@test-universe@@"
+# Script-style suites (scripts/test-*, ci_smoke.sh, the Docker runners): searched anywhere on the line, and the
+# key's characters are restricted so a shell trace's quoting (`+ echo '@@case@@ a::b'`) is not part of it.
+CASE_KEY = r"([A-Za-z0-9_./:-]+::[A-Za-z0-9_./:-]+)"
+CASE_RAN = re.compile(r"@@case@@ " + CASE_KEY)
+CASE_LISTED = re.compile(r"@@case-list@@ " + CASE_KEY)
 # libtest names a should-panic test "<name> - should panic" and rustdoc a `no_run` / `compile_fail` doctest
 # "<name> - compile" / "- compile fail" when running them; `--list` names them without. (A `no_run` doctest
 # compiling *is* its run.)
@@ -94,6 +107,19 @@ def scan(text: str, executed: set, universe: set):
             elif mark == "end" and universe_mode:
                 universe_mode = False
                 LISTED_BLOCKS.append(listed)
+            continue
+        m = CASE_LISTED.search(line)
+        if m:
+            if universe_mode:
+                universe.add(f"script {m.group(1)}")
+                listed += 1
+            continue
+        m = CASE_RAN.search(line)
+        if m:
+            key = f"script {m.group(1)}"
+            universe.add(key)
+            if not universe_mode:
+                executed.add(key)
             continue
         if universe_mode:
             m = TS_LISTED.match(line.strip())
@@ -180,11 +206,10 @@ def fetch(dest: str):
          "--jq", '.jobs[] | "\\(.id)\\t\\(.status)\\t\\(.name)"'],
         capture_output=True, text=True, check=True).stdout.splitlines()
     # The coverage job itself, and the fuzz job (push only, no libtest output, ~25 min), are not waited for.
-    skip = {"Test coverage (observed)"}
     unfinished = []
     for row in rows:
         jid, status, name = row.split("\t", 2)
-        if name in skip or name.startswith("Fuzz"):
+        if name.startswith("Test coverage") or name.startswith("Fuzz"):
             continue
         if status != "completed":
             unfinished.append(name)
@@ -208,10 +233,12 @@ def fetch(dest: str):
 
 def main() -> int:
     args = sys.argv[1:]
-    if args[:1] == ["--fetch"]:
-        fetch(args[1])
-        args = args[1:]
+    fetching = "--fetch" in args
+    scripts_only = "--scripts-only" in args
+    args = [a for a in args if a not in ("--fetch", "--scripts-only")]
     logs = args[0]
+    if fetching:
+        fetch(logs)
     root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     try:
         TRACKED[:] = [f for f in subprocess.run(["git", "-C", root, "ls-files", "*.py"], capture_output=True,
@@ -221,13 +248,24 @@ def main() -> int:
     executed, universe = set(), set()
     for f in sorted(glob.glob(os.path.join(logs, "*"))):
         scan(open(f, encoding="utf-8", errors="replace").read(), executed, universe)
+    if scripts_only:
+        # The Docker workflow: each job lists its own suite's cases before it starts Docker, so the check is
+        # one non-empty listing per job at least, over script cases only.
+        executed = {k for k in executed if k.startswith("script ")}
+        universe = {k for k in universe if k.startswith("script ")}
+        if not LISTED_BLOCKS or min(LISTED_BLOCKS) == 0:
+            print(f"ci-test-coverage: no script suite listed its cases ({len(LISTED_BLOCKS)} complete block(s), "
+                  f"sizes {LISTED_BLOCKS})")
+            return 1
     # The universe must have been listed: a test-universe job that failed or was cancelled would otherwise
     # leave only what ran, and a test that never ran anywhere would be unknown rather than missing.
-    if len(LISTED_BLOCKS) < 2 or min(LISTED_BLOCKS) == 0:
+    elif len(LISTED_BLOCKS) < 2 or min(LISTED_BLOCKS) == 0:
         print(f"ci-test-coverage: the test universe was not listed ({len(LISTED_BLOCKS)} complete block(s), "
               f"sizes {LISTED_BLOCKS}): expected the test-universe job's and the TypeScript job's, each non-empty")
         return 1
     exc = exceptions(root)
+    if scripts_only:
+        exc = [(p, r) for p, r in exc if p.startswith("script ")]
     used = set()
     missing = []
     for key in sorted(universe - executed):

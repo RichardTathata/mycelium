@@ -3,6 +3,9 @@
 # demonstrates the rd/in split (shared reads + competitive exactly-once claims). Retry-hardened for
 # constrained CI runners (the example binds an ephemeral port + forms a 1-node cluster).
 set -uo pipefail
+# Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
+# cases without running them. One demo, so one case.
+if [ "${1:-}" = --list ]; then echo "@@case-list@@ mycelium-blackboard/ci_smoke.sh::microgrid"; exit 0; fi
 
 ATTEMPTS="${BB_SMOKE_ATTEMPTS:-3}"
 MARKER="consumed exactly once"
@@ -15,6 +18,7 @@ run_once() {
   [ "$code" -eq 0 ] && echo "$out" | grep -q "$MARKER"
 }
 
+echo "@@case@@ mycelium-blackboard/ci_smoke.sh::microgrid"
 for i in $(seq 1 "$ATTEMPTS"); do
   echo "── microgrid smoke attempt $i/$ATTEMPTS ──"
   if run_once; then

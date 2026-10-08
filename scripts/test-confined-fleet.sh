@@ -30,6 +30,14 @@
 # Needs: docker, kubectl, network access (images, Calico manifest). Uses `kind` from PATH, or $KIND, or downloads it.
 set -euo pipefail
 
+# Verification policy rule 3: the two phases are its cases. Each prints `@@case@@ <suite>::<case>` as it starts,
+# and --list names both without Docker, kind or a network (phase 2 is skipped, and so unexecuted, under
+# SKIP_NODES=1).
+if [ "${1:-}" = --list ]; then
+  for c in phase1-confinement phase2-real-nodes; do echo "@@case-list@@ scripts/test-confined-fleet.sh::$c"; done
+  exit 0
+fi
+
 CLUSTER="${CLUSTER:-mycelium-confined}"
 CALICO_VERSION="${CALICO_VERSION:-v3.28.2}"
 KIND_VERSION="${KIND_VERSION:-v0.24.0}"
@@ -92,6 +100,7 @@ check_blocked() { # name, url — blocked for the agent, reachable for the contr
 NODE_IMAGE="${NODE_IMAGE:-}"
 phase2() {
   local ns="-n confined-fleet" img="$NODE_IMAGE"
+  echo "@@case@@ scripts/test-confined-fleet.sh::phase2-real-nodes"
   if [ -z "$img" ]; then
     img="mycelium-confined-node:ci"
     echo "== phase 2: build the node image ($img)"
@@ -207,6 +216,7 @@ sys.exit(1 if fails else 0)
 PY
 }
 
+echo "@@case@@ scripts/test-confined-fleet.sh::phase1-confinement"
 echo "== checks from agent pod $AGENT"
 sleep 5 # let Calico program the policies for the new pods
 check_reachable "gateway API :8080" "http://gateway.confined-fleet.svc:8080/"

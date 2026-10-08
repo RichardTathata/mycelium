@@ -55,7 +55,16 @@ an auditor enumerated surfaces from the code instead of the description:
   read from `cargo metadata`, so a new crate is covered the day it joins — and `pytest --collect-only` over both
   Python test directories) and the TypeScript job (`jest --listTests` per file, and every test's title from jest's
   `--json` report, skipped ones included — `scripts/ci-jest-universe.py`, which refuses two same-titled tests in one
-  file because the verbose log keys a test by its leaf title). It fails if the
+  file because the verbose log keys a test by its leaf title), and the **script-style suites**' cases: each
+  suite's `--list` prints one `@@case-list@@ <suite>::<case>` line per case without running anything, and a run
+  prints `@@case@@ <suite>::<case>` as each case starts (keyed `script <suite>::<case>`). That covers
+  `scripts/test-*` (except the inventory's own mutation suite, below), `wire-check-examples.sh` (one case per
+  example directory), the seven `ci_smoke.sh` suites (each demo, mode or section a case; one case where the
+  suite is one dependent scenario) and the LangGraph ladder (listed from the directory). The **Docker suites**
+  (`cluster-suites.yml`: the 13 integration scenarios, overlay S11–S13, the ten federation legs, the
+  confined-fleet phases, the stem-examples demos) run in a workflow this job never reads, so that workflow
+  checks its own: each job lists its suite's cases from a static list in the runner before it starts Docker,
+  and its `case-coverage` job runs `ci-test-coverage.py --scripts-only` over the run's logs. It fails if the
   universe was not listed, and if a job it does not wait for is unfinished. Tests that never run in CI by
   design — loom's broken twins, perf smokes, the fixture regenerator, `ignore` doctest fragments — are listed
   with a reason in `scripts/test-coverage-exceptions.txt`, and an exception that matches nothing fails. On
@@ -67,7 +76,11 @@ an auditor enumerated surfaces from the code instead of the description:
   build (#551, 2.27.0; before it, only `mycelium`'s and `mycelium-core`'s libraries), so the remaining
   gap is a root-crate test gated off `gateway` (its dev-dependencies unify `gateway` back in — `mycelium-gateway-free-tests` is where
   those live), an `all(a, not(b))` gate in any crate (one non-default feature on, another off), or a `--cfg`
-  other than the loom job's; script-style suites (`scripts/test-*`, the Docker workflows). TypeScript
+  other than the loom job's. Of the script-style suites: `scripts/test-check-test-inventory.py` (its 48
+  mutations are not yet cases), a step's inline commands and single `cargo run --example` demonstrations (an
+  exit code, no cases), a case a suite runs but does not list (it counts as executed — the list catches the
+  opposite drift, a listed case that stopped running), and the scale suites (`scale-nightly.yml`, a self-hosted
+  runner that is offline — V1). TypeScript
   tests are known by name since #551 (jest's `--json` report lists skipped ones too). It keys an integration
   test by file and name, not crate, so two crates' same-named tests would mask each other — the static check
   refuses that pair.

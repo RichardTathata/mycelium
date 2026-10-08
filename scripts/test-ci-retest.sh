@@ -3,6 +3,11 @@
 # tier must decide right. Two were wrong until 2026-10-07 (the review of #541): a binary that crashed beside a
 # retried flake went green, and a deterministic doctest failure passed as a "flake" whose retry ran nothing.
 set -uo pipefail
+# Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
+# `run <case>` lines below without building anything.
+if [ "${1:-}" = --list ]; then
+  sed -n 's/^run \([a-z_]*\) .*/@@case-list@@ scripts\/test-ci-retest.sh::\1/p' "$0"; exit 0
+fi
 here="$(cd "$(dirname "$0")" && pwd)"
 dir="$(mktemp -d)"
 trap 'rm -rf "$dir"' EXIT
@@ -34,6 +39,7 @@ CARGO_TARGET_DIR="$dir/target" cargo build --tests -q || exit 2
 fails=0
 run() {
   local name="$1" want="$2"; shift 2
+  echo "@@case@@ scripts/test-ci-retest.sh::$name"
   rm -f target/.flaked
   env CARGO_TARGET_DIR="$dir/target" GITHUB_STEP_SUMMARY= "$@" bash "$here/ci-retest.sh" > "out-$name.txt" 2>&1
   local rc=$?
