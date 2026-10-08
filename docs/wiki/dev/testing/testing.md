@@ -359,8 +359,9 @@ in `lifecycle.rs`, `http.rs`, `confinement.rs` — are not exercised by the libr
 exercised only by a plain build of the binary (`cargo build --no-default-features --features cli,gateway
 --bin mycelium`), which takes no dev-dependencies. That is how `a_tls_table_this_build_cannot_enforce_refuses_to_start`
 was verified: the binary started with a `[tls]` table and listened in plaintext before the fix, and refuses
-by name after it; the lib test stays in the tree as the statement, and this note says why it is not the
-evidence. The same holds for `compliance`? No — nothing in the dev-dependencies enables it, so
+by name after it. The lib test that stated it never ran; since 2026-10-08 it lives in `mycelium-tls-free-tests`
+(`mycelium` built with `gateway` and without `tls`, run on its own in CI), and `check-test-inventory.py` refuses a
+root test whose gate no test build satisfies — it models dev-dependency unification now. The same holds for `compliance`? No — nothing in the dev-dependencies enables it, so
 `not(feature = "compliance")` tests do run. Check `Cargo.toml`'s dev-dependency features before trusting a
 negative feature gate.
 

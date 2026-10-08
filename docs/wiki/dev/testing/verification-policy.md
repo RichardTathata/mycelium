@@ -83,14 +83,15 @@ an auditor enumerated surfaces from the code instead of the description:
   (the parser), `scripts/test-ci-retest.sh` (the retry tier).
 - **What the observed job cannot see**, so the static check below still matters: a test compiled under no
   feature set the universe builds — the universe lists `--all-features` and every workspace crate's own featureless
-  build (#551, 2.27.0; before it, only `mycelium`'s and `mycelium-core`'s libraries), so the remaining
-  gap is a root-crate test gated off `gateway` (its dev-dependencies unify `gateway` back in — `mycelium-gateway-free-tests` is where
-  those live), an `all(a, not(b))` gate in any crate (one non-default feature on, another off), or a `--cfg`
-  other than the loom job's. Of the script-style suites: `scripts/test-check-test-inventory.py` (its 48
-  mutations are not yet cases), a step's inline commands and single `cargo run --example` demonstrations (an
-  exit code, no cases), a case a suite runs but does not list (it counts as executed — the list catches the
-  opposite drift, a listed case that stopped running), and the scale suites (`scale-nightly.yml`, a self-hosted
-  runner that is offline — V1). TypeScript
+  build (#551, 2.27.0; before it, only `mycelium`'s and `mycelium-core`'s libraries). What the universe cannot
+  list — a gate no build in the run satisfies, such as a root-crate test gated off `gateway` or `tls` (the root's
+  dev-dependencies unify both back in), an `all(a, not(b))` gate, a `--cfg` other than the loom job's — the
+  static check refuses before push since 2026-10-08: it evaluates each gate against the features the step's
+  **test build** enables, dev-dependency unification included. A test that needs `gateway` or `tls` off lives in
+  `mycelium-gateway-free-tests` or `mycelium-tls-free-tests`. Of the script-style suites: a step's inline commands
+  and single `cargo run --example` demonstrations (an exit code, no cases), a case a suite runs but does not list
+  (it counts as executed — the list catches the opposite drift, a listed case that stopped running), and the scale
+  suites (`scale-nightly.yml`, a self-hosted runner that is offline — V1). TypeScript
   tests are known by name since #551 (jest's `--json` report lists skipped ones too). It keys an integration
   test by file and name, not crate, so two crates' same-named tests would mask each other — the static check
   refuses that pair.
@@ -106,7 +107,7 @@ an auditor enumerated surfaces from the code instead of the description:
   it provably selects the whole gate — the module's path or the one gated function's name). Exceptions go in
   `scripts/test-inventory-exceptions.txt` with a reason; there are none.
 - `scripts/test-check-test-inventory.py` — the static check's own **mutation suite** (also in `make check` and
-  CI): 48 edits that each leave a test unrun, every one of which the check must fail on — the round-3 ones
+  CI): 49 edits that each leave a test unrun, every one of which the check must fail on — the round-3 ones
   asserting the exact key reported. They are the bypasses three adversarial reviews of #541 found: the first
   version refused *named* test files and was bypassed fourteen ways; the second inventoried targets but not
   library unit tests, read non-feature cfgs as "needs nothing", and counted steps that never run tests (20 of

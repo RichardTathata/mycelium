@@ -224,6 +224,10 @@ jobs:
       # the gateway was unified back in.
       - run: cargo clippy -p mycelium-gateway-free-tests --all-targets -- -D warnings
       - run: cargo test -p mycelium-gateway-free-tests
+      # The same for `tls`: `mycelium`'s dev-dependencies enable it, so its own test build never lacks it. Run alone,
+      # this crate builds `mycelium` with `gateway` and without `tls`; its first test fails if `tls` was unified in.
+      - run: cargo clippy -p mycelium-tls-free-tests --all-targets -- -D warnings
+      - run: cargo test -p mycelium-tls-free-tests
       # The node binary's recorded-run path (`GOSSIP_RECORD_BUNDLE_DIR`) exists only under `sim`;
       # nothing else builds the bin with it, so this is the line that keeps it compiling.
       - run: cargo check --bin mycelium --features cli,sim

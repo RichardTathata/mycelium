@@ -169,6 +169,13 @@ EXPECT = {
     "two crates' same-named integration tests": (
         write("mycelium-blackboard/tests/failover.rs", "#[test]\nfn secondary_startup_lag_is_not_evaporation() {}\n"),
         "integration mycelium-blackboard::failover::secondary_startup_lag_is_not_evaporation"),
+    # Cargo unifies a crate's features through its dev-dependencies in a test build: the root crate's dev-dependency
+    # on `mycelium-tuple-space` (feature `gateway` → `mycelium/gateway`) turns `gateway` back on, so a root test gated
+    # off `gateway` never runs, whatever the step's flags say (the stated limit this check had until 2026-10-08).
+    "a root test gated off gateway, behind a --no-default-features step": (
+        both(append(LIB_TESTS, '\n#[test]\n#[cfg(not(feature = "gateway"))]\nfn zz_off() {}\n'),
+             regex(CI, r"^(\s*)- run: " + re.escape(CORE_TLS), r"\1- run: cargo test --lib --no-default-features\n\1- run: " + CORE_TLS)),
+        "src/lib_tests.rs  (needs without gateway"),
     "npm test narrowed in package.json": (both(regex(CI, r"npx jest --verbose\s", "npm test "),
                                                edit("mycelium-ts/package.json", '"test": "jest"', '"test": "jest tests/live"')),
                                           "typescript mycelium-ts/tests/artifacts.test.ts"),

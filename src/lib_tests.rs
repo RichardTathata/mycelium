@@ -10711,38 +10711,8 @@ async fn an_oidc_table_this_build_cannot_enforce_refuses_to_start() {
     }
 }
 
-/// A `[tls]` or `[gateway_tls]` table in a build without `tls` must refuse to start, not run
-/// plaintext (I1 audit findings `mesh.tls`, `gw.tls`, 2026-10-02). The TLS init and the HTTPS branch
-/// are compiled out, so the fields were accepted and ignored: gossip ran unauthenticated and the
-/// gateway served bearer tokens in cleartext, with no warning. `domain_profile = "enforced"` passed
-/// `validate()` the same way, since it only checks that `tls` is set.
-#[cfg(not(feature = "tls"))]
-#[tokio::test]
-async fn a_tls_table_this_build_cannot_enforce_refuses_to_start() {
-    for field in ["tls", "gateway_tls"] {
-        let port = alloc_port();
-        let mut cfg = GossipConfig::default();
-        cfg.bind_port = port;
-        match field {
-            "tls" => cfg.tls = Some(TlsConfig { auto_cert_dir: std::env::temp_dir().join(format!("tls-{port}")), ..Default::default() }),
-            _ => {
-                cfg.http_port = Some(alloc_port());
-                cfg.gateway_tls = Some(crate::GatewayTlsConfig { cert_pem_path: Some("c.pem".into()), key_pem_path: Some("k.pem".into()), ..Default::default() });
-            }
-        }
-        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
-        match agent.start().await {
-            Err(GossipError::InvalidField { field: f, reason }) => {
-                assert_eq!(f, field);
-                assert!(reason.contains("`tls`"), "the refusal names the missing feature: {reason}");
-            }
-            other => {
-                let _ = agent.shutdown_with_timeout(Duration::from_secs(5)).await;
-                panic!("[{field}] without the `tls` feature must refuse to start, got {other:?}");
-            }
-        }
-    }
-}
+// A `[tls]` or `[gateway_tls]` table in a build without `tls` refusing to start: `mycelium-tls-free-tests`, the one
+// test build of `mycelium` without `tls` (this crate's dev-dependencies turn it on, so a test here never ran).
 
 /// `/a2a` is anonymous skill dispatch unless an evaluator is attached — a configured bearer does not
 /// gate it (I1 audit `a2a.admission`, 2026-10-02). The attach-time warning said the opposite: it
