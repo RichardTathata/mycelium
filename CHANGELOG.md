@@ -21,17 +21,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   groups are unaffected. Test
   `a_governed_groups_membership_moves_only_through_a_governance_route`, seen failing first. **Upgrade note:** a client
   joining a governed group over HTTP uses `/gateway/govern/group` with `govern:write` (`deprecations.md` §20).
-- **`scripts/check-example-matrix.py` no longer reads text that never runs as an example run.** Four shapes in a
-  script CI reaches could pass a ✓ row in `examples/README.md`'s CI column that nothing executes; each is closed,
-  with a self-test case that fails against the 2.28.0 check: a single-quoted `'$(cargo run --example x)'` (a `$(…)`
-  counts only where the shell expands it — unquoted or double-quoted); an unused array `CMD=(cargo run --example x)`
-  (an assignment is not a run; an array counts when used as a program, `"${CMD[@]}"`, as a variable already did);
-  a command under `if false`/`while false`/`until true` or in `if true`'s `else` (never counted) or in a function
-  body (counted only when the function is called from a command that counts, or named by `trap`); and a Python
-  list that is not an argument of a process-starting call — the Python scripts are now parsed, and a vector counts
-  only in `subprocess.run`/`call`/`check_call`/`check_output`/`Popen`, `os.exec*`/`os.spawn*` or
-  `asyncio.create_subprocess_exec` (across lines, or through a variable). Other conditionals and loops still count —
-  they plausibly run, and the docstring says so. The check finds the same sites on this tree as before.
+- **`scripts/check-example-matrix.py` reads less text that never runs as an example run.** Shapes in a script CI
+  reaches that could pass a ✓ row in `examples/README.md`'s CI column nothing executes, now not read as runs, each
+  with a self-test case seen failing first: a single-quoted `'$(cargo run --example x)'` (a `$(…)` counts only where
+  the shell expands it), including one whose quote spans lines (a quoted string is one word across lines); an unused
+  array `CMD=(cargo run --example x)` (an array runs whole only as `"${CMD[@]}"`, its first element as `$CMD`); a
+  branch whose single literal condition cannot take it (`if false`, `if ! true`, `while false`, `until true`) and
+  every branch after a literal `true` one; the right side of `false &&` / `true ||`; code after an unconditional
+  top-level `exit`; an uncalled function body (`{ … }` or `( … )`; called means from a command that counts, or
+  first in a `trap` string); a `case` pattern word; and a Python list outside a process-starting call (Python is
+  now parsed; a file that does not parse is reported by name). **Still read as run although it may not run**, and
+  listed in the check's docstring: any other conditional or loop (nothing is evaluated), every `case` arm, code
+  after a call to a function that exits or after a `return`, a function shadowing a command, a quoted `"$RUN"`, and
+  Python control flow and scope (`if False:`, an uncalled `def`, the last assignment anywhere). The check finds the
+  same sites on this tree as before.
 
 ## [2.28.0] — 2026-10-08
 

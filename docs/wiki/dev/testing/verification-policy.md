@@ -130,11 +130,14 @@ an auditor enumerated surfaces from the code instead of the description:
   target; a **✓ᵖ** row needs such a site only in a **path-filtered** workflow (`cluster-suites.yml`); and every
   example CI executes needs a ✓/✓ᵖ row (or, if it has no row, a place among the README's harness binaries). It is
   derived from the workflows, the scripts their steps reach and the suites' own `--list`s, and skips heredoc bodies
-  and comments; in a shell script it counts a `$(…)` only where the shell expands it (never single-quoted), an
-  array or variable only when used as a program, nothing under `if false`/`while false`, and a function body only
-  when the function is called; in Python (parsed) only an argument vector of a process-starting call. The one
-  approximation left that can read a run where none happens — a conditional or loop whose condition is not the
-  literal `false` — and what it misses are listed in its docstring. Its
+  and comments; in a shell script it counts a `$(…)` only where the shell expands it (never single-quoted, a
+  quote spanning lines read as one word), an array or variable only when used as a program, no branch a single
+  literal condition rules out (`if false`, `if ! true`, after a literal `true` branch), no right side of `false &&`,
+  nothing after a top-level `exit`, and a function body only when the function is called; in Python (parsed; an
+  unparseable file is reported) only an argument vector of a process-starting call. It still reads as run — the
+  unsafe direction — any other conditional or loop (nothing is evaluated), every `case` arm, code after a function
+  that exits or a `return`, a function shadowing a command, a quoted `"$RUN"`, and Python control flow and scope;
+  its docstring lists these and what it misses. Its
   first run found `reason_node` and `reheal_node` executed in every run under rows saying ·; the first review found
   `confined_fleet_node` ✓ only through the path-filtered Docker suites (now ✓ᵖ). It reads `paths:` itself:
   `check-test-inventory.py` still counts a path-filtered workflow as running, unchanged.
