@@ -44,10 +44,16 @@ process (``compare_stem_observations``, ``reason_node``, ``reheal_node``, ``wiki
 **An approximation**, like the test inventory. Read as run although they may not run: a command in a shell
 ``if false``/function body that is never called, or in a loop (in a reached script — the workflow steps
 themselves are read with control flow); an assignment whose variable is used as a program on a line that never
-runs; a Python ``print``/f-string continuation line that happens to hold a cargo argument list. Missed (a false
-alarm on a ✓ row, never a silent pass): an example run under a computed name, a script reached only through a
-wrapper other than those listed (``with-pyyaml.sh``), a compose file's ``dockerfile:``, a Makefile target whose
-recipe is only a loop.
+runs; a Python ``print``/f-string continuation line that happens to hold a cargo argument list; a single-quoted
+``'$(cargo run --example X)'`` and an unused array ``CMD=(cargo run --example X)``. Each can pass a ✓ row it should
+not. Missed: an example run under a computed name, a script reached only through a wrapper other than those listed
+(``with-pyyaml.sh``), a run behind a command prefix (``timeout``, ``env X=1``, ``bash -c "…"``, ``nohup``, ``sudo``,
+``xargs``, ``eval``, ``python -m``), a reusable workflow (``on: workflow_call``) and the jobs that call it, a compose
+file's ``dockerfile:``, a Makefile target whose recipe is only a loop. A miss is a false alarm on a ✓ row — or, on a
+``·`` row CI in fact executes, a silent pass: the column then under-claims, the safe direction. "Every change" is a
+``pull_request`` trigger without ``paths``/``paths-ignore``, without a ``branches`` that omits or a
+``branches-ignore`` that names ``main``, without ``types`` that omit ``synchronize``, and a job or step whose ``if:``
+does not keep it off pull requests; anything else the inventory counts is ✓ᵖ.
 
 Usage: check-example-matrix.py [--root DIR]          the check (needs PyYAML: scripts/with-pyyaml.sh;
                                                       CHECK_EXAMPLE_MATRIX_VERBOSE=1 prints each site found)
@@ -208,13 +214,45 @@ def trigger_class(inv, on) -> str | None:
     on = on or {}
     if "pull_request" in on:
         pr = on["pull_request"] or {}
-        branches = pr.get("branches")
-        if not pr.get("paths") and not pr.get("paths-ignore") and (branches is None or "main" in branches):
+        branches, ignored, types = pr.get("branches"), pr.get("branches-ignore") or [], pr.get("types")
+        if (not pr.get("paths") and not pr.get("paths-ignore") and (branches is None or "main" in branches)
+                and "main" not in ignored and (types is None or "synchronize" in types)):
             return EVERY
     return FILTERED if inv._triggers(on) else None
 
 
 CELLS = {"✓": EVERY, "✓ᵖ": FILTERED, "·": None}
+
+
+NOT_ON_PR = "github.event_name != 'pull_request'"
+
+
+def _cond(v) -> str:
+    return str(v or "").strip().removeprefix("${{").removesuffix("}}").strip()
+
+
+def pr_excluded(doc: dict, wf: str) -> set[str]:
+    """`workflow:job` and `workflow:job:step` locations whose `if:` (a job's, or one it needs) keeps them off pull
+    requests — the inventory counts those as running (they run on every push), but not on every change (#566 review 2)."""
+    jobs = doc.get("jobs") or {}
+
+    def off(name, seen=()):
+        job = jobs.get(name) or {}
+        if name in seen:
+            return False
+        if _cond(job.get("if")) == NOT_ON_PR:
+            return True
+        needs = job.get("needs") or []
+        return any(off(n, seen + (name,)) for n in ([needs] if isinstance(needs, str) else needs))
+
+    out = set()
+    for jname, job in jobs.items():
+        if off(jname):
+            out.add(f"{wf}:{jname}")
+        for i, step in enumerate((job or {}).get("steps") or []):
+            if _cond(step.get("if")) == NOT_ON_PR:
+                out.add(f"{wf}:{jname}:{step.get('name', i)}")
+    return out
 
 
 def readme_rows(path: str) -> tuple[dict, set, list[str]]:
@@ -409,17 +447,21 @@ def check(root: str) -> list[str]:
     wf_dir = os.path.join(root, ".github", "workflows")
 
     workflows = sorted(os.path.join(wf_dir, f) for f in os.listdir(wf_dir) if f.endswith((".yml", ".yaml")))
-    klass = {}
+    klass, off_pr = {}, set()
     for wf in workflows:
         errors += list_wrapped(wf)[1]   # an unfronted run is invisible to the observed job
         doc = yaml.safe_load(open(wf, encoding="utf-8")) or {}
         klass[os.path.basename(wf)] = trigger_class(inv, doc.get("on", doc.get(True, {})))
+        off_pr |= pr_excluded(doc, os.path.basename(wf))
 
     queue: list[tuple[str, str, str]] = []
     for cmd in inv.ci_commands(root, wf_dir):
         k = klass.get(cmd.where.split(":", 1)[0])
         if k is None or not cmd.argv:
             continue
+        parts = cmd.where.split(" (make", 1)[0].split(":")
+        if k == EVERY and (":".join(parts[:2]) in off_pr or ":".join(parts[:3]) in off_pr):
+            k = FILTERED  # it runs on pushes, not on pull requests
         for t in re.findall(r"\(make ([^)\s]+)\)", cmd.where):
             targets.add((t, k))
         w = next((i for i, t in enumerate(cmd.argv) if os.path.basename(t) == WRAPPER), None)
@@ -551,7 +593,7 @@ def main() -> int:
     if errors:
         print(f"check-example-matrix: {len(errors)} problem(s)", file=sys.stderr)
         return 1
-    print("check-example-matrix: every ✓ row has a CI execution site, and every example CI executes has a ✓ row")
+    print("check-example-matrix: every ✓ / ✓ᵖ row has a CI execution site of its class, and every example CI executes has its row")
     return 0
 
 

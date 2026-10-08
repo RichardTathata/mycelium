@@ -20,7 +20,10 @@ CASES = ["baseline", "tick-without-run", "run-with-dot-row", "run-without-row", 
          "path-filtered-is-not-every-change", "every-change-is-not-path-filtered", "wrapper-fronts-only-cargo-run",
          "build-then-run-on-one-line", "name-starting-with-dash", "heredoc-is-not-code",
          "python-docstring-is-not-code", "mention-is-not-execution", "built-path-mention-is-not-execution",
-         "variable-program-is-execution", "harness-name-with-a-row", "makefile-suite-must-be-reached"]
+         "variable-program-is-execution", "harness-name-with-a-row", "makefile-suite-must-be-reached",
+         # review round 2 (#566)
+         "pr-excluded-job-is-not-every-change", "pr-excluded-step-is-not-every-change",
+         "pr-types-filter-is-not-every-change", "pr-branches-ignore-main-is-not-every-change"]
 if sys.argv[1:] == ["--list"]:
     for c in CASES:
         print(f"@@case-list@@ {SUITE}::{c}")
@@ -317,4 +320,23 @@ fails(both(add("Makefile", MAKEFILE), LISTED, ROW), "`zeta` is ✓ in the CI col
 passes(both(add("Makefile", MAKEFILE), LISTED, ROW, step("make suite-x")))
 
 shutil.rmtree(FAKE)
+
+ALPHA_NOT_EVERY = "`alpha` is ✓ in the CI column, but only a path-filtered workflow executes it"
+ALPHA_STEP = f"      - run: scripts/example-case.sh {CR} --example alpha\n"
+
+case("pr-excluded-job-is-not-every-change")
+fails(sub(".github/workflows/ci.yml", "  t:\n    runs-on:", "  t:\n    if: github.event_name != 'pull_request'\n    runs-on:"),
+      ALPHA_NOT_EVERY)
+
+case("pr-excluded-step-is-not-every-change")
+fails(sub(".github/workflows/ci.yml", ALPHA_STEP,
+          f"      - if: ${{{{ github.event_name != 'pull_request' }}}}\n        run: scripts/example-case.sh {CR} --example alpha\n"),
+      ALPHA_NOT_EVERY)
+
+case("pr-types-filter-is-not-every-change")
+fails(sub(".github/workflows/ci.yml", "on: [pull_request]", "on:\n  pull_request:\n    types: [labeled]"), ALPHA_NOT_EVERY)
+
+case("pr-branches-ignore-main-is-not-every-change")
+fails(sub(".github/workflows/ci.yml", "on: [pull_request]", "on:\n  pull_request:\n    branches-ignore: [main]"), ALPHA_NOT_EVERY)
+
 print(f"test-check-example-matrix: {len(CASES)} cases passed")
