@@ -341,8 +341,11 @@ gateway route of its own is written by the substrate or the companion that owns 
 **What changes.** `POST`/`DELETE /gateway/mesh/group` (`mesh:write`) refuse **403** `governed_group` for a group under a
 live membership intent (`POST /gateway/govern/membership`): its members are the roster and quorum its elections count,
 so changing them is governance. `POST`/`DELETE /gateway/govern/group` (`govern:write`) does it, for any group. Every
-membership change through either route is audited (or counted on `/stats` as `governance_unaudited`). A group with no
-membership intent is unaffected.
+membership change through `/gateway/govern/group` is audited (or counted on `/stats` as `governance_unaudited`); a plain group's `mesh:write`
+join is audited, not counted, and a join or leave that changes nothing is not recorded. `POST /gateway/units/declare`
+refuses a `[[group]]` whose name is governed (403 `governed_group`): its filter decides whom the governor can elect.
+"Governed" lasts while the intent is live — re-published within `MEMBERSHIP_INTENT_TTL_MS` (5 min) — and an intent
+`target`ed at one node governs the group fleet-wide. A group with no membership intent is unaffected.
 
 **Will the compiler tell me?** No — it is an HTTP status; the 403's `message` names the route.
 

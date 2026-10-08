@@ -1559,9 +1559,11 @@ async fn gw_group_join(
     if let Some(refused) = refuse_governed_group(&ctx.agent_ctx, &body.group) {
         return refused;
     }
-    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
-        .join_group(body.group.as_str());
-    audit_govern(&ctx.agent_ctx, &format!("grp/{}/join", body.group), json!({"route": "mesh/group"}).to_string());
+    if !is_member(&ctx.agent_ctx, &body.group) {
+        mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
+            .join_group(body.group.as_str());
+        audit_membership(&ctx.agent_ctx, &format!("grp/{}/join", body.group));
+    }
     let members: Vec<String> = crate::agent::helpers::group_members_ctx(&ctx.agent_ctx, &body.group)
         .iter().map(|n| n.to_string()).collect();
     Json(json!({ "ok": true, "group": body.group, "members": members })).into_response()
@@ -1576,16 +1578,21 @@ async fn gw_group_leave(
     if let Some(refused) = refuse_governed_group(&ctx.agent_ctx, &q.group) {
         return refused;
     }
-    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
-        .leave_group(q.group.as_str());
-    audit_govern(&ctx.agent_ctx, &format!("grp/{}/leave", q.group), json!({"route": "mesh/group"}).to_string());
+    if is_member(&ctx.agent_ctx, &q.group) {
+        mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
+            .leave_group(q.group.as_str());
+        audit_membership(&ctx.agent_ctx, &format!("grp/{}/leave", q.group));
+    }
     Json(json!({ "ok": true, "group": q.group })).into_response()
 }
 
 /// Whether `group` is under a live membership intent (`sys/govern/membership/{group}`, fresh within
 /// `MEMBERSHIP_INTENT_TTL_MS` — the governor's own reading, `emergent::detect_governed_group_conflicts`). Such a
 /// group's population is governed: who belongs to it decides an election's roster and quorum, so changing it is a
-/// governance act, not a data-plane write.
+/// governance act, not a data-plane write. Fleet-wide: an intent `target`ed at one node still governs the group here —
+/// the electorate floor (`declared_electorate_min`) and the conflict detector read it the same way. "Live" lapses: an
+/// intent not re-published within the TTL leaves the group ungoverned (and a future-dated `written_at_ms` reads as
+/// fresh, as it does for the governor).
 #[cfg(feature = "gateway")]
 fn is_governed_group(ctx: &TaskCtx, group: &str) -> bool {
     use super::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
@@ -1596,7 +1603,7 @@ fn is_governed_group(ctx: &TaskCtx, group: &str) -> bool {
 }
 
 /// `/gateway/mesh/group`'s refusal for a governed group: **403** `governed_group`, naming the route that moves a node
-/// in or out of one under `govern:write`, audited.
+/// in or out of one under `govern:write` (where the accepted change is audited; the refusal itself is not).
 #[cfg(feature = "gateway")]
 fn refuse_governed_group(ctx: &TaskCtx, group: &str) -> Option<axum::response::Response> {
     is_governed_group(ctx, group).then(|| (
@@ -1620,8 +1627,10 @@ async fn gw_govern_group_join(
     let Some(group) = body.get("group").and_then(|g| g.as_str()).filter(|g| !g.is_empty() && !g.contains('/')) else {
         return bad_request("`group` must be a non-empty string without '/'".into());
     };
-    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core)).join_group(group);
-    audit_govern(&ctx.agent_ctx, &format!("grp/{group}/join"), body.to_string());
+    if !is_member(&ctx.agent_ctx, group) {
+        mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core)).join_group(group);
+        audit_govern(&ctx.agent_ctx, &format!("grp/{group}/join"), body.to_string());
+    }
     let members: Vec<String> = crate::agent::helpers::group_members_ctx(&ctx.agent_ctx, group)
         .iter().map(|n| n.to_string()).collect();
     Json(json!({ "ok": true, "group": group, "governed": is_governed_group(&ctx.agent_ctx, group), "members": members }))
@@ -1631,12 +1640,41 @@ async fn gw_govern_group_join(
 /// `DELETE /gateway/govern/group?group=G` (`govern:write`) — **this node** leaves `G`, governed or not; audited.
 #[cfg(feature = "gateway")]
 async fn gw_govern_group_leave(
-    Query(q):   Query<GroupQuery>,
+    Query(q):   Query<std::collections::HashMap<String, String>>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
-    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core)).leave_group(q.group.as_str());
-    audit_govern(&ctx.agent_ctx, &format!("grp/{}/leave", q.group), json!({"route": "govern/group"}).to_string());
-    Json(json!({ "ok": true, "group": q.group })).into_response()
+    // As strict as the POST: a `target` (or any other parameter) is refused, not dropped and applied here.
+    if let Some(k) = q.keys().find(|k| k.as_str() != "group") {
+        return bad_request(format!("unknown parameter `{k}`"));
+    }
+    let Some(group) = q.get("group").filter(|g| !g.is_empty() && !g.contains('/')) else {
+        return bad_request("`group` must be a non-empty name without '/'".into());
+    };
+    if is_member(&ctx.agent_ctx, group) {
+        mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core)).leave_group(group.as_str());
+        audit_govern(&ctx.agent_ctx, &format!("grp/{group}/leave"), json!({"route": "govern/group"}).to_string());
+    }
+    Json(json!({ "ok": true, "group": group })).into_response()
+}
+
+/// Whether this node is a live member of `group` — so a join that changes nothing, or a leave of a group it is not
+/// in, is not recorded as a change.
+#[cfg(feature = "gateway")]
+fn is_member(ctx: &TaskCtx, group: &str) -> bool {
+    crate::agent::helpers::group_members_ctx(ctx, group).contains(&ctx.node_id)
+}
+
+/// Record a plain group's membership change in the audit trail. Not a governance change — a plain group's membership is
+/// `mesh:write` data plane — so the governance counters are not touched; a failed seal is a warning (#572's review).
+#[cfg(feature = "gateway")]
+fn audit_membership(ctx: &Arc<TaskCtx>, target: &str) {
+    #[cfg(feature = "compliance")]
+    if let Err(e) = super::audit::seal_and_write(ctx, super::audit::AuditAction::Admin, "gateway/mesh", target,
+                                                 super::audit::AuditOutcome::Success, None) {
+        tracing::debug!(target, "group membership change not audited: {e}");
+    }
+    #[cfg(not(feature = "compliance"))]
+    let _ = (ctx, target);
 }
 
 /// `GET /gateway/mesh/group?group=G` — the roster this node can see for `G`.
@@ -2103,6 +2141,16 @@ async fn gw_units_declare(
         Ok(f) => f,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid unit file", "detail": e}))).into_response(),
     };
+    // A group under a membership intent is governed: its definition (its eligibility filter) decides which nodes
+    // the governor can elect into it, so `cap:write` does not redefine it (#572's review).
+    let governed: Vec<&str> = units.groups.iter().map(|g| g.name.as_str()).filter(|n| is_governed_group(&ctx.agent_ctx, n)).collect();
+    if !governed.is_empty() {
+        return (StatusCode::FORBIDDEN, Json(json!({
+            "ok": false, "error": "governed_group",
+            "message": format!("{} under a membership intent: a governed group's definition is not redefined through units/declare",
+                               governed.join(", ")),
+        }))).into_response();
+    }
     let defs = match units.groups.iter().map(|g| g.to_def().map(|d| (g.name.clone(), d))).collect::<Result<Vec<_>, _>>() {
         Ok(d) => d,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid unit file", "detail": e}))).into_response(),
@@ -6729,7 +6777,7 @@ mod tests {
         let r = client.post(format!("{base}/mesh/group")).header(AUTHORIZATION, "Bearer t")
             .json(&serde_json::json!({"group": "plain"})).send().await.unwrap();
         assert_eq!(r.status(), 200, "a plain group is a mesh:write join");
-        assert_eq!(changes(), before + 1, "and the change is audited or counted");
+        assert_eq!(changes(), before, "a plain group's membership is data plane, not a governance change");
 
         let r = client.post(format!("{base}/govern/membership")).header(AUTHORIZATION, "Bearer t")
             .json(&serde_json::json!({"group": "ruled", "min": 1})).send().await.unwrap();
@@ -6751,6 +6799,28 @@ mod tests {
         assert_eq!(body["governed"], true, "{body}");
         assert!(body["members"].as_array().unwrap().iter().any(|m| m == &serde_json::json!(agent.node_id().to_string())), "{body}");
         assert_eq!(changes(), before + 1);
+        // Joining again changes nothing, so nothing is recorded.
+        let r = client.post(format!("{base}/govern/group")).header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"group": "ruled"})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(changes(), before + 1, "a no-op join is not a change");
+
+        // The governed leave: as strict as the join — a `target` is refused, not dropped and applied here.
+        for bad in ["group=ruled&target=10.0.0.5:9000", "group=", "group=a/b", ""] {
+            let r = client.delete(format!("{base}/govern/group?{bad}")).header(AUTHORIZATION, "Bearer t").send().await.unwrap();
+            assert_eq!(r.status(), 400, "{bad}");
+        }
+        let r = client.delete(format!("{base}/govern/group?group=ruled")).header(AUTHORIZATION, "Bearer t").send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(changes(), before + 2, "the leave is a governance change");
+
+        // A governed group is not redefined through units/declare (`cap:write`): its filter decides who the governor
+        // can elect into it (#572's review).
+        let unit = "[[group]]\nname = \"ruled\"\n  [group.filter]\n  ns   = \"depot\"\n  name = \"intake\"\n";
+        let r = client.post(format!("{base}/units/declare")).header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({ "toml": unit })).send().await.unwrap();
+        assert_eq!(r.status(), 403);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "governed_group");
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
     }
 

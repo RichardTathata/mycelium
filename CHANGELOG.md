@@ -15,7 +15,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `POST`/`DELETE /gateway/mesh/group` let any `mesh:write` holder move the node in or out, unaudited (the handler named
   it an open question). Now those routes refuse a governed group **403** `governed_group`, and the new
   `POST`/`DELETE /gateway/govern/group` (`govern:write`) moves the node, for any group; every membership change through
-  either route is audited or counted (`governance_changes` / `governance_unaudited`). Plain groups are unaffected. Test
+  `/govern/group` is audited or counted (`governance_changes` / `governance_unaudited`), a plain group's join is audited,
+  and a no-op join or leave records nothing. `POST /gateway/units/declare` refuses a `[[group]]` whose name is governed
+  (403 `governed_group`) — its filter decides whom the governor can elect, so `cap:write` does not redefine it. Plain
+  groups are unaffected. Test
   `a_governed_groups_membership_moves_only_through_a_governance_route`, seen failing first. **Upgrade note:** a client
   joining a governed group over HTTP uses `/gateway/govern/group` with `govern:write` (`deprecations.md` §20).
 
