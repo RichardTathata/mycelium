@@ -67,6 +67,12 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   `enforce-allocated` spends the granted budget and then refuses, with the rejections recorded in the
   ledger. Being a browser showcase it runs continuously and is built rather than run in CI; the four
   CLI demonstrations are the ones CI runs.
+  `strict_eligibility` (feature `tls`, CI-run since 2026-10-08) is item 5's second: the shipped history
+  source `mandate::history_source::history_from_appointment_stream` end to end — a food co-op's members'
+  assembly signs appointment records and heads, a member's node verifies them and its reader advances,
+  and every `eligible_strict` verdict is asserted, including `Unknown` for a missing record and for a
+  reader with no checkpoint, and the old-key revocation that does not end the history. Until then nothing
+  outside the source's tests called it (doc-coverage run 21).
 - **Food-Rescue Co-op suite** (`examples/coop/`, workspace member
   `mycelium-coop-examples`): **fifteen** demos (thirteen CI + two manual real-model) composed in one constructive world (depot
   nodes rescuing surplus food, no dispatcher) — mailbox_llm · stigmergy · elastic_intent ·

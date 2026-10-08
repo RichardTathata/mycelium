@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`examples/strict_eligibility.rs` calls the shipped history source** (`--features tls`, run in CI). A food
+  co-op's members' assembly publishes signed appointment records and heads for its rotating coordinator role (at
+  most two terms in a row); a member's node verifies them, its reader advances, and
+  `mandate::history_source::history_from_appointment_stream` builds the history `eligible_strict` decides on. Each
+  act asserts: a rested candidate is eligible, one at the limit is not, a node missing one appointment record
+  answers `Unknown` where the lenient check says yes, a node whose reader holds no checkpoint answers `Unknown` with
+  every head presented to it, revoking the assembly's old key leaves the history whole for a reader on a
+  current-key head and empty for one still on a revoked-key head, and an `Unknown` verdict never makes a successor
+  ready. It replaces the earlier `from_chain`-only walk-through, so the run command now needs `--features tls`.
+  Guide 21 points at it instead of the source's tests.
+
 ## [2.27.0] — 2026-10-07
 
 **The doors say what they own.** 2.26.0 recorded `kv:write` as a data-plane superuser scope over namespaces other

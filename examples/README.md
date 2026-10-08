@@ -108,7 +108,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`receipt_ladder`](../docs/guide/18-contracts-and-receipts.md#run-the-ladder) · [src](receipt_ladder.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`replay_a_bundle`](../docs/guide/19-replay-and-simulation.md#run-it) · [src](../mycelium-sim/examples/replay_a_bundle.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`curator_handover`](../docs/guide/21-mandates.md#run-the-demonstration) · [src](../mycelium-wiki/examples/curator_handover.rs) | · | · | · | · | Adv | CLI | · | · | · | ✓ | · |
-| [`strict_eligibility`](../docs/guide/21-mandates.md#eligibility-unknown-history-is-never-eligible-2240) · [src](strict_eligibility.rs) | · | · | · | · | Adv | CLI | · | · | · | · | · |
+| [`strict_eligibility`](../docs/guide/21-mandates.md#eligibility-unknown-history-is-never-eligible-2240) · [src](strict_eligibility.rs) | ○ | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`control_envelope_viz`](../docs/guide/22-stability-and-control.md#run-the-demonstration) · [src](control_envelope_viz.rs) | ○ | · | · | ● | Adv | Web | · | · | ✓ | · | · |
 | [`knowledge_layer`](../docs/design/knowledge-layer.md#7-what-lands-next) · [src](knowledge_layer.rs) | ● | · | · | · | Adv | CLI | · | · | · | ✓ | · |
 | [`federated_domains`](../docs/guide/17-federation.md#encrypting-the-link-the-pin-is-the-anchor) · [src](federated_domains.rs) | ○ | · | · | ● | Adv | CLI | · | · | · | ✓ | · |

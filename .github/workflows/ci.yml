@@ -133,6 +133,10 @@ jobs:
       # `failed` task event and CLOSE the stream, not leave a subscriber waiting on silence.
       - run: cargo run --example a2a_skill_authority --features tls,a2a
       - run: cargo run --example knowledge_layer --features tls
+      # Strict eligibility from the shipped history source: an appointing authority's signed heads, a
+      # reader's checkpoint, and each verdict asserted — including `Unknown` for a missing record and for
+      # a reader with no checkpoint, the cases where "unknown is never eligible" is the whole point.
+      - run: cargo run --example strict_eligibility --features tls
       - run: cargo run --example federated_domains --features tls
       # The third domain: the question two domains cannot ask. Each act asserts, so "trust does
       # not compose" stays a property rather than a paragraph.

@@ -176,10 +176,15 @@ that establishes coverage itself (2.26.0): `mandate::history_source::history_fro
 reads an **appointment stream** in the knowledge layer — one `(issuer, stream)` the appointing authority publishes, pinned by the caller. It walks **back from this node's reader's checkpoint** for that stream (`HeadCheckpoints::checkpoint`, or the durable reader's) along each head's `prev` digest, authenticating every head against the pinned issuer's keys; heads a presenter offers that are not on that chain — another member's stream, a newer head, a duplicate, any order — change nothing, and the read moves no checkpoint. A linked head whose record cannot be fetched is a gap (only the terms after it count); the walk reaching `prev: None` is genesis, and reaching the head a `StreamOrigin::Baseline` names by digest binds that baseline — anything else leaves the origin unknown. "Through the head" means through **this reader's** checkpoint: a reader not yet offered the authority's newest head decides as of the one it holds. The checkpoint head must verify under a key this node holds as current; each older head reached through `prev` need only be attributable to the issuer (a key since revoked still says who signed — the current-key head's signature already fixes it by hash), so a publisher must chain each head from its *own* previous head. A reader whose checkpoint is under a revoked key vouches for nothing until it holds a current-key checkpoint, and a stream the reader has seen fork since it was opened vouches for nothing (forks are held in memory, so a restart forgets them). Build the stream with `AppointmentStream::from_reader` (or `from_parts` for the durable reader) — the struct is `#[non_exhaustive]`; `records` must answer `None` for a record that is not an appointment. `from_chain` remains for
 a source of your own.
 
-No example program calls the source yet. The worked usage is its test module in
-[`src/mandate/history_source.rs`](../../src/mandate/history_source.rs): an authority publishing signed heads, a reader's
-checkpoint, and a call per case — `the_head_is_the_readers_checkpoint_and_reading_does_not_move_it` is the plain path,
-and `a_baseline_binds_only_at_the_head_it_was_taken_at` the `StreamOrigin::Baseline` one.
+`cargo run --example strict_eligibility --features tls` calls the source end to end (CI runs it): a food co-op's
+members' assembly publishes signed appointment records and heads for its rotating coordinator role (two terms in a
+row at most); a member's node verifies them, its reader advances, and `history_from_appointment_stream` builds the
+history each verdict is asserted on — a rested candidate **eligible**, one at the limit **not eligible**, `Unknown` for
+a node missing one appointment record (where the lenient check says yes) and for a node whose reader holds no
+checkpoint, and the history surviving the revocation of the assembly's old key for a reader on a current-key head
+(not for one still on a revoked-key head). The source's test module in
+[`src/mandate/history_source.rs`](../../src/mandate/history_source.rs) covers the rest case by case —
+`a_baseline_binds_only_at_the_head_it_was_taken_at` is the `StreamOrigin::Baseline` path the example does not take.
 
 **What the journal covers.** A `HandoverJournal` says which stretch of the role it speaks for —
 `HandoverJournal::for_scope(scope)`, then `start()` (the first term it recorded) and `endpoint()` (the latest) —
@@ -187,9 +192,9 @@ so a successor can see that a journal starting at term 20 says nothing about ter
 
 `eligibility::ready(successor, journal, &strict)` is the readiness gate: the handover journal read
 **and** every configured rule decided in favour. Two conditions — reading says nothing about
-eligibility, and eligibility says nothing about having read. `cargo run --example strict_eligibility`
-walks one candidate whom the lenient check admits on a history a week short, and the strict check
-holds at `Unknown` until the missing term is back, then refuses.
+eligibility, and eligibility says nothing about having read. `cargo run --example strict_eligibility --features tls`
+ends there: the incoming coordinator is not ready until she has read the journal, and an `Unknown` verdict
+never makes anyone ready.
 
 ---
 
