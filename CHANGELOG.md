@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.29.0] — 2026-10-08
+
+**Who changes an electorate.** A governed group's members are its elections' roster and quorum, yet any `mesh:write`
+holder could move a node in or out, unaudited — the open question the group route's own doc named. The membership
+intent is now the boundary: `/gateway/mesh/group` refuses a governed group **403** `governed_group`, `POST`/`DELETE
+/gateway/govern/group` (`govern:write`, audited) moves the node, and `units/declare` no longer redefines a governed
+group's eligibility filter. Beside it, the example-matrix check reads far less text that never runs as an example run.
+Wire **v12** unchanged. A MINOR: a behaviour change with an upgrade note (`deprecations.md` §20).
+
 ### Changed
 - **A governed group's membership moves only through a governance route.** A group under a live membership intent
   decides its elections from its roster, so who belongs to it is governance, not a data-plane write — and

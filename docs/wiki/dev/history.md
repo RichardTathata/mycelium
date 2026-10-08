@@ -22,6 +22,17 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.29.0 release — 2026-10-08 (tag `v2.29.0`) — who changes an electorate
+
+**#572** — the group route's own doc had named *who may change an electorate* an open question since 2026-09-24. An
+election runs over any group, so the boundary chosen is the membership intent: a governed group refuses `mesh:write`
+joins and leaves (403 `governed_group`), `/gateway/govern/group` (`govern:write`, audited) moves the node, and
+`units/declare` refuses a governed group's `[[group]]` (the review found `cap:write` could steer whom the governor
+elects). Which membership *version* an election counts stays open. **#571** — the example-matrix check no longer
+credits single-quoted substitutions, unused arrays, dead branches, uncalled functions, code after `exit` or Python
+lists outside a subprocess call; the remaining unsafe-direction residue is listed. Release record:
+[`.log/2026-10-08-release-v2.29.0.md`](.log/2026-10-08-release-v2.29.0.md).
+
 ## v2.28.0 release — 2026-10-08 (tag `v2.28.0`) — what the gates cannot see, closed; what the flakes were, found
 
 The three limits 2.27.0 documented: **#558** — `examples/strict_eligibility.rs` drives
