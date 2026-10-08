@@ -12,3 +12,10 @@
 - First run: `reason_node` and `reheal_node` (the LangGraph rungs' nodes, run in every CI run) said · — flipped
   to ✓. Every ✓ row had a site.
 - Pages: `verification-policy.md`, `docs/operations/what-is-proven.md`'s universe row, `examples/README.md`'s legend.
+- Review round 1 (#566): ✓ᵖ for path-filtered workflows (the check reads `paths:` itself; the inventory's `_triggers`
+  unchanged) — `confined_fleet_node` now ✓ᵖ; the wrapper and the listing refuse anything but `cargo [+tc] run`, a
+  name starting with `-`, and an unfronted run after a `cargo build` on one line; a reached file's heredocs,
+  comments and Python docstrings are not read, a file counts only in an executing position, a built-example path
+  only as a program (or a variable used as one, or a Dockerfile instruction); the harness exemption no longer covers
+  a name with a row; a `Makefile:<target>` suite must be reached. Twelve self-test cases, each failing on the
+  round-0 implementation.

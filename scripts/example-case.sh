@@ -13,6 +13,12 @@ if [[ "${1:-}" == "--list" ]]; then
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   exec python3 "$here/check-example-matrix.py" --list "${2:-.github/workflows/ci.yml}"
 fi
+# Only `cargo [+toolchain] run …`: anything else is not a demonstration this case could stand for.
+sub="${2:-}"; [[ "$sub" == +* ]] && sub="${3:-}"
+if [[ "${1:-}" != "cargo" || "$sub" != "run" ]]; then
+  echo "example-case.sh: fronts only \`cargo [+toolchain] run … --example NAME\`, not: $*" >&2
+  exit 2
+fi
 name="" prev=""
 for a in "$@"; do
   [[ "$a" == "--" ]] && break          # what follows is the example's own arguments
@@ -20,7 +26,7 @@ for a in "$@"; do
   if [[ "$a" == --example=* ]]; then name="${a#--example=}"; break; fi
   prev="$a"
 done
-if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+if [[ ! "$name" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]]; then
   echo "example-case.sh: no literal --example NAME in: $*" >&2
   exit 2
 fi
