@@ -253,6 +253,12 @@ path              = "examples/a2a_skill_authority.rs"
 required-features = ["tls", "a2a"]             # the action evaluator is gateway + tls; CI runs it with these
 
 [[example]]
+name              = "strict_eligibility"
+path              = "examples/strict_eligibility.rs"
+# The history source verifies the appointing authority's signed heads and records (`tls`); CI runs it.
+required-features = ["tls"]
+
+[[example]]
 name              = "coordination_integrity"
 path              = "examples/coordination_integrity.rs"
 required-features = ["consensus"]
