@@ -21,6 +21,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   groups are unaffected. Test
   `a_governed_groups_membership_moves_only_through_a_governance_route`, seen failing first. **Upgrade note:** a client
   joining a governed group over HTTP uses `/gateway/govern/group` with `govern:write` (`deprecations.md` §20).
+- **`scripts/check-example-matrix.py` no longer reads text that never runs as an example run.** Four shapes in a
+  script CI reaches could pass a ✓ row in `examples/README.md`'s CI column that nothing executes; each is closed,
+  with a self-test case that fails against the 2.28.0 check: a single-quoted `'$(cargo run --example x)'` (a `$(…)`
+  counts only where the shell expands it — unquoted or double-quoted); an unused array `CMD=(cargo run --example x)`
+  (an assignment is not a run; an array counts when used as a program, `"${CMD[@]}"`, as a variable already did);
+  a command under `if false`/`while false`/`until true` or in `if true`'s `else` (never counted) or in a function
+  body (counted only when the function is called from a command that counts, or named by `trap`); and a Python
+  list that is not an argument of a process-starting call — the Python scripts are now parsed, and a vector counts
+  only in `subprocess.run`/`call`/`check_call`/`check_output`/`Popen`, `os.exec*`/`os.spawn*` or
+  `asyncio.create_subprocess_exec` (across lines, or through a variable). Other conditionals and loops still count —
+  they plausibly run, and the docstring says so. The check finds the same sites on this tree as before.
 
 ## [2.28.0] — 2026-10-08
 

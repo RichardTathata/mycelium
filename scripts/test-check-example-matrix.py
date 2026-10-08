@@ -23,7 +23,10 @@ CASES = ["baseline", "tick-without-run", "run-with-dot-row", "run-without-row", 
          "variable-program-is-execution", "harness-name-with-a-row", "makefile-suite-must-be-reached",
          # review round 2 (#566)
          "pr-excluded-job-is-not-every-change", "pr-excluded-step-is-not-every-change",
-         "pr-types-filter-is-not-every-change", "pr-branches-ignore-main-is-not-every-change"]
+         "pr-types-filter-is-not-every-change", "pr-branches-ignore-main-is-not-every-change",
+         # the unsafe-direction approximations closed
+         "single-quoted-substitution-is-not-a-run", "unused-array-is-not-a-run",
+         "dead-branch-and-uncalled-function-are-not-runs", "python-list-outside-a-subprocess-call-is-not-a-run"]
 if sys.argv[1:] == ["--list"]:
     for c in CASES:
         print(f"@@case-list@@ {SUITE}::{c}")
@@ -340,5 +343,57 @@ fails(sub(".github/workflows/ci.yml", "on: [pull_request]", "on:\n  pull_request
 
 case("pr-branches-ignore-main-is-not-every-change")
 fails(sub(".github/workflows/ci.yml", "on: [pull_request]", "on:\n  pull_request:\n    branches-ignore: [main]"), ALPHA_NOT_EVERY)
+
+# Text in a reached script that reads like an example run but never runs one must not pass a row: the fixture's
+# `delta` row says ·, so each `passes` below fails against a check that reads it as a run, and each `fails` shows
+# the same shape is still read where the shell (or Python) would run it.
+def smoke(extra):
+    return sub("smoke.sh", f"{CR} -q --example beta\n", f"{CR} -q --example beta\n{extra}")
+
+
+case("single-quoted-substitution-is-not-a-run")
+passes(smoke(f"echo '$({CR} --example delta)'\n"))
+passes(smoke(f"echo 'a \"$({CR} --example delta)\" b'\n"))
+fails(smoke(f"echo \"$({CR} --example delta)\"\n"), "`delta` says ·")
+fails(smoke(f"X=$({CR} --example delta)\n"), "`delta` says ·")
+fails(smoke(f"echo \"$(cd x && $({CR} --example delta))\"\n"), "`delta` says ·")
+
+case("unused-array-is-not-a-run")
+passes(smoke(f"CMD=({CR} --example delta)\n"))
+passes(smoke(f"EMPTY=()\nEMPTY+=(x)\nCMD=({CR} --example delta); echo done\n"))
+passes(smoke(f"CMD=(\n  {CR}\n  --example delta\n)\necho \"${{CMD[@]}}\"\n"))
+fails(smoke(f"CMD=({CR} --example delta)\n\"${{CMD[@]}}\" --serve\n"), "`delta` says ·")
+fails(smoke(f"local BIN=(./{BUILT}delta --serve)\n\"${{BIN[@]}}\"\n"), "`delta` says ·")
+
+case("dead-branch-and-uncalled-function-are-not-runs")
+passes(smoke(f"if false; then\n  {CR} --example delta\nfi\n"))
+passes(smoke(f"while false; do {CR} --example delta; done\n"))
+passes(smoke(f"if true; then echo; else\n  {CR} --example delta\nfi\n"))
+passes(smoke(f"run_it() {{\n  {CR} --example delta\n}}\n"))
+passes(smoke(f"function run_it {{ {CR} --example delta; }}\nuncalled() {{ run_it; }}\n"))
+passes(smoke(f"if false; then\n  run_it() {{ {CR} --example delta; }}\nfi\nrun_it\n"))
+fails(smoke(f"if false; then echo; else\n  {CR} --example delta\nfi\n"), "`delta` says ·")
+fails(smoke(f"if [ -n \"$X\" ]; then\n  {CR} --example delta\nfi\n"), "`delta` says ·")
+fails(smoke(f"for m in a b; do\n  {CR} --example delta\ndone\n"), "`delta` says ·")
+fails(smoke(f"run_it() {{\n  {CR} --example delta\n}}\nrun_it\n"), "`delta` says ·")
+fails(smoke(f"inner() {{ {CR} --example delta; }}\nouter() {{\n  inner\n}}\nif ! outer; then exit 1; fi\n"),
+      "`delta` says ·")
+fails(smoke(f"cleanup() {{ {CR} --example delta; }}\ntrap cleanup EXIT\n"), "`delta` says ·")
+passes(smoke(f"run_it() {{ bash other.sh; }}\n"))
+fails(smoke(f"run_it() {{ bash other.sh; }}\nrun_it\n"), "`delta` says ·")
+
+case("python-list-outside-a-subprocess-call-is-not-a-run")
+RUNNER = step("python3 runner.py")
+passes(both(RUNNER, add("runner.py", f'print("usage:",\n      [{PYCR}, "--example", "delta"])\n')))
+passes(both(RUNNER, add("runner.py", f'print(f"run it as "\n      f\'{PYCR}, "--example", "delta"\')\n')))
+passes(both(RUNNER, add("runner.py", f'HELP = [{PYCR}, "--example", "delta"]\nprint(HELP)\n')))
+fails(both(RUNNER, add("runner.py", f'import subprocess\nsubprocess.run(\n    [{PYCR},\n     "--example", "delta"],\n'
+                                    f'    check=True)\n')), "`delta` says ·")
+fails(both(RUNNER, add("runner.py", f'from subprocess import check_call as cc\nCMD = [{PYCR}, "--example", "delta"]\n'
+                                    f'cc(CMD)\n')), "`delta` says ·")
+fails(both(RUNNER, add("runner.py", f'import os\nos.execvp("{C}", [{PYCR}, "--example", "delta"])\n')),
+      "`delta` says ·")
+fails(both(RUNNER, add("runner.py", f'import asyncio\nasyncio.create_subprocess_exec({PYCR}, "--example", "delta")\n')),
+      "`delta` says ·")
 
 print(f"test-check-example-matrix: {len(CASES)} cases passed")

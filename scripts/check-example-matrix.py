@@ -18,13 +18,20 @@ inside a loop or conditional, ``make <target>`` expanded one level):
   * **a script a step runs** — a tracked ``.sh``/``.py``/Dockerfile in an *executing position* (a command's
     program, ``./path``, the script argument of ``bash``/``sh``/``zsh``/``python``/``python3``/``uv run``, or the
     ``-f`` of ``docker build``), and the same positions inside the scripts so reached. In a shell script: a
-    command ``cargo [+tc] run … --example NAME`` (also inside ``$(…)``), or a built-example path as a command's
-    program — directly, or through a variable assigned such a command or path and then used as a program
-    (``RUN="cargo run … --example x"`` then ``$RUN …``). Heredoc bodies and comments are not read. In a
-    Dockerfile: a built-example path or ``--example NAME`` in a ``RUN``/``CMD``/``ENTRYPOINT``/``COPY``
-    instruction (the image is built by the ``docker build -f`` that reached it). In Python (triple-quoted strings
-    and comments dropped): a ``["cargo", "run", …, "--example", "NAME"]`` argument list on one line, or a
-    ``VAR = … "examples" / "NAME"`` path passed first to a ``subprocess`` call;
+    command ``cargo [+tc] run … --example NAME`` (also inside a ``$(…)`` the shell expands — unquoted or
+    double-quoted, never single-quoted), or a built-example path as a command's program — directly, or through a
+    variable or array assigned such a command or path and then used as a program (``RUN="cargo run … --example
+    x"`` then ``$RUN …``; ``CMD=(cargo run … --example x)`` then ``"${CMD[@]}"``; an assignment alone is not a
+    run). Control flow is read: a command under ``if false``, ``while false`` or ``until true`` (or in ``if
+    true``'s ``else``) never counts; one in a function body counts only when the function is called from a
+    command that counts (or named by ``trap``); one in any other conditional or loop counts — it plausibly runs.
+    Heredoc bodies and comments are not read. In a Dockerfile: a built-example path or ``--example NAME`` in a
+    ``RUN``/``CMD``/``ENTRYPOINT``/``COPY`` instruction (the image is built by the ``docker build -f`` that
+    reached it). In Python (parsed, so strings and comments are not code): an argument vector of a
+    process-starting call — ``subprocess.run``/``call``/``check_call``/``check_output``/``Popen`` (also imported
+    by name), ``os.exec*``/``os.spawn*``, ``asyncio.create_subprocess_exec`` — that is ``["cargo", "run", …,
+    "--example", "NAME"]`` (a literal, across lines, or a variable assigned one), or whose program is a ``VAR``
+    assigned ``… "examples" / "NAME"``; the same list anywhere else (a ``print``, an f-string) is not a run;
   * **a listed suite case** — every listing a workflow prints between ``@@test-universe@@ begin <source>`` and
     ``end`` (all but ``rust-python`` and ``typescript``) is run, and a case ``<suite>::NAME`` executes example
     NAME when a running step reached the suite (its script, or its ``Makefile:<target>``) and the suite runs
@@ -41,16 +48,16 @@ executed in that sense — the step is red, so the run is red anyway. An example
 process (``compare_stem_observations``, ``reason_node``, ``reheal_node``, ``wiki_chat``, ``three_node_demo``,
 ``confined_fleet_node``) is covered here only, not as an observed case of its own; its suite's cases are observed.
 
-**An approximation**, like the test inventory. Read as run although they may not run: a command in a shell
-``if false``/function body that is never called, or in a loop (in a reached script — the workflow steps
-themselves are read with control flow); an assignment whose variable is used as a program on a line that never
-runs; a Python ``print``/f-string continuation line that happens to hold a cargo argument list; a single-quoted
-``'$(cargo run --example X)'`` and an unused array ``CMD=(cargo run --example X)``. Each can pass a ✓ row it should
-not. Missed: an example run under a computed name, a script reached only through a wrapper other than those listed
-(``with-pyyaml.sh``), a run behind a command prefix (``timeout``, ``env X=1``, ``bash -c "…"``, ``nohup``, ``sudo``,
-``xargs``, ``eval``, ``python -m``), a reusable workflow (``on: workflow_call``) and the jobs that call it, a compose
-file's ``dockerfile:``, a Makefile target whose recipe is only a loop. A miss is a false alarm on a ✓ row — or, on a
-``·`` row CI in fact executes, a silent pass: the column then under-claims, the safe direction. "Every change" is a
+**An approximation**, like the test inventory. Read as run although it may not run — the one approximation left in
+the unsafe direction, kept because such a branch plausibly runs: a command in a reached script's conditional or
+loop whose condition is anything but the literal ``false`` (``true`` for ``until``) — no condition is evaluated —
+and a function called from one. Missed: an example run under a computed name, a script reached only through a wrapper other than those listed
+(``with-pyyaml.sh``), a run behind a command prefix (``timeout``, ``env X=1``, ``bash -c "…"``, ``nohup``,
+``sudo``, ``xargs``, ``eval``, ``python -m``) or a function called only through one, a Python vector built other
+than as a literal (``[*base, "--example", x]``), a reusable workflow (``on: workflow_call``) and the jobs that call
+it, a compose file's ``dockerfile:``, a Makefile target whose recipe is only a loop. A miss is a false alarm on a ✓
+row — or, on a ``·`` row CI in fact executes, a silent pass: the column then under-claims, the safe direction.
+"Every change" is a
 ``pull_request`` trigger without ``paths``/``paths-ignore``, without a ``branches`` that omits or a
 ``branches-ignore`` that names ``main``, without ``types`` that omit ``synchronize``, and a job or step whose ``if:``
 does not keep it off pull requests; anything else the inventory counts is ✓ᵖ.
@@ -62,6 +69,7 @@ Usage: check-example-matrix.py [--root DIR]          the check (needs PyYAML: sc
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import re
@@ -78,9 +86,6 @@ NOT_SCRIPT_SOURCES = {"rust-python", "typescript"}
 BUILT_EXAMPLE = re.compile(r"(?:^|/)target/(?:debug|release)/examples/([A-Za-z0-9_][A-Za-z0-9_-]*)$")
 BUILT_ANYWHERE = re.compile(r"target/(?:debug|release)/examples/([A-Za-z0-9_][A-Za-z0-9_-]*)")
 EXAMPLE_ANYWHERE = re.compile(r"--example(?:=|\s+)[\"']?([A-Za-z0-9_][A-Za-z0-9_-]*)")
-PY_CARGO_RUN = re.compile(r"[\"']cargo[\"']\s*,\s*(?:[\"']\+[^\"']*[\"']\s*,\s*)?[\"']run[\"'](.*)$")
-PY_EXAMPLE = re.compile(r"[\"']--example[\"']\s*,\s*[\"']([A-Za-z0-9_][A-Za-z0-9_-]*)[\"']")
-PY_PATH_ASSIGN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=.*[\"']examples[\"']\s*/\s*[\"']([A-Za-z0-9_][A-Za-z0-9_-]*)[\"']")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 OPERATORS = {";", "&&", "||", "|", "&", "(", ")", "{", "}", ";;", "|&"}
 KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "time", "exec", "command", "fi", "done",
@@ -345,19 +350,219 @@ def executed_files(argv: list[str], cwd: str, files: set[str]) -> list[str]:
     return out
 
 
-def shell_commands(text: str):
-    """Every simple command in a shell script, `$(…)` bodies included: (assignments, argv)."""
+SUBST = "__check_example_matrix_subst_{}__"
+SUBST_ANY = re.compile(r"__check_example_matrix_subst_(\d+)__")
+ARRAY_OPEN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=$")
+VAR_PROGRAM = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)(?:\[[@*]\])?\}?$")
+
+
+def _close_paren(line: str, j: int) -> int | None:
+    """The index of the `)` that closes a `$(` whose body starts at j (quotes and nesting respected)."""
+    depth, q, n = 1, None, len(line)
+    while j < n:
+        c = line[j]
+        if q == "'":
+            q = None if c == "'" else q
+        elif c == "\\":
+            j += 1
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif q is None and c == "'":
+            q = "'"
+        elif q is None and c == "(":
+            depth += 1
+        elif q is None and c == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return None
+
+
+def substitutions(line: str) -> tuple[str, list[str]]:
+    """The line with each `$(…)` the shell expands — unquoted or double-quoted, never single-quoted — replaced by
+    a placeholder word, and the bodies, by placeholder index."""
+    out, bodies, i, q, n = [], [], 0, None, len(line)
+    while i < n:
+        c = line[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif c == "\\":
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        elif q is None and c == "#" and (i == 0 or line[i - 1].isspace()):
+            break  # a comment
+        elif q is None and c == "'":
+            q = "'"
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif line.startswith("$(", i) and not line.startswith("$((", i):
+            end = _close_paren(line, i + 2)
+            if end is not None:
+                bodies.append(line[i + 2:end])
+                out.append("$" + SUBST.format(len(bodies) - 1))
+                i = end + 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out), bodies
+
+
+def _ops(toks: list[str]) -> list[str]:
+    """shlex groups adjacent punctuation (`()`, `);`): split each such run into the shell's operators."""
+    out = []
+    for t in toks:
+        if t in OPERATORS or not re.fullmatch(r"[;&|()]+", t):
+            out.append(t)
+            continue
+        while t:
+            op = next(o for o in ("&&", "||", ";;", "|&", ";", "&", "|", "(", ")") if t.startswith(o))
+            out.append(op)
+            t = t[len(op):]
+    return out
+
+
+def _walk(text: str, dead0: bool, func0: str | None, sink: list) -> None:
+    """Append (assignments, argv, function or None) for every simple command of a shell text that can run: a
+    command under an `if false`/`while false`/`until true` (or `if true`'s `else`) is dropped; one in a function
+    body is tagged with the function; `$(…)` bodies inherit their command's context. An array assignment
+    `X=(…)` is an assignment (its value a list), not a command."""
+    stack: list[dict] = []   # {"kind": if|loop|brace, "dead": bool, "func": name|None, "cond_true": bool}
+    cur: list[str] = []
+    arrays: dict[str, list[str]] = {}
+    arr: tuple[str, list[str]] | None = None
+    expect_cond: dict | None = None
+    pending_func: str | None = None
+    skip_header = False      # a `for`/`select` header up to its separator
+    bodies: list[str] = []
+
+    def dead() -> bool:
+        return dead0 or any(e["dead"] for e in stack)
+
+    def func() -> str | None:
+        return next((e["func"] for e in reversed(stack) if e.get("func")), func0)
+
+    def nearest(kind: str) -> int | None:
+        return next((i for i in range(len(stack) - 1, -1, -1) if stack[i]["kind"] == kind), None)
+
+    def flush() -> None:
+        nonlocal cur, arrays, expect_cond
+        if not cur and not arrays:
+            return
+        env: dict = {}
+        while cur and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", cur[0]):
+            k, _, v = cur.pop(0).partition("=")
+            env[k] = v
+        env.update(arrays)
+        argv, cur, arrays = cur, [], {}
+        if not dead():
+            sink.append((env, argv, func()))
+            for word in [w for v in env.values() for w in (v if isinstance(v, list) else [v])] + argv:
+                for idx in SUBST_ANY.findall(word):
+                    if int(idx) < len(bodies):
+                        _walk(bodies[int(idx)], False, func(), sink)
+        if expect_cond is not None and argv:
+            expect_cond["dead"] = argv == ["false"] if expect_cond["kind"] != "until" else argv in (["true"], [":"])
+            expect_cond["cond_true"] = argv in (["true"], [":"])
+            if expect_cond["kind"] == "until":
+                expect_cond["kind"] = "loop"
+            expect_cond = None
+
     for _, line in logical_lines(text):
         if line.strip().startswith("#"):
             continue
+        line, bodies = substitutions(line)
         toks = tokens(line)
         if toks is None:
             continue
-        for env, argv in segments(toks):
+        toks = _ops(toks)
+        i = 0
+        while i < len(toks):
+            t = toks[i]
+            i += 1
+            if arr is not None:
+                if t == ")":
+                    arrays[arr[0]] = arr[1]
+                    arr = None
+                else:
+                    arr[1].append(t)
+                continue
+            if skip_header:
+                if t in OPERATORS:
+                    skip_header = False
+                continue
+            if t in OPERATORS:
+                if t == "(" and cur and ARRAY_OPEN.match(cur[-1]):
+                    arr = (ARRAY_OPEN.match(cur.pop()).group(1), [])
+                    continue
+                if t == "(" and toks[i:i + 1] == [")"] and (len(cur) == 1 or (len(cur) == 2 and cur[0] == "function")):
+                    pending_func, cur = cur[-1], []
+                    i += 1
+                    continue
+                if t == "{":
+                    if len(cur) == 2 and cur[0] == "function":
+                        pending_func, cur = cur[1], []
+                    flush()
+                    stack.append({"kind": "brace", "dead": False, "func": pending_func})
+                    pending_func = None
+                    continue
+                flush()
+                if t == "}":
+                    j = nearest("brace")
+                    if j is not None:
+                        del stack[j:]
+                continue
+            if not cur and t in KEYWORDS | {"for", "select"}:
+                if t == "if":
+                    stack.append({"kind": "if", "dead": False})
+                    expect_cond = stack[-1]
+                elif t in ("while", "until"):
+                    stack.append({"kind": "loop" if t == "while" else "until", "dead": False})
+                    expect_cond = stack[-1]
+                elif t in ("for", "select"):
+                    stack.append({"kind": "loop", "dead": False})
+                    skip_header = True
+                elif t in ("elif", "else"):
+                    j = nearest("if")
+                    if j is not None:
+                        stack[j]["dead"] = t == "else" and stack[j].get("cond_true", False)
+                        if t == "elif":
+                            expect_cond = stack[j]
+                elif t in ("fi", "done"):
+                    j = nearest("if" if t == "fi" else "loop")
+                    if j is not None:
+                        del stack[j:]
+                continue
+            cur.append(t)
+        if arr is None:
+            flush()
+        skip_header = False
+
+
+def shell_commands(text: str):
+    """Every simple command a shell script runs, `$(…)` bodies included: (assignments, argv). A function body's
+    commands count only when the function is called from a command that counts (or named by `trap`)."""
+    sink: list = []
+    _walk(text, False, None, sink)
+    funcs = {f for _, _, f in sink if f}
+    called, frontier = set(), {None}
+    while frontier:
+        nxt = set()
+        for env, argv, f in sink:
+            if f not in frontier or not argv:
+                continue
+            names = [argv[0]]
+            if argv[0] == "trap" and len(argv) > 1:
+                names.append((tokens(argv[1]) or [""])[0])
+            for name in names:
+                if name in funcs and name not in called:
+                    called.add(name)
+                    nxt.add(name)
+        frontier = nxt
+    for env, argv, f in sink:
+        if f is None or f in called:
             yield env, argv
-            for word in list(env.values()) + argv:
-                for inner in re.findall(r"\$\(([^()]*)\)", word):
-                    yield from shell_commands(inner)
 
 
 def shell_sites(text: str) -> tuple[set[str], list[list[str]]]:
@@ -366,11 +571,12 @@ def shell_sites(text: str) -> tuple[set[str], list[list[str]]]:
     for env, argv in shell_commands(text):
         cmds.append(argv)
         for k, v in env.items():
-            inner = tokens(v) or []
+            inner = v if isinstance(v, list) else (tokens(v) or [])
             if cargo_sub(inner) == "run" and example_arg(inner) and NAME.match(example_arg(inner)):
                 assigned[k] = example_arg(inner)
-            m = BUILT_ANYWHERE.search(v)
-            if m and BUILT_EXAMPLE.search(v):
+            first = (inner[0] if inner else "") if isinstance(v, list) else v
+            m = BUILT_ANYWHERE.search(first)
+            if m and BUILT_EXAMPLE.search(first):
                 assigned[k] = m.group(1)
         if cargo_sub(argv) == "run":
             name = example_arg(argv)
@@ -382,7 +588,7 @@ def shell_sites(text: str) -> tuple[set[str], list[list[str]]]:
                 found.add(m.group(1))
     for argv in cmds:
         if argv:
-            m = re.match(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$", argv[0])
+            m = VAR_PROGRAM.match(argv[0])
             if m and m.group(1) in assigned:
                 found.add(assigned[m.group(1)])
     return found, cmds
@@ -396,20 +602,74 @@ def dockerfile_sites(text: str) -> set[str]:
     return found
 
 
+SUBPROCESS_CALLS = {"run", "call", "check_call", "check_output", "Popen"}
+OS_EXEC = re.compile(r"^(?:exec|spawn)([lv])p?e?$")
+PY_EXAMPLE_PATH = re.compile(r"[\"']examples[\"']\s*/\s*[\"']([A-Za-z0-9_][A-Za-z0-9_-]*)[\"']")
+
+
+def _py_vectors(call: ast.Call, from_subprocess: set[str]) -> list[list[ast.expr] | ast.expr]:
+    """The argument vectors a process-starting call runs: `subprocess.run/call/check_call/check_output/Popen`'s
+    first argument (or `args=`), `os.exec*`/`os.spawn*`'s list or trailing arguments, and
+    `asyncio.create_subprocess_exec`'s positional arguments. Anything else is not a run."""
+    f = call.func
+    owner = f.value.id if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) else None
+    name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else None
+    if (owner == "subprocess" and name in SUBPROCESS_CALLS) or (owner is None and name in from_subprocess):
+        return call.args[:1] + [k.value for k in call.keywords if k.arg == "args"]
+    m = OS_EXEC.match(name or "") if owner == "os" else None
+    if m:
+        skip = 2 if name.startswith("spawn") else 1  # spawn*'s mode, then the file
+        return call.args[skip:skip + 1] if m.group(1) == "v" else [call.args[skip:]]
+    if owner == "asyncio" and name == "create_subprocess_exec":
+        return [call.args]
+    return []
+
+
 def python_sites(text: str) -> set[str]:
-    text = re.sub(r'("""|\'\'\')[\s\S]*?\1', "", text)
-    found, paths = set(), {}
-    for line in text.split("\n"):
-        line = line.split("#", 1)[0] if line.lstrip().startswith("#") else line
-        m = PY_CARGO_RUN.search(line)
-        if m:
-            found |= set(PY_EXAMPLE.findall(m.group(1)))
-        m = PY_PATH_ASSIGN.match(line)
-        if m:
-            paths[m.group(1)] = m.group(2)
-    for var, name in paths.items():
-        if re.search(rf"subprocess\.\w+\(\s*\[\s*(?:str\(\s*)?{re.escape(var)}\b", text):
-            found.add(name)
+    """Examples a Python script runs: a `cargo [+tc] run … --example NAME` vector, or a path `VAR = … "examples" /
+    "NAME"` as the vector's program, in a process-starting call (``_py_vectors``) — the vector a literal list or
+    tuple, or a variable assigned one. A list anywhere else (a `print`, a docstring) is not a run."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+    lists, paths, from_subprocess = {}, {}, set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            from_subprocess |= {a.asname or a.name for a in node.names if a.name in SUBPROCESS_CALLS}
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    if isinstance(node.value, (ast.List, ast.Tuple)):
+                        lists[t.id] = node.value.elts
+                    m = PY_EXAMPLE_PATH.search(ast.unparse(node.value))
+                    if m:
+                        paths[t.id] = m.group(1)
+
+    def word(e: ast.expr) -> str:
+        if isinstance(e, ast.Constant) and isinstance(e.value, str):
+            return e.value
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "str" and len(e.args) == 1:
+            e = e.args[0]
+        return f"\0{e.id}" if isinstance(e, ast.Name) else ""
+
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for vec in _py_vectors(node, from_subprocess):
+            if isinstance(vec, ast.Name):
+                vec = lists.get(vec.id)
+            elif isinstance(vec, (ast.List, ast.Tuple)):
+                vec = vec.elts
+            if not isinstance(vec, list) or not vec:
+                continue
+            argv = [word(e) for e in vec]
+            if cargo_sub(argv) == "run" and example_arg(argv) and NAME.match(example_arg(argv)):
+                found.add(example_arg(argv))
+            if argv[0].startswith("\0") and argv[0][1:] in paths:
+                found.add(paths[argv[0][1:]])
     return found
 
 
