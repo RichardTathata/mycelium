@@ -9,6 +9,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.28.0] — 2026-10-08
+
+**What the gates cannot see, closed; what the flakes were, found.** The three limits 2.27.0 left documented are gone:
+`strict_eligibility` now drives the shipped history source end to end in CI; `mycelium wire-check` names overlapping
+`[[presence]]` bands, and a rolling-upgrade dip is counted and named; and the coverage gates see what they could not —
+a test whose feature gate no CI build satisfies is refused before push (the check models cargo's dev-dependency
+unification, and found a test that had never run), script suites and single example runs are observed cases, and the
+examples matrix's CI column is held to what CI executes. Then the open issues: a checkpointer test that read a retriable
+miss as fatal (#561), a blob fetch that read an RPC refusal as a corrupt copy (#564 — `mycelium-reason` **0.7.1**, with
+a `refused` outcome for a refusal that holds), and a tripwire test that assumed a local emit is a delivery (#568). #563
+stays open: not reproduced, now instrumented. Wire **v12** unchanged. A MINOR: new public behaviour (a wire-check
+finding, two metrics, a 403 `refused` blob outcome, a machine-readable `reason` on the caller-context refusal).
+
+### Added
+- **`examples/strict_eligibility.rs` calls the shipped history source** (`--features tls`, run in CI). A food
+  co-op's members' assembly publishes signed appointment records and heads for its rotating coordinator role (at
+  most two terms in a row, three in all); a member's node verifies them, its reader advances, and
+  `mandate::history_source::history_from_appointment_stream` builds the history `eligible_strict` decides on. Each
+  act asserts: a rested candidate is eligible, one at the limit is not, a node missing one appointment record
+  answers `Unknown` where the lenient check says yes (and cumulative tenure `Unknown` for a candidate whose
+  consecutive-terms rule stays decided), a node whose reader holds no checkpoint answers `Unknown` with
+  every head presented to it, revoking the assembly's old key (in a hand-built key view, not through the identity path) leaves the history whole for a reader on a
+  current-key head and empty for one still on a revoked-key head, and an `Unknown` verdict never makes a successor
+  ready. It replaces the earlier `from_chain`-only walk-through, so the run command now needs `--features tls`.
+  Guide 21 points at it instead of the source's tests.
+- **Presence bands, the two edge cases 2.26.0 documented.** `mycelium wire-check` names two `[[presence]]` bands over
+  the same capability, at least one with a ceiling, that are not provably disjoint (`presence bands overlap`, a
+  warning) — the capped one sheds against its ceiling while the other's floor or ceiling brings a provider back. Not
+  named: bands disjoint by an `eq` on one attribute to different values or by different `schema_id`s, one band however
+  it is spelled (the runtime's identity — ranking ignored), and a floor at or below a ceiling over one population. And the rolling-upgrade dip is visible: when a band
+  that was above its ceiling falls below it and the providers that left had no `prov-shed` mark (a stem older than
+  2.26.0 withdrawing by its own draw, or a crash), a stem counts `mycelium_artifact_presence_unranked_departures_total`
+  and warns, naming the band and the providers — remembered across a round at the ceiling (a dip often arrives in two
+  steps), each departure once, for four advertise intervals, and excluding a peer whose mark may still be in flight; `capability-lifecycle.md` gives the two remedies. Tests
+  `presence_bands_that_overlap_with_ceilings_are_named` and `an_unmarked_provider_leaving_a_band_below_its_ceiling_is_named`, `the_departure_watch_sees_a_dip_that_arrives_in_two_steps`,
+  each seen failing first. Also: `capability-lifecycle.md` still said there was no shed metric.
+
 ### Changed
 - **A test whose gate no CI build satisfies is refused before push.** `scripts/check-test-inventory.py` evaluated
   each test's `cfg` against a step's flags, so a root-crate test gated off `gateway` or `tls` looked covered by a
@@ -43,34 +80,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   suites run on the changes that touch their paths, not on every change): `confined_fleet_node` was ✓ only through
   them and is now ✓ᵖ. The wrapper fronts only `cargo [+toolchain] run`; an example run inside a script or as a
   process is checked statically, not observed as a case of its own.
-
-### Added
-
-- **`examples/strict_eligibility.rs` calls the shipped history source** (`--features tls`, run in CI). A food
-  co-op's members' assembly publishes signed appointment records and heads for its rotating coordinator role (at
-  most two terms in a row, three in all); a member's node verifies them, its reader advances, and
-  `mandate::history_source::history_from_appointment_stream` builds the history `eligible_strict` decides on. Each
-  act asserts: a rested candidate is eligible, one at the limit is not, a node missing one appointment record
-  answers `Unknown` where the lenient check says yes (and cumulative tenure `Unknown` for a candidate whose
-  consecutive-terms rule stays decided), a node whose reader holds no checkpoint answers `Unknown` with
-  every head presented to it, revoking the assembly's old key (in a hand-built key view, not through the identity path) leaves the history whole for a reader on a
-  current-key head and empty for one still on a revoked-key head, and an `Unknown` verdict never makes a successor
-  ready. It replaces the earlier `from_chain`-only walk-through, so the run command now needs `--features tls`.
-  Guide 21 points at it instead of the source's tests.
-- **Presence bands, the two edge cases 2.26.0 documented.** `mycelium wire-check` names two `[[presence]]` bands over
-  the same capability, at least one with a ceiling, that are not provably disjoint (`presence bands overlap`, a
-  warning) — the capped one sheds against its ceiling while the other's floor or ceiling brings a provider back. Not
-  named: bands disjoint by an `eq` on one attribute to different values or by different `schema_id`s, one band however
-  it is spelled (the runtime's identity — ranking ignored), and a floor at or below a ceiling over one population. And the rolling-upgrade dip is visible: when a band
-  that was above its ceiling falls below it and the providers that left had no `prov-shed` mark (a stem older than
-  2.26.0 withdrawing by its own draw, or a crash), a stem counts `mycelium_artifact_presence_unranked_departures_total`
-  and warns, naming the band and the providers — remembered across a round at the ceiling (a dip often arrives in two
-  steps), each departure once, for four advertise intervals, and excluding a peer whose mark may still be in flight; `capability-lifecycle.md` gives the two remedies. Tests
-  `presence_bands_that_overlap_with_ceilings_are_named` and `an_unmarked_provider_leaving_a_band_below_its_ceiling_is_named`, `the_departure_watch_sees_a_dip_that_arrives_in_two_steps`,
-  each seen failing first. Also: `capability-lifecycle.md` still said there was no shed metric.
-
-### Changed
-
 - **The test-coverage job sees script-style suites** (verification policy rule 3). A script suite now lists its
   cases with `--list` (`@@case-list@@ <suite>::<case>`, nothing run) and prints `@@case@@ <suite>::<case>` as each
   case starts; `scripts/ci-test-coverage.py` reads both as `script <suite>::<case>` keys. `ci.yml`'s

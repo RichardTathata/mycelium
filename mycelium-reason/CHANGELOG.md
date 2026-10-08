@@ -6,7 +6,7 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
-## [0.7.1] — unreleased
+## [0.7.1] — 2026-10-08
 
 **A refusal is not a corrupt copy** (#564). `MeshBlobStore::fetch` counted every non-empty reply that failed the content
 address as corrupt — including the provider's RPC layer answering for it with a caller-context or provider-enforcement
