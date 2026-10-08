@@ -491,6 +491,8 @@ jobs:
       - name: Start reason nodes (A + B, meshed)
         run: |
           mkdir -p "$RUNNER_TEMP/blobs-a" "$RUNNER_TEMP/blobs-b"
+          # RUST_LOG: the blob fetch's miss lines (debug) land in node-*.log, which a failure keeps (#563).
+          export RUST_LOG=warn,mycelium_reason=debug
           BIND_PORT=7101 HTTP_PORT=8101 MODEL=fable-mini BLOB_DIR="$RUNNER_TEMP/blobs-a" \
             ./target/debug/examples/reason_node > "$RUNNER_TEMP/node-a.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/node-a.pid"

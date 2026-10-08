@@ -33,6 +33,13 @@ fn required<T: std::str::FromStr>(name: &str) -> T {
 
 #[tokio::main]
 async fn main() {
+    // Without a subscriber every `tracing` line — the blob fetch's miss log among them — is dropped (#563).
+    // `RUST_LOG` overrides; the default keeps this crate's warnings.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,mycelium_reason=info")))
+        .with_ansi(false)
+        .init();
     let bind_port: u16 = required("BIND_PORT");
     let http_port: u16 = required("HTTP_PORT");
     let blob_dir: String = required("BLOB_DIR");
