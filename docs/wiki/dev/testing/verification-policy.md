@@ -129,8 +129,15 @@ an auditor enumerated surfaces from the code instead of the description:
   build -f`) that runs it, or a listed suite case whose suite a step reached and which takes the case as its cargo
   target; a **✓ᵖ** row needs such a site only in a **path-filtered** workflow (`cluster-suites.yml`); and every
   example CI executes needs a ✓/✓ᵖ row (or, if it has no row, a place among the README's harness binaries). It is
-  derived from the workflows, the scripts their steps reach and the suites' own `--list`s, and skips heredoc bodies,
-  comments and Python triple-quoted strings; what it still reads as run or misses is listed in its docstring. Its
+  derived from the workflows, the scripts their steps reach and the suites' own `--list`s, and skips heredoc bodies
+  and comments; in a shell script it counts a `$(…)` only where the shell expands it (never single-quoted, a
+  quote spanning lines read as one word), an array or variable only when used as a program, no branch a single
+  literal condition rules out (`if false`, `if ! true`, after a literal `true` branch), no right side of `false &&`,
+  nothing after a top-level `exit`, and a function body only when the function is called; in Python (parsed; an
+  unparseable file is reported) only an argument vector of a process-starting call. It still reads as run — the
+  unsafe direction — any other conditional or loop (nothing is evaluated), every `case` arm, code after a function
+  that exits or a `return`, a function shadowing a command, a quoted `"$RUN"`, and Python control flow and scope;
+  its docstring lists these and what it misses. Its
   first run found `reason_node` and `reheal_node` executed in every run under rows saying ·; the first review found
   `confined_fleet_node` ✓ only through the path-filtered Docker suites (now ✓ᵖ). It reads `paths:` itself:
   `check-test-inventory.py` still counts a path-filtered workflow as running, unchanged.
