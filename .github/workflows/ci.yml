@@ -546,6 +546,7 @@ jobs:
       - name: LangGraph ladder rungs 0–5 (echo)
         run: |
           for rung in 00_hello_skill 01_typed 02_durable_state 03_cross_node 04_routed 05_traces; do
+            echo "@@case@@ examples/langgraph::$rung"
             echo "── $rung ──"
             MYCELIUM_TEST_PORT=8101 MYCELIUM_TEST_PORT_B=8102 python examples/langgraph/$rung.py || exit 1
           done
@@ -553,7 +554,9 @@ jobs:
       # (ports 73xx/83xx — disjoint from the shared A/B above) because it kills a node
       # mid-run. Proves a LangGraph graph's model dependency follows it across node death.
       - run: cargo build -p mycelium-reason --features llm,gateway --example reheal_node
-      - run: python examples/langgraph/06_deploy_reheal.py
+      - run: |
+          echo "@@case@@ examples/langgraph::06_deploy_reheal"
+          python examples/langgraph/06_deploy_reheal.py
       # mycelium-py's live gateway suite (realignment repairs S4, the Python half). It was never in
       # the pytest list above, so it never ran in CI; against a `mycelium` node it passes (the
       # Python SDK reads every route the TypeScript one got wrong correctly). Its own node, because
@@ -686,7 +689,7 @@ jobs:
       # (skipped ones too), listed — the test-coverage job checks each executed somewhere.
       - name: List the TypeScript test universe
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin typescript"
           npx jest --listTests
           python3 ../scripts/ci-jest-universe.py "$RUNNER_TEMP/jest-results.json"
           echo "@@test-universe@@ end"
@@ -810,7 +813,7 @@ jobs:
       - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
       - name: List every test
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin rust-python"
           cargo test --workspace --all-features --no-fail-fast -- --list
           # Every workspace crate's own featureless build, so a test gated `not(feature = …)` in any crate is
           # known (derived from cargo metadata, so a new crate is covered the day it joins the workspace). A
@@ -819,6 +822,27 @@ jobs:
             cargo test -p "$p" --no-default-features --no-fail-fast -- --list || exit 1
           done
           pytest --collect-only -q langgraph-checkpoint-mycelium/tests mycelium-py/tests
+          echo "@@test-universe@@ end"
+      # The script-style suites this workflow runs, case by case: each suite's --list prints one
+      # `@@case-list@@ <suite>::<case>` line per case without running anything, and each case prints
+      # `@@case@@ <suite>::<case>` as it starts, in whichever job runs it. The LangGraph ladder's rungs are
+      # listed from the directory, so a new rung no step runs is a case that never executed. The Docker suites
+      # list and check theirs in cluster-suites.yml, a workflow this run does not include.
+      - name: List the script suites' cases
+        run: |
+          echo "@@test-universe@@ begin scripts"
+          python3 scripts/test-check-materials.py --list
+          python3 scripts/test-ci-test-coverage.py --list
+          bash scripts/test-ci-retest.sh --list
+          bash scripts/wire-check-examples.sh --list
+          bash mycelium-blackboard/ci_smoke.sh --list
+          bash mycelium-wiki/ci_smoke.sh --list
+          bash mycelium-reason/ci_smoke.sh --list
+          bash mycelium-guardrails/ci_smoke.sh --list
+          bash examples/community/ci_smoke.sh --list
+          bash examples/fluid_pipeline/ci_smoke.sh --list
+          bash examples/coop/ci_smoke.sh --list
+          for f in examples/langgraph/[0-9][0-9]_*.py; do echo "@@case-list@@ examples/langgraph::$(basename "$f" .py)"; done
           echo "@@test-universe@@ end"
 
   test-coverage:

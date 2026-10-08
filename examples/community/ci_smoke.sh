@@ -11,6 +11,11 @@
 # No Ollama, no network: mock_llm.py stands in on :11434.
 
 set -euo pipefail
+# Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
+# cases without running them. The five stages below are one scenario, each depending on the last, so the
+# suite is one case.
+if [ "${1:-}" = --list ]; then echo "@@case-list@@ examples/community/ci_smoke.sh::community-demo"; exit 0; fi
+echo "@@case@@ examples/community/ci_smoke.sh::community-demo"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

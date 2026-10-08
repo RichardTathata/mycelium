@@ -16,8 +16,15 @@
 # failed for that reason alone while the code under test was fine.
 set -uo pipefail
 
+# Verification policy rule 3: each leg is a case. `leg N slug` prints `@@case@@ <suite>::<N-slug>` as the leg
+# starts, and --list names the `leg` lines below on the host, without Docker.
+if [ "${1:-}" = --list ]; then
+    exec python3 "$(dirname "$0")/../../scripts/list-script-cases.py" "$0" tests/integration/run_federation.sh leg '{1}-{2}'
+fi
+
 PASS=0; FAIL=0
 banner() { printf '\n\033[1;34m== %s ==\033[0m\n' "$1"; }
+leg()    { echo "@@case@@ tests/integration/run_federation.sh::$1-$2"; shift 2; banner "$*"; }
 ok()     { printf '\033[0;32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
 fail()   { printf '\033[0;31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 check()  {
@@ -106,7 +113,7 @@ never_merged() {
 }
 
 # -- 0. Both meshes formed, each under its own CA ---------------------------------------------
-banner "0 . formation"
+leg 0 formation "0 . formation"
 check "alpha a1 sees its three peers"  poll_until 90 test_peers "$A1" 3
 check "alpha gw2 sees its three peers" poll_until 90 test_peers "$GW2" 3
 check "beta b1 sees its one peer"      poll_until 90 test_peers "$B1" 1
@@ -114,7 +121,7 @@ check "alpha gw1 learned the provider's capability" poll_until 90 has_cap "$GW1"
 check "alpha gw2 learned the provider's capability" poll_until 90 has_cap "$GW2"
 
 # -- 1. Discover, invoke -----------------------------------------------------------------------
-banner "1 . discover, invoke"
+leg 1 discover-invoke "1 . discover, invoke"
 check "before discovery a call is refused locally as a link refusal" \
       call_is 409 '.error == "link"' '{"export":"demo/whoami"}'
 # `connect` writes /tmp/probe.out, so status and body are asserted in two steps.
@@ -129,19 +136,19 @@ check "an ungranted export is refused locally, before any byte" \
       call_is 409 '.error == "resolve"' '{"export":"demo/secret"}'
 
 # -- 2. Consensus in each mesh -----------------------------------------------------------------
-banner "2 . consensus, per mesh"
+leg 2 consensus-per-mesh "2 . consensus, per mesh"
 check "alpha commits fed/alpha"        commits "$A1" "fed/alpha" alpha-1
 check "beta commits fed/beta"          commits "$B1" "fed/beta"  beta-1
 check "beta never learns alpha's slot" slot_absent "$B2"  "fed/alpha"
 check "alpha never learns beta's slot" slot_absent "$GW2" "fed/beta"
 
 # -- 3. Never merged, at steady state with bytes crossing --------------------------------------
-banner "3 . never merged (steady state)"
+leg 3 never-merged-steady "3 . never merged (steady state)"
 check "alpha's three tables name no beta node" never_merged "$A1 $A2 $GW1 $GW2" "$BETA_IDS" alpha
 check "beta's three tables name no alpha node" never_merged "$B1 $B2" "$ALPHA_IDS" beta
 
 # -- 4. Lose a gateway, then sever every link --------------------------------------------------
-banner "4 . lose gw1, then sever every link"
+leg 4 lose-gateway-sever "4 . lose gw1, then sever every link"
 docker stop mycelium-fed-alpha-gw1 >/dev/null
 check "repeatable fails over to gw-2 with gw-1 stopped" \
       call_is 200 '.reply != null' '{"export":"demo/whoami","repeatable":true}'
@@ -157,7 +164,7 @@ else fail "discovery cannot refresh with every link severed"; fi
 check "the link reads Down" link_is Down
 
 # -- 5. Keep working locally, both sides -------------------------------------------------------
-banner "5 . both meshes keep working with no link"
+leg 5 work-without-link "5 . both meshes keep working with no link"
 kv_put "$A1" "local/alpha" "still here" >/dev/null
 kv_put "$B1" "local/beta"  "still here" >/dev/null
 check "alpha gossip converges a1 to a2" poll_until 30 kv_is "$A2" "local/alpha" "still here"
@@ -166,11 +173,11 @@ check "alpha commits while partitioned" commits "$A2" "fed/alpha-partitioned" al
 check "beta commits while partitioned"  commits "$B2" "fed/beta-partitioned"  beta-2
 
 # -- 6. Change the grant mid-partition ---------------------------------------------------------
-banner "6 . change the grant while no link exists"
+leg 6 grant-mid-partition "6 . change the grant while no link exists"
 check "gw2 takes policy revision 2, granting demo/secret as well" grant_both "$GW2"
 
 # -- 7. Reconnect ------------------------------------------------------------------------------
-banner "7 . reconnect"
+leg 7 reconnect "7 . reconnect"
 docker network connect --ip 172.32.0.21 mycelium-fed-edge mycelium-fed-beta-probe
 check "reconnected is not ready: refused until discovery refreshes" \
       call_is 409 '.error == "link"' '{"export":"demo/whoami","repeatable":true}'
@@ -190,7 +197,7 @@ check "at-most-once now goes straight to gw-2" \
       call_is 200 '.reply == "federation:beta.example/svc/billing"' '{"export":"demo/secret"}'
 
 # -- 8. Never merged, after the whole cycle ----------------------------------------------------
-banner "8 . never merged (after the cycle)"
+leg 8 never-merged-after "8 . never merged (after the cycle)"
 check "alpha commits again after reconnect"   commits "$A1" "fed/alpha-after" alpha-3
 check "alpha's live tables name no beta node" never_merged "$A1 $A2 $GW2" "$BETA_IDS" alpha
 check "beta's tables name no alpha node"      never_merged "$B1 $B2" "$ALPHA_IDS" beta
@@ -200,7 +207,7 @@ check "beta learned no alpha slot from before it" slot_absent "$B1" "fed/alpha"
 # -- 9. The admission plant: beta's CA cannot join alpha ----------------------------------------
 # Started here rather than by compose: it must not exist while the legs above run. The image and
 # the volume are pinned names in the compose file precisely so this can name them.
-banner "9 . admission plant"
+leg 9 admission-plant "9 . admission plant"
 docker rm -f mycelium-fed-rogue >/dev/null 2>&1
 docker run -d --name mycelium-fed-rogue \
     --network mycelium-fed-alpha --ip "$ROGUE" \

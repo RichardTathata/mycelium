@@ -43,6 +43,9 @@ on:
       - 'examples/units/**'
       - 'examples/coop/**'
       - '.github/workflows/cluster-suites.yml'
+      - 'scripts/ci-test-coverage.py'
+      - 'scripts/list-script-cases.py'
+      - 'Makefile'
   pull_request:
     paths:
       - 'src/**'
@@ -62,6 +65,9 @@ on:
       - 'examples/units/**'
       - 'examples/coop/**'
       - '.github/workflows/cluster-suites.yml'
+      - 'scripts/ci-test-coverage.py'
+      - 'scripts/list-script-cases.py'
+      - 'Makefile'
   schedule:
     - cron: '0 5 * * *'   # nightly 05:00 UTC — catches drift even with no code change
   workflow_dispatch: {}   # run on demand before a risky merge
@@ -73,6 +79,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: List the suite's cases (no Docker)
+        run: |
+          echo "@@test-universe@@ begin integration"
+          bash tests/integration/run.sh --list
+          echo "@@test-universe@@ end"
       # `make test`: docker-compose up --build (node-a/b, late-joiner node-c, mgmt, runner),
       # runner drives tests/integration/scenarios/*, exit code is the runner's.
       - name: Integration suite (make test)
@@ -84,6 +95,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: List the suite's cases (no Docker)
+        run: |
+          echo "@@test-universe@@ begin overlay"
+          python3 tests/overlay/run.py --list
+          echo "@@test-universe@@ end"
       # `make test-overlay`: 3-node overlay cluster (task auction / leader election / shared
       # reasoning log). Un-held 2026-07-09 — the two defects that wiring it surfaced are fixed:
       #   #149  subscribe_log_group exact-once — leased consensus claim + converged-holder read.
@@ -99,6 +115,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: List the suite's cases (no Docker)
+        run: |
+          echo "@@test-universe@@ begin confined-fleet"
+          bash scripts/test-confined-fleet.sh --list
+          echo "@@test-universe@@ end"
       # Deployment evidence, not replay evidence: a real cluster with a CNI that enforces NetworkPolicy, the reference
       # manifests applied unchanged (stand-in images), and every blocked path paired with a positive control.
       # Phase 2 then runs the real node image as the authority, a provider and the gateway, and checks from the agent
@@ -112,6 +133,11 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - name: List the suite's cases (no Docker)
+        run: |
+          echo "@@test-universe@@ begin federation"
+          bash tests/integration/run_federation.sh --list
+          echo "@@test-universe@@ end"
       # `make test-federation`: two meshes under two CAs, one container per node, the consumer
       # disconnected from and reconnected to the edge network by the runner. This is the only
       # place item 2's release gate is claimed with **process isolation and a real network
@@ -126,9 +152,36 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - name: List the suite's cases (no Docker)
+        run: |
+          echo "@@test-universe@@ begin stem-examples"
+          make -s list-stem-examples
+          echo "@@test-universe@@ end"
       # `make test-stem-examples`: for each recut demo, one image (`docker/Dockerfile.stem`), an init
       # that publishes the demo's artifact descriptions into a signed library, the driver (the roles
       # §16 keeps as code, and the asserts) and the stems fed `examples/units/<demo>/*.toml`. The
       # driver prints the same markers the code run prints — the both-ways contract.
       - name: Stem examples suite (make test-stem-examples)
         run: make test-stem-examples
+
+  case-coverage:
+    # Verification policy rule 3 for these suites: ci.yml's test-coverage job reads only its own run, so this
+    # workflow checks its own. Each job above lists its suite's cases (a block named for the job) before it
+    # starts Docker, and each case
+    # prints `@@case@@ <suite>::<case>` as it starts; this fails on any listed case that never did — a scenario
+    # dropped from its runner's list, a leg the runner never reached, SKIP_NODES left on.
+    name: Test coverage (observed, Docker suites)
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [integration, overlay, confined-fleet, federation, stem-examples]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # One named listing per suite job, each required non-empty: a dropped listing step fails here.
+      - run: >-
+          python3 scripts/ci-test-coverage.py --fetch --scripts-only
+          --require integration,overlay,confined-fleet,federation,stem-examples "$RUNNER_TEMP/job-logs"
+        env:
+          GH_TOKEN: ${{ github.token }}

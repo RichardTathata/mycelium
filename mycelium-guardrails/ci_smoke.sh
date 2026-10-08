@@ -9,6 +9,11 @@
 #     unauthorized caller rejected + sealed + proven (Tier C).
 # Retry-hardened for constrained CI runners (each example binds ephemeral ports into one tls mesh).
 set -uo pipefail
+# Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
+# `run_demo <example>` lines below without running them.
+if [ "${1:-}" = --list ]; then
+  exec python3 "$(dirname "$0")/../scripts/list-script-cases.py" "$0" mycelium-guardrails/ci_smoke.sh run_demo '{1}'
+fi
 
 ATTEMPTS="${GUARDRAILS_SMOKE_ATTEMPTS:-3}"
 
@@ -18,6 +23,7 @@ run_demo() {
   local example="$1"
   shift
   local markers=("$@")
+  echo "@@case@@ mycelium-guardrails/ci_smoke.sh::$example"
 
   local i
   for i in $(seq 1 "$ATTEMPTS"); do

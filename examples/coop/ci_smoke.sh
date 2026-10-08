@@ -8,6 +8,11 @@
 # not. (The same posture as the wasm-host e2e port retry and the tuple-space rpc_roundtrip primary
 # poll.) Output of the last attempt is always printed for diagnosis.
 set -uo pipefail
+# Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
+# `run_demo` lines below (each demo's binary is its case) without running them.
+if [ "${1:-}" = --list ]; then
+  exec python3 "$(dirname "$0")/../../scripts/list-script-cases.py" "$0" examples/coop/ci_smoke.sh run_demo '{2}'
+fi
 
 cd "$(dirname "$0")/../.."
 
@@ -18,6 +23,7 @@ ATTEMPTS="${COOP_SMOKE_ATTEMPTS:-3}"
 run_demo() {
   local label="$1" bin="$2"; shift 2
   local markers=("$@")
+  echo "@@case@@ examples/coop/ci_smoke.sh::${bin}"
   echo "── ${label} ─────────────────────────────────────────────"
   local attempt out ok
   # `provisioning` + `catalog` + `mcp_toolgrowth` need the WASM host, gated behind the `wasm`

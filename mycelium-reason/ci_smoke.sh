@@ -4,6 +4,9 @@
 # inference (routed + failover), and fleet-reasoning traces (trace replay). Retry-hardened
 # for constrained CI runners (the example binds three ephemeral ports into one mesh).
 set -uo pipefail
+# Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
+# cases without running them. One demo, so one case.
+if [ "${1:-}" = --list ]; then echo "@@case-list@@ mycelium-reason/ci_smoke.sh::fleet_reasoning"; exit 0; fi
 
 ATTEMPTS="${REASON_SMOKE_ATTEMPTS:-3}"
 MARKERS=("model ready" "routed" "failover" "trace replay")
@@ -20,6 +23,7 @@ run_once() {
   done
 }
 
+echo "@@case@@ mycelium-reason/ci_smoke.sh::fleet_reasoning"
 for i in $(seq 1 "$ATTEMPTS"); do
   echo "── fleet_reasoning smoke attempt $i/$ATTEMPTS ──"
   if run_once; then

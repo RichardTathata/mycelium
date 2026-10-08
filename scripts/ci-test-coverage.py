@@ -8,14 +8,18 @@ executed — passed or failed, not skipped, not ignored, not filtered out, not i
 
   * **Executed:** a Rust ``test <name> ... ok|FAILED`` line under a ``Running <target> (deps/<bin>-…)``
     or ``Doc-tests <crate>`` header (cargo's own lines); a pytest ``-v`` ``<nodeid> PASSED|FAILED|XPASS|XFAIL|ERROR`` line;
-    a jest ``--verbose`` ``✓``/``✕`` line under its ``PASS|FAIL <file>`` header.
+    a jest ``--verbose`` ``✓``/``✕`` line under its ``PASS|FAIL <file>`` header; a script-style suite's
+    ``@@case@@ <suite>::<case>`` line, printed as the case starts (anywhere on the line: a Docker runner's
+    output arrives prefixed with its container's name).
   * **Universe:** everything executed, plus every test any log names as skipped or ignored, plus the
     lists the ``test-universe`` job prints (``cargo test --all-features -- --list`` per crate, the
-    no-default-features builds, ``pytest --collect-only`` over every test directory), so a test gated
-    on a feature no step enables is in the universe and not executed.
+    no-default-features builds, ``pytest --collect-only`` over every test directory, and each script-style
+    suite's ``--list``: one ``@@case-list@@ <suite>::<case>`` line per case, printed without running
+    anything), so a test gated on a feature no step enables is in the universe and not executed.
 
 A test key is ``rust <target>::<binary>::<name>`` (target is ``src/lib.rs``, ``tests/x.rs``,
-``doc:<crate>``…), ``python <nodeid>`` or ``typescript <file>::<title>``. Two crates' same-named
+``doc:<crate>``…), ``python <nodeid>``, ``typescript <file>::<title>`` or ``script <suite>::<case>`` (the suite is the
+script's repository path, or the name of the step or make target that drives it). Two crates' same-named
 integration files share a key, so a same-named test in both counts once — stated, and rare.
 
 ``scripts/test-coverage-exceptions.txt`` lists ``<key-glob> — <reason>`` for tests that legitimately
@@ -24,6 +28,12 @@ the list cannot rot.
 
 Usage: ci-test-coverage.py <dir of job logs>      (each file one job's log, as the API returns it)
        ci-test-coverage.py --fetch <dir>          (GITHUB_REPOSITORY, GITHUB_RUN_ID, GH_TOKEN: fetch, then check)
+       ci-test-coverage.py [--fetch] --scripts-only --require <src,src…> <dir>
+                                                  (a workflow with no Rust/Python/TypeScript universe — the
+                                                   Docker cluster suites: check only ``script`` cases, and
+                                                   require each named job's listing, non-empty)
+Each listing is bracketed ``@@test-universe@@ begin <source>`` … ``end``; without --require the sources required
+are REQUIRED_SOURCES. CI_TEST_COVERAGE_EXCEPTIONS names another exceptions file (the self-test's).
 """
 from __future__ import annotations
 
@@ -48,6 +58,11 @@ JEST_LISTED = re.compile(r"(?:^|/)mycelium-ts/(\S+\.test\.ts)\s*$")
 TS_LISTED = re.compile(r"^@@ts-test@@ (\S+\.test\.ts)::(.+)$")
 JEST_TEST = re.compile(r"^\s+(✓|✕|○ skipped|○ todo|○)\s+(.+?)(?: \(\d+ m?s\))?$")
 UNIVERSE_MARK = "@@test-universe@@"
+# Script-style suites (scripts/test-*, ci_smoke.sh, the Docker runners): searched anywhere on the line, and the
+# key's characters are restricted so a shell trace's quoting (`+ echo '@@case@@ a::b'`) is not part of it.
+CASE_KEY = r"([A-Za-z0-9_./:-]+::[A-Za-z0-9_./:-]+)"
+CASE_RAN = re.compile(r"@@case@@ " + CASE_KEY)
+CASE_LISTED = re.compile(r"@@case-list@@ " + CASE_KEY)
 # libtest names a should-panic test "<name> - should panic" and rustdoc a `no_run` / `compile_fail` doctest
 # "<name> - compile" / "- compile fail" when running them; `--list` names them without. (A `no_run` doctest
 # compiling *is* its run.)
@@ -77,23 +92,52 @@ def clean(line: str) -> str:
 TRACKED: list[str] = []
 
 
-LISTED_BLOCKS: list[int] = []   # entries listed per complete universe block (begin…end)
+LISTED_BLOCKS: list[tuple[str, int]] = []   # (source, entries listed) per complete universe block (begin…end)
+# Each listing names its source — `@@test-universe@@ begin <source>` — and the check requires each expected source
+# present and non-empty, so a dropped listing cannot hide behind the others (a bare `begin` is read, as before,
+# but satisfies no requirement). The CI workflow's three; the Docker workflow passes its own with --require.
+REQUIRED_SOURCES = ["rust-python", "typescript", "scripts"]
 
 
 def scan(text: str, executed: set, universe: set):
     target = None
     jest_file = None
     universe_mode = False
+    in_step_source = False
     listed = 0
+    source = ""
     for raw in text.split("\n"):
         line = clean(raw)
+        # GitHub echoes a `run:` block's source between `##[group]Run …` and `##[endgroup]` before running it. A
+        # marker written literally there (even under a branch never taken) is not a run, and a mark opens nothing.
+        if line.startswith("##[group]Run "):
+            in_step_source = True
+            continue
+        if in_step_source:
+            if line.startswith("##[endgroup]"):
+                in_step_source = False
+            continue
         if UNIVERSE_MARK in line:
-            mark = line.split(UNIVERSE_MARK, 1)[1].strip()
-            if mark == "begin":
+            mark = line.split(UNIVERSE_MARK, 1)[1].split()
+            if mark[:1] == ["begin"] and len(mark) <= 2:
                 universe_mode, listed = True, 0
-            elif mark == "end" and universe_mode:
+                source = mark[1] if len(mark) == 2 else ""
+            elif mark == ["end"] and universe_mode:
                 universe_mode = False
-                LISTED_BLOCKS.append(listed)
+                LISTED_BLOCKS.append((source, listed))
+            continue
+        m = CASE_LISTED.search(line)
+        if m:
+            if universe_mode:
+                universe.add(f"script {m.group(1)}")
+                listed += 1
+            continue
+        m = CASE_RAN.search(line)
+        if m:
+            key = f"script {m.group(1)}"
+            universe.add(key)
+            if not universe_mode:
+                executed.add(key)
             continue
         if universe_mode:
             m = TS_LISTED.match(line.strip())
@@ -159,7 +203,7 @@ def scan(text: str, executed: set, universe: set):
 
 
 def exceptions(root: str) -> list[tuple[str, str]]:
-    path = os.path.join(root, "scripts", "test-coverage-exceptions.txt")
+    path = os.environ.get("CI_TEST_COVERAGE_EXCEPTIONS") or os.path.join(root, "scripts", "test-coverage-exceptions.txt")
     out = []
     if os.path.exists(path):
         for line in open(path, encoding="utf-8"):
@@ -180,11 +224,10 @@ def fetch(dest: str):
          "--jq", '.jobs[] | "\\(.id)\\t\\(.status)\\t\\(.name)"'],
         capture_output=True, text=True, check=True).stdout.splitlines()
     # The coverage job itself, and the fuzz job (push only, no libtest output, ~25 min), are not waited for.
-    skip = {"Test coverage (observed)"}
     unfinished = []
     for row in rows:
         jid, status, name = row.split("\t", 2)
-        if name in skip or name.startswith("Fuzz"):
+        if name.startswith("Test coverage") or name.startswith("Fuzz"):
             continue
         if status != "completed":
             unfinished.append(name)
@@ -208,10 +251,20 @@ def fetch(dest: str):
 
 def main() -> int:
     args = sys.argv[1:]
-    if args[:1] == ["--fetch"]:
-        fetch(args[1])
-        args = args[1:]
+    fetching = "--fetch" in args
+    scripts_only = "--scripts-only" in args
+    require: list[str] = []
+    if "--require" in args:
+        i = args.index("--require")
+        require = [r for r in args[i + 1].split(",") if r]
+        del args[i:i + 2]
+    args = [a for a in args if a not in ("--fetch", "--scripts-only")]
+    if scripts_only and not require:
+        sys.exit("ci-test-coverage: --scripts-only needs --require <source,…>: the listings each job must print")
+    require = require or REQUIRED_SOURCES
     logs = args[0]
+    if fetching:
+        fetch(logs)
     root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     try:
         TRACKED[:] = [f for f in subprocess.run(["git", "-C", root, "ls-files", "*.py"], capture_output=True,
@@ -221,13 +274,32 @@ def main() -> int:
     executed, universe = set(), set()
     for f in sorted(glob.glob(os.path.join(logs, "*"))):
         scan(open(f, encoding="utf-8", errors="replace").read(), executed, universe)
-    # The universe must have been listed: a test-universe job that failed or was cancelled would otherwise
-    # leave only what ran, and a test that never ran anywhere would be unknown rather than missing.
-    if len(LISTED_BLOCKS) < 2 or min(LISTED_BLOCKS) == 0:
-        print(f"ci-test-coverage: the test universe was not listed ({len(LISTED_BLOCKS)} complete block(s), "
-              f"sizes {LISTED_BLOCKS}): expected the test-universe job's and the TypeScript job's, each non-empty")
+    if scripts_only:
+        # The Docker workflow: each job lists its own suite's cases before it starts Docker; only script cases.
+        executed = {k for k in executed if k.startswith("script ")}
+        universe = {k for k in universe if k.startswith("script ")}
+    # The universe must have been listed, every part of it: a listing job that failed or was cancelled, or a
+    # listing step dropped, would otherwise leave only what ran, and a test that never ran anywhere would be
+    # unknown rather than missing.
+    sizes: dict[str, int] = {}
+    for src, n in LISTED_BLOCKS:
+        sizes[src] = sizes.get(src, 0) + n
+    unlisted = [r for r in require if not sizes.get(r)]
+    if unlisted:
+        print(f"ci-test-coverage: the test universe was not listed: no non-empty listing from {', '.join(unlisted)} "
+              f"(listed: {sizes or 'nothing'})")
         return 1
-    exc = exceptions(root)
+    # One exceptions file serves two workflows, so an exception is judged (used, or stale) only where it is in
+    # scope: a `script` one where its suite is listed, a Rust/Python/TypeScript one only outside --scripts-only.
+    listed_suites = {k[len("script "):].split("::", 1)[0] for k in universe if k.startswith("script ")}
+
+    def in_scope(pat: str) -> bool:
+        if pat.startswith("script "):
+            suite = pat[len("script "):].split("::", 1)[0]
+            return any(fnmatch.fnmatchcase(s, suite) for s in listed_suites)
+        return not scripts_only
+
+    exc = [(p, r) for p, r in exceptions(root) if in_scope(p)]
     used = set()
     missing = []
     for key in sorted(universe - executed):

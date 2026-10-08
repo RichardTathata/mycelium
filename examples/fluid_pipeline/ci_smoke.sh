@@ -22,6 +22,9 @@
 # Usage: ci_smoke.sh [pull|push|both]   (default: both)
 
 set -euo pipefail
+# Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
+# modes without running them. Each mode is a case.
+if [ "${1:-}" = --list ]; then for m in pull push; do echo "@@case-list@@ examples/fluid_pipeline/ci_smoke.sh::$m"; done; exit 0; fi
 
 MODES="${1:-both}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -103,6 +106,7 @@ start_nodes() {
 
 run_mode() {
     local mode="$1"
+    echo "@@case@@ examples/fluid_pipeline/ci_smoke.sh::$mode"
     echo "── mode: $mode ──────────────────────────────────────────────"
     PIDS=()
     start_nodes
