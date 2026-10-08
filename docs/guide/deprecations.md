@@ -336,3 +336,16 @@ logs; `POST /gateway/mesh/group` on the node that joins a group (`DELETE /gatewa
 `/gateway/artifacts/publish` for catalogue lines; `/gateway/overlay/lock/acquire` for locks. A namespace with no
 gateway route of its own is written by the substrate or the companion that owns it.
 
+## 20. A governed group's membership moves through a governance route (2.29.0)
+
+**What changes.** `POST`/`DELETE /gateway/mesh/group` (`mesh:write`) refuse **403** `governed_group` for a group under a
+live membership intent (`POST /gateway/govern/membership`): its members are the roster and quorum its elections count,
+so changing them is governance. `POST`/`DELETE /gateway/govern/group` (`govern:write`) does it, for any group. Every
+membership change through either route is audited (or counted on `/stats` as `governance_unaudited`). A group with no
+membership intent is unaffected.
+
+**Will the compiler tell me?** No — it is an HTTP status; the 403's `message` names the route.
+
+**Migration.** A client that joins or leaves a governed group over HTTP uses `/gateway/govern/group` with a
+`govern:write` token. The membership governor's own moves (the embedded API) are unaffected.
+

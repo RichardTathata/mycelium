@@ -72,7 +72,8 @@ nobody joined — is **refused** (`ElectorateUnavailable`), not decided alone. J
 
 ```rust
 agent.mesh().join_group("my-group");            // embedded
-// or over HTTP: POST /gateway/mesh/group {"group":"my-group"}
+// or over HTTP: POST /gateway/mesh/group {"group":"my-group"} (mesh:write) — or, for a group under a membership
+// intent (a governed group), POST /gateway/govern/group (govern:write); the mesh route refuses it 403.
 ```
 
 Before 2026-09-24 an empty roster counted as one member with a quorum of one, satisfied by the

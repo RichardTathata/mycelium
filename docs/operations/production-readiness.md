@@ -213,7 +213,7 @@ this page is the index + the gate.
 
 - ☐ **Groups are joined before they are elected in** — an election over a roster this node cannot see
   is **refused** (`electorate_unavailable`), not decided alone. Join via `mesh().join_group(..)` or
-  `POST /gateway/mesh/group`, and check the roster is complete on *every* node before relying on a
+  `POST /gateway/mesh/group` (`/gateway/govern/group` under `govern:write` for a governed group), and check the roster is complete on *every* node before relying on a
   result. → [diagnostics.md §electorate_unavailable](diagnostics.md)
 - ☐ **Exclusivity is fenced at the resource, not assumed from the election** — carry
   `Leadership::epoch` (the commit's HLC, monotonic across holders) to whatever the leader writes, and

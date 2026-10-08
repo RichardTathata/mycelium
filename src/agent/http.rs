@@ -257,6 +257,7 @@ pub(super) async fn run_http_server(
                                                   .post(gw_group_join)
                                                   .delete(gw_group_leave))
         .route("/govern/profile",                 post(gw_govern_profile))
+        .route("/govern/group",                   post(gw_govern_group_join).delete(gw_govern_group_leave))
         // ── Legible Emergence Phase 2: the relational fleet snapshot (localize) ─
         .route("/fleet",                          get(gw_fleet_snapshot))
         // ── Legible Emergence Phase 3: the causal event ring (explain) ─────────
@@ -774,6 +775,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         // leave **this** node with `mesh:write`. There is deliberately no verb for enrolling
         // another node — see `gw_group_join`.
         "/gateway/mesh/group"          => if read { "mesh:read" } else { "mesh:write" },
+        "/gateway/govern/group"        => "govern:write",
         "/gateway/govern/profile"      => "govern:write",
         // Legible Emergence Phase 2/3: the relational fleet snapshot + causal explain.
         "/gateway/fleet"               => "fleet:read",
@@ -1538,11 +1540,13 @@ struct GroupBody { group: String }
 /// (`ConsensusResult::ElectorateUnavailable`). An election surface without a membership surface is
 /// a surface that can only be used wrongly.
 ///
-/// **What this route does not settle.** *Who* may join, *who* may change an electorate, and *which*
-/// membership version an election is decided against are open questions, tracked in
-/// `docs/wiki/dev/.log/2026-09-24-consensus-vote-binding.md`. This is the operation; the governance
-/// of the operation is the agreement repair's business. Today a caller holding `mesh:write` may
-/// join this node to any group, exactly as an embedded caller holding the handle already may.
+/// **Who may change an electorate (decided 2026-10-08).** A group under a live membership intent is *governed*: its
+/// members are the roster and quorum its elections count, so moving this node in or out of one is a governance act —
+/// this route refuses it **403** `governed_group`, and `POST`/`DELETE /gateway/govern/group` (`govern:write`) does it.
+/// A plain group stays a `mesh:write` join. Every membership change through either route is audited (or counted on
+/// `/stats` when it cannot be). *Which* membership version an election is decided against stays open
+/// (`docs/wiki/dev/.log/2026-09-24-consensus-vote-binding.md`). An embedded caller holding the handle is not a
+/// gateway caller and is not covered here.
 #[cfg(feature = "gateway")]
 async fn gw_group_join(
     State(ctx): State<Arc<HttpCtx>>,
@@ -1552,8 +1556,12 @@ async fn gw_group_join(
         return (StatusCode::BAD_REQUEST,
                 Json(json!({"error": "group must be non-empty and contain no '/'"}))).into_response();
     }
+    if let Some(refused) = refuse_governed_group(&ctx.agent_ctx, &body.group) {
+        return refused;
+    }
     mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
         .join_group(body.group.as_str());
+    audit_govern(&ctx.agent_ctx, &format!("grp/{}/join", body.group), json!({"route": "mesh/group"}).to_string());
     let members: Vec<String> = crate::agent::helpers::group_members_ctx(&ctx.agent_ctx, &body.group)
         .iter().map(|n| n.to_string()).collect();
     Json(json!({ "ok": true, "group": body.group, "members": members })).into_response()
@@ -1565,8 +1573,69 @@ async fn gw_group_leave(
     Query(q):   Query<GroupQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
+    if let Some(refused) = refuse_governed_group(&ctx.agent_ctx, &q.group) {
+        return refused;
+    }
     mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core))
         .leave_group(q.group.as_str());
+    audit_govern(&ctx.agent_ctx, &format!("grp/{}/leave", q.group), json!({"route": "mesh/group"}).to_string());
+    Json(json!({ "ok": true, "group": q.group })).into_response()
+}
+
+/// Whether `group` is under a live membership intent (`sys/govern/membership/{group}`, fresh within
+/// `MEMBERSHIP_INTENT_TTL_MS` — the governor's own reading, `emergent::detect_governed_group_conflicts`). Such a
+/// group's population is governed: who belongs to it decides an election's roster and quorum, so changing it is a
+/// governance act, not a data-plane write.
+#[cfg(feature = "gateway")]
+fn is_governed_group(ctx: &TaskCtx, group: &str) -> bool {
+    use super::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
+    let key = format!("{MEMBERSHIP_PREFIX}{group}");
+    let Some(bytes) = ctx.kv_state.store.pin().get(key.as_str()).and_then(|e| e.data.clone()) else { return false };
+    let Ok(intent) = mycelium_core::serde_fixint::from_slice::<MembershipIntent>(&bytes) else { return false };
+    mycelium_core::sim_seam::wall_now_ms().saturating_sub(intent.written_at_ms) <= MEMBERSHIP_INTENT_TTL_MS
+}
+
+/// `/gateway/mesh/group`'s refusal for a governed group: **403** `governed_group`, naming the route that moves a node
+/// in or out of one under `govern:write`, audited.
+#[cfg(feature = "gateway")]
+fn refuse_governed_group(ctx: &TaskCtx, group: &str) -> Option<axum::response::Response> {
+    is_governed_group(ctx, group).then(|| (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": "governed_group",
+            "message": format!("group {group} is under a membership intent, so its members decide its elections: \
+                                this node joins or leaves it through POST/DELETE /gateway/govern/group (govern:write)") })),
+    ).into_response())
+}
+
+/// `POST /gateway/govern/group` (`govern:write`) — **this node** joins `{group}`, governed or not; audited. The
+/// governed path for what `POST /gateway/mesh/group` refuses for a group under a membership intent.
+#[cfg(feature = "gateway")]
+async fn gw_govern_group_join(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(refused) = refuse_unknown_fields(&body, &["group"]) {
+        return refused;
+    }
+    let Some(group) = body.get("group").and_then(|g| g.as_str()).filter(|g| !g.is_empty() && !g.contains('/')) else {
+        return bad_request("`group` must be a non-empty string without '/'".into());
+    };
+    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core)).join_group(group);
+    audit_govern(&ctx.agent_ctx, &format!("grp/{group}/join"), body.to_string());
+    let members: Vec<String> = crate::agent::helpers::group_members_ctx(&ctx.agent_ctx, group)
+        .iter().map(|n| n.to_string()).collect();
+    Json(json!({ "ok": true, "group": group, "governed": is_governed_group(&ctx.agent_ctx, group), "members": members }))
+        .into_response()
+}
+
+/// `DELETE /gateway/govern/group?group=G` (`govern:write`) — **this node** leaves `G`, governed or not; audited.
+#[cfg(feature = "gateway")]
+async fn gw_govern_group_leave(
+    Query(q):   Query<GroupQuery>,
+    State(ctx): State<Arc<HttpCtx>>,
+) -> impl IntoResponse {
+    mycelium_core::mesh_handle::MeshHandle::from_core(Arc::clone(&ctx.agent_ctx.core)).leave_group(q.group.as_str());
+    audit_govern(&ctx.agent_ctx, &format!("grp/{}/leave", q.group), json!({"route": "govern/group"}).to_string());
     Json(json!({ "ok": true, "group": q.group })).into_response()
 }
 
@@ -2911,7 +2980,7 @@ fn refuse_protected_key(key: &str) -> Option<axum::response::Response> {
     } else if key.starts_with("sys/topology-override/") {
         "the topology override is set through POST /gateway/govern/topology-override (govern:write)"
     } else if key.starts_with("grp/") {
-        "a node joins a group itself: POST /gateway/mesh/group on that node (mesh:write)"
+        "a node joins a group itself: POST /gateway/mesh/group on that node (mesh:write), or POST /gateway/govern/group (govern:write) for a group under a membership intent"
     } else if key.starts_with("prompts/") {
         "prompt templates are written through /gateway/prompts/{ns}/{name} (llm:write)"
     } else if key.starts_with("log/") || key.starts_with("clog/") {
@@ -5814,6 +5883,8 @@ mod tests {
         assert_eq!(required_scope(&Method::POST, "/gateway/overlay/consistent/set"), "consensus:write");
         assert_eq!(required_scope(&Method::GET,  "/gateway/overlay/consistent/get"), "consensus:read");
         assert_eq!(required_scope(&Method::POST, "/gateway/llm/call"), "llm:invoke");
+        assert_eq!(required_scope(&Method::POST, "/gateway/govern/group"), "govern:write");
+        assert_eq!(required_scope(&Method::DELETE, "/gateway/govern/group"), "govern:write");
         assert_eq!(required_scope(&Method::GET,  "/gateway/fleet"), "fleet:read");
         assert_eq!(required_scope(&Method::GET,  "/gateway/explain"), "fleet:read");
         assert_eq!(required_scope(&Method::GET,  "/gateway/diagnose"), "fleet:read");
@@ -6599,6 +6670,7 @@ mod tests {
             ("/gateway/govern/membership", serde_json::json!({"group": "workers", "min": 1})),
             ("/gateway/govern/topology-override", serde_json::json!({"group": "workers", "override": true})),
             ("/gateway/govern/profile", serde_json::json!({"profile": "observe"})),
+            ("/gateway/govern/group", serde_json::json!({"group": "workers"})),
         ];
         let listed: std::collections::BTreeSet<String> = bodies.iter().map(|(r, _)| r.to_string()).collect();
         assert_eq!(routed, listed, "a governance write route without a case here");
@@ -6630,6 +6702,55 @@ mod tests {
         // No `[tls]` identity here, so nothing could be sealed (and without `compliance` nothing is tried):
         // every accepted change is counted as unaudited.
         assert_eq!(unaudited(), changes());
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// A governed group's members decide its elections, so changing them is governance: `POST`/`DELETE
+    /// /gateway/mesh/group` (`mesh:write`) refuses a group under a membership intent **403** `governed_group`, naming
+    /// `/gateway/govern/group` (`govern:write`), which moves the node in or out; every membership change through either
+    /// route is audited or counted. A plain group stays a `mesh:write` join.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn a_governed_groups_membership_moves_only_through_a_governance_route() {
+        use axum::http::header::AUTHORIZATION;
+        let (gossip_port, http_port) = (alloc_port(), alloc_port());
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("t".into());
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}/gateway");
+        let changes = || agent.task_ctx.governance_changes.load(std::sync::atomic::Ordering::Relaxed);
+
+        let before = changes();
+        let r = client.post(format!("{base}/mesh/group")).header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"group": "plain"})).send().await.unwrap();
+        assert_eq!(r.status(), 200, "a plain group is a mesh:write join");
+        assert_eq!(changes(), before + 1, "and the change is audited or counted");
+
+        let r = client.post(format!("{base}/govern/membership")).header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"group": "ruled", "min": 1})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = client.post(format!("{base}/mesh/group")).header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"group": "ruled"})).send().await.unwrap();
+        assert_eq!(r.status(), 403, "a governed group refuses the data-plane join");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["error"], "governed_group");
+        assert!(body["message"].as_str().unwrap().contains("/gateway/govern/group"), "{body}");
+        let r = client.delete(format!("{base}/mesh/group?group=ruled")).header(AUTHORIZATION, "Bearer t").send().await.unwrap();
+        assert_eq!(r.status(), 403, "and the data-plane leave");
+
+        let before = changes();
+        let r = client.post(format!("{base}/govern/group")).header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"group": "ruled"})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["governed"], true, "{body}");
+        assert!(body["members"].as_array().unwrap().iter().any(|m| m == &serde_json::json!(agent.node_id().to_string())), "{body}");
+        assert_eq!(changes(), before + 1);
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
     }
 
