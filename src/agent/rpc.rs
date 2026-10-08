@@ -170,8 +170,7 @@ impl RpcRequestRx {
                 Err(e) => {
                     tracing::warn!(kind = %req.kind(), sender = %req.sender(),
                         "rpc_rx: caller context refused, answering with an error: {e}");
-                    let err = format!("{{\"error\":\"caller context refused: {e}\"}}");
-                    rpc_respond_ctx(&self.ctx, &req, Bytes::from(err.into_bytes()));
+                    rpc_respond_ctx(&self.ctx, &req, Bytes::from(caller_refusal_body(&e)));
                 }
             }
         }
@@ -309,8 +308,29 @@ pub(crate) async fn rpc_call_framed(
     result
 }
 
+/// The reply `rpc_rx` sends for a caller-context refusal: JSON with the message and a machine-readable `reason`
+/// ([`CallerError::code`]), so a requester can tell a transient refusal from a permanent one (#564). Built with
+/// `json!` — the error text can carry quotes (a serde message, a caller's `via`), and an unescaped body was not JSON.
+fn caller_refusal_body(e: &super::gateway_caller::CallerError) -> Vec<u8> {
+    serde_json::json!({ "error": format!("caller context refused: {e}"), "reason": e.code() })
+        .to_string()
+        .into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
+    /// #564's review: the refusal body is JSON whatever the error text holds, and names its reason.
+    #[test]
+    fn a_caller_refusal_body_is_json_with_a_reason() {
+        use super::super::gateway_caller::CallerError;
+        let body = caller_refusal_body(&CallerError::Malformed(r#"invalid type: string "x", expected u8"#.into()));
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(v["reason"], "malformed");
+        assert!(v["error"].as_str().unwrap().contains(r#""x""#));
+        let v: serde_json::Value = serde_json::from_slice(&caller_refusal_body(&CallerError::UnknownSigner)).unwrap();
+        assert_eq!(v["reason"], "unknown_signer");
+    }
+
     use super::*;
     use crate::{GossipAgent, GossipConfig, NodeId};
     use bytes::Bytes;

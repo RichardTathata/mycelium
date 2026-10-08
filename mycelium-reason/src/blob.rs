@@ -234,26 +234,77 @@ pub fn spawn_blob_server(agent: &Arc<GossipAgent>, store: Arc<FsBlobStore>) -> B
 
 // ── Mesh fetching ────────────────────────────────────────────────────────────
 
+/// What one provider's reply to a blob fetch says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReplyOutcome {
+    /// The blob: its bytes match the content address.
+    Valid,
+    /// Empty: the provider does not hold it.
+    Miss,
+    /// Bytes that fail the content address — a damaged copy ([`DAMAGED_REPLY`]) or a forgery.
+    Corrupt,
+    /// The provider's RPC layer answered for it — a caller-context or provider-enforcement refusal, a JSON object
+    /// with an `error` — so its store was never asked (#564). `transient` unless its `reason` is one that holds until
+    /// something changes ([`PERMANENT_REFUSALS`]); `reason` as given, or `unspecified`.
+    Refused { transient: bool, reason: String },
+}
+
+/// Refusal reasons that waiting does not undo: an envelope that is malformed, mismatched, unsigned or badly signed; a
+/// removed member; a denied action or authority not established; a malformed call. Any other reason — an unknown signer
+/// or a marker not yet gossiped, capacity, a timeout, a reason this version does not know, or none (an older peer) — is
+/// treated as transient: retried within the caller's deadline rather than ending the wait (#564's review).
+const PERMANENT_REFUSALS: &[&str] = &[
+    "malformed", "via_mismatch", "unsigned", "bad_signature", "removed",
+    "action_denied", "authority_not_established", "malformed_call", "caller_context_too_large",
+];
+
+/// Classify one reply. The content address is checked first, so a blob that happens to be such JSON is still a blob.
+fn reply_outcome(bytes: &[u8], id: &BlobId) -> ReplyOutcome {
+    if bytes.is_empty() {
+        return ReplyOutcome::Miss;
+    }
+    if BlobId::of(bytes) == *id {
+        return ReplyOutcome::Valid;
+    }
+    let Ok(serde_json::Value::Object(o)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return ReplyOutcome::Corrupt;
+    };
+    if !o.get("error").is_some_and(|e| e.is_string()) {
+        return ReplyOutcome::Corrupt;
+    }
+    let reason = o.get("reason").and_then(|r| r.as_str()).unwrap_or("unspecified").to_string();
+    ReplyOutcome::Refused { transient: !PERMANENT_REFUSALS.contains(&reason.as_str()), reason }
+}
+
 /// Why [`MeshBlobStore::fetch`] did not return a blob.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobMiss {
     /// No provider holds it — every one answered *miss*, or there is none. Transient while blobs propagate.
     NotFound,
-    /// At least one provider could not be reached (timeout or transport error) and none served it. Transient.
+    /// At least one provider could not be reached (timeout or transport error) or refused for now (its RPC layer
+    /// answered for it with a transient reason, #564), and none served it. Transient.
     Unavailable,
     /// Every copy anyone could serve — local or a provider's reply — fails the content address, and no
     /// provider was unreachable or merely lacked it. Not transient: damage or forgery, which waiting does
     /// not undo.
     Corrupt,
+    /// Every holder that could be asked refused, for a reason waiting does not undo (a removed member, a denied
+    /// action, a bad envelope — [`PERMANENT_REFUSALS`]), and none could not be reached or merely lacked it. Not
+    /// transient; the route answers 403 `refused` (#564's review: *authorization refusal stays distinguishable*).
+    Refused,
 }
 
 impl BlobMiss {
-    fn classify(corrupt: usize, unreachable: usize, missed: usize) -> Self {
-        if corrupt > 0 && unreachable == 0 && missed == 0 {
-            Self::Corrupt
-        } else if unreachable > 0 {
+    fn classify(corrupt: usize, unreachable: usize, missed: usize, refused: usize) -> Self {
+        if unreachable > 0 {
             Self::Unavailable
+        } else if missed > 0 {
+            Self::NotFound
+        } else if refused > 0 {
+            Self::Refused // a refusing holder may hold a good copy, so a refusal outranks corrupt evidence
+        } else if corrupt > 0 {
+            Self::Corrupt
         } else {
             Self::NotFound
         }
@@ -265,6 +316,7 @@ impl BlobMiss {
             Self::NotFound => "not_found",
             Self::Unavailable => "unavailable",
             Self::Corrupt => "corrupt",
+            Self::Refused => "refused",
         }
     }
 }
@@ -327,7 +379,7 @@ impl MeshBlobStore {
         let local_damaged = corrupt > 0;
         let providers = self.agent.capabilities().resolve(&CapFilter::new(BLOB_CAP_NS, BLOB_CAP_NAME));
         let me = self.agent.node_id().clone();
-        let (mut unreachable, mut missed) = (0usize, 0usize);
+        let (mut unreachable, mut missed, mut refused) = (0usize, 0usize, 0usize);
         let mut asked: Vec<String> = Vec::new(); // who answered what, for the miss log (#563)
         for (node, _) in providers {
             if node == me {
@@ -338,23 +390,31 @@ impl MeshBlobStore {
                 .service()
                 .rpc_call(node.clone(), BLOB_FETCH_KIND, Bytes::copy_from_slice(&id.0), self.fetch_timeout)
                 .await;
-            match reply {
-                Ok(bytes) if !bytes.is_empty() && BlobId::of(&bytes) == *id => {
+            match reply.as_ref().map(|bytes| reply_outcome(bytes, id)) {
+                Ok(ReplyOutcome::Valid) => {
+                    let bytes = reply.expect("a valid outcome is an Ok reply");
                     if let Err(e) = self.local.put(&bytes) {
                         warn!(id = %id, error = %e, "write-back cache of mesh blob failed");
                     }
                     return Ok(bytes);
                 }
-                Ok(bytes) if !bytes.is_empty() => {
+                Ok(ReplyOutcome::Corrupt) => {
                     corrupt += 1;
                     asked.push(format!("{node}=corrupt"));
                     warn!(id = %id, provider = %node, "mesh blob failed content verification — trying next provider");
                 }
-                Ok(_) => { missed += 1; asked.push(format!("{node}=miss")); } // it does not hold it (yet)
+                Ok(ReplyOutcome::Refused { transient, reason }) => {
+                    // The holder's RPC layer answered for it, so its store was never asked (#564). A refusal that
+                    // passes as gossip converges (an unknown signer, a marker not yet seen, or no reason — an older
+                    // peer) is a holder that could not be asked yet; any other holds until something changes.
+                    if transient { unreachable += 1 } else { refused += 1 }
+                    asked.push(format!("{node}=refused({reason})"));
+                }
+                Ok(ReplyOutcome::Miss) => { missed += 1; asked.push(format!("{node}=miss")); } // it does not hold it (yet)
                 Err(e) => { unreachable += 1; asked.push(format!("{node}=unreachable({e})")); } // it may
             }
         }
-        let miss = BlobMiss::classify(corrupt, unreachable, missed);
+        let miss = BlobMiss::classify(corrupt, unreachable, missed, refused);
         // Which not-found case this was — no other provider resolved, or each answered miss — is what #563 could not
         // tell from a CI failure. Debug: a retriable miss is a state clients poll through, one line per poll per blob.
         debug!(id = %id, reason = miss.as_str(), local_damaged,
@@ -372,6 +432,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = FsBlobStore::open(dir.path()).unwrap();
         (dir, s)
+    }
+
+    /// #564: a refusal from the provider's RPC layer — caller context, provider enforcement — is not a bad copy; it is
+    /// a holder that could not be asked. A damaged copy and forged bytes stay corrupt; a JSON blob is still a blob.
+    #[test]
+    fn an_rpc_refusal_is_not_a_corrupt_copy() {
+        let id = BlobId::of(b"payload");
+        assert_eq!(reply_outcome(b"payload", &id), ReplyOutcome::Valid);
+        assert_eq!(reply_outcome(b"", &id), ReplyOutcome::Miss);
+        assert_eq!(reply_outcome(DAMAGED_REPLY, &id), ReplyOutcome::Corrupt);
+        assert_eq!(reply_outcome(b"forged", &id), ReplyOutcome::Corrupt);
+        let refused = |transient: bool, reason: &str| ReplyOutcome::Refused { transient, reason: reason.into() };
+        assert_eq!(reply_outcome(br#"{"error":"caller context refused: unknown signer","reason":"unknown_signer"}"#, &id), refused(true, "unknown_signer"));
+        assert_eq!(reply_outcome(br#"{"error":"caller context refused: removed","reason":"removed"}"#, &id), refused(false, "removed"));
+        assert_eq!(reply_outcome(br#"{"error":"denied","reason":"action_denied","data":null}"#, &id), refused(false, "action_denied"));
+        assert_eq!(reply_outcome(br#"{"error":"full","reason":"at_capacity","data":null}"#, &id), refused(true, "at_capacity"));
+        assert_eq!(reply_outcome(br#"{"error":"caller context refused: unknown signer"}"#, &id), refused(true, "unspecified"),
+                   "an older peer's refusal names no reason: retriable");
+        assert_eq!(reply_outcome(br#"{"error":7}"#, &id), ReplyOutcome::Corrupt, "not a refusal's shape");
+        let json_blob = br#"{"error":"this is the payload"}"#;
+        assert_eq!(reply_outcome(json_blob, &BlobId::of(json_blob)), ReplyOutcome::Valid);
     }
 
     #[test]
@@ -408,15 +489,21 @@ mod tests {
     /// bad provider sits beside one that simply has not received it (the review of #542, finding 1).
     #[test]
     fn a_miss_is_classified_by_its_worst_evidence() {
-        assert_eq!(BlobMiss::classify(0, 0, 0), BlobMiss::NotFound, "no copy and no provider");
-        assert_eq!(BlobMiss::classify(0, 0, 2), BlobMiss::NotFound, "every provider answered miss");
-        assert_eq!(BlobMiss::classify(0, 2, 0), BlobMiss::Unavailable, "a provider that could not be reached may hold it");
-        assert_eq!(BlobMiss::classify(1, 0, 0), BlobMiss::Corrupt, "every copy anyone could serve is bad");
-        assert_eq!(BlobMiss::classify(1, 0, 1), BlobMiss::NotFound, "an honest provider may still receive it");
-        assert_eq!(BlobMiss::classify(1, 3, 0), BlobMiss::Unavailable, "an unreachable provider may hold a good copy");
+        assert_eq!(BlobMiss::classify(0, 0, 0, 0), BlobMiss::NotFound, "no copy and no provider");
+        assert_eq!(BlobMiss::classify(0, 0, 2, 0), BlobMiss::NotFound, "every provider answered miss");
+        assert_eq!(BlobMiss::classify(0, 2, 0, 0), BlobMiss::Unavailable, "a provider that could not be reached may hold it");
+        assert_eq!(BlobMiss::classify(1, 0, 0, 0), BlobMiss::Corrupt, "every copy anyone could serve is bad");
+        assert_eq!(BlobMiss::classify(1, 0, 1, 0), BlobMiss::NotFound, "an honest provider may still receive it");
+        assert_eq!(BlobMiss::classify(1, 3, 0, 0), BlobMiss::Unavailable, "an unreachable provider may hold a good copy");
+        // #564: a permanent refusal from every holder that could be asked is its own answer; a transient one counts
+        // with the unreachable; a miss or an unreachable holder beside a refusal keeps the wait going.
+        assert_eq!(BlobMiss::classify(0, 0, 0, 2), BlobMiss::Refused, "every holder refused, for good");
+        assert_eq!(BlobMiss::classify(1, 0, 0, 1), BlobMiss::Refused, "a refusing holder may hold a good copy");
+        assert_eq!(BlobMiss::classify(0, 0, 1, 1), BlobMiss::NotFound, "one lacks it, one refused: it may yet arrive");
+        assert_eq!(BlobMiss::classify(0, 1, 0, 1), BlobMiss::Unavailable, "one unreachable (or refused for now)");
         assert_eq!(
-            [BlobMiss::NotFound, BlobMiss::Unavailable, BlobMiss::Corrupt].map(BlobMiss::as_str),
-            ["not_found", "unavailable", "corrupt"]
+            [BlobMiss::NotFound, BlobMiss::Unavailable, BlobMiss::Corrupt, BlobMiss::Refused].map(BlobMiss::as_str),
+            ["not_found", "unavailable", "corrupt", "refused"]
         );
     }
 

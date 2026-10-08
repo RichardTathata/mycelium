@@ -79,6 +79,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`tests/converge.py`) that keeps waiting on a retriable miss and stops on any non-transient reason, with node-free
   tests seen failing first; `TestRowBeforeBlob`'s second poll re-raises a non-retriable one instead of spinning to its
   deadline. Test-only; no package change.
+- **A blob fetch tells a refusal from a corrupt copy (#564; `mycelium-reason` 0.7.1).** A provider's RPC layer refusing
+  the fetch read as a corrupt copy — non-retriable — so a transient refusal ended every checkpointer retry loop. The
+  refusal is now read by its reason: a transient one (an unknown signer, a marker not yet seen, or none) is
+  `unavailable` (503, retriable); one that holds (a removed member, a denied action, a bad envelope), from every holder
+  that could be asked, is `refused` (403, which the checkpointer reads as `unauthorized`). For that, `rpc_rx`'s
+  caller-context refusal is now JSON built with `json!` — an error text with quotes made it invalid JSON, read as
+  corrupt — and carries `reason` (`CallerError::code`). See `mycelium-reason/CHANGELOG.md`.
 
 ## [2.27.0] — 2026-10-07
 

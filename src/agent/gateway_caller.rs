@@ -211,6 +211,22 @@ pub enum CallerError {
     Removed,
 }
 
+impl CallerError {
+    /// A stable machine-readable name, carried in `rpc_rx`'s refusal reply so a requester can act on it: the signer
+    /// not yet known and the marker not yet seen pass as gossip converges; the rest hold until something changes.
+    pub fn code(&self) -> &'static str {
+        match self {
+            CallerError::Malformed(_) => "malformed",
+            CallerError::ViaMismatch { .. } => "via_mismatch",
+            CallerError::Unsigned => "unsigned",
+            CallerError::UnknownSigner => "unknown_signer",
+            CallerError::BadSignature => "bad_signature",
+            CallerError::Missing => "missing",
+            CallerError::Removed => "removed",
+        }
+    }
+}
+
 impl std::fmt::Display for CallerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
