@@ -6,7 +6,7 @@ set -uo pipefail
 # Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
 # `run <case>` lines below without building anything.
 if [ "${1:-}" = --list ]; then
-  sed -n 's/^run \([a-z_]*\) .*/@@case-list@@ scripts\/test-ci-retest.sh::\1/p' "$0"; exit 0
+  exec python3 "$(dirname "$0")/list-script-cases.py" "$0" scripts/test-ci-retest.sh run '{1}'
 fi
 here="$(cd "$(dirname "$0")" && pwd)"
 dir="$(mktemp -d)"

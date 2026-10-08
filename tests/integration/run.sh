@@ -5,8 +5,7 @@ set -euo pipefail
 # Verification policy rule 3: each scenario prints `@@case@@ <suite>::<case>` as it starts (the case is its
 # script's name), and --list names the `run_scenario` lines below on the host, without Docker or a cluster.
 if [ "${1:-}" = --list ]; then
-    sed -n 's|^run_scenario "[^"]*" *"$SCENARIOS_DIR/\([^"]*\)\.sh"$|@@case-list@@ tests/integration/run.sh::\1|p' "$0"
-    exit 0
+    exec python3 "$(dirname "$0")/../../scripts/list-script-cases.py" "$0" tests/integration/run.sh run_scenario '{2:stem}'
 fi
 
 PASS=0

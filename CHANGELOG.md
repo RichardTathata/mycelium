@@ -33,7 +33,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thirteen demos each a case) and the LangGraph ladder, so a case dropped from its script, or a step that stops
   running it, fails the job. The Docker suites (`cluster-suites.yml`: integration scenarios, overlay, federation
   legs, confined-fleet phases, stem-examples demos) list theirs before starting Docker and are checked by a new
-  `case-coverage` job in that workflow (`ci-test-coverage.py --scripts-only`). No suite tests anything different.
+  `case-coverage` job in that workflow (`ci-test-coverage.py --scripts-only --require <jobs>`). Every listing is
+  now named (`@@test-universe@@ begin <source>`) and each expected one must be non-empty, rather than a count of
+  blocks; a shell suite's list is derived from its calls by `scripts/list-script-cases.py`, which fails on a call
+  it cannot read. No suite tests anything different.
 
 ## [2.27.0] — 2026-10-07
 

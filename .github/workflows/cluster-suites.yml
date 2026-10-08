@@ -44,6 +44,8 @@ on:
       - 'examples/coop/**'
       - '.github/workflows/cluster-suites.yml'
       - 'scripts/ci-test-coverage.py'
+      - 'scripts/list-script-cases.py'
+      - 'Makefile'
   pull_request:
     paths:
       - 'src/**'
@@ -64,6 +66,8 @@ on:
       - 'examples/coop/**'
       - '.github/workflows/cluster-suites.yml'
       - 'scripts/ci-test-coverage.py'
+      - 'scripts/list-script-cases.py'
+      - 'Makefile'
   schedule:
     - cron: '0 5 * * *'   # nightly 05:00 UTC — catches drift even with no code change
   workflow_dispatch: {}   # run on demand before a risky merge
@@ -77,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: List the suite's cases (no Docker)
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin integration"
           bash tests/integration/run.sh --list
           echo "@@test-universe@@ end"
       # `make test`: docker-compose up --build (node-a/b, late-joiner node-c, mgmt, runner),
@@ -93,7 +97,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: List the suite's cases (no Docker)
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin overlay"
           python3 tests/overlay/run.py --list
           echo "@@test-universe@@ end"
       # `make test-overlay`: 3-node overlay cluster (task auction / leader election / shared
@@ -113,7 +117,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: List the suite's cases (no Docker)
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin confined-fleet"
           bash scripts/test-confined-fleet.sh --list
           echo "@@test-universe@@ end"
       # Deployment evidence, not replay evidence: a real cluster with a CNI that enforces NetworkPolicy, the reference
@@ -131,7 +135,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: List the suite's cases (no Docker)
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin federation"
           bash tests/integration/run_federation.sh --list
           echo "@@test-universe@@ end"
       # `make test-federation`: two meshes under two CAs, one container per node, the consumer
@@ -150,7 +154,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: List the suite's cases (no Docker)
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin stem-examples"
           make -s list-stem-examples
           echo "@@test-universe@@ end"
       # `make test-stem-examples`: for each recut demo, one image (`docker/Dockerfile.stem`), an init
@@ -162,7 +166,8 @@ jobs:
 
   case-coverage:
     # Verification policy rule 3 for these suites: ci.yml's test-coverage job reads only its own run, so this
-    # workflow checks its own. Each job above lists its suite's cases before it starts Docker, and each case
+    # workflow checks its own. Each job above lists its suite's cases (a block named for the job) before it
+    # starts Docker, and each case
     # prints `@@case@@ <suite>::<case>` as it starts; this fails on any listed case that never did — a scenario
     # dropped from its runner's list, a leg the runner never reached, SKIP_NODES left on.
     name: Test coverage (observed, Docker suites)
@@ -174,6 +179,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - run: python3 scripts/ci-test-coverage.py --fetch --scripts-only "$RUNNER_TEMP/job-logs"
+      # One named listing per suite job, each required non-empty: a dropped listing step fails here.
+      - run: >-
+          python3 scripts/ci-test-coverage.py --fetch --scripts-only
+          --require integration,overlay,confined-fleet,federation,stem-examples "$RUNNER_TEMP/job-logs"
         env:
           GH_TOKEN: ${{ github.token }}

@@ -28,10 +28,12 @@ the list cannot rot.
 
 Usage: ci-test-coverage.py <dir of job logs>      (each file one job's log, as the API returns it)
        ci-test-coverage.py --fetch <dir>          (GITHUB_REPOSITORY, GITHUB_RUN_ID, GH_TOKEN: fetch, then check)
-       ci-test-coverage.py [--fetch] --scripts-only <dir>
+       ci-test-coverage.py [--fetch] --scripts-only --require <src,src…> <dir>
                                                   (a workflow with no Rust/Python/TypeScript universe — the
                                                    Docker cluster suites: check only ``script`` cases, and
-                                                   require one non-empty listing)
+                                                   require each named job's listing, non-empty)
+Each listing is bracketed ``@@test-universe@@ begin <source>`` … ``end``; without --require the sources required
+are REQUIRED_SOURCES. CI_TEST_COVERAGE_EXCEPTIONS names another exceptions file (the self-test's).
 """
 from __future__ import annotations
 
@@ -90,23 +92,39 @@ def clean(line: str) -> str:
 TRACKED: list[str] = []
 
 
-LISTED_BLOCKS: list[int] = []   # entries listed per complete universe block (begin…end)
+LISTED_BLOCKS: list[tuple[str, int]] = []   # (source, entries listed) per complete universe block (begin…end)
+# Each listing names its source — `@@test-universe@@ begin <source>` — and the check requires each expected source
+# present and non-empty, so a dropped listing cannot hide behind the others (a bare `begin` is read, as before,
+# but satisfies no requirement). The CI workflow's three; the Docker workflow passes its own with --require.
+REQUIRED_SOURCES = ["rust-python", "typescript", "scripts"]
 
 
 def scan(text: str, executed: set, universe: set):
     target = None
     jest_file = None
     universe_mode = False
+    in_step_source = False
     listed = 0
+    source = ""
     for raw in text.split("\n"):
         line = clean(raw)
+        # GitHub echoes a `run:` block's source between `##[group]Run …` and `##[endgroup]` before running it. A
+        # marker written literally there (even under a branch never taken) is not a run, and a mark opens nothing.
+        if line.startswith("##[group]Run "):
+            in_step_source = True
+            continue
+        if in_step_source:
+            if line.startswith("##[endgroup]"):
+                in_step_source = False
+            continue
         if UNIVERSE_MARK in line:
-            mark = line.split(UNIVERSE_MARK, 1)[1].strip()
-            if mark == "begin":
+            mark = line.split(UNIVERSE_MARK, 1)[1].split()
+            if mark[:1] == ["begin"] and len(mark) <= 2:
                 universe_mode, listed = True, 0
-            elif mark == "end" and universe_mode:
+                source = mark[1] if len(mark) == 2 else ""
+            elif mark == ["end"] and universe_mode:
                 universe_mode = False
-                LISTED_BLOCKS.append(listed)
+                LISTED_BLOCKS.append((source, listed))
             continue
         m = CASE_LISTED.search(line)
         if m:
@@ -185,7 +203,7 @@ def scan(text: str, executed: set, universe: set):
 
 
 def exceptions(root: str) -> list[tuple[str, str]]:
-    path = os.path.join(root, "scripts", "test-coverage-exceptions.txt")
+    path = os.environ.get("CI_TEST_COVERAGE_EXCEPTIONS") or os.path.join(root, "scripts", "test-coverage-exceptions.txt")
     out = []
     if os.path.exists(path):
         for line in open(path, encoding="utf-8"):
@@ -235,7 +253,15 @@ def main() -> int:
     args = sys.argv[1:]
     fetching = "--fetch" in args
     scripts_only = "--scripts-only" in args
+    require: list[str] = []
+    if "--require" in args:
+        i = args.index("--require")
+        require = [r for r in args[i + 1].split(",") if r]
+        del args[i:i + 2]
     args = [a for a in args if a not in ("--fetch", "--scripts-only")]
+    if scripts_only and not require:
+        sys.exit("ci-test-coverage: --scripts-only needs --require <source,…>: the listings each job must print")
+    require = require or REQUIRED_SOURCES
     logs = args[0]
     if fetching:
         fetch(logs)
@@ -249,23 +275,31 @@ def main() -> int:
     for f in sorted(glob.glob(os.path.join(logs, "*"))):
         scan(open(f, encoding="utf-8", errors="replace").read(), executed, universe)
     if scripts_only:
-        # The Docker workflow: each job lists its own suite's cases before it starts Docker, so the check is
-        # one non-empty listing per job at least, over script cases only.
+        # The Docker workflow: each job lists its own suite's cases before it starts Docker; only script cases.
         executed = {k for k in executed if k.startswith("script ")}
         universe = {k for k in universe if k.startswith("script ")}
-        if not LISTED_BLOCKS or min(LISTED_BLOCKS) == 0:
-            print(f"ci-test-coverage: no script suite listed its cases ({len(LISTED_BLOCKS)} complete block(s), "
-                  f"sizes {LISTED_BLOCKS})")
-            return 1
-    # The universe must have been listed: a test-universe job that failed or was cancelled would otherwise
-    # leave only what ran, and a test that never ran anywhere would be unknown rather than missing.
-    elif len(LISTED_BLOCKS) < 2 or min(LISTED_BLOCKS) == 0:
-        print(f"ci-test-coverage: the test universe was not listed ({len(LISTED_BLOCKS)} complete block(s), "
-              f"sizes {LISTED_BLOCKS}): expected the test-universe job's and the TypeScript job's, each non-empty")
+    # The universe must have been listed, every part of it: a listing job that failed or was cancelled, or a
+    # listing step dropped, would otherwise leave only what ran, and a test that never ran anywhere would be
+    # unknown rather than missing.
+    sizes: dict[str, int] = {}
+    for src, n in LISTED_BLOCKS:
+        sizes[src] = sizes.get(src, 0) + n
+    unlisted = [r for r in require if not sizes.get(r)]
+    if unlisted:
+        print(f"ci-test-coverage: the test universe was not listed: no non-empty listing from {', '.join(unlisted)} "
+              f"(listed: {sizes or 'nothing'})")
         return 1
-    exc = exceptions(root)
-    if scripts_only:
-        exc = [(p, r) for p, r in exc if p.startswith("script ")]
+    # One exceptions file serves two workflows, so an exception is judged (used, or stale) only where it is in
+    # scope: a `script` one where its suite is listed, a Rust/Python/TypeScript one only outside --scripts-only.
+    listed_suites = {k[len("script "):].split("::", 1)[0] for k in universe if k.startswith("script ")}
+
+    def in_scope(pat: str) -> bool:
+        if pat.startswith("script "):
+            suite = pat[len("script "):].split("::", 1)[0]
+            return any(fnmatch.fnmatchcase(s, suite) for s in listed_suites)
+        return not scripts_only
+
+    exc = [(p, r) for p, r in exceptions(root) if in_scope(p)]
     used = set()
     missing = []
     for key in sorted(universe - executed):

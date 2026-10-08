@@ -11,7 +11,7 @@ set -uo pipefail
 # Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names the
 # `run_demo` lines below (each demo's binary is its case) without running them.
 if [ "${1:-}" = --list ]; then
-  sed -n 's/^run_demo "[^"]*" *\([a-z_]*\) .*/@@case-list@@ examples\/coop\/ci_smoke.sh::\1/p' "$0"; exit 0
+  exec python3 "$(dirname "$0")/../../scripts/list-script-cases.py" "$0" examples/coop/ci_smoke.sh run_demo '{2}'
 fi
 
 cd "$(dirname "$0")/../.."

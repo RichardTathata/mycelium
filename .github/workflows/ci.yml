@@ -689,7 +689,7 @@ jobs:
       # (skipped ones too), listed — the test-coverage job checks each executed somewhere.
       - name: List the TypeScript test universe
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin typescript"
           npx jest --listTests
           python3 ../scripts/ci-jest-universe.py "$RUNNER_TEMP/jest-results.json"
           echo "@@test-universe@@ end"
@@ -813,7 +813,7 @@ jobs:
       - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
       - name: List every test
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin rust-python"
           cargo test --workspace --all-features --no-fail-fast -- --list
           # Every workspace crate's own featureless build, so a test gated `not(feature = …)` in any crate is
           # known (derived from cargo metadata, so a new crate is covered the day it joins the workspace). A
@@ -830,7 +830,7 @@ jobs:
       # list and check theirs in cluster-suites.yml, a workflow this run does not include.
       - name: List the script suites' cases
         run: |
-          echo "@@test-universe@@ begin"
+          echo "@@test-universe@@ begin scripts"
           python3 scripts/test-check-materials.py --list
           python3 scripts/test-ci-test-coverage.py --list
           bash scripts/test-ci-retest.sh --list

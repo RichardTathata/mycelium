@@ -9,3 +9,6 @@
   workflow.
 - Pages: `verification-policy.md` (what the job sees and cannot), `cluster-suites.md` (the per-case check);
   `docs/operations/what-is-proven.md`'s universe row.
+- Review round 1: listings named and required by source (a third block had let a missing TypeScript listing
+  pass a count of two); `--scripts-only --require` one listing per Docker job; exceptions scoped per workflow;
+  GitHub's echo of a step's source ignored; shell lists derived by `scripts/list-script-cases.py`.

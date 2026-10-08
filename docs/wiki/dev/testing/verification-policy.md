@@ -57,15 +57,25 @@ an auditor enumerated surfaces from the code instead of the description:
   `--json` report, skipped ones included — `scripts/ci-jest-universe.py`, which refuses two same-titled tests in one
   file because the verbose log keys a test by its leaf title), and the **script-style suites**' cases: each
   suite's `--list` prints one `@@case-list@@ <suite>::<case>` line per case without running anything, and a run
-  prints `@@case@@ <suite>::<case>` as each case starts (keyed `script <suite>::<case>`). That covers
+  prints `@@case@@ <suite>::<case>` as each case starts (keyed `script <suite>::<case>`; a marker inside GitHub's
+  echo of a step's source, `##[group]Run …`, is not a run). A shell suite whose cases are calls (`run_demo`,
+  `run_scenario`, `leg`, `run`) derives its list from them with `scripts/list-script-cases.py`, which reads the
+  shell grammar and fails the listing on a call it cannot read rather than dropping it. That covers
   `scripts/test-*` (except the inventory's own mutation suite, below), `wire-check-examples.sh` (one case per
   example directory), the seven `ci_smoke.sh` suites (each demo, mode or section a case; one case where the
   suite is one dependent scenario) and the LangGraph ladder (listed from the directory). The **Docker suites**
   (`cluster-suites.yml`: the 13 integration scenarios, overlay S11–S13, the ten federation legs, the
   confined-fleet phases, the stem-examples demos) run in a workflow this job never reads, so that workflow
-  checks its own: each job lists its suite's cases from a static list in the runner before it starts Docker,
-  and its `case-coverage` job runs `ci-test-coverage.py --scripts-only` over the run's logs. It fails if the
-  universe was not listed, and if a job it does not wait for is unfinished. Tests that never run in CI by
+  checks its own: before it starts Docker, each job lists its suite's cases on the host — derived from the
+  runner's calls (`run.sh`, `run_federation.sh`), from the runner's scenario table (`run.py`), from the
+  script's phase list (`test-confined-fleet.sh`) or from the Makefile's `STEM_DEMOS` (`make -s
+  list-stem-examples`) — in a listing named for the job, and its `case-coverage` job runs `ci-test-coverage.py
+  --scripts-only --require <the five jobs>` over the run's logs. Every listing is named (`@@test-universe@@
+  begin <source>`) and each required one must be present and non-empty — `rust-python`, `typescript` and
+  `scripts` here, one per suite job there — so one dropped listing fails the check rather than hiding behind
+  the others. It also fails if a job it does not wait for is unfinished. The exceptions file serves both
+  workflows: a `script` exception is judged (used, or stale) only where its suite is listed, a Rust, Python or
+  TypeScript one only in this job. Tests that never run in CI by
   design — loom's broken twins, perf smokes, the fixture regenerator, `ignore` doctest fragments — are listed
   with a reason in `scripts/test-coverage-exceptions.txt`, and an exception that matches nothing fails. On
   #541's own CI (2026-10-07): 1,950 known, 1,936 executed, 14 excepted. Its first real run found the flake

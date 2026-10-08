@@ -19,8 +19,7 @@ set -uo pipefail
 # Verification policy rule 3: each leg is a case. `leg N slug` prints `@@case@@ <suite>::<N-slug>` as the leg
 # starts, and --list names the `leg` lines below on the host, without Docker.
 if [ "${1:-}" = --list ]; then
-    sed -n 's|^leg \([0-9]*\) \([a-z-]*\) .*|@@case-list@@ tests/integration/run_federation.sh::\1-\2|p' "$0"
-    exit 0
+    exec python3 "$(dirname "$0")/../../scripts/list-script-cases.py" "$0" tests/integration/run_federation.sh leg '{1}-{2}'
 fi
 
 PASS=0; FAIL=0
