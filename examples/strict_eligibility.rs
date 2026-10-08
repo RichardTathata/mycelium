@@ -8,8 +8,8 @@
 //! # The setting
 //!
 //! A food co-op rotates its coordinator role every four weeks, and its members agreed that nobody
-//! holds it for more than **two terms in a row** — so the work of running the pick-ups and the
-//! supplier rota keeps being learned by new people. The members' assembly is the appointing
+//! holds it for more than **two terms in a row**, nor for more than **three terms in all** — so the
+//! work of running the pick-ups and the supplier rota keeps being learned by new people. The members' assembly is the appointing
 //! authority: it records each appointment in the knowledge layer and publishes a **signed head** on
 //! one stream, `appointments/coordinator`, each head naming the head before it.
 //!
@@ -22,22 +22,27 @@
 //! fetch is a gap, and only what follows the last gap is vouched for. `eligibility::eligible_strict`
 //! then answers per configured rule: `Eligible`, `Ineligible`, or `Unknown` naming what is missing.
 //!
-//! Six acts, each asserted — the program exits non-zero on a miss:
+//! Six asserted acts and a closing note — the program exits non-zero on a miss:
 //!
 //! 1. the assembly publishes six appointments; a member's node verifies them and its reader advances;
 //! 2. a candidate who rested for two terms is **eligible**;
 //! 3. a candidate who has served two terms in a row is **not eligible**;
 //! 4. **unknown**: a node missing one appointment record (the lenient check says yes on the same
-//!    records), and a node whose reader holds no checkpoint for the stream (all heads presented to it);
+//!    records; cumulative tenure is unknown even for a candidate whose consecutive-terms rule stays
+//!    decided), and a node whose reader holds no checkpoint for the stream (all heads presented to it);
 //! 5. revoking the assembly's old signing key does **not** end the role's history — for a reader whose
-//!    checkpoint is under the current key; one whose checkpoint is under the revoked key vouches for nothing;
+//!    checkpoint is under the current key; one whose checkpoint is under the revoked key vouches for
+//!    nothing. The revocation is a hand-built key view, not one learned through the identity path;
 //! 6. readiness: the incoming coordinator has read the handover journal **and** is eligible.
 //!
 //! # What it does not demonstrate
 //!
 //! That the assembly published every appointment there was — a source vouches for the chain it holds.
 //! That this node's reader has heard the assembly's newest head: "current" means as of the reader's
-//! checkpoint. Records and heads are handed over in-process here rather than gossiped; the gossip path is
+//! checkpoint. That a revocation reaches a node through the identity path — the key view here is built by
+//! hand (`MemberKeys::revoked`), not read from `GossipAgent::knowledge_member_keys` under `compliance`. The
+//! cooling-off rule: it does not fit this co-op's rules (a rest after every term would forbid the two-in-a-row
+//! the members allow), so it is shown in `src/mandate/eligibility.rs`'s tests. Records and heads are handed over in-process here rather than gossiped; the gossip path is
 //! the knowledge layer's own (`examples/knowledge_layer.rs`).
 
 use ed25519_dalek::SigningKey;
@@ -205,13 +210,18 @@ impl MemberNode {
 
 fn show(name: &str, e: &StrictEligibility) {
     note(format!("{name}: consecutive terms → {:?}", e.consecutive.as_ref().expect("configured")));
+    note(format!("{:width$}  cumulative tenure → {:?}", "", e.cumulative.as_ref().expect("configured"), width = name.len()));
 }
 
 fn main() {
     println!("\x1b[1mStrict eligibility — a food co-op's rotating coordinator\x1b[0m");
-    let rules = IncumbencyRules { max_consecutive_terms: Some(2), ..IncumbencyRules::default() };
+    let rules = IncumbencyRules {
+        max_consecutive_terms: Some(2),
+        max_cumulative_ms: Some(3 * TERM),
+        ..IncumbencyRules::default()
+    };
     let now = 7 * TERM; // the start of term 7: who may coordinate it?
-    note("the members' rule: nobody coordinates for more than two terms in a row");
+    note("the members' rules: nobody coordinates for more than two terms in a row, or three in all");
     note("terms 1–6: amara · bea · bea · chidi · dana · dana — term 7 is being filled");
 
     let assembly = Assembly::new();
@@ -234,7 +244,9 @@ fn main() {
     let bea = eligible_strict(&rules, &history, &pid("bea"), now);
     show("bea", &bea);
     assert_eq!(bea.verdict(), RuleVerdict::Eligible);
-    note("her run of two was broken by chidi inside the verified history — decided, in her favour.");
+    assert_eq!(bea.cumulative, Some(RuleVerdict::Eligible), "two terms in all, from the role's first, under three");
+    note("her run of two was broken by chidi inside the verified history, and the history starts at the");
+    note("role's first term, so her total (two terms) is known — both rules decided, in her favour.");
 
     step(3, "dana, who coordinated terms 5 and 6, is not eligible for a third in a row");
     let dana = eligible_strict(&rules, &history, &pid("dana"), now);
@@ -259,14 +271,20 @@ fn main() {
     assert!(matches!(dana_gapped.verdict(), RuleVerdict::Unknown(_)), "her run reaches the gap: an earlier term may extend it");
     let bea_gapped = eligible_strict(&rules, &gapped, &pid("bea"), now);
     show("bea (strict)", &bea_gapped);
-    assert_eq!(bea_gapped.verdict(), RuleVerdict::Eligible, "a gap leaves unknown only what it could change");
-    note("the gap cannot change bea's answer (her run is zero at the head), so it stays decided.");
+    assert_eq!(bea_gapped.consecutive, Some(RuleVerdict::Eligible), "a gap leaves unknown only what it could change");
+    assert!(matches!(bea_gapped.cumulative, Some(RuleVerdict::Unknown(_))), "her total before term 6 is not known");
+    assert!(matches!(bea_gapped.verdict(), RuleVerdict::Unknown(_)), "one unknown rule makes the answer unknown");
+    note("the gap cannot change bea's run (zero at the head), so that rule stays decided — but the verified");
+    note("history no longer starts at the role's first term, so the total before it is not known: unknown.");
 
     bakery.receive_records(&assembly, [&published.records[4]]);
     let restored = bakery.history(&assembly, &published.heads, &keys);
     let dana_restored = eligible_strict(&rules, &restored, &pid("dana"), now);
     show("dana, once term 5's record arrives", &dana_restored);
     assert!(matches!(dana_restored.verdict(), RuleVerdict::Ineligible(Ineligible::ConsecutiveTerms { .. })));
+    let bea_restored = eligible_strict(&rules, &restored, &pid("bea"), now);
+    show("bea, once term 5's record arrives", &bea_restored);
+    assert_eq!(bea_restored.verdict(), RuleVerdict::Eligible, "with the whole history, her total is decided");
 
     note("(b) the orchard's node has just joined: every head and record is presented to it, but its");
     note("    reader holds no checkpoint for the stream yet");
@@ -280,7 +298,9 @@ fn main() {
     assert!(matches!(bea_fresh.verdict(), RuleVerdict::Unknown(_)), "no checkpoint: nothing is current, so nothing is decided");
     note("a presenter cannot make the history look current; the orchard decides once its reader advances.");
 
-    step(5, "the assembly's first signing key is revoked (a lost laptop)");
+    step(5, "the assembly's first signing key is revoked (a lost laptop) — in a hand-built key view");
+    note("the revocation is written into this node's key view by hand (`MemberKeys::revoked`), not learned");
+    note("through the identity path a deployment uses (`GossipAgent::knowledge_member_keys`, `compliance`).");
     let after_revocation = assembly.key_view(&[&assembly.first_key]);
     let history = pantry.history(&assembly, &published.heads, &after_revocation);
     note(format!("pantry (checkpoint on head 6, under the current key): {:?}", history.coverage()));
@@ -321,6 +341,8 @@ fn main() {
     note("· that the assembly published every appointment there was — the source vouches for the chain it holds");
     note("· that a reader has heard the newest head — \"current\" means as of this reader's checkpoint");
     note("· gossip delivery — records and heads are handed over in-process here");
+    note("· a revocation reaching the node through the identity path — act 5's key view is built by hand");
+    note("· the cooling-off rule — it would contradict this co-op's two-in-a-row; the eligibility tests show it");
 
     println!("\nAll assertions passed.");
 }

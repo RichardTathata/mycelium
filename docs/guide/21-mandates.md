@@ -178,11 +178,14 @@ a source of your own.
 
 `cargo run --example strict_eligibility --features tls` calls the source end to end (CI runs it): a food co-op's
 members' assembly publishes signed appointment records and heads for its rotating coordinator role (two terms in a
-row at most); a member's node verifies them, its reader advances, and `history_from_appointment_stream` builds the
+row, three in all, at most); a member's node verifies them, its reader advances, and `history_from_appointment_stream` builds the
 history each verdict is asserted on — a rested candidate **eligible**, one at the limit **not eligible**, `Unknown` for
-a node missing one appointment record (where the lenient check says yes) and for a node whose reader holds no
+a node missing one appointment record (where the lenient check says yes; cumulative tenure is `Unknown` there even for
+a candidate whose consecutive-terms rule stays decided) and for a node whose reader holds no
 checkpoint, and the history surviving the revocation of the assembly's old key for a reader on a current-key head
-(not for one still on a revoked-key head). The source's test module in
+(not for one still on a revoked-key head) — the revocation in a hand-built key view, not one learned through
+the identity path. Cooling-off is not in it (a rest after every term would contradict the co-op's two-in-a-row); the
+eligibility module's tests show it. The source's test module in
 [`src/mandate/history_source.rs`](../../src/mandate/history_source.rs) covers the rest case by case —
 `a_baseline_binds_only_at_the_head_it_was_taken_at` is the `StreamOrigin::Baseline` path the example does not take.
 
