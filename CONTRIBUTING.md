@@ -72,7 +72,8 @@ Run the gate before pushing. Do not trust a remembered test count — run the su
 
 ```sh
 # The pre-push gate: clippy across the feature matrix CI enforces (incl. --no-default-features, which
-# catches feature-gated dead code), the sim-seam and test-inventory checks — a few minutes, no wasmtime
+# catches feature-gated dead code), the examples build, and the repository's checks — sim seams, test
+# inventory, examples matrix, KV namespaces, the wiki mutation fence, positioning, materials. No wasmtime
 make check
 
 # The same plus the test suites and the WASM host's clippy
@@ -82,8 +83,11 @@ make check-full
 make test
 ```
 
-The underlying commands, and the companion crates' gates, are listed in
-[`CLAUDE.md` § Build & test gates](CLAUDE.md#build--test-gates-run-before-pushing).
+The Makefile's `check` and `check-full` targets are the canonical command lists; read them rather than a
+copy. **Prerequisites beyond the Rust toolchain:** `make check` needs **Python ≥ 3.11** (the test-inventory
+check imports `tomllib`; PyYAML is fetched into `target/check-venv` if missing). `make check-full` also runs the
+Python suites, so first, in a virtualenv:
+`pip install -e mycelium-py -e langgraph-checkpoint-mycelium pytest pytest-asyncio`.
 
 The integration suite requires Docker. The first run builds images from scratch;
 subsequent runs reuse the layer cache and are fast.
@@ -95,6 +99,26 @@ evidence that produced them, in [`docs/wiki/dev/testing/verification-policy.md`]
 enumerate every entry point to an invariant before fixing it; close a plan row only on quoted evidence;
 CI discovers tests rather than listing them; an independent adversarial review before merge. The PR
 template asks for each.
+
+### Adding a test or an example so CI runs it
+
+CI collects tests by discovery, and `make check` fails on either omission below — `check-test-inventory.py`
+for tests, `check-example-matrix.py` for examples.
+
+- **A Rust integration test** goes in `tests/` (or the crate's own `tests/`); CI runs `--test '*'`, so never
+  add it to a list.
+- **A test that needs `gateway` or `tls` off** goes in `mycelium-gateway-free-tests` or
+  `mycelium-tls-free-tests`: the root crate's dev-dependencies turn both features back on in every other test
+  build, so a `#[cfg(not(feature = "gateway"))]` test in the root crate never runs.
+- **A test that needs a live node** skips itself without one and reads its `*_LIVE_REQUIRED` guard
+  (`MYCELIUM_LIVE_REQUIRED`, `MYCELIUM_REASON_LIVE_REQUIRED`); set the guard in the CI step that starts the
+  node, so a missing node fails there instead of skipping.
+- **A script-style suite** answers `--list` with one `@@case-list@@ <suite>::<case>` line per case and prints
+  `@@case@@ <suite>::<case>` as each case starts — the `test-coverage` job reads those lines.
+- **An example CI runs** is written `scripts/example-case.sh cargo run --example NAME` in the workflow, and its
+  CI cell in [`examples/README.md`](examples/README.md) is ✓ (an every-change workflow), ✓ᵖ
+  (`cluster-suites.yml`, path-filtered) or · (not run).
+- **A deliberate exclusion** goes in `scripts/test-coverage-exceptions.txt`, with its reason.
 
 ### Test conventions
 
@@ -132,12 +156,12 @@ Do not use `SeqCst` unless you can justify it with a concrete data race.
 ## Layer rules
 
 Mycelium is built in three layers. Each layer writes to its own key prefix in the gossip
-KV store (see the namespace table in `src/lib.rs`). Respect this separation:
+KV store — the namespace table in `src/lib.rs` is canon; this table summarises it. Respect this separation:
 
 | Layer | Key prefix | Notes |
 |-------|-----------|-------|
 | I — KV | raw user keys | Substrate; no signal mesh, no consensus |
-| II — Signals | `sig/` | Reads from Layer I; never writes `gossip/` keys directly |
+| II — Signals | none of its own | Signals travel as wire messages, not KV keys; reads Layer I |
 | III — Consensus | `consensus/` | Builds on both layers |
 | Capability | `cap/`, `gcap/`, `sys/load/` | Reads and writes its own prefix only |
 
@@ -147,7 +171,7 @@ be merged.
 ## Wire protocol
 
 Changing the wire format requires a version bump. See the rolling-upgrade policy in
-`src/framing.rs` (the `WIRE_VERSION` block comment). The steps:
+`mycelium-core/src/framing.rs` (the `WIRE_VERSION` block comment). The steps:
 
 1. Add a `WireMessageVN` struct with the *old* field layout.
 2. Increment `WIRE_VERSION`; set `PREV_WIRE_VERSION` to the old value.
@@ -165,7 +189,8 @@ make test-scale-resilience    # 20-node resilience + late-joiner
 ```
 
 These are slow (~10 min cold) and RAM-intensive. Run them for changes that touch
-`src/connection.rs`, `src/writer.rs`, `src/store.rs`, or `src/agent/tasks.rs`.
+`mycelium-core/src/connection.rs`, `mycelium-core/src/writer.rs`, `mycelium-core/src/store.rs`, or
+`src/agent/tasks.rs`.
 
 ## Licensing
 

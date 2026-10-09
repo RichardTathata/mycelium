@@ -13,7 +13,8 @@ use crate::store::apply_and_notify;
 pub enum ConsistencyError {
     /// All ballot attempts timed out without reaching quorum.
     Timeout { ballots_tried: u32 },
-    /// Another node committed a value to the same slot first.
+    /// The slot was decided for another value — another node committed first, or (2.30.0) this
+    /// call's prepare phase adopted a value a quorum had already accepted.
     Superseded,
     /// Quorum met in headcount but the Hard topology gate was not satisfied.
     TopologyUnsatisfied,
@@ -30,7 +31,7 @@ impl std::fmt::Display for ConsistencyError {
             Self::Timeout { ballots_tried } =>
                 write!(f, "consensus timed out after {ballots_tried} ballot(s)"),
             Self::Superseded =>
-                write!(f, "another node committed to this slot first"),
+                write!(f, "the slot was decided for another value"),
             Self::TopologyUnsatisfied =>
                 write!(f, "quorum met but Hard topology gate not satisfied"),
             Self::ElectorateUnavailable { observed_members: 0, .. } =>

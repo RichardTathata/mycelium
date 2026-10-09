@@ -213,8 +213,15 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   rest`). The client's `IncompleteCheckpoint.reasons`
   carries the same word per blob — read from the route's body, so a proxy's own 502 page is `unavailable` —
   plus `unauthorized` for a 401/403 and `unsupported` for a bare 404 (that node serves no blob route), and
-  `retriable` is false for `corrupt`, `unauthorized` and `unsupported`: a damaged or forged blob, a token
-  without `llm:read`, or a node without the reason companion — each needs a person, not a retry.
+  `retriable` is false for `corrupt`, `unauthorized` and `unsupported`: a damaged or forged blob, a refused
+  read, or a node without the reason companion — each needs a person, not a retry. **A client
+  `unauthorized` is one of two causes**, which the checkpointer (0.3.0) does not yet tell apart: the gateway
+  refusing the token (no `llm:read`), or the route's own **403 `refused`** — every holder refused for good.
+  `GET /gateway/reason/blob/{id}` with a token that has `llm:read` says which: a body of `{"error":"refused"}`
+  means fix the holder's membership or authority, not the token. `refused` needs a substrate ≥ 2.28.0; against
+  an older one every holder refusal reads as 503 `unavailable`. **Which providers a miss asked** — and what each
+  answered (`miss`, `refused(reason)`, `unreachable`) — is a `debug` line, `blob fetch missed`: start the node
+  with `RUST_LOG=warn,mycelium_reason=debug` to see it.
   **Upgrade order:** the checkpointer to 0.3.0 before the reason nodes to 0.7.0 (a 0.2.x checkpointer reads a
   503 or 502 as an unrelated HTTP error). A damaged copy on disk is repaired by putting the right bytes again —
   the next successful mesh fetch on that node does it.

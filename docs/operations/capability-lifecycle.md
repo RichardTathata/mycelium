@@ -117,7 +117,8 @@ still travels as its own evaporating entry and no other node reads the file. A u
 code keeps working; the `mycelium` node binary itself does not read the file, because the provisioner
 lives in the wasm-host crate and the dependency runs the other way. An **SDK agent's** unit file
 reaches its node through `POST /gateway/units/declare` (scope `cap:write`; [guide 10](../guide/10-language-bridges.md)):
-the node declares its capabilities, requirements and groups, refuses the hosting sections with 422, and
+the node declares its capabilities, requirements and groups, refuses the hosting sections with 422 and a
+governed group's `[[group]]` with 403 `governed_group` (2.29.0), and
 reports lanes, mandates and rules as `not_enforced`.
 
 ### Running a stem
@@ -203,7 +204,12 @@ intervals. What to expect and do:
 - **Seeing who withdrew.** `mycelium_artifact_presence_sheds_total` counts this node's withdrawals; for the band
   and the rank, run the stem with `--trace-dir` and read the `prov.shed` decisions with `mycelium explain`
   ([diagnostics.md](diagnostics.md) § reading what a node decided): `above_ceiling` is a withdrawal,
-  `ranked_within_ceiling` a host that stayed, with its rank in the inputs.
+  `ranked_within_ceiling` a host that stayed, with its rank in the inputs. **The stem writes the trace when it
+  shuts down on SIGINT, and only then:** `docker stop` and a Kubernetes pod stop send SIGTERM, which
+  `mycelium-stem` does not handle — it is killed without writing the trace or withdrawing gracefully. Stop it
+  with `docker kill -s INT <container>` (or `kill -INT`) to collect a trace.
+- **A runnable ceiling.** `cargo run -p mycelium-wasm-host --example first_stem_fleet` (run in CI) declares a
+  band of exactly two over three stems that all self-elect, so the surplus host withdraws by rank.
 
 **Placed blobs that need a runtime.** A model or data pack is *placed* by a hosting unit, but a
 placed file serves nothing until the node-local runtime has it. A unit says how, per capability

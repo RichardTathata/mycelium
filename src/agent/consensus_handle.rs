@@ -1,6 +1,6 @@
 //! Consensus operations — [`ConsensusHandle`].
 //!
-//! Wraps the epidemic two-phase agreement primitives (Layer III):
+//! Wraps the agreement primitives (Layer III — prepare, propose, commit):
 //! group proposals, cluster-wide proposals, cross-group proposals,
 //! distributed locks, leader election, trust-slice declarations,
 //! and the consistent KV overlay.

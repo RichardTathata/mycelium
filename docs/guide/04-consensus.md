@@ -35,18 +35,21 @@ sequenceDiagram
     participant B as Voter B
     participant C as Voter C
 
-    P->>A: ConsensusPropose(slot=42, value="x")
-    P->>B: ConsensusPropose(slot=42, value="x")
-    P->>C: ConsensusPropose(slot=42, value="x")
-    A->>A: write ballot/42/A → "accept"
-    B->>B: write ballot/42/B → "accept"
-    C->>C: write ballot/42/C → "accept"
-    Note over A,C: Ballots gossip to all peers
-    P->>P: scan ballot/42/* → quorum reached
-    P->>A: ConsensusCommit(slot=42)
-    P->>B: ConsensusCommit(slot=42)
-    P->>C: ConsensusCommit(slot=42)
-    Note over A,C: committed/42 written to KV<br/>All nodes see consistent value
+    P->>A: Prepare(slot=42, ballot=b)
+    P->>B: Prepare(slot=42, ballot=b)
+    A-->>P: PrepareAck(promised b; accepted: none)
+    B-->>P: PrepareAck(promised b; accepted: none)
+    Note over P: a quorum promised; nothing accepted,<br/>so P may carry its own value "x"<br/>(else the highest-ballot accepted value)
+    P->>A: Propose(slot=42, ballot=b, value="x")
+    P->>B: Propose(slot=42, ballot=b, value="x")
+    P->>C: Propose(slot=42, ballot=b, value="x")
+    A-->>P: Vote(b, digest("x"))
+    C-->>P: Vote(b, digest("x"))
+    Note over P: quorum of value-bound votes
+    P->>A: Commit(slot=42, b, "x")
+    P->>B: Commit(slot=42, b, "x")
+    P->>C: Commit(slot=42, b, "x")
+    Note over A,C: committed/42 and decided/42 written to KV<br/>acceptor memory kept (2.30.0)
 ```
 
 **Available operations**
@@ -168,7 +171,7 @@ MYCELIUM_ROLE=overlay MYCELIUM_PORT=57012 MYCELIUM_HTTP_PORT=8402 \
 **Exercise the overlay**
 
 ```bash
-# Linearizable write
+# Ballot-serialized write — single-decree agreement on a stable roster, not linearizable
 curl -X POST http://localhost:8400/gateway/overlay/consistent/set \
   -H 'Content-Type: application/json' \
   -d '{"key":"counter","value_b64":"MQ=="}'   # "1"; a cluster-wide round — the route takes no group
@@ -196,6 +199,9 @@ The key is yours to choose except under `sys/` and `consensus/`, which the subst
   (2-of-3 quorum). Kill two and it blocks (no quorum).
 - Watch `ballot/` keys appear in the KV dump (`curl
   http://localhost:8400/gateway/kv/keys?prefix=consensus/`) as votes propagate.
+- Run two writes to the same key at once from different nodes: one answers `{"ok": true, …}`, the other
+  **409** `{"ok": false, "error": "superseded"}` — the later proposer learned the earlier's value in its
+  prepare phase and committed *that* (2.30.0). A timeout is **504**.
 
 ---
 
@@ -251,8 +257,8 @@ over the group definition's own `topology_policy`.
 
 ## Leased commits — decisions that expire
 
-By default a commit is **permanent**: the value stays authoritative until a higher-ballot commit
-replaces it. Set `ConsensusConfig::committed_lease_secs` to make it **self-expiring** — the commit
+By default a commit is **permanent**: the value stays authoritative until it is released (a lock
+release tombstones it); a different value proposed against it returns `Superseded`. Set `ConsensusConfig::committed_lease_secs` to make it **self-expiring** — the commit
 carries an epoch-lease window (written to `consensus/lease/{slot}`, gossiped like any entry), and
 once it lapses the slot **reopens**: the value stops being served and the next proposer wins a
 fresh round.
@@ -450,9 +456,11 @@ match agent.consensus().group_propose("workers", "coordinator", Bytes::from("nod
                  ballots_tried, votes_last_ballot, quorum_required);
     }
     ConsensusResult::Superseded { slot, ballot } => {
-        // Another node reached quorum first; read the committed value.
-        let v = agent.consensus().consensus_get(&slot).unwrap();
-        println!("superseded at ballot {}: {:?}", ballot, v);
+        // The slot was decided for another value — another proposer committed first, or this
+        // proposal carried a value a quorum had already accepted (2.30.0). Read what was decided:
+        if let Some(v) = agent.consensus().consensus_get(&slot) {
+            println!("superseded at ballot {}: {:?}", ballot, v);
+        }
     }
     ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } => {
         // This node cannot see an established electorate (2.14.0): an empty roster, or fewer
@@ -490,11 +498,12 @@ let slices = agent.consensus().group_trust("workers");
 
 | Decision | Rationale |
 |---|---|
-| Ballot numbering (SCP §6.2) | Monotonic counter at `consensus/ballot/{slot}`; higher ballot supersedes stale commits |
+| Ballot numbering (SCP §6.2) | Monotonic counter at `consensus/ballot/{slot}`, kept across commits; `consensus/decided/{slot}` records the ballot a commit was decided at — a floor acceptors refuse at or below (2.30.0) |
+| Prepare phase (2.30.0) | A proposer asks a quorum what it has accepted before proposing, and carries the highest-ballot value reported — the property that keeps two concurrent proposers from committing different values |
 | Group-scoped votes | All members hear all votes → any member reaching quorum can commit; proposer crash does not stall the slot |
 | Proposer self-votes | Proposer always counts as one voter; no listener required for single-node quorum |
 | LWW commit idempotency | Two simultaneous commits of the same value are safe; higher-ballot commit wins via LWW timestamp |
-| Optimistic commit / converged-holder | `group_propose` commits against a node's *local* committed view, so under gossip lag two proposers can both return `Committed`. Only the LWW-by-HLC **converged** value (`live_committed_value`) is authoritative — confirm the holder there; don't treat a `Committed` return as exclusive on its own. This is why locks fence on the commit HLC (see [the two rules](#the-two-rules-that-make-it-correct)) |
+| Optimistic commit / converged-holder | Before 2.30.0 `group_propose` committed against a node's *local* committed view, so under gossip lag two proposers could both return `Committed`; the prepare phase prevents that when the two quorums intersect, and it remains possible across an electorate change (§ *Changing an electorate*, above). Only the LWW-by-HLC **converged** value (`live_committed_value`) is authoritative — confirm the holder there; don't treat a `Committed` return as exclusive on its own. This is why locks fence on the commit HLC (see [the two rules](#the-two-rules-that-make-it-correct)) |
 | No ordering log | Each slot is an independent KV entry (CASPaxos-style); no WAL required |
 | Signing | With `tls` feature: all consensus payloads are Ed25519-signed; forged ballots are dropped. Without: trusted-domain only; Byzantine fault tolerance is out of scope |
 
@@ -513,8 +522,10 @@ as first-class APIs without touching the gossip core.
 
 #### Consensus KV (`consistent_set` / `consistent_get`)
 
-Runs a ballot-voting round before writing. Concurrent writes to the same key are totally
-ordered by ballot number; the highest-ballot value is the authoritative committed entry.
+Runs a prepare and a voting round before writing. When two callers race for one key and their quorums
+intersect, the later one learns the earlier's accepted value, commits *that*, and gets
+`Err(ConsistencyError::Superseded)` — exactly one caller sees `Ok(())`. Across an electorate change, or against
+proposers older than 2.30.0, that is not guaranteed (§ *Changing an electorate*).
 
 `consistent_get` is a **local read** — it returns the latest committed value that has
 anti-entropy-propagated to this node, which may lag by up to one gossip round. This is
@@ -522,7 +533,7 @@ suitable for leader election and distributed locks where HLC-based fencing token
 against lower-ballot writers; it is not a substitute for linearizable reads.
 
 ```rust
-// Any node can write — concurrent writers are ordered by ballot number
+// Any node can write — Ok(()) only if YOUR value was decided; Err(Superseded) means another caller's was
 agent.consensus().consistent_set("config/endpoint", b"https://api.v2/").await?;
 let val = agent.consensus().consistent_get("config/endpoint"); // local read, eventually consistent
 ```

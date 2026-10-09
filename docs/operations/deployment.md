@@ -261,6 +261,14 @@ wire. The list is [deprecations.md](../guide/deprecations.md) (§12 for this one
 since 2.26.0 the `/gateway/govern/*` intent routes answer **400** to a loose body (unknown field, wrong type),
 and the KV doors answer **403** `protected_key` for `sys/`/`consensus/` keys; since 2.27.0 for every owned
 namespace, with the log routes refusing `cn/`, `wiki/` and `reason/` streams (`protected_stream`) (§18, §19).
+Since 2.29.0 a governed group's membership moves only through `/gateway/govern/group` (§20).
+
+**Consensus across 2.30.0.** An upgraded proposer runs a prepare phase that older acceptors ignore, so its
+proposals **time out** until a quorum of each consensus group's acceptors runs 2.30.0 or later; older proposers
+keep committing, without the guarantee ([deprecations.md](../guide/deprecations.md) §21). Upgrade every
+consensus group's members within one window, expect `mycelium_consensus_timeouts_total` from upgraded nodes
+(reason `no_voters`) until a quorum is upgraded, and **do not downgrade a node mid-slot** — an older node reads
+the new acceptor record as no record and forgets its promises.
 Before upgrading, grep client code for raw KV writes outside your own prefixes.
 
 **Behaviour changes that refuse a start.** These upgrades make `start()` refuse a node that used to start

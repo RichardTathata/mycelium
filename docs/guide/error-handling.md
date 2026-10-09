@@ -89,7 +89,7 @@ setting — the full list, by `field`:
 #[non_exhaustive]
 pub enum ConsistencyError {
     Timeout { ballots_tried: u32 }, // no quorum reached within deadline
-    Superseded,                     // another node committed first
+    Superseded,                     // the slot was decided for another caller's value
     TopologyUnsatisfied,            // quorum met but Hard topology gate failed
     ElectorateUnavailable { observed_members: usize, declared_min: usize }, // no electorate: nothing decided
 }
@@ -101,8 +101,9 @@ pub enum ConsistencyError {
 **Recoverability:**
 - `Timeout` — retry; the cluster may be partitioned or underloaded. Check
   `ballots_tried` to distinguish a slow cluster from a hard split.
-- `Superseded` — a concurrent writer won the slot. Re-read the current value
-  and decide whether to retry with a new key or accept the other writer's value.
+- `Superseded` — the slot was decided for another value: a concurrent writer committed first, or (2.30.0)
+  this call's prepare phase found a value a quorum had already accepted and committed that instead. Re-read
+  the current value and decide whether to retry with a new key or accept the other writer's value.
 - `ElectorateUnavailable` — the group roster this node sees is empty (an unknown or unjoined group) or
   smaller than a fresh `MembershipIntent { min }` declares, so no electorate could be established and nothing
   was decided. Join the group — `POST /gateway/mesh/group`, or `/gateway/govern/group` (`govern:write`) for a group under a membership intent — or wait for the roster to converge (`GET /gateway/mesh/group?group=G`); do not
@@ -280,6 +281,8 @@ match agent.consensus().consistent_set("seq/head", b"v2").await {
     Err(ConsistencyError::Superseded)        => { /* read current, re-evaluate */ }
     Err(ConsistencyError::Timeout { .. })    => { /* retry */ }
     Err(ConsistencyError::TopologyUnsatisfied) => { /* alert ops */ }
+    Err(ConsistencyError::ElectorateUnavailable { .. }) => { /* join the group / wait for the roster; nothing decided */ }
+    Err(_)                                   => { /* #[non_exhaustive]: an unknown error is not a commit */ }
 }
 ```
 

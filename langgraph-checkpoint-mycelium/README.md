@@ -89,7 +89,9 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   import time
   from langgraph_checkpoint_mycelium import IncompleteCheckpoint
 
-  for attempt in range(40):                      # ~10 s; size the bound to your gossip interval
+  for attempt in range(240):                     # ~60 s — CI has seen a provider become visible only at its
+                                                 # first 30 s capability refresh (#563, root cause open);
+                                                 # the examples and this package's tests also wait 60 s
       try:
           result = graph.invoke(None, config)    # or graph.get_state(config)
           break
@@ -104,8 +106,10 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   **Why each blob is missing** is `e.reasons[blob_id]` (0.3.0, with `mycelium-reason` 0.7.0):
   `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached or refused for now (`mycelium-reason` 0.7.1+), the
   node or a proxy in front of it failed, the read was throttled, or the node itself could not be reached
-  (an `httpx.TransportError`, such as a refused connection); `"unauthorized"` — the gateway refused
-  the read (a token or scope problem); `"corrupt"` — every copy currently on offer fails the content
+  (an `httpx.TransportError`, such as a refused connection); `"unauthorized"` — a 401/403: the gateway refused
+  the token (no `llm:read`), **or** the blob route's own 403 `refused` — every holder refused for good (a removed
+  member, a denied action; `mycelium-reason` 0.7.1). This client does not yet tell the two apart;
+  `GET /gateway/reason/blob/{id}` shows which; `"corrupt"` — every copy currently on offer fails the content
   address (one bad provider beside an honest one that lacks it is `not_found`); `"unsupported"` — the node
   does not serve the blob route (no reason companion there). `e.retriable`
   is true only when every reason is `not_found` or `unavailable`, so the loop above should re-raise

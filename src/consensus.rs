@@ -1,4 +1,4 @@
-//! Consensus — epidemic two-phase agreement built on the signal mesh.
+//! Consensus — single-decree agreement (prepare, propose, commit) built on the signal mesh.
 //!
 //! Lightweight Group-level and System-level agreement built on top of the
 //! epidemic signal layer. Single-decree Paxos over gossip:
@@ -76,7 +76,8 @@ pub struct ConsensusConfig {
     /// known peer count + 1 (for
     /// [`system_propose`](crate::GossipAgent::system_propose)).
     pub quorum_size:    usize,
-    /// How long to wait for votes before declaring a ballot attempt failed.
+    /// How long each phase of a ballot attempt waits — the promises of the prepare phase (2.30.0),
+    /// then the votes — before the attempt is declared failed. A ballot can take up to twice this.
     pub phase1_timeout: Duration,
     /// Maximum number of ballot attempts before returning [`ConsensusResult::Timeout`].
     pub max_ballots:    u32,
@@ -237,9 +238,9 @@ pub enum ConsensusResult {
         /// Compare to `votes_last_ballot` to understand how far off quorum was.
         quorum_required: usize,
     },
-    /// Another node committed a value for this slot before quorum was reached
-    /// by this proposer. The committed value is readable via
-    /// [`consensus_get`](crate::GossipAgent::consensus_get).
+    /// The slot was decided for **another** value: another proposer committed first, or (2.30.0) this
+    /// proposal's prepare phase found a value a quorum had already accepted and committed that instead.
+    /// The committed value is readable via [`consensus_get`](crate::GossipAgent::consensus_get).
     Superseded {
         slot:   Arc<str>,
         ballot: u64,

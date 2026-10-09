@@ -151,7 +151,7 @@ accepts the POST and it gossips to converge — no elected/active endpoint, no f
   via `gateway_scoped_tokens` (or OIDC group mapping); an unmapped token is 401, an
   insufficient one 403.
 - **Provenance:** in a `compliance` build with `[tls]` configured, every governance POST — tuning, timing,
-  membership, profile, topology-override, and `POST /gateway/identity/revoke` — is sealed into the WS2
+  membership, profile, topology-override, `POST`/`DELETE /gateway/govern/group`, and `POST /gateway/identity/revoke` — is sealed into the WS2
   tamper-evident audit trail (`action = Admin`, principal `gateway/govern`), queryable + verifiable at
   `GET /gateway/audit`. One that leaves no record — no `compliance`, or no `[tls]` identity to seal with (warned) —
   is counted: `/stats` `governance_unaudited` beside `governance_changes` (2.27.0). Alert on it where the audit
