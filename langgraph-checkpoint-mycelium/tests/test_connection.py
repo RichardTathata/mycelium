@@ -149,3 +149,33 @@ def test_the_token_is_never_shown(stub):
             s._kv_get("ckpt/x")
         assert secret not in str(ei.value) and secret not in repr(ei.value)
         assert secret not in repr(ei.value.request.headers)   # httpx redacts, and we rely on it
+
+
+# ── the adversarial review's findings on #583 ───────────────────────────────
+
+from langgraph_checkpoint_mycelium.saver import _base_url, _ssl_verify
+
+
+def test_an_empty_ca_file_is_the_system_store_like_none():
+    assert _ssl_verify("") is True
+    assert _ssl_verify(None) is True
+    with MyceliumCheckpointSaver("10.0.0.5", 8101, scheme="https", ca_file="") as s:
+        assert str(s._client.base_url) == "https://10.0.0.5:8101"
+
+
+def test_scheme_is_case_insensitive_and_refuses_non_strings():
+    with MyceliumCheckpointSaver("10.0.0.5", 8101, scheme="HTTPS") as s:
+        assert str(s._client.base_url) == "https://10.0.0.5:8101"
+    for bad in (None, 5, b"https"):
+        with pytest.raises(ValueError, match="scheme"):
+            _base_url("h", 1, bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="scheme"):
+        MyceliumCheckpointSaver("h", 1, scheme=None)  # type: ignore[arg-type]
+
+
+def test_an_ipv6_host_is_bracketed_once():
+    assert _base_url("::1", 8101, "https") == "https://[::1]:8101"
+    assert _base_url("[::1]", 8101, "http") == "http://[::1]:8101"
+    with MyceliumCheckpointSaver("::1", 8101) as s:
+        assert str(s._client.base_url) == "http://[::1]:8101"
+        assert str(s._aclient.base_url) == "http://[::1]:8101"

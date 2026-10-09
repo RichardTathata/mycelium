@@ -86,7 +86,8 @@ A gateway serving HTTPS — the node's own `gateway_tls` (`docs/operations/gatew
 TLS-terminating proxy in front of it — is reached with `{ scheme: "https" }`. Every client class
 takes it in its trailing options (`MyceliumAgent`, `Wiki`, `TupleSpace`, `Blackboard`,
 `PromptSkillClient`; `A2aClient` takes a full URL, so the scheme is in it). The default is
-`"http"`, so an existing loopback deployment is unchanged.
+`"http"`, so an existing loopback deployment is unchanged; it is case-insensitive at run time, and an
+IPv6 host is bracketed for you (`"::1"` → `https://[::1]:9443`).
 
 Certificate verification is Node's own and stays **on** — this SDK has no option to turn it off. A
 private fleet CA (in the node-cert mode of `gateway_tls`, the cluster CA's `ca-cert.pem`, whose

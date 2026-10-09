@@ -39,12 +39,18 @@ export type Scheme = "http" | "https";
  * private fleet CA (the node-cert mode of `gateway_tls` serves the cluster CA's `ca-cert.pem`) is
  * trusted by starting the process with `NODE_EXTRA_CA_CERTS=/path/to/ca-cert.pem` — the built-in
  * `fetch` takes no per-call CA option without a dependency on `undici`, which this SDK does not add.
+ *
+ * The scheme is case-insensitive (a JS caller's `"HTTPS"` is the Python SDK's rule too); `null` or a
+ * non-string is refused by name. An IPv6 literal host (one containing `:`) is bracketed once —
+ * `"::1"` → `http://[::1]:port` — as `URL` and `fetch` require.
  */
-export function baseUrl(host: string, port: number, scheme: Scheme = "http"): string {
-  if (scheme !== "http" && scheme !== "https") {
-    throw new Error(`scheme must be "http" or "https", not ${JSON.stringify(scheme)}`);
+export function baseUrl(host: string, port: number, scheme: string = "http"): string {
+  const s = typeof scheme === "string" ? scheme.toLowerCase() : undefined;
+  if (s !== "http" && s !== "https") {
+    throw new Error(`scheme must be "http" or "https", not ${JSON.stringify(scheme) ?? String(scheme)}`);
   }
-  return `${scheme}://${host}:${port}`;
+  const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${s}://${h}:${port}`;
 }
 
 /** Constructor options carried by every client. */

@@ -44,14 +44,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused there), riding the pooled clients and the dedicated SSE/stream clients; the TypeScript SDK documents
   `NODE_EXTRA_CA_CERTS` rather than add `undici`. Seen failing first: `mycelium-py/tests/test_scheme.py`,
   `mycelium-ts/tests/scheme.test.ts`, `langgraph-checkpoint-mycelium/tests/test_connection.py` (the option
-  was not a parameter). Guide: `docs/guide/10-language-bridges.md` § Reaching a gateway over TLS.
+  was not a parameter). Guide: `docs/guide/10-language-bridges.md` § Reaching a gateway over TLS. The adversarial
+  review of #583 then held both helpers to one rule: the scheme case-insensitive on both sides (the TypeScript helper
+  compared strictly, so a JS caller's `"HTTPS"` threw) and `None`/a non-string the documented `ValueError` (it was an
+  `AttributeError`); an empty `ca_file` is `None` (`ssl.create_default_context(cafile="")` loaded nothing silently
+  where the docs promised a refusal); an IPv6 literal host is bracketed once (`"::1"` built `https://::1:8300`, which
+  httpx rejects). Each seen failing first in the same three test files.
 - **The LangGraph checkpointer sends a bearer** (`langgraph-checkpoint-mycelium` **0.3.2**). `MyceliumCheckpointSaver`
   opened both httpx clients with no headers and took no token, so a token-protected gateway answered 401 to every
   checkpoint — while the saver's own `"unauthorized"` reason and README sent the operator to the token. It now takes
   `token=`, resolved as the Python SDK resolves it (the argument, then `MYCELIUM_GATEWAY_TOKEN`; empty means none)
   and sent as `Authorization: Bearer` on the sync and async clients — header only, never in a URL, the `repr` or an
   error. Seen failing first: `langgraph-checkpoint-mycelium/tests/test_connection.py` (with only the environment
-  variable set, the stub gateway saw `None` where `Bearer env-token` was expected).
+  variable set, the stub gateway saw `None` where `Bearer env-token` was expected). The review also corrected the
+  saver's scope list: every `put()` writes blobs through `PUT /gateway/reason/blob`, which is `llm:write`, so the
+  saver needs `kv:read`, `kv:write`, `llm:read` **and `llm:write`** (the README named three).
 
 ## [2.31.0] — 2026-10-09
 

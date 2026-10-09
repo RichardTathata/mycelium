@@ -45,14 +45,16 @@ A token-protected gateway (`gateway_auth_token`, scoped tokens or OIDC — every
 answers 401 without a bearer) is reached with `token=`, sent as `Authorization: Bearer` on both the
 sync and async clients; when omitted, `MYCELIUM_GATEWAY_TOKEN` is used, exactly as the Python SDK
 resolves it (the argument wins; an empty string means none). The token travels in the header only —
-never in a URL, the saver's `repr` or an error message. Under scoped tokens it needs `kv:read`,
-`kv:write` and `llm:read`. 0.3.2; before it the saver could not present a bearer at all, while this
+never in a URL, the saver's `repr` or an error message. Under scoped tokens it needs `kv:read` and
+`kv:write` (the index rows) and `llm:read` and `llm:write` (the blob tier: every `put()` writes
+blobs through `PUT /gateway/reason/blob`, which is `llm:write`). 0.3.2; before it the saver could not present a bearer at all, while this
 README described `"unauthorized"` as a token problem.
 
 A gateway serving HTTPS — the node's `gateway_tls` or a TLS-terminating proxy — is reached with
 `scheme="https"` (0.3.2; before it `http://` was hard-coded). Certificate verification stays on; a
 private fleet CA is trusted with `ca_file=` (the node-cert mode of `gateway_tls` serves the cluster
-CA's `ca-cert.pem`), read at construction. Both options follow the Python SDK's.
+CA's `ca-cert.pem`), read at construction; an empty `ca_file` means none, like `None`. An IPv6
+host is bracketed for you (`"::1"` → `http://[::1]:8101`). Both options follow the Python SDK's.
 
 ```python
 checkpointer = MyceliumCheckpointSaver("10.0.0.5", 8101, token="…")                      # or MYCELIUM_GATEWAY_TOKEN

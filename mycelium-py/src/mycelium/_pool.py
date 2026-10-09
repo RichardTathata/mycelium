@@ -99,23 +99,34 @@ SCHEMES = ("http", "https")
 def base_url(host: str, port: int, scheme: str = "http") -> str:
     """``"{scheme}://{host}:{port}"`` — the one place every handle builds its base URL.
 
-    Raises :class:`ValueError` for a scheme other than ``http`` / ``https`` (case-insensitive).
-    Before 0.2.9 every handle hard-coded ``http://``, so a gateway serving HTTPS was unreachable
-    from this SDK and the bearer travelled in cleartext off loopback.
+    Raises :class:`ValueError` for a scheme other than ``http`` / ``https`` (case-insensitive;
+    ``None`` or a non-string is the same error, never an ``AttributeError``). An IPv6 literal host
+    (one containing ``:``) is bracketed — ``"::1"`` → ``http://[::1]:port`` — unless the caller
+    already bracketed it; httpx rejects the unbracketed form. Before 0.2.9 every handle hard-coded
+    ``http://``, so a gateway serving HTTPS was unreachable from this SDK and the bearer travelled
+    in cleartext off loopback.
     """
-    s = scheme.lower()
-    if s not in SCHEMES:
+    if not isinstance(scheme, str) or scheme.lower() not in SCHEMES:
         raise ValueError(f"scheme must be one of {SCHEMES}, not {scheme!r}")
-    return f"{s}://{host}:{port}"
+    return f"{scheme.lower()}://{bracket_host(host)}:{port}"
+
+
+def bracket_host(host: str) -> str:
+    """An IPv6 literal in brackets (``::1`` → ``[::1]``); anything else unchanged."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
 
 
 def ssl_verify(ca_file: Optional[str]) -> "ssl.SSLContext | bool":
     """What to hand httpx as ``verify=``: ``True`` (the system trust store) or, for a private
     fleet CA (``mycelium-tls/ca-cert.pem`` in the node-cert mode of ``gateway_tls``), a default
     context that trusts ``ca_file``. Verification — certificate chain **and** hostname — is on in
-    both; there is no option to turn it off. A missing file is refused here, at construction.
+    both; there is no option to turn it off. A missing file is refused here, at construction;
+    an **empty** ``ca_file`` means *none* (the system store), stated here because
+    ``ssl.create_default_context(cafile="")`` would load nothing and say nothing.
     """
-    if ca_file is None:
+    if not ca_file:
         return True
     return ssl.create_default_context(cafile=ca_file)
 

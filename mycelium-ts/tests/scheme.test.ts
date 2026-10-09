@@ -64,3 +64,24 @@ describe("every client sends to the scheme it was given", () => {
     expect(urls[1].startsWith("http://127.0.0.1:7946/")).toBe(true);
   });
 });
+
+describe("the adversarial review's findings on #583", () => {
+  test("scheme is case-insensitive for a JS caller, and a non-string is refused by name", () => {
+    expect(baseUrl("h", 1, "HTTPS")).toBe("https://h:1");
+    expect(baseUrl("h", 1, "Http")).toBe("http://h:1");
+    expect(baseUrl("h", 1, undefined)).toBe("http://h:1");
+    for (const bad of [null, 5, {}, ["https"]]) {
+      expect(() => baseUrl("h", 1, bad as unknown as string)).toThrow(/scheme/);
+    }
+    expect(() => new MyceliumAgent("h", 1, 1000, { scheme: null as unknown as "http" })).toThrow(/scheme/);
+  });
+
+  test("an IPv6 host is bracketed once", async () => {
+    expect(baseUrl("::1", 8300, "https")).toBe("https://[::1]:8300");
+    expect(baseUrl("[::1]", 8300)).toBe("http://[::1]:8300");
+    await new MyceliumAgent("::1", 8300, 1000, { scheme: "https" }).get("k");
+    await new Wiki("::1", 8300, "g").read("p");
+    expect(urls[0].startsWith("https://[::1]:8300/")).toBe(true);
+    expect(urls[1].startsWith("http://[::1]:8300/")).toBe(true);
+  });
+});

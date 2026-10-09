@@ -158,11 +158,14 @@ SCHEMES = ("http", "https")
 
 def _base_url(host: str, port: int, scheme: str) -> str:
     """``"{scheme}://{host}:{port}"`` — the Python SDK's rule (``mycelium._pool.base_url``), mirrored
-    here because this package depends on httpx only. Before 0.3.2 ``http://`` was hard-coded."""
-    s = scheme.lower()
-    if s not in SCHEMES:
+    here because this package depends on httpx only: the scheme case-insensitive, ``None`` or a
+    non-string a ``ValueError``, an IPv6 literal host bracketed once (``::1`` → ``[::1]``).
+    Before 0.3.2 ``http://`` was hard-coded."""
+    if not isinstance(scheme, str) or scheme.lower() not in SCHEMES:
         raise ValueError(f"scheme must be one of {SCHEMES}, not {scheme!r}")
-    return f"{s}://{host}:{port}"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{scheme.lower()}://{host}:{port}"
 
 
 #: Environment variable consulted when the saver is constructed without ``token=`` — the Python
@@ -181,8 +184,10 @@ def _auth_headers(token: str | None) -> dict[str, str]:
 
 def _ssl_verify(ca_file: str | None) -> ssl.SSLContext | bool:
     """httpx's ``verify=``: the system trust store, or a default context that trusts a private fleet
-    CA's PEM. Chain and hostname verification stay on either way; a missing file is refused here."""
-    return True if ca_file is None else ssl.create_default_context(cafile=ca_file)
+    CA's PEM. Chain and hostname verification stay on either way; a missing file is refused here,
+    and an empty ``ca_file`` means *none* (``create_default_context(cafile="")`` would load nothing
+    silently)."""
+    return True if not ca_file else ssl.create_default_context(cafile=ca_file)
 
 
 CKPT_PREFIX  = "ckpt"
@@ -223,6 +228,10 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
     :param scheme:  ``"http"`` (default) or ``"https"`` for a gateway serving TLS (0.3.2).
     :param ca_file: PEM bundle of a private fleet CA to trust instead of the system store
                     (verification stays on; 0.3.2).
+
+    Under scoped tokens the saver needs ``kv:read`` and ``kv:write`` (the index rows) and
+    ``llm:read`` and ``llm:write`` (the blob tier — every ``put()`` writes blobs through
+    ``PUT /gateway/reason/blob``, which is ``llm:write``).
     """
 
     def __init__(

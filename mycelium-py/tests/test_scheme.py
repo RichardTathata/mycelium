@@ -104,3 +104,30 @@ def test_ca_file_pins_a_private_fleet_ca(tmp_path):
 def test_a_missing_ca_file_is_refused_at_construction(tmp_path):
     with pytest.raises(FileNotFoundError):
         MyceliumAgent("10.0.0.5", 8300, scheme="https", ca_file=str(tmp_path / "absent.pem"))
+
+
+# ── the adversarial review's findings on #583 ───────────────────────────────
+
+
+def test_an_empty_ca_file_is_the_system_store_like_none():
+    # ``ssl.create_default_context(cafile="")`` loads nothing and says nothing; "" is None here.
+    assert MyceliumAgent("10.0.0.5", 8300, scheme="https", ca_file="")._pool.verify is True
+    assert Wiki("10.0.0.5", 8300, scheme="https", ca_file="")._pool.verify is True
+
+
+def test_scheme_is_case_insensitive_and_refuses_non_strings():
+    assert base_url("h", 1, "HTTPS") == "https://h:1"
+    assert base_url("h", 1, "Http") == "http://h:1"
+    for bad in (None, 5, b"https", ["https"]):
+        with pytest.raises(ValueError, match="scheme"):
+            base_url("h", 1, bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="scheme"):
+        MyceliumAgent("h", 1, scheme=None)  # type: ignore[arg-type]
+
+
+def test_an_ipv6_host_is_bracketed_once():
+    assert base_url("::1", 8300, "https") == "https://[::1]:8300"
+    assert base_url("[::1]", 8300) == "http://[::1]:8300"
+    assert base_url("fe80::1%en0", 1) == "http://[fe80::1%en0]:1"
+    assert MyceliumAgent("::1", 8300, scheme="https")._base_url == "https://[::1]:8300"
+    assert _pool_base(TupleSpace("::1", 8300, "ns")) == "http://[::1]:8300"

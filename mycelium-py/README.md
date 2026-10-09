@@ -89,7 +89,9 @@ TLS-terminating proxy in front of it — is reached with `scheme="https"`. Every
 hostname — is **on** and has no off switch; a private fleet CA is trusted with `ca_file=` (in the
 node-cert mode of `gateway_tls` that is the cluster CA's `ca-cert.pem`, whose certificate carries an
 IP SAN, so connect by the IP it names). The file is read at construction and a missing one is
-refused there. Both options ride the pooled clients and the dedicated SSE/stream clients.
+refused there; an empty `ca_file` means none, like `None`. The scheme is case-insensitive, and an
+IPv6 host is bracketed for you (`"::1"` → `https://[::1]:9443`). Both options ride the pooled
+clients and the dedicated SSE/stream clients.
 
 ```python
 agent = MyceliumAgent("10.0.0.5", 9443, scheme="https", token="…")                      # system trust store
