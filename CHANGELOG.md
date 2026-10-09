@@ -69,6 +69,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recover from; peers' copies are not consulted). Seen failing first:
   `the_audit_chain_head_is_recovered_from_persistence_at_restart` (the restarted node's stream held three records and
   seq 0 was not the original), `a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_head`.
+- **A failed WAL append poisons the writer until a snapshot repairs the file.** A short write followed by an error
+  (`ENOSPC`, `EIO`) leaves a torn frame at the end of `wal.bin`; the writer forwarded the error to that one caller
+  and carried on, so the next record landed behind the torn frame — the next restart read `Corrupt` with data after
+  it (a refusal to start by default, or both files quarantined), and until then every snapshot aborted on the same
+  `Corrupt`. Now every later append is answered `Err` (`LocalDurability::Failed` on the receipt path) or counted in
+  `dropped_appends()` on the fire-and-forget path, a `sync()` establishes nothing, the failure is logged once at
+  `error`, and the writer tries a repairing snapshot at once and on every snapshot after — the torn frame is the last
+  thing in the file, so a successful snapshot carries the complete records and truncates it — un-poisoning only when
+  one succeeds. The node-local journal has done the same since 2.23.0; this is the WAL's mirror. On-disk format
+  unchanged. Seen failing first: `a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail` (the
+  append after the injected failure was acknowledged `Ok`).
 
 ## [2.31.0] — 2026-10-09
 

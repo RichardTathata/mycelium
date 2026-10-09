@@ -136,6 +136,10 @@ pub struct WalHandle {
     /// holds the value with no WAL record, and would answer `Persisted` for a record replay could
     /// never restore. Counting the drops is what lets that peer decline the claim instead.
     /// Found by the Phase-C adversarial audit (items 1+2+7).
+    ///
+    /// Shared with the writer task, which also counts here the append whose write **failed** and
+    /// every append it **refused** while poisoned by that failure (see `wal_writer_task`): the
+    /// store holds each of those values with no WAL record, which is the same hole.
     dropped_appends: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -200,7 +204,8 @@ impl WalHandle {
         }
     }
 
-    /// How many appends this node skipped because the writer's queue was full.
+    /// How many appends this node skipped because the writer's queue was full, failed at the disk,
+    /// or were refused by a writer poisoned by such a failure.
     ///
     /// **Non-zero means this node cannot establish the replica-sync rung for any record**: it cannot
     /// tell whether the record you are asking about was the one it dropped. See the field's doc.
@@ -520,9 +525,49 @@ pub fn spawn_wal_writer(
     cipher:                 Option<Arc<dyn DataAtRestCipher>>,
     defer_snapshot:         Option<SnapshotDeferHook>,
 ) -> WalHandle {
+    spawn_wal_writer_inner(dir, sync_mode, snapshot_wal_threshold, snapshot_interval_secs, kv_state, node_id, hlc, default_ttl, cipher, defer_snapshot, None)
+}
+
+/// A writer whose next append fails **after writing part of its frame** whenever `fault` is set
+/// (and clears it) — the failure shape a full disk or a pulled cable produces, arranged on demand.
+/// The production path is [`spawn_wal_writer`] with no fault; this is how a test reaches the one
+/// branch it cannot otherwise make the disk take (the same seam `journal.rs` has in `open_with_fault`).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_wal_writer_with_fault(
+    dir:                    PathBuf,
+    sync_mode:              SyncMode,
+    snapshot_wal_threshold: usize,
+    snapshot_interval_secs: u64,
+    kv_state:               Arc<KvState>,
+    node_id:                NodeId,
+    hlc:                    Arc<crate::hlc::Hlc>,
+    default_ttl:            u8,
+    cipher:                 Option<Arc<dyn DataAtRestCipher>>,
+    defer_snapshot:         Option<SnapshotDeferHook>,
+    fault:                  Arc<std::sync::atomic::AtomicBool>,
+) -> WalHandle {
+    spawn_wal_writer_inner(dir, sync_mode, snapshot_wal_threshold, snapshot_interval_secs, kv_state, node_id, hlc, default_ttl, cipher, defer_snapshot, Some(fault))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_wal_writer_inner(
+    dir:                    PathBuf,
+    sync_mode:              SyncMode,
+    snapshot_wal_threshold: usize,
+    snapshot_interval_secs: u64,
+    kv_state:               Arc<KvState>,
+    node_id:                NodeId,
+    hlc:                    Arc<crate::hlc::Hlc>,
+    default_ttl:            u8,
+    cipher:                 Option<Arc<dyn DataAtRestCipher>>,
+    defer_snapshot:         Option<SnapshotDeferHook>,
+    fault:                  Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> WalHandle {
     let channel_depth = (snapshot_wal_threshold * 4).max(1024);
     let (tx, rx) = mpsc::channel::<WalMsg>(channel_depth);
-    let handle = WalHandle { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) };
+    let dropped_appends = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let handle = WalHandle { tx, sync_mode, dropped_appends: std::sync::Arc::clone(&dropped_appends) };
 
     tokio::spawn(wal_writer_task(
         rx,
@@ -536,9 +581,94 @@ pub fn spawn_wal_writer(
         default_ttl,
         cipher,
         defer_snapshot,
+        dropped_appends,
+        fault,
     ));
 
     handle
+}
+
+/// The writer's failure state, beside the loop so every arm reads one record of it.
+///
+/// **A failed append poisons the writer** (2026-10-09; the node-local journal has done the same
+/// since realignment repairs R1). A short write followed by an error — `ENOSPC`, `EIO` — leaves a
+/// torn frame at the end of `wal.bin`. The writer used to hand the error to that one caller and
+/// carry on, so the next record landed *behind* the torn frame: the next restart's
+/// `decode_wal_records` read the torn length over it and answered `Corrupt` with data after — a
+/// refusal to start by default, or both files quarantined — and until then every snapshot aborted
+/// on the same `Corrupt`, so the acknowledged records after the tear were never compacted. Now
+/// every later append is answered `Err` (or counted, on the fire-and-forget path) until a snapshot
+/// succeeds: its step 2b carries the complete records, the torn frame is the *last* thing in the
+/// file (nothing was appended behind it), and step 4 truncates it. The writer tries that snapshot
+/// at once, then on every snapshot it is asked for or its timer brings, and un-poisons only when
+/// one succeeds.
+struct WriterState {
+    /// `Some(reason)` after a failed append, until a snapshot truncates the torn tail.
+    poison: Option<String>,
+    /// Appends refused while poisoned, for the recovery line.
+    refused: u64,
+    /// The last snapshot failure's reason, so one that repeats every interval is logged once at
+    /// `warn` and then at `debug` — a failing disk should not write a warning per period.
+    last_snapshot_err: Option<String>,
+    /// Consecutive repeats of `last_snapshot_err`.
+    repeats: u64,
+}
+
+impl WriterState {
+    fn new() -> Self {
+        Self { poison: None, refused: 0, last_snapshot_err: None, repeats: 0 }
+    }
+
+    /// The error a poisoned writer answers an append or a sync with.
+    fn poisoned_err(reason: &str) -> io::Error {
+        io::Error::other(format!(
+            "the WAL writer refuses appends after a failed write ({reason}) until a snapshot truncates the torn tail"
+        ))
+    }
+
+    /// Record a failed append: the writer is poisoned from here until a snapshot succeeds.
+    fn note_failed_append(&mut self, e: &io::Error) {
+        error!(
+            "persistence: a WAL append failed ({e}); the writer refuses every later append until a snapshot \
+             truncates the torn tail (it tries one now, then on every snapshot it is asked for or its timer brings)"
+        );
+        self.poison = Some(e.to_string());
+    }
+
+    /// Record a snapshot's outcome: the log line (rate-limited on a repeat), and recovery from the
+    /// poisoned state when it succeeded.
+    fn note_snapshot(&mut self, result: &io::Result<()>) {
+        match result {
+            Err(e) => {
+                let reason = e.to_string();
+                if self.last_snapshot_err.as_deref() == Some(reason.as_str()) {
+                    self.repeats += 1;
+                    tracing::debug!(repeats = self.repeats, "persistence: the snapshot failed again: {reason}");
+                } else {
+                    warn!(
+                        "persistence: the snapshot failed: {reason}; the WAL keeps growing until one succeeds \
+                         (a repeat of the same failure is logged at debug)"
+                    );
+                    self.last_snapshot_err = Some(reason);
+                    self.repeats = 0;
+                }
+            }
+            Ok(()) => {
+                if self.last_snapshot_err.take().is_some() {
+                    tracing::info!(failures = self.repeats + 1, "persistence: the snapshot succeeded after failing");
+                    self.repeats = 0;
+                }
+                if self.poison.take().is_some() {
+                    warn!(
+                        refused = self.refused,
+                        "persistence: the WAL writer recovered — a snapshot truncated the torn tail; the appends \
+                         refused meanwhile are absent from the WAL, as their callers were told"
+                    );
+                    self.refused = 0;
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -554,6 +684,8 @@ async fn wal_writer_task(
     default_ttl:            u8,
     cipher:                 Option<Arc<dyn DataAtRestCipher>>,
     defer_snapshot:         Option<SnapshotDeferHook>,
+    dropped_appends:        Arc<std::sync::atomic::AtomicU64>,
+    fault:                  Option<Arc<std::sync::atomic::AtomicBool>>,
 ) {
     let wal_path = dir.join("wal.bin");
     let mut wal_file = match open_wal(&wal_path).await {
@@ -561,6 +693,7 @@ async fn wal_writer_task(
         Err(e) => { error!("persistence: failed to open wal.bin: {e}"); return; }
     };
     let mut wal_entry_count: usize = 0;
+    let mut state = WriterState::new();
 
     let interval = Duration::from_secs(snapshot_interval_secs);
     // Through the timer seam (item 6): the snapshot cadence is a recorded decision.
@@ -584,32 +717,59 @@ async fn wal_writer_task(
                     // Channel closed (WalHandle dropped) or explicit Shutdown:
                     // snapshot and exit.
                     None | Some(WalMsg::Shutdown) => {
-                        let _ = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                        let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                        state.note_snapshot(&result);
                         break;
                     }
                     Some(WalMsg::HoldOwnership(lock)) => {
                         _ownership = Some(lock);
                     }
                     Some(WalMsg::Append { entry, ack, force_sync }) => {
+                        if let Some(reason) = state.poison.as_deref() {
+                            // Poisoned: nothing is appended behind the torn frame. The caller is told
+                            // (`LocalDurability::Failed` on the receipt path), or the drop is counted.
+                            state.refused += 1;
+                            dropped_appends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if let Some(ack) = ack { let _ = ack.send(Err(WriterState::poisoned_err(reason))); }
+                            continue;
+                        }
                         let sync = force_sync || sync_mode == SyncMode::Flush;
-                        let result = wal_append(&mut wal_file, &entry, sync, cipher.as_ref()).await;
+                        let result = if fault.as_ref().is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::SeqCst)) {
+                            wal_append_torn(&mut wal_file, &entry, cipher.as_ref()).await
+                        } else {
+                            wal_append(&mut wal_file, &entry, sync, cipher.as_ref()).await
+                        };
+                        if let Err(e) = &result {
+                            // The store already holds this record (apply first, then the WAL), with no
+                            // WAL record behind it: the same hole a dropped append is, counted the same.
+                            dropped_appends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            state.note_failed_append(e);
+                        }
                         wal_entry_count += 1;
                         if let Some(ack) = ack { let _ = ack.send(result); }
-                        if wal_entry_count >= snapshot_wal_threshold {
-                            let _ = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                        if state.poison.is_some() || wal_entry_count >= snapshot_wal_threshold {
+                            // The threshold snapshot — or, after a failure, the repairing one, tried at once.
+                            let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                            state.note_snapshot(&result);
                             wal_entry_count = 0;
                         }
                     }
                     Some(WalMsg::TriggerSnapshot { ack }) => {
                         let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                        state.note_snapshot(&result);
                         wal_entry_count = 0;
                         let _ = ack.send(result);
                     }
                     Some(WalMsg::Sync { ack }) => {
                         // Nothing is appended: this syncs what is already there. Handled in the
                         // same loop as Append so it cannot race a concurrent write — the ordering
-                        // is what makes "everything before this is durable" true.
-                        let _ = ack.send(wal_file.sync_data().await);
+                        // is what makes "everything before this is durable" true. A poisoned
+                        // writer establishes nothing: the file ends in a torn frame.
+                        let reply = match state.poison.as_deref() {
+                            Some(reason) => Err(WriterState::poisoned_err(reason)),
+                            None => wal_file.sync_data().await,
+                        };
+                        let _ = ack.send(reply);
                     }
                 }
             }
@@ -622,7 +782,8 @@ async fn wal_writer_task(
                     snap_timer.reset_after_ms(30_000); // a recorded deferral, not a skipped period
                     continue;
                 }
-                let _ = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                let result = do_snapshot(&dir, &kv_state, &node_id, &hlc, default_ttl, &mut wal_file, cipher.as_ref()).await;
+                state.note_snapshot(&result);
                 wal_entry_count = 0;
             }
         }
@@ -670,18 +831,7 @@ async fn wal_append(
     sync:   bool,
     cipher: Cipher<'_>,
 ) -> io::Result<()> {
-    // Encode the record, then optionally encrypt the payload. The length prefix
-    // frames whatever lands on disk (ciphertext when a cipher is configured).
-    let mut payload: Vec<u8> = codec::to_vec(entry)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    if let Some(c) = cipher {
-        payload = c.encrypt(&payload);
-    }
-
-    // Build [u32 LE length][payload] in one buffer.
-    let mut buf = BytesMut::with_capacity(payload.len() + 4);
-    buf.put_u32_le(payload.len() as u32);
-    buf.extend_from_slice(&payload);
+    let buf = wal_frame(entry, cipher)?;
 
     // Routed through the replay seams (item 6 PR 3). The *order* of these two is the durability
     // property — a record is durable only once the sync returns — so both are kernel effects and a
@@ -691,6 +841,34 @@ async fn wal_append(
         crate::sim_seam::fs_sync_data(file, WAL_FILE).await?;
     }
     Ok(())
+}
+
+/// One on-disk frame: `[u32 LE length][payload]`, the payload encrypted when a cipher is
+/// configured. The length prefix frames whatever lands on disk (ciphertext under a cipher).
+fn wal_frame(entry: &SyncEntry, cipher: Cipher<'_>) -> io::Result<BytesMut> {
+    let mut payload: Vec<u8> = codec::to_vec(entry)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if let Some(c) = cipher {
+        payload = c.encrypt(&payload);
+    }
+    let mut buf = BytesMut::with_capacity(payload.len() + 4);
+    buf.put_u32_le(payload.len() as u32);
+    buf.extend_from_slice(&payload);
+    Ok(buf)
+}
+
+/// The injected failure behind [`spawn_wal_writer_with_fault`]: the frame's length prefix and one
+/// byte of its body reach the file, then the write fails — a short write followed by an error, which
+/// is what `ENOSPC` or `EIO` leaves. Reached only when a test set the fault; the production writer
+/// is spawned with none.
+async fn wal_append_torn(
+    file:   &mut tfs::File,
+    entry:  &SyncEntry,
+    cipher: Cipher<'_>,
+) -> io::Result<()> {
+    let buf = wal_frame(entry, cipher)?;
+    crate::sim_seam::fs_write_all(file, WAL_FILE, &buf[..5]).await?;
+    Err(io::Error::other("injected write failure after a partial frame"))
 }
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
@@ -1249,6 +1427,68 @@ mod durability_tests {
             found |= e.key.as_ref() == "k" && e.timestamp == 7;
         });
         assert!(found, "append_sync returned Ok before the record was on disk");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── A failed append poisons the writer; a failed snapshot lowers its mark ───────────────
+
+    /// **The writer refuses every append after a failed write until a snapshot repairs the file.**
+    ///
+    /// A short write followed by an error (`ENOSPC`, `EIO`) leaves a torn frame at the end of
+    /// `wal.bin`. The writer used to forward the error to that one caller and carry on: the next
+    /// record landed *behind* the torn frame, where the next restart's `decode_wal_records` read the
+    /// torn length over it and answered `Corrupt` with data after — a refusal to start by default,
+    /// or both files quarantined. Before the restart, every snapshot aborted on the same `Corrupt`
+    /// and the acknowledged records after the tear were never compacted. The node-local journal
+    /// already owns its file and stops after a failed append; this is the WAL's mirror of it.
+    ///
+    /// Seen failing first: the append after the injected failure was acknowledged `Ok`.
+    #[tokio::test]
+    async fn a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail() {
+        use std::sync::atomic::AtomicBool;
+        let dir   = unique_dir("poison");
+        let node  = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc   = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let fault = Arc::new(AtomicBool::new(false));
+        let handle = spawn_wal_writer_with_fault(dir.clone(), SyncMode::Flush, 1_000_000, 3_600,
+            Arc::clone(&state), node, hlc, 1, None, None, Arc::clone(&fault));
+        handle.append_sync(entry("p/1", b"v1", 1, false)).await.expect("a healthy append");
+
+        // The disk is still failing when the writer tries to repair: a directory where `snapshot.tmp`
+        // goes makes the recovery snapshot fail too, so the poisoned state is observable.
+        std::fs::create_dir(dir.join("snapshot.tmp")).unwrap();
+        fault.store(true, Ordering::SeqCst);
+        let e = handle.append_sync(entry("p/2", b"v2", 2, false)).await.expect_err("the torn append is refused to its caller");
+        assert!(e.to_string().contains("injected"), "{e}");
+
+        // Every later append is refused — acked or not — and none reaches the file.
+        let e = handle.append_sync(entry("p/3", b"v3", 3, false)).await
+            .expect_err("an append after a failed write is refused until the file is repaired");
+        assert!(e.to_string().contains("after a failed write"), "the refusal says why: {e}");
+        assert!(handle.append_acked(entry("p/3", b"v3", 3, false)).await.is_err(), "the receipt path is refused too");
+        handle.append_try(entry("p/4", b"v4", 4, false));
+        assert!(handle.sync().await.is_err(), "a sync while poisoned establishes nothing (and orders after the fire-and-forget append)");
+        assert_eq!(handle.dropped_appends(), 4, "the failed append and the three refused ones are counted — this node cannot vouch for the replica-sync rung");
+        let bytes = std::fs::read(dir.join("wal.bin")).unwrap();
+        let mut keys = Vec::new();
+        let end = decode_wal_records(&bytes, None, |e| keys.push(e.key.to_string()));
+        assert_eq!(keys, vec!["p/1".to_string()], "nothing was appended behind the torn frame");
+        assert!(matches!(end, WalEnd::Torn { .. }), "the file ends in the torn frame, not in corruption: {end:?}");
+
+        // The disk recovers: a snapshot truncates the torn tail and the writer takes appends again.
+        std::fs::remove_dir(dir.join("snapshot.tmp")).unwrap();
+        handle.trigger_snapshot().await.expect("the repairing snapshot");
+        handle.append_sync(entry("p/5", b"v5", 5, false)).await.expect("appends resume after the repair");
+
+        // A restart reads every acknowledged record and meets nothing corrupt.
+        let restored = replay_into_fresh_store(&dir).await;
+        assert!(live_value(&restored, "p/1").is_some(), "the record before the tear survives (carried by the snapshot's tail merge)");
+        assert!(live_value(&restored, "p/5").is_some(), "the record after the repair survives");
+        for k in ["p/2", "p/3", "p/4"] {
+            assert!(live_value(&restored, k).is_none(), "{k} was refused and is absent — as its caller was told");
+        }
+        drop(handle);
         std::fs::remove_dir_all(&dir).ok();
     }
 
