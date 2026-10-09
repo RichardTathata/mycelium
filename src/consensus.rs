@@ -704,16 +704,25 @@ impl ConsensusEngine {
 
     /// Applies a KV update from within a consensus task.
     /// Uses `try_send` for gossip dispatch — dropped frames recovered via anti-entropy.
+    /// **Not handed to the WAL**: a record that must survive a restart goes through
+    /// [`kv_set_returning`](Self::kv_set_returning) and [`persist_sync`](Self::persist_sync).
     fn kv_set(&self, key: String, value: Bytes) {
+        let _ = self.kv_set_returning(key, value);
+    }
+
+    /// [`kv_set`](Self::kv_set), returning the applied update so the caller can WAL-append the
+    /// exact entry — apply to the store first, then hand the record to the WAL, never the reverse.
+    fn kv_set_returning(&self, key: String, value: Bytes) -> GossipUpdate {
         let tc  = &self.task_ctx;
         let upd = make_gossip_update(&tc.node_id, tc.default_ttl, Arc::from(key.as_str()), value, false, &tc.hlc);
         apply_and_notify(&tc.kv_state, &upd);
         let tls = tc.tls.get().map(std::sync::Arc::as_ref);
-        let msg = make_kv_wire_msg(upd, tc.node_id.id_hash(), tls);
+        let msg = make_kv_wire_msg(upd.clone(), tc.node_id.id_hash(), tls);
         dispatch_gossip_try_send(
             &tc.gossip_txs, msg,
             tc.node_id.id_hash(), ForwardHint::All, &tc.kv_state.dropped_frames,
         );
+        upd
     }
 
     /// The ballot this slot's most recent commit was decided at, as this node knows it; `0` when
@@ -731,18 +740,27 @@ impl ConsensusEngine {
         present && self.live_committed(slot).is_none()
     }
 
-    /// Records that `slot` was decided at `ballot`, never lowering what is recorded.
-    fn record_decided(&self, slot: &str, ballot: u64) {
-        if ballot > self.decided_floor(slot) {
-            self.kv_set(format!("{}{}", consensus_ns::DECIDED, slot), encode_ballot(ballot));
-        }
+    /// Records that `slot` was decided at `ballot`, never lowering what is recorded — on stable
+    /// storage (`persist_sync`): the floor is what makes acceptors refuse a ballot at or below a
+    /// decision after a restart, so a floor a restart forgets is a decision a stale proposal can
+    /// re-open. Returns whether it reached the WAL (`true` when nothing changed or nothing was
+    /// promised).
+    async fn record_decided(&self, slot: &str, ballot: u64) -> bool {
+        if ballot <= self.decided_floor(slot) { return true; }
+        let upd = self.kv_set_returning(format!("{}{}", consensus_ns::DECIDED, slot), encode_ballot(ballot));
+        self.persist_sync(slot, &upd, "decided ballot").await
     }
 
     /// Writes `ballot` to the slot's shared ballot key unless a higher one is already there, so
-    /// proposers drawing their next ballot start above it.
+    /// proposers drawing their next ballot start above it. Handed to the WAL fire-and-forget
+    /// (`append_try`): the key is a liveness aid — a proposer that restarts without it draws a
+    /// ballot an acceptor's promise refuses, and moves up — so it is not worth an fsync per ballot.
     async fn raise_ballot(&self, ballot_key: &str, ballot: u64) {
         if ballot > self.read_ballot(ballot_key) {
-            self.set_async(ballot_key, encode_ballot(ballot)).await;
+            let upd = self.set_async(ballot_key, encode_ballot(ballot)).await;
+            if let Some(wal) = self.task_ctx.wal.get() {
+                wal.append_try(sync_entry_from(&upd));
+            }
         }
     }
 
@@ -754,30 +772,45 @@ impl ConsensusEngine {
     /// reads *after* its change, and re-reads after writing — if the state moved meanwhile, the
     /// newer one is written again, so the record cannot be left behind a vote or promise that has
     /// already left. Bounded: a slot changing faster than four writes is written as of the last.
-    fn persist_acceptor(&self, slot: &Arc<str>) {
+    ///
+    /// **On stable storage before this returns `true`** (`persist_sync`, a forced `fdatasync`):
+    /// the record is what `prewarm_accepted` restores at the next start, and until 2.32.0 it was
+    /// applied to the store and gossiped but never handed to the WAL, so a node that crashed after
+    /// promising or voting restarted with no memory of it — `lib_tests::
+    /// an_acceptors_record_survives_a_crash_without_a_snapshot`. Every caller refuses to let the
+    /// promise or vote leave on `false`: an unrecorded acceptance is one a restart lets this node
+    /// contradict. `true` when there is nothing to record or nothing was promised (no WAL).
+    async fn persist_acceptor(&self, slot: &Arc<str>) -> bool {
         let key = accepted_key(&self.task_ctx.node_id, slot);
         let read = || self.task_ctx.consensus_accepted.pin().get(slot).map(encode_acceptor);
         let mut current = read();
+        let mut written: Option<GossipUpdate> = None;
         for _ in 0..4 {
-            let Some(bytes) = current else { return };
-            self.kv_set(key.clone(), bytes.clone());
+            let Some(bytes) = current else { break };
+            written = Some(self.kv_set_returning(key.clone(), bytes.clone()));
             let after = read();
-            if after.as_ref() == Some(&bytes) { return; }
+            if after.as_ref() == Some(&bytes) { break; }
             current = after;
+        }
+        match written {
+            Some(upd) => self.persist_sync(slot, &upd, "acceptor record (promise, acceptance)").await,
+            None => true,
         }
     }
 
     /// Tombstones `key` in the KV store and gossips the deletion.
-    fn kv_delete(&self, key: &str) {
+    /// Returns the applied tombstone so the caller can hand it to the WAL.
+    fn kv_delete(&self, key: &str) -> GossipUpdate {
         let tc  = &self.task_ctx;
         let upd = make_gossip_update(&tc.node_id, tc.default_ttl, Arc::from(key), Bytes::new(), true, &tc.hlc);
         apply_and_notify(&tc.kv_state, &upd);
         let tls = tc.tls.get().map(std::sync::Arc::as_ref);
-        let msg = make_kv_wire_msg(upd, tc.node_id.id_hash(), tls);
+        let msg = make_kv_wire_msg(upd.clone(), tc.node_id.id_hash(), tls);
         dispatch_gossip_try_send(
             &tc.gossip_txs, msg,
             tc.node_id.id_hash(), ForwardHint::All, &tc.kv_state.dropped_frames,
         );
+        upd
     }
 
     /// Like `kv_set` but awaits channel capacity (used by the proposer).
@@ -1114,6 +1147,7 @@ impl ConsensusEngine {
                     last = LastAttempt::Contended;
                     Some(seen)
                 }
+                Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, quorum_size),
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -1149,7 +1183,9 @@ impl ConsensusEngine {
             // Durable before the proposal leaves, for the same reason the voter records before its
             // vote leaves: a proposal is an acceptance, and an acceptance a restart forgets is one
             // this node can contradict.
-            self.persist_acceptor(&slot);
+            if !self.persist_acceptor(&slot).await {
+                return self.unrecorded(slot, _attempt + 1, quorum_size);
+            }
 
             self.raise_ballot(&ballot_key, ballot).await;
 
@@ -1399,6 +1435,7 @@ impl ConsensusEngine {
                     last = LastAttempt::Contended;
                     Some(seen)
                 }
+                Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, 0),
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -1421,7 +1458,9 @@ impl ConsensusEngine {
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
                 continue;
             }
-            self.persist_acceptor(&slot);
+            if !self.persist_acceptor(&slot).await {
+                return self.unrecorded(slot, _attempt + 1, 0);
+            }
             self.raise_ballot(&ballot_key, ballot).await;
 
             let propose_msg = ConsensusMsg::Propose {
@@ -1493,9 +1532,9 @@ impl ConsensusEngine {
                                 self.sign_payload(encode_consensus_msg(&commit_msg)),
                             ).await;
                             let committed_upd = self.set_async(&commit_key, value.clone()).await;
-                            let persisted = self.persist_committed(&slot, &committed_upd).await
-                                & self.write_lease(&slot, lease_ms).await;
-                            self.record_decided(&slot, ballot);
+                            let persisted = self.persist_sync(&slot, &committed_upd, "committed slot").await
+                                & self.write_lease(&slot, lease_ms).await
+                                & self.record_decided(&slot, ballot).await;
                             return ConsensusResult::Committed { slot, value: value.clone(), ballot, persisted };
                         }
                     }
@@ -1585,7 +1624,7 @@ impl ConsensusEngine {
                 if let Some((b, a)) = acc { reports.push((b, a.digest(), a.value())); }
             }
         }
-        self.persist_acceptor(slot);
+        if !self.persist_acceptor(slot).await { return Phase1::Unrecorded; }
         let mut promisers: AHashSet<NodeId> = AHashSet::new();
         promisers.insert(me.clone());
 
@@ -1702,9 +1741,9 @@ impl ConsensusEngine {
             Arc::from(consensus_kind::COMMIT), scope.clone(), self.sign_payload(encode_consensus_msg(&commit)),
         ).await;
         let committed_upd = self.set_async(commit_key, value.clone()).await;
-        let persisted = self.persist_committed(slot, &committed_upd).await
-            & self.write_lease(slot, lease_ms).await;
-        self.record_decided(slot, ballot);
+        let persisted = self.persist_sync(slot, &committed_upd, "committed slot").await
+            & self.write_lease(slot, lease_ms).await
+            & self.record_decided(slot, ballot).await;
         Some(ConsensusResult::Committed {
             slot:   Arc::clone(slot),
             value:  value.clone(),
@@ -1713,24 +1752,33 @@ impl ConsensusEngine {
         })
     }
 
-    /// Forces the committed-slot record to stable storage (`append_sync` —
-    /// `fdatasync` in every `SyncMode`). Returns `false` on failure, which the
-    /// commit surfaces as `Committed { persisted: false }` rather than swallowing:
-    /// the cluster commit already happened (COMMIT emitted, value applied), so the
-    /// honest report is "committed, not locally durable". `true` when persistence
-    /// is not configured — no promise was made.
-    async fn persist_committed(&self, slot: &Arc<str>, upd: &crate::framing::GossipUpdate) -> bool {
+    /// Forces an already-applied record to stable storage (`append_sync` — `fdatasync` in every
+    /// `SyncMode`); `what` names it in the log. Returns `false` on failure, which a commit
+    /// surfaces as `Committed { persisted: false }` rather than swallowing: the cluster commit
+    /// already happened (COMMIT emitted, value applied), so the honest report is "committed, not
+    /// locally durable" — and which an acceptor answers by **not answering** (`persist_acceptor`).
+    /// `true` when persistence is not configured — no promise was made.
+    async fn persist_sync(&self, slot: &str, upd: &crate::framing::GossipUpdate, what: &str) -> bool {
         let Some(wal) = self.task_ctx.wal.get() else { return true; };
         match wal.append_sync(sync_entry_from(upd)).await {
             Ok(()) => true,
             Err(e) => {
                 tracing::error!(
                     slot = %slot, error = %e,
-                    "consensus: committed slot did not reach stable storage on this node",
+                    "consensus: {what} did not reach stable storage on this node",
                 );
                 false
             }
         }
+    }
+
+    /// The attempt ends here: this node's own acceptor record did not reach stable storage, so
+    /// nothing left this node and nothing can be in flight. Reported as a `Timeout` with reason
+    /// `unrecorded` — the attempt was not made — rather than retried against a failing disk.
+    fn unrecorded(&self, slot: Arc<str>, ballots_tried: u32, quorum_required: usize) -> ConsensusResult {
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_consensus_timeouts_total", "reason" => "unrecorded").increment(1);
+        ConsensusResult::Timeout { slot, ballots_tried, votes_last_ballot: 0, quorum_required }
     }
 
     /// Writes (or clears) the epoch-lease window for `slot` at commit time.
@@ -1747,23 +1795,17 @@ impl ConsensusEngine {
         match lease_ms {
             Some(ms) => {
                 let upd = self.set_async(&lease_key, encode_lease_ms(ms)).await;
-                let Some(wal) = self.task_ctx.wal.get() else { return true; };
-                match wal.append_sync(sync_entry_from(&upd)).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::error!(
-                            slot = %slot, error = %e,
-                            "consensus: lease for committed slot did not reach stable storage on this node",
-                        );
-                        false
-                    }
-                }
+                self.persist_sync(slot, &upd, "lease for committed slot").await
             }
             None => {
+                // The tombstone is on the same footing as the lease it clears: a restart that
+                // replayed the old lease without it would expire the permanent commit.
                 if self.get(&lease_key).is_some() {
-                    self.kv_delete(&lease_key);
+                    let upd = self.kv_delete(&lease_key);
+                    self.persist_sync(slot, &upd, "lease tombstone for committed slot").await
+                } else {
+                    true
                 }
-                true
             }
         }
     }
@@ -1980,6 +2022,9 @@ enum Phase1 {
     Refused(u64),
     /// No quorum promised within the timeout; carries how many acceptors **other than this node** did.
     Short(usize),
+    /// This node's own promise did not reach stable storage, so the attempt stops before anything
+    /// leaves: a promise a restart forgets is one this node can break.
+    Unrecorded,
 }
 
 /// Outcome of `ConsensusEngine::collect_one_ballot`.
@@ -2496,15 +2541,20 @@ pub(crate) fn untagged_consensus_signatures_accepted() -> u64 {
 // ── Voter task ───────────────────────────────────────────────────────────────
 
 /// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
-/// promised. The promise is **recorded before the answer leaves** — applied to the store and handed
-/// to the WAL, the same rung a vote's record reaches (not an fsync) — because a proposer chooses its
-/// value on the strength of it, and a restart must not let this node break it.
+/// promised. The promise is **on stable storage before the answer leaves** — applied to the store,
+/// then handed to the WAL and fsynced (`persist_acceptor`), the same rung a vote's record and a
+/// commit reach — because a proposer chooses its value on the strength of it, and a restart must
+/// not let this node break it. Until 2.32.0 this said "handed to the WAL" and was not: the record
+/// was applied and gossiped only. A promise that does not reach the WAL is **not answered**.
 #[cfg(feature = "consensus")]
-fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId) {
+async fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId) {
     let floor = ctx.decided_floor(&slot);
     match prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor) {
         PrepareOutcome::Promised(acc) => {
-            ctx.persist_acceptor(&slot);
+            if !ctx.persist_acceptor(&slot).await {
+                tracing::warn!(slot = %slot, ballot, "consensus: promise not recorded; not answering the prepare");
+                return;
+            }
             let ack = ConsensusMsg::PrepareAck {
                 slot:            Arc::clone(&slot),
                 ballot,
@@ -2565,7 +2615,10 @@ pub(crate) async fn run_consensus_listener(
     loop {
         tokio::select! { biased;
             _ = &mut cancel                  => break,
-            _ = shutdown_rx.wait_for(|v| *v) => break,
+            // The `watch::Ref` is dropped inside the block: the arms below await (the acceptor's
+            // record is fsynced before it answers), and a `select!` output holding the guard would
+            // make this future `!Send`.
+            _ = async { let _ = shutdown_rx.wait_for(|v| *v).await; } => break,
             Some(sig) = rx_propose.recv() => {
                 // Silent abstain: overloaded node neither votes nor nacks.
                 // max_abstain_ballots > 0 caps how many ballots can be skipped in a row.
@@ -2581,7 +2634,7 @@ pub(crate) async fn run_consensus_listener(
 
                 let (slot, ballot, value, proposer) = match ctx.decode_verify(&sig.payload) {
                     Some(ConsensusMsg::Prepare { slot, ballot, proposer }) => {
-                        answer_prepare(&ctx, slot, ballot, proposer);
+                        answer_prepare(&ctx, slot, ballot, proposer).await;
                         continue;
                     }
                     Some(ConsensusMsg::Propose { slot, ballot, value, proposer }) =>
@@ -2633,8 +2686,14 @@ pub(crate) async fn run_consensus_listener(
                     // node's acceptance is unrecorded is exactly the memory a restart would lose —
                     // the proposer counts it, the node forgets it, and after a restart the node can
                     // vote again at the same ballot for another value. Same ordering rule as
-                    // "apply to the store, then hand the record to the WAL", one layer up.
-                    ctx.persist_acceptor(&slot);
+                    // "apply to the store, then hand the record to the WAL", one layer up — and
+                    // fsynced, so "durable" means the disk, not the store. An acceptance that does
+                    // not reach the WAL is not voted; the claim stays, and a re-sent proposal for
+                    // the same value re-claims it idempotently.
+                    if !ctx.persist_acceptor(&slot).await {
+                        tracing::warn!(slot = %slot, ballot, "consensus: acceptance not recorded; not voting");
+                        continue;
+                    }
                     ctx.kv_set(
                         format!("{}{}", consensus_ns::BALLOT, &*slot),
                         encode_ballot(ballot),
@@ -2739,11 +2798,16 @@ pub(crate) async fn run_consensus_listener(
                 // The acceptor's memory is **kept**: erasing it here dropped promises, and a delayed
                 // lower-ballot proposal could then commit a second value (2026-10-08 review). What a
                 // commit changes is the floor — a ballot at or below it is refused from now on.
+                // The committed value itself is replicated state anti-entropy re-supplies from any
+                // peer, and its absence after a restart reads as "not yet arrived" (`decision_over`
+                // is false, so a late COMMIT at the decided ballot re-applies and one below it is
+                // refused by the floor) — so it stays on the gossip path. The **floor** is this
+                // node's own refusal memory and reaches the WAL (`record_decided`).
                 ctx.kv_set(
                     format!("{}{}", consensus_ns::COMMITTED, &*slot),
                     value,
                 );
-                ctx.record_decided(&slot, ballot);
+                let _ = ctx.record_decided(&slot, ballot).await;
             }
         }
     }

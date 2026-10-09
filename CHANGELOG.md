@@ -135,6 +135,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   MINOR (`docs/guide/deprecations.md` §23). **Not claimed:** while the allowance is open and the flag is off, a
   bare signature over caller-shaped bytes still reads as a proof there — no narrower than the flag-off posture
   already was, where an unsigned entry is accepted too.
+- **An acceptor's promise and acceptance, and a slot's decided floor, never reached the WAL.** The record
+  `sys/consensus-accepted/{node}/{slot}` — what `prewarm_accepted` restores at start so a restarted node keeps its
+  promise and cannot vote twice at one ballot — was applied to the store and gossiped, never handed to the WAL; so
+  was `consensus/decided/{slot}`, the floor acceptors refuse below. Only the committed slot and its lease were. A
+  node that crashed after promising or voting restarted with no memory of either (an orderly shutdown hid it: the
+  final snapshot is taken from the store), and the prepare path's doc said "handed to the WAL" when it was not.
+  Both now reach stable storage through the commit's own `append_sync` (a forced `fdatasync`) **before** the
+  `PrepareAck`, the vote or the proposal leaves; a record that does not is not answered — the acceptor stays
+  silent, a proposer's own attempt ends as `Timeout` with the new reason `unrecorded` — and a commit's
+  `persisted` now folds the floor in with the slot and the lease. The permanent commit's lease tombstone reaches
+  the WAL the same way; the shared ballot key (`consensus/ballot/`) is appended fire-and-forget, a liveness aid a
+  promise already refuses past. Seen failing first: `an_acceptors_record_survives_a_crash_without_a_snapshot`
+  (the crash copy replayed `consensus/committed/leader/solo` and not the acceptor's record). **Not claimed:** the
+  learner's re-stamp of `consensus/committed/` stays on the gossip path (replicated state anti-entropy
+  re-supplies; its absence after a restart reads as *not yet arrived*, which the restored floor keeps safe), and
+  a `LockGuard`'s release tombstones stay there too (a restored lock is bounded by its lease, which is on disk).
 
 ## [2.31.0] — 2026-10-09
 

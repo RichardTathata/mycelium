@@ -5146,6 +5146,80 @@ async fn a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_appe
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// **An acceptor's record reaches the WAL before its answer leaves.** The record
+/// (`sys/consensus-accepted/{node}/{slot}`) was applied to the store and gossiped, never handed to
+/// the WAL — only the committed slot and its lease were — so a node that crashed after promising or
+/// voting restarted with no memory of it: `prewarm_accepted` reads the store the snapshot and WAL
+/// restore, and neither held the record. The promise a proposer chose its value on was gone, and the
+/// node could vote again at the same ballot for another value — the restart case the in-memory
+/// `acceptor_memory_survives_a_restart` modelled with an encode/decode round trip and nothing on disk.
+///
+/// **The crash is modelled as R2's is**: copy the files while the node runs, replay the copy, then
+/// restart over the copy. An orderly `shutdown()` cannot show this — it snapshots the *store*, which
+/// held the record whatever the WAL said. Seen failing first: the replay held
+/// `consensus/committed/leader/solo` and not the acceptor's record.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn an_acceptors_record_survives_a_crash_without_a_snapshot() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-acceptor-wal-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    // A one-member group: this node is the whole electorate, so its own promise and acceptance are
+    // the record under test, written on the proposer's path (the voter's path writes the same way).
+    a.mesh().join_group("solo");
+    let res = a.consensus()
+        .group_propose("solo", "leader/solo", Bytes::from_static(b"me"), ConsensusConfig::default())
+        .await;
+    assert!(matches!(res, ConsensusResult::Committed { .. }), "{res:?}");
+    let slot: Arc<str> = Arc::from("leader/solo");
+    let live = a.task_ctx.consensus_accepted.pin().get(&slot).cloned().expect("the acceptor holds the slot");
+    assert!(live.promised >= 1, "{live:?}");
+    let key = crate::consensus::accepted_key(&id, &slot);
+
+    // The crash: what is on disk now, with the node still running, is all a restart would have.
+    let crash = base.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+    }
+    let mut replayed = Vec::new();
+    mycelium_core::persistence::replay(&crash, None, |e| replayed.push(e.key.to_string()))
+        .await
+        .expect("the crashed files replay");
+    assert!(replayed.iter().any(|k| k == "consensus/committed/leader/solo"), "the commit is on disk: {replayed:?}");
+    assert!(replayed.iter().any(|k| k == &key), "the acceptor's record is reachable after a crash: {replayed:?}");
+    a.shutdown().await;
+
+    // Restart over what the crash left — not over the orderly shutdown's snapshot.
+    for f in ["snapshot.bin", "wal.bin"] {
+        let _ = std::fs::remove_file(dir.join(f));
+        if crash.join(f).exists() { std::fs::copy(crash.join(f), dir.join(f)).unwrap(); }
+    }
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    let restored = b.task_ctx.consensus_accepted.pin().get(&slot).cloned();
+    assert!(
+        restored.as_ref().is_some_and(|s| s.promised >= live.promised),
+        "prewarm_accepted restores the promise from the WAL: {restored:?} (live was {live:?})",
+    );
+    // And the restored node keeps it: a lower ballot from another proposer is refused.
+    assert!(
+        !crate::consensus::claim_vote(&b.task_ctx.consensus_accepted, &slot, live.promised - 1,
+                                      &Bytes::from_static(b"other"), 0xBEEF, 0),
+        "a ballot below the restored promise is refused",
+    );
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// **Realignment repairs R7** (found by A2's configuration audit, 2026-10-05). A persistence
 /// directory that cannot be created used to be a warning: `start()` logged it and ran **in memory**,
 /// so every write was lost on the next restart — while the guarantee report, resolved from the
