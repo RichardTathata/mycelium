@@ -53,7 +53,9 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   known false positive, dismiss it by hand. This replaced "every test cited by name still exists"
   after `history.md` carried a test's pre-rename name for six days across a pass that declared
   §1 clean — the old check had no enumeration, so it checked whatever the linter remembered
-  (ledger 2026-09-26).
+  (ledger 2026-09-26). **Prove the sweep can say "present" before trusting a "missing"**: run it on one
+  identifier known to exist first. A sweep reporting all 265 identifiers missing is broken, not the docs —
+  under zsh an unquoted `$TREE` is one argument, so `grep` errors (exit 2) on every lookup (2026-10-09).
 - **Cited constants/flags** (e.g. `MAX_KV_WRITE_BYTES`, `WIRE_VERSION`/`PREV_WIRE_VERSION`,
   `swim_failure_detector` default): read the cited file and confirm the stated value/default.
   **Scope includes guide *chapters*, not just the front-door docs** — grep every guide page that pins
@@ -152,6 +154,9 @@ said *"Four bins need it"* (wasm) from 2026-07-07 while the manifest grew to nin
 **A page listing a suite's demos is diffed by name against the runner** — the `run_demo` lines in
 `examples/coop/ci_smoke.sh`, the `[[bin]]` names in the crate's manifest — not counted: `examples.md` said fourteen
 demos with twelve in CI while `procurement_authority` ran as the thirteenth for two weeks (ledger 2026-10-07).
+**When a pass changes a count, grep the page — and its siblings — for every spelling of the old one**, digits and
+words: the 10-07 fix moved "fourteen" to "fifteen" in one sentence and left "additional to the fourteen above" two
+paragraphs later (ledger 2026-10-09).
 
 **Enumeration pages: audit by *category*, not by pinned count.** For pages that list a set
 (`dev/examples.md`, the sub-handle list, the feature list), a re-checked count is not coverage — a

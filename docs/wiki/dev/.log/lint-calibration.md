@@ -358,3 +358,15 @@ Entry format:
   `companions.md` (#542) still said "unreleased on `main`" after v2.26.0 shipped both; §2 compared `.log` dates to
   merged PRs and never asked whether a marker's PR was in a tag. Sharpening (folded into §2): every "unreleased"
   marker is checked with `git tag --contains` against the PR it names.
+
+- 2026-10-09 (full pass): **§4 enumeration — a count fixed in one sentence and not its sibling.** The 10-07 pass
+  added `procurement_authority` and changed `examples.md`'s coop count from fourteen to fifteen in the suite
+  paragraph, but the showcase paragraph still read "the four coop `*_viz` bins are *additional* to the fourteen
+  above". Found by sweeping every spelled-out demo count on the page. Sharpening (folded into §4): when a pass
+  changes a count, grep for every spelling of the old count — digits and words — on the page and its siblings.
+- 2026-10-09 (same pass, a tooling miss, not a drift): **§1's identifier sweep reported all 265 identifiers
+  missing.** The shell was zsh, which does not word-split an unquoted variable, so the path list reached `grep` as
+  one nonexistent path and every lookup exited 2; a second attempt failed on zsh's glob rules. Caught because the
+  result was implausible, before any page was "fixed" to match. Sharpening (folded into §1): run the sweep on a
+  known-present identifier first; the pass now uses a Python sweep (`os.walk`, substring match).
+

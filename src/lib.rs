@@ -199,7 +199,7 @@
 //! | `INFORM`                   | [`emit`] / [`emit_ordered`]                                                 | Epidemic broadcast; no acknowledgement. `emit_ordered` adds causal HLC sequencing.        |
 //! | `REQUEST`                  | [`rpc_call`] / [`rpc_respond`]                                              | Point-to-point call with correlation nonce; awaits reply or timeout.                       |
 //! | `QUERY-IF` / `QUERY-REF`   | [`resolve`] / [`watch_capabilities`]                                        | Snapshot or live-streaming capability satisfaction check.                                  |
-//! | `PROPOSE`                  | [`group_propose`] / [`system_propose`] / [`cross_group_propose`]            | Epidemic two-phase voting; `GroupQuorum` controls the acceptance fraction per group.       |
+//! | `PROPOSE`                  | [`group_propose`] / [`system_propose`] / [`cross_group_propose`]            | Paxos over gossip: prepare, then value-bound votes (2.30.0); `GroupQuorum` sets per-group fractions. |
 //! | `AGREE` / `REFUSE`         | [`rpc_respond`] or [`emit`] with `SignalScope::Individual`                  | Point-to-point reply to a specific RPC request or correlation nonce.                       |
 //! | `SUBSCRIBE`                | [`signal_rx`] / [`signal_rx_from`] / [`watch_capabilities`]                 | Push channel; `signal_rx_from` restricts delivery to trusted senders.                     |
 //! | `CFP` (call-for-proposals) | [`advertise_capability`] + [`declare_requirement`]                          | Providers advertise; consumers declare needs. Emergent groups form without a coordinator.  |
