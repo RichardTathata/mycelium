@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.30.0] — 2026-10-09
+
+**Consensus asks before it proposes.** Two concurrent proposers on a stable roster could commit different values for
+one slot — a strictly higher ballot was granted and overwrote what an acceptor held, and the only guard was the second
+proposer's local view of the commit — and both were told they had won. Consensus now runs a Paxos prepare phase, an
+acceptor never forgets a promise, and a commit of another caller's value returns `Superseded`. It held inside the
+threat model's supported profile too, and 2.14.0's notes overclaimed its closure. Wire **v12** unchanged (two message
+variants appended). A MINOR: behaviour changes with an upgrade note (`deprecations.md` §21).
+
 ### Fixed
 - **Two concurrent proposers could commit different values for one slot, on a stable roster.** A proposer
   learned what an acceptor had accepted only from a refusal, and a strictly higher ballot is never refused —
