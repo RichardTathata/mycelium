@@ -274,6 +274,19 @@ pub enum ConsensusResult {
         /// declared. `observed_members < declared_min` means this node's view is partial.
         declared_min: usize,
     },
+    /// **This node is not in the group's roster, so it may not propose to the group.**
+    ///
+    /// A proposer counts its own promise and its own vote, and the quorum it needs is computed
+    /// from the roster — which, until 2.32.0, it need not have been in. A stranger's self-vote is
+    /// a vote the electorate does not contain: on a one-member group it decided alone, and on a
+    /// larger group two strangers with disjoint acceptors could each reach quorum, since the
+    /// quorums need not intersect in a member. Refused by name at the engine's door, before
+    /// anything leaves, so nothing is in flight; `cluster_propose` has no roster and is unaffected.
+    /// Join the group first — `mesh().join_group`, or `/gateway/govern/group` for a governed one.
+    NotAMember {
+        slot:  Arc<str>,
+        group: Arc<str>,
+    },
 
     /// Quorum size was met but the Hard topology gate was not satisfied — too
     /// few distinct domains at `spread_depth`. The proposal is **not** committed.
@@ -1015,6 +1028,20 @@ impl ConsensusEngine {
     ) -> ConsensusResult {
         let ballot_key = format!("{}{}", consensus_ns::BALLOT, &*slot);
         let commit_key = format!("{}{}", consensus_ns::COMMITTED, &*slot);
+
+        // **A proposer counts itself, so it must be in the roster it counts itself toward.** The
+        // promise and the vote below are inserted for this node unconditionally; the quorum came
+        // from the group's roster. Checked here, at the one door both the library and the gateway
+        // reach (`ConsensusHandle::group_propose`, `http::overlay_group_propose`), so no caller can
+        // reach the counting for a group this node has not joined. A cluster proposal has no
+        // roster: every node is in it. `cross_propose` never counts itself (its claim is a gate).
+        if let SignalScope::Group(group) = &scope {
+            let my_key = format!("{}{}", grp_prefix(group), self.task_ctx.node_id);
+            if self.get(&my_key).is_none() {
+                tracing::warn!(slot = %slot, group = %group, "consensus: refusing to propose to a group this node is not in");
+                return ConsensusResult::NotAMember { slot, group: Arc::clone(group) };
+            }
+        }
 
         // The value this proposer is currently carrying. It starts as the caller's, and is
         // **replaced** by any higher-balloted accepted value an acceptor reports — accepted-value

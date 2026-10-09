@@ -446,3 +446,20 @@ unchanged too, but its doc now states the contract it always needed: the caller 
 `require_identity_proofs` off until every node is on 2.32.0 (the flag's own rule). Watch the two counters: a
 non-zero value names a peer still signing the old way. **The allowance closes in the next MINOR**, after which a
 bare signature is refused everywhere.
+
+## 24. `ConsensusResult`, `CommitError` and `ConsistencyError` gain `NotAMember` (2.32.0)
+
+**What changes.** A group proposal from a node that is not in the group's roster is refused by name —
+`ConsensusResult::NotAMember { slot, group }`, `CommitError::NotAMember { slot, group }`,
+`ConsistencyError::NotAMember { group }`, and **403 `not_a_member`** from `POST /gateway/overlay/elect` and every
+gateway route that reaches a group proposal — where it used to run, counting the proposer's own vote toward a
+quorum drawn from a roster it was not in (CHANGELOG, Unreleased § Fixed). `cluster_propose` is unaffected.
+
+**Will the compiler tell me?** Only if you matched without a `_` arm — all three enums are `#[non_exhaustive]`
+(§13), so an exhaustive `match` inside this crate's dependants already needed one. **That arm must fail closed:**
+a refusal read as a commit is the class of bug `ElectorateUnavailable` ended, one door over.
+
+**Migration.** Join the group before proposing to it — `mesh().join_group(..)`, `POST /gateway/mesh/group`, or
+`/gateway/govern/group` (`govern:write`) for a governed group. A client that elected a leader for a group its
+node had not joined was never electing anything the group's members agreed to.
+

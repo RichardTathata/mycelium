@@ -409,6 +409,18 @@ KV — the coordinator-free property, end to end, Docker-free. Covered in CI by 
 [guide/14 · patterns and pitfalls](../guide/14-patterns-and-pitfalls.md).*
 
 
+## An election was refused: `not_a_member`
+
+`POST /gateway/overlay/elect` answering **403 `not_a_member`** means this node is **not in the group's roster**,
+so it did not propose: a proposer counts its own vote toward a quorum drawn from the roster, and from outside it
+that vote is one the electorate does not contain (until 2.32.0 a stranger to a one-member group elected itself
+its leader). The body names the group; join it and retry — `POST /gateway/mesh/group`, or
+`POST /gateway/govern/group` (`govern:write`) for a governed group.
+
+```json
+{"ok": false, "error": "not_a_member", "group": "G", "detail": "…"}
+```
+
 ## An election was refused: `electorate_unavailable`
 
 `POST /gateway/overlay/elect` answering **409 `electorate_unavailable`** means the node **did not

@@ -3695,6 +3695,7 @@ fn commit_error_response(err: crate::CommitError) -> axum::response::Response {
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
         CommitError::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        CommitError::NotAMember { group, .. } => not_a_member_response(&group),
         // `CommitError` is `#[non_exhaustive]` in `mycelium-core`: a refusal this build does not
         // name is still a refusal, and its `Display` says what it is.
         other => (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": other.to_string() }))).into_response(),
@@ -3846,6 +3847,7 @@ async fn gw_overlay_lock_acquire(
             "observed_members": observed_members,
             "declared_min": declared_min,
         }))).into_response(),
+        crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
     }
 }
 
@@ -3924,7 +3926,24 @@ async fn gw_overlay_elect(
                 "this node sees fewer members than the group declares; its view is partial"
             },
         }))).into_response(),
+        // This node is not in the group: it may not elect a leader for it, least of all itself.
+        crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
     }
+}
+
+/// **403 `not_a_member`**: this node is not in the named group's roster, so it did not propose.
+/// A proposer counts its own vote toward a quorum drawn from the roster; from outside it that vote
+/// is one the electorate does not contain (`ConsensusResult::NotAMember`). An authority refusal,
+/// so 403 like `governed_group`, not the 409 of a roster that could not be established.
+#[cfg(feature = "consensus")]
+fn not_a_member_response(group: &str) -> axum::response::Response {
+    (StatusCode::FORBIDDEN, Json(json!({
+        "ok": false,
+        "error": "not_a_member",
+        "group": group,
+        "detail": "this node is not in the group's roster, so it may not propose to it — join the \
+                   group first (POST /gateway/mesh/group, or /gateway/govern/group for a governed one)",
+    }))).into_response()
 }
 
 // ── Overlay: ordered log ──────────────────────────────────────────────────────

@@ -77,6 +77,23 @@ the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key select
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
 identity.
 
+## Every signature the substrate verifies is domain-tagged (2026-10-09, 2.32.0)
+
+The identity proof was a bare signature over the key history (`32 × N` bytes, nothing more) and a consensus
+payload was signed bare too; a `PrepareAck`/`Promise` carries the **proposer's** `accepted_value` back, so a
+member could have a victim sign a value embedding the member's key at a 32-byte boundary, publish that signed
+answer as `sys/identity-signed/V`, and be merged into V's key set through V's own trusted key — then sign as V.
+Now: an identity proof signs `mycelium.identity/proof/1 ‖ u32 len ‖ history`
+(`helpers::identity_proof_message`), a consensus payload `mycelium.consensus/msg/1 ‖ u32 len ‖ bytes`
+(`consensus::consensus_signing_message`), beside the mandate's `mycelium.mandate/possession/1`; frames are
+unchanged (wire v12). `GossipAgent::sign_with_identity` signs what it is given, so its doc states the contract:
+the caller owns the message's domain. **Mixed fleet, one release:** the bare form of both is accepted and counted
+(`/stats` `identity_untagged_proofs`, `consensus_untagged_signatures`), the identity one **only with
+`require_identity_proofs` off** — under the flag a bare proof is what any signing path could have produced; a
+2.31 node cannot verify a tagged signature, so an upgraded proposer's rounds time out at un-upgraded acceptors
+(`docs/guide/deprecations.md` §23). Test: `a_signed_consensus_answer_is_not_an_identity_proof`, seen failing
+first.
+
 ## The identity-proof window, and a diagnosis that was wrong (2026-09-24)
 
 `require_identity_proofs` defaults to **`false`**. Set it and an identity entry this node cannot

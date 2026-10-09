@@ -9808,6 +9808,100 @@ async fn an_unjoined_group_refuses_to_elect_on_both_surfaces() {
     agent.shutdown().await;
 }
 
+/// **A node that is not in a group's roster may not propose to it.**
+///
+/// A proposer counted its own promise and its own vote unconditionally, while the quorum it needed
+/// was computed from the group's roster — which it need not be in. So a stranger to a one-member
+/// group `{A}` had a quorum of one and satisfied it alone: it chose a leader for the group without
+/// a member voting, from a node the group's members never admitted. On a larger group the same
+/// arithmetic lets two strangers with disjoint acceptors each reach quorum — a stranger's self-vote
+/// is a vote the roster does not contain, so the two quorums need not intersect.
+///
+/// Both surfaces refuse by name now: `ConsensusResult::NotAMember` from the library, and
+/// `403 not_a_member` from the gateway's election route, which proposed `leader/{group}` for any
+/// group a client named. Seen failing first: B committed `leader/members-only` = B.
+#[cfg(all(feature = "consensus", feature = "gateway"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_non_member_cannot_propose_to_a_group_on_either_surface() {
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let http_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let mut cfg_a = GossipConfig::default();
+    cfg_a.bind_port = port_a;
+    cfg_a.bootstrap_peers = vec![id_b.clone()];
+    cfg_a.health_check_max_jitter_ms = 50;
+    let mut cfg_b = GossipConfig::default();
+    cfg_b.bind_port = port_b;
+    cfg_b.bootstrap_peers = vec![id_a.clone()];
+    cfg_b.health_check_max_jitter_ms = 50;
+    cfg_b.http_port = Some(http_b);
+    let a = GossipAgent::new(id_a, cfg_a);
+    let b = GossipAgent::new(id_b.clone(), cfg_b);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    let _la = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let _lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    poll_until(|| !a.peers().is_empty() && !b.peers().is_empty(), 2_000).await;
+
+    // A is the whole roster; B is a stranger to the group, and can see that it is.
+    a.mesh().join_group("members-only");
+    let prefix = crate::signal::grp_prefix("members-only");
+    poll_until(|| !b.kv().scan_prefix(&prefix).is_empty(), 5_000).await;
+
+    let cfg = ConsensusConfig {
+        phase1_timeout: Duration::from_millis(300),
+        max_ballots:    1,
+        ..ConsensusConfig::default()
+    };
+    let res = b.consensus()
+        .group_propose("members-only", "leader/members-only", Bytes::from_static(b"stranger"), cfg.clone())
+        .await;
+    // Seen failing first as `!matches!(res, Committed { .. })`: B committed `leader/members-only` = B.
+    match res {
+        ConsensusResult::NotAMember { ref group, ref slot } => {
+            assert_eq!(&**group, "members-only", "the refusal names the group");
+            assert_eq!(&**slot, "leader/members-only");
+        }
+        other => panic!("a stranger must be refused by name, got {other:?}"),
+    }
+    assert!(
+        b.consensus().consensus_get("leader/members-only").is_none(),
+        "and nothing was committed",
+    );
+    // The receipt verb and the election verb translate it, each as a refusal — never a timeout.
+    match b.consensus().group_propose_receipt("members-only", "leader/members-only", Bytes::from_static(b"stranger"), cfg).await {
+        Err(crate::CommitError::NotAMember { group, .. }) => assert_eq!(&*group, "members-only"),
+        other => panic!("expected CommitError::NotAMember, got {other:?}"),
+    }
+    match b.consensus().elect_leader_receipt("members-only").await {
+        Err(crate::ConsistencyError::NotAMember { group }) => assert_eq!(&*group, "members-only"),
+        other => panic!("expected ConsistencyError::NotAMember, got {other:?}"),
+    }
+    // And the member itself still elects: the roster is explicit, so solo authority is legitimate.
+    let own = a.consensus().elect_leader_receipt("members-only").await.expect("the member elects");
+    assert_eq!(own.leader, *a.node_id());
+
+    // The gateway's election route proposes `leader/{group}` for any group a client names.
+    let client = reqwest::Client::new();
+    let health = format!("http://127.0.0.1:{http_b}/health");
+    for _ in 0..40 {
+        if client.get(&health).send().await.is_ok_and(|r| r.status().is_success()) { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = client.post(format!("http://127.0.0.1:{http_b}/gateway/overlay/elect"))
+        .json(&serde_json::json!({"group": "members-only"}))
+        .send().await.expect("elect request");
+    assert_eq!(r.status(), 403, "an authority refusal, like governed_group");
+    let body: serde_json::Value = r.json().await.expect("json body");
+    assert_eq!(body["error"], "not_a_member", "{body}");
+    assert_eq!(body["group"], "members-only", "{body}");
+
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 /// **Boundary H P1 gate — issuer binding on live nodes.** Two TLS members, A and B.
 ///
 /// 1. A signs a knowledge record as itself; B attributes it to A as `Current` on the member path,

@@ -151,6 +151,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   learner's re-stamp of `consensus/committed/` stays on the gossip path (replicated state anti-entropy
   re-supplies; its absence after a restart reads as *not yet arrived*, which the restored floor keeps safe), and
   a `LockGuard`'s release tombstones stay there too (a restored lock is bounded by its lease, which is on disk).
+- **A proposer counted its own promise and vote without being in the group's roster.** `propose` inserted this
+  node into its promisers and voters unconditionally while the quorum it needed came from the `grp/{group}/`
+  roster; the trust-slice filter applied only to what arrived, and neither `group_propose` nor the gateway's
+  `POST /gateway/overlay/elect` — which proposes `leader/{group}` for any group a client names — asked whether this
+  node was a member. A stranger to a one-member group therefore had a quorum of one and satisfied it alone,
+  choosing the group's leader with no member voting; on a larger group two strangers with disjoint acceptors each
+  reach quorum, since a stranger's self-vote is one the roster does not contain and the quorums need not
+  intersect in a member. The engine now refuses at its one door, before anything leaves:
+  **`ConsensusResult::NotAMember { slot, group }`**, with `CommitError::NotAMember` and
+  `ConsistencyError::NotAMember` beside it and **403 `not_a_member`** (naming the group) from the gateway, on
+  every route that reaches a group proposal. `cluster_propose` has no roster and is unaffected;
+  `cross_group_propose` never counted itself. Seen failing first:
+  `a_non_member_cannot_propose_to_a_group_on_either_surface` (B committed `leader/members-only` = B).
+  **Upgrade note:** three `#[non_exhaustive]` enums gain a variant — a `_` arm must fail closed, as the enums'
+  docs already require (`docs/guide/deprecations.md` §24).
 
 ## [2.31.0] — 2026-10-09
 

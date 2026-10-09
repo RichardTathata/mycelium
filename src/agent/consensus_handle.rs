@@ -79,6 +79,7 @@ pub(crate) fn receipt_from(
         // §1) — a timeout may still commit later, a refusal never will.
         ConsensusResult::ElectorateUnavailable { slot, observed_members, declared_min, .. } =>
             Err(CommitError::ElectorateUnavailable { slot, observed_members, declared_min }),
+        ConsensusResult::NotAMember { slot, group } => Err(CommitError::NotAMember { slot, group }),
         ConsensusResult::Superseded { slot, ballot } => Err(CommitError::Superseded { slot, ballot }),
         ConsensusResult::TopologyUnsatisfied { slot, distinct_domains, domains_required, .. } => {
             Err(CommitError::TopologyUnsatisfied {
@@ -477,6 +478,7 @@ impl ConsensusHandle {
             // enum became `#[non_exhaustive]`.
             ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
+            ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
         }
     }
 
@@ -580,6 +582,7 @@ impl ConsensusHandle {
             // about, one level down.
             ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
+            ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
         }
     }
 
@@ -669,6 +672,7 @@ impl ConsensusHandle {
             // about, one level down.
             ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
+            ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
         }
     }
 

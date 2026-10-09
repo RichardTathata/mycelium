@@ -37,6 +37,15 @@ test is a crash copy of the files, as R2's (`an_acceptors_record_survives_a_cras
 learner's `consensus/committed/` re-stamp (anti-entropy re-supplies it; absent reads as *not yet arrived*) and
 `LockGuard`'s release tombstones (bounded by the lease, which is on disk).
 
+**A proposer counts itself only toward a roster it is in** (2.32.0). `propose_inner` inserts this node into its
+promisers and voters unconditionally, and the quorum it needs is the caller's reading of `grp/{group}/`; so the
+engine's door refuses a `SignalScope::Group` proposal when `grp/{group}/{self}` is absent (`ConsensusResult::
+NotAMember`, 403 `not_a_member` at the gateway). A stranger's self-vote is one the electorate does not contain:
+on a one-member group it decided alone, on a larger one two strangers with disjoint acceptors each reached quorum.
+The check is at the engine, not the callers, so every door — `ConsensusHandle::group_propose`, the gateway's
+`overlay_group_propose` (`/overlay/elect`) — reaches it. `cluster_propose` has no roster; `cross_propose` never
+counts itself. Test: `a_non_member_cannot_propose_to_a_group_on_either_surface`, seen failing first.
+
 **Acceptor memory is never erased — not on commit, not to bound storage** (2.30.0, #575). The record under
 `sys/consensus-accepted/{node}/{slot}` holds the acceptor's **promise** as well as its acceptance, and it outlives
 the commit. It used to be deleted when a slot committed, to keep the prefix bounded; that dropped promises, so a
