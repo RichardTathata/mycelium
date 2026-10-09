@@ -39,13 +39,23 @@ Requires Python ≥ 3.10 and a running Mycelium node whose gateway mounts the
 
 ## Reaching the gateway
 
-`MyceliumCheckpointSaver(host, port, *, timeout=30.0, serde=None, scheme="http", ca_file=None)`.
+`MyceliumCheckpointSaver(host, port, *, timeout=30.0, serde=None, token=None, scheme="http", ca_file=None)`.
+
+A token-protected gateway (`gateway_auth_token`, scoped tokens or OIDC — every `/gateway/*` route
+answers 401 without a bearer) is reached with `token=`, sent as `Authorization: Bearer` on both the
+sync and async clients; when omitted, `MYCELIUM_GATEWAY_TOKEN` is used, exactly as the Python SDK
+resolves it (the argument wins; an empty string means none). The token travels in the header only —
+never in a URL, the saver's `repr` or an error message. Under scoped tokens it needs `kv:read`,
+`kv:write` and `llm:read`. 0.3.2; before it the saver could not present a bearer at all, while this
+README described `"unauthorized"` as a token problem.
+
 A gateway serving HTTPS — the node's `gateway_tls` or a TLS-terminating proxy — is reached with
 `scheme="https"` (0.3.2; before it `http://` was hard-coded). Certificate verification stays on; a
 private fleet CA is trusted with `ca_file=` (the node-cert mode of `gateway_tls` serves the cluster
 CA's `ca-cert.pem`), read at construction. Both options follow the Python SDK's.
 
 ```python
+checkpointer = MyceliumCheckpointSaver("10.0.0.5", 8101, token="…")                      # or MYCELIUM_GATEWAY_TOKEN
 checkpointer = MyceliumCheckpointSaver("10.0.0.5", 9443, scheme="https", ca_file="mycelium-tls/ca-cert.pem")
 ```
 
@@ -119,7 +129,8 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached or refused for now (`mycelium-reason` 0.7.1+), the
   node or a proxy in front of it failed, the read was throttled, or the node itself could not be reached
   (an `httpx.TransportError`, such as a refused connection); `"unauthorized"` — the gateway refused
-  the token (a 401/403 — no `llm:read`); `"refused"` (0.3.1) — the blob route's own 403: every holder refused for
+  the token (a 401/403 — no `llm:read`, or no bearer at all: pass `token=` or set
+  `MYCELIUM_GATEWAY_TOKEN`, 0.3.2); `"refused"` (0.3.1) — the blob route's own 403: every holder refused for
   good (a removed member, a denied action; `mycelium-reason` 0.7.1) — fix the holder's membership or authority,
   not the token; `"corrupt"` — every copy currently on offer fails the content
   address (one bad provider beside an honest one that lacks it is `not_found`); `"unsupported"` — the node

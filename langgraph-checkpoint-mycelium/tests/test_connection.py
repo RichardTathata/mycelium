@@ -62,3 +62,90 @@ def test_ca_file_pins_a_private_fleet_ca_and_keeps_verification_on(tmp_path):
         assert {"commonName": "mycelium-sdk-test-ca"} in subjects
     with pytest.raises(FileNotFoundError):
         MyceliumCheckpointSaver("10.0.0.5", 8101, scheme="https", ca_file=str(tmp_path / "absent.pem"))
+
+
+# ── the bearer (0.3.2) ───────────────────────────────────────────────────────
+
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+TOKEN_ENV = "MYCELIUM_GATEWAY_TOKEN"
+
+
+class _Recorder(BaseHTTPRequestHandler):
+    """Records the ``Authorization`` header of every request; answers 401 when told to."""
+
+    protocol_version = "HTTP/1.1"
+    seen: list[str | None] = []
+    refuse = False
+
+    def do_GET(self) -> None:  # noqa: N802
+        _Recorder.seen.append(self.headers.get("Authorization"))
+        status, body = (401, {"error": "unauthorized"}) if _Recorder.refuse else (200, {"found": False})
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+@pytest.fixture
+def stub(monkeypatch):
+    monkeypatch.delenv(TOKEN_ENV, raising=False)
+    _Recorder.seen, _Recorder.refuse = [], False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+
+
+def test_an_explicit_token_rides_both_clients(stub):
+    with MyceliumCheckpointSaver("127.0.0.1", stub, token="secret") as s:
+        s._kv_get("ckpt/x")
+        asyncio.run(s._akv_get("ckpt/x"))
+    assert _Recorder.seen == ["Bearer secret", "Bearer secret"]
+
+
+def test_the_env_token_is_used_when_none_is_given(stub, monkeypatch):
+    monkeypatch.setenv(TOKEN_ENV, "env-token")
+    with MyceliumCheckpointSaver("127.0.0.1", stub) as s:
+        s._kv_get("ckpt/x")
+    assert _Recorder.seen == ["Bearer env-token"]
+
+
+def test_the_argument_beats_the_env_and_empty_means_none(stub, monkeypatch):
+    monkeypatch.setenv(TOKEN_ENV, "env-token")
+    with MyceliumCheckpointSaver("127.0.0.1", stub, token="arg") as s:
+        s._kv_get("ckpt/x")
+    with MyceliumCheckpointSaver("127.0.0.1", stub, token="") as s:
+        s._kv_get("ckpt/x")
+    assert _Recorder.seen == ["Bearer arg", None]
+
+
+def test_no_token_sends_no_header(stub):
+    with MyceliumCheckpointSaver("127.0.0.1", stub) as s:
+        s._kv_get("ckpt/x")
+    assert _Recorder.seen == [None]
+
+
+def test_the_token_is_never_shown(stub):
+    import httpx
+
+    secret = "s3cr3t-bearer-value"
+    with MyceliumCheckpointSaver("127.0.0.1", stub, token=secret) as s:
+        assert secret not in repr(s) and secret not in str(s)
+        assert secret not in s._base
+        _Recorder.refuse = True
+        with pytest.raises(httpx.HTTPStatusError) as ei:
+            s._kv_get("ckpt/x")
+        assert secret not in str(ei.value) and secret not in repr(ei.value)
+        assert secret not in repr(ei.value.request.headers)   # httpx redacts, and we rely on it

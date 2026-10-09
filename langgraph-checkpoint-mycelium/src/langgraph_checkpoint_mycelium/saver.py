@@ -43,6 +43,7 @@ capped at 8 MiB (the v1 single-frame mesh-fetch ceiling).
 from __future__ import annotations
 
 import json
+import os
 import ssl
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
@@ -164,6 +165,20 @@ def _base_url(host: str, port: int, scheme: str) -> str:
     return f"{s}://{host}:{port}"
 
 
+#: Environment variable consulted when the saver is constructed without ``token=`` — the Python
+#: SDK's (``mycelium._pool.TOKEN_ENV``), so one variable serves both.
+TOKEN_ENV = "MYCELIUM_GATEWAY_TOKEN"
+
+
+def _auth_headers(token: str | None) -> dict[str, str]:
+    """The Python SDK's rule, mirrored: an explicit ``token`` wins, then :data:`TOKEN_ENV`, and an
+    empty string means *none*. ``{"Authorization": "Bearer …"}`` or ``{}`` — the token travels in
+    this header only, never in a URL, and the saver keeps no attribute that would show it in a
+    ``repr`` or an error (httpx redacts the header in its own)."""
+    resolved = (token or None) if token is not None else (os.environ.get(TOKEN_ENV) or None)
+    return {"Authorization": f"Bearer {resolved}"} if resolved else {}
+
+
 def _ssl_verify(ca_file: str | None) -> ssl.SSLContext | bool:
     """httpx's ``verify=``: the system trust store, or a default context that trusts a private fleet
     CA's PEM. Chain and hostname verification stay on either way; a missing file is refused here."""
@@ -201,6 +216,10 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
     :param port:    HTTP port of the gateway.
     :param timeout: Default request timeout in seconds.
     :param serde:   Serializer (defaults to LangGraph's ``JsonPlusSerializer``).
+    :param token:   Gateway bearer, sent as ``Authorization: Bearer`` on both clients; when
+                    ``None``, ``MYCELIUM_GATEWAY_TOKEN`` is used, as the Python SDK does (0.3.2 —
+                    before it the saver could not present a bearer at all, so a token-protected
+                    gateway answered 401 to every call).
     :param scheme:  ``"http"`` (default) or ``"https"`` for a gateway serving TLS (0.3.2).
     :param ca_file: PEM bundle of a private fleet CA to trust instead of the system store
                     (verification stays on; 0.3.2).
@@ -213,14 +232,16 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         *,
         timeout: float = 30.0,
         serde: SerializerProtocol | None = None,
+        token: str | None = None,
         scheme: str = "http",
         ca_file: str | None = None,
     ) -> None:
         super().__init__(serde=serde)
         self._base = _base_url(host, port, scheme)
         verify = _ssl_verify(ca_file)
-        self._client  = httpx.Client(base_url=self._base, timeout=timeout, verify=verify)
-        self._aclient = httpx.AsyncClient(base_url=self._base, timeout=timeout, verify=verify)
+        headers = _auth_headers(token)
+        self._client  = httpx.Client(base_url=self._base, timeout=timeout, verify=verify, headers=headers)
+        self._aclient = httpx.AsyncClient(base_url=self._base, timeout=timeout, verify=verify, headers=headers)
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 

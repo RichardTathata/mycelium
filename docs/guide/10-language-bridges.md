@@ -368,7 +368,9 @@ const agent = new MyceliumAgent("10.0.0.5", 8300, 30_000, { token: "…" }); // 
 ```
 
 Companion handles (`Wiki`, `TupleSpace`, `Blackboard`, `PromptSkillClient`, `ReasonClient`,
-`A2aClient`) take the same option. Under scoped tokens, grant the scopes the client's routes
+`A2aClient`) take the same option, and so does the LangGraph checkpointer
+(`MyceliumCheckpointSaver(host, port, token="…")`, `langgraph-checkpoint-mycelium` ≥ 0.3.2 — before it
+the saver could not present a bearer, so a token-protected gateway answered 401 to every checkpoint). Under scoped tokens, grant the scopes the client's routes
 require, **by name** — a family wildcard such as `kv:*` is refused by `validate()` at start (2.16.0;
 a scope matches exactly, or is the single `*`): `kv:read` / `kv:write` for the KV verbs, `cap:read` /
 `cap:write` for capabilities and `declare`, `mesh:read` / `mesh:write` for signals, mailboxes and

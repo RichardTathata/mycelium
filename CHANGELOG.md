@@ -45,6 +45,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NODE_EXTRA_CA_CERTS` rather than add `undici`. Seen failing first: `mycelium-py/tests/test_scheme.py`,
   `mycelium-ts/tests/scheme.test.ts`, `langgraph-checkpoint-mycelium/tests/test_connection.py` (the option
   was not a parameter). Guide: `docs/guide/10-language-bridges.md` § Reaching a gateway over TLS.
+- **The LangGraph checkpointer sends a bearer** (`langgraph-checkpoint-mycelium` **0.3.2**). `MyceliumCheckpointSaver`
+  opened both httpx clients with no headers and took no token, so a token-protected gateway answered 401 to every
+  checkpoint — while the saver's own `"unauthorized"` reason and README sent the operator to the token. It now takes
+  `token=`, resolved as the Python SDK resolves it (the argument, then `MYCELIUM_GATEWAY_TOKEN`; empty means none)
+  and sent as `Authorization: Bearer` on the sync and async clients — header only, never in a URL, the `repr` or an
+  error. Seen failing first: `langgraph-checkpoint-mycelium/tests/test_connection.py` (with only the environment
+  variable set, the stub gateway saw `None` where `Bearer env-token` was expected).
 
 ## [2.31.0] — 2026-10-09
 
