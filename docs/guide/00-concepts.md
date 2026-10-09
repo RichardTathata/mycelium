@@ -147,7 +147,8 @@ someone publishes a `MembershipIntent` for it; then a `MembershipGovernor` activ
 `min`/`max` band (spinning members up/down or flagging a `conflict`). Govern a group when you need
 a *bounded pool* ("keep 5–10 render workers") or want it observable against a target; leave it
 ungoverned when self-organisation is enough (most groups). Governance is additive — the *same*
-group is just being watched by a governor. **Why create a group at all** →
+group is just being watched by a governor, and its membership becomes a governance act: over HTTP a node
+joins or leaves it through `/gateway/govern/group` (`govern:write`), not `/gateway/mesh/group` (2.29.0). **Why create a group at all** →
 [cookbook: "why (and when) create a group"](cookbook.md#why-and-when-would-i-create-a-group-within-a-cluster).
 
 **Consensus vs. LWW vs. tuple-space rendezvous — "how do agents agree?"**

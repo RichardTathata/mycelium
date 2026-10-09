@@ -92,7 +92,9 @@ name = "intake"
 
 ## `[[group]]`
 
-A capability group the unit defines: the fields of `CapabilityGroupDef` plus a name.
+A capability group the unit defines: the fields of `CapabilityGroupDef` plus a name. A group under a live
+membership intent is **governed**, and `POST /gateway/units/declare` refuses to redefine it (**403**
+`governed_group`, 2.29.0) — its filter decides whom the governor can elect.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -210,7 +212,7 @@ independent of demand. A stem refuses `[[presence]]` without `[hosts]`.
 |---|---|---|---|
 | `ns`, `name`, `schema_id`, `attrs`, `ranking` | as `[[requirement]]` | — | The filter, written inline. |
 | `min_providers` | integer | required | The floor. `0` is refused. |
-| `max_providers` | integer | absent (no ceiling) | The ceiling. Refused when below the floor. Above it, the hosts ranked beyond `max` by the band's rendezvous order withdraw — every host with the same view of the providers agrees which (rule `prov.shed` rev 2). Only providers that will act are ranked: a stem advertises `prov-shed/{ns}:{name}:{hash}` for each band it supervises with a ceiling (retracted only while it provides the band without an install it could withdraw), so a provider that does not (registered in code, a stem without this band) keeps its place — once seen unmarked for two advertise intervals; until then it is presumed to shed — and the rest rank against what is left. Avoid overlapping bands with tight ceilings — an unattributed band and an attribute-restricted one over the same capability can trade a provider back and forth. |
+| `max_providers` | integer | absent (no ceiling) | The ceiling. Refused when below the floor. Above it, the hosts ranked beyond `max` by the band's rendezvous order withdraw — every host with the same view of the providers agrees which (rule `prov.shed` rev 2). Only providers that will act are ranked: a stem advertises `prov-shed/{ns}:{name}:{hash}` for each band it supervises with a ceiling (retracted only while it provides the band without an install it could withdraw), so a provider that does not (registered in code, a stem without this band) keeps its place — once seen unmarked for two advertise intervals; until then it is presumed to shed — and the rest rank against what is left. Avoid overlapping bands with tight ceilings — an unattributed band and an attribute-restricted one over the same capability can trade a provider back and forth. Runnable: `first_stem_fleet` (`mycelium-wasm-host` example, CI) declares a ceiling the run settles to. |
 
 ```toml
 # examples/units/catalog/late.toml

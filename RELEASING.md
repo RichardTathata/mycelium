@@ -131,7 +131,8 @@ plan being released — v2.21.0 moved the line and left the paragraph saying its
 (the install snippet's `tag = "…"` pins) and `docs/guide/installation.md` (`MYCELIUM_RELEASE_TAG`)** — an integrator copies that block, and it was one release
 behind within hours of v2.15.1 because nothing in this step named it; wiki-lint 2026-09-26). Keep
 the *wire version* claim honest (state whether it changed — a wrong wire-compat note misleads
-upgraders). **Also:** `docs/operations/what-is-proven.md` (re-date the header; move any line whose
+upgraders). **Also:** `docs/operations/what-is-proven.md` (re-date the header and each table's *State on* column; replace every
+`Unreleased` on the page with the version being cut; move any line whose
 gate now runs in CI from the third table to the first, and add a row for anything new that is
 claimed but not gated) · the GitHub description (`gh repo edit --description "$(sed -n '/<!-- sentence -->/{n;p;}' docs/positioning.md | sed 's/^\*\*//; s/\*\*$//')"`)
 and the two `Cargo.toml` `description` fields, which `scripts/check-positioning.sh` cannot gate

@@ -1,4 +1,4 @@
-//! Consensus — epidemic two-phase agreement built on the signal mesh.
+//! Consensus — single-decree agreement (prepare, propose, commit) built on the signal mesh.
 //!
 //! Lightweight Group-level and System-level agreement built on top of the
 //! epidemic signal layer. Single-decree Paxos over gossip:
@@ -24,11 +24,12 @@
 //! # Design notes
 //!
 //! - **Ballot numbering** (from SCP §6.2): monotonic counter stored at
-//!   `consensus/ballot/{slot}`; higher ballot supersedes lower.
-//! - **Group-scoped votes**: all group members see all votes; any member that
-//!   reaches quorum may commit — proposer crash does not stall the slot.
-//! - **No signing**: trusted-domain only; Byzantine fault tolerance is
-//!   out of scope.
+//!   `consensus/ballot/{slot}`, kept across commits; `consensus/decided/{slot}` is the floor a commit sets.
+//! - **Group-scoped votes**: votes are broadcast to the group, but only the proposer counts them and
+//!   commits; if it crashes after a quorum accepted, the next proposer's prepare phase finishes it.
+//! - **Signing**: with `tls`, every consensus payload is Ed25519-signed and a vote or proposal must be
+//!   signed by the node it names; without it, trusted-domain only. Byzantine fault tolerance is out of
+//!   scope.
 //! - **Quorum slices** (optional, SCP §3.1): nodes may declare trust sets via
 //!   [`GossipAgent::declare_trust`]. With `use_trust_slices` the proposer's tally counts only
 //!   votes from its declared set — a fixed *eligible* voter set. The quorum size is still simple
@@ -76,7 +77,8 @@ pub struct ConsensusConfig {
     /// known peer count + 1 (for
     /// [`system_propose`](crate::GossipAgent::system_propose)).
     pub quorum_size:    usize,
-    /// How long to wait for votes before declaring a ballot attempt failed.
+    /// How long each phase of a ballot attempt waits — the promises of the prepare phase (2.30.0),
+    /// then the votes — before the attempt is declared failed. A ballot can take up to twice this.
     pub phase1_timeout: Duration,
     /// Maximum number of ballot attempts before returning [`ConsensusResult::Timeout`].
     pub max_ballots:    u32,
@@ -237,9 +239,9 @@ pub enum ConsensusResult {
         /// Compare to `votes_last_ballot` to understand how far off quorum was.
         quorum_required: usize,
     },
-    /// Another node committed a value for this slot before quorum was reached
-    /// by this proposer. The committed value is readable via
-    /// [`consensus_get`](crate::GossipAgent::consensus_get).
+    /// The slot was decided for **another** value: another proposer committed first, or (2.30.0) this
+    /// proposal's prepare phase found a value a quorum had already accepted and committed that instead.
+    /// The committed value is readable via [`consensus_get`](crate::GossipAgent::consensus_get).
     Superseded {
         slot:   Arc<str>,
         ballot: u64,

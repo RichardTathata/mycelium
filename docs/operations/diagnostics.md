@@ -153,7 +153,9 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   value; neither fabricates a commit. This is the common production failure (distinct from a
   *commit conflict*, which is the opposite — two commits, not zero).
 - **Read:** counter `mycelium_consensus_timeouts_total` by `reason` — `no_voters` ⇒ likely a
-  **partition** (no votes heard at all); `quorum_short` ⇒ members heard but **quorum not met**
+  **partition** (no votes heard at all) — **or, during a rolling upgrade to 2.30.0, a prepare phase that
+  gathered too few promises** (older acceptors ignore it; the timeout is counted as `no_voters` with
+  `votes_last_ballot: 0` even with every peer reachable — check versions before treating it as a partition); `quorum_short` ⇒ members heard but **quorum not met**
   (overloaded members, or the quorum set is larger than live membership); `all_opaque` ⇒ every
   member is shedding load (cross-check [fleet-opacity storm](#fleet-opacity-storm)). Dev-side, the
   returned `ConsensusResult::Timeout { ballots_tried, votes_last_ballot, quorum_required }` carries
@@ -374,7 +376,8 @@ what it read, how it ended and the typed reason. The decision points are the gen
 [rule catalogue](../reference/rule-catalogue.md) — an `instrumented` entry records, a `catalogue only`
 entry does not, and `coverage.json` beside a trace says which. The trace is off unless attached, changes
 no decision and never waits (a saturated sink drops the newest record and counts it). A stem writes it
-with `mycelium-stem … --trace-dir <dir>` ([capability-lifecycle.md](capability-lifecycle.md)); the node
+with `mycelium-stem … --trace-dir <dir>` when it shuts down on **SIGINT** — not SIGTERM, so `docker kill -s INT`,
+not `docker stop` ([capability-lifecycle.md](capability-lifecycle.md)); the node
 binary built `--features cli,sim` and started with `GOSSIP_RECORD_BUNDLE_DIR=<dir>` writes
 `decisions.jsonl`, `coverage.json` and `decisions.stats.json` into the bundle beside `build.json` and
 `choices.trace`. Read either with:

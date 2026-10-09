@@ -261,6 +261,8 @@ What the node refuses, and what it only records (`gw_units_declare`, `src/agent/
   declared: the node converts every section before it declares any.
 - **422** — the file has a hosting section: `[hosts]`, `[[presence]]`, `[[activation]]` or
   `[[serve]]`. Those belong to a stem (`mycelium-stem`); an SDK agent hosts nothing.
+- **403 `governed_group`** — a `[[group]]` whose name is under a live membership intent (2.29.0): its
+  definition decides whom the governor can elect, so this route does not redefine it. Nothing is declared.
 - **Accepted, not enforced** — `[[lane]]`, `[[mandate]]` and `[[rule]]` are taken as declarations
   and named in `not_enforced`. They inform `wire-check`; the node does not act on them.
 - A `[[capability]]`'s `probe_url` is not run on this path: the capability is advertised as
@@ -337,7 +339,7 @@ shapes; the SDK READMEs carry the receipt narrative, this table carries the wire
 | `GET /gateway/kv?key=K` | → `{"found": true, "value_b64": "…"}` or `{"found": false}` | a local read |
 | `POST /gateway/kv` | `{"key", "value_b64"}` → `{"ok": true, "operation_id", "local_durability", "local_durability_error"?}` | the write's **receipt**: rung 1, and rung 2 as `local_durability` (`on_disk` · `buffered` · `not_configured` · `failed`, the SDKs' vocabulary) — added 2026-09-26; before it the route answered a bare `{"ok": true}`; a missing `value_b64` is **400 and no mutation** since 2.14.0; `""` writes an empty value. A key in a namespace the substrate or a companion owns (`src/lib.rs` § KV namespace ownership; `ckpt/`, `ckptw/`, `manifest/`, `schemas/` and `agent/{node}/provision/…` excepted) is **403** `{"error": "protected_key", "message": <the route that owns it>}` whatever the token (2.27.0; `sys/`/`consensus/` since 2.26.0) — the same for `DELETE`, `/kv/quorum` and `consistent/set` |
 | `POST /gateway/kv/quorum` | `{"key", "value_b64", "min_acks", "timeout_secs"}` → `{"ok", "acks_received"}` or `{"ok": false, "error": "timeout", "acks_received", "unknown_peers"}` | rung 3: `unknown_peers` is *silence*, not refusal — `DeliveryUnknown` in the receipt vocabulary |
-| consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why |
+| consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why. Not committed: **409** `{"ok": false, "error": "superseded"}` (the slot was decided for another value — the normal answer to a concurrent loser since 2.30.0), 409 `topology_unsatisfied` (and `electorate_unavailable` from lock and elect), **504** on a timeout |
 | `GET /gateway/signal/sse/{kind}` | SSE; event name = the kind; data `{"kind", "sender", "payload_b64", "nonce"}` (`kind` in the data since 2.24.0; `nonce` is a u64 — parse it losslessly) | delivered to **this** subscriber. The node holds at most 256 undelivered signals per subscription and drops past that, logging `Signal handler channel full; signal dropped` — signals are best-effort |
 | `GET /signals/{kind}` | the same event; data `{"kind", "sender", "payload_b64", "nonce", "payload"}` — `payload` is the same base64 as `payload_b64`, kept for readers of the older shape (2.26.0) | as above |
 

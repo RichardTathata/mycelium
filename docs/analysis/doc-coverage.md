@@ -19,6 +19,55 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-10-09 (run 22)** — diff-gated over **#555–#577** (v2.27.0–v2.30.0: governance writes audited or counted,
+  the coverage job's script suites, the example matrix's CI column, presence bands, the strict-eligibility example,
+  blob refusals in `mycelium-reason` 0.7.1, the checkpointer's cross-node wait, governed-group membership, the
+  consensus prepare phase). Three parallel auditors (consensus · groups · governance doors; presence · strict
+  eligibility · blob reasons · artifacts; the checkpointer · *what is proven* · the contributor workflow), every
+  must-work instruction checked against `src/consensus.rs`, `src/agent/http.rs`, `mycelium-reason`,
+  `mycelium-wasm-host` and both SDKs. **Floor before fixes: 0 ✗; 2 `~` (run 21's); 17 Tier-1 items, nine of them
+  instructions that fail as written.** **After: 0 ✗, 0 `~`, 0 failing instructions in scope; three code gaps
+  reported, documented as they behave.** Moves:
+  - **Layer III — Consensus · WHAT·Dev / HOW·Dev ✓ → Thin → ✓** (part calibration): #575's new text was right and
+    the text around it was not — guide 04's sequence diagram had no prepare phase; the overlay was "totally ordered
+    by ballot number" with "the highest-ballot value authoritative" and a curl labelled *Linearizable write* (the
+    rustdoc already said not linearizable); a permanent commit "replaced by a higher-ballot commit"; the
+    `Superseded` arm `unwrap`ped a value a lapsed lease removes; the key-design table still said two proposers can
+    both return `Committed`. `ConsensusResult::Superseded`, `ConsistencyError::Superseded` and its `Display`,
+    `phase1_timeout` (it bounds both phases now) and two module headers corrected. **`error-handling.md`'s
+    `consistent_set` match did not compile** downstream — `ConsistencyError` is `#[non_exhaustive]` and the arms
+    named neither `ElectorateUnavailable` nor `_` (calibration). The **409 `superseded`** a concurrent loser now
+    gets is documented in guide 10's table and guide 04's *What to observe*.
+  - **Consensus · HOW·Ops ✓ → Thin → ✓**: `deployment.md` § Rolling upgrades said nothing of 2.30.0 — an upgraded
+    proposer times out until a quorum of acceptors is upgraded, and a node must not be downgraded mid-slot — nor of
+    §20; `diagnostics.md`'s *Consensus stalled* read `no_voters` as a partition, which mid-upgrade is a prepare
+    phase without enough promises (code gap 3).
+  - **Groups · WHAT·Dev / HOW·Dev, Capabilities / groups · HOW·Dev/Ops ✓ → Thin → ✓**: "governance is additive —
+    the same group, just watched" omitted that its membership becomes a governance act (2.29.0); guide 10's
+    `units/declare` refusals, `unit-file.md` § `[[group]]` and `capability-lifecycle.md` omitted **403
+    `governed_group`**; `tuning.md`'s audited-POST list omitted `govern/group`.
+  - **Presence ceiling · HOW·Dev `~` → ✓**, **HOW·Ops ✓ → Thin → ✓** (calibration): a CI-run example already
+    declares a ceiling (`first_stem_fleet`) and no doc said so; "run the stem with `--trace-dir`" writes nothing
+    under `docker stop` — the stem writes its trace, and withdraws gracefully, only on SIGINT (code gap 2).
+  - **Reasoning — blob reasons and the checkpointer · WHAT·Dev / HOW·Dev / WHAT·Ops ✓ → Thin → ✓**: the client's
+    `unauthorized` covers the route's 403 `refused` (every holder refused for good), which `companions.md` sent an
+    operator to the token for (code gap 1); the README's retry bound (~10 s) was shorter than the ~30 s CI has
+    seen (#563) and than the examples' 60 s; the `blob fetch missed` debug line and `refused`'s substrate floor
+    (≥ 2.28.0) were undocumented.
+  - **What is proven · HOW·Dev `~` → ✓, WHAT·Dev/Ops ✓ → Thin → ✓**: two "Unreleased" markers for 2.28.0 work, a
+    "first hosted CI result still pending" for a step that runs on every change, a "State on 2026-10-03" column —
+    and `RELEASING.md` § 6 now says to replace both kinds at each cut. `CONTRIBUTING.md` gains the prerequisites and
+    the recipe for making CI run a new test or example; its layer table no longer names a `sig/` prefix that does
+    not exist, and its file paths point at `mycelium-core/`.
+  - **The independent review of this run's PR** (rule 4) found its own first fixes short: the snippet still did not
+    compile — `b"v2"` is a `&[u8; 2]`, which `Bytes` has no `From` for (`&b"v2"[..]`; the same in guide 04 and the
+    guide README); "exactly one caller sees `Ok(())`" was false for two callers writing the same value and under a
+    timeout; the new diagram drew a targeted prepare and unicast votes; guide 04's design table and the module doc
+    still said any member reaching quorum commits (only the proposer counts votes) and the module doc "no
+    signing"; the same stale wording survived in the Python SDK's README and docstring (which also named the wrong
+    exception — a 409 raises `httpx.HTTPStatusError`) and the deck. All fixed in the same PR.
+  - **Strict eligibility · HOW·Dev `~` → ✓** (closed by #558: `examples/strict_eligibility.rs` calls the shipped
+    history source, CI-run, linked from guide 21). **Artifact delivery** unchanged, spot-checked.
 - **2026-10-07 (run 21)** — diff-gated over **#541–#551** (v2.26.0 and the unreleased 2.27.0 window: the
   verification policy and the `test-coverage` job, S5's blob reasons, A3's history source, the governance and KV
   doors, the ranked shed, the raw KV routes writing application keys only, the A2A card excluding plumbing and
@@ -583,7 +632,7 @@ closed it.
 | Knowledge layer (item 3 + Boundary H) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
 | Federated domains — the transport (item 2) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (guide 17: `ClientError::Egress`) | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ ᴿ¹⁹ (`federation.md`: the client under `egress.allow_hosts`; `sso.md`: a denied issuer refuses `start()`) |
 | Election / leadership (`mycelium::election`) — new, run 17 | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ | ✓ ᴿ¹⁷ |
-| What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ~ ᴿ²¹ (the contributor's how-to for the verification policy lives in the wiki; `CONTRIBUTING.md` § Testing is stale — outside this run's scope, reported) | ✓ | ✓ ᴿ²¹ (two `ci.yml` line references named by step) |
+| What is proven (`operations/what-is-proven.md`) — new, 2026-09-28 | ✓ | ✓ | ✓ ᴿ²² (`CONTRIBUTING.md` § Testing: prerequisites — Python ≥ 3.11, the `check-full` venv — and *Adding a test or an example so CI runs it*; the layer table and file paths corrected) | ✓ | ✓ ᴿ²¹ (two `ci.yml` line references named by step) |
 | Capability lifecycle — the two arrival paths, the unit file, `wire-check` (`operations/capability-lifecycle.md`, guide 02, `src/capability_config.rs`) — new, 2026-09-28 | ✓ | ✓ ᴿ¹⁸ (`reference/unit-file.md`; the module-doc example now a test) | ✓ | ✓ ᴿ¹⁸ (all 15 findings, six flags, exit codes) | ✓ ᴿ¹⁸ (snippets are TOML; `verify` runs) |
 | Stem node and fleet (`mycelium-stem`, R1/R2) — new, run 18 | ✓ plan §13 | ✓ ᴿ¹⁸ (wasm-host README; `reference/unit-file.md` § who reads what) | ✓ ᴿ¹⁸ (guide 13 §5; `examples/units/`; `make examples-both-ways`) | ✓ ᴿ¹⁸ (`capability-lifecycle.md` § Running a stem: every flag and default) | ✓ ᶻ¹ ᶻ³ (a stem reads an object store by URL and pulls past the frame cap in ranges, both staged to disk — zero-gaps Z1/Z3, 2026-10-03) |
 | Declared activation and serving (`[[activation]]` D21, `[[serve]]` D22) — new, run 18 | ✓ plan D21/D22 | ✓ ᴿ¹⁸ (`reference/unit-file.md`, placeholders, defaults) | ✓ (`examples/units/model_deploy`, `reheal_deploy`, `llm_agent`) | ✓ ᴿ¹⁸ (not a sandbox — `shared-responsibility-matrix.md` CC8) | ✓ ᶻ² (`api_key_env`, read once at start, unset refuses the start by name — zero-gaps Z2, 2026-10-03) |
@@ -599,9 +648,9 @@ closed it.
 | What the trace does not show (the whole-agent replay diverging at the kernel's 20th choice; draw-count equivalence) — new, run 19 | ✓ plan I5/I6 rows | ✓ `tests/decision_trace_replay.rs` module doc · guide 19 ᴿ¹⁹ (cross-link) · the inventory row ᴿ¹⁹ | ✓ ᶻ⁵ (the replay half is a checked-in assertion — `a_recorded_node_replays_decision_for_decision`, in CI; the whole-agent replay is proven, zero-gaps Z5) | ✓ `what-is-proven.md` § not yet shown (what would show it) | — (an operator cannot act beyond not expecting a decision-for-decision replay, which the page says) |
 | Configuration ownership (`docs/reference/configuration.md`, A2) — new, run 20 | ✓ ᴿ²⁰ `configuration.md` § intro (what a type definition cannot answer); D3 in the plan | ✓ ᴿ²⁰ (rows 71/73 corrected for R8; the defect count; linked from `building-on`, the architecture folder note) | ✓ ᴿ²⁰ (`building-on` names it beside the feature list) | ✓ ᴿ²⁰ (`operations/README.md` funnel row; `tuning.md`'s head — whose "an env var exists for every field" was false, eleven have none) | ✓ ᴿ²⁰ (the refusal and restart columns; spot-checked twelve rows against `config.rs`) |
 | A2A interop — the agent card and `tasks/send` (#550) — new, run 21 | ✓ guide 08 § Concept; `00-concepts` | ✓ ᴿ²¹ (guide 08 § How it works; `00-concepts`, cookbook, `skillrunner.html`: the card lists what `/a2a` can call — not plumbing, not prompt skills) | ✓ ᴿ²¹ (guide 08's snippets were not JSON-RPC (`-32601`) and read `input_schema`; now `A2aClient` + the wire shape; guide 10's card is a dict) | ✓ `rbac.md` (public surface), `production-readiness.md` | ✓ ᴿ²¹ (the negative probe names a skill on the card; `confined-fleet.md`: prompt skills under `llm:invoke`) |
-| Presence ceiling and the ranked shed (`max_providers`, `prov-shed`, `election::rank`, `prov.shed` rev 2, #547) — new, run 21 | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings: why the draw was replaced) | ✓ `reference/unit-file.md` § `[[presence]]`; `rule-catalogue.md` rev 2 | ~ ᴿ²¹ (the field row explains it; no example shows a ceiling, and `election::rank` is in no guide) | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings — was ✗) | ✓ ᴿ²¹ (the bound, the rolling-upgrade dip, overlapping bands, and reading a withdrawal from the trace — was ✗) |
+| Presence ceiling and the ranked shed (`max_providers`, `prov-shed`, `election::rank`, `prov.shed` rev 2, #547) — new, run 21 | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings: why the draw was replaced) | ✓ `reference/unit-file.md` § `[[presence]]`; `rule-catalogue.md` rev 2 | ✓ ᴿ²² (`first_stem_fleet` — CI-run — declares a band of exactly two over three self-electing stems; the tutorial, `[[presence]]` and § Presence ceilings now say so) | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings — was ✗) | ✓ ᴿ²¹ (the bound, the rolling-upgrade dip, overlapping bands, and reading a withdrawal from the trace — was ✗) |
 
-ᴿ²¹ closed in run 21 (2026-10-07) · ᴿ²⁰ closed in run 20 (2026-10-06) · ᴿ¹⁹ closed in run 19 (2026-10-03) · ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
+ᴿ²² closed in run 22 (2026-10-09) · ᴿ²¹ closed in run 21 (2026-10-07) · ᴿ²⁰ closed in run 20 (2026-10-06) · ᴿ¹⁹ closed in run 19 (2026-10-03) · ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 
 ## What was found, and how it was closed
 
@@ -730,6 +779,23 @@ cooling-off order; the four `with_egress` signatures; the Python tests run by di
 - `docs/wiki/dev/security.md:190` — "(unreleased on `main`, #543)" → "(2.26.0, #543)".
 - At the 2.27.0 release: `what-is-proven.md`'s universe sentence (jest by test name, every crate's featureless
   build — #551) and CHANGELOG's "audited in a `compliance` build" (add "with `[tls]`").
+
+### Run 22 (2026-10-09) — code gaps the audit surfaced
+
+**Code gaps (documented as they behave, not papered):**
+1. **The checkpointer reports the blob route's 403 `refused` as `unauthorized`.** `saver.py` maps every 401/403 to
+   `"unauthorized"` without reading the body, so "every holder refused for good" (a removed member, a denied action)
+   reads as a token problem. Retriability is right (neither is retriable); the diagnosis is not. Fix: read the
+   route's error on a 403 and return a distinct `"refused"` (`langgraph-checkpoint-mycelium`, a PATCH).
+2. **`mycelium-stem` ignores SIGTERM.** It awaits `ctrl_c()` only, so `docker stop` / a pod stop kills it without
+   writing `--trace-dir` output or withdrawing its installs gracefully; `docker/Dockerfile.stem` sets no
+   `STOPSIGNAL`. Fix: select on SIGINT or SIGTERM (`mycelium-wasm-host/src/bin/mycelium-stem.rs`), or
+   `STOPSIGNAL SIGINT` in the image.
+3. **A prepare phase without enough promises is counted as `no_voters`.** `propose` retries before
+   `votes_last_ballot` is set, so a promise shortfall — the normal state of an upgraded proposer mid-upgrade —
+   reaches `mycelium_consensus_timeouts_total` as `no_voters` with `votes_last_ballot: 0`, which the runbook reads
+   as a partition (`src/consensus.rs`, the phase-1 retry). Fix: its own reason (`promise_short`) and the promise
+   count in the result.
 
 ## Artifacts created
 
@@ -961,6 +1027,19 @@ skepticism, not a re-asserted ✓.
   round 2 reversed the rule and the guide kept round 1), and `companions.md`'s `cn/` compaction over HTTP (#549
   closed the door). The verification policy's rule 2 (*plan rows close on evidence*) applies to a PR's own
   doc lines too.
+
+- **2026-10-09 (run 22) — Layer III · HOW·Dev** (✓ᴿ²¹): `error-handling.md`'s `consistent_set` match did not
+  compile in a downstream crate — `ConsistencyError` has been `#[non_exhaustive]` since 2.14.0 and the arms named
+  neither `ElectorateUnavailable` nor `_`. Guide 04's overlay section said writes are "totally ordered by ballot
+  number" and labelled a curl *Linearizable write* while the rustdoc said not linearizable — both before #575.
+  Found by reading the snippet as a downstream crate would compile it.
+- **2026-10-09 (run 22) — Presence ceiling · HOW·Ops** (✓ᴿ²¹): "run the stem with `--trace-dir`, read the
+  `prov.shed` decisions" fails on the shipped image — the stem writes the trace only on SIGINT, and `docker stop`
+  sends SIGTERM. Found by following the instruction into `mycelium-stem.rs` and `Dockerfile.stem`.
+- 2026-10-09 (run 22), not misses but recorded: cells broken **by the window's own PRs** — #575's surrounding
+  guide 04 text and rustdocs (the author's own change, and its independent reviews checked the new text, not the
+  old text beside it), #572's governed-group refusal missing from guide 10 / `unit-file.md` / lifecycle, #567's
+  `refused` reaching the checkpointer as `unauthorized`, and *what is proven*'s markers surviving two releases.
 
 ## Re-run guidance
 

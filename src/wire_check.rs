@@ -21,7 +21,7 @@
 //! | `orphan lane` | a lane consumed and never produced, or produced and never consumed | error |
 //! | `unhostable entry` | an artifact would satisfy the filter but no unit's `[hosts]` names its kind with budget for its footprint | error |
 //! | `presence unhostable` | a `[[presence]]` floor cannot be met by deployed providers plus distinct hosting units | error |
-//! | `presence bands overlap` | two `[[presence]]` bands with ceilings, over the same capability and not provably disjoint, can trade a provider back and forth — each sheds against its own ceiling | warning |
+//! | `presence bands overlap` | two `[[presence]]` bands, at least one capped, over the same capability and not provably disjoint, can trade a provider back and forth — a capped band sheds against its ceiling while the other's floor or ceiling brings a provider back | warning |
 //! | `unauthorisable edge` | the requirer declares authority vocabulary, and no declared rule could admit the call as a skill or a tool — or the rule that would requires a mandate scope no mandate held by the requirer's principal enumerates | error |
 //! | `would bind by provisioning` | no deployed provider, but a hostable artifact matches | warning (error with `strict_deployed`) |
 //! | `would bind after acceptance` | no deployed provider, and the hostable artifact that matches is **proposed** (D20) — it loads only into a shadow lane until a reviewer accepts it | warning (error with `strict_deployed`) |

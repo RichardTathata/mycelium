@@ -28,8 +28,11 @@ from top to bottom:
 
 1. The librarian publishes a signed catalogue entry for a tiny WASM component.
 2. The printed unit declaration permits that publisher and runtime kind, and
-   declares the requirement and requests a presence floor of two. Each host starts
-   with the same declaration.
+   declares the requirement and requests a presence band of exactly two
+   (`min_providers = 2`, `max_providers = 2`). Each host starts with the same declaration.
+   All three self-elect, so the band can overshoot to three; the host ranked beyond the ceiling
+   withdraws (`prov.shed`), which is why the example waits for providers to settle —
+   [capability-lifecycle.md § Presence ceilings](../../operations/capability-lifecycle.md).
 3. Hosts discover the entry and pull, verify and install it. The observer resolves
    `demo/echo`; it does not choose a preconfigured service address.
 4. An RPC checks the actual component result. A static wiring report is joined to
