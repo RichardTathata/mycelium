@@ -74,7 +74,8 @@ class IncompleteCheckpoint(Exception):
     (0.3.0 — the plan's "absence, temporary unavailability, authorization refusal and corrupt content
     stay distinguishable"): ``"not_found"`` (no reachable holder has it yet), ``"unavailable"`` (a
     holder could not be reached, the node or a proxy in front of it failed, or the read was throttled),
-    ``"unauthorized"`` (the gateway refused the read — a token or scope problem), ``"corrupt"`` (every copy
+    ``"unauthorized"`` (the gateway refused the read — a token or scope problem), ``"refused"`` (0.3.1: the blob
+    route's own 403 — every holder refused for good, a removed member or a denied action), ``"corrupt"`` (every copy
     currently on offer — the node's own and each advertised provider's — fails the content address),
     ``"unsupported"`` (the node does not serve the blob route — no reason companion). ``retriable`` is
     true only when every reason is transient (``not_found`` or ``unavailable``).
@@ -126,6 +127,8 @@ def _blob_reason(resp: httpx.Response) -> str | None:
         return None
     if status == 404:
         return "not_found" if _route_error(resp) == "not_found" else "unsupported"
+    if status == 403 and _route_error(resp) == "refused":
+        return "refused"  # the route's own: every holder refused for good (mycelium-reason 0.7.1)
     if status in (401, 403):
         return "unauthorized"
     if status == 502 and _route_error(resp) == "corrupt":
@@ -137,7 +140,7 @@ def _blob_reason(resp: httpx.Response) -> str | None:
 
 # How serious a reason is: a blob fetched more than once in one read keeps its most serious reason, so
 # ``retriable`` does not depend on which fetch came last.
-_SEVERITY = {"not_found": 1, "unavailable": 2, "corrupt": 3, "unauthorized": 3, "unsupported": 3}
+_SEVERITY = {"not_found": 1, "unavailable": 2, "corrupt": 3, "unauthorized": 3, "refused": 3, "unsupported": 3}
 
 
 def _merge_reason(reasons: dict[str, str], blob_id: str, reason: str) -> None:

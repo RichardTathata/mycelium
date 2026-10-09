@@ -757,6 +757,54 @@ mod tests {
         let _ = ConsistencyError::TopologyUnsatisfied;
     }
 
+    /// **A partition is labelled `no_voters`, through `propose` itself** (the review of #579). Since 2.30.0
+    /// every attempt starts with a prepare phase, so a proposer nobody answers ends there; labelling by
+    /// phase called that `promise_short`, and the runbook sends `promise_short` to the upgrade. Here one
+    /// node demands a quorum of two, so no other acceptor can answer — and the label must say so.
+    #[cfg(feature = "metrics")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_proposer_nobody_answers_times_out_as_no_voters() {
+        use crate::consensus::{ConsensusConfig, ConsensusResult};
+        use std::sync::{Arc as A, Mutex};
+
+        // Records the label set of every counter registered on this thread.
+        #[derive(Default)]
+        struct Labels(A<Mutex<Vec<String>>>);
+        impl metrics::Recorder for Labels {
+            fn describe_counter(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+            fn describe_gauge(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+            fn describe_histogram(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+            fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+                if key.name() == "mycelium_consensus_timeouts_total" {
+                    let reason = key.labels().find(|l| l.key() == "reason").map(|l| l.value().to_string());
+                    self.0.lock().unwrap().push(reason.unwrap_or_default());
+                }
+                metrics::Counter::noop()
+            }
+            fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge { metrics::Gauge::noop() }
+            fn register_histogram(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Histogram { metrics::Histogram::noop() }
+        }
+        let seen = A::new(Mutex::new(Vec::new()));
+        let recorder = Labels(A::clone(&seen));
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let a = make_agent(alloc_port(), &[]).await;
+        let config = ConsensusConfig {
+            quorum_size: 2,
+            max_ballots: 1,
+            phase1_timeout: std::time::Duration::from_millis(200),
+            ballot_retry_jitter_ms: 0,
+            ..ConsensusConfig::default()
+        };
+        match a.consensus().cluster_propose("partition/slot", Bytes::from_static(b"v"), config).await {
+            ConsensusResult::Timeout { .. } => {}
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+        assert_eq!(*seen.lock().unwrap(), vec!["no_voters".to_string()],
+                   "nobody else answered the prepare — a partition, not a promise shortfall");
+        a.shutdown().await;
+    }
+
     #[tokio::test]
     async fn test_leased_commit_expires_and_reopens() {
         use crate::consensus::{ConsensusConfig, ConsensusResult};

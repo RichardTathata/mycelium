@@ -96,9 +96,9 @@ in — an honest consequence of eventual consistency, not a bug). The poll treat
 `IncompleteCheckpoint` (0.2.0) as *not converged yet*: the index row can arrive before its blobs are
 fetchable. An application calling `graph.invoke` on node B meets the same error and should retry it with
 a bound while `e.retriable` — the checkpointer README has the loop. Since 0.3.0 the error says why each
-blob is missing (`e.reasons`: `not_found`, `unavailable`, `unauthorized` — a token problem *or* every holder
-refusing for good, which the client does not yet tell apart — `corrupt`, `unsupported`); the last
-three are not retriable. Upgrade the checkpointer to 0.3.0 before the reason nodes to 0.7.0 — a 0.2.x
+blob is missing (`e.reasons`: `not_found`, `unavailable`, `unauthorized` (a token problem), `refused` (every holder
+refused for good — 0.3.1), `corrupt`, `unsupported`); all but
+the first two are not retriable. Upgrade the checkpointer to 0.3.0 before the reason nodes to 0.7.0 — a 0.2.x
 checkpointer lets a 503 or 502 escape its retry as `httpx.HTTPStatusError`.
 
 ### What a checkpoint's acknowledgement actually proves
@@ -327,7 +327,7 @@ layers — not several look-alike "LangChain examples." Pick by what you're doin
   arriving and its blobs becoming fetchable, a read raises `IncompleteCheckpoint` (0.2.0) —
   never `None` (which LangGraph would read as *no checkpoint* and restart the thread)
   and never a shorter tuple (which would re-run a completed task). Catch it and retry with a bound
-  while `e.retriable`; re-raise otherwise (0.3.0: `corrupt`, `unauthorized`, `unsupported`).
+  while `e.retriable`; re-raise otherwise (0.3.0: `corrupt`, `unauthorized`, `unsupported`; 0.3.1: `refused`).
 - **Reserved prefixes.** The checkpointer owns `ckpt/`/`ckptw/`; `mycelium-reason` owns
   `log/reason/` and the `reason/blob-cache` capability — treat them as reserved
   ([Building on Mycelium](building-on-mycelium.md)).

@@ -119,7 +119,7 @@ via wasm-host).
   **A refusal is not a copy (0.7.1, #564):** a provider's RPC layer answering for it (caller context, provider
   enforcement) was read as corrupt; it is now read by its `reason` — transient (unknown signer, marker not yet seen, or
   none) is `Unavailable`, one that holds (removed, denied, a bad envelope) from every askable holder is `BlobMiss::Refused`,
-  403 `refused`, the checkpointer's `unauthorized`. The substrate's caller-context refusal is JSON with
+  403 `refused` — the checkpointer's `unauthorized` until 0.3.1, its own `refused` since. The substrate's caller-context refusal is JSON with
   `CallerError::code` as its `reason` (`.log/2026-10-08-blob-refusals.md`).
   **COMPLETE (PRs #130–#136, 2026-07-08):** the crate + Python tier, the LangGraph example ladder
   (`examples/langgraph/` rungs 0–6 incl. the echo-CI **deploy/reheal flagship** + a router-robustness

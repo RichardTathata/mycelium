@@ -1007,6 +1007,8 @@ impl ConsensusEngine {
         // gossiped and may lag what this node knows was decided.
         let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
         let mut votes_last_ballot: usize = 0;
+        // How the latest attempt ended — what a timeout is labelled by (doc-coverage run 22, gap 3).
+        let mut last = LastAttempt::None;
         // Captured topology-gate failure from the most recent ballot that
         // reached quorum-by-count but failed the Hard gate. Used to surface
         // `TopologyUnsatisfied` after all ballots are exhausted.
@@ -1086,14 +1088,25 @@ impl ConsensusEngine {
                         ballot: self.read_ballot(&ballot_key),
                     };
                 }
-                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
-                Phase1::Refused(seen) => Some(seen),
+                Phase1::Ready(Phase1Choice::Blocked) => {
+                    last = LastAttempt::Blocked;
+                    Some(0)
+                }
+                Phase1::Short(others) => {
+                    last = LastAttempt::Prepare { others };
+                    Some(0)
+                }
+                Phase1::Refused(seen) => {
+                    last = LastAttempt::Contended;
+                    Some(seen)
+                }
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
+            last = LastAttempt::Vote;
 
             // Phase 2 listens on a fresh refusal channel: a refusal of this ballot's *prepare*, still
             // queued after the promise quorum formed, would otherwise abort a ballot already won.
@@ -1115,6 +1128,7 @@ impl ConsensusEngine {
             if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
                 // Already committed to a different value at this ballot. Cannot win here; move up
                 // rather than emit a proposal we are not entitled to support.
+                last = LastAttempt::Contended;
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
                 continue;
             }
@@ -1172,6 +1186,9 @@ impl ConsensusEngine {
             match outcome {
                 BallotOutcome::Committed(res) => return res,
                 BallotOutcome::NackHigher(b, reported) => {
+                    // Refused at this ballot: another proposer is ahead — contention, however few
+                    // votes had arrived (the review of #579).
+                    last = LastAttempt::Contended;
                     nack_ballot = b;
                     // **Accepted-value preservation.** An acceptor that refused us reported what
                     // it already holds; the next ballot must carry *that* value, not ours. Without
@@ -1225,10 +1242,13 @@ impl ConsensusEngine {
             };
         }
 
+        // This proposer's own vote is in `voters`; the label asks whether anyone *else* answered.
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_consensus_timeouts_total",
-            "reason" => if votes_last_ballot == 0 { "no_voters" } else { "quorum_short" })
+            "reason" => timeout_reason(last, votes_last_ballot.saturating_sub(1)))
             .increment(1);
+        #[cfg(not(feature = "metrics"))]
+        let _ = last;
         ConsensusResult::Timeout {
             slot,
             ballots_tried: config.max_ballots,
@@ -1293,12 +1313,6 @@ impl ConsensusEngine {
             }
 
         // Per-group state (rebuilt from KV once before the ballot loop).
-        struct CrossState {
-            members:     ahash::AHashSet<NodeId>,
-            quorum_frac: f32,
-            accepts:     usize,
-            seen:        ahash::AHashSet<NodeId>, // distinct voters — each counts once
-        }
 
         let mut group_states: AHashMap<Arc<str>, CrossState> = AHashMap::new();
         for gq in groups {
@@ -1335,9 +1349,10 @@ impl ConsensusEngine {
         );
 
         let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
+        let mut last = LastAttempt::None;
 
         for _attempt in 0..config.max_ballots {
-            for gs in group_states.values_mut() { gs.accepts = 0; }
+            for gs in group_states.values_mut() { gs.begin_attempt(); }
 
             // Phase 1, with the same per-group quorum the commit needs — see `propose`.
             let ready = |p: &AHashSet<NodeId>| group_states.values().all(|gs| {
@@ -1358,14 +1373,25 @@ impl ConsensusEngine {
                 Phase1::DecidedOtherwise => {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
-                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
-                Phase1::Refused(seen) => Some(seen),
+                Phase1::Ready(Phase1Choice::Blocked) => {
+                    last = LastAttempt::Blocked;
+                    Some(0)
+                }
+                Phase1::Short(others) => {
+                    last = LastAttempt::Prepare { others };
+                    Some(0)
+                }
+                Phase1::Refused(seen) => {
+                    last = LastAttempt::Contended;
+                    Some(seen)
+                }
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
+            last = LastAttempt::Vote;
 
             // A fresh refusal channel for phase 2 — see `propose`.
             nack_rx = self.task_ctx.signal_handlers.register_with_capacity(
@@ -1377,6 +1403,7 @@ impl ConsensusEngine {
             // here; the claim is the gate, not a vote.
             let floor = self.decided_floor(&slot);
             if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
+                last = LastAttempt::Contended;
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
                 continue;
             }
@@ -1425,9 +1452,7 @@ impl ConsensusEngine {
                                     // Count each DISTINCT voter once — a re-delivered vote
                                     // (gossip re-flood / duplicate PROPOSE) must not inflate
                                     // the tally (the sibling `propose` path is NodeId-keyed too).
-                                    if gs.seen.insert(voter.clone()) {
-                                        gs.accepts += 1;
-                                    }
+                                    gs.count(&voter);
                                 }
                             }
                         }
@@ -1466,6 +1491,7 @@ impl ConsensusEngine {
                                 slot: s, seen_ballot, accepted_ballot, accepted_value,
                             }) if s == slot && seen_ballot >= ballot => {
                                 nack_ballot = seen_ballot;
+                                last = LastAttempt::Contended;
                                 if let Some(v) = accepted_value
                                     && accepted_ballot >= learned.as_ref().map(|(b, _)| *b).unwrap_or(0) {
                                         learned = Some((accepted_ballot, v));
@@ -1475,6 +1501,7 @@ impl ConsensusEngine {
                             Some(ConsensusMsg::Nack { slot: s, seen_ballot })
                                 if s == slot && seen_ballot >= ballot => {
                                 nack_ballot = seen_ballot;
+                                last = LastAttempt::Contended;
                                 break 'collect;
                             }
                             _ => {}
@@ -1499,10 +1526,14 @@ impl ConsensusEngine {
         }
 
         let votes_last_ballot: usize = group_states.values().map(|gs| gs.accepts).sum();
+        // The cross tally counts every member's vote, this node's own included when it is a member that
+        // runs a listener (its vote loops back) — so a lone member can read `quorum_short` here.
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_consensus_timeouts_total",
-            "reason" => if votes_last_ballot == 0 { "no_voters" } else { "quorum_short" })
+            "reason" => timeout_reason(last, votes_last_ballot))
             .increment(1);
+        #[cfg(not(feature = "metrics"))]
+        let _ = last;
         ConsensusResult::Timeout {
             slot,
             ballots_tried:     config.max_ballots,
@@ -1560,7 +1591,7 @@ impl ConsensusEngine {
             tokio::pin!(sleep);
             loop {
                 tokio::select! { biased;
-                    _ = &mut sleep => return Phase1::Short,
+                    _ = &mut sleep => return Phase1::Short(promisers.len().saturating_sub(1)),
                     Some(sig) = vote_rx.recv() => {
                         let Some(ConsensusMsg::PrepareAck {
                             slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
@@ -1845,12 +1876,74 @@ fn commit_is_stale(ballot: u64, floor: u64, over: bool) -> bool {
     ballot < floor || (ballot == floor && over)
 }
 
+/// How a proposal's latest ballot attempt ended — what its timeout is labelled by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(feature = "metrics", test)), allow(dead_code))]
+enum LastAttempt {
+    /// No attempt ran (`max_ballots = 0`).
+    None,
+    /// The prepare phase timed out with `others` acceptors besides this node promising.
+    Prepare { others: usize },
+    /// A quorum promised, but its highest acceptance is known only by digest and is not this value.
+    Blocked,
+    /// An acceptor had promised this ballot or a higher one to someone else, or this node's own acceptor
+    /// refused the claim — another proposer is ahead.
+    Contended,
+    /// The voting phase ran; the timeout's count of other voters decides.
+    Vote,
+}
+
+/// Why a proposal timed out, as `mycelium_consensus_timeouts_total` labels it — by **how many other
+/// acceptors answered**, not by which phase the attempt ended in (the review of #579: since 2.30.0 every
+/// attempt starts with a prepare phase, so a partition ends there too). `others` is the count for a
+/// `Vote` attempt; a `Prepare` attempt carries its own.
+///
+/// `no_voters` — nobody else answered: a partition, or every acceptor older than 2.30.0 (they ignore
+/// `Prepare`). `promise_short` — some promised, too few. `quorum_short` — some voted, too few.
+/// `contended` — another proposer is ahead. `blocked` — the slot's top acceptance is known only by digest.
+#[cfg(any(feature = "metrics", test))]
+fn timeout_reason(last: LastAttempt, others: usize) -> &'static str {
+    match last {
+        LastAttempt::Prepare { others: 0 } | LastAttempt::None => "no_voters",
+        LastAttempt::Prepare { .. } => "promise_short",
+        LastAttempt::Blocked => "blocked",
+        LastAttempt::Contended => "contended",
+        LastAttempt::Vote if others == 0 => "no_voters",
+        LastAttempt::Vote => "quorum_short",
+    }
+}
+
 /// A `Committed` for a value other than `asked` becomes `Superseded` — see `ConsensusEngine::propose`.
 fn own_or_superseded(result: ConsensusResult, asked: &Bytes) -> ConsensusResult {
     match result {
         ConsensusResult::Committed { slot, value, ballot, .. } if value != *asked =>
             ConsensusResult::Superseded { slot, ballot },
         other => other,
+    }
+}
+
+/// One group's tally in a cross-group proposal, per ballot attempt.
+struct CrossState {
+    members:     ahash::AHashSet<NodeId>,
+    quorum_frac: f32,
+    accepts:     usize,
+    seen:        ahash::AHashSet<NodeId>, // distinct voters this attempt — each counts once
+}
+
+impl CrossState {
+    /// A new ballot: its votes start from nothing. Clearing only `accepts` — as before the review of
+    /// #579 — left last ballot's voters in `seen`, so a retry whose voters had voted before could never
+    /// reach quorum, and its timeout read as nobody answering.
+    fn begin_attempt(&mut self) {
+        self.accepts = 0;
+        self.seen.clear();
+    }
+
+    /// Counts `voter` once per attempt — a re-delivered vote must not inflate the tally.
+    fn count(&mut self, voter: &NodeId) {
+        if self.seen.insert(voter.clone()) {
+            self.accepts += 1;
+        }
     }
 }
 
@@ -1871,8 +1964,8 @@ enum Phase1 {
     DecidedOtherwise,
     /// An acceptor has promised this ballot (to another proposer) or a higher one.
     Refused(u64),
-    /// No quorum promised within the timeout.
-    Short,
+    /// No quorum promised within the timeout; carries how many acceptors **other than this node** did.
+    Short(usize),
 }
 
 /// Outcome of `ConsensusEngine::collect_one_ballot`.
@@ -3402,6 +3495,39 @@ mod consensus_msg_auth_tests {
         };
         assert!(matches!(own_or_superseded(committed(&theirs), &mine), ConsensusResult::Superseded { ballot: 4, .. }));
         assert!(matches!(own_or_superseded(committed(&mine), &mine), ConsensusResult::Committed { .. }));
+    }
+
+    /// **A promise shortfall is not counted as a partition** (doc-coverage run 22, code gap 3). A
+    /// proposer whose prepare phase never gathers a quorum — mid-upgrade, acceptors older than 2.30.0
+    /// ignore `Prepare` — retries before any vote is asked for, so it used to time out as `no_voters`,
+    /// which the runbook reads as a partition.
+    #[test]
+    fn a_promise_shortfall_has_its_own_timeout_reason() {
+        // Nobody else answered the prepare: a partition (or acceptors that ignore `Prepare`).
+        assert_eq!(timeout_reason(LastAttempt::Prepare { others: 0 }, 0), "no_voters");
+        // Some promised, too few.
+        assert_eq!(timeout_reason(LastAttempt::Prepare { others: 1 }, 0), "promise_short");
+        assert_eq!(timeout_reason(LastAttempt::Contended, 0), "contended");
+        assert_eq!(timeout_reason(LastAttempt::Blocked, 0), "blocked");
+        assert_eq!(timeout_reason(LastAttempt::Vote, 0), "no_voters");
+        assert_eq!(timeout_reason(LastAttempt::Vote, 2), "quorum_short");
+    }
+
+    /// **A cross-group retry counts its voters afresh** (the review of #579). The per-group tally
+    /// cleared its count each attempt but kept the set of voters seen, so a voter from ballot 1 never
+    /// counted again — a retry whose voters had all voted before could not reach quorum.
+    #[test]
+    fn a_cross_group_retry_counts_its_voters_afresh() {
+        let v = NodeId::new("127.0.0.1", 9001).unwrap();
+        let mut gs = CrossState {
+            members: [v.clone()].into_iter().collect(), quorum_frac: 1.0, accepts: 0, seen: Default::default(),
+        };
+        gs.count(&v);
+        gs.count(&v);
+        assert_eq!(gs.accepts, 1, "a re-delivered vote counts once");
+        gs.begin_attempt();
+        gs.count(&v);
+        assert_eq!(gs.accepts, 1, "the next ballot's vote from the same voter counts");
     }
 
     #[test]

@@ -189,6 +189,21 @@ def test_why_a_blob_is_missing_is_named_and_decides_retriable(world, status, rea
     assert e.value.retriable is retriable
 
 
+def test_a_route_refusal_is_not_a_token_problem(world):
+    """The blob route's own 403 `{"error":"refused"}` (`mycelium-reason` 0.7.1) means every holder refused
+    for good — a removed member, a denied action. Reported as `unauthorized` it sent an operator to the
+    token (doc-coverage run 22, code gap 1). A gateway 403 with any other body is still `unauthorized`."""
+    gw, saver = world
+    cfg = checkpoint_with_write(saver, "t-refused")
+    blob = blob_of(gw, saver, "a completed task's result")
+    gw.blob_status[blob] = 403
+    gw.blob_body[blob] = b'{"error":"refused"}'
+    with pytest.raises(IncompleteCheckpoint) as e:
+        saver.get_tuple(cfg)
+    assert e.value.reasons[blob] == "refused"
+    assert e.value.retriable is False
+
+
 async def test_the_async_loader_names_the_reason_too(world):
     gw, saver = world
     cfg = checkpoint_with_write(saver, "t-why-async")

@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`mycelium-stem` shuts down on SIGTERM** (`docker stop`, a Kubernetes pod stop) as it does on SIGINT — writing its
+  `--trace-dir` output and running its shutdown. It awaited `ctrl_c()` only, so a stopped container was killed
+  (doc-coverage run 22, code gap 2). **The stem and the `mycelium` node also take a stop that arrives during startup**:
+  both registered their handlers only once startup was done (the node already handled SIGTERM after that), so a
+  SIGTERM during the bind took the default kill (reproduced 2 in 40); the handlers are now installed before the bind. Seen failing first: `mycelium-wasm-host/tests/stem_shutdown.rs`.
+- **A consensus timeout is labelled by what other acceptors answered**, not by which phase it ended in
+  (`mycelium_consensus_timeouts_total{reason}`): `no_voters` (none — a partition, or mid-upgrade all older than
+  2.30.0), `promise_short` (some promised, too few), `contended`, `blocked`, `quorum_short`. Since 2.30.0 a partition
+  ends in the prepare phase, and in `propose` the proposer's own vote made it `quorum_short` before that (code gap 3).
+  Seen failing first: `a_proposer_nobody_answers_times_out_as_no_voters` (it was labelled `promise_short` by this
+  change's first cut). A refusal in the voting phase is `contended`, not `no_voters`.
+- **A cross-group proposal's retry counts its voters afresh.** Each group's tally kept the voters it had seen across
+  ballots, so a voter from an earlier ballot never counted again and a retry could not reach quorum. Seen failing
+  first: `a_cross_group_retry_counts_its_voters_afresh`.
+- **`langgraph-checkpoint-mycelium` 0.3.1:** the blob route's own 403 `refused` (every holder refused for good —
+  a removed member, a denied action) is reported as `"refused"`, not `"unauthorized"`, which sent an operator to
+  the token (code gap 1). Not retriable, like `unauthorized`. Seen failing first:
+  `test_a_route_refusal_is_not_a_token_problem`.
+
 ## [2.30.0] — 2026-10-09
 
 **Consensus asks before it proposes.** Two concurrent proposers on a stable roster could commit different values for

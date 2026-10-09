@@ -786,16 +786,20 @@ cooling-off order; the four `with_egress` signatures; the Python tests run by di
 1. **The checkpointer reports the blob route's 403 `refused` as `unauthorized`.** `saver.py` maps every 401/403 to
    `"unauthorized"` without reading the body, so "every holder refused for good" (a removed member, a denied action)
    reads as a token problem. Retriability is right (neither is retriable); the diagnosis is not. Fix: read the
-   route's error on a 403 and return a distinct `"refused"` (`langgraph-checkpoint-mycelium`, a PATCH).
+   route's error on a 403 and return a distinct `"refused"` (`langgraph-checkpoint-mycelium`, a PATCH). **Closed:
+   checkpointer 0.3.1** (`test_a_route_refusal_is_not_a_token_problem`).
 2. **`mycelium-stem` ignores SIGTERM.** It awaits `ctrl_c()` only, so `docker stop` / a pod stop kills it without
    writing `--trace-dir` output or withdrawing its installs gracefully; `docker/Dockerfile.stem` sets no
    `STOPSIGNAL`. Fix: select on SIGINT or SIGTERM (`mycelium-wasm-host/src/bin/mycelium-stem.rs`), or
-   `STOPSIGNAL SIGINT` in the image.
+   `STOPSIGNAL SIGINT` in the image. **Closed (2.30.1):** SIGINT or SIGTERM, the handlers installed
+   before the bind — the node binary too (`mycelium-wasm-host/tests/stem_shutdown.rs`).
 3. **A prepare phase without enough promises is counted as `no_voters`.** `propose` retries before
    `votes_last_ballot` is set, so a promise shortfall — the normal state of an upgraded proposer mid-upgrade —
    reaches `mycelium_consensus_timeouts_total` as `no_voters` with `votes_last_ballot: 0`, which the runbook reads
    as a partition (`src/consensus.rs`, the phase-1 retry). Fix: its own reason (`promise_short`) and the promise
-   count in the result.
+   count in the result. **Closed (2.30.1):** `timeout_reason` labels a timeout by how many *other*
+   acceptors answered — `no_voters`, `promise_short`, `contended`, `blocked`, `quorum_short` — so a partition is
+   still `no_voters` (`a_proposer_nobody_answers_times_out_as_no_voters`); `votes_last_ballot` stays the vote count.
 
 ## Artifacts created
 

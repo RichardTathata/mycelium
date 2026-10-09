@@ -1,7 +1,7 @@
 """The cross-node poll, node-free (issue #561). A second node can read a thread's row before it can fetch the row's
 blobs — in #561's two CI failures because it did not yet resolve the first node as a blob provider (that node's
 advertisement reached it only at the first 30 s refresh) — so `get_tuple` raises `IncompleteCheckpoint` with a retriable
-reason (`not_found`): "not converged yet", not a failure. A non-retriable one (corrupt, unauthorized, unsupported, or a
+reason (`not_found`): "not converged yet", not a failure. A non-retriable one (corrupt, unauthorized, refused, unsupported, or a
 mix with one) still ends the wait, and the deadline still fires."""
 from types import SimpleNamespace
 
