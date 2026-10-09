@@ -32,6 +32,14 @@ SHA-256 content hash of the previous record in this node's stream).
 coordinator). Verify each node's stream independently; the cluster trail is the
 union of those streams.
 
+**The head survives a restart with `[persistence]`.** At `start()` — after the identity is
+loaded and persisted state replayed, before anything can seal — the node folds its own
+persisted stream, verified from genesis (or the newest signed checkpoint, §5) under its
+retained keys, and resumes sealing at the next `seq` (`audit::restore_chain_head`). A record
+that does not verify is logged at `error` and sealed over, never used as the link; without
+persistence there is nothing to recover from and the stream restarts at seq 0 (peers' copies
+are not consulted).
+
 ---
 
 ## 2. Querying the trail
@@ -154,6 +162,7 @@ by design (the chain is meant to notice).
 | `verified: false`, `UnknownSigner` | owner's identity key not learned | confirm peering + shared CA; the key arrives via `sys/identity/` gossip |
 | `verified: false`, `BrokenLink`/`BadSignature` | records tampered or store hand-edited | treat as an incident; cite the offending `seq` + `content_hash` |
 | trail not shrinking | by design — no time-eviction of live keys | export + size the store; see §4 |
+| at `start()`: `audit: the persisted stream stops verifying at …` | a record in this node's own persisted stream did not verify (planted, edited, or signed by a key since revoked) — the head resumed after the verified prefix and the next seal overwrote it | treat as an incident; the log names the `seq`; the overwritten bytes are in the snapshot/WAL files before that start |
 
 ---
 

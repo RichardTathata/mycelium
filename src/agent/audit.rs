@@ -481,6 +481,97 @@ pub(crate) fn verify_stream(ctx: &TaskCtx, node: &NodeId) -> Result<(), AuditVer
     verify_chain_keys(&records, node, &keys, start_seq, start_prev)
 }
 
+/// What a restart recovered of this node's own chain head (see [`restore_chain_head`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveredHead {
+    /// The sequence number the next seal takes.
+    pub(crate) next_seq: u64,
+    /// The content hash the next seal links to.
+    pub(crate) last_hash: [u8; 32],
+    /// Records verified from the anchor, in order.
+    pub(crate) verified: usize,
+    /// Why the fold stopped before the end of the persisted stream, if it did: the first record
+    /// that did not verify, which the head does **not** resume after.
+    pub(crate) unverified: Option<AuditVerifyError>,
+}
+
+/// Fold this node's **own** persisted stream to the chain head a restart must resume from.
+///
+/// `AuditChainState::new()` is genesis, and until this existed nothing read the stream back at
+/// `start()`: a restarted node with `[persistence]` sealed seq 0 again with a zero `prev_hash`,
+/// and LWW overwrote the original genesis record — the tamper-evident chain erased its own history
+/// at every restart (found 2026-10-09).
+///
+/// **Verified, not trusted.** The records are in plain KV, so whoever can write the files can plant
+/// one. The fold anchors at genesis — or, for a stream pruned below a signed checkpoint
+/// (`prune_to_checkpoint`), at the checkpoint whose boundary is the first present record; with no
+/// record at all, at the newest checkpoint — and walks forward through [`verify_chain_keys`] one
+/// record at a time under the retained key set. The head is the end of the **longest verified
+/// prefix**; the first record that does not verify is returned in `unverified` and the head stops
+/// before it, so a forged record seeds nothing — the next seal takes its `seq` and overwrites it,
+/// which the caller logs by name. `None` when there is nothing to recover: no key to verify under
+/// (no `tls` — nothing could have been sealed), or no record and no checkpoint.
+pub(crate) fn recover_chain_head(ctx: &TaskCtx) -> Option<RecoveredHead> {
+    let node = &ctx.node_id;
+    let keys = super::helpers::known_verifying_keys(ctx, node);
+    if keys.is_empty() {
+        return None;
+    }
+    let records = read_stream(ctx, node);
+    let checkpoints = read_checkpoints(ctx, node, &keys);
+    let (anchor_seq, anchor_prev) = match records.first() {
+        None => {
+            let cp = checkpoints.last()?;
+            (cp.checkpoint_seq, cp.prev_hash)
+        }
+        Some(first) if first.record.seq == 0 => (0u64, [0u8; 32]),
+        Some(first) => match checkpoints.iter().find(|c| c.checkpoint_seq == first.record.seq) {
+            Some(cp) => (cp.checkpoint_seq, cp.prev_hash),
+            // No anchor covers the first present record: the fold below reports the gap at it and
+            // the head stays at genesis — nothing at seq 0 is overwritten, because nothing is there.
+            None => (0u64, [0u8; 32]),
+        },
+    };
+    let mut head = RecoveredHead { next_seq: anchor_seq, last_hash: anchor_prev, verified: 0, unverified: None };
+    for sr in &records {
+        match verify_chain_keys(std::slice::from_ref(sr), node, &keys, head.next_seq, head.last_hash) {
+            Ok(()) => {
+                head.next_seq = sr.record.seq + 1;
+                head.last_hash = sr.record.content_hash();
+                head.verified += 1;
+            }
+            Err(e) => {
+                head.unverified = Some(e);
+                break;
+            }
+        }
+    }
+    Some(head)
+}
+
+/// Install the recovered head as the chain's in-memory state (lock #8, a leaf, held alone) and say
+/// what was recovered. Called once by `start()`, after the identity is loaded and persisted state
+/// replayed, before anything can seal.
+pub(crate) fn restore_chain_head(ctx: &TaskCtx) {
+    let Some(head) = recover_chain_head(ctx) else { return };
+    {
+        let mut guard = ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
+        guard.next_seq = head.next_seq;
+        guard.last_hash = head.last_hash;
+    }
+    match &head.unverified {
+        None => tracing::info!(
+            next_seq = head.next_seq, verified = head.verified,
+            "audit: chain head recovered from the persisted stream; sealing resumes at seq {}", head.next_seq
+        ),
+        Some(e) => tracing::error!(
+            next_seq = head.next_seq, verified = head.verified, error = ?e,
+            "audit: the persisted stream stops verifying at {e:?}; the chain resumes after its verified prefix, \
+             and the next seal overwrites the record it could not verify — treat as an incident (docs/operations/audit.md §5)"
+        ),
+    }
+}
+
 /// Distinct node ids with an audit stream in the local KV view, sorted by their
 /// string form for deterministic output.
 pub(crate) fn stream_nodes(ctx: &TaskCtx) -> Vec<NodeId> {

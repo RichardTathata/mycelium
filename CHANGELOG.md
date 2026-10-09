@@ -59,6 +59,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variable set, the stub gateway saw `None` where `Bearer env-token` was expected). The review also corrected the
   saver's scope list: every `put()` writes blobs through `PUT /gateway/reason/blob`, which is `llm:write`, so the
   saver needs `kv:read`, `kv:write`, `llm:read` **and `llm:write`** (the README named three).
+- **The audit chain's head survives a restart.** `AuditChainState::new()` is genesis and nothing read the persisted
+  `sys/audit/{self}/` stream back at `start()`, so a restarted node with `[persistence]` sealed seq 0 again with a
+  zero `prev_hash` and LWW overwrote its own genesis record — the tamper-evident chain erased its history at every
+  restart. `start()` now folds the node's own persisted stream (`audit::restore_chain_head`, after the identity is
+  loaded and before anything can seal), **verified** from genesis or the newest signed checkpoint under the retained
+  key set: the head resumes after the longest verified prefix, and a record that does not verify is logged at `error`
+  and sealed over rather than seeding the chain. Without persistence the stream still restarts at seq 0 (nothing to
+  recover from; peers' copies are not consulted). Seen failing first:
+  `the_audit_chain_head_is_recovered_from_persistence_at_restart` (the restarted node's stream held three records and
+  seq 0 was not the original), `a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_head`.
 
 ## [2.31.0] — 2026-10-09
 

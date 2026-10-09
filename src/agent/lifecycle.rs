@@ -378,6 +378,15 @@ impl GossipAgent {
             }
         }
 
+        // Recover the audit chain's head from this node's own persisted stream **before** anything
+        // can seal — after the identity is loaded (the records are verified under its keys) and the
+        // persisted state replayed. Without this a restarted node sealed seq 0 again and LWW
+        // overwrote its own genesis record (see `audit::restore_chain_head`).
+        #[cfg(feature = "compliance")]
+        if self.task_ctx.tls.get().is_some() {
+            super::audit::restore_chain_head(&self.task_ctx);
+        }
+
         self.start_listener(bind_addr).await.inspect_err(|_| {
             self.state.store(AgentState::Idle as u8, Ordering::Release);
         })?;
