@@ -152,6 +152,7 @@ fn spawn_handler(
         core: core_ctx,
         bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
         rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         commit_conflict_slots: Arc::new(papaya::HashMap::new()),
         event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
@@ -1210,6 +1211,7 @@ async fn test_subscribe_notified_via_gossip() {
             core: core_ctx,
             bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
             rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             commit_conflict_slots: Arc::new(papaya::HashMap::new()),
             event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
@@ -10810,6 +10812,7 @@ async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
 /// | a member's direct `rpc_call_with_mandate` | the provider (C3) |
 /// | `/gateway/rpc/serve` delivering to an SDK agent | the provider check before streaming (C3) |
 /// | `/signals/{kind}`, `/gateway/signal/sse/{kind}` observing a protected kind | the route (C1, the SSE half) |
+/// | `/gateway/rpc/respond` for a request this principal was never handed | the route (`unserved_request`) |
 ///
 /// Not in this matrix, and gated where they are built: federation calls (the same `ae_preflight`,
 /// `federation_transport` tests), the wiki store (`mycelium-wiki` `git_store_authority`), and
@@ -11028,6 +11031,13 @@ async fn test_c7_the_bypass_matrix_no_door_runs_revoked_work() {
         let status = http.get(format!("{base}{path}")).bearer_auth("s3cret").send().await.unwrap().status();
         assert_eq!(status, 403, "{path} refuses to observe protected work");
     }
+    // `rpc/respond` for a request this principal was never handed: refused, nothing emitted. A
+    // `mesh:serve` holder used to be able to answer — and so pre-empt — any in-flight call by nonce.
+    let r = http.post(format!("{base}/gateway/rpc/respond")).bearer_auth("s3cret")
+        .json(&serde_json::json!({"nonce_hex": "00000000000000c7", "sender": me.to_string(), "result_b64": ""}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 403, "rpc/respond refuses a request it never streamed to this principal");
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "unserved_request");
     let tool_call = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"work","arguments":tool_args}});
     let _ = agent.service().rpc_call_with_mandate(me.clone(), "mcp.invoke", tool_call.to_string().into_bytes(),
         &member_mandate("tools/call", &tool, &tool_args), &tool, Duration::from_secs(5)).await;
@@ -11044,6 +11054,71 @@ async fn test_c7_the_bypass_matrix_no_door_runs_revoked_work() {
 
     agent.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **A forged `rpc.result` with the right nonce from the wrong sender does not consume the pending
+/// call.** The reply interceptor claimed a pending oneshot on nonce match alone and `await_nonce_reply`
+/// then dropped the reply on sender mismatch — so the oneshot was consumed either way, and a peer that
+/// learned a nonce could make the legitimate reply undeliverable: the caller timed out although the
+/// provider answered. Now the interceptor claims only when the nonce **and** the expected sender match;
+/// a nonce-only match from another sender is counted (`SystemStats::rpc_reply_sender_mismatches`) and
+/// ignored, and the real reply still arrives. Seen failing first: `Err(Timeout)` where `Ok("real")` was
+/// expected.
+#[tokio::test]
+async fn a_forged_reply_from_the_wrong_sender_does_not_consume_the_pending_call() {
+    use crate::signal::SignalScope;
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let mut cfg_a = GossipConfig::default();
+    cfg_a.bind_port = port_a;
+    cfg_a.bootstrap_peers = vec![id_b.clone()];
+    cfg_a.health_check_max_jitter_ms = 50;
+    let mut cfg_b = GossipConfig::default();
+    cfg_b.bind_port = port_b;
+    cfg_b.bootstrap_peers = vec![id_a.clone()];
+    cfg_b.health_check_max_jitter_ms = 50;
+    let a = Arc::new(GossipAgent::new(id_a.clone(), cfg_a));
+    let b = Arc::new(GossipAgent::new(id_b.clone(), cfg_b));
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    poll_until(|| !a.peers().is_empty() && !b.peers().is_empty(), 5_000).await;
+
+    // A serves `k` to itself. Each request's nonce is leaked to B (the forger) before A answers.
+    let (leak_tx, mut leak_rx) = tokio::sync::mpsc::channel::<u64>(4);
+    {
+        let a = Arc::clone(&a);
+        let mut rx = a.service().rpc_rx("k");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = leak_tx.send(req.nonce()).await;
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                a.service().rpc_respond(&req, b"real".to_vec());
+            }
+        });
+    }
+    // B forges a reply carrying A's nonce, addressed to A, from B — a sender A never called.
+    {
+        let b = Arc::clone(&b);
+        let target = id_a.clone();
+        tokio::spawn(async move {
+            while let Some(nonce) = leak_rx.recv().await {
+                let mut buf = Vec::with_capacity(14);
+                buf.extend_from_slice(&nonce.to_le_bytes());
+                buf.extend_from_slice(b"forged");
+                let _ = b.mesh().emit("rpc.result", SignalScope::Individual(target.clone()), buf);
+            }
+        });
+    }
+
+    let reply = a.service().rpc_call(id_a.clone(), "k", b"hi".to_vec(), Duration::from_secs(5)).await;
+    assert_eq!(reply.as_deref().ok(), Some(&b"real"[..]), "the real reply arrives: {reply:?}");
+    assert_eq!(a.system_stats().rpc_reply_sender_mismatches, 1, "the forged reply was counted, not claimed");
+    assert_eq!(b.system_stats().rpc_reply_sender_mismatches, 0);
+
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 /// **A leadership answer names the rung it reached.**

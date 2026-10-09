@@ -484,8 +484,17 @@ node had not joined was never electing anything the group's members agreed to.
   answer `403 {"error": "protected_kind"}` for `mcp.invoke`, `skill.invoke`, `llm.invoke` and anything in
   `protected_rpc_kinds` — the body the raw routes have sent since 2.15.0. They used to stream every such request's
   frame (caller envelope, carried mandate, nonce) to any `mesh:read` holder.
+- **`POST /gateway/rpc/respond` answers only a request your own `rpc/serve` stream delivered**, and only once:
+  another principal's request, a nonce never streamed, a second answer, or one older than the gateway's 300 s RPC
+  ceiling is `403 {"error": "unserved_request"}` and nothing is emitted. Any `mesh:serve` holder used to be able to
+  answer any in-flight call by nonce. On the mesh side a reply that carries a pending call's nonce from a node the
+  call was not sent to is ignored and counted (`SystemStats::rpc_reply_sender_mismatches`, `/stats`); it used to
+  consume the pending call and time the caller out.
 
-**Will the compiler tell me?** No — HTTP status codes and JSON-RPC error codes.
+**Will the compiler tell me?** `SystemStats` gained a field, so an exhaustive struct literal breaks; otherwise no —
+HTTP status codes and JSON-RPC error codes.
 
 **Migration.** A reader subscribed to a protected kind should read the decision trace (`mycelium explain`) or the
-evidence journal instead; nothing in the SDKs subscribed to one by default.
+evidence journal instead; nothing in the SDKs subscribed to one by default. An SDK agent that serves and responds
+under one bearer (every SDK does) needs nothing; one that split serving and responding across two credentials must
+use one. Alert on `rpc_reply_sender_mismatches > 0`: it names a peer forging replies.

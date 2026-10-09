@@ -100,6 +100,43 @@ struct HttpCtx {
     /// JWT bearers against the IdP JWKS and maps groups to gateway scopes.
     #[cfg(feature = "compliance")]
     oidc:            Option<Arc<super::oidc::OidcVerifier>>,
+    /// Requests streamed to SDK agents and not yet answered: `(sender, nonce, principal)` → the
+    /// HLC decision time (ms) it was streamed at. `gw_rpc_serve` records one when it streams a
+    /// request to the principal that opened the stream; `gw_rpc_respond` answers only a nonce
+    /// recorded for the responding principal and removes it. Bounded: entries older than
+    /// `SERVED_RPC_TTL_MS` (the gateway's own RPC ceiling) are evicted on insert, and past
+    /// `SERVED_RPC_CAP` the oldest go. Lock-order row 55 — leaf, µs.
+    served_rpcs:     Mutex<HashMap<(crate::node_id::NodeId, u64, String), u64>>,
+}
+
+/// Longest a streamed request stays answerable: the gateway's own RPC ceiling (`rpc/call` clamps
+/// `timeout_secs` to 300), after which the caller has timed out and the reply has no one to reach.
+const SERVED_RPC_TTL_MS: u64 = 300_000;
+/// Hard cap on unanswered streamed requests remembered at once; past it the oldest are evicted.
+const SERVED_RPC_CAP: usize = 65_536;
+
+/// `gw_rpc_serve`'s record: this `principal` was handed the request `(sender, nonce)` now.
+fn record_served_rpc(ctx: &HttpCtx, sender: &crate::node_id::NodeId, nonce: u64, principal: &str) {
+    let now = ctx.agent_ctx.hlc.decision_now_ms();
+    let mut served = ctx.served_rpcs.lock().unwrap_or_else(|e| e.into_inner());
+    served.retain(|_, at| now.saturating_sub(*at) <= SERVED_RPC_TTL_MS);
+    if served.len() >= SERVED_RPC_CAP
+        && let Some(oldest) = served.iter().min_by_key(|(_, at)| **at).map(|(k, _)| k.clone())
+    {
+        served.remove(&oldest);
+    }
+    served.insert((sender.clone(), nonce, principal.to_string()), now);
+}
+
+/// `gw_rpc_respond`'s check: was `(sender, nonce)` streamed to `principal` and not yet answered?
+/// Consumes the record — a request is answered once.
+fn take_served_rpc(ctx: &HttpCtx, sender: &crate::node_id::NodeId, nonce: u64, principal: &str) -> bool {
+    let now = ctx.agent_ctx.hlc.decision_now_ms();
+    let mut served = ctx.served_rpcs.lock().unwrap_or_else(|e| e.into_inner());
+    match served.remove(&(sender.clone(), nonce, principal.to_string())) {
+        Some(at) => now.saturating_sub(at) <= SERVED_RPC_TTL_MS,
+        None => false,
+    }
 }
 
 /// One gateway-advertised capability. In-process advertisers get liveness
@@ -211,6 +248,7 @@ pub(super) async fn run_http_server(
         prometheus,
         #[cfg(feature = "compliance")]
         oidc,
+        served_rpcs:  Mutex::new(HashMap::new()),
     });
 
     // ── Language-bridge gateway routes (optionally auth-protected) ────────────
@@ -986,6 +1024,8 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
         "governance_unaudited": ctx.agent_ctx.governance_unaudited
             .load(std::sync::atomic::Ordering::Relaxed),
         "rate_limited_senders": mycelium_core::rate::throttled_sender_count(&ctx.agent_ctx.core),
+        "rpc_reply_sender_mismatches": ctx.agent_ctx.rpc_reply_sender_mismatches
+            .load(std::sync::atomic::Ordering::Relaxed),
         // Legible-Emergence Phase 1 (emergent detectors). The conflict gauge is always present
         // (0 unless the detector loop is running); `view_confidence` — the RT1/RT2 "this is a
         // per-node estimate, not fleet truth" header — is attached only when detectors are enabled.
@@ -3271,21 +3311,31 @@ fn kv_write(ctx: &Arc<TaskCtx>, key: Arc<str>, value: Bytes, tombstone: bool) ->
 ///
 /// Streams requests as `{"nonce_hex": "…", "sender": "IP:PORT", "payload_b64": "…"}`.
 /// The receiver must call `POST /gateway/rpc/respond` with the same `nonce_hex` and
-/// `sender` to complete the round-trip.
+/// `sender` to complete the round-trip — **the same principal** that opened this stream: each
+/// streamed request is recorded against it (`record_served_rpc`), and `rpc/respond` answers
+/// nothing else. `mesh:serve` alone bound neither a kind nor a request, so any holder could
+/// answer any in-flight call it learned a nonce for.
 async fn gw_rpc_serve(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
         Arc::from(kind.as_str()),
         256,
     );
+    let principal: Arc<str> = Arc::from(
+        caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string()).as_str(),
+    );
 
+    let http_ctx = Arc::clone(&ctx);
     let agent_ctx = Arc::clone(&ctx.agent_ctx);
     // Async, because closure plan C3's provider check runs the action preflight (and its journal
     // write) before a request is streamed to the SDK agent that serves it.
     let stream = futures_util::StreamExt::filter_map(ReceiverStream::new(rx), move |sig: crate::signal::Signal| {
       let agent_ctx = Arc::clone(&agent_ctx);
+      let http_ctx = Arc::clone(&http_ctx);
+      let principal = Arc::clone(&principal);
       async move {
         use base64::Engine as _;
         if sig.payload.len() < 8 { return None; }
@@ -3318,6 +3368,8 @@ async fn gw_rpc_serve(
                 return None;
             }
         }
+        // Handed to this principal: the only one `rpc/respond` will take an answer from.
+        record_served_rpc(&http_ctx, req.sender(), req.nonce(), &principal);
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(req.payload());
         let mut data = json!({
             "nonce_hex":   format!("{:016x}", req.nonce()),
@@ -3339,9 +3391,13 @@ async fn gw_rpc_serve(
 /// `POST /gateway/rpc/respond` — send a reply to an in-flight RPC request.
 ///
 /// Body: `{"nonce_hex": "…", "sender": "IP:PORT", "result_b64": "…"}`.
-/// Returns `{"ok": true}`.
+/// Returns `{"ok": true}`. Only a request that `rpc/serve` streamed to **this principal** and
+/// that is not yet answered is accepted; anything else — another principal's request, a nonce never
+/// streamed, a second answer, one past the gateway's RPC ceiling — is `403 unserved_request` and
+/// nothing is emitted or released.
 async fn gw_rpc_respond(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
@@ -3367,6 +3423,20 @@ async fn gw_rpc_respond(
     } else {
         Bytes::new()
     };
+
+    // The request must have been handed to this principal on its own serve stream. Before this
+    // check, `mesh:serve` bound to neither a kind nor a request: any holder could answer — and
+    // pre-empt — any in-flight call whose nonce it learned, and release its parked admission.
+    let principal = caller.map(|Extension(c)| c.principal)
+        .unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+    if !take_served_rpc(&ctx, &sender, nonce, &principal) {
+        warn!(nonce = %nonce_hex, %sender, %principal, "rpc/respond: refused — not a request this principal was handed");
+        return (StatusCode::FORBIDDEN, Json(json!({
+            "ok": false,
+            "error": "unserved_request",
+            "message": "rpc/respond answers only a request your own rpc/serve stream delivered and that is not yet answered",
+        }))).into_response();
+    }
 
     // Closure plan C4: the SDK agent has replied, so the call is no longer in flight.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -6468,7 +6538,12 @@ mod tests {
         drop(r);
         let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-tok")
             .json(&respond).send().await.unwrap();
-        assert_eq!(r.status(), 200, "mesh:serve responds");
+        // The scope admits the route; the handler then refuses a nonce this principal was never
+        // handed (`rpc_respond_answers_only_a_request_this_principal_was_handed`) — 403 from the
+        // handler, not the 403 `required_scope` the scope layer sends.
+        assert_eq!(r.status(), 403, "mesh:serve reaches the handler, which refuses an unserved nonce");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "unserved_request", "{v}");
         let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer serve-tok")
             .json(&serde_json::json!({"target": id.to_string(), "method": "echo", "timeout_secs": 1}))
             .send().await.unwrap();
@@ -6489,6 +6564,99 @@ mod tests {
         assert_eq!(r.status(), 403, "a token with no mesh scope is refused");
         let v: serde_json::Value = r.json().await.unwrap();
         assert_eq!(v["required_scope"], "mesh:serve");
+        agent.shutdown().await;
+    }
+
+    /// **`mesh:serve` bound to neither a kind nor a request: `rpc/respond` could answer any in-flight
+    /// RPC by nonce.** The route took `nonce_hex` and `sender` from the body with nothing binding them
+    /// to a request this principal's serve stream was handed, so any `mesh:serve` holder could pre-empt
+    /// any call it learned a nonce for (and release its parked admission). Now a request streamed on
+    /// `rpc/serve` is recorded against the principal that opened the stream, and `rpc/respond` answers
+    /// only a nonce that principal was handed — another principal, or a nonce never streamed, is
+    /// refused `403 unserved_request` and nothing is emitted. Seen failing first: the other principal's
+    /// reply answered 200 and the caller received it.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn rpc_respond_answers_only_a_request_this_principal_was_handed() {
+        use axum::http::header::AUTHORIZATION;
+        use futures_util::StreamExt as _;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "serve-1".into(), scopes: vec!["mesh:serve".into()] },
+            crate::GatewayToken { token: "serve-2".into(), scopes: vec!["mesh:serve".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        // Principal 1 serves `work`.
+        let resp = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer serve-1")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        tokio::spawn(async move {
+            let mut body = resp.bytes_stream();
+            let mut buf = String::new();
+            let mut seen_tx = Some(seen_tx);
+            while let Some(Ok(chunk)) = body.next().await {
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                if let Some(line) = buf.lines().find_map(|l| l.strip_prefix("data:"))
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim())
+                    && let Some(tx) = seen_tx.take()
+                {
+                    let _ = tx.send(v);
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // A member calls `work`; the request is streamed to principal 1.
+        let caller = {
+            let agent = Arc::clone(&agent);
+            let id = id.clone();
+            tokio::spawn(async move {
+                agent.service().rpc_call(id, "work", b"go".to_vec(), Duration::from_secs(8)).await
+            })
+        };
+        let streamed = tokio::time::timeout(Duration::from_secs(5), seen_rx).await
+            .expect("the request was streamed").expect("stream open");
+        let nonce_hex = streamed["nonce_hex"].as_str().unwrap().to_string();
+        let sender = streamed["sender"].as_str().unwrap().to_string();
+
+        // Principal 2 holds `mesh:serve` too, but was never handed this request.
+        let forged = serde_json::json!({"nonce_hex": nonce_hex, "sender": sender, "result_b64": "Zm9yZ2Vk"});
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-2")
+            .json(&forged).send().await.unwrap();
+        assert_eq!(r.status(), 403, "another principal cannot answer a request it was not handed");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "unserved_request", "{v}");
+
+        // A nonce nobody was handed, from the serving principal itself.
+        let unknown = serde_json::json!({"nonce_hex": "00000000000000ff", "sender": sender, "result_b64": ""});
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-1")
+            .json(&unknown).send().await.unwrap();
+        assert_eq!(r.status(), 403, "a nonce never streamed is refused");
+
+        // The principal that was handed the request answers it, and the caller gets that reply.
+        let real = serde_json::json!({"nonce_hex": nonce_hex, "sender": sender, "result_b64": "ZG9uZQ=="});
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-1")
+            .json(&real).send().await.unwrap();
+        assert_eq!(r.status(), 200, "the serving principal answers");
+        let reply = caller.await.unwrap();
+        assert_eq!(reply.as_deref().ok(), Some(&b"done"[..]), "the caller received the served reply: {reply:?}");
+
+        // Answered once: the same nonce is not answerable again.
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-1")
+            .json(&real).send().await.unwrap();
+        assert_eq!(r.status(), 403, "a request is answered once");
         agent.shutdown().await;
     }
 

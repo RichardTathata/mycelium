@@ -196,6 +196,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sse_doors_refuse_protected_kinds` (both doors answered 200 for `mcp.invoke`). **Upgrade note:** a dashboard or
   SDK reader subscribed to `mcp.invoke`, `skill.invoke`, `llm.invoke` or a configured `protected_rpc_kinds` entry
   now gets 403 at open; read the decision trace or the evidence journal instead (`deprecations.md` §23).
+- **`mesh:serve` bound to neither a kind nor a request: `rpc/respond` could pre-empt any in-flight RPC by nonce.**
+  Two defects, one door. (a) The reply interceptor claimed a pending call's oneshot on **nonce match alone**, and
+  `await_nonce_reply` then dropped the reply on sender mismatch — so the oneshot was consumed either way, and a peer
+  that learned a nonce could make the legitimate reply undeliverable (the caller timed out although the provider
+  answered). The interceptor now claims only when the nonce **and** the node the call was sent to match
+  (`TaskCtx::rpc_pending` carries the target); a nonce-only match from another sender is counted in
+  `SystemStats::rpc_reply_sender_mismatches` (also on `/stats`) and ignored, and the real reply still arrives.
+  (b) `POST /gateway/rpc/respond` took `nonce_hex` and `sender` from the body with nothing binding them to a request
+  this principal's serve stream was handed, so any `mesh:serve` holder could answer any call it learned a nonce for —
+  and release its parked cohort admission. A request streamed on `rpc/serve` is now recorded against the principal
+  that opened the stream (`HttpCtx::served_rpcs`, lock-order row 55, 300 s TTL, capped), and `rpc/respond` answers
+  only a nonce that principal was handed and has not yet answered: anything else is `403 {"error":
+  "unserved_request"}` and nothing is emitted. Both doors added to the C7 bypass matrix. Entry points enumerated by
+  `grep -rn "rpc_pending\|release_parked" src/`: `await_nonce_reply` (the one writer, for `rpc_call` and
+  `bulk_call`), the interceptor (the one reader), `gw_rpc_respond` (the one `release_parked` caller). Seen failing
+  first: `a_forged_reply_from_the_wrong_sender_does_not_consume_the_pending_call` (`Err(Timeout)` where `Ok("real")`
+  was expected) and `rpc_respond_answers_only_a_request_this_principal_was_handed` (the other principal's reply
+  answered 200 and the caller received it). **Upgrade note:** an SDK agent that answers with a nonce from its own
+  serve stream is unaffected; one that answered on another agent's behalf (a different bearer) now gets 403 — open
+  the stream and respond under one credential (`deprecations.md` §23). `SystemStats` gained a field (an exhaustive
+  literal breaks).
 
 ### Security
 - **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component
