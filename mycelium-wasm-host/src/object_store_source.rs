@@ -474,6 +474,7 @@ mod tests {
                 reprobe_every: Duration::from_millis(500),
                 trace: None,
                 stage_dir: Some(dir.join("stem-stage")),
+                max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
             };
             let stem = Stem::start(Arc::clone(&node), &units, opts).unwrap();
             let mut hosted = false;

@@ -77,6 +77,11 @@ pub struct StemOptions {
     /// Where a mesh-sourced stem stages what it pulls (zero-gaps Z3); `None` is
     /// `<placement_root>/stage`. Content-addressed and verified on read, so a stale stage is harmless.
     pub stage_dir:          Option<std::path::PathBuf>,
+    /// The most one artifact may stage, in bytes (default
+    /// [`DEFAULT_MAX_STAGE_BYTES`](crate::DEFAULT_MAX_STAGE_BYTES), 64 GiB). A holder's
+    /// `artifact.size` reply past it — or past the entry's own `size_bytes` hint — is refused
+    /// before a byte is requested.
+    pub max_stage_bytes:    u64,
 }
 
 impl Default for StemOptions {
@@ -89,6 +94,7 @@ impl Default for StemOptions {
             reprobe_every:    Duration::from_secs(10),
             trace:            None,
             stage_dir:        None,
+            max_stage_bytes:  crate::DEFAULT_MAX_STAGE_BYTES,
         }
     }
 }
@@ -215,7 +221,8 @@ impl Stem {
                         });
                         let fetcher = Arc::new(MeshRangedFetcher::resolving(Arc::clone(&agent), librarian_filter(), *timeout));
                         let staged = Arc::new(DiskStagedSource::open(fetcher, &stage_dir)
-                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?);
+                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?
+                            .with_max_stage_bytes(opts.max_stage_bytes));
                         (Arc::clone(&staged) as Arc<dyn ArtifactSource + Send + Sync>, Some(staged))
                     }
                     StemSource::Library(dir) => (Arc::new(
@@ -232,7 +239,8 @@ impl Stem {
                                 .map_err(|e| StemError(format!("store {url}: {e}")))?,
                         );
                         let staged = Arc::new(DiskStagedSource::open(fetcher, &stage_dir)
-                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?);
+                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?
+                            .with_max_stage_bytes(opts.max_stage_bytes));
                         (Arc::clone(&staged) as Arc<dyn ArtifactSource + Send + Sync>, Some(staged))
                     }
                     #[cfg(not(feature = "object_store"))]
@@ -320,6 +328,12 @@ impl Stem {
                 let cache_agent = Arc::clone(&agent);
                 let ticker = tokio::spawn(async move {
                     let mut cache_cap: Option<CapabilityReg> = None;
+                    // A stage that failed is not retried every tick: the n-th consecutive failure
+                    // waits 2^min(n,6) ticks (at most 64) before the next attempt. Counted in
+                    // ticks, so it needs no clock of its own.
+                    let mut stage_failures: std::collections::HashMap<crate::artifact::ArtifactId, u32> =
+                        std::collections::HashMap::new();
+                    let mut ticks: u64 = 0;
                     loop {
                         if *stop_rx.borrow_and_update() {
                             break;
@@ -327,10 +341,20 @@ impl Stem {
                         prov.refresh_catalog(InstallableCatalog::from_kv(&kv));
                         if let Some(m) = &mesh {
                             // Stage every catalogue entry once (idempotent: a staged id is a size
-                            // check, no request) — a component whole, a blob in ranges.
-                            let ids: Vec<_> = prov.catalog().entries().iter().map(|e| e.artifact).collect();
-                            for id in ids {
-                                let _ = m.stage_artifact(&id).await;
+                            // check, no request) — a component whole, a blob in ranges, each
+                            // bounded by the entry's size hint and the stage's ceiling.
+                            let wanted: Vec<_> = prov.catalog().entries().iter().map(|e| (e.artifact, e.size_bytes)).collect();
+                            stage_failures.retain(|id, _| wanted.iter().any(|(w, _)| w == id));
+                            for (id, size_hint) in wanted {
+                                let failures = stage_failures.get(&id).copied().unwrap_or(0);
+                                if failures > 0 && !ticks.is_multiple_of(1u64 << failures.min(6)) {
+                                    continue;
+                                }
+                                if m.stage_artifact_bounded(&id, size_hint).await {
+                                    stage_failures.remove(&id);
+                                } else {
+                                    *stage_failures.entry(id).or_insert(0) += 1;
+                                }
                             }
                             // Once the stage holds something, say so: a peer holder, not the
                             // library of record.
@@ -343,6 +367,7 @@ impl Stem {
                         }
                         prov.provision_round();
                         hosted_w.store(prov.hosted_count(), Ordering::Relaxed);
+                        ticks = ticks.wrapping_add(1);
                         tokio::select! {
                             _ = tokio::time::sleep(tick) => {}
                             _ = stop_rx.changed() => {}
@@ -549,6 +574,7 @@ mod tests {
             reprobe_every: Duration::from_millis(500),
             trace: None,
             stage_dir: None,
+            max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         }
     }
 
@@ -743,6 +769,7 @@ mod tests {
             reprobe_every: Duration::from_secs(1),
             trace: None,
             stage_dir: None,
+            max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         };
 
         // The installer: pulls from the librarian, hosts, and — once its cache holds the bytes —
@@ -812,6 +839,7 @@ mod tests {
             reprobe_every: Duration::from_secs(1),
             trace: None,
             stage_dir: None,
+            max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         };
         // Three stems, started so that the fleet is **deterministic**: with `self_elect_p: 1.0`
         // (no herd damping) three stems started together can all elect in one round — three hosts

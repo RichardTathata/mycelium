@@ -118,6 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         self_elect_p: self_elect.clamp(0.0, 1.0),
         trace: sink.clone(),
         stage_dir: stage_dir.as_ref().map(std::path::PathBuf::from),
+        max_stage_bytes: mycelium_wasm_host::DEFAULT_MAX_STAGE_BYTES,
         ..StemOptions::default()
     };
 

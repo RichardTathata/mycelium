@@ -234,6 +234,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`src/capability_config.rs` — the table validated). **Upgrade note:** a unit file with `[hosts]` and
   no `trusted_publishers` now fails to load; add the publisher keys, or `accept_unsigned = true` to
   keep the old behaviour on purpose.
+- **The staging pull is bounded before its first byte.** `DiskStagedSource::stage_artifact` took the
+  holder's `artifact.size` reply as the pull's `total` and wrote toward it piece by piece — a peer
+  answering `u64::MAX` had the stage filling its disk, with nothing in the catalogue line consulted —
+  and a stem re-tried every failed stage on every tick. A holder's size reply past the stage's ceiling
+  (`DEFAULT_MAX_STAGE_BYTES`, 64 GiB; `DiskStagedSource::with_max_stage_bytes`, `StemOptions::max_stage_bytes`)
+  or past the entry's own `size_bytes` hint (`stage_artifact_bounded`; the hint is outside the
+  signature and bounds the pull without being trusted for anything else — the hash still decides what
+  is kept) is refused before any range is requested, counted as
+  `mycelium_artifact_stage_refused_total{reason="size_past_ceiling"}`; the stem's tick stages each
+  entry under its hint and backs a failed stage off by `2^min(n,6)` ticks. Seen failing first:
+  `a_size_reply_past_the_ceiling_is_refused_before_any_byte_is_written` (`mycelium-wasm-host/src/http_source.rs`
+  — one range was requested against a size of `u64::MAX`). **Upgrade note:** `StemOptions` gained
+  `max_stage_bytes` (an exhaustive literal breaks; `..Default::default()` is unaffected). **Not built:** a
+  `--max-stage-bytes` flag on `mycelium-stem` (the default applies).
 
 ## [2.31.0] — 2026-10-09
 
