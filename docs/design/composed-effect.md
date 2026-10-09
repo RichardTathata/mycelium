@@ -153,7 +153,14 @@ lands*.
 
 **The domain leg is carried, not re-verified.** A destination holds no trust bundle and cannot
 re-check a federated credential; it records the origin the gateway established (`origin_domain`),
-and the evidence record (§3) still carries it. So the sentence this record now supports is: *a
+and the evidence record (§3) *can* carry it. Can, not does (stated 2026-10-09, the 360 review):
+`AeEvidence::with_effect_durability` and `with_origin_domain` (`src/agent/action_evaluator.rs`) are
+**available to** an enforcement point that has the receipt and the credential in hand, and the
+gateway's own evidence path calls neither — in every shipped path both fields are `None` and
+`states_a_composed_effect()` is false; the only callers are the module's own tests. The composed claim
+is reconstructable from a record an enforcement point writes those two fields onto, and nothing in
+this repository writes them yet (`docs/operations/what-is-proven.md`). So the sentence this record now
+supports, once a point writes them, is: *a
 durable effect, **enforced** to be attributed and authorised at the resource, **recorded** as
 cross-domain*. That is stronger than §7 and still not everything: the identity behind *attributed*
 is as strong as item 7's verification (`require_identity_proofs` is default-off), and *authorised*

@@ -11,7 +11,7 @@
 //! [`WikiStore`] trait). A group node runs a **curator** service that serialises writes (single writer
 //! of record, so concurrent same-section edits need no CRDT), runs the LLM ingest/lint, and **brokers
 //! access** (store location + a scoped read grant → group membership is the gate); group agents
-//! **read the store directly, in parallel**. Mycelium is the control plane — curator election +
+//! **read the store directly, in parallel**. Mycelium is the coordination layer — curator election +
 //! ring-failover, the store-location advertisement, the small evaporating proposal queue in KV, and
 //! the MCP tool — never the storage. This is the wiki pattern's native shape (files + an LLM curator +
 //! direct reads, as Mycelium's own `docs/wiki/` works). Plan + design:

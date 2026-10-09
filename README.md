@@ -164,7 +164,11 @@ mTLS peer admission (the real data-isolation boundary), Ed25519-signed consensus
 tamper-evident audit (`compliance` feature), hot identity rotation. Posture + threat framing:
 [guide ch. 09](docs/guide/09-security.md) · [threat model](docs/threat-model.md) · operator
 runbooks under [`docs/operations/`](docs/operations/README.md) (rbac, sso, audit,
-cert-rotation, crown-jewel).
+cert-rotation, crown-jewel). **The default configuration is a development posture, not this one:**
+a `GossipConfig::default()` node gossips in plaintext and trusts every peer, opens its gateway to
+anyone if `http_port` is set, allows all egress and runs under no profile; `profile =
+"secure-single-domain"` makes `start()` refuse unless the enforced posture holds on the node
+([production readiness](docs/operations/production-readiness.md)).
 
 ## Operating it
 

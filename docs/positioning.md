@@ -29,6 +29,9 @@ runs and a record someone else can read. The sentence makes each claim at the st
 - *Where you configure an enforcement point* — gateway and provider enforcement need their features
   (`compliance`, `tls`), an attached evaluator and deployment configuration; a route no enforcement point
   fronts inherits nothing, and a declaration alone enforces nothing. Resource fencing has its own contract.
+  The default configuration is a development posture — plaintext gossip trusting every peer, an open gateway
+  if `http_port` is set, allow-all egress, no profile — and `profile = "secure-single-domain"` makes `start()`
+  refuse unless the enforced posture holds.
 - *It checks authority before work runs and records what it decided* — mandates and the action seam, with
   the evidence journal attached; an evaluator without a journal enforces and records nothing.
 - *A recorded run replays* — replay checks a recording against its captured inputs and choices. It does not

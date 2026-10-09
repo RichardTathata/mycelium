@@ -159,19 +159,38 @@ if let Some((node, cap)) = providers.first() {
 Schema changes follow a git-first workflow. No developer writes directly to the
 mesh's `schemas/` KV prefix in production.
 
-```yaml
-# .github/workflows/ci.yml (excerpt)
-- name: Publish schemas
-  run: |
-    cargo run --bin schema-seed -- \
-      --node ${{ secrets.SCHEMA_NODE }} \
-      --dir ./schemas \
-      --fail-on-conflict   # exits 1 if any Conflict result is returned
+There is no `schema-seed` binary in the repository (an earlier version of this page showed one);
+the gate is a few lines of your own against `SchemaHandle::seed_schemas_from_dir`
+(`mycelium-core/src/schema_handle.rs`), which returns one
+`(schema_id, Result<SchemaPublishResult, SchemaError>)` per `.json` file under the directory.
+A **sketch** of the publishing step a CI job would run on a node of its own — not a shipped tool:
+
+```rust
+// sketch: a small bin of your own, run by CI after merge against a publishing node
+let results = agent.schemas().seed_schemas_from_dir("./schemas").await;
+let mut failed = false;
+for (id, r) in &results {
+    match r {
+        Ok(SchemaPublishResult::Published) | Ok(SchemaPublishResult::Unchanged) => {}
+        Ok(SchemaPublishResult::Conflict { .. }) => {
+            eprintln!("{id}: conflict — bump the version instead of redefining it");
+            failed = true;
+        }
+        Err(e) => {
+            eprintln!("{id}: {e}");
+            failed = true;
+        }
+    }
+}
+if failed {
+    std::process::exit(1);
+}
 ```
 
-The `--fail-on-conflict` flag causes `seed_schemas_from_dir` to return a non-zero
-exit code on any conflict — blocking the merge if a schema redefinition is
-attempted without a version bump.
+Exiting non-zero on any `Conflict` blocks the merge when a schema is redefined without a version
+bump. `Conflict` is advisory, not a lock — its doc-comment says why (a read-then-write with no
+mutual exclusion) — so the gate catches the ordinary case and not a race between two publishers;
+keep one publishing authority, which is what the CI step is.
 
 **Beside it, the wire-check.** The same directory is what `mycelium wire-check <units> --schemas
 ./schemas` reads: a `schema_id` a unit or an artifact declares that names no file is `unknown

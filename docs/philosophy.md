@@ -18,7 +18,7 @@ The architecture is grounded in John Holland's framework for Complex Adaptive Sy
 
 | Holland concept | Mycelium implementation |
 |---|---|
-| Signal propagation — unconditional flooding | All nodes forward all `Signal` frames regardless of scope |
+| Signal propagation — unconditional flooding | All nodes forward all `Signal` frames regardless of admission (the fan-out *set* is scope-shaped under `group_aware_forwarding`, default on; nothing a node declines to admit stops it forwarding) |
 | Boundary — receptor set controlling action | `Boundary::admits()` — controls delivery, never forwarding |
 | Stigmergy — state left in the medium | `sys/load/{node}/…` pheromone keys — opacity written to KV, read by others |
 | Tag matching — signals find matching receptors | `SignalScope::Group(name)` — receptor identity via group membership |

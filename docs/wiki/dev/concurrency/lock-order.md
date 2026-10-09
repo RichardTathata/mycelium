@@ -74,6 +74,15 @@ data-plane companions; previously the table silently covered only `mycelium-core
 `parking_lot` **leaf** — the flat invariant holds workspace-wide. `mycelium-agentfacts`
 holds no locks.
 
+**"Workspace-wide" means the library crates — `src/`, `mycelium-core/`, `mycelium-*/` — and not
+`examples/`** (stated 2026-10-09, the 360 review). `examples/coop` is a workspace member and its
+binaries hold six locks this table does not list: the `Arc<Mutex<VizState>>` behind each viz server
+(`stigmergy_viz.rs`, `provisioning_viz.rs`, `catalog_viz.rs`, `llm_council_viz.rs`) and the per-agent
+`tokio::sync::Mutex<HashMap<…>>` accumulators in `llm_council.rs` and `llm_council_viz.rs`
+(`examples/coop/src/bin/`). The lint sweep (`.claude/commands/wiki-lint.md` §1) greps no `examples/`
+path, so the claim is scoped rather than the sweep extended: they are demo state, outside the
+completeness claim and outside the lint.
+
 **Async contexts:** guards from every *sync* lock above are `!Send` across `await`
 (`std::sync` and default `parking_lot` alike) — the compiler enforces it for spawned
 futures; all those sites release before any `await`. `std::sync::Mutex` is the default

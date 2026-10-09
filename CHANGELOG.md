@@ -9,6 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The composed-effect record: what it can carry versus what is written.** `AeEvidence` *can* carry the receipt's
+  rung and the origin domain (`with_effect_durability`, `with_origin_domain`, 2.11.0) and `states_a_composed_effect()`
+  reads them; **no shipped path calls either builder** — the gateway's evidence path writes neither field, so on every
+  record it produces both are `None` and the predicate is false (the only callers are the module's own tests). The
+  fields are available to an enforcement point that has the receipt and the credential in hand; 2.11.0's *now carries*
+  described the record's shape, not a writer. `docs/design/composed-effect.md` §9 and `what-is-proven.md` now say so.
+  No code change (the 360 review, 2026-10-09).
+
 ## [2.31.0] — 2026-10-09
 
 **Stops that stop, and failures that say what they are.** A node, a stem or a demo image now shuts down on SIGTERM
