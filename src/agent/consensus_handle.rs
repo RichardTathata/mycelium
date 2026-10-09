@@ -435,13 +435,13 @@ impl ConsensusHandle {
     /// writes the value to `consensus/committed/consistent/{key}` (durable, anti-entropy-
     /// synced to all nodes) and to the raw gossip KV key.
     ///
-    /// **Guarantee: ballot serialization, not linearizability.** At any single ballot at most one
-    /// value can gather quorum — a voter refuses to cast a second vote for a *different* value at a
-    /// ballot it has already voted at (single-decree safety, `may_cast_vote`), so two proposers
-    /// racing the same fresh slot cannot both commit at the same ballot. Across *different* ballots
-    /// two proposers can each return `Ok(())`; the committed slot then converges by HLC-LWW on
-    /// `consensus/committed/`, so the later (higher-HLC) commit is authoritative. `consistent_get`
-    /// is a local read and may lag the cluster-wide committed value by up to one anti-entropy round.
+    /// **Guarantee: single-decree agreement on a stable roster, not linearizability.** Since 2.30.0
+    /// a proposer asks a quorum what it has accepted before proposing (the prepare phase), so two
+    /// concurrent callers do not both return `Ok(())` for different values when their quorums
+    /// intersect: the second adopts the first's value, and is told `Superseded`. Across an electorate
+    /// change, or against proposers older than 2.30.0, that is not guaranteed — guide 04
+    /// § *Changing an electorate*. `consistent_get` is a local read and may lag the cluster-wide
+    /// committed value by up to one anti-entropy round.
     ///
     /// **Suitable for:** leader election, distributed locks, single-writer coordinator
     /// patterns where "only one writer should commit first" is sufficient. Use ballot-based

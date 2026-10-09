@@ -305,6 +305,9 @@ with no electorate deciding alone, votes not bound to what they voted for, a nod
 itself, a higher ballot overwriting an accepted value, and none of that memory surviving a restart.
 All five are closed here. The wrong diagnosis is recorded alongside the right one, because it is the
 more instructive of the two: *"it was the only change in that commit"* is a prior, not a mechanism.
+*Correction, 2026-10-08:* the fourth was closed only where an acceptor refused; a strictly higher ballot
+was still granted without reporting what it overwrote, so two proposers could commit different values
+across ballots until the prepare phase (2.30.0, [`.log/2026-10-08-consensus-prepare-phase.md`](.log/2026-10-08-consensus-prepare-phase.md)).
 
 **The centrepiece started as a question in a design note** — *is role accumulation constrained
 anywhere I did not look?* The answer was **no**, twice over, and the second half is the one that

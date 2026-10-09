@@ -476,7 +476,16 @@ Layer III's quorum is `floor(n/2)+1` over the group members **this node observes
 *count*, not an agreement about **which** identities form the electorate: two non-empty, disjoint
 views can each satisfy a locally computed majority, so **quorum intersection across a membership
 change is an assumption the protocol does not enforce**. Value-bound votes (v2.14.0) stop two
-proposers committing different values at one ballot; they do not make two views one view.
+proposers committing different values at one ballot; the prepare phase (v2.30.0) stops it across
+ballots when the quorums intersect and every proposer is v2.30.0 or later; neither makes two views
+one view.
+
+**Before v2.30.0 this profile did not give single-value commits either.** A proposer learned an
+accepted value only from a refusal, and a strictly higher ballot is never refused, so two concurrent
+proposers on a fixed roster with a fixed quorum could each commit a different value for one slot —
+the only guard was the second proposer's local view of the committed key. Inside the profile the
+fence at the resource is what kept a second holder from corrupting anything; it is still the
+contract.
 
 **The supported profile** for any use where the outcome is *exclusive* — a distributed lock, a
 leader, a single writer, anything a second holder would corrupt:

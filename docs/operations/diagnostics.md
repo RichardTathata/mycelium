@@ -136,7 +136,14 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   partition healing.
 - **Read:** gauge `mycelium_consensus_commit_conflicts` (`delta > 0`) or the `commit_conflicts`
   tripwire on `/stats`; snapshot `commit_conflict_slots[]` (the hot slots).
-- **Do:** check consensus membership and whether the cluster recently rejoined after a split.
+- **Do:** check consensus membership and whether the cluster recently rejoined after a split — or whether a
+  group's roster changed during an election: quorums are counted from each proposer's view, so views that differ
+  by two or more members, a joiner nobody lists yet, or a fixed `quorum_size` at or below half the group can let
+  two proposers commit different values (guide 04 § *Changing an electorate*; the supported profile is threat
+  model §7). The counter is per node and partial — only a member that receives the second COMMIT while holding
+  the first counts it — so sum it across nodes. Confirm the work the slot guards is fenced on the epoch.
+  On a node older than 2.30.0 a conflict can also come from two concurrent proposers on a stable roster (no
+  prepare phase); upgrade.
 
 ### Consensus stalled — quorum unavailable
 

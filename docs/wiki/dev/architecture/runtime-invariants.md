@@ -199,9 +199,11 @@ Two different patterns keep getting conflated because the word "consumer group" 
 - **Exact-once *ordered log consumption*** → `subscribe_log_group` / the gateway
   `/gateway/overlay/log/group/subscribe`. Contract: **at most one active consumer at a time**,
   failover on death. Achieved (`src/agent/http.rs`; gate: overlay S11) by a **leased consensus
-  claim with converged-holder confirmation**: `cluster_propose` commits **optimistically against a
-  node's *local* committed view** (`src/consensus.rs`), so two near-simultaneous proposers can
-  both commit — the return is **not** trustworthy for mutual exclusion. But commit-keys are
+  claim with converged-holder confirmation**: before 2.30.0 `cluster_propose` committed **optimistically
+  against a node's *local* committed view** (`src/consensus.rs`), so two near-simultaneous proposers could
+  both commit. The prepare phase (2.30.0, `ConsensusMsg::Prepare`) closes that when the two quorums
+  intersect; they need not when the roster changes under a slot (guide 04 § *Changing an electorate*), so
+  the return is still **not** trustworthy for mutual exclusion on its own. Commit-keys are
   LWW-by-HLC, so the *converged* holder is deterministic: after committing, read the converged
   committed holder (`live_committed_value`) and only that node consumes; losers stand by **without
   releasing** (a tombstone would clear the winner's claim). The winner drains a **private** offset
