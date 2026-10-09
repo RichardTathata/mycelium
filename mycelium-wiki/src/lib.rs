@@ -1,4 +1,4 @@
-//! # mycelium-wiki — a group-scoped, LLM-curated wiki (control plane / data plane)
+//! # mycelium-wiki — a group-scoped, LLM-curated wiki (coordination layer / data plane)
 //!
 //! The **maintained-meaning / authoritative-specific** knowledge canon for a group of agents — the
 //! durable, curated sibling of the tuple space's ephemeral pull and the blackboard's competitive
@@ -6,7 +6,7 @@
 //! joined by a shared id namespace — it is the *specific/authoritative* layer, not a replacement for
 //! either.
 //!
-//! **Architecture (control plane / data plane).** The corpus is **not** in gossiped KV. It lives in a
+//! **Architecture (coordination layer / data plane).** The corpus is **not** in gossiped KV. It lives in a
 //! **node-independent, pluggable store** (a shared filesystem dir / S3 bucket / doc store — see the
 //! [`WikiStore`] trait). A group node runs a **curator** service that serialises writes (single writer
 //! of record, so concurrent same-section edits need no CRDT), runs the LLM ingest/lint, and **brokers
@@ -20,7 +20,7 @@
 //! ## Phase 1 (this release) — the data plane
 //!
 //! The pluggable backing store, deliberately **Mycelium-agnostic** (the store is plain infrastructure;
-//! the control plane arrives in Phase 2 behind the `control-plane` feature):
+//! the coordination layer arrives in Phase 2 behind the `control-plane` feature):
 //! - the [`WikiStore`] trait — `read` / `read_versioned` / `query` / `write_section` / `update_manifest`
 //!   / `write_page` / `list_pages` / `location`. The concurrent write path is a **section-granular
 //!   compare-and-swap** (`read_versioned` → reconcile → `write_section` / `update_manifest`): airtight
@@ -84,7 +84,7 @@ pub use git_store::{GitStore, GitStoreConfig, MyceliumFormat, PageFormat};
 #[cfg(feature = "execution-authority")]
 pub use execution::{ExecutionGateAuthority, WIKI_WRITE};
 
-/// The Mycelium **control plane** (Phase 2) — the curator role, election + ring-failover, the
+/// The Mycelium **coordination layer** (Phase 2) — the curator role, election + ring-failover, the
 /// evaporating proposal queue, and the single-writer apply. Behind the `control-plane` feature so the
 /// data plane above stays Mycelium-agnostic.
 #[cfg(feature = "control-plane")]

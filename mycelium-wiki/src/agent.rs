@@ -1,4 +1,4 @@
-//! The **control plane** (Phase 2) — the Mycelium side. A group's wiki is served by a single elected
+//! The **coordination layer** (Phase 2) — the Mycelium side. A group's wiki is served by a single elected
 //! **curator** discovered on the capability ring, with emergent ring-failover. The curator serialises
 //! writes (drains the evaporating KV proposal queue and applies each to the store — the single writer
 //! of record) and advertises the store location; every agent **reads the store directly**. Because the

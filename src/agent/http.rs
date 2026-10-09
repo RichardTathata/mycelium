@@ -3505,7 +3505,7 @@ async fn gw_mailbox_deliver(
 // ── Overlay gateway helpers ───────────────────────────────────────────────────
 
 /// Build a `ConsensusEngine` from `TaskCtx`, skipping the opacity/load-balance
-/// heuristics used by `GossipAgent::system_propose` — those are performance
+/// heuristics used by `ConsensusHandle::cluster_propose` — those are performance
 /// hints, not correctness requirements, and are not available from `TaskCtx`.
 #[cfg(feature = "consensus")]
 fn overlay_make_engine(ctx: &Arc<TaskCtx>) -> crate::consensus::ConsensusEngine {

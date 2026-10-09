@@ -73,8 +73,9 @@ const a2a   = new A2aClient("http://10.0.0.5:8300", { token: "…" });
 ```
 
 The header rides every request including the SSE streams (`onSignal`, `rpcServe`, `mailbox`,
-`subscribeLog*`). Under scoped tokens the token must carry the route's scope (`kv:read`,
-`mesh:write`, `wiki:*`, … — the node's `docs/operations/rbac.md`). Since 0.1.1; the
+`subscribeLog*`). Under scoped tokens the token must carry the route's scope **by name** (`kv:read`,
+`mesh:write`, `wiki:read` / `wiki:write`, … — a family wildcard such as `wiki:*` is refused by the
+node's `validate()`; the table is the node's `docs/operations/rbac.md`). Since 0.1.1; the
 `auth.test.ts` suite runs without a node and is CI-gated.
 
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway

@@ -210,9 +210,9 @@
 //! [`rpc_respond`]: GossipAgent::rpc_respond
 //! [`resolve`]: GossipAgent::resolve
 //! [`watch_capabilities`]: GossipAgent::watch_capabilities
-//! [`group_propose`]: GossipAgent::group_propose
-//! [`cluster_propose`]: GossipAgent::cluster_propose
-//! [`cross_group_propose`]: GossipAgent::cross_group_propose
+//! [`group_propose`]: ConsensusHandle::group_propose
+//! [`cluster_propose`]: ConsensusHandle::cluster_propose
+//! [`cross_group_propose`]: ConsensusHandle::cross_group_propose
 //! [`signal_rx`]: GossipAgent::signal_rx
 //! [`signal_rx_from`]: GossipAgent::signal_rx_from
 //! [`advertise_capability`]: GossipAgent::advertise_capability

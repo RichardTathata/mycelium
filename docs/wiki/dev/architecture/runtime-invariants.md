@@ -47,7 +47,7 @@ silent drop, which broke RPC and ballot voting in partial meshes. Only *admissio
 `test_individual_signal_reaches_unpeered_target_via_relay`,
 `test_individual_consumers_over_random_partial_meshes` (both in `src/lib_tests.rs`).
 
-**The one legitimate termination: the frame's own target (2026-07-10, #162).** An Individual
+**The first of two carve-outs, routing at the terminal: the frame's own target (2026-07-10, #162).** An Individual
 frame addressed to *this* node has nowhere further to route — admission already delivered it
 locally. Pre-fix it still entered the forward path (both self-emits like mailbox
 deliver-to-self and relayed frames arriving at their destination traverse the gossip queue),

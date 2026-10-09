@@ -132,8 +132,9 @@ the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
   recurring race family, rules + reference impls in
   [lock-free-and-atomics](docs/wiki/dev/concurrency/lock-free-and-atomics.md).
 - **Individual-scope forwarding is unconditional** (flood fallback); only *admission* is
-  scoped. Do not "optimize" it away. The one carve-out is not precedent: a frame addressed
-  to *this* node terminates here (routing at the terminal, #162) —
+  scoped. Do not "optimize" it away. Two carve-outs, neither precedent: a frame addressed
+  to *this* node terminates here (routing at the terminal, #162), and a removed member's frames
+  are dropped at the connection (origin-keyed membership admission, closure plan C5) —
   [runtime-invariants](docs/wiki/dev/architecture/runtime-invariants.md).
 - **Detection, not prevention:** never teach Layer I a higher-layer law (no prefix write
   guards in `apply_and_notify`) — tripwires + counters instead.
@@ -155,8 +156,8 @@ the suite. Scale suites: `make test-scale` (100 nodes), `test-scale-resilience`,
 - **No direct clock, RNG or filesystem access in production logic** — in the three crates the gate
   scans (`src/`, `mycelium-core/src/`, `mycelium-wasm-host/src/`) — every one goes through
   `mycelium_core::sim_seam` (`wall_now_ms`, `mono_instant`, the timer seam the node's periodic loops tick
-  through; the wasm host's librarian sync and `[[serve]]` loops sleep on tokio directly and sit in
-  the baseline), or a recording cannot replay deterministically. `scripts/check-sim-seams.sh` (in `make check`)
+  through; the wasm host's librarian sync and `[[serve]]` loops and `run_capability_probes`' health
+  loop sleep on tokio directly and sit in the baseline), or a recording cannot replay deterministically. `scripts/check-sim-seams.sh` (in `make check`)
   holds a baseline of the permitted call sites in `scripts/sim-seams-baseline.txt`; a
   new one fails the gate until it is routed or the baseline is updated in the open. Off in every
   shipped build (feature `sim`) — [`mycelium-core/src/sim_seam.rs`](mycelium-core/src/sim_seam.rs).

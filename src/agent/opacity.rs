@@ -230,7 +230,7 @@ pub(crate) fn is_self_opaque(kv_state: &KvState, node_id: &crate::node_id::NodeI
 
 /// Counts all nodes with any opaque load entry fresher than `max_age_ms`.
 ///
-/// Used by `system_propose` to build the mid-ballot opaque-recompute callback.
+/// Used by `cluster_propose` to build the mid-ballot opaque-recompute callback.
 #[cfg(feature = "consensus")]
 pub(super) fn count_opaque_all_in_kv(
     kv_state:   &KvState,

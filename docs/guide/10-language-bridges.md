@@ -374,8 +374,9 @@ a scope matches exactly, or is the single `*`): `kv:read` / `kv:write` for the K
 `cap:write` for capabilities and `declare`, `mesh:read` / `mesh:write` for signals, mailboxes and
 `rpc_call`, `mesh:serve` to serve a kind, `consensus:read` / `consensus:write` for the overlay,
 `llm:read` / `llm:write` / `llm:invoke` for prompts and inference (`ReasonClient` included),
-`wiki:read` / `wiki:write`, `tuple:read` / `tuple:write`, `board:read` / `board:write`, and
-`mcp:invoke` for `/mcp`. The route → scope table is `required_scope` in `src/agent/http.rs`, read
+`wiki:read` / `wiki:write`, `tuple:read` / `tuple:write`, `board:read` / `board:write`,
+`mcp:invoke` for `/mcp`, `federation:read` / `federation:invoke` for the `/gateway/federation/*`
+verbs, and `artifact:publish` for `POST /gateway/artifacts/publish`. The route → scope table is `required_scope` in `src/agent/http.rs`, read
 through [rbac.md](../operations/rbac.md). Before these versions the bridges could not
 present a bearer at all — a token-protected node was unreachable from Python and TypeScript.
 
