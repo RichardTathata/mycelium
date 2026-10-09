@@ -170,6 +170,10 @@ pub use action_evaluator::{
     MappingStatus, PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict,
     AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
 };
+#[cfg(feature = "gateway")]
+pub use gateway_caller::{GatewayDispatchError, ResolvedPrincipal};
+#[cfg(feature = "gateway")]
+pub use http::{GatewayPreflight, GatewayRefusal};
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
     CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,

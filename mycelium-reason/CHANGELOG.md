@@ -6,6 +6,26 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
+## [0.8.0] — unreleased
+
+**The façade acts as the HTTP client, under the evaluator.** `POST /gateway/reason/route` and
+`/gateway/reason/v1/chat/completions` dispatched `llm.invoke` with `rpc_call` — the node's own action — so under
+`gateway_caller_profile = secure` the provider saw the gateway node as the caller, not the client whose bearer the
+gateway had just resolved, and no `ActionEvaluator` was consulted while `/mcp`, `/a2a` and `/gateway/llm/call`
+refused the same call. Both handlers now read the gateway's `ResolvedPrincipal` and route through the new
+`InferenceRouter::call_as(caller, enforcement_point, …)`, which runs `GossipAgent::gateway_preflight` per attempt
+(`gateway:reason/route`, `gateway:reason/v1/chat/completions`), dispatches with `ServiceHandle::rpc_call_as` and
+records the outcome. A denial is `403`: `{"error": "policy", "reason", "code", "detail", "data"}` on `/route`;
+`permission_error` / `policy` with a `mycelium: {reason, code, data}` block on the OpenAI envelope.
+
+- **Added:** `InferenceRouter::call_as` (feature `gateway`); `RouteError::Refused { code, reason, message, data }`.
+- **Unchanged:** `InferenceRouter::call` — the embedder's in-process route, framed as the node, no preflight.
+- **Behaviour:** under the secure profile a provider whose caller-context marker has not reached the gateway is
+  refused for a façade call and failed over, as `/gateway/llm/call` does; it used to be called as the node.
+- **Breaking:** an exhaustive `match` on `RouteError` needs the `Refused` arm (hence the MINOR).
+- Seen failing first: `tests/gateway.rs::the_facade_dispatches_as_the_http_client_not_the_node` (the provider saw
+  `node:…`), `the_facade_runs_the_action_preflight` (200, and the provider ran). Requires `mycelium` ≥ 2.32.0.
+
 ## [0.7.1] — 2026-10-08
 
 **A refusal is not a corrupt copy** (#564). `MeshBlobStore::fetch` counted every non-empty reply that failed the content

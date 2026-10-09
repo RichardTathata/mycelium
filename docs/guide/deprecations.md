@@ -490,9 +490,14 @@ node had not joined was never electing anything the group's members agreed to.
   answer any in-flight call by nonce. On the mesh side a reply that carries a pending call's nonce from a node the
   call was not sent to is ignored and counted (`SystemStats::rpc_reply_sender_mismatches`, `/stats`); it used to
   consume the pending call and time the caller out.
+- **`mycelium-reason` 0.8.0: the façade routes act as the HTTP client.** `POST /gateway/reason/route` and
+  `/gateway/reason/v1/chat/completions` carry the resolved principal to the provider and run the gateway's action
+  preflight; a denial is `403` (`{"error": "policy"}` / OpenAI `permission_error`). Under the secure profile a
+  provider without a caller-context marker at the gateway is failed over rather than called as the node.
 
-**Will the compiler tell me?** `SystemStats` gained a field, so an exhaustive struct literal breaks; otherwise no —
-HTTP status codes and JSON-RPC error codes.
+**Will the compiler tell me?** `SystemStats` gained a field, so an exhaustive struct literal breaks, and an
+exhaustive `match` on `mycelium_reason::RouteError` needs the `Refused` arm; otherwise no — HTTP status codes and
+JSON-RPC error codes.
 
 **Migration.** A reader subscribed to a protected kind should read the decision trace (`mycelium explain`) or the
 evidence journal instead; nothing in the SDKs subscribed to one by default. An SDK agent that serves and responds

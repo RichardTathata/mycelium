@@ -186,6 +186,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_non_member_cannot_propose_to_a_group_on_either_surface` (B committed `leader/members-only` = B).
   **Upgrade note:** three `#[non_exhaustive]` enums gain a variant — a `_` arm must fail closed, as the enums'
   docs already require (`docs/guide/deprecations.md` §24).
+- **`mycelium-reason`'s façade dispatched protected `llm.invoke` as the node.** `POST /gateway/reason/route` and
+  `/gateway/reason/v1/chat/completions` never read the principal the gateway's auth layer resolved and called
+  `rpc_call` — the node's own action — so under `gateway_caller_profile = secure` the provider saw `node:{gateway}`
+  as the caller, not the HTTP client (`gw.caller_profile`'s promise held on `/gateway/llm/call` and not here), and
+  no action evaluator was consulted. Both routes now carry the resolved principal into the router's dispatch
+  (`InferenceRouter::call_as` → `rpc_call_as`) and run the gateway's preflight per attempt under
+  `gateway:reason/route` / `gateway:reason/v1/chat/completions`; a denial is `403` (`{"error": "policy", …}` on
+  `/route`, `permission_error`/`policy` with a `mycelium.data` block on the OpenAI envelope) and the provider is never
+  reached. `mycelium-reason` **0.8.0** (`RouteError` gained `Refused`; `call_as` is new; `call` is unchanged and
+  remains the node's own in-process action). Seen failing first: `the_facade_dispatches_as_the_http_client_not_the_node`
+  (the provider saw `node:127.0.0.1:…`) and `the_facade_runs_the_action_preflight` (both doors answered 200 and the
+  provider ran). **Upgrade note:** under the secure profile a provider whose `sys/caller-context` marker has not
+  reached the gateway is now refused for a façade call (`provider_without_caller_context`, failed over) instead of
+  being called as the node — the same rule `/gateway/llm/call` has; an exhaustive `match` on `RouteError` needs the
+  new arm.
 - **The signal SSE doors streamed every protected RPC request to a `mesh:read` holder.** `/signals/{kind}` and
   `/gateway/signal/sse/{kind}` registered a receiver for whatever kind the path named — the same handler table
   `rpc/serve` and the native MCP tools register on, fanned to every receiver — so a `mesh:read` token could open
@@ -217,6 +232,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serve stream is unaffected; one that answered on another agent's behalf (a different bearer) now gets 403 — open
   the stream and respond under one credential (`deprecations.md` §23). `SystemStats` gained a field (an exhaustive
   literal breaks).
+
+### Added
+- **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
+  `mycelium-reason`'s façade needed and nothing had: `ResolvedPrincipal` (the auth layer's resolved principal, read
+  from axum's `Extension` on a route merged with `with_http_routes`; fields crate-private, so it is never
+  constructed outside the auth layer), `ServiceHandle::rpc_call_as` (the gateway dispatch, carrying the client's
+  caller context), `GossipAgent::gateway_preflight` / `gateway_record_execution` (the preflight `/mcp`, `/a2a` and
+  `/gateway/llm/call` run, opaque `GatewayPreflight` / `GatewayRefusal`, inert without `tls`) and
+  `GatewayDispatchError` (`#[non_exhaustive]`). All under `gateway`; additive.
 
 ### Security
 - **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component

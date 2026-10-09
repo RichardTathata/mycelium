@@ -204,6 +204,15 @@ async fn gateway_route_endpoint_routes_and_reports_no_provider() {
 /// hardening the tests above use), optionally token-protected. Returns the agent, its
 /// gossip port, and the HTTP port once `/health` answers.
 async fn start_gateway_node(store: Arc<FsBlobStore>, auth_token: Option<&str>) -> (Arc<GossipAgent>, u16, u16) {
+    start_gateway_node_with(store, auth_token, |_| {}).await
+}
+
+/// [`start_gateway_node`] with a hook over the config before the agent is built.
+async fn start_gateway_node_with(
+    store: Arc<FsBlobStore>,
+    auth_token: Option<&str>,
+    tune: impl Fn(&mut GossipConfig),
+) -> (Arc<GossipAgent>, u16, u16) {
     let mut started = None;
     for _ in 0..16 {
         let base = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -212,6 +221,7 @@ async fn start_gateway_node(store: Arc<FsBlobStore>, auth_token: Option<&str>) -
         cfg.bind_port = base;
         cfg.http_port = Some(http_port);
         cfg.gateway_auth_token = auth_token.map(str::to_owned);
+        tune(&mut cfg);
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).unwrap(), cfg));
         agent.with_http_routes(reason_router(Arc::clone(&agent), Arc::clone(&store)));
         if agent.start().await.is_ok() {
@@ -228,6 +238,179 @@ async fn start_gateway_node(store: Arc<FsBlobStore>, auth_token: Option<&str>) -
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     (agent, base, http_port)
+}
+
+/// **The façade dispatched protected `llm.invoke` as the node.** `/gateway/reason/route` and
+/// `/gateway/reason/v1/chat/completions` never read the principal the gateway's auth layer resolved
+/// and called `rpc_call` — the node's own action — so under `gateway_caller_profile = secure` the
+/// provider saw `node:{gateway}` as the caller, not the HTTP client, and `gw.caller_profile`'s promise
+/// (the provider sees the client as the caller) did not hold on these two routes while it held on
+/// `/gateway/llm/call`. Now both route the resolved principal into the router's dispatch
+/// (`InferenceRouter::call_as` → `ServiceHandle::rpc_call_as`), so the provider's `request_principal`
+/// is `Client(<the bearer's principal>)`. Seen failing first: the provider saw `node:127.0.0.1:…`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_facade_dispatches_as_the_http_client_not_the_node() {
+    use mycelium::RequestPrincipal;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let (agent, _base, http_port) = start_gateway_node_with(store, Some("mesh-key"), |cfg| {
+        cfg.gateway_caller_profile = mycelium::GatewayCallerProfile::Secure;
+    })
+    .await;
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason");
+    let http = reqwest::Client::new();
+
+    let template = PromptTemplate {
+        system: "deterministic echo".into(),
+        user_template: "{{input}}".into(),
+        max_tokens: 512,
+        temperature: 0.0,
+        metadata: HashMap::new(),
+    };
+    let profile =
+        ModelProfile { model: "fable-mini".into(), ctx_window: Some(8192), family: Some("echo".into()), extra: Vec::new() };
+    let _model = serve_model(&agent, profile, template, Arc::new(EchoBackend)).await.unwrap();
+
+    // A second receiver on the provider's kind: it records who each request is from and answers
+    // nothing (the served skill answers). A signal fans to every receiver of its kind.
+    let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel::<String>(8);
+    {
+        let agent = Arc::clone(&agent);
+        let mut rx = agent.service().rpc_rx(mycelium::signal::signal_kind::LLM_INVOKE);
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let who = match agent.request_principal(&req) {
+                    Ok(RequestPrincipal::Client(c)) => format!("client:{}", c.principal),
+                    Ok(RequestPrincipal::Node(n)) => format!("node:{n}"),
+                    Err(e) => format!("refused:{e}"),
+                };
+                let _ = seen_tx.send(who).await;
+            }
+        });
+    }
+
+    let expected = format!("client:{}", mycelium::legacy_token_principal(&agent.node_id().to_string()));
+    // The skill's capability must resolve before a route lands; poll structurally.
+    let mut routed = None;
+    for _ in 0..100 {
+        let resp = http
+            .post(format!("{url}/route"))
+            .bearer_auth("mesh-key")
+            .json(&serde_json::json!({ "model": "fable-mini", "input": "who-am-i" }))
+            .send()
+            .await
+            .unwrap();
+        if resp.status().as_u16() == 200 {
+            routed = Some(resp.json::<serde_json::Value>().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let routed = routed.expect("the route landed");
+    assert!(routed["output"].as_str().unwrap().contains("who-am-i"));
+    let seen = tokio::time::timeout(Duration::from_secs(5), seen_rx.recv()).await.unwrap().unwrap();
+    assert_eq!(seen, expected, "/route: the provider sees the HTTP client as the caller");
+
+    let chat = http
+        .post(format!("{url}/v1/chat/completions"))
+        .bearer_auth("mesh-key")
+        .json(&serde_json::json!({ "model": "fable-mini", "messages": [{ "role": "user", "content": "again" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat.status().as_u16(), 200);
+    let seen = tokio::time::timeout(Duration::from_secs(5), seen_rx.recv()).await.unwrap().unwrap();
+    assert_eq!(seen, expected, "/v1/chat/completions: the provider sees the HTTP client as the caller");
+
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **The façade ran no action preflight.** An evaluator that denies `llm.invoke` was never consulted
+/// on `/gateway/reason/route` or `/v1/chat/completions` — both dispatched straight to the provider —
+/// while `/mcp` and `/a2a` refused the same call. Now both run the gateway's preflight per attempt
+/// (`GossipAgent::gateway_preflight`, enforcement points `gateway:reason/route` and
+/// `gateway:reason/v1/chat/completions`): a denial is `403` with the gateway's `reason` and `data`,
+/// and the provider is never reached. Gated on `knowledge`, the feature that brings `mycelium/tls`
+/// in and with it the evaluator (CI runs this crate's tests with it). Seen failing first: both
+/// doors answered 200 and the provider ran.
+#[cfg(feature = "knowledge")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_facade_runs_the_action_preflight() {
+    use mycelium::{ReferenceEvaluator, Rule};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let cert_dir = dir.path().join("certs");
+    let (agent, _base, http_port) = start_gateway_node_with(store, Some("mesh-key"), |cfg| {
+        cfg.tls = Some(mycelium::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+    })
+    .await;
+    let me = agent.node_id().clone();
+    let resource = format!("prompt:llm/fable-mini@{me}");
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-facade")
+            .with_catalogue("cat-facade", "1")
+            .map_action("llm.invoke", resource.clone())
+            .prohibit(Rule::new("*", "llm.invoke", resource)),
+    ));
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason");
+    let http = reqwest::Client::new();
+
+    let template = PromptTemplate {
+        system: "deterministic echo".into(),
+        user_template: "{{input}}".into(),
+        max_tokens: 512,
+        temperature: 0.0,
+        metadata: HashMap::new(),
+    };
+    let _model = serve_model(&agent, ModelProfile::new("fable-mini"), template, Arc::new(EchoBackend)).await.unwrap();
+    let reached = Arc::new(AtomicUsize::new(0));
+    {
+        let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));
+        let mut rx = agent.service().rpc_rx(mycelium::signal::signal_kind::LLM_INVOKE);
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                reached.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+    let filter = mycelium::CapFilter::new("llm", "fable-mini");
+    for _ in 0..100 {
+        if !agent.capabilities().resolve(&filter).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let r = http
+        .post(format!("{url}/route"))
+        .bearer_auth("mesh-key")
+        .json(&serde_json::json!({ "model": "fable-mini", "input": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403, "/route: the evaluator's denial is answered");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["error"], "policy", "{v}");
+    assert_eq!(v["data"]["reason"], "action_denied", "{v}");
+    assert_eq!(v["data"]["policy_revision"], "rev-facade", "{v}");
+
+    let r = http
+        .post(format!("{url}/v1/chat/completions"))
+        .bearer_auth("mesh-key")
+        .json(&serde_json::json!({ "model": "fable-mini", "messages": [{ "role": "user", "content": "x" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403, "/v1/chat/completions: the evaluator's denial is answered");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["type"], "permission_error", "{v}");
+    assert_eq!(v["error"]["code"], "policy", "{v}");
+    assert_eq!(v["mycelium"]["data"]["reason"], "action_denied", "{v}");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(reached.load(Ordering::SeqCst), 0, "the provider was never reached");
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
 /// The OpenAI-compatible façade: an OpenAI chat request against `/gateway/reason/v1`
@@ -385,15 +568,23 @@ async fn facade_requests_share_one_router_and_spread_across_providers() {
     let _ra = serve_model(&agent_a, ModelProfile::new("fable-mini"), template(), slow()).await.unwrap();
     let _rb = serve_model(&agent_b, ModelProfile::new("fable-mini"), template(), slow()).await.unwrap();
 
-    // Wait until A's router sees both providers (both cap ads gossiped + B live in SWIM).
+    // Wait until A's router sees both providers (both cap ads gossiped + B live in SWIM) — and
+    // B's caller-context marker: the façade dispatches for the HTTP client (0.8.0), and under the
+    // secure profile a provider whose marker has not arrived is refused rather than called as the
+    // node, which would fail every attempt over to A.
     let filter = mycelium::CapFilter::new("llm", "fable-mini");
+    let marker_b = format!("{}{}", mycelium::signal::kv_ns::CALLER_CONTEXT, agent_b.node_id());
     for _ in 0..200 {
-        if agent_a.capabilities().resolve(&filter).len() == 2 && agent_a.peers().len() == 1 {
+        if agent_a.capabilities().resolve(&filter).len() == 2
+            && agent_a.peers().len() == 1
+            && agent_a.kv().get(&marker_b).is_some()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(agent_a.capabilities().resolve(&filter).len(), 2, "both providers visible");
+    assert!(agent_a.kv().get(&marker_b).is_some(), "B's caller-context marker reached A");
 
     let url = format!("http://127.0.0.1:{http_port}/gateway/reason/v1/chat/completions");
     let http = reqwest::Client::new();

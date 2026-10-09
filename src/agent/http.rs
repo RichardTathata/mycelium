@@ -2639,6 +2639,122 @@ pub(crate) enum Preflight {
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) const ENFORCEMENT_POINT_MCP: &str = "gateway:mcp/tools/call";
 
+/// What the gateway's action preflight decided for a route a **companion** mounts
+/// (`with_http_routes`) — [`GossipAgent::gateway_preflight`]'s answer, carried back to
+/// [`GossipAgent::gateway_record_execution`] once the dispatch has happened.
+///
+/// Opaque on purpose: it exists so a companion's door runs the same preflight `/mcp`, `/a2a` and
+/// `/gateway/llm/call` run — evaluator, mandate assessment, evidence record — without the
+/// evaluator types, which are only built with `tls`. Without `tls` every preflight is inert.
+pub struct GatewayPreflight {
+    #[cfg(feature = "tls")]
+    inner: Preflight,
+}
+
+/// A preflight refusal in the shape every gateway door answers with: the JSON-RPC code, the
+/// machine-readable reason, the sentence, and the `data` object (`reason`, `policy_revision`,
+/// `checked`, …).
+#[derive(Clone, Debug)]
+pub struct GatewayRefusal {
+    /// The JSON-RPC error code (`-32030` for a denial, …), as `/mcp` sends it.
+    pub code: i32,
+    /// `action_denied`, `not_established`, `evidence_not_recorded`, … — never prose.
+    pub reason: String,
+    /// The refusal as a sentence.
+    pub message: String,
+    /// The `error.data` object `/mcp` and `/a2a` send.
+    pub data: serde_json::Value,
+}
+
+impl GatewayPreflight {
+    /// `Some` when the dispatch must not happen. `None`: proceed (permitted, or no evaluator is
+    /// attached), then report the outcome with
+    /// [`GossipAgent::gateway_record_execution`].
+    pub fn refusal(&self) -> Option<GatewayRefusal> {
+        #[cfg(feature = "tls")]
+        if let Preflight::Refuse(r) = &self.inner {
+            return Some(GatewayRefusal {
+                code: r.json_rpc_code(),
+                reason: r.reason().to_string(),
+                message: r.to_string(),
+                data: r.error_data(),
+            });
+        }
+        None
+    }
+
+    /// `true` when no evaluator is attached (or none can be in this build): nothing was decided
+    /// and nothing will be recorded.
+    pub fn is_inert(&self) -> bool {
+        #[cfg(feature = "tls")]
+        return matches!(self.inner, Preflight::Inert);
+        #[cfg(not(feature = "tls"))]
+        true
+    }
+}
+
+impl crate::GossipAgent {
+    /// The action preflight a gateway door runs **between the auth layer and the dispatch**, for a
+    /// route a companion mounts. The same function `/mcp`, `/a2a` and `/gateway/llm/call` call:
+    /// inert unless an evaluator is attached (`with_action_evaluator`); with one, the envelope is
+    /// built from `caller` (the auth layer's principal and granted scopes, never the request body),
+    /// `operation` (`llm.invoke`, …), `resource` (`prompt:llm/{model}@{provider}`, …) and the
+    /// `arguments` the policy declared, a presented mandate (`params._meta.mandate`) is assessed,
+    /// and the decision is recorded under `enforcement_point` (name your route:
+    /// `gateway:reason/route`). A refusal is answered to the client and nothing is dispatched; a
+    /// permit is followed by the dispatch (`ServiceHandle::rpc_call_as`) and then
+    /// [`gateway_record_execution`](Self::gateway_record_execution).
+    ///
+    /// A companion door that dispatches a protected kind without this walks around the evaluator
+    /// — the enforcement point that can be bypassed by choosing a different door is not one.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn gateway_preflight(
+        &self,
+        caller: Option<&ResolvedPrincipal>,
+        operation: &str,
+        resource: &str,
+        arguments: &serde_json::Value,
+        params: &serde_json::Value,
+        enforcement_point: &str,
+    ) -> GatewayPreflight {
+        #[cfg(feature = "tls")]
+        {
+            GatewayPreflight {
+                inner: ae_preflight(&self.task_ctx, caller, operation, resource, arguments, params, enforcement_point).await,
+            }
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (caller, operation, resource, arguments, params, enforcement_point);
+            GatewayPreflight {}
+        }
+    }
+
+    /// Record what became of a dispatch [`gateway_preflight`](Self::gateway_preflight) permitted:
+    /// a reply is `completed` (or `failed`, when it is a JSON object with an `error`), a refusal
+    /// before sending is `none`, a timeout or transport error is `unknown` — never a negative.
+    /// Nothing is recorded for an inert or refused preflight.
+    pub async fn gateway_record_execution(
+        &self,
+        preflight: &GatewayPreflight,
+        dispatched: &Result<Bytes, GatewayDispatchError>,
+    ) {
+        #[cfg(feature = "tls")]
+        {
+            use super::action_evaluator::Execution;
+            let mut observed = observed_execution(dispatched);
+            if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
+                observed = Execution::Failed;
+            }
+            ae_record_execution(&self.task_ctx, &preflight.inner, observed).await;
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (preflight, dispatched);
+        }
+    }
+}
+
 /// The A2A route. Gated on `a2a` as well: it is referenced only from that module, and an item
 /// alive in a build that never uses it is the feature-gated dead-code trap CI checks for.
 #[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]

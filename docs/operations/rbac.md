@@ -82,7 +82,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `identity:write` | key revocation (`POST /gateway/identity/revoke`) |
 | `federation:read` / `federation:invoke` | federation's **consumer** side (item 2 row 11): `GET /gateway/federation/domain`, `/partners`, `/catalog/{domain}` / `POST /gateway/federation/connect`, `/call`. Split because they are different powers — reading which partners exist is operator information; `connect` and `call` spend this domain's credential on a partner's gateway, under the caller's own name |
 | `*` | everything (the legacy `gateway_auth_token` is equivalent) |
-| `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` |
+| `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` — both routed **as the client** since 0.8.0 (the provider's `request_principal` is the bearer's principal under the secure profile) and behind the action evaluator (`403 policy`), as `/gateway/llm/call` is |
 | `wiki:read` / `wiki:write` | `mycelium-wiki`: `/wiki/read`, `/wiki/query` / `/wiki/propose`, `/wiki/ingest` |
 | `board:read` / `board:write` | `mycelium-blackboard`: `/bb/read`, `/bb/depth` / `/bb/post`, `claim`, `ack`, `release` |
 | `tuple:read` / `tuple:write` | `mycelium-tuple-space`: `/tuple/depth` / `put`, `take`, `take_by_key`, `complete`, `ack` |
