@@ -22,6 +22,17 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.30.0 release — 2026-10-09 (tag `v2.30.0`) — consensus asks before it proposes
+
+**#575.** Recording the electorate limit (#574) sent its claims to an independent review, which found a broader defect:
+on a **stable** roster two concurrent proposers could commit different values for one slot, because a proposer learned an
+accepted value only from a refusal and a higher ballot is never refused. The fix is classic single-decree Paxos phase 1,
+adapted to ballots drawn from a shared key. Two further reviews broke the first cut — erasing acceptor memory on commit
+dropped promises; a decided floor learned before its commit hid it — and both are recorded in
+[`.log/2026-10-08-consensus-prepare-phase.md`](.log/2026-10-08-consensus-prepare-phase.md) with what stays open
+(electorate changes, leases under clock skew, proposers older than 2.30.0). Release record:
+[`.log/2026-10-09-release-v2.30.0.md`](.log/2026-10-09-release-v2.30.0.md).
+
 ## v2.29.0 release — 2026-10-08 (tag `v2.29.0`) — who changes an electorate
 
 **#572** — the group route's own doc had named *who may change an electorate* an open question since 2026-09-24. An
