@@ -207,6 +207,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ProtectedKind` and `ForeignKind` (an exhaustive `match` breaks); a component that emitted a kind
   outside `comp/{namespace}/…` is now refused — list the kind with `with_emit_kinds` if it is not
   protected work.
+- **A shadow-lane `tool/*` proposal is no longer registered as a live MCP tool.** D20 promises the
+  shadow lane *takes no demand*, and the provisioner kept that for capability resolution (a shadow is
+  advertised as `{name}.shadow`, never under the incumbent's filter) — but the WASM runtime bridged
+  every `tool/*` namespace install as MCP tool `{name}`, shadow or not, so a proposed tool nobody had
+  accepted appeared in `tools/{name}.shadow/{node}`, in `tools/list`, and answered `tools/call`. The
+  install now carries its lane (`RuntimeCtx::shadow`) and the runtime bridges a tool only for a real
+  load; acceptance withdraws the shadow and the reinstall registers it. A `[[serve]]` skill was already
+  shadow-safe (`while_live` resolves `{ns}/{name}`, which a shadow never advertises). Seen failing
+  first: `a_shadow_lane_tool_proposal_is_not_registered_as_an_mcp_tool_until_accepted`
+  (`mycelium-wasm-host/src/provisioner.rs` — the shadow registered `tools/echo.shadow/{node}`).
+  **Upgrade note:** `RuntimeCtx` gained `shadow` (an exhaustive literal breaks). **Not changed:** a
+  shadow *blob*'s `[[activation]]` still runs — activation is placement, not demand.
 
 ## [2.31.0] — 2026-10-09
 

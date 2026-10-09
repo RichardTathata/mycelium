@@ -103,6 +103,11 @@ pub struct RuntimeCtx {
     pub trace: Option<Arc<TraceCtx>>,
     /// The provisioner's install token for this install (`HostedState::Installing { token }`).
     pub install_token: u64,
+    /// D20: this install is the **shadow lane** — a proposed entry a listed reviewer has not yet
+    /// accepted, served under `{name}.shadow` for comparison only. A shadow takes no demand, so a
+    /// runtime must not register it anywhere demand arrives (an MCP tool, a served skill); it is
+    /// resolvable by its shadow name and nothing else.
+    pub shadow: bool,
 }
 
 /// The decision trace's sink and the stamps every record carries, taken once from the startup
@@ -421,8 +426,12 @@ impl ArtifactRuntime for WasmComponentRuntime {
         // `{"description", "inputSchema"}` — and then the MCP tool carries the component's own schema
         // rather than the bridge's generic one. A component that does not answer (an error, or no
         // `inputSchema`) keeps the generic schema; the manifest line and its signature are untouched.
+        // A shadow (D20) is never bridged: the MCP tool is where a `tool/*` component's demand
+        // arrives, and the shadow lane takes none until a listed reviewer accepts the entry.
         #[cfg(feature = "gateway")]
-        let described: Option<serde_json::Value> = if entry.provides.namespace.as_ref() == "tool" {
+        let bridge_tool = entry.provides.namespace.as_ref() == "tool" && !ctx.shadow;
+        #[cfg(feature = "gateway")]
+        let described: Option<serde_json::Value> = if bridge_tool {
             match instance.invoke("describe", b"{}".to_vec()) {
                 Ok(Ok(out)) => serde_json::from_slice::<serde_json::Value>(&out).ok().filter(|v| v.get("inputSchema").is_some()),
                 _ => None,
@@ -448,7 +457,7 @@ impl ArtifactRuntime for WasmComponentRuntime {
         };
         let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served));
         #[cfg(feature = "gateway")]
-        let mcp_tool = if entry.provides.namespace.as_ref() == "tool" {
+        let mcp_tool = if bridge_tool {
             let agent = Arc::clone(&ctx.agent);
             let kind = bridge_kind;
             let generic = format!("{} — an installed WASM component, bridged over mcp.invoke", entry.provides.name);
@@ -789,7 +798,7 @@ mod tests {
             id,
             mycelium::GossipConfig { bind_port: port, ..Default::default() },
         ));
-        RuntimeCtx { agent, trace: None, install_token: 0 }
+        RuntimeCtx { agent, trace: None, install_token: 0, shadow: false }
     }
 
     type ProgressLog = Arc<Mutex<Vec<(u64, u64)>>>;
