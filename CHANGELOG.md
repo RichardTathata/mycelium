@@ -248,6 +248,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   — one range was requested against a size of `u64::MAX`). **Upgrade note:** `StemOptions` gained
   `max_stage_bytes` (an exhaustive literal breaks; `..Default::default()` is unaffected). **Not built:** a
   `--max-stage-bytes` flag on `mycelium-stem` (the default applies).
+- **A hosted component's linear memory is capped.** The wasmtime store had no resource limiter, so a
+  component could `memory.grow` without bound and take the node's memory with it — fuel bounds
+  instructions, not bytes. Every store now carries `StoreLimits` with a memory cap:
+  `DEFAULT_MEMORY_LIMIT_BYTES` (256 MiB — generous for a capability component, the fixtures run in
+  under 2 MiB) or `HostState::with_memory_limit(bytes)` per instance; a grow past it is answered no
+  and an initial allocation past it refuses instantiation. Seen failing first:
+  `a_component_cannot_grow_its_memory_past_the_cap` (`mycelium-wasm-host/src/host.rs` — the echo
+  component instantiated and ran under a 64 KiB cap). **Not built:** a unit-file field for the cap
+  (the runtime uses the default for every install).
 
 ## [2.31.0] — 2026-10-09
 

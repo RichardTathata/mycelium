@@ -11,7 +11,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use mycelium::{KvHandle, MeshHandle, NodeId, SignalScope};
 use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use mycelium::CapFilter;
@@ -90,6 +90,12 @@ impl WasiView for HostState {
     }
 }
 
+/// The most linear memory one component instance may hold by default: 256 MiB. Generous for a
+/// capability component (the fixtures run in well under 2 MiB) and a bound rather than none — a
+/// guest that grows without one takes the node's memory with it. Per instance:
+/// [`HostState::with_memory_limit`].
+pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+
 /// Per-component host context carried in the wasmtime `Store`. Holds the component's identity
 /// (node + capability namespace) and the **scoped** Mycelium handles its imports map onto.
 pub struct HostState {
@@ -102,6 +108,11 @@ pub struct HostState {
     emit_kinds: Vec<String>,
     /// The node's `GossipConfig::protected_rpc_kinds`, refused at `emit` beside the built-ins.
     protected:  Vec<String>,
+    /// The store's resource limiter: the most linear memory this instance may hold
+    /// ([`DEFAULT_MEMORY_LIMIT_BYTES`] unless [`with_memory_limit`](Self::with_memory_limit)).
+    /// A `memory.grow` past it is answered no (the guest sees `-1`, or traps on its own
+    /// allocator's failure); an initial allocation past it refuses instantiation.
+    limits:     StoreLimits,
     // A *restricted, deny-by-default* WASI context: std-based guests import wasi:* from libc
     // init, so the host must provide it — but with no filesystem, network, env, or inherited
     // stdio. The guest's only real doors remain our scoped kv/mesh/log imports.
@@ -119,6 +130,7 @@ impl HostState {
             mesh,
             emit_kinds: Vec::new(),
             protected: Vec::new(),
+            limits: StoreLimitsBuilder::new().memory_size(DEFAULT_MEMORY_LIMIT_BYTES).build(),
             wasi: WasiCtxBuilder::new().build(), // deny-by-default: no fs/net/env/stdio
             table: ResourceTable::new(),
         }
@@ -135,6 +147,14 @@ impl HostState {
     /// [`mycelium::BUILTIN_PROTECTED_RPC_KINDS`] (which are refused whether or not this is called).
     pub fn with_protected_kinds(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.protected.extend(kinds.into_iter().map(Into::into));
+        self
+    }
+
+    /// The most linear memory this component may hold, in bytes (default
+    /// [`DEFAULT_MEMORY_LIMIT_BYTES`]). Enforced by the store's limiter at every `memory.grow`
+    /// and at instantiation.
+    pub fn with_memory_limit(mut self, bytes: usize) -> Self {
+        self.limits = StoreLimitsBuilder::new().memory_size(bytes).build();
         self
     }
 
@@ -304,6 +324,8 @@ impl WasmHost {
         bindings::CapabilityComponent::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |s| s)
             .map_err(|e| WasmHostError::Instantiate(e.to_string()))?;
         let mut store = Store::new(&self.engine, state);
+        // The memory cap: every `memory.grow` (and the initial allocation) is asked of the limiter.
+        store.limiter(|s| &mut s.limits);
         // Component instantiation (libc/WASI init) runs guest code; give it unlimited fuel so the
         // per-call budget bounds only `invoke`, not start-up. (No-op when fuel is disabled.)
         if self.metered {
@@ -542,6 +564,30 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(200), foreign_rx.recv()).await.is_err(),
             "a component's emit reached another component's namespace"
         );
+        agent.shutdown().await;
+    }
+
+    /// A component's linear memory is bounded by the store's limiter: the echo component's libc
+    /// init needs more than 64 KiB, so under that cap its instantiation is refused (the limiter
+    /// answers `memory.grow` — and the initial allocation — with no), and under the default cap it
+    /// runs. Seen failing first: with no limiter the 64 KiB cap instantiated and ran anyway.
+    #[tokio::test]
+    async fn a_component_cannot_grow_its_memory_past_the_cap() {
+        const ECHO_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/echo_component.wasm");
+        let agent = live_agent().await;
+        let host = WasmHost::new().expect("engine");
+
+        let capped = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh()).with_memory_limit(64 * 1024);
+        let refused = match host.instantiate(ECHO_COMPONENT, capped) {
+            Err(WasmHostError::Instantiate(_)) => true,
+            Ok(mut inst) => inst.invoke("greet", b"x".to_vec()).is_err(),
+            Err(_) => false,
+        };
+        assert!(refused, "a component under a 64 KiB memory cap instantiated and ran");
+
+        let default = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+        let mut inst = host.instantiate(ECHO_COMPONENT, default).expect("the default cap runs the component");
+        assert_eq!(inst.invoke("greet", b"hello".to_vec()).unwrap().unwrap(), b"hello");
         agent.shutdown().await;
     }
 
