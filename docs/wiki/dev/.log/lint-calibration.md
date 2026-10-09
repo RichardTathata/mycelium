@@ -369,4 +369,9 @@ Entry format:
   one nonexistent path and every lookup exited 2; a second attempt failed on zsh's glob rules. Caught because the
   result was implausible, before any page was "fixed" to match. Sharpening (folded into §1): run the sweep on a
   known-present identifier first; the pass now uses a Python sweep (`os.walk`, substring match).
+- 2026-10-09: **lock-order table** declared complete "workspace-wide" [2026-10-06 lint, 2026-10-09 lint] but
+  `examples/coop` — a workspace member — holds six untabled locks (four `Arc<Mutex<VizState>>`, two
+  `tokio::sync::Mutex<HashMap<…>>`), and §1's sweep greps no `examples/` path (found by the 360 review). Sharpening:
+  the claim is **scoped**, not the sweep extended — "workspace-wide" now means the library crates on the page, in
+  CLAUDE.md and on the proof page; demo state is outside the claim and outside the lint by statement.
 

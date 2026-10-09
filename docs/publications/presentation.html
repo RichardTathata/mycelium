@@ -1171,7 +1171,7 @@ providers = agent.<span class="cs">resolve_capability</span>(<span class="cv">"c
         </div>
         <div class="card card-accent-blue">
           <div class="card-title">Wire version policy</div>
-          <div class="card-body">Wire v12 current (Merkle anti-entropy; <code>bincode</code> retired for an in-tree codec). <code>PREV_WIRE_VERSION = 11</code> — the rolling-upgrade window keeps gossip, signals and the capability ring online across a version transition; one 2.14.0 note applies to consensus — proposals from an upgraded proposer time out until every voter is upgraded.</div>
+          <div class="card-body">Wire v12 current (Merkle anti-entropy; <code>bincode</code> retired for an in-tree codec). <code>PREV_WIRE_VERSION = 11</code> — the rolling-upgrade window keeps gossip, signals and the capability ring online across a version transition; one note applies to consensus (2.14.0, restated in 2.30.0) — proposals from an upgraded proposer time out until a quorum of its group's acceptors is upgraded.</div>
         </div>
         <div class="card card-accent-purple">
           <div class="card-title">Durable persistence</div>

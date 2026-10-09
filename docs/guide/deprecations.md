@@ -31,6 +31,18 @@ the notice.
 | 8 | exhaustive `match` on `RecordKind` | 2.10.0 | add a `_` arm | **Yes** — `#[non_exhaustive]` from 2.10.0 |
 | 9 | exhaustive `match` on `Execution` | 2.10.0 | add a `_` arm that reads as **unknown**, not as *nothing ran* | **Yes** — `#[non_exhaustive]` from 2.10.0 |
 | 10 | `FederationEdge::authorize(presented, export, now_ms)` | 2.12.0 | `authorize(presented, export, **body**, now_ms)` | **Yes** — it will not compile |
+| 11 | `mesh:read` / `mesh:write` admitted on the serve routes | 2.15.0 (window closed 2.18.2) | a token holding `mesh:serve` | No — `403 {"required_scope": "mesh:serve"}` at the route |
+| 12 | `POST /gateway/kv` without `value_b64` | 2.14.0 | send `value_b64` always (`""` for empty) | No — HTTP 400 |
+| 13 | exhaustive `match` on `TracePolicy` / the federation `ClientError` | 2.20.0 | a `_` arm that fails closed | No — a `_` arm takes the new variant silently |
+| 14 | a two-argument `with_entry_activation` closure | 2.21.0 | a three-argument closure (`&ActivationCtx` third) | **Yes** — the arity is in the trait bound |
+| 15 | exhaustive `match` on `WalMsg`; a second owner or a failed startup snapshot | 2.23.0 | a `_` arm; `OwnershipLock::acquire` before replay | For the `match`, **yes**; the refusals are `InvalidField` at `start()` |
+| 16 | outbound clients following an unchecked redirect | 2.23.0 | `.with_egress(agent.egress_policy())`; list the endpoint host for an object store | No — the redirect fails at request time |
+| 17 | the live timing setters returning `()` | 2.25.0 | `set_health_check_interval_secs(30)?` | **Warns** — `unused_must_use`, an error under `-D warnings` |
+| 18 | `govern_timing` returning `bool`; `sys/` or `consensus/` keys on the KV doors | 2.26.0 | `govern_timing(…)?`; the route that owns the key | `unused_must_use` for the verb; HTTP 400 / 403 for the routes |
+| 19 | the raw KV routes writing an owned namespace | 2.27.0 | the route that owns the namespace | No — HTTP 403 `protected_key` (typed in both SDKs) |
+| 20 | `/gateway/mesh/group` on a governed group | 2.29.0 | `/gateway/govern/group` (`govern:write`) | No — HTTP 403 `governed_group` |
+| 21 | consensus without a prepare phase (a mixed fleet) | 2.30.0 | upgrade a quorum of each group's acceptors; handle `Superseded` | No — wire behaviour; `Timeout` until a quorum is upgraded |
+| 22 | an alert keyed on one consensus-timeout `reason`; a second stop signal that waits; an untyped lost write | 2.31.0 | match the new reason set (§22); allow the grace period; catch `SupersededError` | No — a metric label, an exit code, a Python subclass |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
