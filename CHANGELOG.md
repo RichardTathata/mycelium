@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.31.0] — 2026-10-09
+
+**Stops that stop, and failures that say what they are.** A node, a stem or a demo image now shuts down on SIGTERM
+as on SIGINT — including one that arrives during startup — and a second signal exits at once
+(`mycelium::shutdown::ShutdownSignal`, the release's one API addition, which makes it a MINOR). A consensus timeout
+is labelled by what other acceptors answered (`no_voters`, `promise_short`, `contended`, `blocked`,
+`quorum_short`), and a cross-group retry counts its voters afresh. Doc-coverage run 22 and the wiki lint ride along.
+Companions: `mycelium-py` 0.2.8 (`SupersededError`) and `langgraph-checkpoint-mycelium` 0.3.1 (`refused`). Wire
+**v12** unchanged. **Upgrade note:** alerts keyed on a consensus timeout `reason` (`deprecations.md` §22).
+
 ### Added
 - **`mycelium::shutdown::ShutdownSignal`** — one stop-signal handler for the node binary, `mycelium-stem` and the
   long-running examples: SIGINT or SIGTERM, installed before the bind, and **a second signal exits at once** with

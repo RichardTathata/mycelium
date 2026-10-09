@@ -22,6 +22,16 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.31.0 release — 2026-10-09 (tag `v2.31.0`) — stops that stop
+
+**#577** the wiki lint; **#578** doc-coverage run 22 (nine failing instructions, three code gaps reported); **#579**
+those three gaps closed — and two independent reviews found more under them: labelling a timeout by phase called a
+partition `promise_short` (and the proposer's own vote had long made it `quorum_short`), a SIGTERM during startup
+still killed both binaries (2 in 40), and `cross_propose` never reset its seen-voter set, so a retry could not reach
+quorum; **#580** one `ShutdownSignal` with a second-signal exit, the four demo images, `SupersededError`. Companions:
+`mycelium-py` 0.2.8, `langgraph-checkpoint-mycelium` 0.3.1. Release record:
+[`.log/2026-10-09-release-v2.31.0.md`](.log/2026-10-09-release-v2.31.0.md).
+
 ## v2.30.0 release — 2026-10-09 (tag `v2.30.0`) — consensus asks before it proposes
 
 **#575.** Recording the electorate limit (#574) sent its claims to an independent review, which found a broader defect:

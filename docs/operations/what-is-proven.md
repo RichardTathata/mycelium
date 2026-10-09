@@ -2,7 +2,7 @@
 
 ↑ [Operations](README.md) · beside the [shared-responsibility matrix](shared-responsibility-matrix.md)
 
-**As of 2026-10-09 (v2.30.0).** One dated page for the line between what CI proves on every merge,
+**As of 2026-10-09 (v2.31.0).** One dated page for the line between what CI proves on every merge,
 what has been demonstrated with its bound stated, and what has not yet been shown. Every line names
 its evidence. The places that used to restate this list — `CLAUDE.md` § Active work, the contracts-axis
 plan §10, the self-audit series, the publications ledger, both decks — now link here instead, and
