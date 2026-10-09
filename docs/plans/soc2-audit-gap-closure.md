@@ -14,7 +14,7 @@ of it makes Mycelium itself hold a report.
 
 ## The matrix is the spine
 
-The [shared-responsibility matrix](#workstream-0--the-shared-responsibility-matrix) is drafted
+The [shared-responsibility matrix](#workstream-0--the-shared-responsibility-matrix---drafted-2026-07-22) is drafted
 first and documents current reality — every control, and whether Mycelium provides it, the deployer
 owns it, or it is a **gap**. Each workstream below is defined as **flipping specific matrix cells**
 from "gap / deployer-owns-alone" to "Mycelium-provides / shared." That gives a measurable,

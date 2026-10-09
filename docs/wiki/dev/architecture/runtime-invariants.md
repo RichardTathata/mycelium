@@ -25,6 +25,18 @@ PROPOSE/COMMIT receivers *before* spawning the voter task. Registration inside t
 first poll silently dropped proposals racing startup (single-node tests self-quorum and never
 notice). Keep it synchronous through any refactor.
 
+**Acceptor memory is never erased — not on commit, not to bound storage** (2.30.0, #575). The record under
+`sys/consensus-accepted/{node}/{slot}` holds the acceptor's **promise** as well as its acceptance, and it outlives
+the commit. It used to be deleted when a slot committed, to keep the prefix bounded; that dropped promises, so a
+delayed lower-ballot `Propose` reached acceptors that had forgotten them and could commit a second value — the
+first cut of the prepare phase repeated the mistake through a timestamp-based "retire" and an independent review
+broke it. What a commit changes instead is the **floor**: `consensus/decided/{slot}` records the ballot, acceptors
+refuse at or below it, and a new decision sets the old acceptances aside only once this node can **see** the
+previous one is over (it holds the committed entry and it is not live). `decided` and `committed` gossip
+separately, so filtering on the floor alone hid a commit that had not yet arrived (second review, M1). The prefix
+grows with slots, not ballots. Code: `src/consensus.rs` (`claim_vote`, `prepare_slot`, `set_aside_finished`,
+`commit_is_stale`); record: [`.log/2026-10-08-consensus-prepare-phase.md`](../.log/2026-10-08-consensus-prepare-phase.md).
+
 ## Individual-scope routing: forwarding stays unconditional
 
 `SignalScope::Individual` carries RPC and consensus votes. The gossip loop sends directly to

@@ -116,7 +116,7 @@ contradictory facts).
   direct from the store on the calling node) + `wiki.propose` (enqueues). Over Mycelium's **existing**
   MCP invoke path — schema to `tools/{name}/{node}` for discovery. Public API only; no core fork — the
   mesh-native surface for agents already on the mesh.
-- **HTTP gateway** (feature `gateway`, `Wiki::http_router`): `POST /gateway/wiki/{read,query,propose}`
+- **HTTP gateway** (feature `gateway`, `Wiki::http_router`): `POST /gateway/wiki/{read,query,propose,ingest}`
   mounted via `GossipAgent::with_http_routes` — the JSON edge for **non-mesh** callers, spoken by the
   Python (`mycelium.wiki.Wiki`) + TypeScript (`mycelium-ts` `Wiki`) clients. `query` is
   POST-with-predicate (a GET can't carry an attribute map — the blackboard's read precedent).

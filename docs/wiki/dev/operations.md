@@ -47,7 +47,7 @@ All three are also programmatic (**diagnostics as data**): `agent.fleet_snapshot
 `fleet_diagnosis()`. Operator runbook (one entry per pathology + Prometheus alert recipes):
 [operations/diagnostics.md](../../operations/diagnostics.md).
 
-Governance surface: `POST /gateway/govern/{timing,tuning,membership,profile,topology-override}` +
+Governance surface: `POST /gateway/govern/{timing,tuning,membership,profile,topology-override,group}` (and `DELETE …/group`) +
 `GET /gateway/govern` (deny-by-default scopes, `govern:read`/`govern:write`; each write is sealed into the audit
 trail in a `compliance` build with `[tls]`, and one that is not is counted on `/stats` (`governance_unaudited`) —
 `profile` recorded nothing and accepted a `target` until #555; `topology-override` sets or releases `sys/topology-override/{group}`,

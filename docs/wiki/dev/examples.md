@@ -117,7 +117,7 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   from a verified peer cache). Each opens `http://127.0.0.1:80xx/`. The six `*_viz` are **visual
   variants** of the batch demos (`microgrid` / `stigmergy` / `redistribution` / `llm_council` /
   `provisioning` / `catalog`), which remain the CI-gated versions; the four coop `*_viz` bins are
-  *additional* to the fourteen above. A showcase paces its loop so the
+  *additional* to the fifteen above. A showcase paces its loop so the
   emergence is legible (e.g. a `THINK` dwell for the instant `EchoBackend`) — the batch demos race to
   completion, a showcase must be *watchable*.
 - **Ops Console** (`examples/ops_console/` — `main.rs` + `.html` + README, `:8099`): a generic, read-only dashboard over
