@@ -985,6 +985,32 @@ async fn do_snapshot(
     );
     apply_and_notify(kv_state, &raise_upd);
 
+    // 2–4, in their own function so that **every** exit — a tail that does not read, a corrupt
+    // record, a write or a rename that fails — comes back here to step 5. Each `?` in them used to
+    // return past the lowering, and the node stayed marked self-opaque: the timer branch defers on
+    // that mark, so one failed snapshot silently stopped every timer snapshot after it, and the
+    // mark went on telling the fleet the node was shedding (2026-10-09).
+    let result = snapshot_body(dir, kv_state, hlc, wal_file, cipher).await;
+
+    // 5. Lower opacity — tombstone the persistence key, on success and on failure alike.
+    let lower_upd = crate::framing::make_gossip_update(
+        node_id, default_ttl, opacity_key, bytes::Bytes::new(), true, hlc,
+    );
+    apply_and_notify(kv_state, &lower_upd);
+
+    result
+}
+
+/// Steps 2–4 of [`do_snapshot`]: scan, merge the WAL tail, install the snapshot, truncate the WAL.
+/// The opacity mark around them is `do_snapshot`'s, raised before and lowered after whatever this
+/// returns.
+async fn snapshot_body(
+    dir:         &std::path::Path,
+    kv_state:    &Arc<KvState>,
+    hlc:         &Arc<crate::hlc::Hlc>,
+    wal_file:    &mut tfs::File,
+    cipher:      Cipher<'_>,
+) -> io::Result<()> {
     // 2. Scan store.
     let snapshot_hlc = hlc.current(); // C11: an ordering stamp, not a decision
     let mut entries: Vec<SyncEntry> = {
@@ -1097,12 +1123,6 @@ async fn do_snapshot(
     wal_file.seek(std::io::SeekFrom::Start(0)).await?;
     wal_file.set_len(0).await?;
     crate::sim_seam::fs_sync_data(wal_file, WAL_TRUNCATE).await?;
-
-    // 5. Lower opacity — tombstone the persistence key.
-    let lower_upd = crate::framing::make_gossip_update(
-        node_id, default_ttl, opacity_key, bytes::Bytes::new(), true, hlc,
-    );
-    apply_and_notify(kv_state, &lower_upd);
 
     Ok(())
 }
@@ -1488,6 +1508,62 @@ mod durability_tests {
         for k in ["p/2", "p/3", "p/4"] {
             assert!(live_value(&restored, k).is_none(), "{k} was refused and is absent — as its caller was told");
         }
+        drop(handle);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A failed snapshot lowers the opacity mark it raised, and the timer keeps snapshotting.**
+    ///
+    /// `do_snapshot` step 1 marks the node self-opaque under `sys/load/{node}/persistence` and only
+    /// step 5 lowers it; every `?` between them returned past the lowering. The timer branch defers
+    /// while the node's deferral hook (`is_self_opaque`, which had no age check) reads that mark, so
+    /// one failed snapshot latched the node opaque and silently stopped every timer snapshot after
+    /// it — the WAL grew until a restart, and the three callers discarded the error unlogged.
+    ///
+    /// Seen failing first: the mark was still raised after the failing exit.
+    #[tokio::test]
+    async fn a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs() {
+        let dir   = unique_dir("snapfail");
+        let node  = NodeId::new("127.0.0.1", 1).unwrap();
+        let hlc   = Arc::new(crate::hlc::Hlc::new());
+        let state = KvState::new(0);
+        let opacity_key = format!("{}{}/persistence", crate::signal::kv_ns::LOAD, node);
+        let is_marked = {
+            let st = Arc::clone(&state);
+            let k = opacity_key.clone();
+            move || st.store.pin().get(k.as_str())
+                .and_then(|e| e.data.as_ref().and_then(crate::signal::decode_load_state))
+                .map(|s| s.is_opaque)
+                .unwrap_or(false)
+        };
+        // The deferral hook the node installs reads the same mark (`lifecycle.rs`); here it also
+        // counts how often it deferred.
+        let deferrals = Arc::new(AtomicU64::new(0));
+        let hook: SnapshotDeferHook = {
+            let (marked, d) = (is_marked.clone(), Arc::clone(&deferrals));
+            Arc::new(move || { let m = marked(); if m { d.fetch_add(1, Ordering::Relaxed); } m })
+        };
+        let handle = spawn_wal_writer(dir.clone(), SyncMode::Flush, 1_000_000, 1,
+            Arc::clone(&state), node, hlc, 1, None, Some(hook));
+
+        // The failure: a directory where `snapshot.tmp` goes — step 3's write fails after step 1
+        // raised the mark.
+        std::fs::create_dir(dir.join("snapshot.tmp")).unwrap();
+        let e = handle.trigger_snapshot().await.expect_err("the snapshot fails");
+        assert!(!is_marked(), "the mark raised at step 1 is lowered on the failing exit ({e})");
+
+        // The disk recovers; the next *timer* snapshot runs instead of deferring on a stale mark.
+        std::fs::remove_dir(dir.join("snapshot.tmp")).unwrap();
+        handle.append_sync(entry("t/1", b"v", 1, false)).await.unwrap();
+        assert!(std::fs::metadata(dir.join("wal.bin")).unwrap().len() > 0);
+        let mut truncated = false;
+        for _ in 0..100 {
+            if std::fs::metadata(dir.join("wal.bin")).unwrap().len() == 0 { truncated = true; break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(truncated, "the timer snapshot ran within 5 s (deferrals: {})", deferrals.load(Ordering::Relaxed));
+        assert_eq!(deferrals.load(Ordering::Relaxed), 0, "nothing deferred on the mark of a failed snapshot");
+        assert!(live_value(&*replay_into_fresh_store(&dir).await, "t/1").is_some());
         drop(handle);
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -331,7 +331,7 @@ impl ConsensusHandle {
             }
         }
         let n_nodes = (self.ctx.peers.len() + 1).max(1);
-        let freshness_ms = self.ctx.config.health_check_interval_secs * 2 * 1000;
+        let freshness_ms = super::opacity::opaque_freshness_ms(&self.ctx.config);
         let active_n = if config.count_opaque_as_absent {
             let opaque_count = count_opaque_system_ctx(
                 &self.ctx,

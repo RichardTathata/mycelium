@@ -265,7 +265,9 @@ impl GossipAgent {
                 let defer_snapshot: Option<crate::persistence::SnapshotDeferHook> = {
                     let kv2 = Arc::clone(&kv_state);
                     let nid2 = node_id.clone();
-                    Some(Arc::new(move || crate::agent::is_self_opaque(&kv2, &nid2)))
+                    // Within the fleet's freshness bound, so a stale mark cannot defer for ever.
+                    let max_age_ms = super::opacity::opaque_freshness_ms(&self.config);
+                    Some(Arc::new(move || crate::agent::is_self_opaque(&kv2, &nid2, max_age_ms)))
                 };
                 let handle = crate::persistence::spawn_wal_writer(
                     dir.clone(),

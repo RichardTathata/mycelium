@@ -80,6 +80,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one succeeds. The node-local journal has done the same since 2.23.0; this is the WAL's mirror. On-disk format
   unchanged. Seen failing first: `a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail` (the
   append after the injected failure was acknowledged `Ok`).
+- **A failed snapshot no longer latches the node self-opaque, and the timer keeps snapshotting.** `do_snapshot` raised
+  `sys/load/{node}/persistence` at step 1 and lowered it only at step 5; every `?` between them returned past the
+  lowering, the writer's timer branch defers while `is_self_opaque` reads that mark — which had no age check — and the
+  three callers discarded the error unlogged. One failed snapshot therefore stopped every timer snapshot after it
+  (the WAL grew until a restart) and the node abstained from every proposal while the fleet had stopped counting it
+  within seconds. The mark is now lowered on every exit, a failed snapshot is logged at `warn` with its reason (a
+  repeat of the same failure at `debug`, recovery at `info`), and `is_self_opaque` counts a mark only within the same
+  freshness bound the consensus counters use (`opaque_freshness_ms`: two health-check intervals). Seen failing first:
+  `a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`,
+  `a_stale_self_opacity_mark_does_not_read_as_opaque`.
 
 ## [2.31.0] — 2026-10-09
 

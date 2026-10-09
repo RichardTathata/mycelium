@@ -208,11 +208,25 @@ pub(super) fn count_opaque_members_in_kv(
     }
 }
 
-/// Returns `true` if this node has any `sys/load/{node_id}/*` entry marking `is_opaque`.
+/// The freshness bound an opaque mark is counted within — the one the consensus counters use
+/// (`count_opaque_system_ctx`, `count_opaque_all_in_kv`: two health-check intervals), so this
+/// node reads its own marks the way a peer reads them.
+pub(crate) fn opaque_freshness_ms(cfg: &crate::config::GossipConfig) -> u64 {
+    cfg.health_check_interval_secs.saturating_mul(2_000)
+}
+
+/// Returns `true` if this node has any `sys/load/{node_id}/*` entry marking `is_opaque` that was
+/// written within `max_age_ms` ([`opaque_freshness_ms`]).
+///
+/// The age check is what the fleet-side counters always had and this did not: a mark nobody
+/// lowered — a snapshot that failed past the raise, a writer that died holding one — read as opaque
+/// for ever here, deferring every timer snapshot and abstaining from every proposal, while a peer
+/// had stopped counting the node within seconds (2026-10-09).
 ///
 /// Encapsulates the Layer I prefix scan here in Layer II (opacity.rs) so that
 /// `ConsensusEngine` (Layer III) does not read `KvState` directly for this query.
-pub(crate) fn is_self_opaque(kv_state: &KvState, node_id: &crate::node_id::NodeId) -> bool {
+pub(crate) fn is_self_opaque(kv_state: &KvState, node_id: &crate::node_id::NodeId, max_age_ms: u64) -> bool {
+    let now_ms = mycelium_core::sim_seam::wall_now_ms();
     let load_prefix = format!("{}{}/", kv_ns::LOAD, node_id);
     let seg = kv_ns::LOAD.split_once('/').map_or(kv_ns::LOAD, |(s, _)| s);
     let idx = kv_state.prefix_index.pin();
@@ -222,7 +236,7 @@ pub(crate) fn is_self_opaque(kv_state: &KvState, node_id: &crate::node_id::NodeI
             .filter(|(k, _)| k.starts_with(&*load_prefix))
             .any(|(k, _)| store.get(k.as_ref())
                 .and_then(|e| e.data.as_ref().and_then(decode_load_state))
-                .map(|s| s.is_opaque)
+                .map(|s| s.is_opaque && now_ms.saturating_sub(s.written_at_ms) <= max_age_ms)
                 .unwrap_or(false)
             )
     }).unwrap_or(false)
@@ -446,6 +460,29 @@ mod tests {
 
     fn make_agent() -> GossipAgent {
         GossipAgent::new(NodeId::new("127.0.0.1", 0).unwrap(), GossipConfig::default())
+    }
+
+    /// `is_self_opaque` read any `sys/load/{self}/*` mark as opaque **however old it was**, while the
+    /// fleet-side counters (`count_opaque_all_in_kv`, `count_opaque_system_ctx`) count a node opaque
+    /// only within `max_age_ms`. A mark nobody lowered — a snapshot that failed past step 1, a
+    /// crashed writer — therefore deferred every timer snapshot and made the node abstain for ever,
+    /// where a peer had stopped counting it within seconds. Seen failing first: a mark an hour old
+    /// read as opaque.
+    #[test]
+    fn a_stale_self_opacity_mark_does_not_read_as_opaque() {
+        use crate::signal::{encode_load_state, LoadState};
+        let agent = make_agent();
+        let key = format!("sys/load/{}/persistence", agent.node_id());
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        let max_age_ms = super::opaque_freshness_ms(&agent.config);
+        let stale = LoadState { fill_ratio: 1.0, is_opaque: true, written_at_ms: now - 3_600_000 };
+        let _ = agent.kv().set(key.clone(), encode_load_state(&stale));
+        assert!(!super::is_self_opaque(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms),
+            "a mark older than the fleet's freshness bound is stale, not opaque");
+        let fresh = LoadState { fill_ratio: 1.0, is_opaque: true, written_at_ms: now };
+        let _ = agent.kv().set(key, encode_load_state(&fresh));
+        assert!(super::is_self_opaque(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms), "a fresh mark is opaque");
+        assert_eq!(max_age_ms, agent.config.health_check_interval_secs * 2 * 1000, "the same bound the consensus counters use");
     }
 
     // ── The opacity decision, tested purely (no async governor, no ticker, no timeout). These are
