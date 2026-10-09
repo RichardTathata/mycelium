@@ -498,6 +498,10 @@ node had not joined was never electing anything the group's members agreed to.
   principal that sent the task, and a `tasks/send` / `tasks/sendSubscribe` under an id another identity owns is
   refused — `-32004`. An anonymous caller's task is answered only on the response (or stream) that created it. Any
   client used to be able to read or cancel any task by its caller-chosen id.
+- **`mycelium-tuple-space`: `GET /api/tuple` is `GET /gateway/tuple/overview`**, behind `tuple:read`; the old path
+  answers 404. It sat outside the gateway's auth boundary and answered without a bearer.
+- **`/gateway/llm/call` and `/gateway/llm/stream` run the action evaluator**: a denial is `403 policy` on `/call`
+  and an in-stream `{"type": "error", "error": "policy"}` on `/stream`. Inert without an evaluator attached.
 
 **Will the compiler tell me?** `SystemStats` gained a field, so an exhaustive struct literal breaks, and an
 exhaustive `match` on `mycelium_reason::RouteError` needs the `Refused` arm; otherwise no — HTTP status codes and
@@ -508,4 +512,4 @@ evidence journal instead; nothing in the SDKs subscribed to one by default. An S
 under one bearer (every SDK does) needs nothing; one that split serving and responding across two credentials must
 use one. Alert on `rpc_reply_sender_mismatches > 0`: it names a peer forging replies. An A2A client that polls
 `tasks/get` sends it under the same bearer as its `tasks/send`; an anonymous one reads the result it was already
-given.
+given. A dashboard reading `/api/tuple` reads `/gateway/tuple/overview` with a `tuple:read` bearer.

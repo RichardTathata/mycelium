@@ -1,5 +1,5 @@
 //! Phase 4: the HTTP gateway round-trips the full item lifecycle and the
-//! /api/tuple aggregation reflects the metrics keys. Mirrors what the Python
+//! /gateway/tuple/overview aggregation reflects the metrics keys. Mirrors what the Python
 //! and TypeScript SDKs do over the wire.
 
 #![cfg(feature = "gateway")]
@@ -150,11 +150,11 @@ async fn gateway_roundtrip_and_api_tuple() {
         .expect("wrong ns request");
     assert_eq!(resp.status().as_u16(), 400);
 
-    // /api/tuple aggregates the metrics keys (give the writer one cadence).
+    // /gateway/tuple/overview aggregates the metrics keys (give the writer one cadence).
     let mut nodes_seen = 0;
     for _ in 0..50 {
         let resp: serde_json::Value = http
-            .get(format!("{url}/api/tuple"))
+            .get(format!("{url}/gateway/tuple/overview"))
             .send()
             .await
             .expect("api tuple")
@@ -171,7 +171,56 @@ async fn gateway_roundtrip_and_api_tuple() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(nodes_seen, 1, "/api/tuple never aggregated the metrics keys");
+    assert_eq!(nodes_seen, 1, "/gateway/tuple/overview never aggregated the metrics keys");
+
+    ts.shutdown().await;
+    agent.shutdown().await;
+}
+
+/// **`GET /api/tuple` was served outside `/gateway/` and therefore without a bearer.** The gateway's
+/// auth boundary is a path prefix (`/gateway/*`, `/a2a`, `/federation/*`, `/mcp`, `/signals/*`,
+/// `/consensus/*`), so a companion route mounted anywhere else answers with no credential — and the
+/// cluster-wide tuple overview (every node's role, WAL bytes, per-stage depth, pressure) did. It is now
+/// `GET /gateway/tuple/overview` behind `tuple:read`; the old path answers 404 (the router no longer
+/// mounts it — nothing to redirect an unauthenticated client to). Seen failing first: the new path
+/// answered 404 and the old one 200 with the overview.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_overview_sits_behind_the_gateway_bearer() {
+    let base: u16 = 23400 + (std::process::id() % 400) as u16 * 2;
+    let http_port = base + 1;
+    let cfg = GossipConfig {
+        bind_port: base,
+        http_port: Some(http_port),
+        gateway_auth_token: Some("secret".into()),
+        health_check_max_jitter_ms: 50,
+        ..Default::default()
+    };
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).expect("node id"), cfg));
+    let ts = TupleSpace::new(
+        Arc::clone(&agent),
+        TupleConfig { namespace: Arc::from("gw2"), role: TupleRole::Primary, ..Default::default() },
+    )
+    .await
+    .expect("tuple space");
+    agent.with_http_routes(Arc::clone(&ts).http_router());
+    agent.start().await.expect("agent start");
+    let url = format!("http://127.0.0.1:{http_port}");
+    let http = reqwest::Client::new();
+    for _ in 0..100 {
+        if http.get(format!("{url}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let r = http.get(format!("{url}/api/tuple")).send().await.expect("old path");
+    assert_eq!(r.status().as_u16(), 404, "the old public path is gone");
+    let r = http.get(format!("{url}/gateway/tuple/overview")).send().await.expect("no bearer");
+    assert_eq!(r.status().as_u16(), 401, "the overview demands the bearer");
+    let r = http.get(format!("{url}/gateway/tuple/overview")).bearer_auth("secret").send().await.expect("bearer");
+    assert_eq!(r.status().as_u16(), 200, "the bearer reads the overview");
+    let v: serde_json::Value = r.json().await.expect("overview json");
+    assert!(v.get("nodes").is_some(), "the overview shape is unchanged: {v}");
 
     ts.shutdown().await;
     agent.shutdown().await;

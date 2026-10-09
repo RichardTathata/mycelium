@@ -213,6 +213,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   task). **Upgrade note:** an A2A client that polls `tasks/get` must send it under the same bearer as its
   `tasks/send`; an anonymous client gets its result on the `tasks/send` response or the `sendSubscribe` stream, which
   already carry it (`deprecations.md` §23).
+- **`mycelium-tuple-space`'s `GET /api/tuple` answered without a bearer.** The gateway's auth boundary is a path
+  prefix, and the cluster-wide tuple overview (every node's role, WAL bytes, per-stage depth and pressure) was
+  mounted outside it. It is now `GET /gateway/tuple/overview` behind `tuple:read`; `/api/tuple` answers 404 (the
+  router no longer mounts it — an unauthenticated redirect would have nowhere honest to point). `rbac.md`'s claim
+  that *the routing code asserts* the public list is now true: `http::PUBLIC_PATHS` holds it and
+  `the_public_surface_is_exactly_the_documented_list` probes a running gateway. Seen failing first:
+  `the_overview_sits_behind_the_gateway_bearer` (the old path answered 200 with no bearer). **Upgrade note:** a
+  dashboard or the integration scenario reading `/api/tuple` must read `/gateway/tuple/overview` with a
+  `tuple:read` (or legacy) bearer (`deprecations.md` §23).
+- **`/gateway/llm/call` and `/gateway/llm/stream` ran no action preflight.** The raw routes refuse `llm.invoke` and
+  name `/gateway/llm/call` as its door, yet neither door consulted the evaluator `/mcp` and `/a2a` consult — a policy
+  denying `llm.invoke` was walked around by choosing it. Both now run `ae_preflight` under `gateway:llm/call` /
+  `gateway:llm/stream`, carry a presented `_meta.mandate` to the provider with the resource
+  (`prompt:{ns}/{name}@{provider}`) and record the outcome; a denial is `403 {"error": "policy", …}` on `/call` and
+  the stream's one event `{"type": "error", "error": "policy", …}` on `/stream`. Inert without an evaluator. Seen
+  failing first: `the_llm_doors_run_the_action_preflight` (`/call` answered 200 and the provider ran).
+- **Bearer comparison is constant-time.** `resolve_token` compared a presented bearer with `==`, whose early exit
+  leaks the length of the matching prefix to a timing observer; it now uses `subtle::ConstantTimeEq` (already in
+  the tree under `ed25519-dalek`). No behaviour change; the existing auth tests cover it.
 - **The signal SSE doors streamed every protected RPC request to a `mesh:read` holder.** `/signals/{kind}` and
   `/gateway/signal/sse/{kind}` registered a receiver for whatever kind the path named — the same handler table
   `rpc/serve` and the native MCP tools register on, fanned to every receiver — so a `mesh:read` token could open

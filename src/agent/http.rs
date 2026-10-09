@@ -358,7 +358,7 @@ pub(super) async fn run_http_server(
     let app = Router::new()
         // Library endpoints — public by the M16 edge criterion: what a probe, load balancer or
         // scraper needs with no credential. This list and /bulk are the WHOLE public surface
-        // (docs/operations/rbac.md) — anything else goes behind `gateway_auth`.
+        // (docs/operations/rbac.md, `PUBLIC_PATHS`) — anything else goes behind `gateway_auth`.
         .route("/health",               get(health_handler))
         .route("/ready",                get(ready_handler))
         .route("/stats",                get(stats_handler))
@@ -407,6 +407,9 @@ pub(super) async fn run_http_server(
     };
 
     let listener = prepared.listener;
+    // The one place the public surface is stated in code; the test
+    // `the_public_surface_is_exactly_the_documented_list` holds the router to it.
+    info!(public_paths = ?PUBLIC_PATHS, "gateway: the paths answered without a credential");
 
     // Native gateway TLS (SOC 2 WS-A): when GossipConfig::gateway_tls is set, serve HTTPS
     // over a hand-rolled tokio-rustls accept loop; otherwise the plain axum::serve path. The
@@ -423,6 +426,23 @@ pub(super) async fn run_http_server(
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
+
+/// **The whole public surface** — every path a gateway answers with no credential, as
+/// `docs/operations/rbac.md` lists it (M16 edge criterion: what a probe, load balancer or scraper
+/// needs; the A2A descriptor and `/a2a`, which an A2A peer reaches without a Mycelium credential;
+/// `/bulk/{id}`, a capability URL). The router above mounts exactly these outside `gateway_auth`;
+/// `the_public_surface_is_exactly_the_documented_list` asserts it against a running gateway. A
+/// companion route mounted outside `/gateway/`, `/a2a`, `/federation/` is public by construction
+/// and belongs here or under the prefix — never silently elsewhere.
+pub(crate) const PUBLIC_PATHS: &[&str] = &[
+    "/health",
+    "/ready",
+    "/stats",
+    "/metrics",
+    "/bulk/{corr_id}",
+    "/.well-known/agent.json",
+    "/a2a",
+];
 
 /// Resolve the gateway's rustls `ServerConfig` from `GatewayTlsConfig`: an operator-supplied
 /// cert/key PEM pair, or (both `None`) the node identity cert built with no client-cert demand.
@@ -710,21 +730,27 @@ async fn federation_path_auth(_ctx: Arc<HttpCtx>, request: Request, next: Next) 
 /// only set it behave exactly as before); a named token (`gateway_named_tokens`, `compliance`) is
 /// `token:{issuer}/{name}`; a positional token (`gateway_scoped_tokens`) is `token:{issuer}/#{i}` —
 /// the list position, which reordering moves, so prefer named tokens. Never the secret.
+///
+/// Comparison is constant-time in the secret's bytes (`subtle::ConstantTimeEq`): `==` returns at
+/// the first differing byte, which leaks the length of the matching prefix to a timing observer.
+/// Lengths still differ in time, as in every constant-time string compare.
 fn resolve_token(cfg: &crate::config::GossipConfig, issuer: &str, presented: &str) -> Option<(String, Vec<String>)> {
+    use subtle::ConstantTimeEq as _;
+    let same = |secret: &str| bool::from(secret.as_bytes().ct_eq(presented.as_bytes()));
     if let Some(legacy) = cfg.gateway_auth_token.as_deref()
-        && presented == legacy
+        && same(legacy)
     {
         return Some((gateway_caller::legacy_token_principal(issuer), vec!["*".to_string()]));
     }
     #[cfg(feature = "compliance")]
     {
         for t in &cfg.gateway_named_tokens {
-            if t.token == presented {
+            if same(&t.token) {
                 return Some((gateway_caller::named_token_principal(issuer, &t.name), t.scopes.clone()));
             }
         }
         for (i, t) in cfg.gateway_scoped_tokens.iter().enumerate() {
-            if t.token == presented {
+            if same(&t.token) {
                 return Some((gateway_caller::positional_token_principal(issuer, i), t.scopes.clone()));
             }
         }
@@ -848,6 +874,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/artifacts/publish" => "artifact:publish",
         //   mycelium-tuple-space → `tuple:*`.
         "/gateway/tuple/depth"       => "tuple:read",
+        "/gateway/tuple/overview"    => "tuple:read",
         "/gateway/tuple/put"         => "tuple:write",
         "/gateway/tuple/take"        => "tuple:write",
         "/gateway/tuple/take_by_key" => "tuple:write",
@@ -2754,6 +2781,12 @@ impl crate::GossipAgent {
         }
     }
 }
+
+/// The two LLM doors — the ones `refuse_protected_kind` sends `llm.invoke` to.
+#[cfg(all(feature = "gateway", feature = "tls", feature = "llm"))]
+pub(crate) const ENFORCEMENT_POINT_LLM_CALL: &str = "gateway:llm/call";
+#[cfg(all(feature = "gateway", feature = "tls", feature = "llm"))]
+pub(crate) const ENFORCEMENT_POINT_LLM_STREAM: &str = "gateway:llm/stream";
 
 /// The A2A route. Gated on `a2a` as well: it is referenced only from that module, and an item
 /// alive in a build that never uses it is the feature-gated dead-code trap CI checks for.
@@ -4723,6 +4756,10 @@ struct LlmCallBody {
     context:    std::collections::HashMap<String, String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    /// `_meta.mandate` / `_meta.operation_id`, as on `/mcp`: a presented mandate is assessed by the
+    /// preflight and carried to the provider.
+    #[serde(default, rename = "_meta")]
+    meta: serde_json::Value,
 }
 
 #[cfg(feature = "llm")]
@@ -4761,15 +4798,53 @@ async fn gw_llm_call(
         "context": body.context,
     });
     let payload = Bytes::from(req.to_string().into_bytes());
+    let params = serde_json::json!({ "_meta": body.meta });
+    let resource = format!("prompt:{}/{}@{target}", body.ns, body.name);
 
-    match gateway_caller::gateway_rpc_call(
+    // AE slice: the same evaluator preflight `/mcp` and `/a2a` run. This is the door the raw routes
+    // send `llm.invoke` to, so a policy denying it was walked around by choosing this door.
+    #[cfg(feature = "tls")]
+    let preflight = ae_preflight(
+        &ctx.agent_ctx,
+        caller.as_ref(),
+        signal_kind::LLM_INVOKE,
+        &resource,
+        &serde_json::json!({ "input": body.input, "context": body.context }),
+        &params,
+        ENFORCEMENT_POINT_LLM_CALL,
+    )
+    .await;
+    #[cfg(feature = "tls")]
+    if let Preflight::Refuse(refusal) = &preflight {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "policy", "detail": refusal.to_string(), "data": refusal.error_data(),
+            })),
+        )
+            .into_response();
+    }
+
+    let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
         &ctx.agent_ctx,
         caller.as_ref(),
         target,
         Arc::from(signal_kind::LLM_INVOKE),
         payload,
         timeout,
-    ).await {
+        gateway_caller::presented_mandate(&params),
+        Some(&resource),
+    ).await;
+    #[cfg(feature = "tls")]
+    {
+        use super::action_evaluator::Execution;
+        let mut observed = observed_execution(&dispatched);
+        if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
+            observed = Execution::Failed;
+        }
+        ae_record_execution(&ctx.agent_ctx, &preflight, observed).await;
+    }
+    match dispatched {
         Ok(reply) => {
             let v: serde_json::Value = serde_json::from_slice(&reply)
                 .unwrap_or_else(|_| serde_json::json!({"error":"parse_error","detail":""}));
@@ -4798,6 +4873,9 @@ struct LlmStreamBody {
     input:   String,
     #[serde(default)]
     context: std::collections::HashMap<String, String>,
+    /// As on `/gateway/llm/call`.
+    #[serde(default, rename = "_meta")]
+    meta: serde_json::Value,
 }
 
 #[cfg(feature = "llm")]
@@ -4826,21 +4904,54 @@ async fn gw_llm_stream(
             let data = serde_json::json!({"type":"error","error":"no_provider"}).to_string();
             Event::default().data(data)
         }
-        Some((target, _)) => {
+        Some((target, _)) => 'arm: {
             let req = serde_json::json!({
                 "prompt":  format!("{}/{}", body.ns, body.name),
                 "input":   body.input,
                 "context": body.context,
             });
             let payload = Bytes::from(req.to_string().into_bytes());
-            match gateway_caller::gateway_rpc_call(
+            let params = serde_json::json!({ "_meta": body.meta });
+            let resource = format!("prompt:{}/{}@{target}", body.ns, body.name);
+            // The same preflight as `/gateway/llm/call`; a refusal is the stream's one event.
+            #[cfg(feature = "tls")]
+            let preflight = ae_preflight(
+                &ctx.agent_ctx,
+                caller.as_ref(),
+                signal_kind::LLM_INVOKE,
+                &resource,
+                &serde_json::json!({ "input": body.input, "context": body.context }),
+                &params,
+                ENFORCEMENT_POINT_LLM_STREAM,
+            )
+            .await;
+            #[cfg(feature = "tls")]
+            if let Preflight::Refuse(refusal) = &preflight {
+                let data = serde_json::json!({
+                    "type": "error", "error": "policy", "detail": refusal.to_string(), "data": refusal.error_data(),
+                }).to_string();
+                break 'arm Event::default().data(data);
+            }
+            let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
                 &ctx.agent_ctx,
                 caller.as_ref(),
                 target,
                 Arc::from(signal_kind::LLM_INVOKE),
                 payload,
                 timeout,
-            ).await {
+                gateway_caller::presented_mandate(&params),
+                Some(&resource),
+            ).await;
+            #[cfg(feature = "tls")]
+            {
+                use super::action_evaluator::Execution;
+                let mut observed = observed_execution(&dispatched);
+                if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
+                    observed = Execution::Failed;
+                }
+                ae_record_execution(&ctx.agent_ctx, &preflight, observed).await;
+            }
+            match dispatched {
                 Ok(reply) => {
                     let v: serde_json::Value = serde_json::from_slice(&reply)
                         .unwrap_or_else(|_| serde_json::json!({"error":"parse_error"}));
@@ -6458,6 +6569,58 @@ mod tests {
         assert_eq!(r.status(), 401, "a cookie token must be refused");
         let r = client.get(format!("{base}/gateway/kv/keys")).header(AUTHORIZATION, "Bearer secret").send().await.unwrap();
         assert_eq!(r.status(), 200, "the exact form is admitted");
+        agent.shutdown().await;
+    }
+
+    /// **`rbac.md` says the routing code asserts the public list; this is that assertion.** With a
+    /// bearer configured, every path in `PUBLIC_PATHS` answers without one (never 401), and the
+    /// gated routes — the library's own, the node-level three, and a route a companion merged under
+    /// `/gateway/` — answer 401 without it. The merged router also mounts the same public paths the
+    /// A2A router does, so a companion's descriptor path is covered by the list.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn the_public_surface_is_exactly_the_documented_list() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+        let agent = Arc::new(GossipAgent::new(id, cfg).with_a2a());
+        async fn ok() -> &'static str { "ok" }
+        agent.with_http_routes(axum::Router::new().route("/gateway/app/protected", axum::routing::get(ok)));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        for path in super::PUBLIC_PATHS {
+            let concrete = path.replace("{corr_id}", "0");
+            let r = if *path == "/a2a" {
+                client.post(format!("{base}{concrete}")).json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"id":"x"}})).send().await.unwrap()
+            } else {
+                client.get(format!("{base}{concrete}")).send().await.unwrap()
+            };
+            assert_ne!(r.status(), 401, "{path} is public: it never demands the bearer");
+            // `/bulk/{id}` answers 404 for a nonce nobody staged — the capability URL's own refusal.
+            if *path != "/bulk/{corr_id}" {
+                assert_ne!(r.status(), 404, "{path} is mounted");
+            }
+        }
+        for (method, path) in [
+            ("GET", "/gateway/kv/keys"), ("GET", "/gateway/app/protected"), ("GET", "/signals/probe"),
+            ("POST", "/mcp"), ("GET", "/gateway/tuple/overview"),
+        ] {
+            let req = if method == "GET" { client.get(format!("{base}{path}")) } else { client.post(format!("{base}{path}")).json(&serde_json::json!({})) };
+            let status = req.send().await.unwrap().status();
+            // `/gateway/tuple/overview` is a companion route this node does not mount: a 404 from
+            // the router proves nothing public answered there either.
+            assert!(status == 401 || (path == "/gateway/tuple/overview" && status == 404),
+                "{method} {path} is gated: {status}");
+        }
+        #[cfg(feature = "consensus")]
+        assert_eq!(client.get(format!("{base}/consensus/x")).send().await.unwrap().status(), 401);
         agent.shutdown().await;
     }
 
@@ -8243,6 +8406,81 @@ mod gateway_caller_tests {
         }
 
         g.shutdown().await;
+    }
+
+    /// **`/gateway/llm/call` and `/gateway/llm/stream` ran no action preflight.** The raw routes send
+    /// `llm.invoke` to these two doors (`refuse_protected_kind` names `/gateway/llm/call`), yet neither
+    /// consulted the evaluator `/mcp` and `/a2a` consult: a policy denying `llm.invoke` was walked
+    /// around by choosing this door. Both now run `ae_preflight` under their own enforcement points,
+    /// carry a presented mandate (`_meta.mandate`) to the provider, and record the outcome; a denial
+    /// is `403 {"error": "policy", …}` on `/call` and an in-stream `{"type": "error", "error":
+    /// "policy", …}` on `/stream`, and the provider is never reached. Seen failing first: `/call`
+    /// answered 200 and the provider ran.
+    #[cfg(all(feature = "llm", feature = "tls"))]
+    #[tokio::test]
+    async fn the_llm_doors_run_the_action_preflight() {
+        use crate::capability::Capability;
+        use crate::{ReferenceEvaluator, Rule};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("ae-llm-doors-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        let me = agent.node_id().clone();
+        let resource = format!("prompt:llm/echo@{me}");
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-llm-doors")
+                .with_catalogue("cat-test", "1")
+                .map_action("llm.invoke", resource.clone())
+                .prohibit(Rule::new("*", "llm.invoke", resource)),
+        ));
+        agent.start().await.unwrap();
+        let _reg = agent.capabilities().advertise_capability(Capability::new("llm", "echo"), Duration::from_secs(30));
+        let reached = Arc::new(AtomicUsize::new(0));
+        {
+            let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));
+            let mut rx = agent.service().rpc_rx(crate::signal::signal_kind::LLM_INVOKE);
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    reached.fetch_add(1, Ordering::SeqCst);
+                    agent.service().rpc_respond(&req, br#"{"output":"ran"}"#.to_vec());
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let r = client.post(format!("{base}/gateway/llm/call"))
+            .json(&serde_json::json!({"ns": "llm", "name": "echo", "input": "x"}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 403, "/gateway/llm/call: the evaluator's denial is answered");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "policy", "{v}");
+        assert_eq!(v["data"]["reason"], "action_denied", "{v}");
+        assert_eq!(v["data"]["policy_revision"], "rev-llm-doors", "{v}");
+
+        let r = client.post(format!("{base}/gateway/llm/stream"))
+            .json(&serde_json::json!({"ns": "llm", "name": "echo", "input": "x"}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "SSE commits its status line before the body");
+        let text = r.text().await.unwrap();
+        let data = text.lines().find_map(|l| l.strip_prefix("data:")).expect("one event").trim();
+        let v: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(v["type"], "error", "{v}");
+        assert_eq!(v["error"], "policy", "/gateway/llm/stream: the denial is the stream's one event: {v}");
+        assert_eq!(v["data"]["reason"], "action_denied", "{v}");
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(reached.load(Ordering::SeqCst), 0, "the provider was never reached through either door");
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
     }
 }
 

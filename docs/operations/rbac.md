@@ -85,7 +85,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` — both routed **as the client** since 0.8.0 (the provider's `request_principal` is the bearer's principal under the secure profile) and behind the action evaluator (`403 policy`), as `/gateway/llm/call` is |
 | `wiki:read` / `wiki:write` | `mycelium-wiki`: `/wiki/read`, `/wiki/query` / `/wiki/propose`, `/wiki/ingest` |
 | `board:read` / `board:write` | `mycelium-blackboard`: `/bb/read`, `/bb/depth` / `/bb/post`, `claim`, `ack`, `release` |
-| `tuple:read` / `tuple:write` | `mycelium-tuple-space`: `/tuple/depth` / `put`, `take`, `take_by_key`, `complete`, `ack` |
+| `tuple:read` / `tuple:write` | `mycelium-tuple-space`: `/tuple/depth`, `/tuple/overview` (the cluster-wide monitoring document — `/api/tuple` until 2.32.0, which sat outside the gateway prefix and answered without a bearer; the old path is 404) / `put`, `take`, `take_by_key`, `complete`, `ack` |
 | `artifact:publish` | `mycelium-wasm-host` (feature `gateway`, plan A3): `POST /gateway/artifacts/publish` — one **already-signed** catalogue line, verified against the node's `[hosts].trusted_publishers` and written to `installable/`. Its own family, not `kv:write`, because it is a narrower power with a check the raw KV route does not make; since 2.27.0 the raw KV routes refuse `installable/` (`kv:write` reached it before), and the defence that holds in every case — including a peer writing through Layer I — is still the provisioner's `require_provenance` |
 | `admin` | the deny-by-default fallback for any route not in the table — including any companion path not listed above |
 
@@ -135,7 +135,11 @@ the A2A descriptor (`/.well-known/agent.json`), `POST /a2a` (an A2A peer needs n
 credential — but a bearer *presented* on it is resolved, and an unrecognised one is 401; §7), and
 `GET /bulk/{id}` — a **capability URL**: the 64-bit random per-call nonce is the credential, and
 the serving peer fetches it node-to-node with no shared bearer. **That is the whole public
-surface**; the routing code asserts the same list.
+surface**; the routing code holds the same list (`http::PUBLIC_PATHS`) and the test
+`the_public_surface_is_exactly_the_documented_list` asserts it against a running gateway with a bearer set:
+each listed path answers without one, and the gated routes — the library's, the node-level three and a
+merged companion route — answer 401. A companion route outside the prefixes above is public by
+construction (the note above), which is why `mycelium-tuple-space`'s overview moved under `/gateway/`.
 
 ---
 

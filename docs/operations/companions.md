@@ -36,7 +36,7 @@ left blank. The obligations every companion owes are the
   `shutdown()` leaks it (the wiki makes this a hard invariant, with a canary test).
 - **No Prometheus metrics.** None of the three emit `metrics::` series. Observe via their API
   (`depth()` / `is_primary()` / `is_curator()` / `last_lint()`), tuple-space's `sys/tuple/…` KV
-  soft-state (`/api/tuple`), and `tracing` logs. A `/metrics`-based companion dashboard will have no
+  soft-state (`GET /gateway/tuple/overview`, `tuple:read`), and `tracing` logs. A `/metrics`-based companion dashboard will have no
   data — don't build one.
 
 ## mycelium-tuple-space — staged pull pipelines
@@ -57,7 +57,8 @@ left blank. The obligations every companion owes are the
   self-promote.
 - **Observe.** `is_primary()` / `is_secondary()`, `depth()` (non-blocking — safe as a probe); cluster
   metrics as `sys/tuple/{node}/{ns}/…` KV keys (role, wal_bytes, per-stage depth/waiters/inflight/…),
-  exposed over HTTP at `/api/tuple`.
+  exposed over HTTP at `GET /gateway/tuple/overview` (`tuple:read`; `/api/tuple` until 2.32.0, which sat
+  outside the gateway's auth boundary and answered without a bearer — it now answers 404).
 - **Teardown.** `shutdown()` retracts the caps, aborts tasks, and **fsyncs the WAL** before returning.
 - **Lock note (advanced).** The store has a documented 3-tier lock order (WAL → stage → inflight,
   released in reverse) — relevant only if you profile the hot/compaction path.
