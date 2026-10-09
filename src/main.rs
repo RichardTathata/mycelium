@@ -49,12 +49,17 @@ async fn run(config: GossipConfig, trace: Option<Arc<mycelium::decision::Decisio
         agent.with_decision_trace(sink);
     }
 
+    // The stop signals are installed before the node binds, so a SIGTERM during startup is an orderly
+    // shutdown — the bundle written — rather than the default action's kill. Not in interactive mode,
+    // whose Ctrl-C must keep its default (a handler nobody awaits would swallow it).
+    let interactive = std::env::args().any(|a| a == "-i" || a == "--interactive");
+    let shutdown = if interactive { None } else { Some(ShutdownSignal::install()?) };
+
     agent.start().await?;
 
-    if std::env::args().any(|a| a == "-i" || a == "--interactive") {
-        run_interactive(Arc::clone(&agent)).await?;
-    } else {
-        await_shutdown_signal().await?;
+    match shutdown {
+        None => run_interactive(Arc::clone(&agent)).await?,
+        Some(signal) => signal.wait().await?,
     }
 
     tracing::info!("Shutting down...");
@@ -135,20 +140,39 @@ fn parse_args() -> Result<GossipConfig, GossipError> {
     Ok(config)
 }
 
-/// Waits for Ctrl-C (all platforms) or SIGTERM (Unix).
-async fn await_shutdown_signal() -> Result<(), std::io::Error> {
+/// SIGINT (all platforms) or SIGTERM (Unix), installed when constructed and awaited later — see `run`.
+struct ShutdownSignal {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate())?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result,
-            _ = sigterm.recv() => Ok(()),
+    int:  tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    term: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignal {
+    fn install() -> Result<Self, std::io::Error> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Ok(Self { int: signal(SignalKind::interrupt())?, term: signal(SignalKind::terminate())? })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
         }
     }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await
+
+    async fn wait(mut self) -> Result<(), std::io::Error> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.int.recv() => Ok(()),
+                _ = self.term.recv() => Ok(()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await
+        }
     }
 }
 

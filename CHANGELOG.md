@@ -10,13 +10,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **`mycelium-stem` shuts down on SIGTERM** (`docker stop`, a Kubernetes pod stop) as it does on SIGINT: it writes its
-  `--trace-dir` output and withdraws its installs. It awaited `ctrl_c()` only, so a stopped container was killed with
-  neither (doc-coverage run 22, code gap 2). Seen failing first: `mycelium-wasm-host/tests/stem_shutdown.rs`.
-- **A prepare phase that never gathers a quorum of promises times out as `promise_short`**, not `no_voters`
-  (`mycelium_consensus_timeouts_total`). Mid-upgrade to 2.30.0 that is acceptors which ignore `Prepare`, and the
-  runbook read `no_voters` as a partition (code gap 3). Seen failing first:
-  `a_promise_shortfall_has_its_own_timeout_reason`.
+- **`mycelium-stem` and the `mycelium` node shut down on SIGTERM** (`docker stop`, a Kubernetes pod stop) as they do on
+  SIGINT — the stem writes its `--trace-dir` output and runs its shutdown, the node its bundle — **including during
+  startup**: the handlers are installed before the node binds. The stem awaited `ctrl_c()` only, so a stopped container
+  was killed (doc-coverage run 22, code gap 2); both registered their handler only once startup was done, leaving it
+  exposed to the default kill (reproduced 2 in 40). Seen failing first: `mycelium-wasm-host/tests/stem_shutdown.rs`.
+- **A consensus timeout is labelled by what other acceptors answered**, not by which phase it ended in
+  (`mycelium_consensus_timeouts_total{reason}`): `no_voters` (none — a partition, or mid-upgrade all older than
+  2.30.0), `promise_short` (some promised, too few), `contended`, `blocked`, `quorum_short`. Since 2.30.0 a partition
+  ends in the prepare phase, and in `propose` the proposer's own vote made it `quorum_short` before that (code gap 3).
+  Seen failing first: `a_proposer_nobody_answers_times_out_as_no_voters` (it was labelled `promise_short`).
 - **`langgraph-checkpoint-mycelium` 0.3.1:** the blob route's own 403 `refused` (every holder refused for good —
   a removed member, a denied action) is reported as `"refused"`, not `"unauthorized"`, which sent an operator to
   the token (code gap 1). Not retriable, like `unauthorized`. Seen failing first:

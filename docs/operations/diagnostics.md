@@ -152,17 +152,19 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   `propose` returns `ConsensusResult::Timeout` and a `consistent_get` serves the last committed
   value; neither fabricates a commit. This is the common production failure (distinct from a
   *commit conflict*, which is the opposite — two commits, not zero).
-- **Read:** counter `mycelium_consensus_timeouts_total` by `reason` — `no_voters` ⇒ likely a
-  **partition** (no votes heard at all); `promise_short` ⇒ the prepare phase never gathered a quorum of
-  promises, so no vote was asked for — **during a rolling upgrade to 2.30.0, acceptors older than it**
-  (they ignore `Prepare`), otherwise the same causes as `no_voters` (2.31.0; before it this was counted as
-  `no_voters`, with `votes_last_ballot: 0`); `quorum_short` ⇒ members heard but **quorum not met**
+- **Read:** counter `mycelium_consensus_timeouts_total` by `reason`, which since 2.30.1 counts what **other**
+  acceptors answered on the last attempt — `no_voters` ⇒ **none did**: a **partition**, or, during a rolling
+  upgrade to 2.30.0, every acceptor still older (they ignore `Prepare`); `promise_short` ⇒ some promised,
+  too few (a partial partition, or part of the group not yet upgraded); `contended` ⇒ another proposer holds
+  a higher ballot — contention, not failure; `blocked` ⇒ the slot's top acceptance is known only by digest (a
+  record from before 2.30.0 — deprecations §21); `quorum_short` ⇒ members heard but **quorum not met**
   (overloaded members, or the quorum set is larger than live membership); `all_opaque` ⇒ every
   member is shedding load (cross-check [fleet-opacity storm](#fleet-opacity-storm)). Dev-side, the
   returned `ConsensusResult::Timeout { ballots_tried, votes_last_ballot, quorum_required }` carries
   the same distinction per call.
-- **Do:** for `promise_short`, check the group's versions first — finish the upgrade (deprecations §21);
-  for `no_voters`, restore member reachability / heal the partition (membership is
+- **Do:** for `no_voters` or `promise_short` during an upgrade, check the group's versions first — finish
+  it (deprecations §21); for `contended`, nothing is broken — fewer concurrent proposers for the slot; for
+  `no_voters`, restore member reachability / heal the partition (membership is
   peer-exchange + CA admission — check both); for `quorum_short`, add capacity or confirm the
   quorum is `⌊n/2⌋+1` of the **consensus group**, not the whole cluster; for `all_opaque`, relieve
   load. A **leased** commit self-heals on the next round once quorum returns — no manual repair.
@@ -192,7 +194,7 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   **held**; `lease_expired: true` ⇒ the lease lapsed and the slot has **reopened** — the lock is
   effectively free (a stale holder cannot win). Repeated `Superseded` in caller logs is
   contention, **not** a bug — the converged-holder discipline rejecting a loser. Watch
-  `mycelium_consensus_timeouts_total{reason="quorum_short"}` if acquisition itself is timing out
+  `mycelium_consensus_timeouts_total{reason=~"quorum_short|promise_short|no_voters"}` if acquisition itself is timing out
   (a consensus-throughput problem, not lock semantics).
 - **Do:** a crashed holder's lock **self-clears at lease expiry** — wait up to the `ttl` you set;
   don't force it. If sections routinely overrun, raise `ttl` above the observed hold time and keep
@@ -280,7 +282,7 @@ groups:
 
 - name: mycelium-consensus
   rules:
-  # Consensus rounds timing out — the CP overlay is blocking (no quorum). Partition if reason=no_voters; a 2.30.0 upgrade in progress if promise_short.
+  # Consensus rounds timing out — the CP overlay is blocking (no quorum). Partition (or an unfinished 2.30.0 upgrade) if reason=no_voters / promise_short.
   - alert: MyceliumConsensusStalled
     expr: rate(mycelium_consensus_timeouts_total[5m]) > 0
     for: 3m
@@ -378,8 +380,8 @@ what it read, how it ended and the typed reason. The decision points are the gen
 [rule catalogue](../reference/rule-catalogue.md) — an `instrumented` entry records, a `catalogue only`
 entry does not, and `coverage.json` beside a trace says which. The trace is off unless attached, changes
 no decision and never waits (a saturated sink drops the newest record and counts it). A stem writes it
-with `mycelium-stem … --trace-dir <dir>` when it shuts down — on SIGINT or, since 2.31.0, SIGTERM (`docker stop`);
-before 2.31.0 SIGTERM killed it without one ([capability-lifecycle.md](capability-lifecycle.md)); the node
+with `mycelium-stem … --trace-dir <dir>` when it shuts down — on SIGINT or, since 2.30.1, SIGTERM (`docker stop`);
+before 2.30.1 SIGTERM killed it without one ([capability-lifecycle.md](capability-lifecycle.md)); the node
 binary built `--features cli,sim` and started with `GOSSIP_RECORD_BUNDLE_DIR=<dir>` writes
 `decisions.jsonl`, `coverage.json` and `decisions.stats.json` into the bundle beside `build.json` and
 `choices.trace`. Read either with:

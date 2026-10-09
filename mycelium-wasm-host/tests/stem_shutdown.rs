@@ -1,5 +1,7 @@
-//! **`mycelium-stem` shuts down on SIGTERM as it does on SIGINT** — writing its `--trace-dir` output and
-//! withdrawing its installs (doc-coverage run 22, code gap 2).
+//! **`mycelium-stem` shuts down on SIGTERM as it does on SIGINT** — the same orderly path: it writes its
+//! `--trace-dir` output and exits 0 (doc-coverage run 22, code gap 2). The unit here hosts nothing, so the
+//! withdrawal step runs over no installs; what this pins is that SIGTERM reaches the shutdown path at all,
+//! including when it arrives the moment the port is bound (handlers installed before the bind).
 //!
 //! `docker stop` and a Kubernetes pod stop send SIGTERM. The stem awaited `ctrl_c()` only, so a stopped
 //! container was killed without its decision trace and without a graceful withdrawal — and the runbook's
@@ -35,7 +37,7 @@ fn sigterm_writes_the_trace_and_exits_cleanly() {
         if let Some(status) = child.try_wait().unwrap() {
             panic!("the stem exited before binding: {status}");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(5));
     }
 
     let killed = Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap();

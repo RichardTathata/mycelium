@@ -1007,9 +1007,8 @@ impl ConsensusEngine {
         // gossiped and may lag what this node knows was decided.
         let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
         let mut votes_last_ballot: usize = 0;
-        // Whether the latest attempt ended in the prepare phase, before any vote was asked for — a
-        // promise shortfall is not a partition, and the timeout says which (doc-coverage run 22, gap 3).
-        let mut ended_in_prepare = false;
+        // How the latest attempt ended — what a timeout is labelled by (doc-coverage run 22, gap 3).
+        let mut last = LastAttempt::None;
         // Captured topology-gate failure from the most recent ballot that
         // reached quorum-by-count but failed the Hard gate. Used to surface
         // `TopologyUnsatisfied` after all ballots are exhausted.
@@ -1089,18 +1088,25 @@ impl ConsensusEngine {
                         ballot: self.read_ballot(&ballot_key),
                     };
                 }
-                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => {
-                    ended_in_prepare = true;
+                Phase1::Ready(Phase1Choice::Blocked) => {
+                    last = LastAttempt::Blocked;
                     Some(0)
                 }
-                Phase1::Refused(seen) => Some(seen),
+                Phase1::Short(others) => {
+                    last = LastAttempt::Prepare { others };
+                    Some(0)
+                }
+                Phase1::Refused(seen) => {
+                    last = LastAttempt::Contended;
+                    Some(seen)
+                }
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
-            ended_in_prepare = false;
+            last = LastAttempt::Vote;
 
             // Phase 2 listens on a fresh refusal channel: a refusal of this ballot's *prepare*, still
             // queued after the promise quorum formed, would otherwise abort a ballot already won.
@@ -1122,6 +1128,7 @@ impl ConsensusEngine {
             if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
                 // Already committed to a different value at this ballot. Cannot win here; move up
                 // rather than emit a proposal we are not entitled to support.
+                last = LastAttempt::Contended;
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
                 continue;
             }
@@ -1232,12 +1239,13 @@ impl ConsensusEngine {
             };
         }
 
+        // This proposer's own vote is in `voters`; the label asks whether anyone *else* answered.
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_consensus_timeouts_total",
-            "reason" => timeout_reason(ended_in_prepare, votes_last_ballot))
+            "reason" => timeout_reason(last, votes_last_ballot.saturating_sub(1)))
             .increment(1);
         #[cfg(not(feature = "metrics"))]
-        let _ = ended_in_prepare;
+        let _ = last;
         ConsensusResult::Timeout {
             slot,
             ballots_tried: config.max_ballots,
@@ -1344,7 +1352,7 @@ impl ConsensusEngine {
         );
 
         let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
-        let mut ended_in_prepare = false;
+        let mut last = LastAttempt::None;
 
         for _attempt in 0..config.max_ballots {
             for gs in group_states.values_mut() { gs.accepts = 0; }
@@ -1368,18 +1376,25 @@ impl ConsensusEngine {
                 Phase1::DecidedOtherwise => {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
-                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => {
-                    ended_in_prepare = true;
+                Phase1::Ready(Phase1Choice::Blocked) => {
+                    last = LastAttempt::Blocked;
                     Some(0)
                 }
-                Phase1::Refused(seen) => Some(seen),
+                Phase1::Short(others) => {
+                    last = LastAttempt::Prepare { others };
+                    Some(0)
+                }
+                Phase1::Refused(seen) => {
+                    last = LastAttempt::Contended;
+                    Some(seen)
+                }
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
-            ended_in_prepare = false;
+            last = LastAttempt::Vote;
 
             // A fresh refusal channel for phase 2 — see `propose`.
             nack_rx = self.task_ctx.signal_handlers.register_with_capacity(
@@ -1391,6 +1406,7 @@ impl ConsensusEngine {
             // here; the claim is the gate, not a vote.
             let floor = self.decided_floor(&slot);
             if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
+                last = LastAttempt::Contended;
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
                 continue;
             }
@@ -1515,10 +1531,10 @@ impl ConsensusEngine {
         let votes_last_ballot: usize = group_states.values().map(|gs| gs.accepts).sum();
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_consensus_timeouts_total",
-            "reason" => timeout_reason(ended_in_prepare, votes_last_ballot))
+            "reason" => timeout_reason(last, votes_last_ballot))
             .increment(1);
         #[cfg(not(feature = "metrics"))]
-        let _ = ended_in_prepare;
+        let _ = last;
         ConsensusResult::Timeout {
             slot,
             ballots_tried:     config.max_ballots,
@@ -1576,7 +1592,7 @@ impl ConsensusEngine {
             tokio::pin!(sleep);
             loop {
                 tokio::select! { biased;
-                    _ = &mut sleep => return Phase1::Short,
+                    _ = &mut sleep => return Phase1::Short(promisers.len().saturating_sub(1)),
                     Some(sig) = vote_rx.recv() => {
                         let Some(ConsensusMsg::PrepareAck {
                             slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
@@ -1861,17 +1877,40 @@ fn commit_is_stale(ballot: u64, floor: u64, over: bool) -> bool {
     ballot < floor || (ballot == floor && over)
 }
 
-/// Why a proposal timed out, as `mycelium_consensus_timeouts_total` labels it. `promise_short`: the last
-/// attempt never gathered a quorum of promises, so no vote was asked for — mid-upgrade to 2.30.0 that is
-/// acceptors that ignore `Prepare`, not a partition, and it used to be counted as `no_voters`.
+/// How a proposal's latest ballot attempt ended — what its timeout is labelled by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(feature = "metrics", test)), allow(dead_code))]
+enum LastAttempt {
+    /// No attempt ran (`max_ballots = 0`).
+    None,
+    /// The prepare phase timed out with `others` acceptors besides this node promising.
+    Prepare { others: usize },
+    /// A quorum promised, but its highest acceptance is known only by digest and is not this value.
+    Blocked,
+    /// An acceptor had promised this ballot or a higher one to someone else, or this node's own acceptor
+    /// refused the claim — another proposer is ahead.
+    Contended,
+    /// The voting phase ran; the timeout's count of other voters decides.
+    Vote,
+}
+
+/// Why a proposal timed out, as `mycelium_consensus_timeouts_total` labels it — by **how many other
+/// acceptors answered**, not by which phase the attempt ended in (the review of #579: since 2.30.0 every
+/// attempt starts with a prepare phase, so a partition ends there too). `others` is the count for a
+/// `Vote` attempt; a `Prepare` attempt carries its own.
+///
+/// `no_voters` — nobody else answered: a partition, or every acceptor older than 2.30.0 (they ignore
+/// `Prepare`). `promise_short` — some promised, too few. `quorum_short` — some voted, too few.
+/// `contended` — another proposer is ahead. `blocked` — the slot's top acceptance is known only by digest.
 #[cfg(any(feature = "metrics", test))]
-fn timeout_reason(ended_in_prepare: bool, votes_last_ballot: usize) -> &'static str {
-    if ended_in_prepare {
-        "promise_short"
-    } else if votes_last_ballot == 0 {
-        "no_voters"
-    } else {
-        "quorum_short"
+fn timeout_reason(last: LastAttempt, others: usize) -> &'static str {
+    match last {
+        LastAttempt::Prepare { others: 0 } | LastAttempt::None => "no_voters",
+        LastAttempt::Prepare { .. } => "promise_short",
+        LastAttempt::Blocked => "blocked",
+        LastAttempt::Contended => "contended",
+        LastAttempt::Vote if others == 0 => "no_voters",
+        LastAttempt::Vote => "quorum_short",
     }
 }
 
@@ -1901,8 +1940,8 @@ enum Phase1 {
     DecidedOtherwise,
     /// An acceptor has promised this ballot (to another proposer) or a higher one.
     Refused(u64),
-    /// No quorum promised within the timeout.
-    Short,
+    /// No quorum promised within the timeout; carries how many acceptors **other than this node** did.
+    Short(usize),
 }
 
 /// Outcome of `ConsensusEngine::collect_one_ballot`.
@@ -3440,9 +3479,14 @@ mod consensus_msg_auth_tests {
     /// which the runbook reads as a partition.
     #[test]
     fn a_promise_shortfall_has_its_own_timeout_reason() {
-        assert_eq!(timeout_reason(true, 0), "promise_short");
-        assert_eq!(timeout_reason(false, 0), "no_voters");
-        assert_eq!(timeout_reason(false, 2), "quorum_short");
+        // Nobody else answered the prepare: a partition (or acceptors that ignore `Prepare`).
+        assert_eq!(timeout_reason(LastAttempt::Prepare { others: 0 }, 0), "no_voters");
+        // Some promised, too few.
+        assert_eq!(timeout_reason(LastAttempt::Prepare { others: 1 }, 0), "promise_short");
+        assert_eq!(timeout_reason(LastAttempt::Contended, 0), "contended");
+        assert_eq!(timeout_reason(LastAttempt::Blocked, 0), "blocked");
+        assert_eq!(timeout_reason(LastAttempt::Vote, 0), "no_voters");
+        assert_eq!(timeout_reason(LastAttempt::Vote, 2), "quorum_short");
     }
 
     #[test]

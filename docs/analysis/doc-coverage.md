@@ -791,14 +791,15 @@ cooling-off order; the four `with_egress` signatures; the Python tests run by di
 2. **`mycelium-stem` ignores SIGTERM.** It awaits `ctrl_c()` only, so `docker stop` / a pod stop kills it without
    writing `--trace-dir` output or withdrawing its installs gracefully; `docker/Dockerfile.stem` sets no
    `STOPSIGNAL`. Fix: select on SIGINT or SIGTERM (`mycelium-wasm-host/src/bin/mycelium-stem.rs`), or
-   `STOPSIGNAL SIGINT` in the image. **Closed (2.31.0):** SIGINT or SIGTERM
-   (`mycelium-wasm-host/tests/stem_shutdown.rs`).
+   `STOPSIGNAL SIGINT` in the image. **Closed (2.30.1):** SIGINT or SIGTERM, the handlers installed
+   before the bind — the node binary too (`mycelium-wasm-host/tests/stem_shutdown.rs`).
 3. **A prepare phase without enough promises is counted as `no_voters`.** `propose` retries before
    `votes_last_ballot` is set, so a promise shortfall — the normal state of an upgraded proposer mid-upgrade —
    reaches `mycelium_consensus_timeouts_total` as `no_voters` with `votes_last_ballot: 0`, which the runbook reads
    as a partition (`src/consensus.rs`, the phase-1 retry). Fix: its own reason (`promise_short`) and the promise
-   count in the result. **Closed (2.31.0):** `timeout_reason` labels it `promise_short`
-   (`a_promise_shortfall_has_its_own_timeout_reason`); `votes_last_ballot` stays the vote count.
+   count in the result. **Closed (2.30.1):** `timeout_reason` labels a timeout by how many *other*
+   acceptors answered — `no_voters`, `promise_short`, `contended`, `blocked`, `quorum_short` — so a partition is
+   still `no_voters` (`a_proposer_nobody_answers_times_out_as_no_voters`); `votes_last_ballot` stays the vote count.
 
 ## Artifacts created
 

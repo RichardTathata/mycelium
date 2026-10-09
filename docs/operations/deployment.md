@@ -268,7 +268,8 @@ proposals **time out** until a quorum of each consensus group's acceptors runs 2
 whole cluster for cluster-scope calls (`consistent_set`, locks, leader election); older proposers
 keep committing, without the guarantee ([deprecations.md](../guide/deprecations.md) §21). Upgrade every
 consensus group's members within one window, expect `mycelium_consensus_timeouts_total` (a `metrics` build) from
-upgraded nodes, reason `promise_short` (`no_voters` before 2.31.0), until a quorum is upgraded, and **do not downgrade a node mid-slot** — an older node reads
+upgraded nodes — reason `no_voters` while no acceptor answers the prepare phase, `promise_short` once some
+do — until a quorum is upgraded, and **do not downgrade a node mid-slot** — an older node reads
 the new acceptor record as no record and forgets its promises.
 Before upgrading, grep client code for raw KV writes outside your own prefixes.
 
