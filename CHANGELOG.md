@@ -90,6 +90,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   freshness bound the consensus counters use (`opaque_freshness_ms`: two health-check intervals). Seen failing first:
   `a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`,
   `a_stale_self_opacity_mark_does_not_read_as_opaque`.
+- **`persist.sync_mode` reads `not_configured` under `sync_mode = "os"`.** The writer syncs only when
+  `force_sync || sync_mode == Flush`, so `os` is buffered exactly like `async` — but the guarantee resolved
+  `enforced` for it, and `secure-single-domain` admitted a node whose acks were `buffered`. It now resolves
+  `not_configured — sync_mode (os: the OS buffers; an ack is `buffered`)`, and the profile refuses the start by
+  name; the catalogue golden is regenerated. **Check before upgrading:** a `secure-single-domain` node running
+  `sync_mode = "os"` now fails at start — set `flush`. Seen failing first:
+  `the_secure_profile_names_sync_mode_os_as_not_configured`.
 
 ## [2.31.0] — 2026-10-09
 

@@ -228,7 +228,7 @@
       "subsystem": "persistence",
       "kind": "node_enforced",
       "promise": "a WAL acknowledgement is a durability claim: the write is on disk before the ack",
-      "needs": "`[persistence]` with `sync_mode` other than `async`",
+      "needs": "`[persistence]` with `sync_mode = \"flush\"` — the writer syncs only in `flush` (or on `append_sync`); `os` is buffered like `async`",
       "enforcement_points": [
         "wal::append (SyncMode)"
       ],

@@ -822,12 +822,15 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           |c| if c.config.persistence.is_some() { Resolution::Enforced } else { Resolution::NotConfigured { missing: "[persistence]" } }),
         g("persist.sync_mode", 1, "persistence", Node,
           "a WAL acknowledgement is a durability claim: the write is on disk before the ack",
-          "`[persistence]` with `sync_mode` other than `async`",
+          "`[persistence]` with `sync_mode = \"flush\"` — the writer syncs only in `flush` (or on `append_sync`); `os` is buffered like `async`",
           &["wal::append (SyncMode)"], "docs/design/contracts-receipts.md",
           |c| if c.config.persistence.is_some() { None } else { Some("no `[persistence]` configured") },
           |c| match c.config.persistence.as_ref().map(|p| p.sync_mode) {
+              Some(crate::config::SyncMode::Flush) => Resolution::Enforced,
               Some(crate::config::SyncMode::Async) => Resolution::NotConfigured { missing: "sync_mode (async: an ack is `buffered`, which the receipt says honestly)" },
-              Some(_) => Resolution::Enforced,
+              // The writer treats `Os` as `Async` (`persistence.rs`: it syncs when `force_sync || sync_mode == Flush`),
+              // so it resolved `enforced` for a mode that enforces nothing (2026-10-09).
+              Some(crate::config::SyncMode::Os) => Resolution::NotConfigured { missing: "sync_mode (os: the OS buffers; an ack is `buffered`)" },
               None => Resolution::NotConfigured { missing: "[persistence]" },
           }),
         g("persist.unreadable_refused", 1, "persistence", Node,
@@ -1108,6 +1111,41 @@ mod tests {
         }
         assert!(e.contains("not_configured") && e.contains("docs/operations/rbac.md"), "what is missing and where to read: {e}");
         assert!(!a.guarantee_report().started, "the boundary was not passed");
+    }
+
+    /// `persist.sync_mode` promises *the write is on disk before the ack*. The writer syncs only when
+    /// `force_sync || sync_mode == Flush` (`persistence.rs`, the `Append` arm), and in `Os` an append
+    /// is the same `try_send` as in `Async` — so `Os` resolved `enforced` for a mode that enforces
+    /// nothing, and `secure-single-domain` admitted a node whose acks were `buffered`. Seen failing
+    /// first: the refusal under `Os` did not name `persist.sync_mode`.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn the_secure_profile_names_sync_mode_os_as_not_configured() {
+        use crate::config::{PersistenceConfig, SyncMode};
+        let base = std::env::temp_dir().join(format!("mycelium-sync-os-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let start_under = |mode: SyncMode| {
+            let port = crate::test_util::alloc_port();
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = port;
+            cfg.http_port = Some(crate::test_util::alloc_port());
+            cfg.profile = Some("secure-single-domain".into());
+            cfg.persistence = Some(PersistenceConfig { base_path: base.join(format!("{mode:?}")), sync_mode: mode, snapshot_wal_threshold: 10, snapshot_interval_secs: 300, on_unreadable: Default::default() });
+            GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg)
+        };
+        let os = start_under(SyncMode::Os);
+        let e = os.start().await.unwrap_err().to_string();
+        assert!(e.contains("profile `secure-single-domain` rev 2"), "{e}");
+        assert!(e.contains("persist.sync_mode"), "`os` is named as unmet — the writer treats it as `async`: {e}");
+        assert!(e.contains("os: the OS buffers"), "what is missing says why: {e}");
+        assert_eq!(os.guarantee_report().entry("persist.sync_mode").unwrap().resolution, Resolution::NotConfigured { missing: "sync_mode (os: the OS buffers; an ack is `buffered`)" });
+
+        // The contrast: `Flush` is the mode the promise holds under, and the same refusal does not name it.
+        let flush = start_under(SyncMode::Flush);
+        let e = flush.start().await.unwrap_err().to_string();
+        assert!(!e.contains("persist.sync_mode"), "flush enforces the promise and is not named: {e}");
+        assert_eq!(flush.guarantee_report().entry("persist.sync_mode").unwrap().resolution, Resolution::Enforced);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Plan G13: an attachment after `start()` is counted and the report says so, because the block
