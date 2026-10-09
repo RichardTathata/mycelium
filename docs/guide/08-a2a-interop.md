@@ -17,7 +17,13 @@ capabilities, or the mesh topology.
 > [20](20-authorising-actions.md)) or a federation edge ([17](17-federation.md)); with neither, an
 > anonymous caller reaches skill dispatch and `with_a2a()` warns about exactly that. Building with
 > `--features a2a` alone (no `tls`) has no evaluator by construction. The methods the handler knows
-> are `tasks/send`, `tasks/sendSubscribe`, `tasks/get` and `tasks/cancel`.
+> are `tasks/send`, `tasks/sendSubscribe`, `tasks/get` and `tasks/cancel`. **A task belongs to the
+> identity that created it** (since 2.32.0): `tasks/get` and `tasks/cancel` answer only the bearer's
+> principal that sent it, and a `tasks/send` under an id another identity owns is refused — all
+> `-32004`, naming the rule. Task ids are caller-chosen, so they are enumerable; before this any
+> client could read another caller's completed artifact or cancel its task by naming the id. An
+> anonymous caller has no identity to match: its task is answered only on the `tasks/send` response
+> or the `tasks/sendSubscribe` stream that created it (both carry the full result).
 
 ```mermaid
 sequenceDiagram

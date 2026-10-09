@@ -104,6 +104,33 @@ pub(crate) enum Part {
 pub(crate) struct A2aTask {
     pub task:       Task,
     pub created_at: Instant,
+    /// The principal that created the task (`tasks/send` / `tasks/sendSubscribe`), or `None` for an
+    /// anonymous caller. `tasks/get` and `tasks/cancel` answer **only this identity**: ids are
+    /// caller-chosen and therefore enumerable, and before this field any client could read another
+    /// caller's completed artifact or cancel its task by naming the id. An anonymous task has no
+    /// identity to answer to, so it is read only on the response that created it.
+    pub owner:      Option<String>,
+}
+
+/// The identity a task is owned by: the resolved principal, or `None` for an anonymous caller (and
+/// for a handler reached without the auth layer, as in a bare-router unit test).
+fn task_owner(caller: Option<&ResolvedPrincipal>) -> Option<String> {
+    caller.filter(|c| c.principal != gateway_caller::PRINCIPAL_ANONYMOUS).map(|c| c.principal.clone())
+}
+
+/// The refusal `tasks/get`, `tasks/cancel` and a re-send under an existing id answer anyone but the
+/// identity that created the task — the code the federated branch already uses for the same rule.
+fn not_the_creator(id: Option<Value>) -> Value {
+    jsonrpc_error(
+        id,
+        -32004,
+        "tasks/get, tasks/cancel and a tasks/send under an existing id are answered only to the identity that created it; an anonymous task is answered only on the response that created it",
+    )
+}
+
+/// `true` when a task under `task_id` exists and `owner` is not the identity that created it.
+fn owned_by_another(state: &A2aState, task_id: &str, owner: &Option<String>) -> bool {
+    state.tasks.pin().get(task_id).is_some_and(|t| t.owner != *owner)
 }
 
 // ── Router context ────────────────────────────────────────────────────────────
@@ -374,6 +401,12 @@ async fn handle_tasks_send(
         .or_else(|| params.get("skill_id"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // A caller-chosen id another identity already owns is refused before any dispatch: a re-send
+    // under it would replace that caller's task with this one's.
+    let owner = task_owner(caller);
+    if owned_by_another(state, &task_id, &owner) {
+        return not_the_creator(id);
+    }
 
     // Item 2 PR 8: a federated caller was authenticated at the auth layer; the export it named is
     // authorised here, now that the body has said which skill it is asking for. The credential
@@ -463,7 +496,7 @@ async fn handle_tasks_send(
     match dispatched {
         Ok(reply) => {
             let task = completed_task(task_id.clone(), reply);
-            state.tasks.pin().insert(task_id, A2aTask { task: task.clone(), created_at: Instant::now() });
+            state.tasks.pin().insert(task_id, A2aTask { task: task.clone(), created_at: Instant::now(), owner });
             jsonrpc_ok(id, serde_json::to_value(&task).unwrap_or(Value::Null))
         }
         Err(GatewayDispatchError::Rpc(e)) => {
@@ -477,18 +510,27 @@ async fn handle_tasks_send(
     }
 }
 
-fn handle_tasks_get(state: &A2aState, id: Option<Value>, params: &Value) -> Value {
+/// `tasks/get`: the task, **to the identity that created it**. Anyone else — another principal,
+/// or an anonymous caller, who has no identity to match — is refused `-32004` naming the rule.
+fn handle_tasks_get(state: &A2aState, caller: Option<&ResolvedPrincipal>, id: Option<Value>, params: &Value) -> Value {
     let task_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let owner = task_owner(caller);
     match state.tasks.pin().get(task_id) {
-        Some(entry) => jsonrpc_ok(id, serde_json::to_value(&entry.task).unwrap_or(Value::Null)),
-        None        => jsonrpc_error(id, -32001, "task not found"),
+        Some(entry) if owner.is_some() && entry.owner == owner => {
+            jsonrpc_ok(id, serde_json::to_value(&entry.task).unwrap_or(Value::Null))
+        }
+        Some(_) => not_the_creator(id),
+        None    => jsonrpc_error(id, -32001, "task not found"),
     }
 }
 
-fn handle_tasks_cancel(state: &A2aState, id: Option<Value>, params: &Value) -> Value {
+/// `tasks/cancel`: the same owner rule as `tasks/get`, checked before the task's state.
+fn handle_tasks_cancel(state: &A2aState, caller: Option<&ResolvedPrincipal>, id: Option<Value>, params: &Value) -> Value {
     let task_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let owner = task_owner(caller);
     let guard = state.tasks.pin();
     match guard.get(task_id) {
+        Some(entry) if owner.is_none() || entry.owner != owner => not_the_creator(id),
         Some(entry) if entry.task.status.state == "completed" => {
             jsonrpc_error(id, -32002, "task already completed")
         }
@@ -516,6 +558,7 @@ pub(crate) async fn tasks_send_subscribe(
     params:   Value,
 ) -> impl IntoResponse {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
+    let owner = task_owner(caller.as_ref());
 
     // Emit "submitted" immediately.
     let _ = tx.try_send(Ok(Event::default()
@@ -605,7 +648,7 @@ pub(crate) async fn tasks_send_subscribe(
         match dispatched {
             Ok(reply) => {
                 let task = completed_task(task_id2.clone(), reply);
-                state2.tasks.pin().insert(task_id2.clone(), A2aTask { task: task.clone(), created_at: Instant::now() });
+                state2.tasks.pin().insert(task_id2.clone(), A2aTask { task: task.clone(), created_at: Instant::now(), owner });
                 let _ = tx.send(Ok(Event::default()
                     .event("task_status_update")
                     .data(serde_json::to_string(&task).unwrap_or_default()))).await;
@@ -674,7 +717,8 @@ pub(crate) async fn a2a_jsonrpc_full(
     // *native* caller's — or cancel it, by naming its id. Task ids are caller-supplied on
     // `tasks/send`, so they are enumerable. Refused here for the same reason streaming is: binding
     // them to an export is a revision of D5, not a silent extension.
-    // Found by the Phase-C adversarial audit (items 1+2+7).
+    // Found by the Phase-C adversarial audit (items 1+2+7). That closed the federated half only;
+    // the native half — any bearer, or none, reading any task — is closed by `A2aTask::owner`.
     #[cfg(feature = "tls")]
     if federated.is_some() && (method == "tasks/get" || method == "tasks/cancel") {
         return Json(jsonrpc_error(
@@ -696,6 +740,9 @@ pub(crate) async fn a2a_jsonrpc_full(
             .unwrap_or("")
             .to_string();
         let text     = text_from_message(params.get("message").unwrap_or(&Value::Null));
+        if owned_by_another(&state, &task_id, &task_owner(caller.as_ref())) {
+            return Json(not_the_creator(id)).into_response();
+        }
         return tasks_send_subscribe(state, caller, id, task_id, skill_id, text, params.clone()).await.into_response();
     }
 
@@ -709,8 +756,8 @@ pub(crate) async fn a2a_jsonrpc_full(
             &params,
             &raw,
         ).await,
-        "tasks/get"    => handle_tasks_get(&state, id.clone(), &params),
-        "tasks/cancel" => handle_tasks_cancel(&state, id.clone(), &params),
+        "tasks/get"    => handle_tasks_get(&state, caller.as_ref(), id.clone(), &params),
+        "tasks/cancel" => handle_tasks_cancel(&state, caller.as_ref(), id.clone(), &params),
         _              => jsonrpc_error(id, -32601, "method not found"),
     };
     Json(result).into_response()
@@ -902,7 +949,7 @@ mod tests {
     fn tasks_get_unknown_returns_error() {
         let tasks = Arc::new(papaya::HashMap::<String, A2aTask>::new());
         let state = A2aState { task_ctx: make_ctx(), tasks };
-        let result = handle_tasks_get(&state, None, &json!({ "id": "no-such-id" }));
+        let result = handle_tasks_get(&state, None, None, &json!({ "id": "no-such-id" }));
         assert_eq!(result["error"]["code"], -32001);
     }
 
@@ -952,8 +999,8 @@ mod tests {
         let tasks = Arc::new(papaya::HashMap::<String, A2aTask>::new());
         let now = Instant::now();
         let old = now.checked_sub(Duration::from_secs(600)).expect("clock supports -600s");
-        tasks.pin().insert("stale".into(), A2aTask { task: mk("stale"), created_at: old });
-        tasks.pin().insert("fresh".into(), A2aTask { task: mk("fresh"), created_at: now });
+        tasks.pin().insert("stale".into(), A2aTask { task: mk("stale"), created_at: old, owner: None });
+        tasks.pin().insert("fresh".into(), A2aTask { task: mk("fresh"), created_at: now, owner: None });
         evict_stale_tasks(&tasks, now);
         assert!(tasks.pin().get("stale").is_none(), "stale task evicted");
         assert!(tasks.pin().get("fresh").is_some(), "fresh task survives the sweep");
@@ -967,9 +1014,98 @@ mod tests {
             status:    TaskStatus { state: "completed".into() },
             artifacts: vec![],
         };
-        tasks.pin().insert("t1".into(), A2aTask { task, created_at: Instant::now() });
+        tasks.pin().insert("t1".into(), A2aTask { task, created_at: Instant::now(), owner: Some("token:gw/a".into()) });
         let state = A2aState { task_ctx: make_ctx(), tasks };
-        let result = handle_tasks_cancel(&state, None, &json!({ "id": "t1" }));
+        let creator = ResolvedPrincipal { principal: "token:gw/a".into(), scopes: Vec::new() };
+        let result = handle_tasks_cancel(&state, Some(&creator), None, &json!({ "id": "t1" }));
         assert_eq!(result["error"]["code"], -32002);
+        // The owner rule comes before the state rule: another identity, or no identity, is -32004.
+        let other = ResolvedPrincipal { principal: "token:gw/b".into(), scopes: Vec::new() };
+        assert_eq!(handle_tasks_cancel(&state, Some(&other), None, &json!({ "id": "t1" }))["error"]["code"], -32004);
+        assert_eq!(handle_tasks_cancel(&state, None, None, &json!({ "id": "t1" }))["error"]["code"], -32004);
+        assert_eq!(handle_tasks_get(&state, None, None, &json!({ "id": "t1" }))["error"]["code"], -32004);
+        assert_eq!(handle_tasks_get(&state, Some(&creator), None, &json!({ "id": "t1" }))["result"]["id"], "t1");
+    }
+
+    /// **Public `/a2a` `tasks/get` and `tasks/cancel` had no owner check.** Task ids are caller-chosen
+    /// on `tasks/send`, so they are enumerable, and both methods looked an id up with no caller — any
+    /// client could read another caller's completed artifact or cancel its task by naming the id. The
+    /// federated half was closed in the Phase-C audit (2026-09-20); the native half was not. Now a task
+    /// records the principal that created it, and `tasks/get` / `tasks/cancel` answer **only that
+    /// identity**: another principal, or an anonymous caller, is refused `-32004` naming the rule, and
+    /// a `tasks/send` naming an id another principal owns is refused before any dispatch. Seen failing
+    /// first: the second principal read the first's task (`result.id == "t-alice"`).
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn a_task_is_readable_and_cancellable_only_by_the_identity_that_created_it() {
+        use crate::capability::Capability;
+        use crate::test_util::alloc_port;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "alice-tok".into(), scopes: vec!["kv:read".into()] },
+            crate::GatewayToken { token: "bob-tok".into(), scopes: vec!["kv:read".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg).with_a2a());
+        agent.start().await.unwrap();
+        let _reg = agent.capabilities().advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+        let ran = Arc::new(AtomicUsize::new(0));
+        {
+            let (agent, ran) = (Arc::clone(&agent), Arc::clone(&ran));
+            let mut rx = agent.service().rpc_rx("skill.invoke");
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    agent.service().rpc_respond(&req, b"dispatched".to_vec());
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let http = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{http_port}/a2a");
+        let call = |bearer: Option<&str>, method: &str, params: serde_json::Value| {
+            let (http, url, method) = (http.clone(), url.clone(), method.to_string());
+            let bearer = bearer.map(str::to_owned);
+            async move {
+                let mut req = http.post(&url).json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}));
+                if let Some(b) = bearer {
+                    req = req.bearer_auth(b);
+                }
+                let r = req.send().await.unwrap();
+                assert_eq!(r.status(), 200, "answered as JSON-RPC");
+                r.json::<serde_json::Value>().await.unwrap()
+            }
+        };
+        let send = |id: &str| json!({
+            "id": id, "skillId": "depot/dispatch",
+            "message": {"role": "user", "parts": [{"type": "text", "text": "go"}]},
+        });
+
+        let v = call(Some("alice-tok"), "tasks/send", send("t-alice")).await;
+        assert_eq!(v["result"]["status"]["state"], "completed", "{v}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+        for (who, method) in [(Some("bob-tok"), "tasks/get"), (Some("bob-tok"), "tasks/cancel"), (None, "tasks/get"), (None, "tasks/cancel")] {
+            let v = call(who, method, json!({"id": "t-alice"})).await;
+            assert_eq!(v["error"]["code"], -32004, "{who:?} {method}: not the identity that created the task: {v}");
+            assert!(v["error"]["message"].as_str().unwrap().contains("created it"), "names the rule: {v}");
+        }
+        // The creator reads its own task.
+        let v = call(Some("alice-tok"), "tasks/get", json!({"id": "t-alice"})).await;
+        assert_eq!(v["result"]["id"], "t-alice", "{v}");
+        // A caller-chosen id cannot be taken over by another principal's `tasks/send`: refused before dispatch.
+        let v = call(Some("bob-tok"), "tasks/send", send("t-alice")).await;
+        assert_eq!(v["error"]["code"], -32004, "{v}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "nothing was dispatched for the refused send");
+        let v = call(Some("alice-tok"), "tasks/get", json!({"id": "t-alice"})).await;
+        assert_eq!(v["result"]["id"], "t-alice", "alice's task is still hers: {v}");
+
+        agent.shutdown().await;
     }
 }

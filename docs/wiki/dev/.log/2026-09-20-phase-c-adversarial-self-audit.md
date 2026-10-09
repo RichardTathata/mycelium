@@ -49,7 +49,10 @@ in v2.9.1** — it is a design gap, not a defect, and needs its own decision.
    for exactly this reason before reading the tail back; the receipt path did not.
 2. **A federated partner could read or cancel any caller's tasks** — only `tasks/send` authorised
    against the export; `tasks/get` and `tasks/cancel` took no caller and no export, over
-   caller-supplied and therefore enumerable ids.
+   caller-supplied and therefore enumerable ids. *2026-10-09:* this closed the federated half only.
+   A native bearer — or no bearer — could still read or cancel any task by id; closed by
+   `A2aTask::owner` (a task answers only the identity that created it, `-32004`; test
+   `a_task_is_readable_and_cancellable_only_by_the_identity_that_created_it`).
 3. **A client could supply its own caller-context frame** through the raw-emission routes, where the
    gateway is the sender so `via` matches by construction. The existing guard caught only *bare* bytes.
 4. **A remote panic in item 7's own refusal path** — an under-length payload, reachable *because* the

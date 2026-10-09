@@ -201,6 +201,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reached the gateway is now refused for a façade call (`provider_without_caller_context`, failed over) instead of
   being called as the node — the same rule `/gateway/llm/call` has; an exhaustive `match` on `RouteError` needs the
   new arm.
+- **Public `/a2a` `tasks/get` and `tasks/cancel` had no owner check.** Task ids are caller-chosen on `tasks/send`,
+  so they are enumerable, and both methods looked an id up with no caller: any client — any bearer, or none — could
+  read another caller's completed artifact or cancel its task by naming the id. The Phase-C audit (2026-09-20)
+  closed this for federated credentials only. A task now records the principal that created it (`A2aTask::owner`)
+  and `tasks/get` / `tasks/cancel` answer **only that identity**; another principal, or an anonymous caller (no
+  identity to match), is refused `-32004` naming the rule, and a `tasks/send` or `tasks/sendSubscribe` under an id
+  another identity owns is refused before any dispatch. Every reader of the task map enumerated
+  (`grep -n "\.tasks" src/agent/a2a.rs`: the two inserts, `get`, `cancel`, the eviction sweep). Seen failing first:
+  `a_task_is_readable_and_cancellable_only_by_the_identity_that_created_it` (the second principal read the first's
+  task). **Upgrade note:** an A2A client that polls `tasks/get` must send it under the same bearer as its
+  `tasks/send`; an anonymous client gets its result on the `tasks/send` response or the `sendSubscribe` stream, which
+  already carry it (`deprecations.md` §23).
 - **The signal SSE doors streamed every protected RPC request to a `mesh:read` holder.** `/signals/{kind}` and
   `/gateway/signal/sse/{kind}` registered a receiver for whatever kind the path named — the same handler table
   `rpc/serve` and the native MCP tools register on, fanned to every receiver — so a `mesh:read` token could open
