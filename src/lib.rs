@@ -224,6 +224,8 @@
 pub mod capability;
 pub mod capability_config;
 pub mod wire_check;
+/// Stop signals for a long-running node: SIGINT or SIGTERM, installed before the bind, a second one exits.
+pub mod shutdown;
 pub mod mesh_manifest;
 /// Federation identity and policy objects (v3 item 2 — `docs/design/federated-domains.md`).
 /// The contract (types, canonical signing bytes) and, under `tls`, the transport's first arm (`edge`,

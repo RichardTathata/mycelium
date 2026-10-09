@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async move {
         // Before anything binds: a stop that arrives during startup is then an orderly shutdown too.
-        let shutdown = ShutdownSignal::install()?;
+        let shutdown = mycelium::shutdown::ShutdownSignal::install()?;
         let node = NodeId::new(&config.bind_address, config.bind_port)?;
         let agent = Arc::new(GossipAgent::new(node, config));
         // A3: the gateway publish route, before start(), from the hosts table's trusted keys.
@@ -236,45 +236,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
-/// SIGINT **or SIGTERM** — the second is what `docker stop` and a Kubernetes pod stop send. Awaiting only
-/// `ctrl_c()` left a stopped container killed without its `--trace-dir` output and without withdrawing
-/// its installs (doc-coverage run 22, code gap 2).
-///
-/// The handlers are **installed at the top of the runtime, before the node binds** and awaited later: a
-/// handler registered when the wait begins leaves startup — the bind, the librarian, `Stem::start` —
-/// exposed to the default action, which kills the process (the review of #579 reproduced it, 2 in 40).
-struct ShutdownSignal {
-    #[cfg(unix)]
-    int:  tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    term: tokio::signal::unix::Signal,
-}
-
-impl ShutdownSignal {
-    fn install() -> std::io::Result<Self> {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            Ok(Self { int: signal(SignalKind::interrupt())?, term: signal(SignalKind::terminate())? })
-        }
-        #[cfg(not(unix))]
-        {
-            Ok(Self {})
-        }
-    }
-
-    #[cfg_attr(not(unix), allow(unused_mut))]
-    async fn wait(mut self) -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = self.int.recv() => Ok(()),
-                _ = self.term.recv() => Ok(()),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            tokio::signal::ctrl_c().await
-        }
-    }
-}

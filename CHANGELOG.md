@@ -9,7 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`mycelium::shutdown::ShutdownSignal`** — one stop-signal handler for the node binary, `mycelium-stem` and the
+  long-running examples: SIGINT or SIGTERM, installed before the bind, and **a second signal exits at once** with
+  `128 + signal` (a hung shutdown used to wait for SIGKILL). Seen failing first: `tests/shutdown_signal.rs` (the
+  child process ignored the second SIGTERM).
+- **`mycelium-py` 0.2.8: `SupersededError`** — `consistent_set`, `cross_group_propose`, `distributed_lock` and
+  `elect_leader` raise it for a 409 `superseded` (the slot was decided for another value); still an
+  `httpx.HTTPStatusError`. Python only. Seen failing first:
+  `mycelium-py/tests/test_superseded.py`.
+
 ### Fixed
+- **The demo images stop on `docker stop`.** `federation_node`, `llm_agent`, `three_node_demo` and
+  `confined_fleet_node` (each an image's entrypoint) awaited Ctrl-C only or never stopped, so a stop waited out Docker's grace period and was killed;
+  `three_node_demo` now also shuts its agent down, flushing a configured persistence directory.
 - **`mycelium-stem` shuts down on SIGTERM** (`docker stop`, a Kubernetes pod stop) as it does on SIGINT — writing its
   `--trace-dir` output and running its shutdown. It awaited `ctrl_c()` only, so a stopped container was killed
   (doc-coverage run 22, code gap 2). **The stem and the `mycelium` node also take a stop that arrives during startup**:

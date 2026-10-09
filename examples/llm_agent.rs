@@ -1639,6 +1639,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent_n0 = make_agent(PORT_N0, &[PORT_N1, PORT_N2], Some(GW_PORT_N0));
     let agent_n1 = make_agent(PORT_N1, &[PORT_N0, PORT_N2], Some(GW_PORT_N1));
     let agent_n2 = make_agent(PORT_N2, &[PORT_N0, PORT_N1], Some(GW_PORT_N2));
+    // SIGINT or SIGTERM (`docker stop`), installed before the bind; a second signal exits at once.
+    let shutdown = mycelium::shutdown::ShutdownSignal::install()?;
     agent_n0.start().await?;
     agent_n1.start().await?;
     agent_n2.start().await?;
@@ -2057,8 +2059,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Keep main alive
-    tokio::signal::ctrl_c().await?;
+    // Keep main alive until a stop signal.
+    shutdown.wait().await?;
     println!("\nShutting down.");
     Ok(())
 }

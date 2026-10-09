@@ -1753,6 +1753,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent.with_http_routes(extra);
     }
 
+    // SIGINT or SIGTERM (`docker stop` — this binary is the image's entrypoint), installed before the bind;
+    // a second signal exits at once. The roles below never return, so the signal ends the run.
+    let shutdown = mycelium::shutdown::ShutdownSignal::install()?;
     agent.start().await.expect("agent start");
     info!("[{role}] node_id={}", agent.node_id());
 
@@ -1792,24 +1795,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    match role.as_str() {
-        "tool-a" => run_tool_a(agent, &role).await,
-        "tool-b" => run_tool_b(agent, &role).await,
-        "tool-sf"   => run_tool_sf(agent, &role).await,
-        "tool-book" => run_tool_book(agent, &role).await,
-        "verifier"  => run_verifier(agent, &role).await,
-        "llm"    => run_chat_server(agent, LlmCfg::from_env(), chat_port).await,
-        "mgmt"   => run_mgmt_server(agent, mgmt_port).await,
-        "node"    => run_node(agent, &role).await,
-        "overlay" => {
-            let _consensus = agent.consensus().start_consensus_listener(ConsensusConfig::default());
-            info!("[overlay] consensus listener started; HTTP gateway ready on :{http_port}");
-            loop { tokio::time::sleep(std::time::Duration::from_secs(60)).await; }
+    let role_agent = Arc::clone(&agent);
+    let run_role = async move {
+        let agent = role_agent;
+        match role.as_str() {
+            "tool-a" => run_tool_a(agent, &role).await,
+            "tool-b" => run_tool_b(agent, &role).await,
+            "tool-sf"   => run_tool_sf(agent, &role).await,
+            "tool-book" => run_tool_book(agent, &role).await,
+            "verifier"  => run_verifier(agent, &role).await,
+            "llm"    => run_chat_server(agent, LlmCfg::from_env(), chat_port).await,
+            "mgmt"   => run_mgmt_server(agent, mgmt_port).await,
+            "node"    => run_node(agent, &role).await,
+            "overlay" => {
+                let _consensus = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+                info!("[overlay] consensus listener started; HTTP gateway ready on :{http_port}");
+                loop { tokio::time::sleep(std::time::Duration::from_secs(60)).await; }
+            }
+            other    => {
+                error!("Unknown MYCELIUM_ROLE='{other}' — expected tool-a, tool-b, tool-sf, tool-book, verifier, llm, mgmt, node, or overlay");
+                std::process::exit(1);
+            }
         }
-        other    => {
-            error!("Unknown MYCELIUM_ROLE='{other}' — expected tool-a, tool-b, tool-sf, tool-book, verifier, llm, mgmt, node, or overlay");
-            std::process::exit(1);
-        }
+    };
+    tokio::select! {
+        _ = run_role => {}
+        r = shutdown.wait() => r?,
     }
+    // An orderly stop: the persistence directory, when configured, is flushed and released.
+    agent.shutdown().await;
     Ok(())
 }

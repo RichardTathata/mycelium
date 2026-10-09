@@ -89,6 +89,31 @@ class _ProtectedWriteError(PermissionError, httpx.HTTPStatusError):
         return self.message
 
 
+class SupersededError(httpx.HTTPStatusError):
+    """A consensus write that did not commit **your** value: the slot was decided for another (HTTP 409
+    ``superseded``, substrate 2.30.0+ — the normal answer to a concurrent loser).
+
+    Raised by ``consistent_set``, ``cross_group_propose``, ``distributed_lock`` and ``elect_leader`` (0.2.8). Still an :class:`httpx.HTTPStatusError`,
+    what these verbs raised for the same 409 before, so an existing ``except`` keeps catching it. Read the
+    decided value with ``consistent_get``. A timeout (504) and the other 409s stay plain HTTP errors.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        super().__init__("the slot was decided for another value (409 superseded)",
+                         request=response.request, response=response)
+
+
+def _raise_if_superseded(resp: httpx.Response) -> None:
+    if resp.status_code != 409:
+        return
+    try:
+        word = resp.json().get("error")
+    except (ValueError, AttributeError):
+        return
+    if word == "superseded":
+        raise SupersededError(resp)
+
+
 class ProtectedKeyError(_ProtectedWriteError):
     """The gateway refused a **protected key** on a raw KV route (HTTP 403 ``protected_key``).
 
@@ -1007,14 +1032,15 @@ class MyceliumAgent:
 
         Returns a :class:`CommitResult` — ``.persisted`` says whether the committed slot also
         reached the gateway node's own disk (since 0.2.4; ``None`` from a pre-v2.4.2 node).
-        Raises ``httpx.HTTPStatusError`` when the commit did not happen — 409 ``superseded`` (the slot was
-        decided for another value), 409 ``topology_unsatisfied``, 504 on a timeout (which does not mean the
-        value lost: read the key) — and :class:`ProtectedKeyError` for a key in an owned namespace, as
+        Raises :class:`SupersededError` when the slot was decided for another value (409, 0.2.8); a plain
+        ``httpx.HTTPStatusError`` for 409 ``topology_unsatisfied`` or a 504 timeout (which does not mean the
+        value lost: read the key); and :class:`ProtectedKeyError` for a key in an owned namespace, as
         :meth:`set` does."""
         body = {"key": key, "value_b64": base64.b64encode(value).decode()}
         with self._pool.sync() as c:
             r = c.post("/gateway/overlay/consistent/set", json=body)
             _raise_if_protected(r, key=key)
+            _raise_if_superseded(r)
             r.raise_for_status()
             data = r.json()
             if not data.get("ok"):
@@ -1042,7 +1068,9 @@ class MyceliumAgent:
         """
         body = {"name": name, "ttl_secs": ttl_secs}
         with self._pool.sync() as c:
-            data = c.post("/gateway/overlay/lock/acquire", json=body).raise_for_status().json()
+            resp = c.post("/gateway/overlay/lock/acquire", json=body)
+            _raise_if_superseded(resp)
+            data = resp.raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "lock acquisition failed"))
         return LockGuard(_agent=self, guard_id=data["guard_id"], token=int(data["token"]))
@@ -1053,7 +1081,9 @@ class MyceliumAgent:
         """Elect a leader for ``group`` via consensus. Returns the winner's ``"IP:PORT"``."""
         body = {"group": group}
         with self._pool.sync() as c:
-            data = c.post("/gateway/overlay/elect", json=body).raise_for_status().json()
+            resp = c.post("/gateway/overlay/elect", json=body)
+            _raise_if_superseded(resp)
+            data = resp.raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "election failed"))
         return data["leader"]
@@ -1094,7 +1124,9 @@ class MyceliumAgent:
             ],
         }
         with self._pool.sync() as c:
-            data = c.post("/gateway/consensus/cross_group_propose", json=body).raise_for_status().json()
+            resp = c.post("/gateway/consensus/cross_group_propose", json=body)
+            _raise_if_superseded(resp)
+            data = resp.raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "cross_group_propose failed"))
         return CommitResult._from_json(data)

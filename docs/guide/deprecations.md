@@ -383,3 +383,29 @@ promise quorum, a proposal of any other value for that slot is refused (`Timeout
 while fewer than a quorum are upgraded — the same shape as 2.14.0's value-bound votes. Do not downgrade a node
 mid-slot.
 
+## 22. Consensus timeout reasons say who answered; a second stop signal exits; a lost write is typed (2.31.0)
+
+**What changes.**
+- **`mycelium_consensus_timeouts_total{reason}`** is labelled by what *other* acceptors answered on the last attempt:
+  `no_voters` (none — a partition, or mid-upgrade every acceptor older than 2.30.0), `promise_short` (some
+  promised, too few), `contended` (another proposer is ahead), `blocked` (the slot's top acceptance is known only by
+  digest), `quorum_short` (some voted, too few). `contended` and `blocked` are new. A partition inside a group
+  proposal used to read `quorum_short` (the proposer's own vote counted) and now reads `no_voters`; a refusal used
+  to read `no_voters` or `quorum_short` and now reads `contended`.
+- **A second SIGINT/SIGTERM during shutdown exits at once** with `128 + signal` (130, 143) — the node binary,
+  `mycelium-stem` and the long-running examples (`mycelium::shutdown::ShutdownSignal`). A shutdown that hung used
+  to wait for SIGKILL. The first signal still runs the orderly shutdown, including one that arrives during
+  startup.
+- **`mycelium-py` 0.2.8:** `consistent_set`, `cross_group_propose`, `distributed_lock` and `elect_leader` raise
+  `SupersededError` for a 409 `superseded` — still an `httpx.HTTPStatusError`. Python only: the TypeScript SDK
+  still rejects with its generic error.
+
+**Will the compiler tell me?** No — a metric label, an exit code and a Python subclass.
+
+**Migration.** An alert keyed on a single `reason` value should match the new set — for "consensus is
+stalling", `reason=~"no_voters|promise_short|quorum_short"`; `contended` is contention, not failure. A supervisor
+that sends a second signal to hurry a stop now gets an immediate exit with 130/143 rather than a wait; send one and
+allow the grace period if the orderly shutdown matters (the stem's trace and its withdrawals, unsynced
+persistence). Existing
+`except httpx.HTTPStatusError` handlers keep catching a lost write; catch `SupersededError` to tell it apart.
+
