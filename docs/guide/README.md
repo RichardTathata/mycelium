@@ -209,7 +209,7 @@ agent.mesh().signal_rx(signal_kind::INVOKE);  // returns mpsc::Receiver<Signal>
 agent.mesh().emit(signal_kind::INVOKE, SignalScope::Group("nlp".into()), payload);
 
 // Layer III — quorum agreement (opt-in)
-agent.consensus().consistent_set("seq/counter", b"1").await?;
+agent.consensus().consistent_set("seq/counter", &b"1"[..]).await?;
 
 // Capability system — discovery
 let cap = agent.capabilities().advertise_capability(Capability::new("llm", "inference"), Duration::from_secs(60));

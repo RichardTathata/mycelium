@@ -220,8 +220,9 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   `GET /gateway/reason/blob/{id}` with a token that has `llm:read` says which: a body of `{"error":"refused"}`
   means fix the holder's membership or authority, not the token. `refused` needs a substrate ≥ 2.28.0; against
   an older one every holder refusal reads as 503 `unavailable`. **Which providers a miss asked** — and what each
-  answered (`miss`, `refused(reason)`, `unreachable`) — is a `debug` line, `blob fetch missed`: start the node
-  with `RUST_LOG=warn,mycelium_reason=debug` to see it.
+  answered (`miss`, `refused(reason)`, `unreachable`) — is a `debug` line, `blob fetch missed`: raise
+  `mycelium_reason` to `debug` in the node's log filter to see it (the `reason_node` example reads
+  `RUST_LOG=warn,mycelium_reason=debug`).
   **Upgrade order:** the checkpointer to 0.3.0 before the reason nodes to 0.7.0 (a 0.2.x checkpointer reads a
   503 or 502 as an unrelated HTTP error). A damaged copy on disk is repaired by putting the right bytes again —
   the next successful mesh fetch on that node does it.

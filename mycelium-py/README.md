@@ -350,8 +350,9 @@ retry it on the strength of a timeout. The same rule crosses a domain boundary a
 
 #### `consistent_set(key, value)` / `consistent_get(key) → bytes | None`
 
-Ballot-serialized (consensus-durable) write: runs a consensus round before writing. Concurrent
-writes to the same key are totally ordered by ballot number. `consistent_get` is a local read
+Ballot-serialized (consensus-durable) write: runs a consensus round before writing. Of two concurrent
+writes of different values to one key, at most one succeeds; the other is refused (409 `superseded`) or
+times out (504), and a timeout does not mean its value lost — read the key (substrate ≥ 2.30.0). `consistent_get` is a local read
 and may lag by up to one anti-entropy round.
 
 ```python

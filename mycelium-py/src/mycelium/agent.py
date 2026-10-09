@@ -1002,13 +1002,15 @@ class MyceliumAgent:
 
     def consistent_set(self, key: str, value: bytes) -> CommitResult:
         """Ballot-serialized (consensus-durable) write. Runs a consensus round before writing ``key``.
-        Concurrent writes to the same key are totally ordered by ballot number.
+        Of two concurrent writes of different values to one key, at most one succeeds (substrate >= 2.30.0).
         ``consistent_get`` is a local read and may lag by up to one anti-entropy round.
 
         Returns a :class:`CommitResult` — ``.persisted`` says whether the committed slot also
         reached the gateway node's own disk (since 0.2.4; ``None`` from a pre-v2.4.2 node).
-        Raises ``RuntimeError`` if the commit itself failed, and :class:`ProtectedKeyError` for a key
-        in an owned namespace, as :meth:`set` does."""
+        Raises ``httpx.HTTPStatusError`` when the commit did not happen — 409 ``superseded`` (the slot was
+        decided for another value), 409 ``topology_unsatisfied``, 504 on a timeout (which does not mean the
+        value lost: read the key) — and :class:`ProtectedKeyError` for a key in an owned namespace, as
+        :meth:`set` does."""
         body = {"key": key, "value_b64": base64.b64encode(value).decode()}
         with self._pool.sync() as c:
             r = c.post("/gateway/overlay/consistent/set", json=body)

@@ -1545,7 +1545,7 @@ agent.<span class="cs">mesh</span>().<span class="cs">suppress</span>(<span clas
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card card-accent-purple">
           <div class="card-title">Epidemic ballot voting — no leader</div>
-          <div class="card-body">CASPaxos-adjacent. Proposals gossip through the cluster. No Raft leader. Concurrent writes to the same key are totally ordered by ballot number.</div>
+          <div class="card-body">CASPaxos-adjacent. Proposals gossip through the cluster. No Raft leader. Of two concurrent writes of different values to one key, at most one succeeds; a proposer first asks a quorum what it has already accepted.</div>
         </div>
         <div class="card card-accent-blue">
           <div class="card-title">Cross-group federation</div>

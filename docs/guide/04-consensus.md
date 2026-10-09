@@ -37,15 +37,18 @@ sequenceDiagram
 
     P->>A: Prepare(slot=42, ballot=b)
     P->>B: Prepare(slot=42, ballot=b)
+    P->>C: Prepare(slot=42, ballot=b)
+    Note over A,C: Prepare goes to the whole scope;<br/>each answer goes back to P alone
     A-->>P: PrepareAck(promised b; accepted: none)
     B-->>P: PrepareAck(promised b; accepted: none)
-    Note over P: a quorum promised; nothing accepted,<br/>so P may carry its own value "x"<br/>(else the highest-ballot accepted value)
+    Note over P: P counts itself — with A and B a quorum (3 of 4) promised;<br/>nothing accepted, so P may carry its own value "x"<br/>(else the highest-ballot accepted value)
     P->>A: Propose(slot=42, ballot=b, value="x")
     P->>B: Propose(slot=42, ballot=b, value="x")
     P->>C: Propose(slot=42, ballot=b, value="x")
     A-->>P: Vote(b, digest("x"))
     C-->>P: Vote(b, digest("x"))
-    Note over P: quorum of value-bound votes
+    Note over A,C: votes are broadcast to the group;<br/>only the proposer counts them
+    Note over P: P's own vote, A and C — 3 of 4, bound to "x"
     P->>A: Commit(slot=42, b, "x")
     P->>B: Commit(slot=42, b, "x")
     P->>C: Commit(slot=42, b, "x")
@@ -199,9 +202,10 @@ The key is yours to choose except under `sys/` and `consensus/`, which the subst
   (2-of-3 quorum). Kill two and it blocks (no quorum).
 - Watch `ballot/` keys appear in the KV dump (`curl
   http://localhost:8400/gateway/kv/keys?prefix=consensus/`) as votes propagate.
-- Run two writes to the same key at once from different nodes: one answers `{"ok": true, …}`, the other
-  **409** `{"ok": false, "error": "superseded"}` — the later proposer learned the earlier's value in its
-  prepare phase and committed *that* (2.30.0). A timeout is **504**.
+- Run two writes of **different** values to the same key at once from different nodes: at most one answers
+  `{"ok": true, …}`; the other **409** `{"ok": false, "error": "superseded"}` — the later proposer found the
+  earlier's value already committed, or accepted by a quorum, which it then committed in its own place (2.30.0)
+  — or **504** on a timeout, which does not mean its value lost (read the key).
 
 ---
 
@@ -500,10 +504,10 @@ let slices = agent.consensus().group_trust("workers");
 |---|---|
 | Ballot numbering (SCP §6.2) | Monotonic counter at `consensus/ballot/{slot}`, kept across commits; `consensus/decided/{slot}` records the ballot a commit was decided at — a floor acceptors refuse at or below (2.30.0) |
 | Prepare phase (2.30.0) | A proposer asks a quorum what it has accepted before proposing, and carries the highest-ballot value reported — the property that keeps two concurrent proposers from committing different values |
-| Group-scoped votes | All members hear all votes → any member reaching quorum can commit; proposer crash does not stall the slot |
+| Group-scoped votes | Votes are broadcast to the group, but only the proposer counts them and commits. If it crashes after a quorum accepted, the next proposer's prepare phase learns the accepted value and finishes it |
 | Proposer self-votes | Proposer always counts as one voter; no listener required for single-node quorum |
 | LWW commit idempotency | Two simultaneous commits of the same value are safe; higher-ballot commit wins via LWW timestamp |
-| Optimistic commit / converged-holder | Before 2.30.0 `group_propose` committed against a node's *local* committed view, so under gossip lag two proposers could both return `Committed`; the prepare phase prevents that when the two quorums intersect, and it remains possible across an electorate change (§ *Changing an electorate*, above). Only the LWW-by-HLC **converged** value (`live_committed_value`) is authoritative — confirm the holder there; don't treat a `Committed` return as exclusive on its own. This is why locks fence on the commit HLC (see [the two rules](#the-two-rules-that-make-it-correct)) |
+| Optimistic commit / converged-holder | Before 2.30.0 `group_propose` committed against a node's *local* committed view, so under gossip lag two proposers could both return `Committed`; the prepare phase prevents that when the two quorums intersect, and it remains possible across an electorate change ([§ What a successful election means](#what-a-successful-election-means)). Only the LWW-by-HLC **converged** value (`live_committed_value`) is authoritative — confirm the holder there; don't treat a `Committed` return as exclusive on its own. This is why locks fence on the commit HLC (see [the two rules](#the-two-rules-that-make-it-correct)) |
 | No ordering log | Each slot is an independent KV entry (CASPaxos-style); no WAL required |
 | Signing | With `tls` feature: all consensus payloads are Ed25519-signed; forged ballots are dropped. Without: trusted-domain only; Byzantine fault tolerance is out of scope |
 
@@ -522,10 +526,13 @@ as first-class APIs without touching the gossip core.
 
 #### Consensus KV (`consistent_set` / `consistent_get`)
 
-Runs a prepare and a voting round before writing. When two callers race for one key and their quorums
-intersect, the later one learns the earlier's accepted value, commits *that*, and gets
-`Err(ConsistencyError::Superseded)` — exactly one caller sees `Ok(())`. Across an electorate change, or against
-proposers older than 2.30.0, that is not guaranteed (§ *Changing an electorate*).
+Runs a prepare and a voting round before writing. When two callers race with **different** values for one key
+and their quorums intersect, at most one sees `Ok(())`; the other gets `Err(Superseded)` — the later proposer
+found the earlier's value already committed, or accepted by a quorum, which it then committed in its own place —
+or `Err(Timeout)`. A timeout does not mean your value lost: a later proposer may have adopted and committed it, so
+read `consistent_get`. Two callers writing the **same** value can both see `Ok(())`. Across an electorate change,
+or against proposers older than 2.30.0, none of this is guaranteed
+([§ What a successful election means](#what-a-successful-election-means)).
 
 `consistent_get` is a **local read** — it returns the latest committed value that has
 anti-entropy-propagated to this node, which may lag by up to one gossip round. This is
@@ -534,7 +541,7 @@ against lower-ballot writers; it is not a substitute for linearizable reads.
 
 ```rust
 // Any node can write — Ok(()) only if YOUR value was decided; Err(Superseded) means another caller's was
-agent.consensus().consistent_set("config/endpoint", b"https://api.v2/").await?;
+agent.consensus().consistent_set("config/endpoint", &b"https://api.v2/"[..]).await?;
 let val = agent.consensus().consistent_get("config/endpoint"); // local read, eventually consistent
 ```
 

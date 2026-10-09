@@ -24,11 +24,12 @@
 //! # Design notes
 //!
 //! - **Ballot numbering** (from SCP §6.2): monotonic counter stored at
-//!   `consensus/ballot/{slot}`; higher ballot supersedes lower.
-//! - **Group-scoped votes**: all group members see all votes; any member that
-//!   reaches quorum may commit — proposer crash does not stall the slot.
-//! - **No signing**: trusted-domain only; Byzantine fault tolerance is
-//!   out of scope.
+//!   `consensus/ballot/{slot}`, kept across commits; `consensus/decided/{slot}` is the floor a commit sets.
+//! - **Group-scoped votes**: votes are broadcast to the group, but only the proposer counts them and
+//!   commits; if it crashes after a quorum accepted, the next proposer's prepare phase finishes it.
+//! - **Signing**: with `tls`, every consensus payload is Ed25519-signed and a vote or proposal must be
+//!   signed by the node it names; without it, trusted-domain only. Byzantine fault tolerance is out of
+//!   scope.
 //! - **Quorum slices** (optional, SCP §3.1): nodes may declare trust sets via
 //!   [`GossipAgent::declare_trust`]. With `use_trust_slices` the proposer's tally counts only
 //!   votes from its declared set — a fixed *eligible* voter set. The quorum size is still simple

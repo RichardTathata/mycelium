@@ -209,7 +209,8 @@ intervals. What to expect and do:
   `mycelium-stem` does not handle — it is killed without writing the trace or withdrawing gracefully. Stop it
   with `docker kill -s INT <container>` (or `kill -INT`) to collect a trace.
 - **A runnable ceiling.** `cargo run -p mycelium-wasm-host --example first_stem_fleet` (run in CI) declares a
-  band of exactly two over three stems that all self-elect, so the surplus host withdraws by rank.
+  band of exactly two over three stems that all self-elect; the run settles to two, the surplus host withdrawing
+  by rank.
 
 **Placed blobs that need a runtime.** A model or data pack is *placed* by a hosting unit, but a
 placed file serves nothing until the node-local runtime has it. A unit says how, per capability

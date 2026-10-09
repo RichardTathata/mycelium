@@ -59,6 +59,13 @@ concern). WHY is usually shared Dev+Ops.
     and `RELEASING.md` § 6 now says to replace both kinds at each cut. `CONTRIBUTING.md` gains the prerequisites and
     the recipe for making CI run a new test or example; its layer table no longer names a `sig/` prefix that does
     not exist, and its file paths point at `mycelium-core/`.
+  - **The independent review of this run's PR** (rule 4) found its own first fixes short: the snippet still did not
+    compile — `b"v2"` is a `&[u8; 2]`, which `Bytes` has no `From` for (`&b"v2"[..]`; the same in guide 04 and the
+    guide README); "exactly one caller sees `Ok(())`" was false for two callers writing the same value and under a
+    timeout; the new diagram drew a targeted prepare and unicast votes; guide 04's design table and the module doc
+    still said any member reaching quorum commits (only the proposer counts votes) and the module doc "no
+    signing"; the same stale wording survived in the Python SDK's README and docstring (which also named the wrong
+    exception — a 409 raises `httpx.HTTPStatusError`) and the deck. All fixed in the same PR.
   - **Strict eligibility · HOW·Dev `~` → ✓** (closed by #558: `examples/strict_eligibility.rs` calls the shipped
     history source, CI-run, linked from guide 21). **Artifact delivery** unchanged, spot-checked.
 - **2026-10-07 (run 21)** — diff-gated over **#541–#551** (v2.26.0 and the unreleased 2.27.0 window: the

@@ -87,7 +87,8 @@ The Makefile's `check` and `check-full` targets are the canonical command lists;
 copy. **Prerequisites beyond the Rust toolchain:** `make check` needs **Python ≥ 3.11** (the test-inventory
 check imports `tomllib`; PyYAML is fetched into `target/check-venv` if missing). `make check-full` also runs the
 Python suites, so first, in a virtualenv:
-`pip install -e mycelium-py -e langgraph-checkpoint-mycelium pytest pytest-asyncio`.
+`pip install -e './mycelium-py[typed]' -e langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse`
+(CI's own line).
 
 The integration suite requires Docker. The first run builds images from scratch;
 subsequent runs reuse the layer cache and are fast.

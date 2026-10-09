@@ -276,7 +276,7 @@ There is no global error wrapper — callers match exactly the variants they
 care about:
 
 ```rust
-match agent.consensus().consistent_set("seq/head", b"v2").await {
+match agent.consensus().consistent_set("seq/head", &b"v2"[..]).await {
     Ok(())                                   => { /* committed */ }
     Err(ConsistencyError::Superseded)        => { /* read current, re-evaluate */ }
     Err(ConsistencyError::Timeout { .. })    => { /* retry */ }
