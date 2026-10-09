@@ -14,7 +14,7 @@ uncredentialed:
 
 | Endpoint | Tells you |
 |---|---|
-| `GET /health` | `200` = process alive (liveness probe) |
+| `GET /health` | `200` = process alive (liveness probe). With `[persistence]` the body carries a `persistence` block: `wal_refusing_appends` (`true` while the WAL writer refuses every append after a failed write, until a snapshot truncates the torn tail — since 2026-10-09), its `reason`, and `dropped_appends` (appends with no WAL record: queue-full drops, the failed write, the refusals) |
 | `GET /ready` | `200` = startup complete → serving KV/signals/membership (readiness probe). Capability discovery gossips independently and does **not** gate readiness — a node advertising no soft state is still ready (changed 2026-07-15) |
 | `GET /stats` | `node_id`, `cluster_name`, `store_entries`, `dropped_frames`, `task_count`, and the tripwire counters (`commit_conflicts`, `sys_namespace_violations`, `cap_authz_violations`, `schema_mismatch`, `governance_changes` / `governance_unaudited` (accepted governance writes at this gateway — `/gateway/govern/*`, `identity/revoke` — and those that left no audit record; 2.27.0. A plain group's `mesh:write` join is audited, not counted), `rate_limited_senders`, `individual_flood_fallbacks`), plus liveness (`dead_shards`, `gc_alive`, `health_monitor_alive`) |
 | `GET /metrics` | Prometheus scrape (requires the `metrics` feature). Carries a `cluster` label on every series when `cluster_name` is set |

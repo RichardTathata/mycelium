@@ -120,6 +120,10 @@ pub enum WalMsg {
     /// while a cloned handle somewhere still points at a writer that is gone (realignment repairs
     /// R2). Sent once by [`WalHandle::hold_ownership`].
     HoldOwnership(OwnershipLock),
+    /// Put the writer into the poisoned state without a disk fault, so a dependent crate's test can
+    /// watch the state surface (`/health`) and clear. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    PoisonForTest { reason: String, ack: oneshot::Sender<()> },
     Shutdown,
 }
 
@@ -141,9 +145,27 @@ pub struct WalHandle {
     /// every append it **refused** while poisoned by that failure (see `wal_writer_task`): the
     /// store holds each of those values with no WAL record, which is the same hole.
     dropped_appends: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// `Some(reason)` while the writer refuses appends after a failed write (see `WriterState`),
+    /// published by the writer so `/health` can say so. A `watch` channel, not a lock field.
+    refusing: tokio::sync::watch::Receiver<Option<String>>,
 }
 
 impl WalHandle {
+    /// `Some(reason)` while the writer refuses every append after a failed write, until a snapshot
+    /// truncates the torn tail; `None` otherwise. Surfaced on `/health` as `wal_refusing_appends`.
+    pub fn refusing_appends(&self) -> Option<String> {
+        self.refusing.borrow().clone()
+    }
+
+    /// Poison the writer as a failed append would, without a disk fault, and wait until it has.
+    /// Test builds only (`test-support` for a dependent crate's tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn poison_for_test(&self, reason: &str) -> io::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(WalMsg::PoisonForTest { reason: reason.to_string(), ack: tx }).await.map_err(|_| writer_gone())?;
+        rx.await.map_err(|_| writer_gone())
+    }
+
     /// Hand the WAL's [`OwnershipLock`] to the writer task, which holds it until it exits. Call it
     /// once, right after [`spawn_wal_writer`], before the first append: the message is queued ahead
     /// of every append, so the writer owns the file for all of them. If the writer is already gone
@@ -274,7 +296,8 @@ impl WalHandle {
     /// Test-only constructor over a raw channel (writer-death probes).
     #[cfg(test)]
     pub(crate) fn from_parts(tx: mpsc::Sender<WalMsg>, sync_mode: SyncMode) -> Self {
-        Self { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) }
+        let (_keep, refusing) = tokio::sync::watch::channel(None);
+        Self { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)), refusing }
     }
 
     /// Stop the writer: it takes its final snapshot, releases the WAL's ownership lock and exits.
@@ -567,7 +590,8 @@ fn spawn_wal_writer_inner(
     let channel_depth = (snapshot_wal_threshold * 4).max(1024);
     let (tx, rx) = mpsc::channel::<WalMsg>(channel_depth);
     let dropped_appends = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let handle = WalHandle { tx, sync_mode, dropped_appends: std::sync::Arc::clone(&dropped_appends) };
+    let (refusing_tx, refusing) = tokio::sync::watch::channel(None);
+    let handle = WalHandle { tx, sync_mode, dropped_appends: std::sync::Arc::clone(&dropped_appends), refusing };
 
     tokio::spawn(wal_writer_task(
         rx,
@@ -582,6 +606,7 @@ fn spawn_wal_writer_inner(
         cipher,
         defer_snapshot,
         dropped_appends,
+        refusing_tx,
         fault,
     ));
 
@@ -605,6 +630,8 @@ fn spawn_wal_writer_inner(
 struct WriterState {
     /// `Some(reason)` after a failed append, until a snapshot truncates the torn tail.
     poison: Option<String>,
+    /// The handle's copy of `poison`, for `/health` (`WalHandle::refusing_appends`).
+    refusing_tx: tokio::sync::watch::Sender<Option<String>>,
     /// Appends refused while poisoned, for the recovery line.
     refused: u64,
     /// The last snapshot failure's reason, so one that repeats every interval is logged once at
@@ -615,8 +642,22 @@ struct WriterState {
 }
 
 impl WriterState {
-    fn new() -> Self {
-        Self { poison: None, refused: 0, last_snapshot_err: None, repeats: 0 }
+    fn new(refusing_tx: tokio::sync::watch::Sender<Option<String>>) -> Self {
+        Self { poison: None, refusing_tx, refused: 0, last_snapshot_err: None, repeats: 0 }
+    }
+
+    /// Enter the poisoned state and publish it.
+    fn poison(&mut self, reason: String) {
+        self.refusing_tx.send_replace(Some(reason.clone()));
+        self.poison = Some(reason);
+    }
+
+    /// Count one refused append — every path, acked or fire-and-forget.
+    fn refuse(&mut self, dropped_appends: &std::sync::atomic::AtomicU64) {
+        self.refused += 1;
+        dropped_appends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_wal_appends_refused_total").increment(1);
     }
 
     /// The error a poisoned writer answers an append or a sync with.
@@ -632,7 +673,9 @@ impl WriterState {
             "persistence: a WAL append failed ({e}); the writer refuses every later append until a snapshot \
              truncates the torn tail (it tries one now, then on every snapshot it is asked for or its timer brings)"
         );
-        self.poison = Some(e.to_string());
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_wal_append_failures_total").increment(1);
+        self.poison(e.to_string());
     }
 
     /// Record a snapshot's outcome: the log line (rate-limited on a repeat), and recovery from the
@@ -659,10 +702,13 @@ impl WriterState {
                     self.repeats = 0;
                 }
                 if self.poison.take().is_some() {
+                    self.refusing_tx.send_replace(None);
                     warn!(
                         refused = self.refused,
-                        "persistence: the WAL writer recovered — a snapshot truncated the torn tail; the appends \
-                         refused meanwhile are absent from the WAL, as their callers were told"
+                        "persistence: the WAL writer recovered — a snapshot truncated the torn tail. The appends \
+                         refused meanwhile have no WAL record; a value the store already held (apply first, then \
+                         the WAL) was carried into this snapshot, and its caller was told its durability was not \
+                         established"
                     );
                     self.refused = 0;
                 }
@@ -685,6 +731,7 @@ async fn wal_writer_task(
     cipher:                 Option<Arc<dyn DataAtRestCipher>>,
     defer_snapshot:         Option<SnapshotDeferHook>,
     dropped_appends:        Arc<std::sync::atomic::AtomicU64>,
+    refusing_tx:            tokio::sync::watch::Sender<Option<String>>,
     fault:                  Option<Arc<std::sync::atomic::AtomicBool>>,
 ) {
     let wal_path = dir.join("wal.bin");
@@ -693,7 +740,7 @@ async fn wal_writer_task(
         Err(e) => { error!("persistence: failed to open wal.bin: {e}"); return; }
     };
     let mut wal_entry_count: usize = 0;
-    let mut state = WriterState::new();
+    let mut state = WriterState::new(refusing_tx);
 
     let interval = Duration::from_secs(snapshot_interval_secs);
     // Through the timer seam (item 6): the snapshot cadence is a recorded decision.
@@ -724,13 +771,17 @@ async fn wal_writer_task(
                     Some(WalMsg::HoldOwnership(lock)) => {
                         _ownership = Some(lock);
                     }
+                    #[cfg(any(test, feature = "test-support"))]
+                    Some(WalMsg::PoisonForTest { reason, ack }) => {
+                        state.poison(reason);
+                        let _ = ack.send(());
+                    }
                     Some(WalMsg::Append { entry, ack, force_sync }) => {
-                        if let Some(reason) = state.poison.as_deref() {
-                            // Poisoned: nothing is appended behind the torn frame. The caller is told
-                            // (`LocalDurability::Failed` on the receipt path), or the drop is counted.
-                            state.refused += 1;
-                            dropped_appends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if let Some(ack) = ack { let _ = ack.send(Err(WriterState::poisoned_err(reason))); }
+                        if let Some(reason) = state.poison.clone() {
+                            // Poisoned: nothing is appended behind the torn frame. Every refusal is
+                            // counted; a caller awaiting an ack is told (`LocalDurability::Failed`).
+                            state.refuse(&dropped_appends);
+                            if let Some(ack) = ack { let _ = ack.send(Err(WriterState::poisoned_err(&reason))); }
                             continue;
                         }
                         let sync = force_sync || sync_mode == SyncMode::Flush;
@@ -978,7 +1029,7 @@ async fn do_snapshot(
     let opaque_val = crate::signal::encode_load_state(&crate::signal::LoadState {
         fill_ratio:    1.0,
         is_opaque:     true,
-        written_at_ms: crate::hlc::physical_ms(hlc.current()), // C11: a stamp, not a decision
+        written_at_ms: crate::hlc::physical_ms(hlc.current()), // C11: a stamp that feeds the deferral decision (`defer_snapshot_on_self_opacity` ages it against `wall_now_ms`; a clock ahead of the wall reads it fresh — it fails closed, towards deferring)
     });
     let raise_upd = crate::framing::make_gossip_update(
         node_id, default_ttl, Arc::clone(&opacity_key), opaque_val, false, hlc,

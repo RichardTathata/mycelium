@@ -140,7 +140,7 @@ pub(crate) use helpers::emit_signal;
 pub(crate) use helpers::emit_signal_async;
 #[cfg(feature = "consensus")]
 pub(crate) use helpers::make_gossip_update;
-pub(crate) use opacity::is_self_opaque;
+
 #[cfg(feature = "gateway")]
 pub use mcp::McpClientHandle;
 pub use mcp::{McpCall, McpError, McpToolHandle};

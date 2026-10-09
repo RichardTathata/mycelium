@@ -74,10 +74,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and carried on, so the next record landed behind the torn frame — the next restart read `Corrupt` with data after
   it (a refusal to start by default, or both files quarantined), and until then every snapshot aborted on the same
   `Corrupt`. Now every later append is answered `Err` (`LocalDurability::Failed` on the receipt path) or counted in
-  `dropped_appends()` on the fire-and-forget path, a `sync()` establishes nothing, the failure is logged once at
+  `dropped_appends()` on every path, a `sync()` establishes nothing, the failure is logged once at
   `error`, and the writer tries a repairing snapshot at once and on every snapshot after — the torn frame is the last
   thing in the file, so a successful snapshot carries the complete records and truncates it — un-poisoning only when
-  one succeeds. The node-local journal has done the same since 2.23.0; this is the WAL's mirror. On-disk format
+  one succeeds. A refused append has no WAL record, but the store already holds its value (apply first, then the
+  WAL), so the repairing snapshot's store scan carries it into `snapshot.bin`; what its caller was told is that
+  durability was **not established** by the ack. `/health` carries a `persistence` block (`wal_refusing_appends`,
+  `reason`, `dropped_appends`) and the counters `gossip_wal_append_failures_total` /
+  `gossip_wal_appends_refused_total` say so too. The node-local journal has done the same since 2.23.0; this is the WAL's mirror. On-disk format
   unchanged. Seen failing first: `a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail` (the
   append after the injected failure was acknowledged `Ok`).
 - **A failed snapshot no longer latches the node self-opaque, and the timer keeps snapshotting.** `do_snapshot` raised
@@ -89,7 +93,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repeat of the same failure at `debug`, recovery at `info`), and `is_self_opaque` counts a mark only within the same
   freshness bound the consensus counters use (`opaque_freshness_ms`: two health-check intervals). Seen failing first:
   `a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`,
-  `a_stale_self_opacity_mark_does_not_read_as_opaque`.
+  `a_stale_self_opacity_mark_does_not_read_as_opaque`. The bound ages **only the `persistence` mark**, read by the
+  snapshot-deferral hook (`defer_snapshot_on_self_opacity`); a requirement's or the governor's mark is a transition,
+  lowered by whoever raised it, and `is_self_opaque` reads those unaged as before. The bound reads the static
+  `health_check_interval_secs`, not the hot-tuned value.
 - **`persist.sync_mode` reads `not_configured` under `sync_mode = "os"`.** The writer syncs only when
   `force_sync || sync_mode == Flush`, so `os` is buffered exactly like `async` — but the guarantee resolved
   `enforced` for it, and `secure-single-domain` admitted a node whose acks were `buffered`. It now resolves

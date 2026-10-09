@@ -567,7 +567,7 @@ pub(crate) fn restore_chain_head(ctx: &TaskCtx) {
         Some(e) => tracing::error!(
             next_seq = head.next_seq, verified = head.verified, error = ?e,
             "audit: the persisted stream stops verifying at {e:?}; the chain resumes after its verified prefix, \
-             and the next seal overwrites the record it could not verify — treat as an incident (docs/operations/audit.md §5)"
+             and the next seal overwrites the record it could not verify — treat as an incident (docs/operations/audit.md §6)"
         ),
     }
 }

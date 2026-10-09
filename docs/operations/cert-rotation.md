@@ -75,6 +75,13 @@ curl -X POST https://gateway:9443/gateway/identity/revoke \
   -d '{"revoked_key":"<old-verifying-key-hex>","reason":"suspected compromise"}'
 ```
 
+**Before restarting a node that revoked its key:** the audit chain's head is recovered at `start()`
+by verifying the persisted stream under the retained keys, and a revoked key is excluded there too —
+every record it signed fails `BadSignature`, the fold stops at genesis and the next seal overwrites
+seq 0. Seal a checkpoint with the **new** key (`agent.audit_checkpoint()`) and prune
+(`agent.audit_prune_to_checkpoint()`) **before** the restart, so the head anchors at the checkpoint
+([audit.md §1, §5](audit.md)).
+
 **Ownership limit (by design):** only the node itself, holding its *current* key, can revoke
 its own keys — the coordinator-free trade-off. A **fully-compromised or offline** node is the
 operator's case, below; an earlier version of this paragraph said that mechanism was *not yet

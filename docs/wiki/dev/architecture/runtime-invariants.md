@@ -338,17 +338,22 @@ alone — still said `enforced` and `secure-single-domain` admitted the node.
 end of `wal.bin`; the writer used to forward the error to that caller and append the next record
 *behind* it, where `decode_wal_records` read the torn length over it as `Corrupt` — a refusal at the
 next start, and every snapshot before it aborted. Now `WriterState::poison` is set by the failed
-append and every later `Append` is answered `Err` (counted in `dropped_appends()` on the try path,
-alongside the failed record itself — the store holds each with no WAL record, the replica-sync hole),
+append and every later `Append` is answered `Err` and counted in `dropped_appends()` — every path,
+alongside the failed record itself: the store already holds each value (apply first, then the WAL)
+with no WAL record, the replica-sync hole, and the repairing snapshot's store scan carries those
+values into `snapshot.bin`; what the caller was told is that the ack established nothing —
 `Sync` establishes nothing, and the writer tries a repairing snapshot at once and on every snapshot
 after, un-poisoning only on success: the torn frame is the last thing in the file, so step 2b carries
 the complete records and step 4 truncates it. Beside it, `do_snapshot`'s steps 2–4 are
 `snapshot_body`, so **every** exit reaches step 5's lowering of `sys/load/{node}/persistence` — each
 `?` used to return past it, leaving the node self-opaque, the timer branch deferring on the mark for
 ever and the three callers discarding the error unlogged; a failed snapshot is now logged at `warn`
-(a repeat at `debug`), and `is_self_opaque` takes the fleet's freshness bound
-(`opacity::opaque_freshness_ms`, two health-check intervals), so no stale mark defers or abstains
-beyond it. Pins: `a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail`
+(a repeat at `debug`), and the deferral hook (`opacity::defer_snapshot_on_self_opacity`) ages the
+`persistence` mark alone against the fleet's freshness bound (`opaque_freshness_ms`, two
+health-check intervals, the static interval) — a requirement's or the governor's mark is a
+transition its owner lowers, so `is_self_opaque` still reads those unaged and agrees with
+`CapabilityHandle::is_opaque` (the adversarial review of #584). The writer's refusing state is on
+`/health` (`persistence.wal_refusing_appends`) and in `gossip_wal_appends_refused_total`. Pins: `a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail`
 (`spawn_wal_writer_with_fault`, the WAL's `open_with_fault`),
 `a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`,
 `a_stale_self_opacity_mark_does_not_read_as_opaque`. And `persist.sync_mode` resolves

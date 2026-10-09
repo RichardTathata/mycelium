@@ -216,9 +216,7 @@ impl ConsensusHandle {
             .iter()
             .map(NodeId::to_string)
             .collect();
-        let freshness = Duration::from_millis(
-            self.ctx.config.health_check_interval_secs * 2 * 1000,
-        );
+        let freshness = Duration::from_millis(super::opacity::opaque_freshness_ms(&self.ctx.config));
         // The electorate must be **established**, not inferred from absence. An empty roster used
         // to be counted as one member with a quorum of one, which this proposer's own self-vote
         // satisfied — so every node committed its own candidate unopposed. See

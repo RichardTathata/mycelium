@@ -215,18 +215,45 @@ pub(crate) fn opaque_freshness_ms(cfg: &crate::config::GossipConfig) -> u64 {
     cfg.health_check_interval_secs.saturating_mul(2_000)
 }
 
-/// Returns `true` if this node has any `sys/load/{node_id}/*` entry marking `is_opaque` that was
-/// written within `max_age_ms` ([`opaque_freshness_ms`]).
+/// Returns `true` if this node has any `sys/load/{node_id}/*` entry marking `is_opaque`.
 ///
-/// The age check is what the fleet-side counters always had and this did not: a mark nobody
-/// lowered — a snapshot that failed past the raise, a writer that died holding one — read as opaque
-/// for ever here, deferring every timer snapshot and abstaining from every proposal, while a peer
-/// had stopped counting the node within seconds (2026-10-09).
+/// **Unaged, by design.** A requirement's mark (`capability_ops.rs`, stamped once when it is
+/// declared unmet), a group requirement's (`emergent_groups.rs`) and the governor's own (written on
+/// `GoOpaque`, never re-stamped on `Hold`) are **transitions**: whoever raised one lowers it, and
+/// `BOUNDARY_TRANSPARENT` is emitted when it goes. Ageing them here — tried 2026-10-09 and caught by
+/// the adversarial review of #584 — made `is_overloaded()`, `SelfDegraded` and the deferral hook
+/// read the node as transparent after two health intervals while the requirement still held it
+/// opaque, disagreeing with `CapabilityHandle::is_opaque`. The one mark that is a stamp with no
+/// owner to lower it is the snapshot's, which [`defer_snapshot_on_self_opacity`] ages alone.
 ///
 /// Encapsulates the Layer I prefix scan here in Layer II (opacity.rs) so that
 /// `ConsensusEngine` (Layer III) does not read `KvState` directly for this query.
-pub(crate) fn is_self_opaque(kv_state: &KvState, node_id: &crate::node_id::NodeId, max_age_ms: u64) -> bool {
+pub(crate) fn is_self_opaque(kv_state: &KvState, node_id: &crate::node_id::NodeId) -> bool {
+    any_self_mark(kv_state, node_id, |_, s| s.is_opaque)
+}
+
+/// The kind under which `do_snapshot` marks the node opaque for the snapshot's duration.
+const PERSISTENCE_KIND: &str = "persistence";
+
+/// The snapshot-deferral hook's reading: any self-opacity mark defers the timer snapshot — except
+/// the snapshot's **own** mark (`sys/load/{self}/persistence`), which counts only within
+/// `max_age_ms` ([`opaque_freshness_ms`]). That mark is a stamp, not a transition: `do_snapshot`
+/// raises and lowers it, and a failed snapshot used to return past the lowering, so a stale one
+/// deferred every timer snapshot for ever while the fleet had stopped counting the node within
+/// seconds (2026-10-09). Every other kind keeps [`is_self_opaque`]'s unaged reading.
+pub(crate) fn defer_snapshot_on_self_opacity(kv_state: &KvState, node_id: &crate::node_id::NodeId, max_age_ms: u64) -> bool {
     let now_ms = mycelium_core::sim_seam::wall_now_ms();
+    any_self_mark(kv_state, node_id, |kind, s| {
+        s.is_opaque && (kind != PERSISTENCE_KIND || now_ms.saturating_sub(s.written_at_ms) <= max_age_ms)
+    })
+}
+
+/// The one scan behind both readings: `pred(kind, state)` over every `sys/load/{node_id}/{kind}`.
+fn any_self_mark(
+    kv_state: &KvState,
+    node_id: &crate::node_id::NodeId,
+    pred: impl Fn(&str, &LoadState) -> bool,
+) -> bool {
     let load_prefix = format!("{}{}/", kv_ns::LOAD, node_id);
     let seg = kv_ns::LOAD.split_once('/').map_or(kv_ns::LOAD, |(s, _)| s);
     let idx = kv_state.prefix_index.pin();
@@ -236,7 +263,7 @@ pub(crate) fn is_self_opaque(kv_state: &KvState, node_id: &crate::node_id::NodeI
             .filter(|(k, _)| k.starts_with(&*load_prefix))
             .any(|(k, _)| store.get(k.as_ref())
                 .and_then(|e| e.data.as_ref().and_then(decode_load_state))
-                .map(|s| s.is_opaque && now_ms.saturating_sub(s.written_at_ms) <= max_age_ms)
+                .map(|s| pred(&k[load_prefix.len()..], &s))
                 .unwrap_or(false)
             )
     }).unwrap_or(false)
@@ -462,12 +489,12 @@ mod tests {
         GossipAgent::new(NodeId::new("127.0.0.1", 0).unwrap(), GossipConfig::default())
     }
 
-    /// `is_self_opaque` read any `sys/load/{self}/*` mark as opaque **however old it was**, while the
-    /// fleet-side counters (`count_opaque_all_in_kv`, `count_opaque_system_ctx`) count a node opaque
-    /// only within `max_age_ms`. A mark nobody lowered — a snapshot that failed past step 1, a
-    /// crashed writer — therefore deferred every timer snapshot and made the node abstain for ever,
-    /// where a peer had stopped counting it within seconds. Seen failing first: a mark an hour old
-    /// read as opaque.
+    /// The snapshot-deferral hook read the snapshot's own `sys/load/{self}/persistence` mark as a
+    /// reason to defer **however old it was**, while the fleet-side counters
+    /// (`count_opaque_all_in_kv`, `count_opaque_system_ctx`) count a node opaque only within
+    /// `max_age_ms`. A mark nobody lowered — a snapshot that failed past step 1, a crashed writer —
+    /// therefore deferred every timer snapshot for ever, where a peer had stopped counting the node
+    /// within seconds. Seen failing first: a mark an hour old read as a reason to defer.
     #[test]
     fn a_stale_self_opacity_mark_does_not_read_as_opaque() {
         use crate::signal::{encode_load_state, LoadState};
@@ -477,12 +504,40 @@ mod tests {
         let max_age_ms = super::opaque_freshness_ms(&agent.config);
         let stale = LoadState { fill_ratio: 1.0, is_opaque: true, written_at_ms: now - 3_600_000 };
         let _ = agent.kv().set(key.clone(), encode_load_state(&stale));
-        assert!(!super::is_self_opaque(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms),
-            "a mark older than the fleet's freshness bound is stale, not opaque");
+        assert!(!super::defer_snapshot_on_self_opacity(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms),
+            "a persistence mark older than the fleet's freshness bound is stale, not a reason to defer");
         let fresh = LoadState { fill_ratio: 1.0, is_opaque: true, written_at_ms: now };
         let _ = agent.kv().set(key, encode_load_state(&fresh));
-        assert!(super::is_self_opaque(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms), "a fresh mark is opaque");
+        assert!(super::defer_snapshot_on_self_opacity(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms), "a fresh mark defers");
         assert_eq!(max_age_ms, agent.config.health_check_interval_secs * 2 * 1000, "the same bound the consensus counters use");
+    }
+
+    /// The adversarial review of #584 (finding 1): the age bound aged **every** self-opacity mark —
+    /// a requirement declared unmet (`capability_ops.rs`, stamped once) and the governor's own mark
+    /// (written on `GoOpaque`, never re-stamped on `Hold`) read as transparent after two health
+    /// intervals, so `is_overloaded()`, `SelfDegraded` and the deferral hook disagreed with
+    /// `CapabilityHandle::is_opaque` while the requirement still held the node opaque and no
+    /// `BOUNDARY_TRANSPARENT` had been emitted. Only the `persistence` mark is a stamp that can go
+    /// stale without a transition; the other kinds keep transition semantics. Seen failing first:
+    /// a requirement mark an hour old read as transparent.
+    #[test]
+    fn a_stale_requirement_mark_keeps_the_node_opaque_and_only_the_persistence_mark_ages() {
+        use crate::signal::{encode_load_state, LoadState};
+        let agent = make_agent();
+        let now = mycelium_core::sim_seam::wall_now_ms();
+        let max_age_ms = super::opaque_freshness_ms(&agent.config);
+        let stale = |fill: f32| encode_load_state(&LoadState { fill_ratio: fill, is_opaque: true, written_at_ms: now - 3_600_000 });
+        let req_key = format!("sys/load/{}/req/ai/llm", agent.node_id());
+        let _ = agent.kv().set(req_key.clone(), stale(1.0));
+        assert!(super::is_self_opaque(&agent.task_ctx.kv_state, agent.node_id()),
+            "a requirement mark holds the node opaque however old it is — nothing lowered it");
+        assert!(super::defer_snapshot_on_self_opacity(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms),
+            "the snapshot defers on an opacity that is still in force");
+        let _ = agent.kv().delete(req_key);
+        let persist_key = format!("sys/load/{}/persistence", agent.node_id());
+        let _ = agent.kv().set(persist_key, stale(1.0));
+        assert!(!super::defer_snapshot_on_self_opacity(&agent.task_ctx.kv_state, agent.node_id(), max_age_ms),
+            "a persistence mark older than the bound is stale — it does not defer");
     }
 
     // ── The opacity decision, tested purely (no async governor, no ticker, no timeout). These are

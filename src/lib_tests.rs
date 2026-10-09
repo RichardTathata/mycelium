@@ -4783,6 +4783,66 @@ async fn a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_h
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The adversarial review of #584 (finding 2): only the genesis branch of `recover_chain_head` was
+/// tested. The three other anchors, each through the real seal/checkpoint/prune calls:
+/// (a) no record and a checkpoint — the stream pruned to its head — anchors at the newest checkpoint;
+/// (b) a first record at N with a checkpoint at N — a pruned stream — anchors there and verifies on;
+/// (c) a first record at N with no matching checkpoint — a hand-deleted genesis — stays at genesis
+/// and reports the gap, overwriting nothing because nothing is at seq 0.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap() {
+    use crate::agent::audit::{recover_chain_head, AuditVerifyError};
+    use crate::config::TlsConfig;
+    use crate::{audit_key, AuditAction, AuditOutcome};
+
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let cert_dir = std::env::temp_dir().join(format!("myc-audit-anchors-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let seal = |n: u64| a.audit(AuditAction::Invoke, "10.0.0.1:9000", format!("skill/{n}"), AuditOutcome::Success, None).unwrap();
+
+    // (b) records 0,1 · checkpoint at 2 · records 2,3 · prune → [2, 3] anchored at the checkpoint.
+    let _h0 = seal(0); let _h1 = seal(1);
+    let (cp_seq, cp_prev) = a.audit_checkpoint().unwrap();
+    assert_eq!(cp_seq, 2);
+    let _h2 = seal(2); let h3 = seal(3);
+    assert_eq!(a.audit_prune_to_checkpoint(), 2, "records 0 and 1 pruned");
+    let head = recover_chain_head(&a.task_ctx).expect("a stream to recover");
+    assert_eq!((head.next_seq, head.last_hash, head.verified, head.unverified.clone()), (4, h3, 2, None),
+        "(b) anchored at the checkpoint's (seq, prev_hash) and verified through seq 3");
+    let _ = cp_prev;
+
+    // (a) checkpoint at 4, prune everything → no record, anchored at the newest checkpoint.
+    let (cp_seq, cp_prev) = a.audit_checkpoint().unwrap();
+    assert_eq!((cp_seq, cp_prev), (4, h3));
+    assert_eq!(a.audit_prune_to_checkpoint(), 2);
+    assert!(a.audit_stream(&id).is_empty());
+    let head = recover_chain_head(&a.task_ctx).expect("a checkpoint to recover from");
+    assert_eq!((head.next_seq, head.last_hash, head.verified, head.unverified.clone()), (4, h3, 0, None),
+        "(a) the newest checkpoint is the head when the stream is pruned to it");
+    let h4 = seal(4);
+    assert_eq!(a.audit_stream(&id).last().map(|r| (r.record.seq, r.record.prev_hash)), Some((4, h3)));
+    assert_eq!(a.audit_verify(&id), Ok(()), "verification resumes from the checkpoint over the new seal");
+
+    // (c) delete the first present record (seq 4) by hand: no checkpoint at 5 → genesis, and the gap named.
+    assert!(a.kv().delete(audit_key(&id, 4)));
+    let _h5 = seal(5);
+    let head = recover_chain_head(&a.task_ctx).expect("records to fold");
+    assert_eq!(head.next_seq, 0, "(c) no anchor covers seq 5: the head stays at genesis");
+    assert_eq!(head.last_hash, [0u8; 32]);
+    assert_eq!(head.verified, 0);
+    assert_eq!(head.unverified, Some(AuditVerifyError::SequenceGap { expected: 0, found: 5 }), "the gap is reported, not guessed over");
+    let _ = h4;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
 // ── WS3 crown-jewel — data-at-rest encryption hook ────────────────────────
 
 /// A trivial reversible cipher for exercising the data-at-rest hook: a 1-byte

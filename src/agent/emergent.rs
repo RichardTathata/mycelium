@@ -538,7 +538,7 @@ pub fn compute_view_confidence_at(ctx: &TaskCtx, now: std::time::Instant) -> Vie
         peers_known,
         peers_heard,
         max_staleness_ms,
-        self_degraded: super::opacity::is_self_opaque(&ctx.kv_state, &ctx.node_id, super::opacity::opaque_freshness_ms(&ctx.config)),
+        self_degraded: super::opacity::is_self_opaque(&ctx.kv_state, &ctx.node_id),
     }
 }
 

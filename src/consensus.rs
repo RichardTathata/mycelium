@@ -802,7 +802,7 @@ impl ConsensusEngine {
     /// Delegates to the opacity helper in `agent::opacity` so this type
     /// does not scan `KvState` directly.
     fn is_overloaded(&self) -> bool {
-        crate::agent::is_self_opaque(&self.task_ctx.kv_state, &self.task_ctx.node_id, crate::agent::opacity::opaque_freshness_ms(&self.task_ctx.config))
+        crate::agent::opacity::is_self_opaque(&self.task_ctx.kv_state, &self.task_ctx.node_id)
     }
 
     fn emit(&self, kind: Arc<str>, scope: SignalScope, payload: Bytes) {
