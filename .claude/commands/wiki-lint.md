@@ -54,7 +54,7 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   after `history.md` carried a test's pre-rename name for six days across a pass that declared
   §1 clean — the old check had no enumeration, so it checked whatever the linter remembered
   (ledger 2026-09-26). **Prove the sweep can say "present" before trusting a "missing"**: run it on one
-  identifier known to exist first. A sweep reporting most of 265 identifiers missing is broken, not the docs —
+  identifier known to exist first. A sweep reporting all 265 identifiers missing is broken, not the docs —
   under zsh an unquoted `$TREE` is one argument, so `grep` errors (exit 2) on every lookup (2026-10-09).
 - **Cited constants/flags** (e.g. `MAX_KV_WRITE_BYTES`, `WIRE_VERSION`/`PREV_WIRE_VERSION`,
   `swim_failure_detector` default): read the cited file and confirm the stated value/default.
