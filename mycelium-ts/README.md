@@ -49,13 +49,15 @@ await handle.drop();
 
 ## API reference
 
-### `new MyceliumAgent(host, port, timeout, { token })`
+### `new MyceliumAgent(host, port, timeout, { token, scheme })`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `host` | `"127.0.0.1"` | Gateway host |
 | `port` | `7946` | HTTP port the Mycelium node listens on |
 | `timeout` | `30_000` | Default request timeout (milliseconds) |
+| `token` | — | Gateway bearer; `MYCELIUM_GATEWAY_TOKEN` when unset ([below](#authentication-gateway-bearer)) |
+| `scheme` | `"http"` | `"https"` for a gateway serving TLS ([below](#reaching-a-gateway-over-tls)) |
 
 ---
 
@@ -77,6 +79,33 @@ The header rides every request including the SSE streams (`onSignal`, `rpcServe`
 `mesh:write`, `wiki:read` / `wiki:write`, … — a family wildcard such as `wiki:*` is refused by the
 node's `validate()`; the table is the node's `docs/operations/rbac.md`). Since 0.1.1; the
 `auth.test.ts` suite runs without a node and is CI-gated.
+
+### Reaching a gateway over TLS
+
+A gateway serving HTTPS — the node's own `gateway_tls` (`docs/operations/gateway-tls.md`) or a
+TLS-terminating proxy in front of it — is reached with `{ scheme: "https" }`. Every client class
+takes it in its trailing options (`MyceliumAgent`, `Wiki`, `TupleSpace`, `Blackboard`,
+`PromptSkillClient`; `A2aClient` takes a full URL, so the scheme is in it). The default is
+`"http"`, so an existing loopback deployment is unchanged.
+
+Certificate verification is Node's own and stays **on** — this SDK has no option to turn it off. A
+private fleet CA (in the node-cert mode of `gateway_tls`, the cluster CA's `ca-cert.pem`, whose
+certificate carries an IP SAN, so connect by the IP it names) is trusted by starting the process
+with it in `NODE_EXTRA_CA_CERTS`; the built-in `fetch` takes no per-call CA option without a
+dependency on `undici`, which this SDK deliberately does not add.
+
+```ts
+const agent = new MyceliumAgent("10.0.0.5", 9443, 30_000, { scheme: "https", token: "…" });
+const wiki  = new Wiki("10.0.0.5", 9443, "council", { scheme: "https" });
+const a2a   = new A2aClient("https://10.0.0.5:9443");
+```
+```sh
+NODE_EXTRA_CA_CERTS=mycelium-tls/ca-cert.pem node app.js     # a pinned fleet CA
+```
+
+Since 0.2.3 — before it every client hard-coded `http://`, so a TLS gateway was unreachable from
+this package and the bearer travelled in cleartext off loopback. `baseUrl(host, port, scheme)` is
+the one place the URL is built; `scheme.test.ts` runs without a node.
 
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway
 (`rpcCall`, `scatterGather`, `PromptSkillClient.call`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a

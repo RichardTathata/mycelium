@@ -32,6 +32,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extended to entry 22; `converge.py`'s path; `cluster_propose` as the canonical verb in the crate docs; the
   `test-overlay` help comment on its own target; the deck's rolling-upgrade note restated per 2.30.0.
 
+### Fixed
+- **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
+  `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
+  Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway
+  serving HTTPS (`gateway_tls`, v2.3.0, or a TLS-terminating proxy) was unreachable from any SDK, and a bearer
+  sent to a node off loopback travelled in cleartext. Each now takes `scheme="https"` / `{ scheme: "https" }`
+  (default `http`, unchanged), built in one place per language (`mycelium.base_url`, `mycelium-ts` `baseUrl`,
+  the checkpointer's mirror of the Python rule). Verification stays on with no off switch; Python and the
+  checkpointer pin a private fleet CA with `ca_file=` (httpx `verify=`, read at construction, a missing file
+  refused there), riding the pooled clients and the dedicated SSE/stream clients; the TypeScript SDK documents
+  `NODE_EXTRA_CA_CERTS` rather than add `undici`. Seen failing first: `mycelium-py/tests/test_scheme.py`,
+  `mycelium-ts/tests/scheme.test.ts`, `langgraph-checkpoint-mycelium/tests/test_connection.py` (the option
+  was not a parameter). Guide: `docs/guide/10-language-bridges.md` § Reaching a gateway over TLS.
+
 ## [2.31.0] — 2026-10-09
 
 **Stops that stop, and failures that say what they are.** A node, a stem or a demo image now shuts down on SIGTERM

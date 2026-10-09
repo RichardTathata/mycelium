@@ -380,6 +380,29 @@ verbs, and `artifact:publish` for `POST /gateway/artifacts/publish`. The route �
 through [rbac.md](../operations/rbac.md). Before these versions the bridges could not
 present a bearer at all — a token-protected node was unreachable from Python and TypeScript.
 
+## Reaching a gateway over TLS
+
+A gateway serving HTTPS — the node's own `gateway_tls` ([operations/gateway-tls.md](../operations/gateway-tls.md))
+or a TLS-terminating proxy — is reached by saying the scheme; the default stays `http`, so a
+loopback deployment is unchanged. Verification is on in both SDKs and neither has an off switch.
+
+```python
+agent = MyceliumAgent("10.0.0.5", 9443, scheme="https", ca_file="mycelium-tls/ca-cert.pem")  # mycelium-py ≥ 0.2.9
+saver = MyceliumCheckpointSaver("10.0.0.5", 9443, scheme="https", ca_file="…")           # checkpointer ≥ 0.3.2
+```
+```ts
+const agent = new MyceliumAgent("10.0.0.5", 9443, 30_000, { scheme: "https" }); // mycelium-ts ≥ 0.2.3
+// a private fleet CA: NODE_EXTRA_CA_CERTS=mycelium-tls/ca-cert.pem node app.js
+```
+
+Every handle takes the option (`A2aClient` takes a full URL, so the scheme is in it). Python
+pins a private fleet CA with `ca_file=` (httpx `verify=`, chain and hostname checked); Node's
+`fetch` has no per-call CA option without `undici`, so the TypeScript SDK documents
+`NODE_EXTRA_CA_CERTS` rather than add the dependency. In the node-cert mode of `gateway_tls` the
+certificate carries an IP SAN only — connect by the IP it names. Before these versions every
+client hard-coded `http://`: a TLS gateway was unreachable from the SDKs, and a bearer sent to a
+node off loopback travelled in cleartext.
+
 ## The sidecar in practice — fluid pipeline
 
 `examples/fluid_pipeline/` is the reference implementation of language bridge
@@ -425,8 +448,8 @@ when:
 Use Rust directly when:
 - You need maximum throughput (no HTTP hop, no serialization)
 - You're embedding Mycelium inside a larger Rust service
-- You need `--features tls` (mTLS is only available in the Rust binary, not
-  via the HTTP gateway)
+- You need the mutually-authenticated gossip transport (`--features tls` — mTLS is the Rust
+  binary's; the gateway's server-side TLS is reachable from the SDKs with `scheme="https"`)
 
 **SDK method count.** `mycelium-py` and `mycelium-ts` each mirror 28+ methods
 from the Rust API. Both are maintained in sync with the Rust library and

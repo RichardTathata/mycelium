@@ -47,5 +47,5 @@ export {
   CatalogView,
 } from "./federation";
 export { Artifacts, ArtifactError, PublishReceipt } from "./artifacts";
-export { TOKEN_ENV, resolveToken, authHeaders, type AuthOptions } from "./auth";
+export { TOKEN_ENV, resolveToken, authHeaders, baseUrl, type AuthOptions, type Scheme } from "./auth";
 export { sseStream, SseOverflowError, type SseOptions } from "./sse";

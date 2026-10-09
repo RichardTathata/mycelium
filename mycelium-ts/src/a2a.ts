@@ -231,7 +231,8 @@ export class A2aClient {
   private readonly auth: Record<string, string>;
   private readonly timeoutMs: number;
 
-  constructor(agentCardUrl: string, { timeoutMs = 30_000, token }: { timeoutMs?: number } & AuthOptions = {}) {
+  // A full URL is taken here, so the scheme is in it; only the bearer applies.
+  constructor(agentCardUrl: string, { timeoutMs = 30_000, token }: { timeoutMs?: number } & Pick<AuthOptions, "token"> = {}) {
     this.baseUrl   = agentCardUrl.replace(/\/$/, "");
     this.timeoutMs = timeoutMs;
     this.auth      = authHeaders(resolveToken(token));

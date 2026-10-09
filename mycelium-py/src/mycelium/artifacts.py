@@ -29,7 +29,7 @@ from typing import Any, Optional
 
 import httpx
 
-from ._pool import ClientPool, PoolOwner
+from ._pool import ClientPool, PoolOwner, base_url
 
 
 class ArtifactError(Exception):
@@ -65,9 +65,14 @@ class Artifacts(PoolOwner):
         port: int = 7946,
         *,
         token: Optional[str] = None,
+        scheme: str = "http",
+        ca_file: Optional[str] = None,
         _pool: Optional[ClientPool] = None,
     ) -> None:
-        self._pool = _pool if _pool is not None else ClientPool(f"http://{host}:{port}", token=token)
+        self._pool = (
+            _pool if _pool is not None
+            else ClientPool(base_url(host, port, scheme), token=token, ca_file=ca_file)
+        )
 
     def publish(self, entry_hex: str, *, timeout: Optional[float] = None) -> dict[str, Any]:
         """Publish one signed catalogue line. Returns the gateway's receipt

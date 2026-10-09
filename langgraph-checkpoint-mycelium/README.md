@@ -37,6 +37,18 @@ pip install ./langgraph-checkpoint-mycelium
 Requires Python ≥ 3.10 and a running Mycelium node whose gateway mounts the
 `mycelium-reason` routes (see the `reason_node` example in that crate).
 
+## Reaching the gateway
+
+`MyceliumCheckpointSaver(host, port, *, timeout=30.0, serde=None, scheme="http", ca_file=None)`.
+A gateway serving HTTPS — the node's `gateway_tls` or a TLS-terminating proxy — is reached with
+`scheme="https"` (0.3.2; before it `http://` was hard-coded). Certificate verification stays on; a
+private fleet CA is trusted with `ca_file=` (the node-cert mode of `gateway_tls` serves the cluster
+CA's `ca-cert.pem`), read at construction. Both options follow the Python SDK's.
+
+```python
+checkpointer = MyceliumCheckpointSaver("10.0.0.5", 9443, scheme="https", ca_file="mycelium-tls/ca-cert.pem")
+```
+
 ## The storage split
 
 Naïve checkpoint-blobs-in-KV would flood every node with every agent's channel

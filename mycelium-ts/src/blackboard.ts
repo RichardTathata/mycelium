@@ -1,4 +1,4 @@
-import { authHeaders, resolveToken, type AuthOptions } from "./auth";
+import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/blackboard — TypeScript client for the Mycelium Blackboard.
  *
@@ -53,7 +53,7 @@ export class Blackboard {
     private readonly ns: string = "board",
     opts: AuthOptions = {},
   ) {
-    this.baseUrl = `http://${host}:${port}`;
+    this.baseUrl = baseUrl(host, port, opts.scheme);
     this.auth = authHeaders(resolveToken(opts.token));
   }
 

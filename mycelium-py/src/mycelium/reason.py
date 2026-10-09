@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 import httpx
 
-from ._pool import ClientPool
+from ._pool import ClientPool, base_url
 
 
 class ReasonError(Exception):
@@ -63,6 +63,9 @@ class ReasonClient:
     :param host: Hostname or IP of the Mycelium HTTP gateway.
     :param port: HTTP port (default 8080).
     :param timeout: Default request timeout in seconds.
+    :param token: Gateway bearer; defaults to ``MYCELIUM_GATEWAY_TOKEN`` when unset.
+    :param scheme: ``"http"`` (default) or ``"https"`` for a gateway serving TLS.
+    :param ca_file: PEM bundle of a private fleet CA to trust (verification stays on).
     """
 
     def __init__(
@@ -72,13 +75,15 @@ class ReasonClient:
         timeout: float = 30.0,
         *,
         token: Optional[str] = None,
+        scheme: str = "http",
+        ca_file: Optional[str] = None,
     ) -> None:
-        self._base = f"http://{host}:{port}"
+        self._base = base_url(host, port, scheme)
         self._timeout = timeout
         # Pooled, loop-aware (see _pool.py): the previous eager AsyncClient was
         # bound to whichever loop first used it, breaking a handle reused
         # across separate asyncio.run() calls. `token` → gateway bearer.
-        self._pool = ClientPool(self._base, timeout, token=token)
+        self._pool = ClientPool(self._base, timeout, token=token, ca_file=ca_file)
 
     # ── Routed inference (wedge ①) ─────────────────────────────────────────────
 

@@ -39,7 +39,7 @@ import asyncio
 import base64
 from typing import Any, Optional
 
-from ._pool import ClientPool, PoolOwner
+from ._pool import ClientPool, PoolOwner, base_url
 
 
 class TupleBackpressureError(Exception):
@@ -57,10 +57,19 @@ class TupleNotFoundError(Exception):
 class TupleSpace(PoolOwner):
     """Async client for one tuple space namespace via a node's HTTP gateway."""
 
-    def __init__(self, host: str, port: int, ns: str = "pipeline", *, token: Optional[str] = None):
-        self._base_url = f"http://{host}:{port}"
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        ns: str = "pipeline",
+        *,
+        token: Optional[str] = None,
+        scheme: str = "http",
+        ca_file: Optional[str] = None,
+    ):
+        self._base_url = base_url(host, port, scheme)
         self._ns = ns
-        self._pool = ClientPool(self._base_url, token=token)
+        self._pool = ClientPool(self._base_url, token=token, ca_file=ca_file)
 
     # ── Producer API ─────────────────────────────────────────────────────────
 
