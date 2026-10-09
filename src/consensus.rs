@@ -1186,6 +1186,9 @@ impl ConsensusEngine {
             match outcome {
                 BallotOutcome::Committed(res) => return res,
                 BallotOutcome::NackHigher(b, reported) => {
+                    // Refused at this ballot: another proposer is ahead — contention, however few
+                    // votes had arrived (the review of #579).
+                    last = LastAttempt::Contended;
                     nack_ballot = b;
                     // **Accepted-value preservation.** An acceptor that refused us reported what
                     // it already holds; the next ballot must carry *that* value, not ours. Without
@@ -1310,12 +1313,6 @@ impl ConsensusEngine {
             }
 
         // Per-group state (rebuilt from KV once before the ballot loop).
-        struct CrossState {
-            members:     ahash::AHashSet<NodeId>,
-            quorum_frac: f32,
-            accepts:     usize,
-            seen:        ahash::AHashSet<NodeId>, // distinct voters — each counts once
-        }
 
         let mut group_states: AHashMap<Arc<str>, CrossState> = AHashMap::new();
         for gq in groups {
@@ -1355,7 +1352,7 @@ impl ConsensusEngine {
         let mut last = LastAttempt::None;
 
         for _attempt in 0..config.max_ballots {
-            for gs in group_states.values_mut() { gs.accepts = 0; }
+            for gs in group_states.values_mut() { gs.begin_attempt(); }
 
             // Phase 1, with the same per-group quorum the commit needs — see `propose`.
             let ready = |p: &AHashSet<NodeId>| group_states.values().all(|gs| {
@@ -1455,9 +1452,7 @@ impl ConsensusEngine {
                                     // Count each DISTINCT voter once — a re-delivered vote
                                     // (gossip re-flood / duplicate PROPOSE) must not inflate
                                     // the tally (the sibling `propose` path is NodeId-keyed too).
-                                    if gs.seen.insert(voter.clone()) {
-                                        gs.accepts += 1;
-                                    }
+                                    gs.count(&voter);
                                 }
                             }
                         }
@@ -1496,6 +1491,7 @@ impl ConsensusEngine {
                                 slot: s, seen_ballot, accepted_ballot, accepted_value,
                             }) if s == slot && seen_ballot >= ballot => {
                                 nack_ballot = seen_ballot;
+                                last = LastAttempt::Contended;
                                 if let Some(v) = accepted_value
                                     && accepted_ballot >= learned.as_ref().map(|(b, _)| *b).unwrap_or(0) {
                                         learned = Some((accepted_ballot, v));
@@ -1505,6 +1501,7 @@ impl ConsensusEngine {
                             Some(ConsensusMsg::Nack { slot: s, seen_ballot })
                                 if s == slot && seen_ballot >= ballot => {
                                 nack_ballot = seen_ballot;
+                                last = LastAttempt::Contended;
                                 break 'collect;
                             }
                             _ => {}
@@ -1529,6 +1526,8 @@ impl ConsensusEngine {
         }
 
         let votes_last_ballot: usize = group_states.values().map(|gs| gs.accepts).sum();
+        // The cross tally counts every member's vote, this node's own included when it is a member that
+        // runs a listener (its vote loops back) — so a lone member can read `quorum_short` here.
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_consensus_timeouts_total",
             "reason" => timeout_reason(last, votes_last_ballot))
@@ -1920,6 +1919,31 @@ fn own_or_superseded(result: ConsensusResult, asked: &Bytes) -> ConsensusResult 
         ConsensusResult::Committed { slot, value, ballot, .. } if value != *asked =>
             ConsensusResult::Superseded { slot, ballot },
         other => other,
+    }
+}
+
+/// One group's tally in a cross-group proposal, per ballot attempt.
+struct CrossState {
+    members:     ahash::AHashSet<NodeId>,
+    quorum_frac: f32,
+    accepts:     usize,
+    seen:        ahash::AHashSet<NodeId>, // distinct voters this attempt — each counts once
+}
+
+impl CrossState {
+    /// A new ballot: its votes start from nothing. Clearing only `accepts` — as before the review of
+    /// #579 — left last ballot's voters in `seen`, so a retry whose voters had voted before could never
+    /// reach quorum, and its timeout read as nobody answering.
+    fn begin_attempt(&mut self) {
+        self.accepts = 0;
+        self.seen.clear();
+    }
+
+    /// Counts `voter` once per attempt — a re-delivered vote must not inflate the tally.
+    fn count(&mut self, voter: &NodeId) {
+        if self.seen.insert(voter.clone()) {
+            self.accepts += 1;
+        }
     }
 }
 
@@ -3487,6 +3511,23 @@ mod consensus_msg_auth_tests {
         assert_eq!(timeout_reason(LastAttempt::Blocked, 0), "blocked");
         assert_eq!(timeout_reason(LastAttempt::Vote, 0), "no_voters");
         assert_eq!(timeout_reason(LastAttempt::Vote, 2), "quorum_short");
+    }
+
+    /// **A cross-group retry counts its voters afresh** (the review of #579). The per-group tally
+    /// cleared its count each attempt but kept the set of voters seen, so a voter from ballot 1 never
+    /// counted again — a retry whose voters had all voted before could not reach quorum.
+    #[test]
+    fn a_cross_group_retry_counts_its_voters_afresh() {
+        let v = NodeId::new("127.0.0.1", 9001).unwrap();
+        let mut gs = CrossState {
+            members: [v.clone()].into_iter().collect(), quorum_frac: 1.0, accepts: 0, seen: Default::default(),
+        };
+        gs.count(&v);
+        gs.count(&v);
+        assert_eq!(gs.accepts, 1, "a re-delivered vote counts once");
+        gs.begin_attempt();
+        gs.count(&v);
+        assert_eq!(gs.accepts, 1, "the next ballot's vote from the same voter counts");
     }
 
     #[test]

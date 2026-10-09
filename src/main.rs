@@ -161,6 +161,7 @@ impl ShutdownSignal {
         }
     }
 
+    #[cfg_attr(not(unix), allow(unused_mut))]
     async fn wait(mut self) -> Result<(), std::io::Error> {
         #[cfg(unix)]
         {

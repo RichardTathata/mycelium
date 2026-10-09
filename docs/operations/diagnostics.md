@@ -194,7 +194,8 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   **held**; `lease_expired: true` ⇒ the lease lapsed and the slot has **reopened** — the lock is
   effectively free (a stale holder cannot win). Repeated `Superseded` in caller logs is
   contention, **not** a bug — the converged-holder discipline rejecting a loser. Watch
-  `mycelium_consensus_timeouts_total{reason=~"quorum_short|promise_short|no_voters"}` if acquisition itself is timing out
+  `mycelium_consensus_timeouts_total{reason=~"quorum_short|promise_short|no_voters|contended|blocked"}` if acquisition itself is timing out —
+  `contended` is the usual one for a lock: another acquirer is ahead
   (a consensus-throughput problem, not lock semantics).
 - **Do:** a crashed holder's lock **self-clears at lease expiry** — wait up to the `ttl` you set;
   don't force it. If sections routinely overrun, raise `ttl` above the observed hold time and keep

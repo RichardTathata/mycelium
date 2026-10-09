@@ -11,3 +11,7 @@
   `no_voters` · `promise_short` · `contended` · `blocked` · `quorum_short`. Pinned end to end by
   `a_proposer_nobody_answers_times_out_as_no_voters` (a thread-local `metrics` recorder).
 - **The checkpointer names the route's 403 `refused`** (`langgraph-checkpoint-mycelium` 0.3.1).
+- **The second review of #579** found a refusal in the voting phase labelled `no_voters` (now `contended`), and a
+  bug older than this PR: `cross_propose` cleared each group's count per ballot but kept the set of voters seen, so a
+  voter from an earlier ballot never counted again and a retry could not reach quorum (`CrossState::begin_attempt`,
+  `a_cross_group_retry_counts_its_voters_afresh`). The cross tally can include this node's own looped-back vote.
