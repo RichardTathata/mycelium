@@ -186,6 +186,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_non_member_cannot_propose_to_a_group_on_either_surface` (B committed `leader/members-only` = B).
   **Upgrade note:** three `#[non_exhaustive]` enums gain a variant — a `_` arm must fail closed, as the enums'
   docs already require (`docs/guide/deprecations.md` §24).
+- **The signal SSE doors streamed every protected RPC request to a `mesh:read` holder.** `/signals/{kind}` and
+  `/gateway/signal/sse/{kind}` registered a receiver for whatever kind the path named — the same handler table
+  `rpc/serve` and the native MCP tools register on, fanned to every receiver — so a `mesh:read` token could open
+  `/signals/mcp.invoke` and read each tool call's whole frame (`payload_b64`: the caller envelope, the carried mandate
+  and possession proof, the correlation nonce) while the raw routes refused to *send* that kind (closure plan C1).
+  Both streams now refuse a protected kind with the raw routes' own body, `403 {"error": "protected_kind", …}`,
+  whatever the token holds; an ordinary kind still streams. Added to the C7 bypass matrix. Seen failing first:
+  `sse_doors_refuse_protected_kinds` (both doors answered 200 for `mcp.invoke`). **Upgrade note:** a dashboard or
+  SDK reader subscribed to `mcp.invoke`, `skill.invoke`, `llm.invoke` or a configured `protected_rpc_kinds` entry
+  now gets 403 at open; read the decision trace or the evidence journal instead (`deprecations.md` §23).
 
 ### Security
 - **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component

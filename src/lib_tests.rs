@@ -10809,6 +10809,7 @@ async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
 /// | `/gateway/signal/emit`, RPC-shaped | the route (C1) |
 /// | a member's direct `rpc_call_with_mandate` | the provider (C3) |
 /// | `/gateway/rpc/serve` delivering to an SDK agent | the provider check before streaming (C3) |
+/// | `/signals/{kind}`, `/gateway/signal/sse/{kind}` observing a protected kind | the route (C1, the SSE half) |
 ///
 /// Not in this matrix, and gated where they are built: federation calls (the same `ae_preflight`,
 /// `federation_transport` tests), the wiki store (`mycelium-wiki` `git_store_authority`), and
@@ -11020,6 +11021,12 @@ async fn test_c7_the_bypass_matrix_no_door_runs_revoked_work() {
     ] {
         let status = http.post(format!("{base}/gateway/{route}")).bearer_auth("s3cret").json(&body).send().await.unwrap().status();
         assert_eq!(status, 403, "{route} refuses protected work");
+    }
+    // The SSE doors: a protected kind can be observed no more than it can be sent — a `mesh:read`
+    // holder reading `/signals/mcp.invoke` would see every tool call's frame, mandate included.
+    for path in ["/signals/mcp.invoke", "/gateway/signal/sse/mcp.invoke", "/signals/depot.custom"] {
+        let status = http.get(format!("{base}{path}")).bearer_auth("s3cret").send().await.unwrap().status();
+        assert_eq!(status, 403, "{path} refuses to observe protected work");
     }
     let tool_call = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"work","arguments":tool_args}});
     let _ = agent.service().rpc_call_with_mandate(me.clone(), "mcp.invoke", tool_call.to_string().into_bytes(),

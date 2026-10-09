@@ -477,3 +477,15 @@ a refusal read as a commit is the class of bug `ElectorateUnavailable` ended, on
 `/gateway/govern/group` (`govern:write`) for a governed group. A client that elected a leader for a group its
 node had not joined was never electing anything the group's members agreed to.
 
+## 23. The gateway's doors answer only what they were asked by whom (unreleased)
+
+**What changes.**
+- **The signal SSE streams refuse a protected kind.** `GET /signals/{kind}` and `GET /gateway/signal/sse/{kind}`
+  answer `403 {"error": "protected_kind"}` for `mcp.invoke`, `skill.invoke`, `llm.invoke` and anything in
+  `protected_rpc_kinds` — the body the raw routes have sent since 2.15.0. They used to stream every such request's
+  frame (caller envelope, carried mandate, nonce) to any `mesh:read` holder.
+
+**Will the compiler tell me?** No — HTTP status codes and JSON-RPC error codes.
+
+**Migration.** A reader subscribed to a protected kind should read the decision trace (`mycelium explain`) or the
+evidence journal instead; nothing in the SDKs subscribed to one by default.

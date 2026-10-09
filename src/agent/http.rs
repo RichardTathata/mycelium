@@ -1814,7 +1814,14 @@ async fn gw_govern_membership(
 async fn signal_sse_handler(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
+    // Observing protected work is refused like sending it (closure plan C1, the SSE half): this
+    // stream registers on the same table `rpc/serve` and the native MCP tools register on, and a
+    // signal fans to every receiver — so a `mesh:read` holder would read each protected request's
+    // whole frame (caller envelope, carried mandate and possession proof, correlation nonce).
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
     let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
         std::sync::Arc::from(kind.as_str()),
         256,
@@ -1832,12 +1839,12 @@ async fn signal_sse_handler(
             "nonce":       sig.nonce,
             "payload":     payload_b64,
         });
-        Ok(Event::default()
+        Ok::<_, Infallible>(Event::default()
             .event(sig.kind.as_ref())
             .data(data.to_string()))
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// JSON-RPC 2.0 handler for the MCP protocol (`POST /mcp`).
@@ -2405,7 +2412,12 @@ async fn gw_signal_emit(
 async fn gw_signal_sse(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
+    // Closure plan C1, the SSE half: a protected kind can be observed no more than it can be sent
+    // on a raw route (see `signal_sse_handler`).
+    if let Some(refused) = refuse_protected_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
     let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
         Arc::from(kind.as_str()),
         256,
@@ -2420,12 +2432,12 @@ async fn gw_signal_sse(
             "payload_b64": payload_b64,
             "nonce":       sig.nonce,
         });
-        Ok(Event::default()
+        Ok::<_, Infallible>(Event::default()
             .event(sig.kind.as_ref())
             .data(data.to_string()))
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// `GET /gateway/demand?ns=X&name=Y`
@@ -2486,6 +2498,10 @@ pub(crate) use super::is_protected_kind;
 ///
 /// A protected kind is refused `403` with the door to use instead. It is refused whatever the
 /// token's scopes (the legacy token holds `*`), and whether or not `compliance` is built in.
+///
+/// The two signal SSE doors (`/signals/{kind}`, `/gateway/signal/sse/{kind}`) refuse it too: they
+/// register on the same handler table the serve routes and the native MCP tools use, and a signal
+/// fans to every receiver, so observing a protected kind is reading every protected request's frame.
 fn refuse_protected_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
     if !is_protected_kind(cfg, kind) {
         return None;
@@ -6368,6 +6384,55 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(reached.load(Ordering::SeqCst), 0, "no raw route reached the tool");
+        agent.shutdown().await;
+    }
+
+    /// **The SSE doors streamed every protected RPC request to a `mesh:read` holder.** Both signal
+    /// streams registered a receiver for whatever kind the path named — the same table `rpc/serve`
+    /// and the native MCP tools register on, fanned to every receiver — so a `mesh:read` token could
+    /// open `/signals/mcp.invoke` and read each tool call's whole frame (`payload_b64`: the caller
+    /// envelope, the carried mandate and possession proof, the correlation nonce) while the raw
+    /// routes refused to *send* that kind. Observing protected work is refused with the same body
+    /// the raw routes use; an ordinary kind still streams. Seen failing first: both doors answered
+    /// 200 for `mcp.invoke`.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn sse_doors_refuse_protected_kinds() {
+        use axum::http::header::AUTHORIZATION;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.protected_rpc_kinds = vec!["depot.dispatch".into()];
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "mesh-tok".into(), scopes: vec!["mesh:read".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        for kind in ["mcp.invoke", "skill.invoke", "llm.invoke", "depot.dispatch"] {
+            for path in [format!("/signals/{kind}"), format!("/gateway/signal/sse/{kind}")] {
+                let r = client.get(format!("{base}{path}")).header(AUTHORIZATION, "Bearer mesh-tok")
+                    .send().await.unwrap();
+                assert_eq!(r.status(), 403, "{path}: a mesh:read holder cannot observe protected work");
+                let v: serde_json::Value = r.json().await.unwrap();
+                assert_eq!(v["error"], "protected_kind", "{path} names the refusal: {v}");
+                assert_eq!(v["kind"], kind, "{path}: {v}");
+            }
+        }
+        // The plant: an ordinary kind still streams on both doors.
+        for path in ["/signals/repair.request", "/gateway/signal/sse/repair.request"] {
+            let r = client.get(format!("{base}{path}")).header(AUTHORIZATION, "Bearer mesh-tok")
+                .send().await.unwrap();
+            assert_eq!(r.status(), 200, "{path}: an ordinary kind streams");
+            drop(r);
+        }
         agent.shutdown().await;
     }
 

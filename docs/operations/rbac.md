@@ -74,7 +74,7 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `govern:read` / `govern:write` | `GET /gateway/govern` / `POST /gateway/govern/{tuning,timing,membership,profile,topology-override,group}` (and `DELETE /gateway/govern/group`) — the governors' admission contract and the control profile ladder (`control-profiles.md`) |
 | *(none)* — `/a2a` | **No scope is required on this route.** Auth is *optional*: a federation credential names the partner; a bearer resolves to a principal but its **scopes are dropped**; nothing presented is anonymous. Authority here comes from an `ActionEvaluator`, not the scope table — and with no evaluator attached an anonymous caller reaches skill dispatch. `with_a2a()` warns in that configuration |
 | `mesh:serve` | the RPC serve stream (`/gateway/rpc/serve/{kind}`) and `/gateway/rpc/respond`: **serving without the power to call**. Added 2026-09-25 (closure plan C1). The one-release window that admitted a `mesh:read` or `mesh:write` token here closed in 2.18.2: such a token now gets `403 {"required_scope": "mesh:serve"}` — reissue it |
-| `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox subscribe, demand / signal emit, rpc call, scatter, **group membership of a plain group** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node; a group under a membership intent refuses these **403** `governed_group` — its membership moves through `/gateway/govern/group` under `govern:write`, 2.29.0) |
+| `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}` — never a protected kind, which both refuse `403 protected_kind` since 2.32.0), mailbox subscribe, demand / signal emit, rpc call, scatter, **group membership of a plain group** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node; a group under a membership intent refuses these **403** `governed_group` — its membership moves through `/gateway/govern/group` under `govern:write`, 2.29.0) |
 | `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose — consistent set refuses every owned-namespace key as the KV routes do (403 `protected_key`), and log append/compact refuse a stream under `cn/`, `wiki/` or `reason/` (403 `protected_stream`) |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
@@ -124,7 +124,11 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 refused there `403` with `{"error": "protected_kind", "kind": …, "message": …}` naming the door to use, whatever the
 token's scopes and whether or not `compliance` is built. Before this, a client with `mesh:write` could send
 `mcp.invoke` or `skill.invoke` straight to a provider and skip the action evaluator and mandate checks that `/mcp`
-and `/a2a` run. The SDKs raise `ProtectedKindError`.
+and `/a2a` run. The SDKs raise `ProtectedKindError`. **The two signal streams refuse a protected kind the same way**
+(`/signals/{kind}`, `/gateway/signal/sse/{kind}`; since 2.32.0): a `mesh:read` holder cannot *observe* protected work.
+The streams register on the handler table `rpc/serve` and the native MCP tools register on, and a signal fans to every
+receiver, so opening `/signals/mcp.invoke` read every tool call's whole frame — the caller envelope, the carried mandate
+and possession proof, the correlation nonce — while the raw routes refused to send that kind.
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`, `/stats`, `/metrics`,
 the A2A descriptor (`/.well-known/agent.json`), `POST /a2a` (an A2A peer needs no Mycelium
