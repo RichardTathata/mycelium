@@ -12,10 +12,16 @@
 //! the Component-Model canonical ABI, **not** a socket:
 //!
 //! - The host's **imports** (what a component may call) are a *capability-scoped projection* of
-//!   Mycelium's public handles — confined KV, signal emit, log. This is the one place the
+//!   Mycelium's public handles — confined KV, confined signal emit, log. This is the one place the
 //!   substrate's detection-not-prevention posture flips to genuine **prevention**: the guest is
 //!   untrusted foreign code in the node's own process, so the host mediating every import is
-//!   legitimate (reject out-of-namespace writes, etc.).
+//!   legitimate. What is confined, exactly: **`kv`** reads and writes land under
+//!   `comp/{node}/{namespace}/…` and nowhere else (`confine_key`); **`mesh.emit`** sends only a
+//!   kind under `comp/{namespace}/…` or one the host listed for the component, and never a
+//!   protected RPC kind — `mcp.invoke`, `skill.invoke`, `llm.invoke`, the node's
+//!   `protected_rpc_kinds` — whose doors check authority (`confine_kind`); a refused emit is
+//!   dropped, logged and counted (`mycelium_wasm_host_emits_refused_total`). Not confined: `log`,
+//!   and the *payload* of an admitted emit.
 //! - The component's **export** `handle(request) -> response` is the capability entry point the
 //!   host calls on an inbound invocation.
 //!
@@ -51,7 +57,7 @@ pub use catalog::{
     publish_installable, InstallableCatalog, InstallableEntry, Manifest, ManifestError,
     ResourceRequirements, ENTRY_FORMAT_VERSION, INSTALLABLE_PREFIX, MANIFEST_FILE,
 };
-pub use confine::{confine_key, ConfinementError, COMPONENT_KV_PREFIX};
+pub use confine::{confine_key, confine_kind, ConfinementError, COMPONENT_KV_PREFIX, COMPONENT_SIGNAL_PREFIX};
 pub use host::{HostState, Instance, Request, Response, WasmHost, WasmHostError};
 pub use http_source::{
     BlobFetcher, DiskStagedSource, HttpLibrarySource, PrefetchingSource, RangedBlobFetcher,

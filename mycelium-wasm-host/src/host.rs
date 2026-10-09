@@ -18,7 +18,7 @@ use mycelium::CapFilter;
 
 use crate::artifact::{verify_artifact, ArtifactId, ArtifactSource};
 use crate::catalog::InstallableCatalog;
-use crate::confine::{confine_key, ConfinementError};
+use crate::confine::{confine_key, confine_kind, ConfinementError};
 
 /// Generated host/guest bindings for [`wit/host.wit`]. Wrapped in a private module so the
 /// generated `mycelium::host::*` paths don't collide with the `mycelium` *crate* dependency.
@@ -60,7 +60,17 @@ impl bindings::mycelium::host::kv::Host for HostState {
 
 impl bindings::mycelium::host::mesh::Host for HostState {
     fn emit(&mut self, kind: String, payload: Vec<u8>) {
-        HostState::emit(self, &kind, payload);
+        // The WIT signature carries no error channel (changing it would re-cut every committed
+        // fixture component), so a refused emit is dropped, logged and counted — never sent.
+        if let Err(e) = HostState::emit(self, &kind, payload) {
+            let reason = match e {
+                ConfinementError::ProtectedKind => "protected_kind",
+                ConfinementError::ForeignKind => "foreign_kind",
+                _ => "malformed",
+            };
+            metrics::counter!("mycelium_wasm_host_emits_refused_total", "reason" => reason).increment(1);
+            tracing::warn!(component = %self.namespace, %kind, %e, "denied component mesh.emit");
+        }
     }
 }
 
@@ -87,6 +97,11 @@ pub struct HostState {
     namespace: Arc<str>,
     kv:        KvHandle,
     mesh:      MeshHandle,
+    /// Signal kinds this component may emit beside its own `comp/{namespace}/…` family
+    /// (host-granted; a protected kind in here is still refused).
+    emit_kinds: Vec<String>,
+    /// The node's `GossipConfig::protected_rpc_kinds`, refused at `emit` beside the built-ins.
+    protected:  Vec<String>,
     // A *restricted, deny-by-default* WASI context: std-based guests import wasi:* from libc
     // init, so the host must provide it — but with no filesystem, network, env, or inherited
     // stdio. The guest's only real doors remain our scoped kv/mesh/log imports.
@@ -102,9 +117,25 @@ impl HostState {
             namespace: namespace.into(),
             kv,
             mesh,
+            emit_kinds: Vec::new(),
+            protected: Vec::new(),
             wasi: WasiCtxBuilder::new().build(), // deny-by-default: no fs/net/env/stdio
             table: ResourceTable::new(),
         }
+    }
+
+    /// Let this component emit `kinds` beside its own `comp/{namespace}/…` family. A protected
+    /// kind listed here is still refused at [`emit`](Self::emit) — a grant cannot open that door.
+    pub fn with_emit_kinds(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.emit_kinds.extend(kinds.into_iter().map(Into::into));
+        self
+    }
+
+    /// The node's `GossipConfig::protected_rpc_kinds`, refused at [`emit`](Self::emit) beside
+    /// [`mycelium::BUILTIN_PROTECTED_RPC_KINDS`] (which are refused whether or not this is called).
+    pub fn with_protected_kinds(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.protected.extend(kinds.into_iter().map(Into::into));
+        self
     }
 
     /// The capability namespace this component provides (its confinement scope).
@@ -134,9 +165,15 @@ impl HostState {
         Ok(())
     }
 
-    /// `mesh.emit` — broadcast a signal into the mesh (`System` scope for v0).
-    pub fn emit(&mut self, kind: &str, payload: Vec<u8>) {
+    /// `mesh.emit` — broadcast a signal into the mesh (`Cluster` scope for v0), **confined**: only a
+    /// kind under `comp/{namespace}/…` or one the host listed ([`with_emit_kinds`](Self::with_emit_kinds)),
+    /// and never a protected RPC kind ([`confine_kind`]). A refused kind is never sent — an emit
+    /// from inside the node's process would reach `rpc_rx(kind)` on this node unframed, as a plain
+    /// member call with no mandate and no evaluator.
+    pub fn emit(&mut self, kind: &str, payload: Vec<u8>) -> Result<(), ConfinementError> {
+        confine_kind(&self.namespace, kind, &self.emit_kinds, &self.protected)?;
         let _ = self.mesh.emit(kind.to_string(), SignalScope::Cluster, Bytes::from(payload));
+        Ok(())
     }
 }
 
@@ -467,6 +504,44 @@ mod tests {
         state.kv_delete("state/cursor").unwrap();
         assert_eq!(state.kv_get("state/cursor").unwrap(), None);
 
+        agent.shutdown().await;
+    }
+
+    /// A hosted component's `mesh.emit` is a door: an unscoped emit of `mcp.invoke` at cluster
+    /// scope reaches every `rpc_rx("mcp.invoke")` on the hosting node unframed — a plain member
+    /// call with no mandate and no evaluator. Seen failing first: the protected kind arrived at
+    /// the handler.
+    #[tokio::test]
+    async fn a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace() {
+        let agent = live_agent().await;
+        let mut protected_rx = agent.service().rpc_rx(mycelium::signal_kind::MCP_INVOKE);
+        let mut own_rx = agent.mesh().signal_rx("comp/nlp/tick");
+        let mut foreign_rx = agent.mesh().signal_rx("comp/other/tick");
+        let mut state = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+
+        // Eight-byte nonce prefix so the RPC receiver treats it as a well-formed request.
+        let payload = b"\0\0\0\0\0\0\0\x01{\"name\":\"anything\"}".to_vec();
+        assert_eq!(state.emit(mycelium::signal_kind::MCP_INVOKE, payload.clone()), Err(ConfinementError::ProtectedKind));
+        assert_eq!(state.emit("skill.invoke", payload.clone()), Err(ConfinementError::ProtectedKind));
+        assert_eq!(state.emit("comp/other/tick", payload.clone()), Err(ConfinementError::ForeignKind));
+        assert_eq!(state.emit("comp/nlp/tick", payload.clone()), Ok(()));
+
+        // The in-namespace emit arrives...
+        let own = tokio::time::timeout(std::time::Duration::from_secs(5), own_rx.recv())
+            .await
+            .expect("the component's own-namespace emit arrives")
+            .expect("channel open");
+        assert_eq!(own.payload.as_ref(), payload.as_slice());
+        // ...and nothing else does: the protected kind never reaches the handler, nor does another
+        // component's namespace.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), protected_rx.recv()).await.is_err(),
+            "a component's emit of a protected kind reached rpc_rx(mcp.invoke)"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), foreign_rx.recv()).await.is_err(),
+            "a component's emit reached another component's namespace"
+        );
         agent.shutdown().await;
     }
 

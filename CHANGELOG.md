@@ -187,6 +187,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Upgrade note:** three `#[non_exhaustive]` enums gain a variant — a `_` arm must fail closed, as the enums'
   docs already require (`docs/guide/deprecations.md` §24).
 
+### Security
+- **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component
+  named at cluster scope on the node's full `MeshHandle` — only `kv` was confined — so a component could
+  emit `mcp.invoke`, `skill.invoke` or `llm.invoke` from inside the node's process and reach every
+  `rpc_rx` of that kind on the hosting node **unframed**: a self-originated request is a plain member
+  call, with no mandate and no evaluator, past the doors (`/mcp`, `/a2a`, the raw routes' `protected_kind`
+  refusal, provider enforcement) that check authority for exactly those kinds. A component may now emit
+  only a kind under `comp/{namespace}/…` or one the host listed for it (`HostState::with_emit_kinds`), and
+  never a protected kind — the built-ins or the node's `protected_rpc_kinds`, which a listing cannot
+  override (`confine_kind`, rule `host.emit_admission`). The WIT signature is unchanged (it carries no
+  error channel, and changing it would re-cut every committed fixture component), so a refused emit is
+  dropped, logged and counted: `mycelium_wasm_host_emits_refused_total{reason}`. The predicate every
+  door asks is now one ungated function, `mycelium::is_protected_kind` (with
+  `BUILTIN_PROTECTED_RPC_KINDS`), which the gateway's raw routes and provider enforcement call too. Seen
+  failing first: `a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace`
+  (`mycelium-wasm-host/src/host.rs` — the protected kind arrived at `rpc_rx(mcp.invoke)`). **Upgrade
+  note:** `HostState::emit` returns `Result<(), ConfinementError>` and `ConfinementError` gained
+  `ProtectedKind` and `ForeignKind` (an exhaustive `match` breaks); a component that emitted a kind
+  outside `comp/{namespace}/…` is now refused — list the kind with `with_emit_kinds` if it is not
+  protected work.
+
 ## [2.31.0] — 2026-10-09
 
 **Stops that stop, and failures that say what they are.** A node, a stem or a demo image now shuts down on SIGTERM

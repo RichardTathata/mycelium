@@ -22,9 +22,13 @@ WIT world in [`wit/host.wit`] — in-process FFI over the Component-Model canoni
 socket:
 
 - **Host imports** (what a component may call) — a *capability-scoped projection* of Mycelium's
-  public handles: confined `kv`, `mesh` emit, `log`. Component KV is confined to
+  public handles: confined `kv`, confined `mesh` emit, `log`. Component KV is confined to
   `comp/{node}/{namespace}/…`; a component can never escape its subtree or reach the capability
-  registry. This is the one place the substrate's *detection-not-prevention* posture flips to
+  registry. A component's `mesh.emit` is confined to kinds under `comp/{namespace}/…` (or kinds
+  the host listed for it) and never a protected RPC kind — `mcp.invoke`, `skill.invoke`,
+  `llm.invoke`, the node's `protected_rpc_kinds` — since an emit from inside the process would
+  reach that kind's handlers unframed, past the door that checks authority; a refused emit is
+  dropped, logged and counted (`mycelium_wasm_host_emits_refused_total`). This is the one place the substrate's *detection-not-prevention* posture flips to
   genuine **prevention** — the guest is untrusted foreign code in the node's own process, so the
   host mediating every import is legitimate. The host also provides a **restricted, deny-by-default
   WASI** context (no filesystem, network, env, or inherited stdio) — std-based guests link `wasi:*`

@@ -20,7 +20,10 @@ interface kv {
     delete: func(key: string);
 }
 
-/// Signal emission into the mesh. The host applies the admission scope (broadcast for v0).
+/// Signal emission into the mesh (broadcast for v0). The host confines the kind: only
+/// `comp/{namespace}/…` or a kind the host listed for the component, never a protected RPC kind
+/// (`mcp.invoke`, `skill.invoke`, `llm.invoke`, the node's `protected_rpc_kinds`). A refused emit
+/// is dropped, logged and counted — this signature carries no error channel.
 interface mesh {
     emit: func(kind: string, payload: list<u8>);
 }

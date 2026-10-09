@@ -2473,20 +2473,10 @@ async fn gw_demand(
     })).into_response()
 }
 
-/// RPC kinds that are **protected work**: each has a door of its own where authority is checked.
-/// `mcp.invoke` is `/mcp` `tools/call` (AE preflight, mandates); `skill.invoke` is `/a2a` (the same);
-/// `llm.invoke` is `/gateway/llm/call` (scope `llm:invoke`). Operators add more with
-/// `GossipConfig::protected_rpc_kinds`.
-pub const BUILTIN_PROTECTED_RPC_KINDS: &[&str] = &[
-    crate::signal::signal_kind::MCP_INVOKE,
-    "skill.invoke",
-    crate::signal::signal_kind::LLM_INVOKE,
-];
-
-/// Is `kind` protected work on this node?
-pub(crate) fn is_protected_kind(cfg: &crate::config::GossipConfig, kind: &str) -> bool {
-    BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || cfg.protected_rpc_kinds.iter().any(|k| k == kind)
-}
+// The protected-kind list (`BUILTIN_PROTECTED_RPC_KINDS`) and its predicate live ungated in
+// `agent/mod.rs` since the wasm host began refusing them at a component's `mesh.emit` (a build
+// without the gateway has that door too).
+pub(crate) use super::is_protected_kind;
 
 /// **Closure plan C1.** The gateway's raw routes (`rpc/call`, `scatter`, `signal/emit`,
 /// `mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`) take the RPC kind from the request

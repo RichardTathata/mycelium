@@ -145,6 +145,24 @@ pub(crate) use helpers::make_gossip_update;
 pub use mcp::McpClientHandle;
 pub use mcp::{McpCall, McpError, McpToolHandle};
 pub use rpc::{RpcError, RpcRequest, RpcRequestRx};
+
+/// RPC kinds that are **protected work**: each has a door of its own where authority is checked.
+/// `mcp.invoke` is `/mcp` `tools/call` (AE preflight, mandates); `skill.invoke` is `/a2a` (the same);
+/// `llm.invoke` is `/gateway/llm/call` (scope `llm:invoke`). Operators add more with
+/// `GossipConfig::protected_rpc_kinds`. Ungated: the gateway's raw routes refuse these kinds
+/// (closure plan C1), provider enforcement checks them (C3), and a hosted WASM component's
+/// `mesh.emit` refuses them — the last of which exists in a build without the gateway.
+pub const BUILTIN_PROTECTED_RPC_KINDS: &[&str] = &[
+    signal_kind::MCP_INVOKE,
+    "skill.invoke",
+    signal_kind::LLM_INVOKE,
+];
+
+/// Is `kind` protected work on this node — one of [`BUILTIN_PROTECTED_RPC_KINDS`] or a kind the
+/// operator listed in `GossipConfig::protected_rpc_kinds`? The one predicate every door asks.
+pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
+    BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || cfg.protected_rpc_kinds.iter().any(|k| k == kind)
+}
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
     preflight, ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision,

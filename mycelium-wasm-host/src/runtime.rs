@@ -287,7 +287,8 @@ struct Served {
 
 impl Served {
     fn fresh(&self, agent: &GossipAgent) -> Result<Instance, WasmHostError> {
-        let state = HostState::new(agent.node_id().clone(), self.ns.clone(), agent.kv(), agent.mesh());
+        let state = HostState::new(agent.node_id().clone(), self.ns.clone(), agent.kv(), agent.mesh())
+            .with_protected_kinds(agent.config().protected_rpc_kinds.iter().cloned());
         self.again.host.instantiate_with_fuel(&self.again.bytes, state, self.again.budget)
     }
 }
@@ -399,7 +400,8 @@ impl ArtifactRuntime for WasmComponentRuntime {
             entry.provides.namespace.clone(),
             ctx.agent.kv(),
             ctx.agent.mesh(),
-        );
+        )
+        .with_protected_kinds(ctx.agent.config().protected_rpc_kinds.iter().cloned());
         // Components are small (well under the mesh frame cap): pull + verify + instantiate in
         // one step. Chunked/ranged pulls with incremental progress are the blob runtime's job.
         // The verified bytes are kept so a trapped instance can be replaced (see `Reinstantiate`).

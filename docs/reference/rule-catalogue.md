@@ -2,7 +2,7 @@
 
 **Generated** from the `RuleDescriptor`s each crate registers (`mycelium_core::rule`); do not edit. Regenerate with `UPDATE_RULE_CATALOGUE=1 cargo test -p mycelium-wasm-host --features stem --test rule_catalogue`. A rule is a decision point the substrate already has, described: what triggers it, what it reads, how it can end and why, what it writes, which guards it passes, how it may relate to other rules, where its code and tests are, and whether the decision trace records it. A descriptor executes nothing. A relationship is a hypothesis until a trace or a test shows it. The plan is `docs/plans/guarantees-and-rule-catalogue.md`.
 
-Schema `mycelium.rules/1` · 26 rules.
+Schema `mycelium.rules/1` · 27 rules.
 
 | Rule | Responsibilities | Trace | Summary |
 |---|---|---|---|
@@ -10,6 +10,7 @@ Schema `mycelium.rules/1` · 26 rules.
 | [`ae.preflight`](#aepreflight) | Authority | catalogue only | Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. |
 | [`cap.match`](#capmatch) | Response | catalogue only | The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch. |
 | [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start. |
+| [`host.emit_admission`](#hostemit_admission) | Admission, Authority | catalogue only | A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority. |
 | [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
 | [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
 | [`membership.governed`](#membershipgoverned) | Response | instrumented | This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view. |
@@ -99,6 +100,22 @@ Deny by default under `compliance`: a route needs its scope; with no credential 
 - **Guards:** Authority
 - **May trigger:** [`ae.preflight`](#aepreflight)
 - **Code:** `http::gateway_auth / required_scope` · **Docs:** docs/operations/rbac.md · **Tests:** `named_tokens_alone_still_close_the_gateway`, `a_token_table_this_build_cannot_enforce_refuses_to_start`
+
+## `host.emit_admission`
+
+rev 1 · `mycelium-wasm-host::host` · Admission, Authority · trace: catalogue only
+
+A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority.
+
+- **Trigger:** a hosted component calls its `mesh.emit(kind, payload)` import
+- **Reads:**
+  - the component's namespace, the kinds the host listed for it, and the node's `protected_rpc_kinds` — all set at instantiation — scope: this component instance; freshness: fixed at instantiation
+- **Outcomes:**
+  - Action: `admitted`
+  - Refusal: `protected_kind`, `foreign_kind`, `malformed`
+- **Effects:** the signal is emitted at cluster scope, or dropped — never sent — and counted: `mycelium_wasm_host_emits_refused_total{reason}`
+- **Guards:** Authority
+- **Code:** `host::HostState::emit` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace`, `a_protected_kind_is_refused_even_when_listed`
 
 ## `kv.expiry`
 
