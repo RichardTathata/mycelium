@@ -98,12 +98,23 @@ async fn main() {
         Some("ca-init") => ca_init(&args[2]).await,
         Some("agent-doors") => agent_doors(&args[2], &args[3]).await,
         Some("agent-load") => agent_load(args[2].parse().expect("milliseconds")).await,
-        _ => match env("ROLE").as_str() {
-            "operator" => operator().await,
-            "provider" => member(Role::Provider).await,
-            "gateway" => member(Role::Gateway).await,
-            other => panic!("unknown ROLE {other}"),
-        },
+        _ => {
+            // The long-running roles: this binary is an image's entrypoint (PID 1), so `docker stop`'s SIGTERM
+            // must end it — installed before any role binds; a second signal exits at once.
+            let shutdown = mycelium::shutdown::ShutdownSignal::install().expect("signal handlers");
+            let role = async {
+                match env("ROLE").as_str() {
+                    "operator" => operator().await,
+                    "provider" => member(Role::Provider).await,
+                    "gateway" => member(Role::Gateway).await,
+                    other => panic!("unknown ROLE {other}"),
+                }
+            };
+            tokio::select! {
+                _ = role => {}
+                _ = shutdown.wait() => {}
+            }
+        }
     }
 }
 

@@ -52,6 +52,8 @@ def agent():
 CALLS = {
     "consistent_set":      lambda a: a.consistent_set("config/endpoint", b"x"),
     "cross_group_propose": lambda a: a.cross_group_propose("slot", b"x", [{"group": "g", "quorum": 0.5}]),
+    "distributed_lock":    lambda a: a.distributed_lock("jobs/nightly"),
+    "elect_leader":        lambda a: a.elect_leader("workers"),
 }
 
 

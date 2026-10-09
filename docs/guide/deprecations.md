@@ -396,14 +396,16 @@ mid-slot.
   `mycelium-stem` and the long-running examples (`mycelium::shutdown::ShutdownSignal`). A shutdown that hung used
   to wait for SIGKILL. The first signal still runs the orderly shutdown, including one that arrives during
   startup.
-- **`mycelium-py` 0.2.8:** `consistent_set` and `cross_group_propose` raise `SupersededError` for a 409
-  `superseded` — still an `httpx.HTTPStatusError`.
+- **`mycelium-py` 0.2.8:** `consistent_set`, `cross_group_propose`, `distributed_lock` and `elect_leader` raise
+  `SupersededError` for a 409 `superseded` — still an `httpx.HTTPStatusError`. Python only: the TypeScript SDK
+  still rejects with its generic error.
 
 **Will the compiler tell me?** No — a metric label, an exit code and a Python subclass.
 
 **Migration.** An alert keyed on a single `reason` value should match the new set — for "consensus is
 stalling", `reason=~"no_voters|promise_short|quorum_short"`; `contended` is contention, not failure. A supervisor
 that sends a second signal to hurry a stop now gets an immediate exit with 130/143 rather than a wait; send one and
-allow the grace period if the orderly shutdown matters (the stem's trace, the node's bundle). Existing
+allow the grace period if the orderly shutdown matters (the stem's trace and its withdrawals, unsynced
+persistence). Existing
 `except httpx.HTTPStatusError` handlers keep catching a lost write; catch `SupersededError` to tell it apart.
 

@@ -93,7 +93,7 @@ class SupersededError(httpx.HTTPStatusError):
     """A consensus write that did not commit **your** value: the slot was decided for another (HTTP 409
     ``superseded``, substrate 2.30.0+ — the normal answer to a concurrent loser).
 
-    Raised by ``consistent_set`` and ``cross_group_propose`` (0.2.8). Still an :class:`httpx.HTTPStatusError`,
+    Raised by ``consistent_set``, ``cross_group_propose``, ``distributed_lock`` and ``elect_leader`` (0.2.8). Still an :class:`httpx.HTTPStatusError`,
     what these verbs raised for the same 409 before, so an existing ``except`` keeps catching it. Read the
     decided value with ``consistent_get``. A timeout (504) and the other 409s stay plain HTTP errors.
     """
@@ -1068,7 +1068,9 @@ class MyceliumAgent:
         """
         body = {"name": name, "ttl_secs": ttl_secs}
         with self._pool.sync() as c:
-            data = c.post("/gateway/overlay/lock/acquire", json=body).raise_for_status().json()
+            resp = c.post("/gateway/overlay/lock/acquire", json=body)
+            _raise_if_superseded(resp)
+            data = resp.raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "lock acquisition failed"))
         return LockGuard(_agent=self, guard_id=data["guard_id"], token=int(data["token"]))
@@ -1079,7 +1081,9 @@ class MyceliumAgent:
         """Elect a leader for ``group`` via consensus. Returns the winner's ``"IP:PORT"``."""
         body = {"group": group}
         with self._pool.sync() as c:
-            data = c.post("/gateway/overlay/elect", json=body).raise_for_status().json()
+            resp = c.post("/gateway/overlay/elect", json=body)
+            _raise_if_superseded(resp)
+            data = resp.raise_for_status().json()
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "election failed"))
         return data["leader"]

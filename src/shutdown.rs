@@ -4,12 +4,18 @@
 //! behaves the same everywhere (doc-coverage run 22 and its reviews):
 //!
 //! - **SIGINT or SIGTERM.** `docker stop` and a Kubernetes pod stop send SIGTERM; a process that awaits only
-//!   Ctrl-C is killed by it, with no orderly shutdown.
-//! - **Installed when constructed.** Create it before the node binds and await it afterwards: a handler
-//!   registered only when the wait begins leaves startup exposed to the default action, which kills.
+//!   Ctrl-C gets no orderly shutdown from it — killed outright, or, as a container's PID 1, left running
+//!   until the grace period ends in SIGKILL.
+//! - **Installed when constructed** (Unix). Create it before the node binds and await it afterwards: a handler
+//!   registered only when the wait begins leaves startup exposed to the default action, which kills. Elsewhere
+//!   nothing is registered until [`wait`](ShutdownSignal::wait), which awaits Ctrl-C.
 //! - **A second signal exits at once.** Once the first has started a shutdown, the handlers stay installed,
 //!   so a second signal would otherwise do nothing and a hung shutdown would wait for SIGKILL. The second
-//!   exits the process with `128 + signal` (130 for SIGINT, 143 for SIGTERM).
+//!   exits the process with `128 + signal` (130 for SIGINT, 143 for SIGTERM). A forced exit is
+//!   **SIGKILL-equivalent**: no destructors run, WAL records not yet synced are lost, and a file being written
+//!   (a stem's `--trace-dir` output) can be left truncated; on-disk state is repaired at the next start. The
+//!   watcher is a task, so it runs only while the runtime can poll it — a synchronous block after the first
+//!   signal, or work after the runtime is dropped, is not interruptible by it.
 //!
 //! Do not create one in an interactive program that should keep Ctrl-C's default: a handler nobody awaits
 //! swallows the signal.
@@ -47,6 +53,14 @@ impl ShutdownSignal {
                 _ = self.int.recv() => {}
                 _ = self.term.recv() => {}
             }
+            // A SIGINT and a SIGTERM both pending (a wrapper forwarding TERM while Ctrl-C also reaches the
+            // process group) are one stop, not two: take whatever else is already pending before the
+            // watcher starts, so it counts only a signal that arrives later.
+            std::future::poll_fn(|cx| {
+                let _ = self.int.poll_recv(cx);
+                let _ = self.term.poll_recv(cx);
+                std::task::Poll::Ready(())
+            }).await;
             let (mut int, mut term) = (self.int, self.term);
             tokio::spawn(async move {
                 let code = tokio::select! {

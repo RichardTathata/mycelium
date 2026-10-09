@@ -353,7 +353,8 @@ retry it on the strength of a timeout. The same rule crosses a domain boundary a
 Ballot-serialized (consensus-durable) write: runs a consensus round before writing. Of two concurrent
 writes of different values to one key, at most one succeeds; the other raises `SupersededError` (409
 `superseded`, 0.2.8 — still an `httpx.HTTPStatusError`) or times out (504), and a timeout does not mean its value
-lost — read the key (substrate ≥ 2.30.0). `cross_group_propose` raises `SupersededError` the same way. `consistent_get` is a local read
+lost — read the key (substrate ≥ 2.30.0). `cross_group_propose`, `distributed_lock` and `elect_leader` raise
+`SupersededError` the same way. `consistent_get` is a local read
 and may lag by up to one anti-entropy round.
 
 ```python
@@ -522,8 +523,8 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 ### Errors
 
-Three gateway refusals are raised as typed errors, each a `PermissionError` carrying the gateway's
-`message`, which names the route to use instead. An ordinary scope refusal (`403` without one of
+Four gateway answers are raised as typed errors. The three refusals are each a `PermissionError` carrying the
+gateway's `message`, which names the route to use instead; `SupersededError` is a lost consensus write. An ordinary scope refusal (`403` without one of
 these codes) stays an `httpx.HTTPStatusError`.
 
 | Error | Gateway answer | Raised by | Attribute |
@@ -531,6 +532,7 @@ these codes) stays an `httpx.HTTPStatusError`.
 | `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpc_call`, `scatter_gather`, `emit`, `deliver_event`, `emit_sharded`, `emit_reliable` (0.2.7) | `.kind` |
 | `ProtectedKeyError` (since 0.2.7) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `set_with_min_acks`, `consistent_set` | `.key`, `.message`, `.response` |
 | `ProtectedStreamError` (since 0.2.7) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compact_log` | `.stream`, `.message`, `.response` |
+| `SupersededError` (since 0.2.8) | `409 superseded` — the slot was decided for another value (a concurrent writer, holder or leader won) | `consistent_set`, `cross_group_propose`, `distributed_lock`, `elect_leader` | `.response` |
 
 `ProtectedKeyError` and `ProtectedStreamError` are also `httpx.HTTPStatusError`s — what these verbs
 raised for the same `403` before 0.2.7 — so an existing `except httpx.HTTPStatusError` still catches them.
