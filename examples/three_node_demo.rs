@@ -1753,6 +1753,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent.with_http_routes(extra);
     }
 
+    // SIGINT or SIGTERM (`docker stop` — this binary is the image's entrypoint), installed before the bind;
+    // a second signal exits at once. The roles below never return, so the signal ends the run.
+    let shutdown = mycelium::shutdown::ShutdownSignal::install()?;
     agent.start().await.expect("agent start");
     info!("[{role}] node_id={}", agent.node_id());
 
@@ -1792,6 +1795,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let role_agent = Arc::clone(&agent);
+    let run_role = async move {
+    let agent = role_agent;
     match role.as_str() {
         "tool-a" => run_tool_a(agent, &role).await,
         "tool-b" => run_tool_b(agent, &role).await,
@@ -1811,5 +1817,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     }
+    };
+    tokio::select! {
+        _ = run_role => {}
+        r = shutdown.wait() => r?,
+    }
+    // An orderly stop: the persistence directory, when configured, is flushed and released.
+    agent.shutdown().await;
     Ok(())
 }

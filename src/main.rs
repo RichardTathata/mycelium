@@ -53,7 +53,7 @@ async fn run(config: GossipConfig, trace: Option<Arc<mycelium::decision::Decisio
     // shutdown — the bundle written — rather than the default action's kill. Not in interactive mode,
     // whose Ctrl-C must keep its default (a handler nobody awaits would swallow it).
     let interactive = std::env::args().any(|a| a == "-i" || a == "--interactive");
-    let shutdown = if interactive { None } else { Some(ShutdownSignal::install()?) };
+    let shutdown = if interactive { None } else { Some(mycelium::shutdown::ShutdownSignal::install()?) };
 
     agent.start().await?;
 
@@ -140,42 +140,6 @@ fn parse_args() -> Result<GossipConfig, GossipError> {
     Ok(config)
 }
 
-/// SIGINT (all platforms) or SIGTERM (Unix), installed when constructed and awaited later — see `run`.
-struct ShutdownSignal {
-    #[cfg(unix)]
-    int:  tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    term: tokio::signal::unix::Signal,
-}
-
-impl ShutdownSignal {
-    fn install() -> Result<Self, std::io::Error> {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            Ok(Self { int: signal(SignalKind::interrupt())?, term: signal(SignalKind::terminate())? })
-        }
-        #[cfg(not(unix))]
-        {
-            Ok(Self {})
-        }
-    }
-
-    #[cfg_attr(not(unix), allow(unused_mut))]
-    async fn wait(mut self) -> Result<(), std::io::Error> {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = self.int.recv() => Ok(()),
-                _ = self.term.recv() => Ok(()),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            tokio::signal::ctrl_c().await
-        }
-    }
-}
 
 /// `mycelium wire-check <units-dir> [--library <artifacts-dir>] [--format text|json|dot]
 /// [--strict-deployed] [--revision <rev>]`. Reads every `*.toml` in `units-dir` as a unit (its

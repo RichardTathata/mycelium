@@ -205,8 +205,8 @@ intervals. What to expect and do:
   and the rank, run the stem with `--trace-dir` and read the `prov.shed` decisions with `mycelium explain`
   ([diagnostics.md](diagnostics.md) § reading what a node decided): `above_ceiling` is a withdrawal,
   `ranked_within_ceiling` a host that stayed, with its rank in the inputs. **The stem writes the trace when it
-  shuts down** — on SIGINT, or SIGTERM (`docker stop`, a Kubernetes pod stop) since 2.30.1; a stem before
-  2.30.1 is killed by SIGTERM without writing it or withdrawing gracefully, so stop it with
+  shuts down** — on SIGINT, or SIGTERM (`docker stop`, a Kubernetes pod stop) since 2.31.0; a stem before
+  2.31.0 is killed by SIGTERM without writing it or withdrawing gracefully, so stop it with
   `docker kill -s INT <container>`.
 - **A runnable ceiling.** `cargo run -p mycelium-wasm-host --example first_stem_fleet` (run in CI) declares a
   band of exactly two over three stems that all self-elect; the run settles to two, the surplus host withdrawing

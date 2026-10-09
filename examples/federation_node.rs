@@ -290,6 +290,8 @@ async fn run_node(role: &str) {
     }
     let agent = Arc::new(agent);
     agent.with_http_routes(admin_router(Admin { agent: Arc::clone(&agent), edge }));
+    // SIGINT or SIGTERM (`docker stop`), installed before the bind; a second signal exits at once.
+    let shutdown = mycelium::shutdown::ShutdownSignal::install().expect("signal handlers");
     agent.start().await.expect("start");
     info!(role, domain = %dom, node = %agent.node_id(), "up under the enforced profile");
 
@@ -320,7 +322,7 @@ async fn run_node(role: &str) {
         });
     }
 
-    tokio::signal::ctrl_c().await.ok();
+    shutdown.wait().await.ok();
     drop(regs);
     agent.shutdown().await;
 }

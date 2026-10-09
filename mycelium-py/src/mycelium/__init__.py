@@ -13,6 +13,7 @@ from .agent import (
     ProtectedKindError,
     ProtectedKeyError,
     ProtectedStreamError,
+    SupersededError,
 )
 from .a2a import A2aClient, arguments_digest, mandate_request_bytes
 from .artifacts import Artifacts, ArtifactError
@@ -34,6 +35,7 @@ __all__ = [
     "ProtectedKindError",
     "ProtectedKeyError",
     "ProtectedStreamError",
+    "SupersededError",
     "CapabilityHandle",
     "UnitHandle",
     "Signal",

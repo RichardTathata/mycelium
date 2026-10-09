@@ -152,7 +152,7 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   `propose` returns `ConsensusResult::Timeout` and a `consistent_get` serves the last committed
   value; neither fabricates a commit. This is the common production failure (distinct from a
   *commit conflict*, which is the opposite — two commits, not zero).
-- **Read:** counter `mycelium_consensus_timeouts_total` by `reason`, which since 2.30.1 counts what **other**
+- **Read:** counter `mycelium_consensus_timeouts_total` by `reason`, which since 2.31.0 counts what **other**
   acceptors answered on the last attempt — `no_voters` ⇒ **none did**: a **partition**, or, during a rolling
   upgrade to 2.30.0, every acceptor still older (they ignore `Prepare`); `promise_short` ⇒ some promised,
   too few (a partial partition, or part of the group not yet upgraded); `contended` ⇒ another proposer holds
@@ -381,8 +381,8 @@ what it read, how it ended and the typed reason. The decision points are the gen
 [rule catalogue](../reference/rule-catalogue.md) — an `instrumented` entry records, a `catalogue only`
 entry does not, and `coverage.json` beside a trace says which. The trace is off unless attached, changes
 no decision and never waits (a saturated sink drops the newest record and counts it). A stem writes it
-with `mycelium-stem … --trace-dir <dir>` when it shuts down — on SIGINT or, since 2.30.1, SIGTERM (`docker stop`);
-before 2.30.1 SIGTERM killed it without one ([capability-lifecycle.md](capability-lifecycle.md)); the node
+with `mycelium-stem … --trace-dir <dir>` when it shuts down — on SIGINT or, since 2.31.0, SIGTERM (`docker stop`);
+before 2.31.0 SIGTERM killed it without one ([capability-lifecycle.md](capability-lifecycle.md)); the node
 binary built `--features cli,sim` and started with `GOSSIP_RECORD_BUNDLE_DIR=<dir>` writes
 `decisions.jsonl`, `coverage.json` and `decisions.stats.json` into the bundle beside `build.json` and
 `choices.trace`. Read either with:
