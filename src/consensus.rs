@@ -1007,6 +1007,9 @@ impl ConsensusEngine {
         // gossiped and may lag what this node knows was decided.
         let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
         let mut votes_last_ballot: usize = 0;
+        // Whether the latest attempt ended in the prepare phase, before any vote was asked for — a
+        // promise shortfall is not a partition, and the timeout says which (doc-coverage run 22, gap 3).
+        let mut ended_in_prepare = false;
         // Captured topology-gate failure from the most recent ballot that
         // reached quorum-by-count but failed the Hard gate. Used to surface
         // `TopologyUnsatisfied` after all ballots are exhausted.
@@ -1086,7 +1089,10 @@ impl ConsensusEngine {
                         ballot: self.read_ballot(&ballot_key),
                     };
                 }
-                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
+                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => {
+                    ended_in_prepare = true;
+                    Some(0)
+                }
                 Phase1::Refused(seen) => Some(seen),
             };
             if let Some(floor) = retry_floor {
@@ -1094,6 +1100,7 @@ impl ConsensusEngine {
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
+            ended_in_prepare = false;
 
             // Phase 2 listens on a fresh refusal channel: a refusal of this ballot's *prepare*, still
             // queued after the promise quorum formed, would otherwise abort a ballot already won.
@@ -1227,8 +1234,10 @@ impl ConsensusEngine {
 
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_consensus_timeouts_total",
-            "reason" => if votes_last_ballot == 0 { "no_voters" } else { "quorum_short" })
+            "reason" => timeout_reason(ended_in_prepare, votes_last_ballot))
             .increment(1);
+        #[cfg(not(feature = "metrics"))]
+        let _ = ended_in_prepare;
         ConsensusResult::Timeout {
             slot,
             ballots_tried: config.max_ballots,
@@ -1335,6 +1344,7 @@ impl ConsensusEngine {
         );
 
         let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
+        let mut ended_in_prepare = false;
 
         for _attempt in 0..config.max_ballots {
             for gs in group_states.values_mut() { gs.accepts = 0; }
@@ -1358,7 +1368,10 @@ impl ConsensusEngine {
                 Phase1::DecidedOtherwise => {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
-                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => Some(0),
+                Phase1::Ready(Phase1Choice::Blocked) | Phase1::Short => {
+                    ended_in_prepare = true;
+                    Some(0)
+                }
                 Phase1::Refused(seen) => Some(seen),
             };
             if let Some(floor) = retry_floor {
@@ -1366,6 +1379,7 @@ impl ConsensusEngine {
                 ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
                 continue;
             }
+            ended_in_prepare = false;
 
             // A fresh refusal channel for phase 2 — see `propose`.
             nack_rx = self.task_ctx.signal_handlers.register_with_capacity(
@@ -1501,8 +1515,10 @@ impl ConsensusEngine {
         let votes_last_ballot: usize = group_states.values().map(|gs| gs.accepts).sum();
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_consensus_timeouts_total",
-            "reason" => if votes_last_ballot == 0 { "no_voters" } else { "quorum_short" })
+            "reason" => timeout_reason(ended_in_prepare, votes_last_ballot))
             .increment(1);
+        #[cfg(not(feature = "metrics"))]
+        let _ = ended_in_prepare;
         ConsensusResult::Timeout {
             slot,
             ballots_tried:     config.max_ballots,
@@ -1843,6 +1859,20 @@ fn set_aside_finished(reports: &mut Vec<AcceptReport>, floor: u64, over: bool) {
 /// floor) or has ended (at the floor, and `over`) — such a COMMIT is not re-stamped.
 fn commit_is_stale(ballot: u64, floor: u64, over: bool) -> bool {
     ballot < floor || (ballot == floor && over)
+}
+
+/// Why a proposal timed out, as `mycelium_consensus_timeouts_total` labels it. `promise_short`: the last
+/// attempt never gathered a quorum of promises, so no vote was asked for — mid-upgrade to 2.30.0 that is
+/// acceptors that ignore `Prepare`, not a partition, and it used to be counted as `no_voters`.
+#[cfg(any(feature = "metrics", test))]
+fn timeout_reason(ended_in_prepare: bool, votes_last_ballot: usize) -> &'static str {
+    if ended_in_prepare {
+        "promise_short"
+    } else if votes_last_ballot == 0 {
+        "no_voters"
+    } else {
+        "quorum_short"
+    }
 }
 
 /// A `Committed` for a value other than `asked` becomes `Superseded` — see `ConsensusEngine::propose`.
@@ -3402,6 +3432,17 @@ mod consensus_msg_auth_tests {
         };
         assert!(matches!(own_or_superseded(committed(&theirs), &mine), ConsensusResult::Superseded { ballot: 4, .. }));
         assert!(matches!(own_or_superseded(committed(&mine), &mine), ConsensusResult::Committed { .. }));
+    }
+
+    /// **A promise shortfall is not counted as a partition** (doc-coverage run 22, code gap 3). A
+    /// proposer whose prepare phase never gathers a quorum — mid-upgrade, acceptors older than 2.30.0
+    /// ignore `Prepare` — retries before any vote is asked for, so it used to time out as `no_voters`,
+    /// which the runbook reads as a partition.
+    #[test]
+    fn a_promise_shortfall_has_its_own_timeout_reason() {
+        assert_eq!(timeout_reason(true, 0), "promise_short");
+        assert_eq!(timeout_reason(false, 0), "no_voters");
+        assert_eq!(timeout_reason(false, 2), "quorum_short");
     }
 
     #[test]

@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`mycelium-stem` shuts down on SIGTERM** (`docker stop`, a Kubernetes pod stop) as it does on SIGINT: it writes its
+  `--trace-dir` output and withdraws its installs. It awaited `ctrl_c()` only, so a stopped container was killed with
+  neither (doc-coverage run 22, code gap 2). Seen failing first: `mycelium-wasm-host/tests/stem_shutdown.rs`.
+- **A prepare phase that never gathers a quorum of promises times out as `promise_short`**, not `no_voters`
+  (`mycelium_consensus_timeouts_total`). Mid-upgrade to 2.30.0 that is acceptors which ignore `Prepare`, and the
+  runbook read `no_voters` as a partition (code gap 3). Seen failing first:
+  `a_promise_shortfall_has_its_own_timeout_reason`.
+- **`langgraph-checkpoint-mycelium` 0.3.1:** the blob route's own 403 `refused` (every holder refused for good —
+  a removed member, a denied action) is reported as `"refused"`, not `"unauthorized"`, which sent an operator to
+  the token (code gap 1). Not retriable, like `unauthorized`. Seen failing first:
+  `test_a_route_refusal_is_not_a_token_problem`.
+
 ## [2.30.0] — 2026-10-09
 
 **Consensus asks before it proposes.** Two concurrent proposers on a stable roster could commit different values for

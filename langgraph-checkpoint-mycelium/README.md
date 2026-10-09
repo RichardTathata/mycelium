@@ -80,7 +80,7 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   only when every reason is transient**: `not_found` (the blob route's 404) or `unavailable`
   (503, or any other 5xx, 408 or 429 — a proxy's 502 page included). `corrupt` (a 502 whose
   body is the route's own `corrupt`),
-  `unauthorized` (401/403) and `unsupported` (a bare 404 — no reason companion) are not:
+  `unauthorized` (401/403), `refused` (the route's 403) and `unsupported` (a bare 404 — no reason companion) are not:
   `e.retriable` is false and waiting will not fix them. Catch it and retry a retriable one
   after a short wait, with a bound; do not treat it as "start fresh". An application meets it from
   `graph.invoke(…)` / `graph.get_state(…)` on a node that has not converged yet:
@@ -106,10 +106,10 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   **Why each blob is missing** is `e.reasons[blob_id]` (0.3.0, with `mycelium-reason` 0.7.0):
   `"not_found"` — no reachable holder has it yet; `"unavailable"` — a holder could not be reached or refused for now (`mycelium-reason` 0.7.1+), the
   node or a proxy in front of it failed, the read was throttled, or the node itself could not be reached
-  (an `httpx.TransportError`, such as a refused connection); `"unauthorized"` — a 401/403: the gateway refused
-  the token (no `llm:read`), **or** the blob route's own 403 `refused` — every holder refused for good (a removed
-  member, a denied action; `mycelium-reason` 0.7.1). This client does not yet tell the two apart;
-  `GET /gateway/reason/blob/{id}` shows which; `"corrupt"` — every copy currently on offer fails the content
+  (an `httpx.TransportError`, such as a refused connection); `"unauthorized"` — the gateway refused
+  the token (a 401/403 — no `llm:read`); `"refused"` (0.3.1) — the blob route's own 403: every holder refused for
+  good (a removed member, a denied action; `mycelium-reason` 0.7.1) — fix the holder's membership or authority,
+  not the token; `"corrupt"` — every copy currently on offer fails the content
   address (one bad provider beside an honest one that lacks it is `not_found`); `"unsupported"` — the node
   does not serve the blob route (no reason companion there). `e.retriable`
   is true only when every reason is `not_found` or `unavailable`, so the loop above should re-raise

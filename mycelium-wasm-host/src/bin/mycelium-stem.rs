@@ -215,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let stem = Stem::start(Arc::clone(&agent), &units, opts)?;
         tracing::info!(units = %units_path, hosting = units.hosts.is_some(), "stem node up");
-        tokio::signal::ctrl_c().await?;
+        shutdown_signal().await?;
         tracing::info!("shutting down");
         stem.stop().await;
         if let (Some(dir), Some(sink)) = (&trace_dir, &sink) {
@@ -232,4 +232,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent.shutdown().await;
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+/// SIGINT **or SIGTERM** — the second is what `docker stop` and a Kubernetes pod stop send. Awaiting only
+/// `ctrl_c()` left a stopped container killed without its `--trace-dir` output and without withdrawing
+/// its installs (doc-coverage run 22, code gap 2).
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r,
+            _ = term.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }

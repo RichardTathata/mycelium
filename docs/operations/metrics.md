@@ -96,7 +96,7 @@ captures the path tail, so the hierarchical slot is typed as-is; bearer when a t
 
 | Metric | Type | Labels | Meaning | Watch for / alert |
 |---|---|---|---|---|
-| `mycelium_consensus_timeouts_total` | counter | `reason` | consensus rounds that timed out without committing (no quorum) | `rate > 0` = the overlay is blocking → [consensus stalled](diagnostics.md#consensus-stalled--quorum-unavailable). `reason`: `no_voters` (partition), `quorum_short` (members heard but quorum not met — overload / quorum set too high), `all_opaque` (every member shedding load), `empty_groups` (misuse) |
+| `mycelium_consensus_timeouts_total` | counter | `reason` | consensus rounds that timed out without committing (no quorum) | `rate > 0` = the overlay is blocking → [consensus stalled](diagnostics.md#consensus-stalled--quorum-unavailable). `reason`: `no_voters` (partition), `promise_short` (the prepare phase gathered too few promises — mid-upgrade to 2.30.0, older acceptors; 2.31.0), `quorum_short` (members heard but quorum not met — overload / quorum set too high), `all_opaque` (every member shedding load), `empty_groups` (misuse) |
 | `mycelium_consensus_commit_conflicts` | gauge | — | cumulative split-brain double-commits (mirrors `/stats` `commit_conflicts`) | `delta > 0` = a slot was committed twice → [consensus commit conflict](diagnostics.md#consensus-commit-conflict) |
 | `mycelium_schema_mismatch` | gauge | — | cumulative capability payloads routed around for schema version skew (mirrors `/stats` `schema_mismatch`) | `delta > 0` = a provider has an unmigrated schema version → [schema mismatch](diagnostics.md#schema-mismatch) |
 

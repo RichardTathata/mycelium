@@ -213,12 +213,12 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   rest`). The client's `IncompleteCheckpoint.reasons`
   carries the same word per blob — read from the route's body, so a proxy's own 502 page is `unavailable` —
   plus `unauthorized` for a 401/403 and `unsupported` for a bare 404 (that node serves no blob route), and
-  `retriable` is false for `corrupt`, `unauthorized` and `unsupported`: a damaged or forged blob, a refused
-  read, or a node without the reason companion — each needs a person, not a retry. **A client
-  `unauthorized` is one of two causes**, which the checkpointer (0.3.0) does not yet tell apart: the gateway
-  refusing the token (no `llm:read`), or the route's own **403 `refused`** — every holder refused for good.
-  `GET /gateway/reason/blob/{id}` with a token that has `llm:read` says which: a body of `{"error":"refused"}`
-  means fix the holder's membership or authority, not the token. `refused` needs a substrate ≥ 2.28.0; against
+  `retriable` is false for `corrupt`, `unauthorized`, `refused` and `unsupported`: a damaged or forged blob, a refused
+  read, or a node without the reason companion — each needs a person, not a retry. The client
+  tells the two 403s apart (checkpointer 0.3.1): `unauthorized` is the gateway refusing the token (no
+  `llm:read`); `refused` is the route's own — every holder refused for good — so fix the holder's membership or
+  authority, not the token (a 0.3.0 client reports both as `unauthorized`; `GET /gateway/reason/blob/{id}`
+  shows which). `refused` needs a substrate ≥ 2.28.0; against
   an older one every holder refusal reads as 503 `unavailable`. **Which providers a miss asked** — and what each
   answered (`miss`, `refused(reason)`, `unreachable`) — is a `debug` line, `blob fetch missed`: raise
   `mycelium_reason` to `debug` in the node's log filter to see it (the `reason_node` example reads
