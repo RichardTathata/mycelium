@@ -406,14 +406,17 @@ pub(crate) fn identity_proof_message(history: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Proofs this node accepted in the **untagged** (pre-2.32.0) form — a mixed-fleet allowance for
-/// one release, taken only while `require_identity_proofs` is off (`validate_and_merge_identity`).
-/// Non-zero means a peer still signs its proof the old way; the allowance closes in the next MINOR
-/// (`docs/guide/deprecations.md` §23).
+/// Proof **validations** this node accepted in the **untagged** (pre-2.32.0) form — a mixed-fleet
+/// allowance for one release, taken only while `require_identity_proofs` is off
+/// (`validate_and_merge_identity`). Validations, not peers: the identity watcher re-validates
+/// every record on every `sys/identity*` change, so one un-upgraded peer raises this repeatedly.
+/// Still rising means a peer still signs its proof the old way; the allowance closes in the next
+/// MINOR (`docs/guide/deprecations.md` §23).
 #[cfg(feature = "tls")]
 static UNTAGGED_IDENTITY_PROOFS_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// How many untagged identity proofs this process has accepted under the mixed-fleet allowance.
+/// How many untagged identity-proof validations this process has accepted under the mixed-fleet
+/// allowance (re-validations included — see the counter's doc).
 #[cfg(feature = "tls")]
 #[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
 pub(crate) fn untagged_identity_proofs_accepted() -> u64 {
@@ -570,6 +573,11 @@ pub(crate) fn validate_and_merge_identity(
         // The pre-2.32.0 form, from a peer not yet upgraded. One release, counted, never under
         // `require_identity_proofs` — see the function doc.
         sig_ok = true;
+        // No quieter than an unsigned forgery: the anchor tripwire the no-proof path runs (a key
+        // the CA anchor does not hold trips `identity_anchor_conflicts`) runs here too, since a
+        // bare signature by a trusted key is exactly what a forged answer carries (the adversarial
+        // review of #585, F4a).
+        flag_identity_anchor_conflict(anchor_keys, conflict_counter, node, kv_keys);
         UNTAGGED_IDENTITY_PROOFS_ACCEPTED.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "metrics")]
         metrics::counter!("mycelium_identity_untagged_proofs_total").increment(1);

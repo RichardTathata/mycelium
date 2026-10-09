@@ -89,10 +89,15 @@ Now: an identity proof signs `mycelium.identity/proof/1 ‖ u32 len ‖ history`
 unchanged (wire v12). `GossipAgent::sign_with_identity` signs what it is given, so its doc states the contract:
 the caller owns the message's domain. **Mixed fleet, one release:** the bare form of both is accepted and counted
 (`/stats` `identity_untagged_proofs`, `consensus_untagged_signatures`), the identity one **only with
-`require_identity_proofs` off** — under the flag a bare proof is what any signing path could have produced; a
-2.31 node cannot verify a tagged signature, so an upgraded proposer's rounds time out at un-upgraded acceptors
-(`docs/guide/deprecations.md` §23). Test: `a_signed_consensus_answer_is_not_an_identity_proof`, seen failing
-first.
+`require_identity_proofs` off** — under the flag a bare proof is what any signing path could have produced. A
+2.32 acceptor **answers in the form of the request it verified** (`SignatureForm`, `sign_payload_as`), so a 2.31
+proposer's rounds complete; a 2.31 node cannot verify a tagged signature, so a 2.32 proposer times out at
+un-upgraded acceptors, and a 2.31 verifier counts every 2.32 peer's proof as an `identity_anchor_conflicts`
+hit, re-raised on every `sys/identity*` event, with the peer's handshake key still anchored
+(`docs/guide/deprecations.md` §23 has every direction). The counters count validations, not peers. The tagging
+covers the identity proof and the consensus payload only: KV `SignedData`, role claims and audit records are
+still untagged (`what-is-proven.md`). Tests: `a_signed_consensus_answer_is_not_an_identity_proof`,
+`an_acceptor_answers_in_the_signature_form_of_the_request`, seen failing first.
 
 ## The identity-proof window, and a diagnosis that was wrong (2026-09-24)
 

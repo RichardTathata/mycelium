@@ -126,15 +126,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   verifies as the other; `GossipAgent::sign_with_identity` now states that its caller owns the message's domain.
   Seen failing first: `a_signed_consensus_answer_is_not_an_identity_proof` (the member's key entered `peer_keys`).
   Wire **v12** unchanged — the frames carry the same bytes; only the signed message gains a prefix.
-  **Mixed fleet, one release:** a 2.32 node still accepts the bare (2.31) form of both signatures, counted
-  (`mycelium_identity_untagged_proofs_total`, `mycelium_consensus_untagged_signatures_total`) — the identity one
-  **only while `require_identity_proofs` is off**, since that flag is the posture under which every proof must be
-  one (`GET /gateway/stats` reports both as `identity_untagged_proofs` / `consensus_untagged_signatures`); a 2.31
-  node cannot verify a tagged signature, so a 2.32 proposer's consensus messages are dropped at
-  un-upgraded acceptors until they are upgraded, as with 2.30.0's `Prepare`. The allowance closes in the next
-  MINOR (`docs/guide/deprecations.md` §23). **Not claimed:** while the allowance is open and the flag is off, a
-  bare signature over caller-shaped bytes still reads as a proof there — no narrower than the flag-off posture
-  already was, where an unsigned entry is accepted too.
+  **Mixed fleet, one release, direction by direction** (`docs/guide/deprecations.md` §23): a 2.32 node accepts
+  the bare (2.31) form of both signatures and counts each acceptance (`mycelium_identity_untagged_proofs_total`,
+  `mycelium_consensus_untagged_signatures_total`; `GET /stats` `identity_untagged_proofs` /
+  `consensus_untagged_signatures` — validations, not peers: the identity watcher re-validates every record on
+  every `sys/identity*` change), the identity one **only while `require_identity_proofs` is off**, since that flag
+  is the posture under which every proof must be one. A 2.32 **acceptor answers in the form of the request it
+  verified** — a bare `Prepare`/`Propose` gets a bare `PrepareAck`/`Promise`/`Nack`/vote — so a **2.31 proposer's
+  rounds complete against 2.32 acceptors**, lease renewals included (found by the adversarial review of #585:
+  the first cut answered everything tagged, which a 2.31 proposer drops). A **2.32 proposer** is dropped at 2.31
+  acceptors and learners (*bad signature*), so it times out until a quorum of its group is upgraded, as with
+  2.30.0's `Prepare`; a 2.31 learner takes the committed value from anti-entropy instead. On the identity side a
+  **2.31 verifier rejects a 2.32 peer's tagged proof** as *present but not verifying*: the keys are not merged,
+  `identity_anchor_conflicts` increments, and the watcher re-raises it on every `sys/identity*` event for every
+  2.32 peer — so an un-upgraded node's `identity_anchor_conflicts` **climbs during the window** and is not a
+  poisoning signal there; a 2.32 peer's handshake key still enters that node's `peer_keys` through the TLS anchor
+  (`record_peer_anchor`), its **rotated** keys do not until the node upgrades. The allowance closes in the next
+  MINOR. **Not claimed:** while the allowance is open and the flag is off, a bare signature over caller-shaped
+  bytes still reads as a proof there (now with the anchor tripwire the unsigned path always had), no narrower
+  than the flag-off posture already was; and **the tagging covers the identity proof and the consensus payload
+  only** — KV `SignedData` (`canonical_update_bytes`), role claims and audit records are still signed over
+  untagged canonical bytes, the residual for the next MINOR (`docs/operations/what-is-proven.md`). The proof side
+  is closed regardless: the verifier accepts only a message that *begins* with the 25-byte identity tag, and none
+  of those messages can — a KV update's bytes 8–16 are the signer's own id hash, a role claim's or audit record's
+  first word is a small length prefix with zero high bytes.
 - **An acceptor's promise and acceptance, and a slot's decided floor, never reached the WAL.** The record
   `sys/consensus-accepted/{node}/{slot}` — what `prewarm_accepted` restores at start so a restarted node keeps its
   promise and cannot vote twice at one ballot — was applied to the store and gossiped, never handed to the WAL; so
@@ -145,8 +160,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PrepareAck`, the vote or the proposal leaves; a record that does not is not answered — the acceptor stays
   silent, a proposer's own attempt ends as `Timeout` with the new reason `unrecorded` — and a commit's
   `persisted` now folds the floor in with the slot and the lease. The permanent commit's lease tombstone reaches
-  the WAL the same way; the shared ballot key (`consensus/ballot/`) is appended fire-and-forget, a liveness aid a
-  promise already refuses past. Seen failing first: `an_acceptors_record_survives_a_crash_without_a_snapshot`
+  the WAL the same way; the shared ballot key (`consensus/ballot/`) is appended fire-and-forget (`append_try`)
+  from the proposer's `raise_ballot` and the voter's write alike, a liveness aid a promise already refuses past.
+  An acceptor that withholds an answer counts it (`GET /stats` `consensus_acceptor_unrecorded`,
+  `mycelium_consensus_unrecorded_total{role}`). **Unmeasured:** the per-answer `append_sync` on the voter loop is
+  an fsync per promise and per vote, serialised on the listener; its cost is not measured here —
+  `examples/authority_drain` is the shape such a measurement takes.
+  Seen failing first: `an_acceptors_record_survives_a_crash_without_a_snapshot`
   (the crash copy replayed `consensus/committed/leader/solo` and not the acceptor's record). **Not claimed:** the
   learner's re-stamp of `consensus/committed/` stays on the gossip path (replicated state anti-entropy
   re-supplies; its absence after a restart reads as *not yet arrived*, which the restored floor keeps safe), and

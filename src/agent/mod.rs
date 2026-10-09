@@ -1532,12 +1532,14 @@ impl GossipAgent {
     ///
     /// **The caller owns the message's domain.** This signs `msg` as given, so a caller **must**
     /// pass a message that says what it is — a domain prefix of its own, or a self-describing
-    /// document — never bare caller-shaped bytes. Every signature the substrate itself verifies is
-    /// over a tagged message: an identity proof over `mycelium.identity/proof/1 ‖ …`, a consensus
-    /// payload over `mycelium.consensus/msg/1 ‖ …`, a mandate possession over
-    /// `mycelium.mandate/possession/1 ‖ …`; a signature made here cannot be mistaken for one of
-    /// those unless `msg` begins with that exact tag, which no caller should produce. AgentFacts
-    /// signs canonical JSON, whose first byte is `{`, so it is safe by shape as well as by rule.
+    /// document — never bare caller-shaped bytes. The identity proof (`mycelium.identity/proof/1 ‖ …`),
+    /// the consensus payload (`mycelium.consensus/msg/1 ‖ …`) and a mandate possession
+    /// (`mycelium.mandate/possession/1 ‖ …`) are verified over tagged messages, so a signature made
+    /// here cannot be mistaken for one of those unless `msg` begins with that exact tag, which no
+    /// caller should produce. KV `SignedData`, role claims and audit records are still verified
+    /// over untagged canonical bytes (`docs/operations/what-is-proven.md`), so a message that could
+    /// parse as one of those is the caller's to avoid. AgentFacts signs canonical JSON, whose first
+    /// byte is `{`, so it is safe by shape as well as by rule.
     pub fn sign_with_identity(&self, msg: &[u8]) -> Option<[u8; 64]> {
         let tls = self.task_ctx.tls.get()?;
         Some(crate::tls::sign_bytes(&tls.signing_key(), msg))

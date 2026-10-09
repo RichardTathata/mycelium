@@ -8982,6 +8982,27 @@ mod identity_proof_default {
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 
+    /// **The allowance is no quieter than an unsigned forgery** (the adversarial review of #585,
+    /// F4a). With the flag off, a bare proof signed by the victim's own key — the forged answer of
+    /// the test above — merged on `signer_trusted` without the anchor tripwire, so in a CA-anchored
+    /// fleet it was silent where an unsigned forgery trips `identity_anchor_conflicts`. The bare
+    /// branch now runs the same tripwire. Seen failing first: the counter stayed at 0.
+    #[test]
+    fn a_bare_proof_under_the_allowance_still_trips_the_anchor_tripwire() {
+        let victim = NodeId::new("127.0.0.1", 7122).unwrap();
+        let v_sk = SigningKey::from_bytes(&[65u8; 32]);
+        let v_vk = v_sk.verifying_key().to_bytes();
+        let a_vk = SigningKey::from_bytes(&[66u8; 32]).verifying_key().to_bytes();
+        let mut history = v_vk.to_vec();
+        history.extend_from_slice(&a_vk);
+        // V's key is CA-anchored (a direct connection), and the bare proof is V's own signature.
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        anchor.pin().insert(victim.clone(), std::collections::HashSet::from([v_vk]));
+        let bare = encode_identity_proof(&v_vk, &v_sk.sign(&history).to_bytes());
+        validate_and_merge_identity(&pk, &anchor, &counter, &victim, &history, &[v_vk, a_vk], Some(&bare), false);
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "a key the anchor does not hold trips the tripwire, bare proof or none");
+    }
+
     /// **The consensus side of the same window.** A payload is signed under its own tag now, and a
     /// bare signature — a 2.31 node's — still verifies for one release, told apart so it can be
     /// counted. A signature under the identity tag, or any other, is neither.
@@ -9900,6 +9921,105 @@ async fn a_non_member_cannot_propose_to_a_group_on_either_surface() {
 
     a.shutdown().await;
     b.shutdown().await;
+}
+
+/// **An acceptor answers in the signature form of the request it verified** (the adversarial
+/// review of #585, F1). A 2.31 proposer verifies bare signatures only, so an acceptor that answered
+/// every request tagged dropped out of every un-upgraded proposer's rounds — the opposite of what
+/// the allowance promised. Now a bare-signed `Prepare` or `Propose` gets a bare-signed answer while
+/// the allowance is open, and a tagged one a tagged answer. Driven through the running listener,
+/// the way a frame from the network arrives. Seen failing first: the ack to a bare prepare
+/// verified as `Tagged`.
+#[cfg(all(feature = "tls", feature = "consensus"))]
+#[tokio::test]
+async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
+    use crate::config::TlsConfig;
+    use crate::consensus::{
+        consensus_kind, consensus_signing_message, encode_consensus_msg, verify_consensus_signature,
+        ConsensusMsg, SignatureForm, SignedConsensusMsg,
+    };
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let cert_dir = std::env::temp_dir().join(format!("myc-reply-form-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let tls = Arc::clone(a.task_ctx.tls.get().expect("tls identity"));
+    let my_key = tls.verifying_key_bytes();
+    let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
+
+    // A prepare as a proposer of each era signs it, addressed to this node as the acceptor.
+    let send = |ballot: u64, form: SignatureForm| {
+        let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from("reply-form"), ballot, proposer: id.clone() });
+        let message = match form {
+            SignatureForm::Tagged => consensus_signing_message(&bytes),
+            SignatureForm::Untagged => bytes.to_vec(),
+        };
+        let signed = SignedConsensusMsg {
+            msg_bytes: bytes,
+            signer: id.clone(),
+            signature: crate::tls::sign_bytes(&tls.signing_key(), &message).to_vec(),
+        };
+        mycelium_core::ops::emit_signal(
+            &a.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Individual(id.clone()),
+            Bytes::from(mycelium_core::serde_fixint::to_vec(&signed).unwrap()),
+        );
+    };
+    let form_of = |payload: &Bytes| {
+        let signed: SignedConsensusMsg = mycelium_core::serde_fixint::from_slice(payload).expect("a signed answer");
+        verify_consensus_signature(&[my_key], &signed.msg_bytes, &signed.signature)
+    };
+
+    send(3, SignatureForm::Untagged);
+    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
+    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Untagged),
+               "a 2.31 proposer verifies bare only: the answer to its bare prepare is bare");
+
+    send(4, SignatureForm::Tagged);
+    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
+    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Tagged), "a tagged request is answered tagged");
+
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **An acceptor that cannot record its promise counts the answer it withheld** (the adversarial
+/// review of #585, F5). The WAL writer is stopped under a running listener, so the fsync a promise
+/// needs fails; the prepare goes unanswered — and `consensus_acceptor_unrecorded` says so, where
+/// before only a warning did. Seen failing first with the increment absent: the counter stayed 0.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn an_unrecorded_promise_is_counted_as_well_as_withheld() {
+    use crate::consensus::{acceptor_answers_unrecorded, consensus_kind, encode_consensus_msg, ConsensusMsg};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-unrecorded-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
+    // The disk goes away under the acceptor: the writer stops, so every forced append fails.
+    a.task_ctx.wal.get().expect("persistence configured").shutdown().await;
+
+    let before = acceptor_answers_unrecorded();
+    let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from("unrecorded"), ballot: 1, proposer: id.clone() });
+    mycelium_core::ops::emit_signal(&a.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Individual(id.clone()), bytes);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), acks.recv()).await.is_err(),
+        "a promise that did not reach the WAL is not answered",
+    );
+    assert_eq!(acceptor_answers_unrecorded(), before + 1, "and the withheld answer is counted");
+
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// **Boundary H P1 gate — issuer binding on live nodes.** Two TLS members, A and B.

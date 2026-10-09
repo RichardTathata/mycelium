@@ -1019,6 +1019,11 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
         body["consensus_untagged_signatures"] =
             json!(crate::consensus::untagged_consensus_signatures_accepted());
     }
+    // Answers this node's acceptor withheld because its promise or acceptance did not reach the WAL.
+    #[cfg(feature = "consensus")]
+    {
+        body["consensus_acceptor_unrecorded"] = json!(crate::consensus::acceptor_answers_unrecorded());
+    }
     Json(body)
 }
 
