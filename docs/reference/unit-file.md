@@ -183,7 +183,8 @@ Present only for a unit that runs a provisioner. These are the provisioner's own
 | `kinds` | array of strings | empty | Artifact kinds this host can run: `"wasm-component"`, `"blob"`. Any other is refused. |
 | `install_budget_bytes` | integer | absent (no budget) | The most this host installs, in bytes. |
 | `headroom` | float | absent (the provisioner's `0.8`) | Fraction of available resources an install may use. Refused outside `(0, 1]`. |
-| `trusted_publishers` | array of strings | empty | Publisher keys, `ed25519:<64 hex>`, whose entries this host installs. Empty means provenance is not required. A stem refuses a key in any other form. |
+| `trusted_publishers` | array of strings | empty | Publisher keys, `ed25519:<64 hex>`, whose entries this host installs. **Empty is refused** (`hosts.trusted_publishers`): with no key, any entry any peer gossips installs here with no provenance. To run that way on purpose, set `accept_unsigned = true`. A stem refuses a key in any other form. |
+| `accept_unsigned` | boolean | `false` | Say on purpose that this host installs entries with no provenance: it lets an empty `trusted_publishers` validate, and the stem warns once at start. Refused beside a non-empty `trusted_publishers` (one or the other names the policy). Never set it on a host that can reach a network any other party can publish into. |
 | `placement_root` | string | absent (a stem uses `artifacts`, relative to its working directory) | Where blobs are placed. |
 | `fuel_per_call` | integer | absent | Fuel budget, in wasm instructions, for each call into an entry signed by an agent (a trusted key not in `operator_publishers`). `0` is refused. |
 | `operator_publishers` | array of strings | empty | The operator's own keys. Each must also be in `trusted_publishers`; refused otherwise, and refused when `trusted_publishers` is empty. |

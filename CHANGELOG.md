@@ -219,6 +219,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`mycelium-wasm-host/src/provisioner.rs` — the shadow registered `tools/echo.shadow/{node}`).
   **Upgrade note:** `RuntimeCtx` gained `shadow` (an exhaustive literal breaks). **Not changed:** a
   shadow *blob*'s `[[activation]]` still runs — activation is placement, not demand.
+- **A `[hosts]` table with no `trusted_publishers` refuses at start, instead of installing anything any
+  peer publishes.** `Provisioner::provenance_ok` admitted every entry when the trusted list was empty,
+  `validate()` checked only the subset rules, and the stem started without a word (the reference said
+  *empty means provenance is not required*) — so a stem whose unit file omitted the key installed and
+  served any catalogue line gossiped into its mesh. The 2.18.1 shape: `validate()` now refuses it by
+  name (`hosts.trusted_publishers`), and the stem will not start; a host that means to run without
+  provenance says so with `[hosts] accept_unsigned = true`, which the stem warns about once at start
+  and which is refused beside a non-empty `trusted_publishers`. Every reader of the list was enumerated
+  (`grep -rn trusted_publishers mycelium-wasm-host/src src`): the provisioner's predicate, the stem's
+  start, the artifact gateway's publish door and `validate()`'s operator-key rules — none changes
+  meaning. Every example unit file under `examples/units/` and the co-op fixtures already list a key.
+  Seen failing first: `a_hosts_table_without_trusted_publishers_is_refused_unless_it_opts_out`
+  (`src/capability_config.rs` — the table validated). **Upgrade note:** a unit file with `[hosts]` and
+  no `trusted_publishers` now fails to load; add the publisher keys, or `accept_unsigned = true` to
+  keep the old behaviour on purpose.
 
 ## [2.31.0] — 2026-10-09
 

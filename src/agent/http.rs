@@ -5281,7 +5281,7 @@ mod tests {
 
         // Refusals, by name.
         let r = client.post(format!("{base}/gateway/units/declare"))
-            .json(&serde_json::json!({ "toml": "[hosts]\nkinds = [\"blob\"]\n" })).send().await.unwrap();
+            .json(&serde_json::json!({ "toml": "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n" })).send().await.unwrap();
         assert_eq!(r.status(), 422);
         assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "hosting sections");
         let r = client.post(format!("{base}/gateway/units/declare"))

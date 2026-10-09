@@ -276,6 +276,19 @@ impl Stem {
                         .map(|s| parse_publisher("trusted_publishers", s))
                         .collect::<Result<Vec<_>, _>>()?;
                     prov.require_provenance(keys);
+                } else if h.accept_unsigned {
+                    // `validate()` refused the empty list unless this was said on purpose; say it
+                    // back once, where the operator reads the start.
+                    tracing::warn!(
+                        "[hosts] accept_unsigned = true: this stem installs entries with no provenance — \
+                         any catalogue line any peer gossips installs here; list trusted_publishers to close it"
+                    );
+                } else {
+                    // Unreachable through `NodeCapabilityConfig::validate()`; a config built in code
+                    // and never validated gets the same refusal, by name.
+                    return Err(StemError(
+                        "hosts.trusted_publishers is empty and hosts.accept_unsigned is not set: list the publisher keys, or accept unsigned entries on purpose".into(),
+                    ));
                 }
                 if metered {
                     let operator_publishers = h
