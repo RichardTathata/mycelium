@@ -8594,7 +8594,7 @@ fn a_mandate_identifier_from_the_wire_is_never_empty() {
 #[cfg(feature = "tls")]
 mod identity_proof_default {
     use super::*;
-    use crate::agent::helpers::{encode_identity_proof, validate_and_merge_identity};
+    use crate::agent::helpers::{encode_identity_proof, identity_proof_message, validate_and_merge_identity};
     use ed25519_dalek::{Signer, SigningKey};
 
     fn keys() -> papaya::HashMap<NodeId, Vec<[u8; 32]>> {
@@ -8644,7 +8644,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[51u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let sig = sk.sign(&history).to_bytes();
+        let sig = sk.sign(&identity_proof_message(&history)).to_bytes();
         let sealed = crate::agent::helpers::encode_sealed_identity(
             &history, &encode_identity_proof(&vk, &sig));
 
@@ -8681,7 +8681,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[52u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
 
         // A *valid* pair — the point is that validity is not the issue; arrival is.
         let (h, proof) = crate::agent::helpers::resolve_identity_record(
@@ -8703,7 +8703,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[53u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
 
         let (h, proof) = crate::agent::helpers::resolve_identity_record(
             None, &history, Some(&legacy_proof), /* require */ false);
@@ -8727,7 +8727,7 @@ mod identity_proof_default {
         let a_vk = attacker.verifying_key().to_bytes();
         let history = a_vk.to_vec();
         let sealed = crate::agent::helpers::encode_sealed_identity(
-            &history, &encode_identity_proof(&a_vk, &attacker.sign(&history).to_bytes()));
+            &history, &encode_identity_proof(&a_vk, &attacker.sign(&identity_proof_message(&history)).to_bytes()));
 
         let (h, proof) = crate::agent::helpers::resolve_identity_record(
             Some(&sealed), &history, None, true);
@@ -8747,7 +8747,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[56u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let good = encode_sealed_identity(&history, &encode_identity_proof(&vk, &sk.sign(&history).to_bytes()));
+        let good = encode_sealed_identity(&history, &encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes()));
         assert!(parse_sealed_identity(&good).is_some(), "the round trip holds");
 
         let mut wrong_version = good.clone();
@@ -8777,7 +8777,7 @@ mod identity_proof_default {
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
         // Self-signed: the signer is one of the keys in its own published history.
-        let sig = sk.sign(&history).to_bytes();
+        let sig = sk.sign(&identity_proof_message(&history)).to_bytes();
         let proof = encode_identity_proof(&vk, &sig);
 
         let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
@@ -8795,7 +8795,7 @@ mod identity_proof_default {
         let usurper = SigningKey::from_bytes(&[44u8; 32]);
         let u_vk = usurper.verifying_key().to_bytes();
         let u_history = u_vk.to_vec();
-        let u_sig = usurper.sign(&u_history).to_bytes();
+        let u_sig = usurper.sign(&identity_proof_message(&u_history)).to_bytes();
         let u_proof = encode_identity_proof(&u_vk, &u_sig);
         validate_and_merge_identity(
             &pk, &anchor, &counter, &stranger, &u_history, &[u_vk], Some(&u_proof), true,
@@ -8805,6 +8805,127 @@ mod identity_proof_default {
             "an unchained key never joins an established set — this is the poisoning case",
         );
         assert_eq!(counter.load(Ordering::SeqCst), 1, "and that one IS flagged");
+    }
+
+    /// **A signature a node makes for any other purpose must never be an identity proof.**
+    ///
+    /// The proof was a bare signature over the key history, and a history is `32 × N` bytes and
+    /// nothing more. Consensus signed its serialized `ConsensusMsg` bare too, and a `PrepareAck`
+    /// carries the **proposer's** bytes back (`accepted_value`). So a member A proposes a value
+    /// that embeds A's own key at a 32-byte boundary, V accepts it, A prepares a higher ballot, V
+    /// answers with the value — signed as V — and A publishes V's signed answer as
+    /// `sys/identity-signed/V`: a sealed record whose "history" is the answer and whose proof is
+    /// V's own signature over it. The verifier chained it through V's trusted key and merged every
+    /// 32-byte chunk, A's key among them; A could then sign as V.
+    ///
+    /// The proof is now a signature over `mycelium.identity/proof/1 ‖ len ‖ history`, which no
+    /// other signing path produces. The answer below is signed the way a 2.31 node signs a
+    /// consensus message — bare — which is also what a 2.31 node's identity proof looks like;
+    /// with proofs required, neither is a proof any more. Seen failing on the unfixed code: A's
+    /// key entered `peer_keys[V]`.
+    #[test]
+    fn a_signed_consensus_answer_is_not_an_identity_proof() {
+        use crate::agent::helpers::{encode_sealed_identity, parse_identity_keys, resolve_identity_record};
+        use crate::consensus::{encode_consensus_msg, ConsensusMsg};
+
+        let victim = NodeId::new("127.0.0.1", 7120).unwrap();
+        let v_sk = SigningKey::from_bytes(&[60u8; 32]);
+        let v_vk = v_sk.verifying_key().to_bytes();
+        let a_vk = SigningKey::from_bytes(&[61u8; 32]).verifying_key().to_bytes();
+
+        // V's answer to A's prepare, carrying the value A proposed. The value is A's to choose.
+        let ack = |value: Vec<u8>| ConsensusMsg::PrepareAck {
+            slot: Arc::from("leader/g"), ballot: 2, voter: victim.clone(),
+            accepted_ballot: 1, accepted_digest: Some([0u8; 32]),
+            accepted_value: Some(Bytes::from(value)), committed_digest: None,
+        };
+        // Where the value lands in the encoding, found with a marker rather than assumed.
+        let marker = vec![0xABu8; 64];
+        let probe = encode_consensus_msg(&ack(marker.clone()));
+        let at = probe.windows(64).position(|w| w == &marker[..]).expect("the value is carried verbatim");
+        let base = probe.len() - 64;
+        // Lead so A's key sits on a 32-byte boundary; tail so the whole answer is 32-aligned.
+        let lead = (32 - at % 32) % 32;
+        let mut value = vec![0u8; lead];
+        value.extend_from_slice(&a_vk);
+        let pad = (32 - (base + value.len()) % 32) % 32;
+        value.extend(std::iter::repeat_n(0u8, pad));
+        let blob = encode_consensus_msg(&ack(value));
+        assert_eq!(blob.len() % 32, 0, "the answer reads as whole keys");
+        let chunks = parse_identity_keys(&blob);
+        assert!(chunks.contains(&a_vk), "and A's key is one of them");
+
+        // What V signs as a consensus participant, published by A as V's sealed identity record.
+        let v_sig = v_sk.sign(&blob).to_bytes();
+        let sealed = encode_sealed_identity(&blob, &encode_identity_proof(&v_vk, &v_sig));
+
+        // V is established at this node, so the record chains through a trusted key.
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        pk.pin().insert(victim.clone(), vec![v_vk]);
+        let (h, proof) = resolve_identity_record(Some(&sealed), &[], None, /* require */ true);
+        assert_eq!(h, &blob[..], "the sealed record is the one validated");
+        validate_and_merge_identity(&pk, &anchor, &counter, &victim, h, &chunks, proof, true);
+        assert!(
+            !pk.pin().get(&victim).is_some_and(|v| v.contains(&a_vk)),
+            "A's key must not enter peer_keys[V]: a consensus signature is not an identity proof",
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "and the attempt is counted");
+    }
+
+    /// **The one-release allowance, pinned.** A proof signed the pre-2.32.0 way — bare, over the
+    /// history — is still accepted while `require_identity_proofs` is **off**, so a fleet upgrades
+    /// node by node; it is counted so an operator can see which peers still sign that way. With the
+    /// flag on it is refused: that posture says every proof must be one, and a bare signature over
+    /// 32-aligned bytes is what any other signing path could have made (the test above). The
+    /// allowance closes in the next MINOR (`docs/guide/deprecations.md` §23); when it does, the
+    /// first half of this test flips and should be rewritten, not kept passing.
+    #[test]
+    fn an_untagged_proof_is_accepted_only_while_proofs_are_not_required() {
+        use crate::agent::helpers::untagged_identity_proofs_accepted;
+        let node = NodeId::new("127.0.0.1", 7121).unwrap();
+        let sk = SigningKey::from_bytes(&[62u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let history = vk.to_vec();
+        let old_form = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+
+        let before = untagged_identity_proofs_accepted();
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), false);
+        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)), "flag off: a 2.31 peer's proof still establishes it");
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "not a conflict");
+        assert!(untagged_identity_proofs_accepted() > before, "but counted, so the operator can see the un-upgraded peer");
+
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), true);
+        assert!(pk.pin().get(&node).is_none(), "flag on: only a tagged proof is a proof");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // And the tagged form is what the flag accepts.
+        let new_form = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&new_form), true);
+        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// **The consensus side of the same window.** A payload is signed under its own tag now, and a
+    /// bare signature — a 2.31 node's — still verifies for one release, told apart so it can be
+    /// counted. A signature under the identity tag, or any other, is neither.
+    #[test]
+    fn a_consensus_signature_verifies_tagged_first_and_bare_for_one_release() {
+        use crate::consensus::{consensus_signing_message, verify_consensus_signature, SignatureForm};
+        let sk = SigningKey::from_bytes(&[63u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let other = SigningKey::from_bytes(&[64u8; 32]).verifying_key().to_bytes();
+        let payload = b"a serialized ConsensusMsg";
+        let tagged = sk.sign(&consensus_signing_message(payload)).to_bytes();
+        let bare = sk.sign(payload).to_bytes();
+        let as_identity = sk.sign(&identity_proof_message(payload)).to_bytes();
+        assert_eq!(verify_consensus_signature(&[other, vk], payload, &tagged), Some(SignatureForm::Tagged));
+        assert_eq!(verify_consensus_signature(&[vk], payload, &bare), Some(SignatureForm::Untagged), "2.31's form, for one release");
+        assert_eq!(verify_consensus_signature(&[vk], payload, &as_identity), None, "a signature under another tag is not a consensus signature");
+        assert_eq!(verify_consensus_signature(&[other], payload, &tagged), None);
+        assert_eq!(verify_consensus_signature(&[], payload, &tagged), None, "no key, no verification");
     }
 }
 

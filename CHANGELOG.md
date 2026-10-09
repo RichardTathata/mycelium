@@ -114,6 +114,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name; the catalogue golden is regenerated. **Check before upgrading:** a `secure-single-domain` node running
   `sync_mode = "os"` now fails at start — set `flush`. Seen failing first:
   `the_secure_profile_names_sync_mode_os_as_not_configured`.
+- **A signature a node made for any other purpose could be presented as its identity proof.** The proof
+  (`sys/identity-proof/`, and inside the sealed `sys/identity-signed/` record) was a bare signature over the key
+  history, and a history is `32 × N` bytes and nothing more; consensus signed its serialized payload bare too, and a
+  `PrepareAck` or `Promise` carries the **proposer's** bytes back (`accepted_value`). So a member could propose a
+  value embedding its own key at a 32-byte boundary, have a victim accept it and answer a higher-ballot prepare with
+  it — signed as the victim — then publish that signed answer as the victim's identity record; the verifier chained
+  it through the victim's trusted key and merged every 32-byte chunk, the member's key among them. The proof is now a
+  signature over `mycelium.identity/proof/1 ‖ len ‖ history` (`helpers::identity_proof_message`) and a consensus
+  payload over `mycelium.consensus/msg/1 ‖ len ‖ bytes` (`consensus::consensus_signing_message`), so neither
+  verifies as the other; `GossipAgent::sign_with_identity` now states that its caller owns the message's domain.
+  Seen failing first: `a_signed_consensus_answer_is_not_an_identity_proof` (the member's key entered `peer_keys`).
+  Wire **v12** unchanged — the frames carry the same bytes; only the signed message gains a prefix.
+  **Mixed fleet, one release:** a 2.32 node still accepts the bare (2.31) form of both signatures, counted
+  (`mycelium_identity_untagged_proofs_total`, `mycelium_consensus_untagged_signatures_total`) — the identity one
+  **only while `require_identity_proofs` is off**, since that flag is the posture under which every proof must be
+  one (`GET /gateway/stats` reports both as `identity_untagged_proofs` / `consensus_untagged_signatures`); a 2.31
+  node cannot verify a tagged signature, so a 2.32 proposer's consensus messages are dropped at
+  un-upgraded acceptors until they are upgraded, as with 2.30.0's `Prepare`. The allowance closes in the next
+  MINOR (`docs/guide/deprecations.md` §23). **Not claimed:** while the allowance is open and the flag is off, a
+  bare signature over caller-shaped bytes still reads as a proof there — no narrower than the flag-off posture
+  already was, where an unsigned entry is accepted too.
 
 ## [2.31.0] — 2026-10-09
 

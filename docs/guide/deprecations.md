@@ -421,3 +421,28 @@ allow the grace period if the orderly shutdown matters (the stem's trace and its
 persistence). Existing
 `except httpx.HTTPStatusError` handlers keep catching a lost write; catch `SupersededError` to tell it apart.
 
+## 23. Identity proofs and consensus signatures are domain-tagged: the bare form is accepted for one release (2.32.0)
+
+**What changes.** An identity proof is a signature over `mycelium.identity/proof/1 ‖ len ‖ history`, and a
+consensus payload's signature is over `mycelium.consensus/msg/1 ‖ len ‖ bytes`; before 2.32.0 both were bare
+signatures over the bytes themselves, which let one be presented as the other (CHANGELOG, Unreleased § Fixed). The
+frames are unchanged — wire **v12** — so this is a rolling-upgrade allowance, not a wire bump:
+
+- **A 2.32 node accepts the bare form of both for one release**, and counts what it accepts
+  (`mycelium_identity_untagged_proofs_total`, `mycelium_consensus_untagged_signatures_total`; a warning per
+  identity proof). The identity allowance holds **only while `require_identity_proofs` is off**. With the flag on,
+  a bare proof is refused like an unsealed one: that flag already requires the whole fleet to write proofs, and a
+  bare signature over 32-aligned bytes is what any other signing path could have produced.
+- **A 2.31 node cannot verify a tagged signature.** Its identity verifier rejects a 2.32 peer's proof (merged with
+  the tripwire when the flag is off; refused when on), and its consensus listener drops a 2.32 proposer's
+  `Prepare`/`Propose`/`Commit` as *bad signature* — so until a quorum of a group's acceptors is upgraded, an
+  upgraded proposer times out rather than commits, and a 2.31 proposer's rounds still complete against 2.32
+  acceptors. The same shape as §21.
+
+**Will the compiler tell me?** No — it is signing behaviour; the API is unchanged. `sign_with_identity` is
+unchanged too, but its doc now states the contract it always needed: the caller tags its own message.
+
+**Migration.** Upgrade the fleet before relying on consensus from upgraded proposers, with
+`require_identity_proofs` off until every node is on 2.32.0 (the flag's own rule). Watch the two counters: a
+non-zero value names a peer still signing the old way. **The allowance closes in the next MINOR**, after which a
+bare signature is refused everywhere.

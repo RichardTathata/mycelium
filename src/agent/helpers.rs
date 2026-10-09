@@ -372,12 +372,53 @@ pub(crate) fn flag_identity_anchor_conflict(
 
 // ── Identity Phase 2: signed proofs (prevention) ────────────────────────────
 //
-// `sys/identity-proof/{V}` = signer_key(32) ‖ signature(64) over the `sys/identity/{V}` history
-// bytes. A node accepts an identity entry only if its proof is signed by a key already trusted
+// `sys/identity-proof/{V}` = signer_key(32) ‖ signature(64) over
+// [`identity_proof_message`] of the `sys/identity/{V}` history bytes — a domain-tagged message,
+// never the bare history (see that function for why). A node accepts an identity entry only if its proof is signed by a key already trusted
 // for V (CA anchor from Phase 1b, or a prior valid key — rotation chaining), or, for a
 // never-before-seen V, TOFU-accepts a self-signed first entry. No proof ⇒ rollout tolerance
 // (old unsigned nodes still establish; Phase 3 tightens that). Signed by an *untrusted* key ⇒
 // rejected — the poisoning case.
+
+/// The domain tag an identity proof is signed under. Bumping the trailing version is a format
+/// change, so a reader that does not know the new tag refuses rather than misreads.
+#[cfg(feature = "tls")]
+pub(crate) const IDENTITY_PROOF_DOMAIN: &[u8] = b"mycelium.identity/proof/1";
+
+/// The message a node signs to prove a key history is its own:
+/// `mycelium.identity/proof/1 ‖ len(u32 LE) ‖ history`.
+///
+/// **Why a tag.** The proof used to be a bare signature over the history, and a history is
+/// `32 × N` bytes and nothing more — so *any* signature a node made over bytes that happen to be
+/// 32-aligned read as a proof of whatever 32-byte chunks those bytes held. A consensus answer was
+/// one such signature: a `PrepareAck` carries the proposer's bytes back, so a member could have a
+/// victim sign a value embedding the member's own key, publish the signed answer as the victim's
+/// identity record, and be merged into the victim's key set (`lib_tests::identity_proof_default::
+/// a_signed_consensus_answer_is_not_an_identity_proof`). Under this tag no other signing path
+/// produces a proof: consensus signs under its own tag (`consensus::CONSENSUS_MSG_DOMAIN`), and
+/// [`GossipAgent::sign_with_identity`](crate::GossipAgent::sign_with_identity) tells its callers
+/// to tag theirs. Same shape as `mandate::grant::possession_message`.
+#[cfg(feature = "tls")]
+pub(crate) fn identity_proof_message(history: &[u8]) -> Vec<u8> {
+    let mut out = IDENTITY_PROOF_DOMAIN.to_vec();
+    out.extend_from_slice(&(history.len() as u32).to_le_bytes());
+    out.extend_from_slice(history);
+    out
+}
+
+/// Proofs this node accepted in the **untagged** (pre-2.32.0) form — a mixed-fleet allowance for
+/// one release, taken only while `require_identity_proofs` is off (`validate_and_merge_identity`).
+/// Non-zero means a peer still signs its proof the old way; the allowance closes in the next MINOR
+/// (`docs/guide/deprecations.md` §23).
+#[cfg(feature = "tls")]
+static UNTAGGED_IDENTITY_PROOFS_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many untagged identity proofs this process has accepted under the mixed-fleet allowance.
+#[cfg(feature = "tls")]
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
+pub(crate) fn untagged_identity_proofs_accepted() -> u64 {
+    UNTAGGED_IDENTITY_PROOFS_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Encode a proof value: `signer_key(32) ‖ signature(64)` = 96 bytes.
 #[cfg(feature = "tls")]
@@ -404,12 +445,13 @@ pub(crate) fn parse_identity_proof(bytes: &[u8]) -> Option<([u8; 32], [u8; 64])>
 /// Sign a node's own identity `history` bytes with its current key, producing the proof value
 /// to publish at `sys/identity-proof/{self}`. At startup the current key is the node's initial
 /// key (self-signed → TOFU/anchor); during rotation this runs *before* cutover so it signs with
-/// the **prior** key (which peers already trust → chains the new key in).
+/// the **prior** key (which peers already trust → chains the new key in). The signature is over
+/// [`identity_proof_message`], never the bare history.
 #[cfg(feature = "tls")]
 pub(crate) fn sign_identity_proof(tls: &mycelium_core::tls::NodeTls, history: &[u8]) -> Vec<u8> {
     let sk = tls.signing_key();
     let signer = sk.verifying_key().to_bytes();
-    let sig = crate::tls::sign_bytes(&sk, history);
+    let sig = crate::tls::sign_bytes(&sk, &identity_proof_message(history));
     encode_identity_proof(&signer, &sig)
 }
 
@@ -483,6 +525,13 @@ pub(crate) fn resolve_identity_record<'a>(
 /// `peer_keys` only if authenticated (identity-auth Phase 2). See the module comment for the rule
 /// table. Rejection increments `conflict_counter` + warns; no proof falls back to the Phase-1b
 /// accept-and-flag path (rollout tolerance).
+///
+/// The proof is a signature over [`identity_proof_message`]. A bare signature over the history —
+/// the pre-2.32.0 form — is accepted for **one release**, counted
+/// ([`untagged_identity_proofs_accepted`]) and warned about, and **only while `require_proofs` is
+/// off**: that flag is the posture that says every proof must be one, and a bare signature over
+/// 32-aligned bytes is exactly what any other signing path could have produced. A fleet running
+/// with the flag on must be upgraded as a whole, as the flag's own contract already requires.
 #[cfg(feature = "tls")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_and_merge_identity(
@@ -516,7 +565,20 @@ pub(crate) fn validate_and_merge_identity(
         return;
     };
 
-    let sig_ok = crate::tls::verify_bytes(&signer, history_bytes, &sig);
+    let mut sig_ok = crate::tls::verify_bytes(&signer, &identity_proof_message(history_bytes), &sig);
+    if !sig_ok && !require_proofs && crate::tls::verify_bytes(&signer, history_bytes, &sig) {
+        // The pre-2.32.0 form, from a peer not yet upgraded. One release, counted, never under
+        // `require_identity_proofs` — see the function doc.
+        sig_ok = true;
+        UNTAGGED_IDENTITY_PROOFS_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_identity_untagged_proofs_total").increment(1);
+        tracing::warn!(
+            node = %node,
+            "accepted an untagged (pre-2.32.0) identity proof; this allowance closes in the next \
+             MINOR — upgrade the peer (docs/guide/deprecations.md §23)"
+        );
+    }
     let anchor = anchor_keys.pin().get(node).cloned().unwrap_or_default();
     let current = peer_keys.pin().get(node).cloned().unwrap_or_default();
     let established = !anchor.is_empty() || !current.is_empty();

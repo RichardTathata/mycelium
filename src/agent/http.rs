@@ -961,7 +961,7 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
     let task_count = ctx.agent_ctx.task_handles
         .lock().unwrap_or_else(|e| e.into_inner())
         .len();
-    Json(json!({
+    let mut body = json!({
         "node_id":       ctx.agent_ctx.node_id.to_string(),
         "cluster_name":  ctx.agent_ctx.config.cluster_name,
         "store_entries": kv.store.pin().len(),
@@ -1006,7 +1006,20 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
             .then(|| super::emergent::compute_opaque_node_pct(&ctx.agent_ctx)),
         "view_confidence": ctx.agent_ctx.config.emergent_detectors_enabled
             .then(|| super::emergent::compute_view_confidence(&ctx.agent_ctx)),
-    }))
+    });
+    // The 2.32.0 mixed-fleet allowance: signatures accepted in the bare (pre-2.32.0) form. Non-zero
+    // names a peer not yet upgraded; the allowance closes in the next MINOR (`deprecations.md` §23).
+    #[cfg(feature = "tls")]
+    {
+        body["identity_untagged_proofs"] =
+            json!(crate::agent::helpers::untagged_identity_proofs_accepted());
+    }
+    #[cfg(all(feature = "tls", feature = "consensus"))]
+    {
+        body["consensus_untagged_signatures"] =
+            json!(crate::consensus::untagged_consensus_signatures_accepted());
+    }
+    Json(body)
 }
 
 /// `GET /gateway/audit` — query the tamper-evident audit trail (compliance, scope
@@ -5384,7 +5397,7 @@ mod tests {
         let m_key = m_sk.verifying_key().to_bytes();
         let mut history = v_key.to_vec();
         history.extend_from_slice(&m_key);
-        let m_sig = m_sk.sign(&history).to_bytes();
+        let m_sig = m_sk.sign(&crate::agent::helpers::identity_proof_message(&history)).to_bytes();
         let bad_proof = crate::agent::helpers::encode_identity_proof(&m_key, &m_sig);
         let kv_keys = [v_key, m_key];
         crate::agent::helpers::validate_and_merge_identity(
@@ -5399,7 +5412,7 @@ mod tests {
         let v2_key = v2_sk.verifying_key().to_bytes();
         let mut hist2 = v2_key.to_vec();
         hist2.extend_from_slice(&v_key);
-        let good_sig = v_sk.sign(&hist2).to_bytes();       // signed by the prior key
+        let good_sig = v_sk.sign(&crate::agent::helpers::identity_proof_message(&hist2)).to_bytes(); // signed by the prior key
         let good_proof = crate::agent::helpers::encode_identity_proof(&v_key, &good_sig);
         crate::agent::helpers::validate_and_merge_identity(
             &peer_keys, &anchor_keys, &conflicts, &victim, &hist2, &[v2_key, v_key], Some(&good_proof), false);

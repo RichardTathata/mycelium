@@ -1529,6 +1529,15 @@ impl GossipAgent {
     /// `SignedData`. `None` if no `tls` identity is configured. Public so companion crates (e.g.
     /// WS-F AgentFacts emission) can **self-certify** documents under the node identity without
     /// reaching into the substrate; the matching key is [`identity_public_key`](Self::identity_public_key).
+    ///
+    /// **The caller owns the message's domain.** This signs `msg` as given, so a caller **must**
+    /// pass a message that says what it is — a domain prefix of its own, or a self-describing
+    /// document — never bare caller-shaped bytes. Every signature the substrate itself verifies is
+    /// over a tagged message: an identity proof over `mycelium.identity/proof/1 ‖ …`, a consensus
+    /// payload over `mycelium.consensus/msg/1 ‖ …`, a mandate possession over
+    /// `mycelium.mandate/possession/1 ‖ …`; a signature made here cannot be mistaken for one of
+    /// those unless `msg` begins with that exact tag, which no caller should produce. AgentFacts
+    /// signs canonical JSON, whose first byte is `{`, so it is safe by shape as well as by rule.
     pub fn sign_with_identity(&self, msg: &[u8]) -> Option<[u8; 64]> {
         let tls = self.task_ctx.tls.get()?;
         Some(crate::tls::sign_bytes(&tls.signing_key(), msg))

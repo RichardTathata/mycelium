@@ -14,6 +14,15 @@ insider-resistance). This is a **security trust-root** change: it must be review
 landed as a phased workstream, not ad-hoc. This document specifies the fix precisely so it
 can be.
 
+> **Amendment (2026-10-09, 2.32.0).** The proof's signature is over a **domain-tagged** message,
+> `mycelium.identity/proof/1 ‖ len(u32 LE) ‖ history` (`helpers::identity_proof_message`), not the
+> bare history this design describes. A bare signature over `32 × N` bytes was indistinguishable
+> from any other signature a node made over 32-aligned bytes — a consensus `PrepareAck` carrying a
+> proposer-chosen value was one — so a victim's signed consensus answer could be published as its
+> proof and every 32-byte chunk of it merged as a key. Consensus payloads are tagged too
+> (`mycelium.consensus/msg/1`). The bare form is accepted for one release, with
+> `require_identity_proofs` off only (`docs/guide/deprecations.md` §23).
+
 ## 0. Current state (verified against code, 2026-07-15)
 
 The verifying keys a node trusts for its peers live in `TaskCtx::peer_keys`

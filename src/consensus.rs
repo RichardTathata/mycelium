@@ -851,10 +851,12 @@ impl ConsensusEngine {
 
     /// Wraps `bytes` in a `SignedConsensusMsg` when TLS is active; returns
     /// `bytes` unchanged when TLS is disabled (zero overhead on the non-TLS path).
+    /// The signature is over [`consensus_signing_message`] of `bytes` — domain-tagged — while
+    /// `msg_bytes` carries `bytes` as they are, so the frame is unchanged (wire v12).
     fn sign_payload(&self, bytes: Bytes) -> Bytes {
         #[cfg(feature = "tls")]
         if let Some(tls) = self.task_ctx.tls.get() {
-            let sig = crate::tls::sign_bytes(&tls.signing_key(), &bytes);
+            let sig = crate::tls::sign_bytes(&tls.signing_key(), &consensus_signing_message(&bytes));
             let signed = SignedConsensusMsg {
                 msg_bytes:  bytes.clone(),
                 signer:     self.task_ctx.node_id.clone(),
@@ -901,11 +903,23 @@ impl ConsensusEngine {
                     key_set.retain(|k| !revoked.contains(k));
                 }
             }
-            if key_set.is_empty()
-                || !key_set.iter().any(|k| crate::tls::verify_bytes(k, &signed.msg_bytes, &signed.signature))
-            {
-                tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
-                return None;
+            match verify_consensus_signature(&key_set, &signed.msg_bytes, &signed.signature) {
+                Some(SignatureForm::Tagged) => {}
+                Some(SignatureForm::Untagged) => {
+                    // A peer not yet on 2.32.0. One release, counted — see `SignatureForm`.
+                    UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_consensus_untagged_signatures_total").increment(1);
+                    tracing::debug!(
+                        signer = %signed.signer,
+                        "accepted an untagged (pre-2.32.0) consensus signature; this allowance closes \
+                         in the next MINOR (docs/guide/deprecations.md §23)"
+                    );
+                }
+                None => {
+                    tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
+                    return None;
+                }
             }
             let msg = decode_consensus_msg(&signed.msg_bytes)?;
             // Bind the message's CLAIMED authority to the VERIFIED signer. The signature proves only
@@ -2417,6 +2431,66 @@ pub(crate) struct SignedConsensusMsg {
     pub msg_bytes: Bytes,
     pub signer:    NodeId,
     pub signature: Vec<u8>,
+}
+
+/// The domain tag a consensus message is signed under.
+#[cfg(feature = "tls")]
+pub(crate) const CONSENSUS_MSG_DOMAIN: &[u8] = b"mycelium.consensus/msg/1";
+
+/// The message a node signs for a consensus payload: `mycelium.consensus/msg/1 ‖ len(u32 LE) ‖
+/// bytes`. The payload used to be signed bare, and a `PrepareAck` or `Promise` carries a
+/// proposer-chosen value back, so a signed answer was a signature over bytes another node shaped —
+/// which the identity proof, also bare over `32 × N` bytes, accepted as a proof of whatever keys
+/// those bytes held. The identity proof now requires its own tag (`helpers::identity_proof_message`),
+/// which closes that on its own; this tag is defence in depth, so no consensus signature verifies
+/// as anything but a consensus signature. The frame is unchanged: `msg_bytes` carries the payload
+/// bare, only the signed message gains the prefix.
+#[cfg(feature = "tls")]
+pub(crate) fn consensus_signing_message(bytes: &[u8]) -> Vec<u8> {
+    let mut out = CONSENSUS_MSG_DOMAIN.to_vec();
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// Which form a verified consensus signature took.
+///
+/// `Untagged` is the pre-2.32.0 form — a bare signature over the payload — accepted for **one
+/// release** so a fleet can upgrade node by node (a 2.31 acceptor's votes still count at a 2.32
+/// proposer, and a 2.31 proposer's proposals are still answered); counted in
+/// [`untagged_consensus_signatures_accepted`] and closed in the next MINOR
+/// (`docs/guide/deprecations.md` §23). A 2.31 node cannot verify a tagged signature, so while any
+/// node is un-upgraded a 2.32 proposer's messages are dropped there — the same shape as 2.30.0's
+/// `Prepare` window.
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignatureForm { Tagged, Untagged }
+
+/// Verifies `sig` over `msg_bytes` against any key in `keys`: the tagged form first, then the
+/// untagged one. `None` when neither verifies, or when there is no key to verify against.
+#[cfg(feature = "tls")]
+pub(crate) fn verify_consensus_signature(keys: &[[u8; 32]], msg_bytes: &[u8], sig: &[u8]) -> Option<SignatureForm> {
+    if keys.is_empty() { return None; }
+    let tagged = consensus_signing_message(msg_bytes);
+    if keys.iter().any(|k| crate::tls::verify_bytes(k, &tagged, sig)) {
+        return Some(SignatureForm::Tagged);
+    }
+    if keys.iter().any(|k| crate::tls::verify_bytes(k, msg_bytes, sig)) {
+        return Some(SignatureForm::Untagged);
+    }
+    None
+}
+
+/// Consensus signatures this process accepted in the untagged (pre-2.32.0) form — see
+/// [`SignatureForm`]. Non-zero means a peer is not yet upgraded.
+#[cfg(feature = "tls")]
+static UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many untagged consensus signatures this process has accepted under the mixed-fleet allowance.
+#[cfg(feature = "tls")]
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
+pub(crate) fn untagged_consensus_signatures_accepted() -> u64 {
+    UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // ── Voter task ───────────────────────────────────────────────────────────────
