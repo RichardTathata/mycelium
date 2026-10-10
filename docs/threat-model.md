@@ -156,16 +156,20 @@ is itself a crown jewel (Boundary A).
   mechanisms and the transport bounds of 2.32 (row B of the post-360 hardening plan): a
   socket that connects and says nothing is closed after `handshake_timeout_ms`, a silent
   established one after `inbound_idle_timeout_secs`; a frame in flight must keep moving
-  (`peer_read_stall_timeout_ms` receiving, `peer_write_stall_timeout_ms` sending; a
-  bandwidth floor on reads, `peer_min_rate_bytes_per_sec`, is off by default because it is
-  per connection and would cut a joiner whose link its senders share — so a peer can hold
-  a socket by trickling a byte per read window unless the floor is set), so a peer that never reads cannot park a writer or hold more than one
-  anti-entropy reply; a stalled subscriber loses its own signals rather than its kind's
-  admission; the signal log holds at most 4096 sender-chosen kinds, evicting the least
-  recently seen. These bound what **one** socket, peer or
-  kind can hold — they are not a defence against many: on a plaintext mesh anyone who can
-  reach the port can open `max_connections` sockets and speak once each per idle bound,
-  and per-source limits are not built.
+  (`peer_read_stall_timeout_ms` receiving, `peer_write_stall_timeout_ms` sending) and, when
+  received, keep 1 KiB/s past the stall window (`peer_min_rate_bytes_per_sec`); at
+  `max_connections` a newcomer **preempts** the connection whose last complete frame is
+  oldest, so connections that hold a permit without using it — a trickle inside a frame, a
+  tiny frame every idle period — give it up to whoever arrives, while a connect flood cannot
+  preempt a peer that talks more often than `handshake_timeout_ms`. A peer that never reads
+  cannot park a writer or hold more than one anti-entropy reply; a stalled subscriber loses
+  its own signals rather than its kind's admission; the signal log holds at most 4096
+  sender-chosen kinds, evicting the least recently seen; `sys/quorum/` evidence is written
+  only for kinds this node works on or asks about, bounded per kind and per second. These
+  bound what **one** socket, peer or kind can hold. What they do not stop: an attacker who
+  keeps **every** permit busy *and* talks more often than `handshake_timeout_ms` on each
+  (~1024 frames per 10 s at the defaults) is indistinguishable from a fleet and is not
+  preempted; per-source limits are not built.
 - **Key custody** — Mycelium provides hooks; the KMS/HSM and rotation are the
   operator's.
 

@@ -166,6 +166,10 @@ pub struct ConnContext {
     /// including Individual-scoped RPC responses — for up to two
     /// health-check intervals.
     pub peer_list_tx: tokio::sync::watch::Sender<Arc<[NodeId]>>,
+    /// This connection's standing for preemption at `max_connections` (#602's round 3): the read
+    /// loop marks each completed frame on it and closes when it is chosen. `None` for a context that
+    /// is not a single accepted connection.
+    pub inbound_slot: Option<Arc<crate::bounds::InboundSlot>>,
 }
 
 pub async fn handle_connection(
@@ -175,8 +179,14 @@ pub async fn handle_connection(
 ) -> Result<(), GossipError> {
     let ConnContext {
         task_ctx, peers, shutdown, peer_writers, backoff, n_shards,
-        intern_keys, intern_max_keys, max_peers, writer_timing, peer_list_tx,
+        intern_keys, intern_max_keys, max_peers, writer_timing, peer_list_tx, inbound_slot,
     } = ctx;
+    let preempted = || async {
+        match &inbound_slot {
+            Some(slot) => slot.preempted().await,
+            None => std::future::pending().await,
+        }
+    };
     let node_id         = task_ctx.node_id.clone();
     let gossip_txs      = Arc::clone(&task_ctx.gossip_txs);
     let seen            = Arc::clone(&task_ctx.seen);
@@ -230,6 +240,12 @@ pub async fn handle_connection(
     let mut spoke = false;
 
     loop {
+        // A large frame grew the buffer (doubling, up to ~16 MiB for a 10 MB frame); give it back
+        // before waiting on the next one rather than holding it for the connection's life (#602's
+        // round 3, Q4). Frames forwarded zero-copy were split off and own their bytes.
+        if recv_buf.capacity() > 1 << 20 {
+            recv_buf = BytesMut::with_capacity(2_048);
+        }
         let silence_bound = if spoke { idle_bound } else { Some(first_frame_bound) };
         // Two waits per frame (row B; #602's review, finding 1). First the frame's **first byte**,
         // under the silence bound — `handshake_timeout_ms` for a connection's first frame,
@@ -247,6 +263,10 @@ pub async fn handle_connection(
                 Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
             },
             _ = shutdown_rx.wait_for(|v| *v) => break,
+            _ = preempted() => {
+                tracing::debug!(from = %peer_addr, "inbound connection preempted at max_connections");
+                break;
+            }
             _ = async {
                 match silence_bound {
                     // A real-socket deadline: outside the replay kernel's coverage, like the
@@ -280,8 +300,13 @@ pub async fn handle_connection(
                 Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
             },
             _ = shutdown_rx.wait_for(|v| *v) => break,
+            _ = preempted() => {
+                tracing::debug!(from = %peer_addr, "inbound connection preempted mid-frame at max_connections");
+                break;
+            }
         };
         socket.get_mut().arm(None);
+        if let Some(slot) = &inbound_slot { slot.frame_completed(); }
         spoke = true;
 
         // Inbound rate limiting: drop frames from a flooding peer. The effective limit is the
@@ -619,6 +644,10 @@ pub async fn handle_connection(
             }
 
             WireMessage::StateResponse { entries } => {
+                // Group commit (#602's round 3, finding 3): every entry is applied to the store first,
+                // then the chunk goes to the WAL as one batch — one fsync under `Flush` rather than one
+                // per entry, which made a chunk of tiny entries take minutes while this loop did not read.
+                let mut batch: Vec<SyncEntry> = if wal.is_some() { Vec::with_capacity(entries.len()) } else { Vec::new() };
                 for entry in entries {
                     // Absorb the remote HLC stamp so our clock dominates anything
                     // anti-entropy hands us, even on a fresh restart where the
@@ -640,9 +669,12 @@ pub async fn handle_connection(
                     // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                     // invariant 1). An anti-entropy entry names no writer: `Origin::Unknown`.
                     apply_inbound(&kv_state, &update, Origin::Unknown, &node_id_str, self_hash, &sys_violations);
-                    if let Some(ref wal) = wal {
-                        let _ = wal.append(sync_entry_from(&update)).await;
+                    if wal.is_some() {
+                        batch.push(sync_entry_from(&update));
                     }
+                }
+                if let Some(ref wal) = wal {
+                    let _ = wal.append_batch(batch).await;
                 }
                 #[cfg(feature = "metrics")]
                 metrics::counter!("gossip_anti_entropy_rounds_total").increment(1);

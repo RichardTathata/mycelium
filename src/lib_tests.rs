@@ -226,6 +226,7 @@ fn spawn_handler(
         max_peers: usize::MAX,
         writer_timing: mycelium_core::writer::WriterTiming::with_idle(Duration::ZERO),
         peer_list_tx: tokio::sync::watch::channel(std::sync::Arc::from(Vec::<NodeId>::new())).0,
+        inbound_slot: None,
     };
     let handle = tokio::spawn(handle_connection(
         crate::stream::GossipStream::Plain(socket),
@@ -1291,6 +1292,7 @@ async fn test_subscribe_notified_via_gossip() {
             max_peers: usize::MAX,
             writer_timing: mycelium_core::writer::WriterTiming::with_idle(Duration::ZERO),
             peer_list_tx: tokio::sync::watch::channel(std::sync::Arc::from(Vec::<NodeId>::new())).0,
+            inbound_slot: None,
         };
         use crate::connection::handle_connection;
         tokio::spawn(handle_connection(crate::stream::GossipStream::Plain(reader), "127.0.0.1:0".parse().unwrap(), ctx));

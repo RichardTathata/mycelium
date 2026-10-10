@@ -777,15 +777,15 @@ pub struct GossipConfig {
     /// Validated `1..=3_600_000`. Default `60_000`. Env: `GOSSIP_PEER_READ_STALL_TIMEOUT_MS`.
     pub peer_read_stall_timeout_ms: u64,
     /// Milliseconds a batch being **sent** may go without a byte accepted by the peer (row B; #602's
-    /// re-review, finding 3). Longer than the read bound on purpose: a receiver does not read while it
-    /// applies a frame, and applying one ~10 MB anti-entropy chunk into a WAL that fsyncs each append
-    /// was **measured at 329 s** (70 000 × 64 B entries; 41.8 s for 9 000 × 1 KiB; 0.78 s for
-    /// 152 × 64 KiB — a developer Mac, 2026-10-10, `worst_case_chunk_apply_with_an_fsync_wal`), so a
-    /// shorter bound would cut a healthy peer mid-bootstrap on every attempt. Past it the connection
-    /// fails like any write error (`SystemStats::outbound_stalls`). What it costs: a peer that accepts
-    /// and never reads parks **its own** writer (and its one anti-entropy reply) this long — nothing
-    /// else waits on it, and shutdown or eviction interrupt it at once. Validated `1..=3_600_000`.
-    /// Default `600_000`. Env: `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS`.
+    /// re-review finding 3, round 3 finding 3). A receiver does not read while it applies a frame, so
+    /// this must outlast the slowest healthy apply of one anti-entropy chunk. With the receiver's WAL
+    /// group-committed per chunk (one fsync, `WalHandle::append_batch`) that was **measured at 3.4 s**
+    /// for the worst chunk a sender can build — ~145 000 tombstones, `sync_mode = "flush"`, a debug
+    /// build on a developer Mac, 2026-10-10 (`worst_case_chunk_apply_with_an_fsync_wal`; 1.6 s for
+    /// 70 000 × 64 B, 0.2 s for 9 000 × 1 KiB). Before group commit the same 70 000 entries took 329 s,
+    /// one fsync each. The default leaves ~17× margin. Past it the connection fails like any write
+    /// error (`SystemStats::outbound_stalls`); shutdown or eviction interrupt it at once. Validated
+    /// `1..=3_600_000`. Default `60_000`. Env: `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS`.
     pub peer_write_stall_timeout_ms: u64,
     /// A bandwidth floor, bytes per second, on frames being **received**: once
     /// `peer_read_stall_timeout_ms` has passed since a frame started, it must have moved at least
@@ -1311,8 +1311,8 @@ impl Default for GossipConfig {
             handshake_timeout_ms: 10_000,
             inbound_idle_timeout_secs: 300,
             peer_read_stall_timeout_ms: 60_000,
-            peer_write_stall_timeout_ms: 600_000,
-            peer_min_rate_bytes_per_sec: 0,
+            peer_write_stall_timeout_ms: 60_000,
+            peer_min_rate_bytes_per_sec: 1024,
             group_aware_forwarding: true,
             epidemic_extra_peers:   3,
             health_check_max_jitter_ms: 0,

@@ -372,15 +372,18 @@ struct SignalLog {
     kinds_refused:     std::sync::atomic::AtomicU64,
     /// Kinds evicted, least recently seen first, to make room for a new one (#602's review, finding 3).
     kinds_evicted:     std::sync::atomic::AtomicU64,
-    /// Kinds someone asked about (`quorum*`, `last_signal`, the `*_persistent` reads), with when: a
-    /// pin exempts its kind from eviction and lets it write `sys/quorum/` evidence for one
-    /// `sender_log_window` after the last query (#602's re-review, finding 5 — pins were permanent, so
-    /// after 4096 distinct queries nothing more could be pinned). A watch renews its pin on every poll.
-    /// Bounded by [`SIGNAL_LOG_MAX_KINDS`]: a full table drops lapsed pins first.
-    queried:           PapayaMap<Arc<str>, Instant>,
+    /// Kinds someone asked about (`quorum*`, `last_signal`, the `*_persistent` reads), with the
+    /// monotonic-ns instant the pin lapses: a pin exempts its kind from eviction and lets it write
+    /// `sys/quorum/` evidence until then — at least one `sender_log_window` after the last query, and
+    /// at least the window the caller asked about (`quorum_persistent(kind, window)`; #602's round 3,
+    /// finding 4). Pins were permanent before the re-review (finding 5). A watch renews its pin on
+    /// every poll. Bounded by [`SIGNAL_LOG_MAX_KINDS`]: a full table drops lapsed pins first.
+    queried:           PapayaMap<Arc<str>, u64>,
     /// At-capacity insertions that may still skip a scan, after one found nothing evictable
-    /// (#602's re-review, finding 6).
+    /// (#602's re-review, finding 6) — valid only until `scan_credit_until` (mono ns), the earliest a
+    /// pin seen by that scan lapses, so a lapsed pin makes its kind evictable at once (round 3, Q2).
     scan_credit:       std::sync::atomic::AtomicU64,
+    scan_credit_until: std::sync::atomic::AtomicU64,
     /// One evictor at a time; a concurrent first sighting is admitted over the cap rather than
     /// evicting twice.
     evicting:          std::sync::atomic::AtomicBool,
@@ -398,35 +401,42 @@ impl SignalLog {
             kinds_evicted: std::sync::atomic::AtomicU64::new(0),
             queried:       PapayaMap::new(),
             scan_credit:   std::sync::atomic::AtomicU64::new(0),
+            scan_credit_until: std::sync::atomic::AtomicU64::new(0),
             evicting:      std::sync::atomic::AtomicBool::new(false),
             eviction_scans: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Marks `kind` as asked about, exempting it from eviction.
+    /// Marks `kind` as asked about for one `sender_log_window`, exempting it from eviction.
     fn pin(&self, kind: &str) {
+        self.pin_for(kind, self.sender_log_window);
+    }
+
+    /// Marks `kind` as asked about for `max(at_least, sender_log_window)` from now; an existing pin
+    /// that lasts longer is kept.
+    fn pin_for(&self, kind: &str, at_least: Duration) {
         let q = self.queried.pin();
-        let now = crate::sim_seam::mono_instant();
-        if q.contains_key(kind) {
-            q.insert(Arc::from(kind), now);
+        let now = crate::sim_seam::mono_now_ns();
+        let span = at_least.max(self.sender_log_window).as_nanos().min(u64::MAX as u128) as u64;
+        let until = now.saturating_add(span);
+        if let Some(existing) = q.get(kind).copied() {
+            if existing < until { q.insert(Arc::from(kind), until); }
             return;
         }
         if q.len() >= SIGNAL_LOG_MAX_KINDS {
-            let window = self.sender_log_window;
             let lapsed: Vec<Arc<str>> = q.iter()
-                .filter(|(_, at)| crate::sim_seam::mono_span(at, &now) >= window)
+                .filter(|(_, until)| **until <= now)
                 .map(|(k, _)| Arc::clone(k))
                 .collect();
             for k in lapsed { q.remove(&k); }
             if q.len() >= SIGNAL_LOG_MAX_KINDS { return; }
         }
-        q.insert(Arc::from(kind), now);
+        q.insert(Arc::from(kind), until);
     }
 
-    /// Whether `kind` was queried within the last `sender_log_window`.
+    /// Whether `kind` holds a pin that has not lapsed.
     fn is_pinned(&self, kind: &str) -> bool {
-        self.queried.pin().get(kind)
-            .is_some_and(|at| crate::sim_seam::mono_elapsed(at) < self.sender_log_window)
+        self.queried.pin().get(kind).is_some_and(|until| crate::sim_seam::mono_now_ns() < *until)
     }
 
     /// Whether the log tracks `kind` now (it was delivered, or seeded from `sys/quorum/`).
@@ -452,13 +462,20 @@ impl SignalLog {
     fn evict_kinds(&self, keep: &str, worker: &dyn Fn(&str) -> bool) -> Option<usize> {
         use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
         let credit = self.scan_credit.load(Relaxed);
-        if credit > 0 {
+        if credit > 0 && crate::sim_seam::mono_now_ns() < self.scan_credit_until.load(Relaxed) {
             self.scan_credit.store(credit - 1, Relaxed);
             return Some(0);
         }
         if self.evicting.compare_exchange(false, true, AcqRel, Acquire).is_err() {
             return None;
         }
+        // Cleared on every exit, a panic included (#602's round 3, Q3): a flag left set would stop
+        // eviction for good.
+        struct Evicting<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Evicting<'_> {
+            fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::Release); }
+        }
+        let _evicting = Evicting(&self.evicting);
         self.eviction_scans.fetch_add(1, Relaxed);
         let seen = self.last_seen.pin();
         let log = self.sender_log.pin();
@@ -498,9 +515,19 @@ impl SignalLog {
             }
         }
         if gone == 0 {
+            // Skip the next eighth's scans — but only until the earliest pin among the tracked kinds
+            // lapses, or one window passes, whichever is first.
+            let now = crate::sim_seam::mono_now_ns();
+            let queried = self.queried.pin();
+            let earliest = seen.iter()
+                .filter_map(|(k, _)| queried.get(k.as_ref()).copied())
+                .filter(|until| *until > now)
+                .min()
+                .unwrap_or(u64::MAX);
+            let window = self.sender_log_window.as_nanos().min(u64::MAX as u128) as u64;
+            self.scan_credit_until.store(earliest.min(now.saturating_add(window)), Relaxed);
             self.scan_credit.store(want as u64, Relaxed);
         }
-        self.evicting.store(false, std::sync::atomic::Ordering::Release);
         self.kinds_evicted.fetch_add(gone as u64, Relaxed);
         #[cfg(feature = "metrics")]
         metrics::counter!("gossip_signal_log_kinds_evicted_total").increment(gone as u64);
@@ -552,11 +579,26 @@ impl SignalLog {
     fn record(&self, kind: &Arc<str>, sender: NodeId, now: Instant, worker: &dyn Fn(&str) -> bool) {
         if !self.admit(kind, worker) { return; }
         self.last_seen.pin().insert(Arc::clone(kind), now);
-        let arc = self.arc_for(kind);
-        let mut log = arc.lock();
-        log.insert(sender.id_hash(), (sender, now));
-        if log.len() > SIGNAL_LOG_MAX_SENDERS_PER_KIND {
-            evict_oldest_senders(&mut log, (SIGNAL_LOG_MAX_SENDERS_PER_KIND / 8).max(1));
+        // The evictor can remove the kind's log between our stamp and our insert (it removed the
+        // stamp first, we re-inserted it, then it removed the log): our entry would land in a
+        // detached log and the stamp would stand alone (#602's round 3, finding 5). So after the
+        // insert, check the log we wrote is the one the table holds; if not, write again — the
+        // stamp is ours, so the evictor cannot take the new log without first seeing a newer stamp.
+        for _ in 0..4 {
+            let arc = self.arc_for(kind);
+            {
+                let mut log = arc.lock();
+                log.insert(sender.id_hash(), (sender.clone(), now));
+                if log.len() > SIGNAL_LOG_MAX_SENDERS_PER_KIND {
+                    evict_oldest_senders(&mut log, (SIGNAL_LOG_MAX_SENDERS_PER_KIND / 8).max(1));
+                }
+            }
+            if self.sender_log.pin().get(kind.as_ref()).is_some_and(|held| Arc::ptr_eq(held, &arc)) {
+                return;
+            }
+            if self.last_seen.pin().get(kind.as_ref()) != Some(&now) {
+                return; // a newer record owns the stamp; it wrote a whole entry of its own
+            }
         }
     }
 
@@ -683,17 +725,35 @@ impl SuppressionTable {
 /// to one per second per pair without reading `KvState`.
 struct QuorumEvidence {
     quorum_written: PapayaMap<Arc<str>, Instant>,
+    /// Senders each kind has written evidence for, at most [`SIGNAL_LOG_MAX_SENDERS_PER_KIND`] per
+    /// kind (#602's round 3, finding 2): `Signal.sender` is chosen by the frame, so without it a
+    /// random-sender flood on a worked kind wrote a new `sys/quorum/` key per forged sender. A sender
+    /// already counted keeps refreshing its key; a new one past the cap writes nothing (counted).
+    /// Bounded by the kinds that may write at all (a worker or a live pin).
+    senders_written: PapayaMap<Arc<str>, Arc<PapayaMap<u64, ()>>>,
+    /// Evidence writes skipped by either bound (diagnostics).
+    skipped: std::sync::atomic::AtomicU64,
 }
 
 impl QuorumEvidence {
-    fn new() -> Self { Self { quorum_written: PapayaMap::new() } }
+    fn new() -> Self {
+        Self { quorum_written: PapayaMap::new(), senders_written: PapayaMap::new(), skipped: std::sync::atomic::AtomicU64::new(0) }
+    }
+
+    fn skip(&self) -> Option<(Arc<str>, Bytes)> {
+        self.skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_quorum_evidence_skipped_total").increment(1);
+        None
+    }
 
     fn payload(&self, kind: &Arc<str>, sender: &NodeId) -> Option<(Arc<str>, Bytes)> {
-        // Bounded (#602's review, finding 2): an entry only rate-limits a write within the last
-        // second, so older ones are dropped when the table is full. Still full of entries under a
-        // second old, the write goes ahead **unremembered** rather than suppressing evidence a worked
-        // kind needs (the re-review, finding 1) — only exempt kinds reach here, so that is a burst of
-        // real senders, written once per signal as before 2.32.
+        // Two bounds (#602's review finding 2; round 3 finding 2). Per kind: evidence keys for at most
+        // the log's per-kind sender cap. Overall: the rate-limit table holds entries under a second
+        // old and at most `SIGNAL_LOG_MAX_KINDS` of them — older ones are dropped when it is full, and
+        // a write that would need a slot past that is **skipped**, never written unremembered, so
+        // evidence is never written at line rate. The cost, stated: a burst of more than 4096 distinct
+        // (kind, sender) pairs within one second loses some evidence for that second.
         let now = Instant::now();
         let quorum_key: Arc<str> = Arc::from(
             format!("{}{}/{}", kv_ns::QUORUM, kind, sender).as_str()
@@ -706,6 +766,28 @@ impl QuorumEvidence {
         if !should_write {
             return None;
         }
+        {
+            let per_kind = self.senders_written.pin();
+            let set = match per_kind.get(kind.as_ref()) {
+                Some(set) => Arc::clone(set),
+                None => {
+                    let fresh = Arc::new(PapayaMap::new());
+                    let mut held_set = None;
+                    per_kind.compute(Arc::clone(kind), |e| match e {
+                        Some((_, set)) => { held_set = Some(Arc::clone(set)); papaya::Operation::Abort(()) }
+                        None => { held_set = Some(Arc::clone(&fresh)); papaya::Operation::Insert(Arc::clone(&fresh)) }
+                    });
+                    held_set.expect("compute sets it on both arms")
+                }
+            };
+            let senders = set.pin();
+            if !senders.contains_key(&sender.id_hash()) {
+                if senders.len() >= SIGNAL_LOG_MAX_SENDERS_PER_KIND {
+                    return self.skip();
+                }
+                senders.insert(sender.id_hash(), ());
+            }
+        }
         if held.len() >= SIGNAL_LOG_MAX_KINDS && !held.contains_key(&quorum_key) {
             let stale: Vec<Arc<str>> = held.iter()
                 .filter(|(_, last)| crate::sim_seam::mono_span(last, &now) > Duration::from_secs(1))
@@ -713,9 +795,10 @@ impl QuorumEvidence {
                 .collect();
             for k in stale { held.remove(&k); }
         }
-        if held.len() < SIGNAL_LOG_MAX_KINDS || held.contains_key(&quorum_key) {
-            held.insert(Arc::clone(&quorum_key), now);
+        if held.len() >= SIGNAL_LOG_MAX_KINDS && !held.contains_key(&quorum_key) {
+            return self.skip();
         }
+        held.insert(Arc::clone(&quorum_key), now);
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH).unwrap_or_default()
             .as_millis() as u64;
@@ -858,6 +941,12 @@ impl SignalHandlers {
     /// evidence also contributes to it.
     pub fn pin_kind(&self, kind: &str) {
         self.log.pin(kind);
+    }
+
+    /// Like [`pin_kind`](Self::pin_kind), for at least `at_least` — what a reader asking about a
+    /// window longer than the sender-log window needs (`quorum_persistent(kind, window)`).
+    pub fn pin_kind_for(&self, kind: &str, at_least: Duration) {
+        self.log.pin_for(kind, at_least);
     }
 
     /// Scans of the kind table made to find eviction candidates (diagnostics).
@@ -1939,5 +2028,46 @@ mod bound_tests {
         }
         assert!(h.log_eviction_scans() <= 2_000 / (SIGNAL_LOG_MAX_KINDS as u64 / 8) as usize as u64 + 2,
                 "{} scans for 2000 new kinds", h.log_eviction_scans());
+    }
+
+    /// #602's round 3, finding 2: a random-sender flood on a kind this node works on wrote a
+    /// `sys/quorum/` key per forged sender at line rate — at the table's cap the write went ahead
+    /// unremembered. Evidence is bounded per kind by the log's sender cap, and the table bound holds.
+    #[test]
+    fn evidence_writes_are_bounded_per_kind_and_by_the_table() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        let mut keep = Vec::new();
+        let mut written = 0usize;
+        let started = std::time::Instant::now();
+        for k in 0..8 {
+            let kind: Arc<str> = Arc::from(format!("worked.{k}"));
+            keep.push(h.register(Arc::clone(&kind)));
+            for p in 0..(SIGNAL_LOG_MAX_SENDERS_PER_KIND as u16 + 500) {
+                let sender = id(1 + p);
+                h.deliver(&sig(&kind, sender.clone()));
+                written += usize::from(h.quorum_evidence_payload(&kind, &sender).is_some());
+            }
+        }
+        // The table bounds writes to its size per second (entries older than a second are reusable);
+        // the per-kind bound to 8 × the sender cap in all.
+        let seconds = started.elapsed().as_secs() as usize + 1;
+        assert!(written <= SIGNAL_LOG_MAX_KINDS * seconds,
+                "{written} evidence writes in {seconds} s; the table bounds them at {SIGNAL_LOG_MAX_KINDS} a second");
+        assert!(written <= 8 * SIGNAL_LOG_MAX_SENDERS_PER_KIND);
+        assert!(h.evidence_entries() <= SIGNAL_LOG_MAX_KINDS);
+    }
+
+    #[test]
+    fn one_kinds_evidence_is_bounded_by_the_sender_cap() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        let kind: Arc<str> = Arc::from("worked");
+        let _w = h.register(Arc::clone(&kind));
+        let mut written = 0usize;
+        for p in 0..(SIGNAL_LOG_MAX_SENDERS_PER_KIND as u16 * 3) {
+            let sender = id(1 + p);
+            h.deliver(&sig(&kind, sender.clone()));
+            written += usize::from(h.quorum_evidence_payload(&kind, &sender).is_some());
+        }
+        assert!(written <= SIGNAL_LOG_MAX_SENDERS_PER_KIND, "{written} evidence keys for one kind");
     }
 }

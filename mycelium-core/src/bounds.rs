@@ -31,6 +31,10 @@ pub struct TransportBounds {
     /// `peer_read_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (#602's review, finding 1) —
     /// counted apart from `inbound_timed_out`, which is silence between frames.
     pub inbound_frames_stalled: AtomicU64,
+    /// Inbound connections closed to give their permit to a newcomer at `max_connections`: the one
+    /// whose last complete frame is oldest (#602's round 3, finding 1). See
+    /// `SystemStats::inbound_connections_preempted`.
+    pub inbound_preempted: AtomicU64,
     /// Outbound writer connections failed because the peer accepted no byte for
     /// `peer_write_stall_timeout_ms` (#602's re-review, finding 9). See `SystemStats::outbound_stalls`.
     pub outbound_stalls: Arc<AtomicU64>,
@@ -41,9 +45,87 @@ pub struct TransportBounds {
     /// claimed for a sender the connection handler has already found in `peers`, and is removed when
     /// the reply's last frame is gone.
     replying_to: Arc<papaya::HashMap<NodeId, ()>>,
+    /// Live inbound connections and when each last completed a frame (#602's round 3, finding 1).
+    inbound: Arc<papaya::HashMap<u64, Arc<InboundSlot>>>,
+    next_inbound: AtomicU64,
+}
+
+/// One inbound connection's standing for preemption: when it last **completed** a frame (monotonic
+/// ns; its accept until it does), and the signal that closes it.
+pub struct InboundSlot {
+    last_frame_ns: AtomicU64,
+    close:         tokio::sync::Notify,
+}
+
+impl InboundSlot {
+    /// Records that a frame completed now.
+    pub fn frame_completed(&self) {
+        self.last_frame_ns.store(crate::sim_seam::mono_now_ns(), Ordering::Relaxed);
+    }
+
+    /// Resolves when this connection has been chosen for preemption.
+    pub async fn preempted(&self) {
+        self.close.notified().await;
+    }
+}
+
+/// A connection's registration; removed from the table when dropped.
+pub struct InboundRegistration {
+    id:   u64,
+    map:  Arc<papaya::HashMap<u64, Arc<InboundSlot>>>,
+    /// The slot the connection updates and listens on.
+    pub slot: Arc<InboundSlot>,
+}
+
+impl Drop for InboundRegistration {
+    fn drop(&mut self) {
+        self.map.pin().remove(&self.id);
+    }
 }
 
 impl TransportBounds {
+    /// Registers an inbound connection accepted now.
+    pub fn register_inbound(&self) -> InboundRegistration {
+        let id = self.next_inbound.fetch_add(1, Ordering::Relaxed);
+        let slot = Arc::new(InboundSlot {
+            last_frame_ns: AtomicU64::new(crate::sim_seam::mono_now_ns()),
+            close:         tokio::sync::Notify::new(),
+        });
+        self.inbound.pin().insert(id, Arc::clone(&slot));
+        InboundRegistration { id, map: Arc::clone(&self.inbound), slot }
+    }
+
+    /// Preemption at the permit cap (#602's round 3, finding 1). Closes the inbound connection whose
+    /// last **complete** frame is oldest — counting a connection that has completed none from its
+    /// accept — provided that frame is at least `min_quiet` old, and returns whether one was chosen.
+    ///
+    /// Why this rule: the two cheap ways to hold every permit were a trickle inside a frame (never
+    /// silent for the stall bound) and a tiny complete frame every idle period; both leave a last
+    /// complete frame that ages, while a peer doing real work completes frames all the time. The
+    /// `min_quiet` floor (`handshake_timeout_ms`) is what keeps a connect flood from preempting a
+    /// talking peer: a fresh connection completes nothing and never outranks one that spoke within it.
+    /// A healthy peer's writer closes its own idle link after `writer_idle_timeout_secs`, so a link
+    /// quieter than `min_quiet` but not yet closed is the one honest peer that can be preempted; its
+    /// writer reconnects on its next frame. One O(connections) scan per newcomer at the cap.
+    pub fn preempt_oldest(&self, min_quiet: std::time::Duration) -> bool {
+        let now = crate::sim_seam::mono_now_ns();
+        let min_quiet = min_quiet.as_nanos().min(u64::MAX as u128) as u64;
+        let map = self.inbound.pin();
+        let victim = map.iter()
+            .map(|(id, slot)| (*id, slot.last_frame_ns.load(Ordering::Relaxed)))
+            .filter(|(_, last)| now.saturating_sub(*last) >= min_quiet)
+            .min_by_key(|(_, last)| *last);
+        let Some((id, _)) = victim else { return false };
+        // Take it out of the table so a second newcomer does not choose it too; the connection's
+        // registration drop finds nothing to remove.
+        let Some(slot) = map.remove(&id).cloned() else { return false };
+        slot.close.notify_one();
+        self.inbound_preempted.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_inbound_connections_preempted_total").increment(1);
+        true
+    }
+
     /// Claims `peer`'s reply slot, or returns `None` (and counts the skip) when a reply to `peer`
     /// is still in flight.
     pub fn claim_reply(&self, peer: &NodeId) -> Option<Arc<ReplySlot>> {

@@ -219,14 +219,17 @@ mod default_tests {
     /// 8 KiB/s tripped every sender of a joiner whose link is shared by eight peers at 512 kbit/s, and a
     /// 15 s no-progress bound on the writer was shorter than a peer's apply of one anti-entropy chunk
     /// into an fsync WAL (measured 2026-10-10 on a developer Mac: 41.8 s for 9 000 × 1 KiB, 329 s for
-    /// 70 000 × 64 B). The defaults must not cut either.
+    /// 70 000 × 64 B — 3.4 s for the worst chunk once round 3 group-committed it). The defaults must not
+    /// cut either.
     #[test]
     fn the_defaults_do_not_cut_a_shared_link_or_a_slow_apply() {
         let cfg = crate::config::GossipConfig::default();
         let r = StallBound::read_from_config(&cfg);
-        assert_eq!(r.min_rate, 0, "no per-connection rate floor by default");
+        // Round 3 restored a floor, low enough for a shared link: 1 KiB/s each lets 64 senders share 512 kbit/s.
+        assert_eq!(r.min_rate, 1024, "a 1 KiB/s read floor by default");
         assert!(r.stall >= Duration::from_secs(60), "{:?}", r.stall);
         let w = StallBound::write_from_config(&cfg);
-        assert!(w.stall >= Duration::from_secs(600), "the writer must outlast a 329 s chunk apply; got {:?}", w.stall);
+        // Round 3: with group commit the worst chunk applies in 3.4 s (debug build); 329 s before it.
+        assert!(w.stall >= Duration::from_secs(34), "the writer must outlast a 3.4 s chunk apply with margin; got {:?}", w.stall);
     }
 }

@@ -259,10 +259,15 @@ setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`)
   an established connection `inbound_idle_timeout_secs` between frames (`mycelium-core/src/connection.rs`).
 - **Progress, not frames** — a frame in flight, either direction, is under `StallGuard`
   (`mycelium-core/src/stall.rs`): no byte for `peer_read_stall_timeout_ms` (60 s) receiving or
-  `peer_write_stall_timeout_ms` (600 s) sending — the writer's bound must outlast the peer's **apply**
-  of a chunk, measured at 329 s into an fsync WAL (`configuration.md`) — and the read floor
-  `peer_min_rate_bytes_per_sec` is off by default (per connection, it cuts a joiner whose link its
-  senders share). Read and write bounds differ on purpose; do not merge them. **Do not bound a whole frame by a
+  `peer_write_stall_timeout_ms` (60 s) sending — the writer's bound must outlast the peer's **apply**
+  of a chunk: 329 s into an fsync WAL with one fsync per entry, 3.4 s once anti-entropy is
+  group-committed (§Persistence; `configuration.md`). The read floor `peer_min_rate_bytes_per_sec`
+  defaults to 1 KiB/s — per connection, so a joiner needs senders × floor of link. Do not ungroup the
+  anti-entropy WAL without revisiting the write bound.
+- **Preemption at `max_connections`** — a newcomer at the cap closes the inbound connection whose last
+  *complete* frame is oldest, if at least `handshake_timeout_ms` old (`TransportBounds::preempt_oldest`).
+  That is what reaches a trickle inside a frame and a tiny frame every idle period; the quiet floor is
+  what keeps a connect flood off a talking peer. **Do not bound a whole frame by a
   fixed time** — a frame is up to 10 MB, and #602's review found the first version cutting a slow
   but healthy link mid-frame on every attempt, so a late joiner on it never bootstrapped. A closed socket returns
   its `max_connections` permit. `validate()` keeps `inbound_idle_timeout_secs` above
@@ -371,6 +376,12 @@ ack first, and the writer runs its threshold snapshot **in the same poll as the 
 — so the store scan lacked the acknowledged write and step 4 (WAL truncation) erased its only
 copy. Do not "restore" WAL-first ordering for a durability-before-visibility feel: the sync path
 never had it, and the snapshot is taken from the store.
+**Anti-entropy is group-committed** (2.32, #602's round 3): a `StateResponse` chunk's entries are all
+applied first, then handed over as one `WalHandle::append_batch` — one write and, under `Flush`, one
+`fdatasync` — rather than one awaited fsync per entry (a chunk of ~150 000 tiny entries took minutes
+while the read loop did not read). The order rule holds per chunk; what widens is the crash window
+inside one chunk, whose records anti-entropy re-sends. Receipt-bearing writes (`set_with_receipt`,
+`append_sync`, consensus) are untouched — only the anti-entropy path batches, and its acks are ignored.
 
 **2. The snapshot merges the WAL tail before truncating.** `do_snapshot` reads `wal.bin` (every
 record since the last truncation) and folds it into the store scan under the store's own

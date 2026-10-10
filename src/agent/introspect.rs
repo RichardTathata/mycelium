@@ -217,6 +217,8 @@ impl GossipAgent {
                 self.task_ctx.transport_bounds.inbound_timed_out.load(Ordering::Relaxed),
             inbound_frames_stalled:
                 self.task_ctx.transport_bounds.inbound_frames_stalled.load(Ordering::Relaxed),
+            inbound_connections_preempted:
+                self.task_ctx.transport_bounds.inbound_preempted.load(Ordering::Relaxed),
             outbound_stalls:
                 self.task_ctx.transport_bounds.outbound_stalls.load(Ordering::Relaxed),
             anti_entropy_replies_skipped:

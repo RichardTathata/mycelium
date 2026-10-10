@@ -139,40 +139,29 @@ pub(super) async fn run_listener_task(mut listener: TcpListener, lctx: ListenerC
                         if let Err(e) = socket.set_nodelay(true) {
                             warn!("set_nodelay failed for {}: {}", peer_addr, e);
                         }
+                        let handshake = Duration::from_millis(conn.task_ctx.config.handshake_timeout_ms);
                         match Arc::clone(&conn_sem).try_acquire_owned() {
                             Ok(permit) => {
-                                let ctx = conn.clone();
-                                let tls = tls.clone();
-                                let handshake = Duration::from_millis(ctx.task_ctx.config.handshake_timeout_ms);
-                                conn_set.spawn(async move {
-                                    let _permit = permit;
-                                    // Row B: the handshake is bounded. Before, a socket that
-                                    // connected and never completed TLS held its permit for as
-                                    // long as it stayed open, and `max_connections` of them
-                                    // closed the node to every peer. A real-socket deadline,
-                                    // outside the replay kernel like the socket (inventory §2.4).
-                                    let gs = match time::timeout(handshake, tls_accept(socket, &tls)).await {
-                                        Ok(r) => r,
-                                        Err(_) => {
-                                            ctx.task_ctx.transport_bounds.count_inbound_timeout();
-                                            debug!("TLS accept from {} timed out after {:?} (handshake_timeout_ms)", peer_addr, handshake);
-                                            return;
-                                        }
-                                    };
-                                    match gs {
-                                        Ok(gs) => {
-                                            if let Err(e) = handle_connection(gs, peer_addr, ctx).await {
-                                                warn!("Connection error from {}: {}", peer_addr, e);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!("TLS accept from {}: {}", peer_addr, e);
-                                        }
-                                    }
-                                });
+                                conn_set.spawn(serve_inbound(permit, socket, peer_addr, conn.clone(), tls.clone()));
                             }
                             Err(_) => {
-                                warn!("Connection limit ({}) reached, dropping {}", max_conn, peer_addr);
+                                // Preemption at the cap (#602's round 3, finding 1): rather than
+                                // refusing the newcomer, close the connection whose last complete
+                                // frame is oldest — if one has been quiet at least `handshake` —
+                                // and give its permit to the newcomer once it is returned.
+                                if conn.task_ctx.transport_bounds.preempt_oldest(handshake) {
+                                    let sem = Arc::clone(&conn_sem);
+                                    let ctx = conn.clone();
+                                    let tls = tls.clone();
+                                    conn_set.spawn(async move {
+                                        match time::timeout(handshake, sem.acquire_owned()).await {
+                                            Ok(Ok(permit)) => serve_inbound(permit, socket, peer_addr, ctx, tls).await,
+                                            _ => warn!("Connection limit ({}) reached; {} preempted a connection but its permit did not return in time", max_conn, peer_addr),
+                                        }
+                                    });
+                                } else {
+                                    warn!("Connection limit ({}) reached, dropping {} (no connection quiet long enough to preempt)", max_conn, peer_addr);
+                                }
                             }
                         }
                     }
@@ -1169,6 +1158,47 @@ pub(super) async fn run_gc_task(ctx: GcContext) {
     if !*shutdown_rx.borrow() {
         error!("GC task exited unexpectedly; tombstone expiry and subscription eviction have stopped");
     }
+}
+
+/// Serves one accepted inbound connection holding `permit`: registers it for preemption, bounds
+/// the TLS handshake (row B), then runs the read loop. The permit and the registration are released
+/// when this returns.
+async fn serve_inbound(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    socket: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    mut ctx: ConnContext,
+    tls: Option<Arc<NodeTls>>,
+) {
+    let _permit = permit;
+    let registration = ctx.task_ctx.transport_bounds.register_inbound();
+    ctx.inbound_slot = Some(Arc::clone(&registration.slot));
+    let handshake = Duration::from_millis(ctx.task_ctx.config.handshake_timeout_ms);
+    // The handshake is bounded (row B): before, a socket that connected and never completed TLS held
+    // its permit for as long as it stayed open. A real-socket deadline, outside the replay kernel like
+    // the socket (inventory §2.4). A connection chosen for preemption mid-handshake goes too.
+    let gs = tokio::select! {
+        r = time::timeout(handshake, tls_accept(socket, &tls)) => match r {
+            Ok(r) => r,
+            Err(_) => {
+                ctx.task_ctx.transport_bounds.count_inbound_timeout();
+                debug!("TLS accept from {} timed out after {:?} (handshake_timeout_ms)", peer_addr, handshake);
+                return;
+            }
+        },
+        _ = registration.slot.preempted() => return,
+    };
+    match gs {
+        Ok(gs) => {
+            if let Err(e) = handle_connection(gs, peer_addr, ctx).await {
+                warn!("Connection error from {}: {}", peer_addr, e);
+            }
+        }
+        Err(e) => {
+            warn!("TLS accept from {}: {}", peer_addr, e);
+        }
+    }
+    drop(registration);
 }
 
 /// Upgrades a plain `TcpStream` to a `GossipStream` by performing a TLS server

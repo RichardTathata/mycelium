@@ -446,6 +446,12 @@ pub struct SystemStats {
     /// between frames. Rising with a healthy peer means the link is slower than the floor.
     pub inbound_frames_stalled: u64,
 
+    /// Cumulative inbound gossip connections closed to give their `max_connections` permit to a
+    /// newcomer: at the cap, the connection whose last complete frame is oldest — and at least
+    /// `handshake_timeout_ms` old — is closed (#602's round 3). Rising steadily means something holds
+    /// connections open without using them; a connection that talks more often than that is never chosen.
+    pub inbound_connections_preempted: u64,
+
     /// Cumulative outbound writer connections failed because the peer accepted no byte for
     /// `peer_write_stall_timeout_ms` (#602's re-review). Queued frames to that peer were dropped
     /// during the reconnect backoff. Rising for one peer means it is not reading.
@@ -2086,4 +2092,7 @@ pub(crate) fn gateway_member_keys(
 impl GossipAgent {
     /// The task context, for crate tests outside `agent` (`resource_bounds_tests`).
     pub(crate) fn task_ctx_for_tests(&self) -> &Arc<TaskCtx> { &self.task_ctx }
+
+    /// The store, for crate tests that need tombstones (`kv().get` hides them).
+    pub(crate) fn kv_state_for_tests(&self) -> &Arc<KvState> { &self.kv_state }
 }
